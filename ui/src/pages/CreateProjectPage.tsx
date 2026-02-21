@@ -10,7 +10,8 @@ import {
   createProject,
   validateProjectId,
   validatePrefix,
-  validatePath,
+  validateProjectStatus,
+  validateParent,
   validateSummary,
   ProjectServiceError,
 } from '../api/projects';
@@ -18,7 +19,6 @@ import {
 interface FormData {
   project_id: string;
   prefix: string;
-  path: string;
   summary: string;
   status: string;
   parent: string;
@@ -27,7 +27,6 @@ interface FormData {
 interface FormErrors {
   project_id?: string;
   prefix?: string;
-  path?: string;
   summary?: string;
   status?: string;
   parent?: string;
@@ -42,19 +41,17 @@ interface SubmissionState {
 }
 
 const STATUS_OPTIONS = [
-  { value: 'active_development', label: 'Active Development' },
+  { value: 'planning', label: 'Planning' },
+  { value: 'development', label: 'Development' },
   { value: 'active_production', label: 'Active Production' },
-  { value: 'maintenance', label: 'Maintenance' },
-  { value: 'archived', label: 'Archived' },
 ];
 
 export function CreateProjectPage() {
   const [formData, setFormData] = useState<FormData>({
     project_id: '',
     prefix: '',
-    path: '',
     summary: '',
-    status: 'active_development',
+    status: 'development',
     parent: 'devops',
   });
 
@@ -94,22 +91,19 @@ export function CreateProjectPage() {
       newErrors.prefix = prefixValidation.error;
     }
 
-    const pathValidation = validatePath(formData.path);
-    if (!pathValidation.valid) {
-      newErrors.path = pathValidation.error;
-    }
-
     const summaryValidation = validateSummary(formData.summary);
     if (!summaryValidation.valid) {
       newErrors.summary = summaryValidation.error;
     }
 
-    if (!formData.status.trim()) {
-      newErrors.status = 'Status is required';
+    const statusValidation = validateProjectStatus(formData.status);
+    if (!statusValidation.valid) {
+      newErrors.status = statusValidation.error;
     }
 
-    if (!formData.parent.trim()) {
-      newErrors.parent = 'Parent project is required';
+    const parentValidation = validateParent(formData.parent);
+    if (!parentValidation.valid) {
+      newErrors.parent = parentValidation.error;
     }
 
     setErrors(newErrors);
@@ -126,12 +120,21 @@ export function CreateProjectPage() {
     setSubmission({ isLoading: true, success: false });
 
     try {
-      const response = await createProject(formData);
+      const payload = {
+        name: formData.project_id.trim(),
+        prefix: formData.prefix.trim().toUpperCase(),
+        summary: formData.summary.trim(),
+        status: formData.status,
+        ...(formData.parent.trim() ? { parent: formData.parent.trim() } : {}),
+      };
+
+      const response = await createProject(payload);
+      const createdProjectId = response.project.project_id;
 
       setSubmission({
         isLoading: false,
         success: true,
-        successMessage: `Project "${formData.project_id}" created successfully! Reference document: ${response.reference_doc_id}`,
+        successMessage: `Project "${createdProjectId}" created successfully.`,
       });
 
       // Reset form after successful submission
@@ -139,14 +142,13 @@ export function CreateProjectPage() {
         setFormData({
           project_id: '',
           prefix: '',
-          path: '',
           summary: '',
-          status: 'active_development',
+          status: 'development',
           parent: 'devops',
         });
         setSubmission({ isLoading: false, success: false });
         // Optionally redirect to projects list or new project
-        window.location.href = `/enceladus/projects/${formData.project_id}`;
+        window.location.href = `/enceladus/projects/${createdProjectId}`;
       }, 2000);
     } catch (error) {
       let errorMessage = 'Failed to create project';
@@ -158,6 +160,8 @@ export function CreateProjectPage() {
           errorMessage = `Project "${formData.project_id}" already exists.`;
         } else if (error.status === 400) {
           errorMessage = `Validation error: ${error.message}`;
+        } else if (error.status === 404) {
+          errorMessage = 'Create Project API route not found. Please contact support.';
         } else {
           errorMessage = error.message;
         }
@@ -220,7 +224,7 @@ export function CreateProjectPage() {
             <p className="text-xs text-red-400 mt-1">{errors.project_id}</p>
           )}
           <p className="text-xs text-slate-400 mt-1">
-            Lowercase letters, numbers, and hyphens only. No leading/trailing hyphens.
+            Must start with a letter; lowercase letters, numbers, underscores, and hyphens are allowed.
           </p>
         </div>
 
@@ -244,30 +248,7 @@ export function CreateProjectPage() {
           />
           {errors.prefix && <p className="text-xs text-red-400 mt-1">{errors.prefix}</p>}
           <p className="text-xs text-slate-400 mt-1">
-            2-3 uppercase letters. Used for record IDs (e.g., MP-TSK-001).
-          </p>
-        </div>
-
-        {/* Path */}
-        <div>
-          <label htmlFor="path" className="block text-sm font-medium text-slate-200 mb-1">
-            Path <span className="text-red-400">*</span>
-          </label>
-          <input
-            type="text"
-            id="path"
-            name="path"
-            value={formData.path}
-            onChange={handleChange}
-            placeholder="e.g., projects/my-project"
-            disabled={submission.isLoading}
-            className={`w-full px-3 py-2 border rounded-lg text-sm font-mono bg-slate-700 text-slate-100 placeholder-slate-500 ${
-              errors.path ? 'border-red-500' : 'border-slate-600'
-            } disabled:bg-slate-600 disabled:text-slate-400`}
-          />
-          {errors.path && <p className="text-xs text-red-400 mt-1">{errors.path}</p>}
-          <p className="text-xs text-slate-400 mt-1">
-            Repository path for project documentation and assets.
+            Exactly 3 uppercase letters. Used for record IDs (e.g., DVP-TSK-001).
           </p>
         </div>
 
@@ -292,7 +273,7 @@ export function CreateProjectPage() {
             <p className="text-xs text-red-400 mt-1">{errors.summary}</p>
           )}
           <p className="text-xs text-slate-400 mt-1">
-            10-500 characters. Describe the project's purpose and scope.
+            1-500 characters. Describe the project's purpose and scope.
           </p>
         </div>
 
@@ -323,7 +304,7 @@ export function CreateProjectPage() {
         {/* Parent Project */}
         <div>
           <label htmlFor="parent" className="block text-sm font-medium text-slate-200 mb-1">
-            Parent Project <span className="text-red-400">*</span>
+            Parent Project
           </label>
           <input
             type="text"
@@ -341,7 +322,7 @@ export function CreateProjectPage() {
             <p className="text-xs text-red-400 mt-1">{errors.parent}</p>
           )}
           <p className="text-xs text-slate-400 mt-1">
-            Project ID of the parent project (typically "devops").
+            Optional project ID for hierarchy (for top-level projects leave blank).
           </p>
         </div>
 

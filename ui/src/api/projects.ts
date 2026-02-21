@@ -6,18 +6,27 @@
  */
 
 export type CreateProjectRequest = {
-  project_id: string;
+  name: string;
   prefix: string;
-  path: string;
   summary: string;
   status: string;
-  parent: string;
+  parent?: string;
 };
 
 export type CreateProjectResponse = {
-  project_id: string;
-  created_at: string;
-  reference_doc_id: string;
+  success: boolean;
+  project: {
+    project_id: string;
+    prefix: string;
+    path: string;
+    summary: string;
+    status: string;
+    parent?: string;
+    created_at: string;
+    updated_at: string;
+    created_by: string;
+  };
+  initialization: Record<string, string>;
 };
 
 export class ProjectServiceError extends Error {
@@ -36,7 +45,35 @@ export class ProjectServiceError extends Error {
   }
 }
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+const CANONICAL_PROJECTS_URL = '/api/v1/projects';
+
+function normalizeApiBaseUrl(value: string | undefined): string {
+  const raw = (value ?? '/api/v1').trim();
+  if (!raw) return '/api/v1';
+  const withLeadingSlash = raw.startsWith('/') ? raw : `/${raw}`;
+  return withLeadingSlash.replace(/\/+$/, '');
+}
+
+const BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
+
+async function postCreateProject(
+  url: string,
+  data: CreateProjectRequest
+): Promise<{ response: Response; body: Record<string, unknown> }> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
+    // Credentials: include ensures enceladus_id_token cookie is sent
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  return { response, body };
+}
 
 /**
  * Create a new project via devops-project-service Lambda
@@ -45,37 +82,28 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
 export async function createProject(
   data: CreateProjectRequest
 ): Promise<CreateProjectResponse> {
-  const url = `${BASE_URL}/projects`;
+  const primaryUrl = `${BASE_URL}/projects`;
 
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-      // Credentials: include ensures enceladus_id_token cookie is sent
-      credentials: 'include',
-      body: JSON.stringify(data),
-    });
-
-    const responseData = await response.json().catch(() => ({}));
+    let { response, body } = await postCreateProject(primaryUrl, data);
+    if (response.status === 404 && primaryUrl !== CANONICAL_PROJECTS_URL) {
+      ({ response, body } = await postCreateProject(CANONICAL_PROJECTS_URL, data));
+    }
 
     if (!response.ok) {
       const errorMessage =
-        (responseData as Record<string, unknown>)?.error ||
-        (responseData as Record<string, unknown>)?.message ||
+        body.error ||
+        body.message ||
         `HTTP ${response.status}: ${response.statusText}`;
 
       throw new ProjectServiceError(
         response.status,
         String(errorMessage),
-        responseData as Record<string, unknown>
+        body
       );
     }
 
-    return responseData as CreateProjectResponse;
+    return body as unknown as CreateProjectResponse;
   } catch (error) {
     if (error instanceof ProjectServiceError) {
       throw error;
@@ -96,52 +124,37 @@ export function validateProjectId(projectId: string): {
   valid: boolean;
   error?: string;
 } {
-  if (!projectId.trim()) {
+  const value = projectId.trim();
+  if (!value) {
     return { valid: false, error: 'Project ID is required' };
   }
-  if (projectId.length < 3) {
-    return { valid: false, error: 'Project ID must be at least 3 characters' };
+  if (value.length < 1) {
+    return { valid: false, error: 'Project ID must be at least 1 character' };
   }
-  if (projectId.length > 50) {
+  if (value.length > 50) {
     return { valid: false, error: 'Project ID must be at most 50 characters' };
   }
-  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(projectId)) {
+  if (!/^[a-z][a-z0-9_-]{0,49}$/.test(value)) {
     return {
       valid: false,
-      error: 'Project ID must be lowercase letters, numbers, and hyphens (no leading/trailing hyphens)',
+      error: 'Project ID must start with a letter and only include lowercase letters, numbers, underscores, and hyphens',
     };
   }
   return { valid: true };
 }
 
 /**
- * Validate prefix format (uppercase letters only, 2-3 chars)
+ * Validate prefix format (uppercase letters only, exactly 3 chars)
  */
 export function validatePrefix(prefix: string): { valid: boolean; error?: string } {
-  if (!prefix.trim()) {
+  const value = prefix.trim();
+  if (!value) {
     return { valid: false, error: 'Prefix is required' };
   }
-  if (!/^[A-Z]{2,3}$/.test(prefix)) {
+  if (!/^[A-Z]{3}$/.test(value)) {
     return {
       valid: false,
-      error: 'Prefix must be 2-3 uppercase letters only (e.g., ENC, DVP)',
-    };
-  }
-  return { valid: true };
-}
-
-/**
- * Validate path format (allows dashes, hyphens, slashes)
- */
-export function validatePath(path: string): { valid: boolean; error?: string } {
-  if (!path.trim()) {
-    return { valid: false, error: 'Path is required' };
-  }
-  // Allow lowercase, numbers, dashes, hyphens, underscores, and forward slashes
-  if (!/^[a-z0-9][a-z0-9\-_/]*[a-z0-9]$/.test(path) && path.length > 2) {
-    return {
-      valid: false,
-      error: 'Path must be lowercase letters, numbers, dashes, underscores, and forward slashes',
+      error: 'Prefix must be exactly 3 uppercase letters (e.g., DVP)',
     };
   }
   return { valid: true };
@@ -151,14 +164,44 @@ export function validatePath(path: string): { valid: boolean; error?: string } {
  * Validate summary text
  */
 export function validateSummary(summary: string): { valid: boolean; error?: string } {
-  if (!summary.trim()) {
+  const value = summary.trim();
+  if (!value) {
     return { valid: false, error: 'Summary is required' };
   }
-  if (summary.length < 10) {
-    return { valid: false, error: 'Summary must be at least 10 characters' };
-  }
-  if (summary.length > 500) {
+  if (value.length > 500) {
     return { valid: false, error: 'Summary must be at most 500 characters' };
+  }
+  return { valid: true };
+}
+
+/**
+ * Validate status against backend-accepted values
+ */
+export function validateProjectStatus(status: string): { valid: boolean; error?: string } {
+  if (!status.trim()) {
+    return { valid: false, error: 'Status is required' };
+  }
+  const allowed = new Set(['planning', 'development', 'active_production']);
+  if (!allowed.has(status)) {
+    return {
+      valid: false,
+      error: 'Status must be planning, development, or active_production',
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * Validate optional parent project ID
+ */
+export function validateParent(parent: string): { valid: boolean; error?: string } {
+  const value = parent.trim();
+  if (!value) return { valid: true };
+  if (!/^[a-z][a-z0-9_-]{0,49}$/.test(value)) {
+    return {
+      valid: false,
+      error: 'Parent must match project ID format (lowercase, numbers, _ or -)',
+    };
   }
   return { valid: true };
 }
