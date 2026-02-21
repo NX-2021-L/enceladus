@@ -13,6 +13,7 @@ import {
   validateProjectStatus,
   validateParent,
   validateSummary,
+  validateRepo,
   ProjectServiceError,
 } from '../api/projects';
 
@@ -22,6 +23,7 @@ interface FormData {
   summary: string;
   status: string;
   parent: string;
+  repo: string;
 }
 
 interface FormErrors {
@@ -30,6 +32,7 @@ interface FormErrors {
   summary?: string;
   status?: string;
   parent?: string;
+  repo?: string;
   submit?: string;
 }
 
@@ -53,6 +56,7 @@ export function CreateProjectPage() {
     summary: '',
     status: 'development',
     parent: 'devops',
+    repo: '',
   });
 
   const [errors, setErrors] = useState<FormErrors>({});
@@ -106,6 +110,11 @@ export function CreateProjectPage() {
       newErrors.parent = parentValidation.error;
     }
 
+    const repoValidation = validateRepo(formData.repo);
+    if (!repoValidation.valid) {
+      newErrors.repo = repoValidation.error;
+    }
+
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -126,6 +135,7 @@ export function CreateProjectPage() {
         summary: formData.summary.trim(),
         status: formData.status,
         ...(formData.parent.trim() ? { parent: formData.parent.trim() } : {}),
+        ...(formData.repo.trim() ? { repo: formData.repo.trim() } : {}),
       };
 
       const response = await createProject(payload);
@@ -145,6 +155,7 @@ export function CreateProjectPage() {
           summary: '',
           status: 'development',
           parent: 'devops',
+          repo: '',
         });
         setSubmission({ isLoading: false, success: false });
         // Optionally redirect to projects list or new project
@@ -323,6 +334,31 @@ export function CreateProjectPage() {
           )}
           <p className="text-xs text-slate-400 mt-1">
             Optional project ID for hierarchy (for top-level projects leave blank).
+          </p>
+        </div>
+
+        {/* Repository URL */}
+        <div>
+          <label htmlFor="repo" className="block text-sm font-medium text-slate-200 mb-1">
+            Repository URL
+          </label>
+          <input
+            type="text"
+            id="repo"
+            name="repo"
+            value={formData.repo}
+            onChange={handleChange}
+            placeholder="e.g., https://github.com/user/repo"
+            disabled={submission.isLoading}
+            className={`w-full px-3 py-2 border rounded-lg text-sm bg-slate-700 text-slate-100 placeholder-slate-500 ${
+              errors.repo ? 'border-red-500' : 'border-slate-600'
+            } disabled:bg-slate-600 disabled:text-slate-400`}
+          />
+          {errors.repo && (
+            <p className="text-xs text-red-400 mt-1">{errors.repo}</p>
+          )}
+          <p className="text-xs text-slate-400 mt-1">
+            Optional link to the project's repository (e.g., GitHub URL).
           </p>
         </div>
 

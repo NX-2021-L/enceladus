@@ -11,6 +11,7 @@ export type CreateProjectRequest = {
   summary: string;
   status: string;
   parent?: string;
+  repo?: string;
 };
 
 export type CreateProjectResponse = {
@@ -19,6 +20,7 @@ export type CreateProjectResponse = {
     project_id: string;
     prefix: string;
     path: string;
+    repo?: string;
     summary: string;
     status: string;
     parent?: string;
@@ -204,4 +206,23 @@ export function validateParent(parent: string): { valid: boolean; error?: string
     };
   }
   return { valid: true };
+}
+
+/**
+ * Validate optional repository URL
+ */
+export function validateRepo(repo: string): { valid: boolean; error?: string } {
+  const value = repo.trim();
+  if (!value) return { valid: true }; // Optional field
+
+  // Basic URL validation - check if it's a valid URL format
+  try {
+    new URL(value);
+    return { valid: true };
+  } catch {
+    return {
+      valid: false,
+      error: 'Repository URL must be a valid URL (e.g., https://github.com/user/repo)',
+    };
+  }
 }
