@@ -10,15 +10,29 @@ if ! command -v trufflehog >/dev/null 2>&1; then
   exit 1
 fi
 
+PATTERN="(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|-----BEGIN (RSA|OPENSSH|EC|DSA|PRIVATE KEY)-----|xox[baprs]-[A-Za-z0-9-]{10,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{35}|sk_(live|test)_[0-9A-Za-z]{16,}|api[_-]?key\\s*[:=]\\s*['\\\"][A-Za-z0-9_\\-]{16,}['\\\"]|secret[_-]?key\\s*[:=]\\s*['\\\"][A-Za-z0-9_\\-]{16,}['\\\"]|authorization:\\s*bearer\\s+[A-Za-z0-9._\\-]+)"
+
 echo "[START] Regex secrets sweep"
-if rg -n --hidden \
-  --glob "!.git/**" \
-  --glob "!ui/node_modules/**" \
-  --glob "!ui/dist/**" \
-  "(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|-----BEGIN (RSA|OPENSSH|EC|DSA|PRIVATE KEY)-----|xox[baprs]-[A-Za-z0-9-]{10,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{35}|sk_(live|test)_[0-9A-Za-z]{16,}|api[_-]?key\\s*[:=]\\s*['\\\"][A-Za-z0-9_\\-]{16,}['\\\"]|secret[_-]?key\\s*[:=]\\s*['\\\"][A-Za-z0-9_\\-]{16,}['\\\"]|authorization:\\s*bearer\\s+[A-Za-z0-9._\\-]+)" \
-  "${REPO_ROOT}"; then
-  echo "[ERROR] Regex sweep found potential secret material." >&2
-  exit 1
+if command -v rg >/dev/null 2>&1; then
+  if rg -n --hidden \
+    --glob "!.git/**" \
+    --glob "!ui/node_modules/**" \
+    --glob "!ui/dist/**" \
+    "${PATTERN}" \
+    "${REPO_ROOT}"; then
+    echo "[ERROR] Regex sweep found potential secret material." >&2
+    exit 1
+  fi
+else
+  if grep -RInE \
+    --exclude-dir=.git \
+    --exclude-dir=node_modules \
+    --exclude-dir=dist \
+    "${PATTERN}" \
+    "${REPO_ROOT}"; then
+    echo "[ERROR] Regex sweep found potential secret material." >&2
+    exit 1
+  fi
 fi
 echo "[SUCCESS] Regex secrets sweep clean"
 
@@ -27,7 +41,12 @@ trufflehog git --no-update --fail --results=verified,unknown,unverified "file://
 echo "[SUCCESS] TruffleHog git history scan clean"
 
 echo "[START] TruffleHog filesystem scan"
-trufflehog filesystem --no-update --fail --results=verified,unknown,unverified "${REPO_ROOT}"
+trufflehog filesystem \
+  --no-update \
+  --fail \
+  --results=verified,unknown,unverified \
+  --exclude-paths "${REPO_ROOT}/.trufflehog-exclude-paths.txt" \
+  "${REPO_ROOT}"
 echo "[SUCCESS] TruffleHog filesystem scan clean"
 
 if [[ "${SCAN_REMOTE}" == "1" ]]; then
@@ -55,4 +74,3 @@ if [[ "${SCAN_REMOTE}" == "1" ]]; then
 fi
 
 echo "[DONE] Secrets guard checks passed"
-
