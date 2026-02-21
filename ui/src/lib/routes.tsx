@@ -4,6 +4,7 @@ import { DashboardPage } from '../pages/DashboardPage'
 import { ProjectsListPage } from '../pages/ProjectsListPage'
 import { ProjectDetailPage } from '../pages/ProjectDetailPage'
 import { ProjectReferencePage } from '../pages/ProjectReferencePage'
+import { CreateProjectPage } from '../pages/CreateProjectPage'
 import { FeedPage } from '../pages/FeedPage'
 import { TaskDetailPage } from '../pages/TaskDetailPage'
 import { IssueDetailPage } from '../pages/IssueDetailPage'
@@ -22,6 +23,7 @@ export const router = createBrowserRouter(
       children: [
         { path: '/', element: <DashboardPage /> },
         { path: '/projects', element: <ProjectsListPage /> },
+        { path: '/projects/create', element: <CreateProjectPage /> },
         { path: '/projects/:projectId', element: <ProjectDetailPage /> },
         // Reference page — only reachable from ProjectDetailPage, no bottom nav entry
         { path: '/projects/:projectId/reference', element: <ProjectReferencePage /> },
