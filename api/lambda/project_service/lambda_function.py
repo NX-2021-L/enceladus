@@ -36,6 +36,7 @@ import re
 import time
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer
@@ -154,13 +155,59 @@ def _verify_token(token: str) -> Dict[str, Any]:
 
 
 def _extract_token(event: Dict) -> Optional[str]:
+    """Extract enceladus_id_token from Cookie header or API Gateway v2 cookies."""
     headers = event.get("headers") or {}
+    cookie_parts: List[str] = []
+
     cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
-    for part in cookie_header.split(";"):
-        part = part.strip()
-        if part.startswith("enceladus_id_token="):
-            return part[len("enceladus_id_token="):]
+    if cookie_header:
+        cookie_parts.extend(part.strip() for part in cookie_header.split(";") if part.strip())
+
+    event_cookies = event.get("cookies") or []
+    if isinstance(event_cookies, list):
+        cookie_parts.extend(part.strip() for part in event_cookies if isinstance(part, str) and part.strip())
+    elif isinstance(event_cookies, str) and event_cookies.strip():
+        cookie_parts.append(event_cookies.strip())
+
+    for part in cookie_parts:
+        if not part.startswith("enceladus_id_token="):
+            continue
+        return unquote(part[len("enceladus_id_token="):])
     return None
+
+
+def _cookie_names(event: Dict[str, Any]) -> List[str]:
+    """Collect cookie names only (never values) for auth diagnostics."""
+    headers = event.get("headers") or {}
+    names: List[str] = []
+
+    cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
+    if cookie_header:
+        for part in cookie_header.split(";"):
+            token = part.strip()
+            if "=" in token:
+                names.append(token.split("=", 1)[0].strip())
+
+    event_cookies = event.get("cookies") or []
+    if isinstance(event_cookies, list):
+        for part in event_cookies:
+            if isinstance(part, str) and "=" in part:
+                names.append(part.split("=", 1)[0].strip())
+    elif isinstance(event_cookies, str) and "=" in event_cookies:
+        names.append(event_cookies.split("=", 1)[0].strip())
+
+    return sorted(set(name for name in names if name))
+
+
+def _event_path(event: Dict[str, Any]) -> str:
+    return event.get("rawPath") or event.get("path", "")
+
+
+def _event_method(event: Dict[str, Any]) -> str:
+    return (
+        (event.get("requestContext") or {}).get("http", {}).get("method")
+        or event.get("httpMethod", "")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -626,10 +673,8 @@ _PROJECTS_PATH = re.compile(
 
 
 def lambda_handler(event: Dict, context: Any) -> Dict:
-    method = (
-        (event.get("requestContext") or {}).get("http", {}).get("method")
-        or event.get("httpMethod", "")
-    )
+    method = _event_method(event)
+    path = _event_path(event)
 
     # CORS preflight
     if method == "OPTIONS":
@@ -638,14 +683,26 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     # Auth
     token = _extract_token(event)
     if not token:
+        logger.warning(
+            "auth failed: no enceladus_id_token found. method=%s path=%s cookie_names=%s has_event_cookies=%s",
+            method,
+            path,
+            _cookie_names(event),
+            bool(event.get("cookies")),
+        )
         return _error(401, "Authentication required. Please sign in.")
     try:
         claims = _verify_token(token)
     except ValueError as exc:
+        logger.warning(
+            "auth failed: token validation failed. method=%s path=%s error=%s",
+            method,
+            path,
+            str(exc),
+        )
         return _error(401, str(exc))
 
     # Parse path
-    path = event.get("rawPath") or event.get("path", "")
     path_params = event.get("pathParameters") or {}
     project_name = path_params.get("projectName")
     if project_name is None:
