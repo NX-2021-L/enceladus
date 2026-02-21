@@ -1,0 +1,167 @@
+name: UI Backend Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "ui/**"
+      - "scripts/submit_backend_ui_deploy.py"
+      - ".github/workflows/ui-backend-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      change_type:
+        description: "Semver bump type"
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      summary:
+        description: "Deployment summary (optional override)"
+        type: string
+        required: false
+        default: ""
+      related_ids:
+        description: "Comma-separated tracker IDs (optional override)"
+        type: string
+        required: false
+        default: "DVP-TSK-421"
+      wait_for_deploy:
+        description: "Wait for terminal deployment result"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  DEPLOY_PROJECT_ID: devops
+  DEPLOY_TABLE: devops-deployment-manager
+  CONFIG_BUCKET: jreese-net
+  CONFIG_PREFIX: deploy-config
+  DEPLOY_QUEUE_NAME: devops-deploy-queue.fifo
+  DEPLOYMENT_TYPE: github_public_static
+
+jobs:
+  deploy:
+    name: Submit Backend UI Deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: ui-backend-deploy-main
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3
+
+      - name: Configure AWS credentials (OIDC role)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (static keys fallback)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Build deployment metadata
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CHANGE_TYPE: ${{ github.event.inputs.change_type }}
+          INPUT_SUMMARY: ${{ github.event.inputs.summary }}
+          INPUT_RELATED_IDS: ${{ github.event.inputs.related_ids }}
+          INPUT_WAIT: ${{ github.event.inputs.wait_for_deploy }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          change_type="${INPUT_CHANGE_TYPE:-patch}"
+          if [[ "${change_type}" != "patch" && "${change_type}" != "minor" && "${change_type}" != "major" ]]; then
+            change_type="patch"
+          fi
+
+          head_line="$(printf '%s' "${HEAD_COMMIT_MESSAGE:-}" | head -n 1)"
+          if [[ -n "${INPUT_SUMMARY:-}" ]]; then
+            summary="${INPUT_SUMMARY}"
+          elif [[ -n "${head_line}" ]]; then
+            summary="UI GitHub Actions deploy: ${head_line}"
+          else
+            summary="UI GitHub Actions deploy ${CURRENT_SHA:0:12}"
+          fi
+
+          related_ids="${INPUT_RELATED_IDS:-DVP-TSK-421}"
+
+          files_changed=""
+          zero_sha="0000000000000000000000000000000000000000"
+          if [[ -n "${BEFORE_SHA:-}" && "${BEFORE_SHA}" != "${zero_sha}" ]]; then
+            files_changed="$(git diff --name-only "${BEFORE_SHA}" "${CURRENT_SHA}" -- ui | paste -sd, - || true)"
+          fi
+          if [[ -z "${files_changed}" ]]; then
+            files_changed="$(git ls-files ui | paste -sd, - || true)"
+          fi
+
+          wait_flag="--wait"
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${INPUT_WAIT}" == "false" ]]; then
+            wait_flag="--no-wait"
+          fi
+
+          {
+            echo "change_type=${change_type}"
+            echo "summary=${summary}"
+            echo "related_ids=${related_ids}"
+            echo "files_changed=${files_changed}"
+            echo "wait_flag=${wait_flag}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Submit deployment request
+        run: |
+          set -euo pipefail
+          python scripts/submit_backend_ui_deploy.py \
+            --project-id "${DEPLOY_PROJECT_ID}" \
+            --region "${AWS_REGION}" \
+            --deploy-table "${DEPLOY_TABLE}" \
+            --config-bucket "${CONFIG_BUCKET}" \
+            --config-prefix "${CONFIG_PREFIX}" \
+            --queue-name "${DEPLOY_QUEUE_NAME}" \
+            --ui-dir ui \
+            --deployment-type "${DEPLOYMENT_TYPE}" \
+            --change-type "${{ steps.meta.outputs.change_type }}" \
+            --summary "${{ steps.meta.outputs.summary }}" \
+            --changes "GitHub Actions ${GITHUB_WORKFLOW} run ${GITHUB_RUN_ID} for ${GITHUB_SHA:0:12}" \
+            --related-ids "${{ steps.meta.outputs.related_ids }}" \
+            --files-changed "${{ steps.meta.outputs.files_changed }}" \
+            --submitted-by "github-actions:${GITHUB_REPOSITORY}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --sha "${GITHUB_SHA}" \
+            ${{ steps.meta.outputs.wait_flag }}
