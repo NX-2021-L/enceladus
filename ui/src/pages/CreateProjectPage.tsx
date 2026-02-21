@@ -5,7 +5,8 @@
  * via the devops-project-service Lambda endpoint.
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   createProject,
   validateProjectId,
@@ -50,6 +51,8 @@ const STATUS_OPTIONS = [
 ];
 
 export function CreateProjectPage() {
+  const navigate = useNavigate();
+  const redirectTimeoutRef = useRef<number | null>(null);
   const [formData, setFormData] = useState<FormData>({
     project_id: '',
     prefix: '',
@@ -64,6 +67,14 @@ export function CreateProjectPage() {
     isLoading: false,
     success: false,
   });
+
+  useEffect(() => {
+    return () => {
+      if (redirectTimeoutRef.current !== null) {
+        window.clearTimeout(redirectTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
@@ -148,7 +159,11 @@ export function CreateProjectPage() {
       });
 
       // Reset form after successful submission
-      setTimeout(() => {
+      if (redirectTimeoutRef.current !== null) {
+        window.clearTimeout(redirectTimeoutRef.current);
+      }
+
+      redirectTimeoutRef.current = window.setTimeout(() => {
         setFormData({
           project_id: '',
           prefix: '',
@@ -158,8 +173,7 @@ export function CreateProjectPage() {
           repo: '',
         });
         setSubmission({ isLoading: false, success: false });
-        // Optionally redirect to projects list or new project
-        window.location.href = `/enceladus/projects/${createdProjectId}`;
+        navigate(`/projects/${createdProjectId}`, { replace: true });
       }, 2000);
     } catch (error) {
       let errorMessage = 'Failed to create project';
