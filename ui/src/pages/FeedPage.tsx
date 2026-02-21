@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo, useRef } from 'react'
+import { useEffect, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useFeed } from '../hooks/useFeed'
 import { useProjects } from '../hooks/useProjects'
@@ -8,7 +8,7 @@ import { FeedRow } from '../components/cards/FeedRow'
 import { AnimatedList } from '../components/shared/AnimatedList'
 import { SearchInput } from '../components/shared/SearchInput'
 import { FilterBar } from '../components/shared/FilterBar'
-import { SortPicker } from '../components/shared/SortPicker'
+import { RecentItemsDisplay } from '../components/shared/RecentItemsDisplay'
 import { ScrollSentinel } from '../components/shared/ScrollSentinel'
 import { FreshnessBadge } from '../components/shared/FreshnessBadge'
 import { LoadingState } from '../components/shared/LoadingState'
@@ -19,9 +19,6 @@ import {
   RECORD_TYPE_LABELS,
   RECORD_TYPE_COLORS,
   SORT_OPTIONS_FEED,
-  SORT_OPTIONS_TASKS,
-  SORT_OPTIONS_ISSUES,
-  SORT_OPTIONS_FEATURES,
   TASK_STATUSES,
   ISSUE_STATUSES,
   FEATURE_STATUSES,
@@ -80,12 +77,6 @@ export function FeedPage() {
     }
   }, [singleType, setFilter, filters.sortBy])
 
-  const sortOptions = useMemo(() => {
-    if (singleType === 'task') return SORT_OPTIONS_TASKS
-    if (singleType === 'issue') return SORT_OPTIONS_ISSUES
-    if (singleType === 'feature') return SORT_OPTIONS_FEATURES
-    return SORT_OPTIONS_FEED
-  }, [singleType])
 
   if (isPending) return <LoadingState />
   if (isError) return <ErrorState />
@@ -183,11 +174,8 @@ export function FeedPage() {
         />
       )}
 
-      <SortPicker
-        options={sortOptions}
-        active={filters.sortBy ?? 'updated:desc'}
-        onChange={(v) => setFilter('sortBy', v)}
-      />
+      {/* Recent Items Display (replaces SortPicker) */}
+      <RecentItemsDisplay items={items} />
 
       {visible.length ? (
         <>
