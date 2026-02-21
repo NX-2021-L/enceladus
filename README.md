@@ -1,14 +1,19 @@
 # Enceladus
 
-Monorepo shell for Enceladus components:
+Monorepo for Enceladus components:
 
-- `api/` - backend API service (placeholder)
-- `ui/` - web UI (PWA source migrated)
-- `mcp-server/` - MCP server service (placeholder)
+- `api/` - backend API source (Lambda services, source mirror)
+- `ui/` - web UI (PWA source + active GitHub Actions deployment flow)
+- `mcp-server/` - Enceladus MCP server source (source mirror)
 
 ## Status
 
-This initial setup only includes the UI codebase. API and MCP server directories are intentionally empty placeholders.
+API and MCP source files are now stored in this repo so the full Enceladus codebase is available in GitHub.
+
+Important deployment boundary:
+
+- UI: auto-deploy enabled through GitHub Actions + backend deployment manager.
+- API/MCP: source-only in this repo; no GitHub Actions auto-deploy is configured for non-UI components.
 
 ## UI Deployment Integration
 
@@ -19,6 +24,8 @@ The UI deployment now integrates with the backend Deployment Manager using GitHu
 - Trigger conditions:
   - Push to `main` with changes under `ui/**`
   - Manual `workflow_dispatch`
+
+Non-UI paths (`api/**`, `mcp-server/**`) do not trigger this workflow.
 
 ### Required Repository Secrets
 
@@ -42,4 +49,13 @@ python3 scripts/submit_backend_ui_deploy.py \
   --summary "Dry run validation from local" \
   --related-ids "DVP-TSK-421" \
   --dry-run
+```
+
+## Source Sync (API/MCP)
+
+To refresh API/MCP source mirrors from the canonical DevOps tool directories:
+
+```bash
+cd /Users/jreese/Dropbox/claude-code-dev/projects/enceladus/repo
+./scripts/sync_non_ui_sources.sh
 ```
