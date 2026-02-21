@@ -8,6 +8,7 @@ import { useAuthState } from '../../lib/authState'
 const TITLES: Record<string, string> = {
   '/': 'Dashboard',
   '/projects': 'Projects',
+  '/projects/create': 'Create Project',
   '/feed': 'Feed',
   '/documents': 'Documents',
   '/coordination': 'Coordination',
@@ -19,7 +20,9 @@ function resolveTitle(pathname: string): string {
   if (pathname.startsWith('/tasks/')) return 'Task Detail'
   if (pathname.startsWith('/issues/')) return 'Issue Detail'
   if (pathname.startsWith('/features/')) return 'Feature Detail'
-  if (pathname.startsWith('/projects/')) return 'Project Detail'
+  if (pathname.startsWith('/projects/')) {
+    return pathname === '/projects/create' ? 'Create Project' : 'Project Detail'
+  }
   if (pathname.startsWith('/coordination/')) return 'Request Detail'
   return 'Project Status'
 }
