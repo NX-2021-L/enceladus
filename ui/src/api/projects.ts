@@ -131,16 +131,17 @@ export function validatePrefix(prefix: string): { valid: boolean; error?: string
 }
 
 /**
- * Validate path format
+ * Validate path format (allows dashes, hyphens, slashes)
  */
 export function validatePath(path: string): { valid: boolean; error?: string } {
   if (!path.trim()) {
     return { valid: false, error: 'Path is required' };
   }
-  if (!/^[a-z0-9][a-z0-9\-/]*[a-z0-9]$/.test(path) && path.length > 2) {
+  // Allow lowercase, numbers, dashes, hyphens, underscores, and forward slashes
+  if (!/^[a-z0-9][a-z0-9\-_/]*[a-z0-9]$/.test(path) && path.length > 2) {
     return {
       valid: false,
-      error: 'Path must be lowercase letters, numbers, hyphens, and forward slashes',
+      error: 'Path must be lowercase letters, numbers, dashes, underscores, and forward slashes',
     };
   }
   return { valid: true };
