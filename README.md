@@ -59,3 +59,31 @@ To refresh API/MCP source mirrors from the canonical DevOps tool directories:
 cd /Users/jreese/Dropbox/claude-code-dev/projects/enceladus/repo
 ./scripts/sync_non_ui_sources.sh
 ```
+
+## Secrets Guardrails
+
+Secrets protection is now enforced at multiple layers:
+
+- GitHub repository settings:
+  - Secret scanning: enabled
+  - Push protection: enabled
+- CI gate:
+  - Workflow: `.github/workflows/secrets-guardrail.yml`
+  - Runs on PRs and pushes to `main`
+  - Scans git history + filesystem for secrets
+  - Scheduled daily scan also checks the public GitHub repo URL
+- Local pre-push hook (recommended):
+  - Hook file: `.githooks/pre-push`
+  - Install once per clone:
+
+```bash
+cd /Users/jreese/Dropbox/claude-code-dev/projects/enceladus/repo
+./scripts/install_git_hooks.sh
+```
+
+Run the guard scans manually at any time:
+
+```bash
+cd /Users/jreese/Dropbox/claude-code-dev/projects/enceladus/repo
+./scripts/secrets_guard.sh
+```
