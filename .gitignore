@@ -1,0 +1,46 @@
+# OS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Node / frontend
+node_modules/
+yarn.lock
+pnpm-lock.yaml
+dist/
+build/
+.parcel-cache/
+.svelte-kit/
+.next/
+.nuxt/
+*.log
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+
+# Static site generators
+_site/
+.cache/
+
+# Testing / coverage
+coverage/
+.nyc_output/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Misc
+.terraform/
+.serverless/
+.DS_Store
+
+# Ensure agent-reference content stays out of repos
+../agent-reference/
