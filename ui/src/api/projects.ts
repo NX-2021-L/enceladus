@@ -5,29 +5,34 @@
  * The enceladus_id_token cookie is automatically sent via credentials:'include'.
  */
 
-export interface CreateProjectRequest {
+export type CreateProjectRequest = {
   project_id: string;
   prefix: string;
   path: string;
   summary: string;
   status: string;
   parent: string;
-}
+};
 
-export interface CreateProjectResponse {
+export type CreateProjectResponse = {
   project_id: string;
   created_at: string;
   reference_doc_id: string;
-}
+};
 
 export class ProjectServiceError extends Error {
+  public status: number;
+  public details?: Record<string, unknown>;
+
   constructor(
-    public status: number,
+    status: number,
     message: string,
-    public details?: Record<string, unknown>
+    details?: Record<string, unknown>
   ) {
     super(message);
     this.name = 'ProjectServiceError';
+    this.status = status;
+    this.details = details;
   }
 }
 
