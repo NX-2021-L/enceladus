@@ -72,6 +72,7 @@ TEMPLATE_URL = os.environ.get(
 # Validation patterns
 _NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,49}$")
 _PREFIX_PATTERN = re.compile(r"^[A-Z]{3}$")
+_REPO_URL_PATTERN = re.compile(r"^https?://[^\s]+$")
 _VALID_CREATE_STATUSES = {"planning", "development", "active_production"}
 _ALL_STATUSES = _VALID_CREATE_STATUSES | {"closed", "archived"}
 
@@ -309,11 +310,18 @@ def _validate_create_input(body: Dict) -> Tuple[Optional[Dict], Optional[str]]:
         parent = str(parent).strip()
         if not parent:
             parent = None
+    repo = body.get("repo")
+    if repo is not None:
+        repo = str(repo).strip()
+        if not repo:
+            repo = None
+        elif len(repo) > 2048 or not _REPO_URL_PATTERN.match(repo):
+            errors.append("repo: when provided, must be a valid http(s) URL up to 2048 characters")
     if errors:
         return None, "; ".join(errors)
     return {
         "name": name, "prefix": prefix, "summary": summary,
-        "status": status, "parent": parent,
+        "status": status, "parent": parent, "repo": repo,
     }, None
 
 
@@ -358,6 +366,7 @@ def _handle_create(body: Dict, claims: Dict) -> Dict:
     summary = data["summary"]
     status = data["status"]
     parent = data["parent"]
+    repo = data["repo"]
     now = _now_z()
     created_by = claims.get("sub", "unknown")
 
@@ -416,6 +425,7 @@ def _handle_create(body: Dict, claims: Dict) -> Dict:
     item: Dict[str, Dict[str, str]] = {
         "project_id": {"S": name},
         "prefix": {"S": prefix},
+        # Path remains computed internally for hierarchy support and backward compatibility.
         "path": {"S": path},
         "summary": {"S": summary},
         "status": {"S": status},
@@ -425,6 +435,8 @@ def _handle_create(body: Dict, claims: Dict) -> Dict:
     }
     if parent:
         item["parent"] = {"S": parent}
+    if repo:
+        item["repo"] = {"S": repo}
 
     try:
         ddb.put_item(
@@ -491,7 +503,9 @@ def _handle_create(body: Dict, claims: Dict) -> Dict:
     project_data = {
         "project_id": name,
         "prefix": prefix,
+        # Deprecated client-facing field; retained to avoid breaking existing consumers.
         "path": path,
+        "repo": repo,
         "summary": summary,
         "status": status,
         "parent": parent,
