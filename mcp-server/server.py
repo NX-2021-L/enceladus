@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -134,6 +135,7 @@ GSI_PROJECT_TYPE = "project-type-index"
 
 SERVER_NAME = "enceladus"
 SERVER_VERSION = "0.4.0"
+HTTP_USER_AGENT = os.environ.get("ENCELADUS_HTTP_USER_AGENT", f"enceladus-mcp-server/{SERVER_VERSION}")
 
 logger = logging.getLogger(SERVER_NAME)
 
@@ -147,6 +149,45 @@ _sqs_client = None
 _deploy_queue_url: Optional[str] = None
 _governance_catalog_cache: Dict[str, Dict[str, Any]] = {}
 _governance_catalog_cached_at: float = 0.0
+
+
+def _build_ssl_context() -> Optional[ssl.SSLContext]:
+    """Build an SSL context with certifi fallback for reliable HTTPS calls."""
+    cert_file = str(os.environ.get("SSL_CERT_FILE", "") or "").strip()
+    if cert_file:
+        try:
+            return ssl.create_default_context(cafile=cert_file)
+        except Exception as exc:
+            logger.warning("SSL_CERT_FILE %r is not usable: %s", cert_file, exc)
+
+    try:
+        import certifi  # type: ignore
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        try:
+            return ssl.create_default_context()
+        except Exception:
+            return None
+
+
+_SSL_CTX = _build_ssl_context()
+
+
+def _json_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _urlopen(req: urllib.request.Request, timeout: int):
+    if _SSL_CTX is not None:
+        return urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX)
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def _get_ddb():
@@ -483,7 +524,7 @@ def _deploy_api_request(
         encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
         if encoded_qs:
             url = f"{url}?{encoded_qs}"
-    headers = {"Accept": "application/json"}
+    headers = _json_headers()
     if DEPLOY_API_COOKIE:
         headers["Cookie"] = DEPLOY_API_COOKIE
     if payload is not None:
@@ -493,7 +534,7 @@ def _deploy_api_request(
         body = None
     req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with _urlopen(req, timeout=20) as resp:
             text = resp.read().decode("utf-8")
             return json.loads(text) if text else {"success": True}
     except urllib.error.HTTPError as exc:
@@ -523,7 +564,7 @@ def _document_api_request(
         if encoded_qs:
             url = f"{url}?{encoded_qs}"
 
-    headers = {"Accept": "application/json"}
+    headers = _json_headers()
     if DOCUMENT_API_INTERNAL_API_KEY:
         headers["X-Coordination-Internal-Key"] = DOCUMENT_API_INTERNAL_API_KEY
     if payload is not None:
@@ -534,7 +575,7 @@ def _document_api_request(
 
     req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with _urlopen(req, timeout=20) as resp:
             text = resp.read().decode("utf-8")
             return json.loads(text) if text else {"success": True}
     except urllib.error.HTTPError as exc:
@@ -2330,12 +2371,13 @@ async def _deploy_history_list(args: dict) -> list[TextContent]:
 async def _coordination_capabilities(args: dict) -> list[TextContent]:
     """Fetch capabilities from the coordination API (public endpoint)."""
     try:
-        import urllib.request
-
         url = f"{COORDINATION_API_BASE}/capabilities"
-        req = urllib.request.Request(url, method="GET")
-        req.add_header("Accept", "application/json")
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        req = urllib.request.Request(
+            url=url,
+            method="GET",
+            headers=_json_headers(),
+        )
+        with _urlopen(req, timeout=10) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         return _result_text(body)
     except Exception as exc:
