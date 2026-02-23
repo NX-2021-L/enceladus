@@ -141,6 +141,59 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertIn("CODEX_API_KEY", blob)
         self.assertIn("COORDINATION_CALLBACK_PROVIDER=\"openai_codex\"", blob)
 
+    def test_build_ssm_commands_uses_idempotent_mcp_profile_bootstrap(self):
+        request = {
+            "request_id": "CRQ-MCP001",
+            "project_id": "enceladus",
+            "feature_id": "ENC-FTR-016",
+        }
+        commands = coordination_lambda._build_ssm_commands(
+            request,
+            "codex_full_auto",
+            "validate mcp bootstrap",
+        )
+        blob = "\n".join(commands)
+        self.assertIn("COORD_MCP_INSTALLER_CANDIDATES_JSON", blob)
+        self.assertIn("COORD_MCP_MARKER_PATH", blob)
+        self.assertIn("COORD_MCP_PROFILE_PATH", blob)
+        self.assertIn("COORD_MCP_SKIP_INSTALL=0", blob)
+        self.assertIn("COORD_MCP_BOOTSTRAP_MAX_ATTEMPTS", blob)
+        self.assertIn("COORDINATION_PREFLIGHT_MCP_PROFILE_MODE=warm_skip", blob)
+
+    def test_build_ssm_commands_mcp_connectivity_checks_capabilities_and_governance_hash(self):
+        request = {
+            "request_id": "CRQ-MCP002",
+            "project_id": "enceladus",
+            "feature_id": "ENC-FTR-016",
+        }
+        commands = coordination_lambda._build_ssm_commands(
+            request,
+            "preflight",
+            None,
+        )
+        blob = "\n".join(commands)
+        self.assertIn("coordination_capabilities", blob)
+        self.assertIn("governance_hash", blob)
+        self.assertIn("api_gateway", blob)
+
+    @patch.object(
+        coordination_lambda,
+        "_provider_secret_readiness",
+        return_value={
+            "openai_codex": {"secret_status": "active"},
+            "claude_agent_sdk": {"secret_status": "active"},
+        },
+    )
+    def test_handle_capabilities_exposes_host_v2_mcp_and_fleet_template(self, _mock_readiness):
+        resp = coordination_lambda._handle_capabilities()
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        caps = body["capabilities"]
+        self.assertIn("mcp_bootstrap", caps["host_v2"])
+        self.assertIn("fleet_template", caps["host_v2"])
+        self.assertIn("profile_path", caps["enceladus_mcp_profile"])
+        self.assertIn("marker_path", caps["enceladus_mcp_profile"])
+
     @patch.object(coordination_lambda, "DISPATCH_TIMEOUT_CEILING_SECONDS", 1800)
     @patch.object(coordination_lambda, "HOST_V2_TIMEOUT_SECONDS", 9999)
     @patch.object(coordination_lambda, "_build_ssm_commands", return_value=["echo ok"])
