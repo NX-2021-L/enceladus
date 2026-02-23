@@ -16,6 +16,7 @@ import { ChildRecords } from '../components/shared/ChildRecords'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
 import { formatDate } from '../lib/formatters'
+import { filterRelatedItems, getChildrenIds } from '../lib/relationshipFilters'
 
 export function TaskDetailPage() {
   const { taskId } = useParams<{ taskId: string }>()
@@ -265,22 +266,41 @@ export function TaskDetailPage() {
         </div>
       )}
 
-      {/* Related Items */}
+      {/* Related Items — ENC-FTR-014: De-duplicated (excludes parent/children) */}
       <div className="bg-slate-800 rounded-lg p-4">
         <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
           Related Items
         </h3>
-        <RelatedItems
-          groups={[
-            { label: 'Features', ids: task.related_feature_ids ?? [], routePrefix: '/features' },
-            { label: 'Tasks', ids: task.related_task_ids ?? [], routePrefix: '/tasks' },
-            { label: 'Issues', ids: task.related_issue_ids ?? [], routePrefix: '/issues' },
-          ]}
-          recordMap={recordMap}
-        />
-        {!(task.related_feature_ids?.length || task.related_task_ids?.length || task.related_issue_ids?.length) && (
-          <p className="text-sm text-slate-500">No related items.</p>
-        )}
+        {useMemo(() => {
+          // Get all children IDs to exclude from related items (de-duplication)
+          const childrenIds = getChildrenIds(task.task_id, allTasks)
+            .concat(getChildrenIds(task.task_id, allIssues))
+            .concat(getChildrenIds(task.task_id, allFeatures))
+
+          // Filter related items to exclude parent and children
+          const filteredFeatures = filterRelatedItems(task.related_feature_ids ?? [], task.parent, childrenIds)
+          const filteredTasks = filterRelatedItems(task.related_task_ids ?? [], task.parent, childrenIds)
+          const filteredIssues = filterRelatedItems(task.related_issue_ids ?? [], task.parent, childrenIds)
+
+          const hasRelated = filteredFeatures.length > 0 || filteredTasks.length > 0 || filteredIssues.length > 0
+
+          return (
+            <>
+              {hasRelated ? (
+                <RelatedItems
+                  groups={[
+                    { label: 'Features', ids: filteredFeatures, routePrefix: '/features' },
+                    { label: 'Tasks', ids: filteredTasks, routePrefix: '/tasks' },
+                    { label: 'Issues', ids: filteredIssues, routePrefix: '/issues' },
+                  ]}
+                  recordMap={recordMap}
+                />
+              ) : (
+                <p className="text-sm text-slate-500">No related items.</p>
+              )}
+            </>
+          )
+        }, [task, allTasks, allIssues, allFeatures, recordMap])}
       </div>
 
       {/* History */}
