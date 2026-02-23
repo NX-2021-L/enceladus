@@ -1,7 +1,13 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { documentKeys, fetchDocumentsByProject } from '../api/documents'
+import { isSessionExpiredError } from '../lib/authSession'
 import type { DocumentFilters } from '../types/filters'
+
+/** Default polling interval for document list (15 s). More conservative than the
+ *  3 s feed polling because the document API queries DynamoDB directly rather than
+ *  reading a pre-generated S3 file. */
+const DOCUMENTS_POLL_INTERVAL = 15_000
 
 function compareDates(a: string | null, b: string | null): number {
   if (!a) return 1
@@ -15,11 +21,24 @@ function parseSort(raw?: string): { field: string; dir: 1 | -1 } {
   return { field, dir: d === 'asc' ? -1 : 1 }
 }
 
-export function useDocuments(projectId: string, filters?: DocumentFilters) {
+interface UseDocumentsOptions {
+  /** Enable automatic polling so newly created documents appear without a
+   *  manual refresh.  Mirrors the Feed page's polling behaviour. */
+  polling?: boolean
+}
+
+export function useDocuments(projectId: string, filters?: DocumentFilters, options?: UseDocumentsOptions) {
   const query = useQuery({
     queryKey: documentKeys.list(projectId),
     queryFn: () => fetchDocumentsByProject(projectId),
     enabled: !!projectId,
+    refetchInterval: options?.polling ? DOCUMENTS_POLL_INTERVAL : undefined,
+    retry: (count, error) => {
+      if (isSessionExpiredError(error)) return false
+      return count < 2
+    },
+    throwOnError: false,
+    meta: { suppressSessionExpired: true },
   })
 
   const filtered = useMemo(() => {

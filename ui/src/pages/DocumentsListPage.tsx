@@ -24,7 +24,7 @@ export function DocumentsListPage() {
 
   // Documents require a project selection — default to first available
   const selectedProject = filters.projectId ?? projects[0]?.project_id ?? ''
-  const { documents, isPending, isError } = useDocuments(selectedProject, filters)
+  const { documents, isPending, isError } = useDocuments(selectedProject, filters, { polling: true })
   const { visible, sentinelRef, hasMore, total } = useInfiniteList(documents)
 
   if (!projects.length) return <LoadingState />
