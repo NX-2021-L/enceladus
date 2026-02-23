@@ -106,6 +106,10 @@ export interface FeaturesFeed extends FeedEnvelope<Feature> {
   features: Feature[]
 }
 
+export interface DocumentsFeed extends FeedEnvelope<Document> {
+  documents: Document[]
+}
+
 export interface Document {
   document_id: string
   project_id: string

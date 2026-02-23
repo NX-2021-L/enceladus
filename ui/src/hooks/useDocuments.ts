@@ -1,12 +1,12 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { documentKeys, fetchDocumentsByProject } from '../api/documents'
+import { feedKeys, fetchDocumentsFeed } from '../api/feeds'
 import { isSessionExpiredError } from '../lib/authSession'
 import type { DocumentFilters } from '../types/filters'
 
-/** Default polling interval for document list (15 s). More conservative than the
- *  3 s feed polling because the document API queries DynamoDB directly rather than
- *  reading a pre-generated S3 file. */
+/** Polling interval for the S3-backed documents feed (15 s).
+ *  Aligned with the CloudFront s-maxage (300 s) and the feed publisher's
+ *  SQS FIFO debounce window (5 min). */
 const DOCUMENTS_POLL_INTERVAL = 15_000
 
 function compareDates(a: string | null, b: string | null): number {
@@ -27,11 +27,16 @@ interface UseDocumentsOptions {
   polling?: boolean
 }
 
-export function useDocuments(projectId: string, filters?: DocumentFilters, options?: UseDocumentsOptions) {
+/**
+ * Fetch documents from the S3-backed documents feed (`/mobile/v1/documents.json`).
+ *
+ * The feed contains all documents across all projects.  Filtering by project,
+ * status, search, and sort is done client-side.
+ */
+export function useDocuments(filters?: DocumentFilters, options?: UseDocumentsOptions) {
   const query = useQuery({
-    queryKey: documentKeys.list(projectId),
-    queryFn: () => fetchDocumentsByProject(projectId),
-    enabled: !!projectId,
+    queryKey: feedKeys.documents,
+    queryFn: fetchDocumentsFeed,
     refetchInterval: options?.polling ? DOCUMENTS_POLL_INTERVAL : undefined,
     retry: (count, error) => {
       if (isSessionExpiredError(error)) return false
@@ -41,9 +46,12 @@ export function useDocuments(projectId: string, filters?: DocumentFilters, optio
     meta: { suppressSessionExpired: true },
   })
 
+  const documents = query.data?.documents
+
   const filtered = useMemo(() => {
-    if (!query.data) return []
-    let items = query.data
+    if (!documents) return []
+    let items = documents
+    if (filters?.projectId) items = items.filter((d) => d.project_id === filters.projectId)
     if (filters?.status?.length) items = items.filter((d) => filters.status!.includes(d.status))
     if (filters?.search) {
       const q = filters.search.toLowerCase()
@@ -62,11 +70,11 @@ export function useDocuments(projectId: string, filters?: DocumentFilters, optio
       else cmp = compareDates(a.updated_at, b.updated_at)
       return cmp * dir
     })
-  }, [query.data, filters?.status, filters?.search, filters?.sortBy])
+  }, [documents, filters?.projectId, filters?.status, filters?.search, filters?.sortBy])
 
   return {
     documents: filtered,
-    allDocuments: query.data ?? [],
+    allDocuments: documents ?? [],
     ...query,
   }
 }

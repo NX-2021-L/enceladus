@@ -22,9 +22,9 @@ export function DocumentsListPage() {
   const { filters, toggleArrayFilter, setFilter } = useFilterState<DocumentFilters>({})
   const { projects } = useProjects()
 
-  // Documents require a project selection — default to first available
+  // Default to first available project; projectId is now part of filters for the S3 feed hook
   const selectedProject = filters.projectId ?? projects[0]?.project_id ?? ''
-  const { documents, isPending, isError } = useDocuments(selectedProject, filters, { polling: true })
+  const { documents, isPending, isError } = useDocuments({ ...filters, projectId: selectedProject }, { polling: true })
   const { visible, sentinelRef, hasMore, total } = useInfiniteList(documents)
 
   if (!projects.length) return <LoadingState />
