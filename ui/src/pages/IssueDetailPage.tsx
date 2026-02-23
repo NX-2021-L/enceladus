@@ -17,6 +17,7 @@ import { ChildRecords } from '../components/shared/ChildRecords'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
 import { formatDate } from '../lib/formatters'
+import { filterRelatedItems, getChildrenIds } from '../lib/relationshipFilters'
 
 export function IssueDetailPage() {
   const { issueId } = useParams<{ issueId: string }>()
@@ -250,22 +251,41 @@ export function IssueDetailPage() {
         </div>
       )}
 
-      {/* Related Items */}
+      {/* Related Items — ENC-FTR-014: De-duplicated (excludes parent/children) */}
       <div className="bg-slate-800 rounded-lg p-4">
         <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
           Related Items
         </h3>
-        <RelatedItems
-          groups={[
-            { label: 'Features', ids: issue.related_feature_ids ?? [], routePrefix: '/features' },
-            { label: 'Tasks', ids: issue.related_task_ids ?? [], routePrefix: '/tasks' },
-            { label: 'Issues', ids: issue.related_issue_ids ?? [], routePrefix: '/issues' },
-          ]}
-          recordMap={recordMap}
-        />
-        {!(issue.related_feature_ids?.length || issue.related_task_ids?.length || issue.related_issue_ids?.length) && (
-          <p className="text-sm text-slate-500">No related items.</p>
-        )}
+        {useMemo(() => {
+          // Get all children IDs to exclude from related items (de-duplication)
+          const childrenIds = getChildrenIds(issue.issue_id, allTasks)
+            .concat(getChildrenIds(issue.issue_id, allIssues))
+            .concat(getChildrenIds(issue.issue_id, allFeatures))
+
+          // Filter related items to exclude parent and children
+          const filteredFeatures = filterRelatedItems(issue.related_feature_ids ?? [], issue.parent, childrenIds)
+          const filteredTasks = filterRelatedItems(issue.related_task_ids ?? [], issue.parent, childrenIds)
+          const filteredIssues = filterRelatedItems(issue.related_issue_ids ?? [], issue.parent, childrenIds)
+
+          const hasRelated = filteredFeatures.length > 0 || filteredTasks.length > 0 || filteredIssues.length > 0
+
+          return (
+            <>
+              {hasRelated ? (
+                <RelatedItems
+                  groups={[
+                    { label: 'Features', ids: filteredFeatures, routePrefix: '/features' },
+                    { label: 'Tasks', ids: filteredTasks, routePrefix: '/tasks' },
+                    { label: 'Issues', ids: filteredIssues, routePrefix: '/issues' },
+                  ]}
+                  recordMap={recordMap}
+                />
+              ) : (
+                <p className="text-sm text-slate-500">No related items.</p>
+              )}
+            </>
+          )
+        }, [issue, allTasks, allIssues, allFeatures, recordMap])}
       </div>
 
       {/* History */}
