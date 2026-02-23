@@ -100,11 +100,39 @@ DISPATCH_TIMEOUT_CEILING_SECONDS = int(os.environ.get("DISPATCH_TIMEOUT_CEILING_
 SSM_DOCUMENT_NAME = os.environ.get("SSM_DOCUMENT_NAME", "AWS-RunShellScript")
 HOST_V2_ENCELADUS_MCP_INSTALLER = os.environ.get(
     "HOST_V2_ENCELADUS_MCP_INSTALLER",
-    "projects/devops/tools/enceladus-mcp-server/install_profile.sh",
+    "tools/enceladus-mcp-server/install_profile.sh",
 )
 HOST_V2_PROVIDER_CHECK_SCRIPT = os.environ.get(
     "HOST_V2_PROVIDER_CHECK_SCRIPT",
     "projects/devops/tools/agentcli-host-v2/provider_rotation_check.py",
+)
+HOST_V2_MCP_PROFILE_PATH = os.environ.get("HOST_V2_MCP_PROFILE_PATH", ".claude/mcp.json")
+HOST_V2_MCP_MARKER_PATH = os.environ.get(
+    "HOST_V2_MCP_MARKER_PATH",
+    ".cache/enceladus/mcp-profile-installed-v1.json",
+)
+HOST_V2_MCP_BOOTSTRAP_RETRY_BACKOFF_SECONDS = tuple(
+    int(part.strip())
+    for part in os.environ.get("HOST_V2_MCP_BOOTSTRAP_RETRY_BACKOFF_SECONDS", "2,5,10").split(",")
+    if part.strip()
+)
+if not HOST_V2_MCP_BOOTSTRAP_RETRY_BACKOFF_SECONDS:
+    HOST_V2_MCP_BOOTSTRAP_RETRY_BACKOFF_SECONDS = (2, 5, 10)
+HOST_V2_MCP_BOOTSTRAP_MAX_ATTEMPTS = int(
+    os.environ.get(
+        "HOST_V2_MCP_BOOTSTRAP_MAX_ATTEMPTS",
+        str(len(HOST_V2_MCP_BOOTSTRAP_RETRY_BACKOFF_SECONDS) + 1),
+    )
+)
+HOST_V2_MCP_BOOTSTRAP_SCRIPT = os.environ.get(
+    "HOST_V2_MCP_BOOTSTRAP_SCRIPT",
+    "tools/enceladus-mcp-server/host_v2_first_bootstrap.sh",
+)
+HOST_V2_FLEET_LAUNCH_TEMPLATE_ID = os.environ.get("HOST_V2_FLEET_LAUNCH_TEMPLATE_ID", "")
+HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION = os.environ.get("HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION", "$Default")
+HOST_V2_FLEET_USER_DATA_TEMPLATE = os.environ.get(
+    "HOST_V2_FLEET_USER_DATA_TEMPLATE",
+    "tools/enceladus-mcp-server/host_v2_user_data_template.sh",
 )
 DEFAULT_OPENAI_CODEX_MODEL = os.environ.get("DEFAULT_OPENAI_CODEX_MODEL", "gpt-5.1-codex-max")
 OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "https://api.openai.com")
@@ -153,7 +181,7 @@ COORDINATION_GSI_IDEMPOTENCY = os.environ.get("COORDINATION_GSI_IDEMPOTENCY", "i
 TRACKER_GSI_PROJECT_TYPE = os.environ.get("TRACKER_GSI_PROJECT_TYPE", "project-type-index")
 ENCELADUS_MCP_SERVER_PATH = os.environ.get(
     "ENCELADUS_MCP_SERVER_PATH",
-    "projects/devops/tools/enceladus-mcp-server/server.py",
+    "tools/enceladus-mcp-server/server.py",
 )
 
 ENABLE_CLAUDE_HEADLESS = os.environ.get("ENABLE_CLAUDE_HEADLESS", "false").lower() == "true"
@@ -918,6 +946,7 @@ def _resolve_mcp_server_path() -> str:
     candidates.extend(
         [
             str(cwd / "tools/enceladus-mcp-server/server.py"),
+            str(cwd / "projects/enceladus/tools/enceladus-mcp-server/server.py"),
             str(cwd / "projects/devops/tools/enceladus-mcp-server/server.py"),
             str(pathlib.Path(__file__).resolve().parents[3] / "enceladus-mcp-server/server.py"),
         ]
@@ -2441,6 +2470,10 @@ def _build_dispatch_payload_commands(request: Dict[str, Any], execution_mode: st
         "execution_mode": execution_mode,
         "provider_secret_refs": provider_refs,
         "enceladus_mcp_profile_installer": HOST_V2_ENCELADUS_MCP_INSTALLER,
+        "enceladus_mcp_bootstrap_mode": "setup_if_missing_once",
+        "enceladus_mcp_profile_path": HOST_V2_MCP_PROFILE_PATH,
+        "enceladus_mcp_marker_path": HOST_V2_MCP_MARKER_PATH,
+        "enceladus_mcp_bootstrap_max_attempts": HOST_V2_MCP_BOOTSTRAP_MAX_ATTEMPTS,
     }
     payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return [
@@ -2460,37 +2493,116 @@ def _build_dispatch_payload_commands(request: Dict[str, Any], execution_mode: st
 
 
 def _build_mcp_profile_bootstrap_commands() -> List[str]:
-    installer = json.dumps(HOST_V2_ENCELADUS_MCP_INSTALLER)
-    fallback_installer = json.dumps("projects/devops/tools/enceladus-mcp-server/install_profile.sh")
+    installer_candidates: List[str] = []
+    for candidate in (
+        HOST_V2_ENCELADUS_MCP_INSTALLER,
+        "tools/enceladus-mcp-server/install_profile.sh",
+        "projects/enceladus/tools/enceladus-mcp-server/install_profile.sh",
+        "projects/devops/tools/enceladus-mcp-server/install_profile.sh",
+    ):
+        normalized = str(candidate or "").strip()
+        if normalized and normalized not in installer_candidates:
+            installer_candidates.append(normalized)
+
+    retry_backoffs = [int(v) for v in HOST_V2_MCP_BOOTSTRAP_RETRY_BACKOFF_SECONDS if int(v) >= 0]
+    if not retry_backoffs:
+        retry_backoffs = [2, 5, 10]
+    max_attempts = max(1, HOST_V2_MCP_BOOTSTRAP_MAX_ATTEMPTS)
     log_path = "/tmp/coordination-mcp-profile.log"
+
     return [
-        f"COORD_MCP_INSTALLER={installer}",
-        f"COORD_MCP_INSTALLER_FALLBACK={fallback_installer}",
+        f"COORD_MCP_INSTALLER_CANDIDATES_JSON={shlex.quote(json.dumps(installer_candidates, separators=(',', ':')))}",
+        f"COORD_MCP_PROFILE_PATH_RAW={json.dumps(HOST_V2_MCP_PROFILE_PATH)}",
+        f"COORD_MCP_MARKER_PATH_RAW={json.dumps(HOST_V2_MCP_MARKER_PATH)}",
         (
-            "if [ ! -x \"$COORD_MCP_INSTALLER\" ] && [ -x \"$COORD_MCP_INSTALLER_FALLBACK\" ]; then "
-            "COORD_MCP_INSTALLER=\"$COORD_MCP_INSTALLER_FALLBACK\"; "
+            "case \"$COORD_MCP_PROFILE_PATH_RAW\" in "
+            "/*) COORD_MCP_PROFILE_PATH=\"$COORD_MCP_PROFILE_PATH_RAW\" ;; "
+            "*) COORD_MCP_PROFILE_PATH=\"$HOME/$COORD_MCP_PROFILE_PATH_RAW\" ;; "
+            "esac"
+        ),
+        (
+            "case \"$COORD_MCP_MARKER_PATH_RAW\" in "
+            "/*) COORD_MCP_MARKER_PATH=\"$COORD_MCP_MARKER_PATH_RAW\" ;; "
+            "*) COORD_MCP_MARKER_PATH=\"$HOME/$COORD_MCP_MARKER_PATH_RAW\" ;; "
+            "esac"
+        ),
+        "COORD_MCP_SKIP_INSTALL=0",
+        (
+            "if [ -f \"$COORD_MCP_PROFILE_PATH\" ] "
+            "&& grep -q '\"enceladus\"' \"$COORD_MCP_PROFILE_PATH\" 2>/dev/null "
+            "&& [ -f \"$COORD_MCP_MARKER_PATH\" ]; then "
+            "COORD_MCP_SKIP_INSTALL=1; "
+            "echo 'COORDINATION_PREFLIGHT_MCP_PROFILE_MODE=warm_skip'; "
+            "fi"
+        ),
+        "COORD_MCP_INSTALLER=''",
+        (
+            "if [ \"$COORD_MCP_SKIP_INSTALL\" -eq 0 ]; then "
+            "COORD_MCP_INSTALLER=$(python3 -c "
+            "'import json,os,sys; "
+            "c=json.loads(sys.argv[1]); "
+            "print(next((x for x in c if os.path.isfile(x) and os.access(x, os.X_OK)), \"\"))' "
+            "\"$COORD_MCP_INSTALLER_CANDIDATES_JSON\"); "
             "fi"
         ),
         (
-            "if [ ! -x \"$COORD_MCP_INSTALLER\" ]; then "
+            "if [ \"$COORD_MCP_SKIP_INSTALL\" -eq 0 ] && [ -z \"$COORD_MCP_INSTALLER\" ]; then "
             "echo '[ERROR] Enceladus MCP installer not found or not executable'; "
             f"echo {shlex.quote('COORDINATION_PREFLIGHT_ERROR=' + json.dumps({'stage': 'mcp', 'code': 'installer_missing'}, sort_keys=True, separators=(',', ':')))}; "
             "exit 23; "
             "fi"
         ),
+        f"COORD_MCP_BOOTSTRAP_MAX_ATTEMPTS={max_attempts}",
         (
-            "\"$COORD_MCP_INSTALLER\" >"
-            f"{log_path} 2>&1 || "
-            "(echo '[ERROR] Enceladus MCP profile bootstrap failed'; "
-            f"tail -n 40 {log_path} || true; "
-            f"echo {shlex.quote('COORDINATION_PREFLIGHT_ERROR=' + json.dumps({'stage': 'mcp', 'code': 'bootstrap_failed'}, sort_keys=True, separators=(',', ':')))}; "
-            "exit 24)"
+            f"COORD_MCP_BOOTSTRAP_BACKOFFS={json.dumps(' '.join(str(v) for v in retry_backoffs))}"
+        ),
+        f"COORD_MCP_PROFILE_LOG={log_path}",
+        "COORD_MCP_BOOTSTRAP_DONE=0",
+        "COORD_MCP_ATTEMPT=1",
+        (
+            "if [ \"$COORD_MCP_SKIP_INSTALL\" -eq 0 ]; then "
+            "while [ \"$COORD_MCP_ATTEMPT\" -le \"$COORD_MCP_BOOTSTRAP_MAX_ATTEMPTS\" ]; do "
+            "if \"$COORD_MCP_INSTALLER\" >\"$COORD_MCP_PROFILE_LOG\" 2>&1; then "
+            "COORD_MCP_BOOTSTRAP_DONE=1; break; "
+            "fi; "
+            "tail -n 40 \"$COORD_MCP_PROFILE_LOG\" || true; "
+            "if [ \"$COORD_MCP_ATTEMPT\" -lt \"$COORD_MCP_BOOTSTRAP_MAX_ATTEMPTS\" ]; then "
+            "COORD_MCP_BACKOFF=$(python3 -c "
+            "'import sys; vals=[int(v) for v in (sys.argv[1] or \"\").split() if v.strip()]; "
+            "idx=max(0,min(int(sys.argv[2])-1,len(vals)-1)); "
+            "print(vals[idx] if vals else 2)' "
+            "\"$COORD_MCP_BOOTSTRAP_BACKOFFS\" \"$COORD_MCP_ATTEMPT\"); "
+            "echo \"[WARNING] Enceladus MCP profile bootstrap failed (attempt $COORD_MCP_ATTEMPT); retrying in $COORD_MCP_BACKOFF s\"; "
+            "sleep \"$COORD_MCP_BACKOFF\"; "
+            "fi; "
+            "COORD_MCP_ATTEMPT=$((COORD_MCP_ATTEMPT + 1)); "
+            "done; "
+            "fi"
         ),
         (
-            "if [ ! -f \"$HOME/.claude/mcp.json\" ] || ! grep -q '\"enceladus\"' \"$HOME/.claude/mcp.json\"; then "
+            "if [ \"$COORD_MCP_SKIP_INSTALL\" -eq 0 ] && [ \"$COORD_MCP_BOOTSTRAP_DONE\" -ne 1 ]; then "
+            "echo '[ERROR] Enceladus MCP profile bootstrap failed'; "
+            "tail -n 40 \"$COORD_MCP_PROFILE_LOG\" || true; "
+            f"echo {shlex.quote('COORDINATION_PREFLIGHT_ERROR=' + json.dumps({'stage': 'mcp', 'code': 'bootstrap_failed'}, sort_keys=True, separators=(',', ':')))}; "
+            "exit 24; "
+            "fi"
+        ),
+        (
+            "if [ ! -f \"$COORD_MCP_PROFILE_PATH\" ] || ! grep -q '\"enceladus\"' \"$COORD_MCP_PROFILE_PATH\"; then "
             "echo '[ERROR] Enceladus MCP profile validation failed'; "
             f"echo {shlex.quote('COORDINATION_PREFLIGHT_ERROR=' + json.dumps({'stage': 'mcp', 'code': 'profile_missing'}, sort_keys=True, separators=(',', ':')))}; "
             "exit 25; "
+            "fi"
+        ),
+        (
+            "if [ \"$COORD_MCP_SKIP_INSTALL\" -eq 0 ]; then "
+            "mkdir -p \"$(dirname \"$COORD_MCP_MARKER_PATH\")\"; "
+            "printf '{\"installed_at\":\"%s\",\"installer\":\"%s\",\"profile\":\"%s\"}\\n' "
+            "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$COORD_MCP_INSTALLER\" \"$COORD_MCP_PROFILE_PATH\" "
+            "> \"$COORD_MCP_MARKER_PATH\"; "
+            "echo 'COORDINATION_PREFLIGHT_MCP_PROFILE_MODE=cold_install'; "
+            "else "
+            "echo 'COORDINATION_PREFLIGHT_MCP_PROFILE_MODE=warm_skip'; "
             "fi"
         ),
         f"echo {shlex.quote('COORDINATION_PREFLIGHT_OK=' + json.dumps({'stage': 'mcp', 'status': 'ok'}, sort_keys=True, separators=(',', ':')))}",
@@ -3784,20 +3896,31 @@ def _build_mcp_connectivity_check_commands() -> List[str]:
     check_py = """
 import json
 import sys
+import urllib.request
 
 for candidate in (
+    "projects/enceladus/tools/enceladus-mcp-server",
     "projects/devops/tools/enceladus-mcp-server",
     "tools/enceladus-mcp-server",
     "/home/ec2-user/claude-code-dev/projects/devops/tools/enceladus-mcp-server",
+    "/home/ec2-user/claude-code-dev/projects/enceladus/tools/enceladus-mcp-server",
 ):
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
 health = None
 fallback_reason = None
+capabilities_status = "unreachable"
+governance_hash = ""
+coordination_api_base = "https://jreese.net/api/v1/coordination"
 try:
     import dispatch_plan_generator as dpg
     health = dpg.test_connection_health()
+    try:
+        governance_hash = str(dpg.compute_governance_hash() or "")
+    except Exception as gov_exc:
+        fallback_reason = f"governance_hash:{gov_exc}"
+    coordination_api_base = str(getattr(dpg, "COORDINATION_API_BASE", coordination_api_base) or coordination_api_base)
 except Exception as exc:  # pragma: no cover - host runtime fallback
     fallback_reason = str(exc)
 
@@ -3814,12 +3937,50 @@ if health is None:
         health["s3"] = "ok"
     except Exception:
         health["s3"] = "unreachable"
-    health["fallback"] = "ok" if health["dynamodb"] == "ok" and health["s3"] == "ok" else "degraded"
+    try:
+        req = urllib.request.Request(
+            f"{coordination_api_base.rstrip('/')}/capabilities",
+            method="GET",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            capabilities_status = "ok" if getattr(resp, "status", 500) == 200 else "degraded"
+    except Exception:
+        capabilities_status = "unreachable"
+    health["api_gateway"] = capabilities_status
+    health["fallback"] = (
+        "ok"
+        if health["dynamodb"] == "ok" and health["s3"] == "ok" and health["api_gateway"] == "ok"
+        else "degraded"
+    )
     if fallback_reason:
         health["fallback_reason"] = fallback_reason[:300]
 
+if capabilities_status != "ok":
+    try:
+        req = urllib.request.Request(
+            f"{coordination_api_base.rstrip('/')}/capabilities",
+            method="GET",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            capabilities_status = "ok" if getattr(resp, "status", 500) == 200 else "degraded"
+    except Exception:
+        capabilities_status = "unreachable"
+
+health["coordination_capabilities"] = capabilities_status
+health["governance_hash"] = "ok" if len(governance_hash) >= 32 else "unreachable"
+
 print("[INFO] Enceladus MCP connection health " + json.dumps(health, sort_keys=True))
-required = {k: v for k, v in health.items() if k in ("dynamodb", "s3", "fallback")}
+if governance_hash:
+    print("[INFO] Enceladus governance hash " + governance_hash)
+required = {
+    "dynamodb": health.get("dynamodb", "unreachable"),
+    "s3": health.get("s3", "unreachable"),
+    "api_gateway": health.get("api_gateway", "unreachable"),
+    "coordination_capabilities": health.get("coordination_capabilities", "unreachable"),
+    "governance_hash": health.get("governance_hash", "unreachable"),
+}
 sys.exit(0 if all(str(v).lower() == "ok" for v in required.values()) else 1)
 """.strip()
     backoffs = " ".join(str(v) for v in MCP_CONNECTIVITY_BACKOFF_SECONDS)
@@ -5336,10 +5497,26 @@ def _handle_capabilities() -> Dict[str, Any]:
                     "instance_id": HOST_V2_INSTANCE_ID,
                     "project": HOST_V2_PROJECT,
                     "work_root": HOST_V2_WORK_ROOT,
+                    "mcp_bootstrap": {
+                        "mode": "setup_if_missing_once",
+                        "profile_path": HOST_V2_MCP_PROFILE_PATH,
+                        "marker_path": HOST_V2_MCP_MARKER_PATH,
+                        "max_attempts": HOST_V2_MCP_BOOTSTRAP_MAX_ATTEMPTS,
+                        "retry_backoff_seconds": list(HOST_V2_MCP_BOOTSTRAP_RETRY_BACKOFF_SECONDS),
+                        "bootstrap_script": HOST_V2_MCP_BOOTSTRAP_SCRIPT,
+                    },
+                    "fleet_template": {
+                        "ready": bool(HOST_V2_FLEET_LAUNCH_TEMPLATE_ID),
+                        "launch_template_id": HOST_V2_FLEET_LAUNCH_TEMPLATE_ID,
+                        "launch_template_version": HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION,
+                        "user_data_template": HOST_V2_FLEET_USER_DATA_TEMPLATE,
+                    },
                 },
                 "enceladus_mcp_profile": {
                     "installer": HOST_V2_ENCELADUS_MCP_INSTALLER,
                     "server_name": "enceladus",
+                    "profile_path": HOST_V2_MCP_PROFILE_PATH,
+                    "marker_path": HOST_V2_MCP_MARKER_PATH,
                 },
                 "callback": {
                     "endpoint": "POST /api/v1/coordination/requests/{requestId}/callback",

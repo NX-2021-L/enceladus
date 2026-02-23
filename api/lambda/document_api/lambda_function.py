@@ -61,15 +61,22 @@ except Exception as _jwt_import_err:
 
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_PREFIX = os.environ.get("S3_PREFIX", "agent-documents")
+S3_REFERENCE_PREFIX = os.environ.get("S3_REFERENCE_PREFIX", "mobile/v1/reference")
+S3_GOVERNANCE_PREFIX = os.environ.get("S3_GOVERNANCE_PREFIX", "governance/live")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 DOCUMENT_API_INTERNAL_API_KEY = os.environ.get(
     "DOCUMENT_API_INTERNAL_API_KEY",
     os.environ.get("COORDINATION_INTERNAL_API_KEY", ""),
 )
+GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
+GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file").strip().lower()
+PROJECT_REFERENCE_KEYWORD = os.environ.get("PROJECT_REFERENCE_KEYWORD", "project-reference").strip().lower()
+SYNC_CREATED_BY = "document-api-sync"
 CORS_ORIGIN = "https://jreese.net"
 MAX_CONTENT_SIZE = 1_048_576  # 1 MB max document content
 MAX_TITLE_LENGTH = 500
@@ -550,6 +557,310 @@ def _deserialize_item(item: Dict) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Primary reference reconciliation (project reference + governance files)
+# ---------------------------------------------------------------------------
+
+
+def _keywords_lower_set(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    out: set[str] = set()
+    for entry in value:
+        text = str(entry).strip().lower()
+        if text:
+            out.add(text)
+    return out
+
+
+def _merge_keywords(existing: Any, required: List[str]) -> List[str]:
+    merged = _keywords_lower_set(existing)
+    for kw in required:
+        text = str(kw).strip().lower()
+        if text:
+            merged.add(text)
+    return sorted(merged)
+
+
+def _query_project_documents(project_id: str) -> List[Dict[str, Any]]:
+    ddb = _get_ddb()
+    params: Dict[str, Any] = {
+        "TableName": DOCUMENTS_TABLE,
+        "IndexName": "project-updated-index",
+        "KeyConditionExpression": "project_id = :pid",
+        "ExpressionAttributeValues": {":pid": {"S": project_id}},
+        "ScanIndexForward": False,
+    }
+    out: List[Dict[str, Any]] = []
+    while True:
+        resp = ddb.query(**params)
+        out.extend(_deserialize_item(item) for item in resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        params["ExclusiveStartKey"] = lek
+    return out
+
+
+def _stable_doc_id(seed: str) -> str:
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12].upper()
+    return f"DOC-{digest}"
+
+
+def _put_document_content_bytes(
+    project_id: str,
+    document_id: str,
+    content_bytes: bytes,
+) -> Tuple[str, str, int]:
+    key = _s3_key(project_id, document_id)
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+    size_bytes = len(content_bytes)
+    _get_s3().put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=content_bytes,
+        ContentType="text/markdown; charset=utf-8",
+        CacheControl="max-age=0, s-maxage=300, must-revalidate",
+    )
+    return key, content_hash, size_bytes
+
+
+def _upsert_synced_document(
+    *,
+    existing: Optional[Dict[str, Any]],
+    project_id: str,
+    file_name: str,
+    title: str,
+    description: str,
+    keywords: List[str],
+    content_bytes: bytes,
+) -> None:
+    now = _now_z()
+    ddb = _get_ddb()
+    document_id = (existing or {}).get("document_id") or _stable_doc_id(f"{project_id}:{file_name}")
+
+    s3_key, content_hash, size_bytes = _put_document_content_bytes(project_id, document_id, content_bytes)
+
+    if existing:
+        ddb.update_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": {"S": document_id}},
+            UpdateExpression=(
+                "SET title = :title, description = :desc, file_name = :fn, "
+                "s3_bucket = :sb, s3_key = :sk, content_type = :ct, "
+                "content_hash = :hash, size_bytes = :size, keywords = :kw, "
+                "updated_at = :ts, #status = :status, #ver = if_not_exists(#ver, :zero) + :one"
+            ),
+            ExpressionAttributeNames={
+                "#status": "status",
+                "#ver": "version",
+            },
+            ExpressionAttributeValues={
+                ":title": {"S": title},
+                ":desc": {"S": description},
+                ":fn": {"S": file_name},
+                ":sb": {"S": S3_BUCKET},
+                ":sk": {"S": s3_key},
+                ":ct": {"S": "text/markdown"},
+                ":hash": {"S": content_hash},
+                ":size": {"N": str(size_bytes)},
+                ":kw": _serialize_list(keywords),
+                ":ts": {"S": now},
+                ":status": {"S": "active"},
+                ":zero": {"N": "0"},
+                ":one": {"N": "1"},
+            },
+        )
+        return
+
+    item = {
+        "document_id": {"S": document_id},
+        "project_id": {"S": project_id},
+        "title": {"S": title},
+        "description": {"S": description},
+        "file_name": {"S": file_name},
+        "s3_bucket": {"S": S3_BUCKET},
+        "s3_key": {"S": s3_key},
+        "content_type": {"S": "text/markdown"},
+        "content_hash": {"S": content_hash},
+        "size_bytes": {"N": str(size_bytes)},
+        "related_items": _serialize_list([]),
+        "keywords": _serialize_list(keywords),
+        "created_by": {"S": SYNC_CREATED_BY},
+        "created_at": {"S": now},
+        "updated_at": {"S": now},
+        "status": {"S": "active"},
+        "version": {"N": "1"},
+    }
+    try:
+        ddb.put_item(
+            TableName=DOCUMENTS_TABLE,
+            Item=item,
+            ConditionExpression="attribute_not_exists(document_id)",
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        # Concurrent creation path: convert this attempt into an update.
+        resp = ddb.get_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": {"S": document_id}},
+            ConsistentRead=True,
+        )
+        current = _deserialize_item(resp.get("Item", {}))
+        if current:
+            _upsert_synced_document(
+                existing=current,
+                project_id=project_id,
+                file_name=file_name,
+                title=title,
+                description=description,
+                keywords=keywords,
+                content_bytes=content_bytes,
+            )
+
+
+def _sync_project_reference_document(project_id: str) -> None:
+    ddb = _get_ddb()
+    ref_row = ddb.get_item(
+        TableName=TRACKER_TABLE,
+        Key={
+            "project_id": {"S": project_id},
+            "record_id": {"S": f"reference#{project_id}"},
+        },
+        ConsistentRead=True,
+    ).get("Item")
+
+    if not ref_row:
+        logger.info("project reference sync skipped (no tracker row): project=%s", project_id)
+        return
+
+    ref_meta = _deserialize_item(ref_row)
+    s3_bucket = str(ref_meta.get("s3_bucket") or S3_BUCKET)
+    s3_key = str(ref_meta.get("s3_key") or f"{S3_REFERENCE_PREFIX.rstrip('/')}/{project_id}.md")
+
+    docs = _query_project_documents(project_id)
+    by_keyword = [
+        doc for doc in docs
+        if PROJECT_REFERENCE_KEYWORD in _keywords_lower_set(doc.get("keywords"))
+    ]
+    canonical_file = f"{project_id}-reference.md"
+    canonical = [d for d in by_keyword if str(d.get("file_name") or "").strip() == canonical_file]
+    if canonical:
+        existing = canonical[0]
+    else:
+        by_title = [
+            d for d in by_keyword
+            if "project reference" in str(d.get("title") or "").strip().lower()
+        ]
+        existing = by_title[0] if by_title else (by_keyword[0] if by_keyword else None)
+
+    # Always hash-check against the current S3 object body (tracker metadata can lag).
+    body = _get_s3().get_object(Bucket=s3_bucket, Key=s3_key)["Body"].read()
+    body_hash = hashlib.sha256(body).hexdigest()
+
+    if existing and str(existing.get("content_hash") or "") == body_hash:
+        return
+
+    default_title = f"{project_id} Project Reference"
+    title = str((existing or {}).get("title") or default_title).strip()
+    file_name = str((existing or {}).get("file_name") or f"{project_id}-reference.md").strip()
+    description = str((existing or {}).get("description") or "Canonical project reference document.").strip()
+    keywords = _merge_keywords(
+        (existing or {}).get("keywords", []),
+        ["reference", PROJECT_REFERENCE_KEYWORD, project_id],
+    )
+
+    _upsert_synced_document(
+        existing=existing,
+        project_id=project_id,
+        file_name=file_name,
+        title=title,
+        description=description,
+        keywords=keywords,
+        content_bytes=body,
+    )
+
+
+def _list_governance_live_files() -> List[str]:
+    s3 = _get_s3()
+    prefix = S3_GOVERNANCE_PREFIX.rstrip("/") + "/"
+    paginator = s3.get_paginator("list_objects_v2")
+    files: List[str] = []
+    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = str(obj.get("Key") or "")
+            if not key.startswith(prefix):
+                continue
+            rel = key[len(prefix):]
+            if not rel or rel.endswith("/"):
+                continue
+            files.append(rel)
+    return sorted(set(files))
+
+
+def _sync_governance_documents() -> None:
+    docs = _query_project_documents(GOVERNANCE_PROJECT_ID)
+    doc_by_file: Dict[str, Dict[str, Any]] = {}
+    for doc in docs:
+        file_name = str(doc.get("file_name") or "").strip()
+        if not file_name:
+            continue
+        kws = _keywords_lower_set(doc.get("keywords"))
+        title = str(doc.get("title") or "")
+        if GOVERNANCE_KEYWORD in kws or title.startswith("Governance:"):
+            doc_by_file[file_name] = doc
+
+    for rel_file in _list_governance_live_files():
+        key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{rel_file}"
+        existing = doc_by_file.get(rel_file)
+
+        # Fast path: compare metadata hash when available.
+        metadata_hash = ""
+        try:
+            head = _get_s3().head_object(Bucket=S3_BUCKET, Key=key)
+            metadata_hash = str((head.get("Metadata") or {}).get("content_sha256") or "").strip()
+        except Exception as exc:
+            logger.warning("governance sync head_object failed for %s: %s", key, exc)
+
+        if existing and metadata_hash and str(existing.get("content_hash") or "") == metadata_hash:
+            continue
+
+        body = _get_s3().get_object(Bucket=S3_BUCKET, Key=key)["Body"].read()
+        content_hash = hashlib.sha256(body).hexdigest()
+        if existing and str(existing.get("content_hash") or "") == content_hash:
+            continue
+
+        title = str((existing or {}).get("title") or f"Governance: {rel_file}").strip()
+        file_name = str((existing or {}).get("file_name") or rel_file).strip()
+        description = str(
+            (existing or {}).get("description")
+            or "Authoritative Enceladus governance file."
+        ).strip()
+        keywords = _merge_keywords(
+            (existing or {}).get("keywords", []),
+            ["coordination", "enceladus", "governance", GOVERNANCE_KEYWORD, "mcp"],
+        )
+
+        _upsert_synced_document(
+            existing=existing,
+            project_id=GOVERNANCE_PROJECT_ID,
+            file_name=file_name,
+            title=title,
+            description=description,
+            keywords=keywords,
+            content_bytes=body,
+        )
+
+
+def _sync_primary_reference_documents(project_id: str, keyword: str) -> None:
+    key = str(keyword or "").strip().lower()
+    if not project_id or not key:
+        return
+    if key == PROJECT_REFERENCE_KEYWORD:
+        _sync_project_reference_document(project_id)
+    elif key == GOVERNANCE_KEYWORD and project_id == GOVERNANCE_PROJECT_ID:
+        _sync_governance_documents()
+
+
+# ---------------------------------------------------------------------------
 # PUT — Upload new document
 # ---------------------------------------------------------------------------
 
@@ -945,6 +1256,18 @@ def _handle_search(qs: Dict) -> Dict:
     related = qs.get("related", "").strip()
     title_search = qs.get("title", "").strip().lower()
     status_filter = qs.get("status", "active").strip().lower()
+
+    # Keep primary reference docs current at read-time for PWA document routes.
+    if project_id and keyword in {PROJECT_REFERENCE_KEYWORD, GOVERNANCE_KEYWORD}:
+        try:
+            _sync_primary_reference_documents(project_id, keyword)
+        except Exception as exc:
+            logger.warning(
+                "primary reference sync failed (project=%s keyword=%s): %s",
+                project_id,
+                keyword,
+                exc,
+            )
 
     # If project specified, use GSI query + client-side filter
     if project_id:

@@ -59,6 +59,28 @@ function referenceRank(doc: Document, projectId: string): number {
   return 2
 }
 
+function isCanonicalProjectReferenceDoc(doc: Document, projectId: string): boolean {
+  const keywords = new Set((doc.keywords ?? []).map((keyword) => keyword.toLowerCase()))
+  if (!keywords.has(PROJECT_REFERENCE_KEYWORD)) return false
+
+  const fileName = (doc.file_name ?? '').trim().toLowerCase()
+  if (fileName === `${projectId}-reference.md`) return true
+
+  const title = (doc.title ?? '').trim().toLowerCase()
+  return title.endsWith('project reference')
+}
+
+function isCanonicalGovernanceDoc(doc: Document): boolean {
+  const keywords = new Set((doc.keywords ?? []).map((keyword) => keyword.toLowerCase()))
+  if (!keywords.has(GOVERNANCE_KEYWORD)) return false
+
+  const title = (doc.title ?? '').trim().toLowerCase()
+  if (title.startsWith('governance:')) return true
+
+  const fileName = (doc.file_name ?? '').trim().toLowerCase()
+  return fileName === 'agents.md' || fileName.startsWith('agents/')
+}
+
 function compareUpdatedAtDesc(a: Document, b: Document): number {
   const aTime = a.updated_at ?? ''
   const bTime = b.updated_at ?? ''
@@ -80,10 +102,13 @@ export async function fetchPrimaryProjectReferenceDocs(projectId: string): Promi
       ? []
       : await searchDocuments({ project: normalizedProject, title: 'Project Reference' })
 
+  const canonicalProjectReferenceDocs = [...projectReferenceDocs, ...fallbackProjectReferenceDocs]
+    .filter((doc) => isCanonicalProjectReferenceDoc(doc, normalizedProject))
+  const canonicalGovernanceDocs = governanceDocs.filter(isCanonicalGovernanceDoc)
+
   return dedupeByDocumentId([
-    ...projectReferenceDocs,
-    ...fallbackProjectReferenceDocs,
-    ...governanceDocs,
+    ...canonicalProjectReferenceDocs,
+    ...canonicalGovernanceDocs,
   ]).sort((a, b) => {
     const rankDiff = referenceRank(a, normalizedProject) - referenceRank(b, normalizedProject)
     if (rankDiff !== 0) return rankDiff
