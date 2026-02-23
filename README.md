@@ -4,7 +4,7 @@ Monorepo for Enceladus components:
 
 - `api/` - backend API source (Lambda services, source mirror)
 - `ui/` - web UI (PWA source + active GitHub Actions deployment flow)
-- `mcp-server/` - Enceladus MCP server source (source mirror)
+- `mcp-server/` - Enceladus MCP server source (source mirror) + native MCP briefing templates (`mcp-server/briefings/`)
 
 ## Status
 
