@@ -43,6 +43,18 @@ export function IssueDetailPage() {
     return map
   }, [allTasks, allIssues, allFeatures])
 
+  // ENC-FTR-014: Compute filtered related items (de-duplicated, excludes parent/children)
+  const filteredRelated = useMemo(() => {
+    if (!issue) return { features: [] as string[], tasks: [] as string[], issues: [] as string[], hasRelated: false }
+    const childrenIds = getChildrenIds(issue.issue_id, allTasks)
+      .concat(getChildrenIds(issue.issue_id, allIssues))
+      .concat(getChildrenIds(issue.issue_id, allFeatures))
+    const features = filterRelatedItems(issue.related_feature_ids ?? [], issue.parent, childrenIds)
+    const tasks = filterRelatedItems(issue.related_task_ids ?? [], issue.parent, childrenIds)
+    const issues = filterRelatedItems(issue.related_issue_ids ?? [], issue.parent, childrenIds)
+    return { features, tasks, issues, hasRelated: features.length > 0 || tasks.length > 0 || issues.length > 0 }
+  }, [issue, allTasks, allIssues, allFeatures])
+
   if (isPending) return <LoadingState />
   if (isError) return <ErrorState />
   if (!issue) return <ErrorState message="Issue not found" />
@@ -256,36 +268,18 @@ export function IssueDetailPage() {
         <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
           Related Items
         </h3>
-        {useMemo(() => {
-          // Get all children IDs to exclude from related items (de-duplication)
-          const childrenIds = getChildrenIds(issue.issue_id, allTasks)
-            .concat(getChildrenIds(issue.issue_id, allIssues))
-            .concat(getChildrenIds(issue.issue_id, allFeatures))
-
-          // Filter related items to exclude parent and children
-          const filteredFeatures = filterRelatedItems(issue.related_feature_ids ?? [], issue.parent, childrenIds)
-          const filteredTasks = filterRelatedItems(issue.related_task_ids ?? [], issue.parent, childrenIds)
-          const filteredIssues = filterRelatedItems(issue.related_issue_ids ?? [], issue.parent, childrenIds)
-
-          const hasRelated = filteredFeatures.length > 0 || filteredTasks.length > 0 || filteredIssues.length > 0
-
-          return (
-            <>
-              {hasRelated ? (
-                <RelatedItems
-                  groups={[
-                    { label: 'Features', ids: filteredFeatures, routePrefix: '/features' },
-                    { label: 'Tasks', ids: filteredTasks, routePrefix: '/tasks' },
-                    { label: 'Issues', ids: filteredIssues, routePrefix: '/issues' },
-                  ]}
-                  recordMap={recordMap}
-                />
-              ) : (
-                <p className="text-sm text-slate-500">No related items.</p>
-              )}
-            </>
-          )
-        }, [issue, allTasks, allIssues, allFeatures, recordMap])}
+        {filteredRelated.hasRelated ? (
+          <RelatedItems
+            groups={[
+              { label: 'Features', ids: filteredRelated.features, routePrefix: '/features' },
+              { label: 'Tasks', ids: filteredRelated.tasks, routePrefix: '/tasks' },
+              { label: 'Issues', ids: filteredRelated.issues, routePrefix: '/issues' },
+            ]}
+            recordMap={recordMap}
+          />
+        ) : (
+          <p className="text-sm text-slate-500">No related items.</p>
+        )}
       </div>
 
       {/* History */}

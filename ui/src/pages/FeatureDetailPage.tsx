@@ -73,6 +73,17 @@ export function FeatureDetailPage() {
     return filterRelatedItems(allIds, feature.parent, childrenIds)
   }, [allIssues, allFeatures, allTasks, feature])
 
+  // ENC-FTR-014: Compute filtered related feature IDs (de-duplicated, excludes parent/children)
+  const filteredRelatedFeatureIds = useMemo(() => {
+    if (!feature) return [] as string[]
+    const childrenIds = getChildrenIds(feature.feature_id, allTasks)
+      .concat(getChildrenIds(feature.feature_id, allIssues))
+      .concat(getChildrenIds(feature.feature_id, allFeatures))
+    return filterRelatedItems(feature.related_feature_ids ?? [], feature.parent, childrenIds)
+  }, [feature, allTasks, allIssues, allFeatures])
+
+  const hasRelated = relatedTaskIds.length > 0 || filteredRelatedFeatureIds.length > 0 || relatedIssueIds.length > 0
+
   const recordMap = useMemo<Record<string, RecordInfo>>(() => {
     const map: Record<string, RecordInfo> = {}
     for (const t of allTasks) map[t.task_id] = { title: t.title, status: t.status }
@@ -304,32 +315,18 @@ export function FeatureDetailPage() {
         <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
           Related Items
         </h3>
-        {useMemo(() => {
-          // Filter feature-related items (de-duplication already done in useMemo above)
-          const childrenIds = getChildrenIds(feature.feature_id, allTasks)
-            .concat(getChildrenIds(feature.feature_id, allIssues))
-            .concat(getChildrenIds(feature.feature_id, allFeatures))
-          const filteredFeatures = filterRelatedItems(feature.related_feature_ids ?? [], feature.parent, childrenIds)
-
-          const hasRelated = relatedTaskIds.length > 0 || filteredFeatures.length > 0 || relatedIssueIds.length > 0
-
-          return (
-            <>
-              {hasRelated ? (
-                <RelatedItems
-                  groups={[
-                    { label: 'Tasks', ids: relatedTaskIds, routePrefix: '/tasks' },
-                    { label: 'Features', ids: filteredFeatures, routePrefix: '/features' },
-                    { label: 'Issues', ids: relatedIssueIds, routePrefix: '/issues' },
-                  ]}
-                  recordMap={recordMap}
-                />
-              ) : (
-                <p className="text-sm text-slate-500">No related items.</p>
-              )}
-            </>
-          )
-        }, [relatedTaskIds, relatedIssueIds, feature, allTasks, allIssues, allFeatures, recordMap])}
+        {hasRelated ? (
+          <RelatedItems
+            groups={[
+              { label: 'Tasks', ids: relatedTaskIds, routePrefix: '/tasks' },
+              { label: 'Features', ids: filteredRelatedFeatureIds, routePrefix: '/features' },
+              { label: 'Issues', ids: relatedIssueIds, routePrefix: '/issues' },
+            ]}
+            recordMap={recordMap}
+          />
+        ) : (
+          <p className="text-sm text-slate-500">No related items.</p>
+        )}
       </div>
 
       {/* History */}
