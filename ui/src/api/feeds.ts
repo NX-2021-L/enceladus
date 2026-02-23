@@ -1,4 +1,4 @@
-import type { Task, Issue, Feature, ProjectsFeed, TasksFeed, IssuesFeed, FeaturesFeed } from '../types/feeds'
+import type { Task, Issue, Feature, ProjectsFeed, TasksFeed, IssuesFeed, FeaturesFeed, DocumentsFeed } from '../types/feeds'
 import { fetchFeed, fetchWithAuth } from './client'
 
 const BASE_URL = import.meta.env.VITE_FEED_BASE_URL || '/mobile/v1'
@@ -8,6 +8,7 @@ export const feedKeys = {
   tasks: ['feed', 'tasks'] as const,
   issues: ['feed', 'issues'] as const,
   features: ['feed', 'features'] as const,
+  documents: ['feed', 'documents'] as const,
   liveFeed: ['feed', 'live'] as const,
   reference: (projectId: string) => ['feed', 'reference', projectId] as const,
 }
@@ -31,6 +32,7 @@ export const fetchProjects = () => fetchFeed<ProjectsFeed>('projects')
 export const fetchTasks = () => fetchFeed<TasksFeed>('tasks')
 export const fetchIssues = () => fetchFeed<IssuesFeed>('issues')
 export const fetchFeatures = () => fetchFeed<FeaturesFeed>('features')
+export const fetchDocumentsFeed = () => fetchFeed<DocumentsFeed>('documents')
 
 export async function fetchProjectReference(projectId: string): Promise<string> {
   const url = `${BASE_URL}/reference/${projectId}.md`
