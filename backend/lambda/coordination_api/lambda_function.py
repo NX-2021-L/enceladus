@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 import asyncio
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -134,6 +135,22 @@ HOST_V2_FLEET_USER_DATA_TEMPLATE = os.environ.get(
     "HOST_V2_FLEET_USER_DATA_TEMPLATE",
     "tools/enceladus-mcp-server/host_v2_user_data_template.sh",
 )
+HOST_V2_FLEET_ENABLED = os.environ.get("HOST_V2_FLEET_ENABLED", "true").lower() == "true"
+HOST_V2_FLEET_FALLBACK_TO_STATIC = os.environ.get("HOST_V2_FLEET_FALLBACK_TO_STATIC", "true").lower() == "true"
+HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES = int(os.environ.get("HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES", "3"))
+HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS = int(os.environ.get("HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS", "420"))
+HOST_V2_FLEET_READINESS_POLL_SECONDS = int(os.environ.get("HOST_V2_FLEET_READINESS_POLL_SECONDS", "15"))
+HOST_V2_FLEET_INSTANCE_TTL_SECONDS = int(os.environ.get("HOST_V2_FLEET_INSTANCE_TTL_SECONDS", "3600"))
+HOST_V2_FLEET_SWEEP_ON_DISPATCH = os.environ.get("HOST_V2_FLEET_SWEEP_ON_DISPATCH", "true").lower() == "true"
+HOST_V2_FLEET_SWEEP_GRACE_SECONDS = int(os.environ.get("HOST_V2_FLEET_SWEEP_GRACE_SECONDS", "300"))
+HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL = (
+    os.environ.get("HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL", "true").lower() == "true"
+)
+HOST_V2_FLEET_TAG_MANAGED_BY_VALUE = os.environ.get(
+    "HOST_V2_FLEET_TAG_MANAGED_BY_VALUE",
+    "enceladus-coordination",
+)
+HOST_V2_FLEET_NAME_PREFIX = os.environ.get("HOST_V2_FLEET_NAME_PREFIX", "enceladus-host-v2-fleet")
 DEFAULT_OPENAI_CODEX_MODEL = os.environ.get("DEFAULT_OPENAI_CODEX_MODEL", "gpt-5.1-codex-max")
 OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "https://api.openai.com")
 OPENAI_API_TIMEOUT_SECONDS = float(os.environ.get("OPENAI_API_TIMEOUT_SECONDS", "45"))
@@ -200,6 +217,7 @@ WORKER_RUNTIME_LOG_GROUP = os.environ.get("WORKER_RUNTIME_LOG_GROUP", "/enceladu
 MCP_SERVER_LOG_GROUP = os.environ.get("MCP_SERVER_LOG_GROUP", "/enceladus/mcp/server")
 MCP_AUDIT_CALLER_IDENTITY = os.environ.get("MCP_AUDIT_CALLER_IDENTITY", "devops-coordination-api")
 COORDINATION_PUBLIC_BASE_URL = os.environ.get("COORDINATION_PUBLIC_BASE_URL", "https://jreese.net")
+COORDINATION_MCP_HTTP_PATH = os.environ.get("COORDINATION_MCP_HTTP_PATH", "/api/v1/coordination/mcp")
 ENABLE_MCP_GOVERNANCE_PROMPT = os.environ.get("ENABLE_MCP_GOVERNANCE_PROMPT", "true").lower() == "true"
 GOVERNANCE_PROMPT_MAX_CHARS = int(os.environ.get("GOVERNANCE_PROMPT_MAX_CHARS", "120000"))
 GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK = (
@@ -475,6 +493,7 @@ def _classify_mcp_error(exc: Exception) -> str:
 
 _ddb = None
 _ssm = None
+_ec2 = None
 _eb = None
 _sqs = None
 _sns = None
@@ -505,6 +524,17 @@ def _get_ssm():
             config=Config(retries={"max_attempts": 5, "mode": "standard"}),
         )
     return _ssm
+
+
+def _get_ec2():
+    global _ec2
+    if _ec2 is None:
+        _ec2 = boto3.client(
+            "ec2",
+            region_name=SSM_REGION,
+            config=Config(retries={"max_attempts": 5, "mode": "standard"}),
+        )
+    return _ec2
 
 
 def _get_eb():
@@ -722,7 +752,7 @@ def _cors_headers() -> Dict[str, str]:
         "Access-Control-Allow-Origin": CORS_ORIGIN,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": (
-            "Content-Type, Cookie, X-Coordination-Callback-Token, "
+            "Accept, Authorization, Content-Type, Cookie, X-Coordination-Callback-Token, "
             "X-Coordination-Internal-Key"
         ),
         "Access-Control-Allow-Credentials": "true",
@@ -1845,6 +1875,7 @@ def _move_to_dead_letter(request: Dict[str, Any], reason: str, failure_class: Op
             extra={"failure_class": failure_class} if failure_class else None,
         )
     _release_dispatch_lock(request, "dead_letter")
+    _cleanup_dispatch_host(request, "dead_letter")
     request["result"] = {
         **(request.get("result") or {}),
         "summary": (request.get("result") or {}).get("summary") or reason,
@@ -1938,11 +1969,25 @@ def _find_intake_candidates(project_id: str, now_epoch: int) -> List[Dict[str, A
     return candidates
 
 
-def _find_active_host_dispatch(project_id: str, current_request_id: str) -> Optional[Dict[str, Any]]:
+def _dispatch_uses_host_runtime(execution_mode: str) -> bool:
+    mode = str(execution_mode or "").strip().lower()
+    return mode not in {"claude_agent_sdk", "codex_app_server", "codex_full_auto"}
+
+
+def _fleet_launch_ready() -> bool:
+    return bool(HOST_V2_FLEET_ENABLED and HOST_V2_FLEET_LAUNCH_TEMPLATE_ID)
+
+
+def _active_host_dispatches(
+    project_id: str,
+    *,
+    current_request_id: str = "",
+    instance_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     ddb = _get_ddb()
     now_epoch = _unix_now()
     cutoff = now_epoch - max(HOST_V2_TIMEOUT_SECONDS, 600) - 600
-    items: List[Dict[str, Any]] = []
+    active: List[Dict[str, Any]] = []
     last_evaluated_key = None
 
     while True:
@@ -1968,26 +2013,335 @@ def _find_active_host_dispatch(project_id: str, current_request_id: str) -> Opti
             state = str(item.get("state") or "")
             if state not in {"dispatching", "running"}:
                 continue
+            execution_mode = str(item.get("execution_mode") or "")
+            if not _dispatch_uses_host_runtime(execution_mode):
+                continue
             lock_expires_epoch = int(item.get("lock_expires_epoch") or 0)
             if lock_expires_epoch and lock_expires_epoch < now_epoch:
                 continue
             dispatch = item.get("dispatch") or {}
-            instance_id = str(dispatch.get("instance_id") or HOST_V2_INSTANCE_ID)
-            if instance_id != HOST_V2_INSTANCE_ID:
+            candidate_instance_id = str(dispatch.get("instance_id") or HOST_V2_INSTANCE_ID)
+            if instance_id and candidate_instance_id != instance_id:
                 continue
-            return {
-                "request_id": rid,
-                "state": state,
-                "dispatch_id": str(dispatch.get("dispatch_id") or ""),
-                "command_id": str(dispatch.get("command_id") or ""),
-                "instance_id": instance_id,
-                "lock_expires_epoch": lock_expires_epoch,
-            }
+            active.append(
+                {
+                    "request_id": rid,
+                    "state": state,
+                    "dispatch_id": str(dispatch.get("dispatch_id") or ""),
+                    "command_id": str(dispatch.get("command_id") or ""),
+                    "instance_id": candidate_instance_id,
+                    "lock_expires_epoch": lock_expires_epoch,
+                    "execution_mode": execution_mode,
+                    "host_kind": str(dispatch.get("host_kind") or "static"),
+                }
+            )
         last_evaluated_key = resp.get("LastEvaluatedKey")
         if not last_evaluated_key:
             break
 
-    return None
+    return active
+
+
+def _count_active_host_dispatches(project_id: str, *, current_request_id: str = "") -> int:
+    return len(_active_host_dispatches(project_id, current_request_id=current_request_id))
+
+
+def _find_active_host_dispatch(
+    project_id: str,
+    current_request_id: str,
+    *,
+    instance_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    active = _active_host_dispatches(
+        project_id,
+        current_request_id=current_request_id,
+        instance_id=instance_id or HOST_V2_INSTANCE_ID,
+    )
+    return active[0] if active else None
+
+
+def _launch_fleet_instance(project_id: str, request_id: str, dispatch_id: str) -> Dict[str, Any]:
+    ec2 = _get_ec2()
+    name_suffix = dispatch_id.lower().replace("dsp-", "")[:12]
+    instance_name = f"{HOST_V2_FLEET_NAME_PREFIX}-{name_suffix}"
+    tags = [
+        {"Key": "Name", "Value": instance_name},
+        {"Key": "enceladus:managed-by", "Value": HOST_V2_FLEET_TAG_MANAGED_BY_VALUE},
+        {"Key": "enceladus:project", "Value": str(project_id)},
+        {"Key": "enceladus:coordination-request-id", "Value": str(request_id)},
+        {"Key": "enceladus:dispatch-id", "Value": str(dispatch_id)},
+        {"Key": "enceladus:fleet-node", "Value": "true"},
+    ]
+    response = ec2.run_instances(
+        MinCount=1,
+        MaxCount=1,
+        LaunchTemplate={
+            "LaunchTemplateId": HOST_V2_FLEET_LAUNCH_TEMPLATE_ID,
+            "Version": HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION,
+        },
+        TagSpecifications=[{"ResourceType": "instance", "Tags": tags}],
+        InstanceInitiatedShutdownBehavior="terminate",
+    )
+    instances = response.get("Instances") or []
+    if not instances:
+        raise RuntimeError("Fleet launch failed: run_instances returned no instances")
+    instance = instances[0]
+    instance_id = str(instance.get("InstanceId") or "")
+    if not instance_id:
+        raise RuntimeError("Fleet launch failed: missing InstanceId")
+    return {
+        "instance_id": instance_id,
+        "launch_template_id": HOST_V2_FLEET_LAUNCH_TEMPLATE_ID,
+        "launch_template_version": HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION,
+        "launched_at": _now_z(),
+        "dispatch_id": dispatch_id,
+        "project_id": project_id,
+    }
+
+
+def _wait_for_fleet_instance_readiness(instance_id: str) -> Dict[str, Any]:
+    deadline = time.time() + max(30, HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS)
+    poll_seconds = max(3, HOST_V2_FLEET_READINESS_POLL_SECONDS)
+    ec2 = _get_ec2()
+    ssm = _get_ssm()
+    last_state = "unknown"
+
+    while time.time() < deadline:
+        try:
+            response = ec2.describe_instances(InstanceIds=[instance_id])
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code") or "")
+            if code == "InvalidInstanceID.NotFound":
+                time.sleep(poll_seconds)
+                continue
+            raise
+
+        reservations = response.get("Reservations") or []
+        if not reservations or not (reservations[0].get("Instances") or []):
+            time.sleep(poll_seconds)
+            continue
+        instance = (reservations[0].get("Instances") or [])[0]
+        last_state = str(((instance.get("State") or {}).get("Name") or "unknown")).lower()
+        if last_state in {"terminated", "shutting-down", "stopping", "stopped"}:
+            raise RuntimeError(f"Fleet instance {instance_id} entered terminal state '{last_state}' before readiness")
+        if last_state != "running":
+            time.sleep(poll_seconds)
+            continue
+
+        info = ssm.describe_instance_information(
+            Filters=[{"Key": "InstanceIds", "Values": [instance_id]}],
+            MaxResults=1,
+        )
+        details = info.get("InstanceInformationList") or []
+        if details and str(details[0].get("PingStatus") or "").lower() == "online":
+            return {
+                "instance_id": instance_id,
+                "state": last_state,
+                "ssm_ping_status": "Online",
+                "ready_at": _now_z(),
+            }
+        time.sleep(poll_seconds)
+
+    raise RuntimeError(
+        f"Fleet instance {instance_id} readiness timeout after {HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS}s "
+        f"(last_state={last_state})"
+    )
+
+
+def _cleanup_dispatch_host(request: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    dispatch = dict(request.get("dispatch") or {})
+    if str(dispatch.get("host_kind") or "").lower() != "fleet":
+        return request
+    if not HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL:
+        dispatch["host_cleanup_state"] = "skipped_by_config"
+        dispatch["host_cleanup_reason"] = reason
+        dispatch["host_cleanup_at"] = _now_z()
+        request["dispatch"] = dispatch
+        return request
+
+    cleanup_state = str(dispatch.get("host_cleanup_state") or "")
+    if cleanup_state in {"terminated", "already_terminated"}:
+        return request
+
+    instance_id = str(dispatch.get("instance_id") or "")
+    if not instance_id:
+        return request
+
+    try:
+        _get_ec2().terminate_instances(InstanceIds=[instance_id])
+        dispatch["host_cleanup_state"] = "terminated"
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code") or "")
+        if code == "InvalidInstanceID.NotFound":
+            dispatch["host_cleanup_state"] = "already_terminated"
+        else:
+            dispatch["host_cleanup_state"] = "termination_failed"
+            dispatch["host_cleanup_error"] = str(exc)
+    dispatch["host_cleanup_reason"] = reason
+    dispatch["host_cleanup_at"] = _now_z()
+    request["dispatch"] = dispatch
+    return request
+
+
+def _sweep_orphan_fleet_hosts(project_id: str) -> Dict[str, Any]:
+    if not _fleet_launch_ready():
+        return {"enabled": False, "scanned": 0, "terminated": 0, "kept": 0}
+
+    try:
+        active_dispatches = _active_host_dispatches(project_id)
+    except Exception as exc:
+        logger.warning("fleet sweep skipped: unable to read active dispatches (%s)", exc)
+        return {"enabled": True, "error": str(exc), "scanned": 0, "terminated": 0, "kept": 0}
+
+    active_instance_ids = {str(item.get("instance_id") or "") for item in active_dispatches if item.get("instance_id")}
+    max_age = max(300, HOST_V2_FLEET_INSTANCE_TTL_SECONDS + HOST_V2_FLEET_SWEEP_GRACE_SECONDS)
+    now_epoch = _unix_now()
+    filters = [
+        {"Name": "tag:enceladus:managed-by", "Values": [HOST_V2_FLEET_TAG_MANAGED_BY_VALUE]},
+        {"Name": "tag:enceladus:project", "Values": [project_id]},
+        {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]},
+    ]
+
+    scanned = 0
+    kept = 0
+    terminate_ids: List[str] = []
+    try:
+        paginator = _get_ec2().get_paginator("describe_instances")
+        for page in paginator.paginate(Filters=filters):
+            for reservation in page.get("Reservations") or []:
+                for instance in reservation.get("Instances") or []:
+                    scanned += 1
+                    iid = str(instance.get("InstanceId") or "")
+                    if not iid:
+                        continue
+                    if iid in active_instance_ids:
+                        kept += 1
+                        continue
+                    launched_at = instance.get("LaunchTime")
+                    launched_epoch = int(launched_at.timestamp()) if hasattr(launched_at, "timestamp") else now_epoch
+                    age_seconds = max(0, now_epoch - launched_epoch)
+                    if age_seconds >= max_age:
+                        terminate_ids.append(iid)
+                    else:
+                        kept += 1
+    except Exception as exc:
+        logger.warning("fleet sweep describe_instances failed: %s", exc)
+        return {
+            "enabled": True,
+            "error": str(exc),
+            "scanned": scanned,
+            "terminated": 0,
+            "kept": kept,
+            "active_dispatches": len(active_dispatches),
+        }
+
+    terminated = 0
+    if terminate_ids:
+        try:
+            for i in range(0, len(terminate_ids), 50):
+                batch = terminate_ids[i : i + 50]
+                _get_ec2().terminate_instances(InstanceIds=batch)
+                terminated += len(batch)
+        except Exception as exc:
+            logger.warning("fleet sweep terminate failed: %s", exc)
+            return {
+                "enabled": True,
+                "error": str(exc),
+                "scanned": scanned,
+                "terminated": terminated,
+                "kept": kept,
+                "active_dispatches": len(active_dispatches),
+            }
+
+    return {
+        "enabled": True,
+        "scanned": scanned,
+        "terminated": terminated,
+        "kept": kept,
+        "active_dispatches": len(active_dispatches),
+    }
+
+
+def _resolve_host_dispatch_target(
+    request: Dict[str, Any],
+    execution_mode: str,
+    dispatch_id: str,
+    *,
+    host_allocation: str = "auto",
+) -> Dict[str, Any]:
+    if not _dispatch_uses_host_runtime(execution_mode):
+        return {
+            "instance_id": HOST_V2_INSTANCE_ID,
+            "host_kind": "managed_session",
+            "host_allocation": "managed",
+            "host_source": "provider_api",
+        }
+
+    allocation = str(host_allocation or "auto").strip().lower()
+    if allocation not in {"auto", "static", "fleet"}:
+        raise ValueError(f"Unsupported host_allocation '{host_allocation}'")
+
+    if allocation == "static":
+        return {
+            "instance_id": HOST_V2_INSTANCE_ID,
+            "host_kind": "static",
+            "host_allocation": "static",
+            "host_source": "host_v2",
+        }
+
+    fleet_available = _fleet_launch_ready()
+    if (allocation == "fleet" or (allocation == "auto" and fleet_available)) and fleet_available:
+        project_id = str(request.get("project_id") or "")
+        request_id = str(request.get("request_id") or "")
+        if HOST_V2_FLEET_SWEEP_ON_DISPATCH:
+            sweep_result = _sweep_orphan_fleet_hosts(project_id)
+            logger.info("[INFO] fleet orphan sweep result: %s", json.dumps(sweep_result, sort_keys=True))
+        active_dispatches = _count_active_host_dispatches(project_id, current_request_id=request_id)
+        if HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES > 0 and active_dispatches >= HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES:
+            raise RuntimeError(
+                "host_fleet_capacity_exceeded:"
+                f" active={active_dispatches} max={HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES}"
+            )
+
+        launch = _launch_fleet_instance(project_id, request_id, dispatch_id)
+        instance_id = launch["instance_id"]
+        try:
+            readiness = _wait_for_fleet_instance_readiness(instance_id)
+        except Exception:
+            try:
+                _get_ec2().terminate_instances(InstanceIds=[instance_id])
+            except Exception:
+                logger.warning("failed terminating fleet instance after readiness error: %s", instance_id)
+            raise
+
+        return {
+            "instance_id": instance_id,
+            "host_kind": "fleet",
+            "host_allocation": "fleet",
+            "host_source": "launch_template",
+            "launch_template_id": HOST_V2_FLEET_LAUNCH_TEMPLATE_ID,
+            "launch_template_version": HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION,
+            "launched_at": launch.get("launched_at"),
+            "ready_at": readiness.get("ready_at"),
+            "instance_ttl_seconds": HOST_V2_FLEET_INSTANCE_TTL_SECONDS,
+        }
+
+    if allocation == "fleet":
+        if HOST_V2_FLEET_FALLBACK_TO_STATIC:
+            return {
+                "instance_id": HOST_V2_INSTANCE_ID,
+                "host_kind": "static",
+                "host_allocation": "fleet-fallback-static",
+                "host_source": "host_v2",
+            }
+        raise RuntimeError("host_fleet_unavailable: launch template not configured")
+
+    return {
+        "instance_id": HOST_V2_INSTANCE_ID,
+        "host_kind": "static",
+        "host_allocation": "auto-static",
+        "host_source": "host_v2",
+    }
 
 
 def _find_dedup_match(
@@ -4414,8 +4768,16 @@ def _send_dispatch(
     execution_mode: str,
     prompt: Optional[str],
     dispatch_id: str,
+    host_allocation: str = "auto",
 ) -> Dict[str, Any]:
     ssm = _get_ssm()
+    dispatch_target = _resolve_host_dispatch_target(
+        request,
+        execution_mode,
+        dispatch_id,
+        host_allocation=host_allocation,
+    )
+    target_instance_id = str(dispatch_target.get("instance_id") or HOST_V2_INSTANCE_ID)
     commands = _build_ssm_commands(request, execution_mode, prompt, dispatch_id)
     timeout_ceiling = max(60, DISPATCH_TIMEOUT_CEILING_SECONDS)
     timeout_seconds = min(max(HOST_V2_TIMEOUT_SECONDS, 60), timeout_ceiling)
@@ -4424,7 +4786,7 @@ def _send_dispatch(
     try:
         resp = ssm.send_command(
             DocumentName=SSM_DOCUMENT_NAME,
-            InstanceIds=[HOST_V2_INSTANCE_ID],
+            InstanceIds=[target_instance_id],
             Parameters={
                 "commands": commands,
                 "executionTimeout": [str(timeout_seconds)],
@@ -4450,10 +4812,19 @@ def _send_dispatch(
             error_code=error_code,
             extra={
                 "execution_mode": execution_mode,
-                "instance_id": HOST_V2_INSTANCE_ID,
+                "instance_id": target_instance_id,
+                "host_kind": dispatch_target.get("host_kind"),
                 "worker_log_group": WORKER_RUNTIME_LOG_GROUP,
             },
         )
+        if str(dispatch_target.get("host_kind") or "") == "fleet":
+            try:
+                _get_ec2().terminate_instances(InstanceIds=[target_instance_id])
+            except Exception:
+                logger.warning(
+                    "failed terminating fleet instance after send_command failure: %s",
+                    target_instance_id,
+                )
         raise RuntimeError(f"SSM dispatch failed: {exc}") from exc
 
     command = resp.get("Command") or {}
@@ -4467,8 +4838,9 @@ def _send_dispatch(
         error_code="",
         extra={
             "execution_mode": execution_mode,
-            "instance_id": HOST_V2_INSTANCE_ID,
+            "instance_id": target_instance_id,
             "command_id": command.get("CommandId"),
+            "host_kind": dispatch_target.get("host_kind"),
             "worker_log_group": WORKER_RUNTIME_LOG_GROUP,
         },
     )
@@ -4476,10 +4848,18 @@ def _send_dispatch(
         "dispatch_id": dispatch_id,
         "command_id": command.get("CommandId"),
         "document_name": SSM_DOCUMENT_NAME,
-        "instance_id": HOST_V2_INSTANCE_ID,
+        "instance_id": target_instance_id,
         "region": SSM_REGION,
         "sent_at": _now_z(),
         "execution_mode": execution_mode,
+        "host_kind": dispatch_target.get("host_kind"),
+        "host_allocation": dispatch_target.get("host_allocation"),
+        "host_source": dispatch_target.get("host_source"),
+        "host_launch_template_id": dispatch_target.get("launch_template_id"),
+        "host_launch_template_version": dispatch_target.get("launch_template_version"),
+        "host_launched_at": dispatch_target.get("launched_at"),
+        "host_ready_at": dispatch_target.get("ready_at"),
+        "host_instance_ttl_seconds": dispatch_target.get("instance_ttl_seconds"),
         "coordination_request_id": request.get("request_id"),
         "project_id": request.get("project_id"),
         "timeout_seconds": timeout_seconds,
@@ -4503,11 +4883,12 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
     command_id = dispatch.get("command_id")
     if not command_id:
         return request
+    instance_id = str(dispatch.get("instance_id") or HOST_V2_INSTANCE_ID)
 
     ssm = _get_ssm()
 
     try:
-        inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=HOST_V2_INSTANCE_ID)
+        inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code")
         if code in {"InvocationDoesNotExist", "InvalidCommandId"}:
@@ -4637,6 +5018,7 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
             "provider_result": provider_result,
             "ssm_status": status,
             "ssm_status_details": status_details,
+            "instance_id": instance_id,
             "preflight_error": preflight_error,
             "preflight_ok": preflight_ok,
             "provider_preflight": provider_preflight,
@@ -4644,6 +5026,7 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
         reason="timeout" if timeout_failure else None,
     )
     _release_dispatch_lock(request, "ssm_terminal")
+    request = _cleanup_dispatch_host(request, "ssm_terminal")
 
     _update_request(request)
     _finalize_tracker_from_request(request)
@@ -5369,6 +5752,222 @@ def _emit_callback_event(request: Dict[str, Any], callback_body: Dict[str, Any])
 # ---------------------------------------------------------------------------
 
 
+def _mcp_jsonrpc_response(request_id: Any, result: Dict[str, Any]) -> Dict[str, Any]:
+    return _response(
+        200,
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result,
+        },
+    )
+
+
+def _mcp_jsonrpc_error(
+    request_id: Any,
+    *,
+    code: int,
+    message: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+    if data:
+        body["error"]["data"] = data
+    return _response(200, body)
+
+
+def _mcp_to_plain(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_mcp_to_plain(item) for item in value]
+    if isinstance(value, tuple):
+        return [_mcp_to_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _mcp_to_plain(v) for k, v in value.items()}
+    if dataclasses.is_dataclass(value):
+        return {str(k): _mcp_to_plain(v) for k, v in dataclasses.asdict(value).items()}
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _mcp_to_plain(model_dump(exclude_none=True))
+    to_dict = getattr(value, "dict", None)
+    if callable(to_dict):
+        return _mcp_to_plain(to_dict())
+    return str(value)
+
+
+def _mcp_mime_type_for_uri(uri: str) -> str:
+    uri_text = str(uri or "").strip()
+    if uri_text.endswith(".json"):
+        return "application/json"
+    if uri_text.startswith("governance://") or uri_text.startswith("projects://reference/"):
+        return "text/markdown"
+    return "text/plain"
+
+
+def _run_async(coro: Any) -> Any:
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:
+        # Defensive fallback for runtimes that already have an active loop.
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+
+def _dispatch_mcp_jsonrpc_method(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    method_name = str(method or "").strip()
+    params = params if isinstance(params, dict) else {}
+    module = _load_mcp_server_module()
+
+    if method_name == "initialize":
+        return {
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {
+                "name": "enceladus",
+                "version": "0.4.1",
+            },
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": False, "listChanged": False},
+            },
+        }
+
+    if method_name in {"initialized", "notifications/initialized", "ping"}:
+        return {}
+
+    if method_name in {"tools/list", "list_tools"}:
+        payload = _run_async(module.list_tools())
+        return {"tools": _mcp_to_plain(payload or [])}
+
+    if method_name in {"tools/call", "call_tool"}:
+        tool_name = str(params.get("name") or "").strip()
+        if not tool_name:
+            raise ValueError("tools/call requires params.name")
+
+        args = params.get("arguments")
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            raise ValueError("tools/call requires params.arguments to be an object")
+
+        call_args = dict(args)
+        call_args.setdefault("caller_identity", MCP_AUDIT_CALLER_IDENTITY)
+        result = _run_async(module.call_tool(tool_name, call_args))
+        content = _mcp_to_plain(result or [])
+        is_error = any(
+            isinstance(item, dict) and str(item.get("text") or "").startswith("ERROR:")
+            for item in (content if isinstance(content, list) else [])
+        )
+        return {
+            "content": content if isinstance(content, list) else [content],
+            "isError": is_error,
+        }
+
+    if method_name in {"resources/list", "list_resources"}:
+        payload = _run_async(module.list_resources())
+        return {"resources": _mcp_to_plain(payload or [])}
+
+    if method_name in {"resources/templates/list", "list_resource_templates"}:
+        payload = _run_async(module.list_resource_templates())
+        return {"resourceTemplates": _mcp_to_plain(payload or [])}
+
+    if method_name in {"resources/read", "read_resource"}:
+        uri = str(params.get("uri") or "").strip()
+        if not uri:
+            raise ValueError("resources/read requires params.uri")
+        text = _run_async(module.read_resource(uri))
+        return {
+            "contents": [
+                {
+                    "uri": uri,
+                    "mimeType": _mcp_mime_type_for_uri(uri),
+                    "text": str(text or ""),
+                }
+            ]
+        }
+
+    raise KeyError(method_name)
+
+
+def _handle_mcp_http(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    method, _ = _path_method(event)
+    if method == "GET":
+        return _response(
+            200,
+            {
+                "success": True,
+                "transport": "streamable_http",
+                "protocol": "jsonrpc-2.0",
+                "mcp_path": COORDINATION_MCP_HTTP_PATH,
+                "authenticated": bool(claims),
+                "methods_supported": [
+                    "initialize",
+                    "ping",
+                    "tools/list",
+                    "tools/call",
+                    "resources/list",
+                    "resources/templates/list",
+                    "resources/read",
+                ],
+            },
+        )
+
+    try:
+        request = _json_body(event)
+    except ValueError as exc:
+        return _mcp_jsonrpc_error(
+            None,
+            code=-32700,
+            message=f"Parse error: {exc}",
+        )
+
+    request_id = request.get("id")
+    method_name = request.get("method")
+    params = request.get("params", {})
+    jsonrpc = request.get("jsonrpc")
+
+    if jsonrpc != "2.0" or not isinstance(method_name, str):
+        return _mcp_jsonrpc_error(
+            request_id,
+            code=-32600,
+            message="Invalid Request",
+            data={"hint": "Expected JSON-RPC 2.0 object with string method"},
+        )
+
+    try:
+        result = _dispatch_mcp_jsonrpc_method(method_name, params if isinstance(params, dict) else {})
+        return _mcp_jsonrpc_response(request_id, result)
+    except KeyError:
+        return _mcp_jsonrpc_error(
+            request_id,
+            code=-32601,
+            message=f"Method not found: {method_name}",
+        )
+    except ValueError as exc:
+        return _mcp_jsonrpc_error(
+            request_id,
+            code=-32602,
+            message=f"Invalid params: {exc}",
+        )
+    except Exception as exc:
+        logger.exception("mcp http method failed: %s", method_name)
+        return _mcp_jsonrpc_error(
+            request_id,
+            code=-32603,
+            message=f"Internal error: {exc}",
+        )
+
+
 def _handle_capabilities() -> Dict[str, Any]:
     provider_secrets = _provider_secret_readiness()
     return _response(
@@ -5438,9 +6037,16 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "callback_mechanism": "Direct OpenAI Responses API response (synchronous)",
                         "governance_context_source": "enceladus_mcp_resources",
                         "mcp_server_configuration": {
-                            "url": f"{COORDINATION_PUBLIC_BASE_URL.rstrip('/')}/api/v1/coordination",
-                            "label": "Enceladus Coordination API",
+                            "url": f"{COORDINATION_PUBLIC_BASE_URL.rstrip('/')}{COORDINATION_MCP_HTTP_PATH}",
+                            "label": "Enceladus MCP Remote Gateway",
+                            "transport": "streamable_http",
+                            "auth_mode": "cognito_or_internal_key",
+                            "auth_header": "X-Coordination-Internal-Key",
                             "access_token_secret_ref": provider_secrets["openai_codex"].get("secret_ref"),
+                            "compatibility": {
+                                "chatgpt_custom_gpt": True,
+                                "managed_codex_sessions": True,
+                            },
                         },
                     },
                     "claude_agent_sdk": {
@@ -5508,10 +6114,19 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "bootstrap_script": HOST_V2_MCP_BOOTSTRAP_SCRIPT,
                     },
                     "fleet_template": {
+                        "enabled": HOST_V2_FLEET_ENABLED,
                         "ready": bool(HOST_V2_FLEET_LAUNCH_TEMPLATE_ID),
                         "launch_template_id": HOST_V2_FLEET_LAUNCH_TEMPLATE_ID,
                         "launch_template_version": HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION,
                         "user_data_template": HOST_V2_FLEET_USER_DATA_TEMPLATE,
+                        "fallback_to_static": HOST_V2_FLEET_FALLBACK_TO_STATIC,
+                        "max_active_dispatches": HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES,
+                        "readiness_timeout_seconds": HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS,
+                        "readiness_poll_seconds": HOST_V2_FLEET_READINESS_POLL_SECONDS,
+                        "instance_ttl_seconds": HOST_V2_FLEET_INSTANCE_TTL_SECONDS,
+                        "sweep_on_dispatch": HOST_V2_FLEET_SWEEP_ON_DISPATCH,
+                        "sweep_grace_seconds": HOST_V2_FLEET_SWEEP_GRACE_SECONDS,
+                        "auto_terminate_on_terminal": HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL,
                     },
                 },
                 "enceladus_mcp_profile": {
@@ -5527,6 +6142,25 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "transport": "stdio",
                         "tools_provided": 27,
                         "resources_provided": 3,
+                        "remote_gateway": {
+                            "url": f"{COORDINATION_PUBLIC_BASE_URL.rstrip('/')}{COORDINATION_MCP_HTTP_PATH}",
+                            "transport": "streamable_http",
+                            "auth_mode": "cognito_or_internal_key",
+                            "auth_header": "X-Coordination-Internal-Key",
+                            "methods_supported": [
+                                "initialize",
+                                "ping",
+                                "tools/list",
+                                "tools/call",
+                                "resources/list",
+                                "resources/templates/list",
+                                "resources/read",
+                            ],
+                            "compatibility": {
+                                "chatgpt_custom_gpt": True,
+                                "managed_codex_sessions": True,
+                            },
+                        },
                     },
                 },
                 "callback": {
@@ -5563,6 +6197,16 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "related_record_ids": "union_set",
                     },
                     "promotion": "on_read",
+                },
+                "mcp_remote_gateway": {
+                    "url": f"{COORDINATION_PUBLIC_BASE_URL.rstrip('/')}{COORDINATION_MCP_HTTP_PATH}",
+                    "transport": "streamable_http",
+                    "auth_mode": "cognito_or_internal_key",
+                    "auth_header": "X-Coordination-Internal-Key",
+                    "compatibility": {
+                        "chatgpt_custom_gpt": True,
+                        "managed_codex_sessions": True,
+                    },
                 },
                 "deterministic_completion_path": "GET /api/v1/coordination/requests/{requestId}",
             },
@@ -5901,6 +6545,9 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
     if prompt is not None and not isinstance(prompt, str):
         return _error(400, "'prompt' must be a string when provided")
     allow_host_concurrency_override = bool(body.get("allow_host_concurrency_override"))
+    host_allocation = str(body.get("host_allocation") or "auto").strip().lower()
+    if host_allocation not in {"auto", "static", "fleet"}:
+        return _error(400, "'host_allocation' must be one of ['auto', 'static', 'fleet']")
     dispatch_id = str(body.get("dispatch_id") or _new_dispatch_id()).strip().upper()
     if not re.fullmatch(r"[A-Z0-9-]{6,64}", dispatch_id):
         return _error(400, "'dispatch_id' must match [A-Z0-9-]{6,64}")
@@ -5913,17 +6560,36 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
     try:
         direct_dispatch_mode = execution_mode in {"claude_agent_sdk", "codex_app_server", "codex_full_auto"}
         uses_host_dispatch = not direct_dispatch_mode
+        uses_fleet_dispatch = uses_host_dispatch and host_allocation in {"auto", "fleet"} and _fleet_launch_ready()
         if uses_host_dispatch and not allow_host_concurrency_override:
-            active_host_dispatch = _find_active_host_dispatch(
-                str(request.get("project_id") or ""),
-                request_id,
-            )
-            if active_host_dispatch:
-                return _error(
-                    409,
-                    "Active host dispatch exists for this project",
-                    active_dispatch=active_host_dispatch,
+            project_id = str(request.get("project_id") or "")
+            if uses_fleet_dispatch:
+                active_host_dispatches = _count_active_host_dispatches(
+                    project_id,
+                    current_request_id=request_id,
                 )
+                if (
+                    HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES > 0
+                    and active_host_dispatches >= HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES
+                ):
+                    return _error(
+                        409,
+                        "Fleet capacity limit reached for host-backed dispatches",
+                        active_host_dispatches=active_host_dispatches,
+                        max_active_host_dispatches=HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES,
+                    )
+            else:
+                active_host_dispatch = _find_active_host_dispatch(
+                    project_id,
+                    request_id,
+                    instance_id=HOST_V2_INSTANCE_ID,
+                )
+                if active_host_dispatch:
+                    return _error(
+                        409,
+                        "Active host dispatch exists for this project",
+                        active_dispatch=active_host_dispatch,
+                    )
 
         if not _acquire_dispatch_lock(request_id, lock_expires_epoch):
             return _error(409, "Request is already locked for dispatch", lock_expires_epoch=request.get("lock_expires_epoch"))
@@ -5970,6 +6636,7 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                 execution_mode=execution_mode,
                 prompt=prompt,
                 dispatch_id=dispatch_id,
+                host_allocation=host_allocation,
             )
 
         request.setdefault("mcp", {})
@@ -5993,6 +6660,17 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
             running_extra = {"execution_id": dispatch_meta.get("execution_id")}
             running_provider = "openai_codex"
             running_summary = f"Dispatch started (execution_id={dispatch_meta.get('execution_id')})"
+        else:
+            running_extra.update(
+                {
+                    "instance_id": dispatch_meta.get("instance_id"),
+                    "host_kind": dispatch_meta.get("host_kind"),
+                }
+            )
+            running_summary = (
+                f"Dispatch started (command_id={dispatch_meta.get('command_id')}, "
+                f"instance_id={dispatch_meta.get('instance_id')}, host_kind={dispatch_meta.get('host_kind')})"
+            )
 
         _append_state_transition(
             request,
@@ -6148,6 +6826,7 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                 details=result_details,
             )
             _release_dispatch_lock(request, release_reason)
+            request = _cleanup_dispatch_host(request, release_reason)
             _update_request(request)
             _finalize_tracker_from_request(request)
             return _response(
@@ -6228,6 +6907,7 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                     "non_retriable_classes": sorted(_NON_RETRIABLE_FAILURE_CLASSES),
                 }
                 _release_dispatch_lock(request, "retry_scheduled")
+                request = _cleanup_dispatch_host(request, "retry_scheduled")
                 _update_request(request)
                 return _response(
                     202,
@@ -6248,6 +6928,7 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
             )
 
         _release_dispatch_lock(request, "dispatch_failed")
+        request = _cleanup_dispatch_host(request, "dispatch_failed")
         if retryable and current_attempt >= MAX_DISPATCH_ATTEMPTS:
             _move_to_dead_letter(request, "Retries exhausted after dispatch failures", failure_class=failure_class)
         _update_request(request)
@@ -6385,6 +7066,7 @@ def _handle_callback(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
                     reason="timeout" if timeout_failure else None,
                 )
                 _release_dispatch_lock(request, "callback_terminal")
+                request = _cleanup_dispatch_host(request, "callback_terminal")
                 _update_request(request)
                 _finalize_tracker_from_request(request)
             else:
@@ -6448,6 +7130,7 @@ def _handle_callback(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
                 reason="timeout" if timeout_failure else None,
             )
             _release_dispatch_lock(request, "callback_terminal")
+            request = _cleanup_dispatch_host(request, "callback_terminal")
             _update_request(request)
             _finalize_tracker_from_request(request)
 
@@ -6570,6 +7253,7 @@ def _handle_eventbridge_callback(event: Dict[str, Any]) -> Dict[str, Any]:
                     reason="timeout" if timeout_failure else None,
                 )
                 _release_dispatch_lock(request, "eventbridge_terminal")
+                request = _cleanup_dispatch_host(request, "eventbridge_terminal")
                 _update_request(request)
                 _finalize_tracker_from_request(request)
             else:
@@ -6605,6 +7289,7 @@ def _handle_eventbridge_callback(event: Dict[str, Any]) -> Dict[str, Any]:
                 reason="timeout" if timeout_failure else None,
             )
             _release_dispatch_lock(request, "eventbridge_terminal")
+            request = _cleanup_dispatch_host(request, "eventbridge_terminal")
             _update_request(request)
             _finalize_tracker_from_request(request)
 
@@ -6719,6 +7404,7 @@ def _handle_sqs_callback(event: Dict[str, Any]) -> Dict[str, Any]:
                         reason="timeout" if timeout_failure else None,
                     )
                     _release_dispatch_lock(request, "sqs_terminal")
+                    request = _cleanup_dispatch_host(request, "sqs_terminal")
                     _update_request(request)
                     _finalize_tracker_from_request(request)
                 else:
@@ -6754,6 +7440,7 @@ def _handle_sqs_callback(event: Dict[str, Any]) -> Dict[str, Any]:
                     reason="timeout" if timeout_failure else None,
                 )
                 _release_dispatch_lock(request, "sqs_terminal")
+                request = _cleanup_dispatch_host(request, "sqs_terminal")
                 _update_request(request)
                 _finalize_tracker_from_request(request)
 
@@ -6844,6 +7531,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     claims, auth_err = _authenticate(event)
     if auth_err:
         return auth_err
+
+    # GET/POST /api/v1/coordination/mcp
+    # Auth required (Cognito cookie or X-Coordination-Internal-Key).
+    if method in {"GET", "POST"} and path == COORDINATION_MCP_HTTP_PATH:
+        return _handle_mcp_http(event, claims or {})
 
     # POST /api/v1/coordination/requests
     if method == "POST" and path == "/api/v1/coordination/requests":
