@@ -169,6 +169,7 @@ GSI_PROJECT_TYPE = "project-type-index"
 
 SERVER_NAME = "enceladus"
 SERVER_VERSION = "0.4.0"
+HTTP_USER_AGENT = os.environ.get("ENCELADUS_HTTP_USER_AGENT", f"enceladus-mcp-server/{SERVER_VERSION}")
 
 logger = logging.getLogger(SERVER_NAME)
 
@@ -294,6 +295,9 @@ _RELATION_FIELDS = set(_RELATION_ID_FIELDS) | {"depends_on"}
 _DEPENDENCY_TYPES = ("task", "issue", "feature")
 _SINGLE_CHAR_TOKEN_RE = re.compile(r"^[A-Za-z0-9,\-\s]$")
 _COORDINATION_REQUEST_ID_RE = re.compile(r"^(CRQ|DSP)-[A-Z0-9-]{3,64}$", re.IGNORECASE)
+_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR"}
+_TRACKER_COUNTER_PREFIX = "counter#"
+_TRACKER_CREATE_MAX_ATTEMPTS = int(os.environ.get("ENCELADUS_TRACKER_CREATE_MAX_ATTEMPTS", "32"))
 
 
 def _get_prefix_map() -> Dict[str, str]:
@@ -348,6 +352,94 @@ def _classify_related_ids(related_ids: List[str]) -> Dict[str, List[str]]:
         field = f"related_{rtype}_ids"
         out.setdefault(field, []).append(rid_u)
     return out
+
+
+def _tracker_counter_key(project_id: str, record_type: str) -> Dict[str, Dict[str, str]]:
+    return {
+        "project_id": _ser_s(project_id),
+        "record_id": _ser_s(f"{_TRACKER_COUNTER_PREFIX}{record_type}"),
+    }
+
+
+def _record_numeric_suffix(record_id: str) -> Optional[int]:
+    parts = str(record_id).strip().split("-")
+    if len(parts) < 3:
+        return None
+    try:
+        return int(parts[-1])
+    except ValueError:
+        return None
+
+
+def _max_existing_tracker_number(ddb: Any, project_id: str, record_type: str) -> int:
+    kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :rtype_prefix)",
+        "ExpressionAttributeValues": {
+            ":pid": _ser_s(project_id),
+            ":rtype_prefix": _ser_s(f"{record_type}#"),
+        },
+        "ProjectionExpression": "record_id",
+    }
+    max_num = 0
+    while True:
+        query_resp = ddb.query(**kwargs)
+        for item in query_resp.get("Items", []):
+            sk = _deser_val(item.get("record_id", {}))
+            human_id = sk.split("#", 1)[1] if "#" in sk else sk
+            parsed = _record_numeric_suffix(human_id)
+            if parsed is not None:
+                max_num = max(max_num, parsed)
+        last_key = query_resp.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        kwargs["ExclusiveStartKey"] = last_key
+    return max_num
+
+
+def _next_tracker_record_id(ddb: Any, project_id: str, prefix: str, record_type: str) -> str:
+    type_suffix = _TRACKER_TYPE_SUFFIX.get(record_type, "TSK")
+    counter_key = _tracker_counter_key(project_id, record_type)
+    counter_item = ddb.get_item(
+        TableName=TRACKER_TABLE,
+        Key=counter_key,
+        ConsistentRead=True,
+    ).get("Item")
+
+    seed_num = 0
+    if not counter_item:
+        seed_num = _max_existing_tracker_number(ddb, project_id, record_type)
+
+    now = _now_z()
+    update_resp = ddb.update_item(
+        TableName=TRACKER_TABLE,
+        Key=counter_key,
+        UpdateExpression=(
+            "SET next_num = if_not_exists(next_num, :seed) + :one, "
+            "updated_at = :now, "
+            "created_at = if_not_exists(created_at, :now), "
+            "record_type = if_not_exists(record_type, :counter_type), "
+            "item_id = if_not_exists(item_id, :counter_item_id)"
+        ),
+        ExpressionAttributeValues={
+            ":seed": {"N": str(seed_num)},
+            ":one": {"N": "1"},
+            ":now": _ser_s(now),
+            ":counter_type": _ser_s("counter"),
+            ":counter_item_id": _ser_s(f"COUNTER-{record_type.upper()}"),
+        },
+        ReturnValues="UPDATED_NEW",
+    )
+    attrs = update_resp.get("Attributes", {})
+    next_num_attr = attrs.get("next_num", {"N": str(seed_num + 1)})
+    next_num = int(str(next_num_attr.get("N", str(seed_num + 1))))
+    return f"{prefix}-{type_suffix}-{next_num:03d}"
+
+
+def _is_conditional_check_failed(exc: Exception) -> bool:
+    if not isinstance(exc, ClientError):
+        return False
+    return str(exc.response.get("Error", {}).get("Code", "")) == "ConditionalCheckFailedException"
 
 
 def _dedupe_preserve_order(values: List[str]) -> List[str]:
@@ -799,7 +891,10 @@ def _deploy_api_request(
         encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
         if encoded_qs:
             url = f"{url}?{encoded_qs}"
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
     if DEPLOY_API_COOKIE:
         headers["Cookie"] = DEPLOY_API_COOKIE
     if payload is not None:
@@ -839,7 +934,10 @@ def _document_api_request(
         if encoded_qs:
             url = f"{url}?{encoded_qs}"
 
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
     if DOCUMENT_API_INTERNAL_API_KEY:
         headers["X-Coordination-Internal-Key"] = DOCUMENT_API_INTERNAL_API_KEY
     if payload is not None:
@@ -1224,6 +1322,23 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["project_id"],
+            },
+        ),
+        Tool(
+            name="tracker_pending_updates",
+            description="List tracker records with pending update notes. Supports single project or all projects.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "The project name (e.g., devops). Omit if all=true.",
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "description": "Scan all projects for pending updates. If true, project_id is ignored.",
+                    },
+                },
             },
         ),
         Tool(
@@ -2289,6 +2404,81 @@ async def _tracker_list(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
+async def _tracker_pending_updates(args: dict) -> list[TextContent]:
+    """List tracker records with non-empty pending update notes.
+
+    Supports scanning a single project or all projects.
+    Used by MCP-only session initialization to check for pending PWA updates
+    without requiring tracker.py fallback.
+    """
+    project_id = args.get("project_id")
+    scan_all = args.get("all", False)
+
+    if not project_id and not scan_all:
+        return _result_text({"error": "Provide project_id or all=true"})
+
+    ddb = _get_ddb()
+
+    # Build filter expression for records with non-empty 'update' field
+    filter_expr = "attribute_exists(#upd)"
+    expr_names = {"#upd": "update"}
+    expr_vals = {}
+
+    if scan_all:
+        # Scan entire table for pending updates
+        scan_kwargs: Dict[str, Any] = {
+            "TableName": TRACKER_TABLE,
+            "FilterExpression": filter_expr,
+            "ExpressionAttributeNames": expr_names,
+        }
+    else:
+        # Scan with project filter
+        filter_expr += " AND project_id = :pid"
+        expr_vals[":pid"] = _ser_s(project_id)
+        scan_kwargs: Dict[str, Any] = {
+            "TableName": TRACKER_TABLE,
+            "FilterExpression": filter_expr,
+            "ExpressionAttributeNames": expr_names,
+            "ExpressionAttributeValues": expr_vals,
+        }
+
+    try:
+        items = []
+        # Support pagination for large result sets
+        last_evaluated_key = None
+        while True:
+            if last_evaluated_key:
+                scan_kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+            resp = ddb.scan(**scan_kwargs)
+            items.extend([_deser_item(i) for i in resp.get("Items", [])])
+
+            last_evaluated_key = resp.get("LastEvaluatedKey")
+            if not last_evaluated_key:
+                break
+    except (BotoCoreError, ClientError) as exc:
+        return _result_text({"error": f"DynamoDB scan failed: {exc}"})
+
+    # Format results
+    summary = []
+    for r in items:
+        sk = r.get("record_id", "")
+        entry = {
+            "id": sk.split("#", 1)[1] if "#" in sk else sk,
+            "type": r.get("record_type"),
+            "update": r.get("update", ""),
+        }
+        summary.append(entry)
+
+    # Sort by ID for consistency
+    summary.sort(key=lambda x: x.get("id", ""))
+
+    result: Dict[str, Any] = {"records": summary, "count": len(summary)}
+    if not summary:
+        result["message"] = "No pending updates found"
+    return _result_text(result)
+
+
 async def _tracker_set(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash(args)
     if governance_error:
@@ -2841,41 +3031,10 @@ async def _tracker_create(args: dict) -> list[TextContent]:
         return _result_text({"error": f"Project '{project_id}' not found in projects table"})
     prefix = _deser_val(proj.get("prefix", {"S": "UNK"}))
 
-    # Determine next ID by scanning existing records of this type
-    type_suffix = {"task": "TSK", "issue": "ISS", "feature": "FTR"}.get(record_type, "TSK")
-
-    # Query for highest existing ID of this type in this project
-    # GSI project-type-index: PK=project_id, SK=record_type
-    # But we need record_id to extract numeric suffix — query the table directly
-    query_resp = ddb.query(
-        TableName=TRACKER_TABLE,
-        KeyConditionExpression="project_id = :pid AND begins_with(record_id, :rtype_prefix)",
-        ExpressionAttributeValues={
-            ":pid": _ser_s(project_id),
-            ":rtype_prefix": _ser_s(f"{record_type}#"),
-        },
-        ProjectionExpression="record_id",
-    )
-    max_num = 0
-    for item in query_resp.get("Items", []):
-        sk = _deser_val(item["record_id"])  # e.g. "task#DVP-TSK-245"
-        human_id = sk.split("#", 1)[1] if "#" in sk else sk
-        parts = human_id.split("-")
-        if len(parts) == 3:
-            try:
-                max_num = max(max_num, int(parts[2]))
-            except ValueError:
-                pass
-    next_num = max_num + 1
-    new_id = f"{prefix}-{type_suffix}-{next_num:03d}"
-
     now = _now_z()
     note_suffix = _write_source_note_suffix(args)
-    sk = f"{record_type}#{new_id}"
     item: Dict[str, Any] = {
         "project_id": _ser_s(project_id),
-        "record_id": _ser_s(sk),
-        "item_id": _ser_s(new_id),
         "record_type": _ser_s(record_type),
         "title": _ser_s(title),
         "status": _ser_s(status),
@@ -2976,11 +3135,32 @@ async def _tracker_create(args: dict) -> list[TextContent]:
             if ids:
                 item[field] = {"L": [_ser_s(i) for i in ids]}
 
-    ddb.put_item(
-        TableName=TRACKER_TABLE,
-        Item=item,
-        ConditionExpression="attribute_not_exists(record_id)",
-    )
+    max_attempts = max(1, _TRACKER_CREATE_MAX_ATTEMPTS)
+    for attempt in range(1, max_attempts + 1):
+        new_id = _next_tracker_record_id(ddb, project_id, prefix, record_type)
+        sk = f"{record_type}#{new_id}"
+        item["record_id"] = _ser_s(sk)
+        item["item_id"] = _ser_s(new_id)
+        try:
+            ddb.put_item(
+                TableName=TRACKER_TABLE,
+                Item=item,
+                ConditionExpression="attribute_not_exists(record_id)",
+            )
+            break
+        except ClientError as exc:
+            if _is_conditional_check_failed(exc) and attempt < max_attempts:
+                continue
+            raise
+    else:
+        return _result_text(
+            {
+                "error": (
+                    f"Failed to allocate a unique record ID for {record_type} in project "
+                    f"'{project_id}' after {max_attempts} attempts."
+                )
+            }
+        )
 
     # --- Bidirectional relationship enforcement (ENC-FTR-013 ontology) ---
     # Best-effort: add inverse relationship on target records
@@ -3683,6 +3863,7 @@ async def _coordination_capabilities(args: dict) -> list[TextContent]:
         url = f"{COORDINATION_API_BASE}/capabilities"
         req = urllib.request.Request(url, method="GET")
         req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", HTTP_USER_AGENT)
         with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         return _result_text(body)
@@ -3954,6 +4135,7 @@ _TOOL_HANDLERS = {
     "projects_get": _projects_get,
     "tracker_get": _tracker_get,
     "tracker_list": _tracker_list,
+    "tracker_pending_updates": _tracker_pending_updates,
     "tracker_set": _tracker_set,
     "tracker_log": _tracker_log,
     "tracker_create": _tracker_create,
