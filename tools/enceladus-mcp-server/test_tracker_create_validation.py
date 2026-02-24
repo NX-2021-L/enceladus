@@ -327,3 +327,121 @@ def test_document_policy_allows_docstore_basename_file():
 
     assert denial is None
     assert fake_ddb.put_calls
+
+
+class _GovernanceArchiveFailS3:
+    def __init__(self):
+        self.put_keys = []
+
+    def get_object(self, **_kwargs):
+        return {"Body": io.BytesIO(b"previous content")}
+
+    def put_object(self, **kwargs):
+        key = kwargs["Key"]
+        self.put_keys.append(key)
+        if key.startswith("governance/history/"):
+            raise RuntimeError("archive write failed")
+        return {}
+
+
+class _GovernanceNoExistingObjectS3:
+    def __init__(self):
+        self.put_keys = []
+
+    def get_object(self, **_kwargs):
+        raise server.ClientError(
+            {
+                "Error": {"Code": "NoSuchKey", "Message": "missing"},
+                "ResponseMetadata": {"HTTPStatusCode": 404},
+            },
+            "GetObject",
+        )
+
+    def put_object(self, **kwargs):
+        self.put_keys.append(kwargs["Key"])
+        return {}
+
+
+class _GovernanceReadFailureS3:
+    def __init__(self):
+        self.put_keys = []
+
+    def get_object(self, **_kwargs):
+        raise RuntimeError("s3 read failed")
+
+    def put_object(self, **kwargs):
+        self.put_keys.append(kwargs["Key"])
+        return {}
+
+
+def _call_governance_update(args: dict) -> dict:
+    content = _run(server._governance_update(args))
+    assert content, "governance_update returned empty content"
+    return json.loads(content[0].text)
+
+
+def test_governance_update_aborts_when_archive_write_fails():
+    fake_s3 = _GovernanceArchiveFailS3()
+    with patch.object(server, "_require_governance_hash_envelope", return_value=None), patch.object(
+        server, "_enforce_document_storage_policy", return_value=None
+    ), patch.object(server, "_get_s3", return_value=fake_s3), patch.object(
+        server, "_compute_governance_hash", return_value="a" * 64
+    ):
+        result = _call_governance_update(
+            {
+                "governance_hash": "a" * 64,
+                "file_name": "agents.md",
+                "content": "# new",
+                "change_summary": "test update",
+            }
+        )
+
+    assert result.get("success") is False
+    assert result["error"]["code"] == "UPSTREAM_ERROR"
+    assert "archive" in result["error"]["message"].lower()
+    assert len(fake_s3.put_keys) == 1
+    assert fake_s3.put_keys[0].startswith("governance/history/agents.md/")
+
+
+def test_governance_update_allows_first_write_without_existing_object():
+    fake_s3 = _GovernanceNoExistingObjectS3()
+    with patch.object(server, "_require_governance_hash_envelope", return_value=None), patch.object(
+        server, "_enforce_document_storage_policy", return_value=None
+    ), patch.object(server, "_get_s3", return_value=fake_s3), patch.object(
+        server, "_compute_governance_hash", return_value="b" * 64
+    ):
+        result = _call_governance_update(
+            {
+                "governance_hash": "b" * 64,
+                "file_name": "agents.md",
+                "content": "# first",
+                "change_summary": "first publish",
+            }
+        )
+
+    assert result["status"] == "updated"
+    assert result["s3_key"] == "governance/live/agents.md"
+    assert "archived_to" not in result
+    assert fake_s3.put_keys == ["governance/live/agents.md"]
+
+
+def test_governance_update_blocks_on_existing_read_failure():
+    fake_s3 = _GovernanceReadFailureS3()
+    with patch.object(server, "_require_governance_hash_envelope", return_value=None), patch.object(
+        server, "_enforce_document_storage_policy", return_value=None
+    ), patch.object(server, "_get_s3", return_value=fake_s3), patch.object(
+        server, "_compute_governance_hash", return_value="c" * 64
+    ):
+        result = _call_governance_update(
+            {
+                "governance_hash": "c" * 64,
+                "file_name": "agents.md",
+                "content": "# content",
+                "change_summary": "update",
+            }
+        )
+
+    assert result.get("success") is False
+    assert result["error"]["code"] == "UPSTREAM_ERROR"
+    assert "archival safety" in result["error"]["message"]
+    assert fake_s3.put_keys == []
