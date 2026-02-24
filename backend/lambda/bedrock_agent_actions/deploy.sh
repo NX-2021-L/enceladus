@@ -14,6 +14,10 @@ PROJECTS_TABLE="${PROJECTS_TABLE:-projects}"
 DOCUMENTS_TABLE="${DOCUMENTS_TABLE:-documents}"
 DEPLOY_TABLE="${DEPLOY_TABLE:-devops-deployment-manager}"
 COORDINATION_TABLE="${COORDINATION_TABLE:-coordination-requests}"
+GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE:-governance-policies}"
+AGENT_COMPLIANCE_TABLE="${AGENT_COMPLIANCE_TABLE:-agent-compliance-violations}"
+DOCUMENT_STORAGE_POLICY_ID="${DOCUMENT_STORAGE_POLICY_ID:-document_storage_cloud_only}"
+COMPLIANCE_ENFORCEMENT_DEFAULT="${COMPLIANCE_ENFORCEMENT_DEFAULT:-enforce}"
 S3_BUCKET="${S3_BUCKET:-jreese-net}"
 S3_DOC_PREFIX="${S3_DOC_PREFIX:-agent-documents}"
 S3_REFERENCE_PREFIX="${S3_REFERENCE_PREFIX:-reference}"
@@ -89,6 +93,21 @@ ensure_role() {
       "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${DEPLOY_TABLE}"
     },
     {
+      "Sid": "GovernancePoliciesRead",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"],
+      "Resource": [
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${GOVERNANCE_POLICIES_TABLE}",
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${GOVERNANCE_POLICIES_TABLE}/index/*"
+      ]
+    },
+    {
+      "Sid": "ComplianceTableWrite",
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem"],
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${AGENT_COMPLIANCE_TABLE}"
+    },
+    {
       "Sid": "S3ReadAccess",
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:ListBucket"],
@@ -152,6 +171,10 @@ ensure_function() {
   PROJECTS_TABLE="${PROJECTS_TABLE}" \
   DOCUMENTS_TABLE="${DOCUMENTS_TABLE}" \
   DEPLOY_TABLE="${DEPLOY_TABLE}" \
+  GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE}" \
+  AGENT_COMPLIANCE_TABLE="${AGENT_COMPLIANCE_TABLE}" \
+  DOCUMENT_STORAGE_POLICY_ID="${DOCUMENT_STORAGE_POLICY_ID}" \
+  COMPLIANCE_ENFORCEMENT_DEFAULT="${COMPLIANCE_ENFORCEMENT_DEFAULT}" \
   DYNAMODB_REGION="${REGION}" \
   S3_BUCKET="${S3_BUCKET}" \
   python3 - "${env_file}" <<'PY'
@@ -165,6 +188,10 @@ env_vars = {
     "PROJECTS_TABLE": os.environ["PROJECTS_TABLE"],
     "DOCUMENTS_TABLE": os.environ["DOCUMENTS_TABLE"],
     "DEPLOY_TABLE": os.environ["DEPLOY_TABLE"],
+    "GOVERNANCE_POLICIES_TABLE": os.environ["GOVERNANCE_POLICIES_TABLE"],
+    "AGENT_COMPLIANCE_TABLE": os.environ["AGENT_COMPLIANCE_TABLE"],
+    "DOCUMENT_STORAGE_POLICY_ID": os.environ["DOCUMENT_STORAGE_POLICY_ID"],
+    "COMPLIANCE_ENFORCEMENT_DEFAULT": os.environ["COMPLIANCE_ENFORCEMENT_DEFAULT"],
     "DYNAMODB_REGION": os.environ["DYNAMODB_REGION"],
     "S3_BUCKET": os.environ["S3_BUCKET"],
 }

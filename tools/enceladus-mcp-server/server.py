@@ -100,6 +100,22 @@ PROJECTS_TABLE = os.environ.get("ENCELADUS_PROJECTS_TABLE", "projects")
 DOCUMENTS_TABLE = os.environ.get("ENCELADUS_DOCUMENTS_TABLE", "documents")
 COORDINATION_TABLE = os.environ.get("ENCELADUS_COORDINATION_TABLE", "coordination-requests")
 DEPLOY_TABLE = os.environ.get("ENCELADUS_DEPLOY_TABLE", "devops-deployment-manager")
+GOVERNANCE_POLICIES_TABLE = os.environ.get(
+    "ENCELADUS_GOVERNANCE_POLICIES_TABLE",
+    "governance-policies",
+)
+AGENT_COMPLIANCE_TABLE = os.environ.get(
+    "ENCELADUS_AGENT_COMPLIANCE_TABLE",
+    "agent-compliance-violations",
+)
+DOCUMENT_STORAGE_POLICY_ID = os.environ.get(
+    "ENCELADUS_DOCUMENT_STORAGE_POLICY_ID",
+    "document_storage_cloud_only",
+)
+COMPLIANCE_ENFORCEMENT_DEFAULT = os.environ.get(
+    "ENCELADUS_COMPLIANCE_ENFORCEMENT_DEFAULT",
+    "enforce",
+).strip().lower()
 AWS_REGION = os.environ.get("ENCELADUS_REGION", "us-west-2")
 S3_BUCKET = os.environ.get("ENCELADUS_S3_BUCKET", "jreese-net")
 S3_REFERENCE_PREFIX = os.environ.get("ENCELADUS_S3_REFERENCE_PREFIX", "mobile/v1/reference")
@@ -168,7 +184,7 @@ DEPLOY_API_COOKIE = os.environ.get("ENCELADUS_DEPLOY_COOKIE", "")
 GSI_PROJECT_TYPE = "project-type-index"
 
 SERVER_NAME = "enceladus"
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "0.4.1"
 HTTP_USER_AGENT = os.environ.get("ENCELADUS_HTTP_USER_AGENT", f"enceladus-mcp-server/{SERVER_VERSION}")
 
 logger = logging.getLogger(SERVER_NAME)
@@ -1166,6 +1182,191 @@ def _compute_governance_hash() -> str:
     return h.hexdigest()
 
 
+def _default_document_storage_policy() -> Dict[str, Any]:
+    """Fallback policy when governance-policies table is unavailable."""
+    return {
+        "policy_id": DOCUMENT_STORAGE_POLICY_ID,
+        "status": "active",
+        "enforcement_mode": COMPLIANCE_ENFORCEMENT_DEFAULT or "enforce",
+        "allowed_targets": ["docstore_api", "governance_s3", "mcp_validator", "bedrock_action"],
+        "forbidden_path_prefixes": ["/", "~/", "../", "./", "\\\\", "C:\\"],
+    }
+
+
+def _load_document_storage_policy(policy_id: str = DOCUMENT_STORAGE_POLICY_ID) -> Dict[str, Any]:
+    fallback = _default_document_storage_policy()
+    fallback["policy_source"] = "default"
+    fallback["policy_id"] = policy_id or DOCUMENT_STORAGE_POLICY_ID
+    try:
+        resp = _get_ddb().get_item(
+            TableName=GOVERNANCE_POLICIES_TABLE,
+            Key={"policy_id": _ser_s(fallback["policy_id"])},
+            ConsistentRead=True,
+        )
+        item = resp.get("Item")
+        if not item:
+            return fallback
+        loaded = _deser_item(item)
+        if not isinstance(loaded, dict):
+            return fallback
+        loaded.setdefault("policy_id", fallback["policy_id"])
+        loaded.setdefault("status", "active")
+        loaded.setdefault("enforcement_mode", COMPLIANCE_ENFORCEMENT_DEFAULT or "enforce")
+        loaded.setdefault("allowed_targets", fallback["allowed_targets"])
+        loaded["policy_source"] = "dynamodb"
+        return loaded
+    except Exception as exc:
+        logger.warning(
+            "[POLICY] Failed to load policy '%s' from %s: %s",
+            fallback["policy_id"],
+            GOVERNANCE_POLICIES_TABLE,
+            exc,
+        )
+        return fallback
+
+
+def _looks_like_local_path(path_value: str) -> bool:
+    text = str(path_value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(("/", "~/", "../", "./", "\\\\")):
+        return True
+    return bool(re.match(r"^[a-z]:[\\/]", lowered))
+
+
+def _evaluate_document_policy(
+    *,
+    operation: str,
+    storage_target: str,
+    args: Dict[str, Any],
+    policy_id: str = DOCUMENT_STORAGE_POLICY_ID,
+) -> Dict[str, Any]:
+    policy = _load_document_storage_policy(policy_id)
+    allowed_targets_raw = policy.get("allowed_targets")
+    if isinstance(allowed_targets_raw, list):
+        allowed_targets = {
+            str(entry).strip().lower()
+            for entry in allowed_targets_raw
+            if str(entry).strip()
+        }
+    else:
+        allowed_targets = set()
+    if not allowed_targets:
+        allowed_targets = {"docstore_api", "governance_s3", "mcp_validator", "bedrock_action"}
+
+    operation_name = str(operation or "").strip().lower() or "unknown_operation"
+    target_name = str(storage_target or "").strip().lower() or "unknown_target"
+    policy_status = str(policy.get("status") or "active").strip().lower()
+    enforcement_mode = str(policy.get("enforcement_mode") or COMPLIANCE_ENFORCEMENT_DEFAULT or "enforce").strip().lower()
+
+    reasons: List[str] = []
+
+    if policy_status != "active":
+        reasons.append(f"policy status={policy_status} (enforcement skipped)")
+    if target_name not in allowed_targets:
+        reasons.append(f"storage_target '{target_name}' is not allowlisted")
+
+    suspicious_fields: Dict[str, str] = {}
+    for field in ("file_name", "path", "output_path", "local_path", "target_path", "destination"):
+        if field not in args:
+            continue
+        raw = str(args.get(field) or "").strip()
+        if not raw:
+            continue
+        if _looks_like_local_path(raw):
+            suspicious_fields[field] = raw
+
+    if suspicious_fields:
+        fields = ", ".join(f"{key}={value}" for key, value in suspicious_fields.items())
+        reasons.append(f"local filesystem path detected ({fields})")
+
+    if operation_name.startswith("documents_"):
+        file_name = str(args.get("file_name") or "").strip()
+        if file_name and ("/" in file_name or "\\" in file_name):
+            reasons.append("documents_* file_name must be basename only (no path segments)")
+
+    should_enforce = policy_status == "active" and enforcement_mode == "enforce"
+    denied = should_enforce and bool(reasons)
+    decision = "denied" if denied else "allowed"
+
+    return {
+        "success": True,
+        "policy_id": str(policy.get("policy_id") or policy_id or DOCUMENT_STORAGE_POLICY_ID),
+        "policy_source": str(policy.get("policy_source") or "unknown"),
+        "policy_status": policy_status,
+        "enforcement_mode": enforcement_mode,
+        "operation": operation_name,
+        "storage_target": target_name,
+        "allowed_targets": sorted(allowed_targets),
+        "decision": decision,
+        "allowed": not denied,
+        "reasons": reasons,
+        "checked_at": _now_z(),
+    }
+
+
+def _record_compliance_event(
+    *,
+    evaluation: Dict[str, Any],
+    args: Dict[str, Any],
+) -> None:
+    event_id = f"CMP-{uuid.uuid4().hex[:20].upper()}"
+    now = _now_z()
+    epoch = int(time.time())
+    details = {
+        "operation": evaluation.get("operation"),
+        "storage_target": evaluation.get("storage_target"),
+        "decision": evaluation.get("decision"),
+        "reasons": evaluation.get("reasons"),
+        "policy_source": evaluation.get("policy_source"),
+        "policy_status": evaluation.get("policy_status"),
+        "enforcement_mode": evaluation.get("enforcement_mode"),
+    }
+
+    item = {
+        "violation_id": _ser_s(event_id),
+        "policy_id": _ser_s(str(evaluation.get("policy_id") or DOCUMENT_STORAGE_POLICY_ID)),
+        "event_epoch": {"N": str(epoch)},
+        "event_time": _ser_s(now),
+        "result": _ser_s(str(evaluation.get("decision") or "unknown")),
+        "provider": _ser_s(str(args.get("provider") or "unknown")),
+        "project_id": _ser_s(str(args.get("project_id") or GOVERNANCE_PROJECT_ID or "")),
+        "coordination_request_id": _ser_s(str(args.get("coordination_request_id") or args.get("request_id") or "")),
+        "dispatch_id": _ser_s(str(args.get("dispatch_id") or "")),
+        "details": _ser_value(details),
+        "created_at": _ser_s(now),
+    }
+    try:
+        _get_ddb().put_item(TableName=AGENT_COMPLIANCE_TABLE, Item=item)
+    except Exception as exc:
+        logger.warning("[POLICY] Failed to persist compliance event %s: %s", event_id, exc)
+
+
+def _enforce_document_storage_policy(
+    *,
+    operation: str,
+    storage_target: str,
+    args: Dict[str, Any],
+    policy_id: str = DOCUMENT_STORAGE_POLICY_ID,
+) -> Optional[Dict[str, Any]]:
+    evaluation = _evaluate_document_policy(
+        operation=operation,
+        storage_target=storage_target,
+        args=args,
+        policy_id=policy_id,
+    )
+    _record_compliance_event(evaluation=evaluation, args=args)
+    if evaluation.get("allowed") is True:
+        return None
+    return _error_payload(
+        "POLICY_DENIED",
+        "; ".join(str(reason) for reason in evaluation.get("reasons") or []) or "document policy denied",
+        retryable=False,
+        details=evaluation,
+    )
+
+
 # ===================================================================
 # MCP SERVER DEFINITION
 # ===================================================================
@@ -1733,6 +1934,47 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["document_id", "governance_hash"],
+            },
+        ),
+        Tool(
+            name="check_document_policy",
+            description=(
+                "Evaluate document-storage governance policy for a proposed write. "
+                "Returns allow/deny with reasons and writes an audit event."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": "Operation name (e.g., documents_put, documents_patch).",
+                    },
+                    "storage_target": {
+                        "type": "string",
+                        "description": "Logical storage target (e.g., docstore_api, governance_s3).",
+                    },
+                    "file_name": {
+                        "type": "string",
+                        "description": "Optional proposed file name/path to validate.",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project ID for audit context.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Optional provider identity for audit context.",
+                    },
+                    "coordination_request_id": {
+                        "type": "string",
+                        "description": "Optional coordination request ID for audit context.",
+                    },
+                    "dispatch_id": {
+                        "type": "string",
+                        "description": "Optional dispatch ID for audit context.",
+                    },
+                },
+                "required": ["operation", "storage_target"],
             },
         ),
         # --- Reference Search (DVP-TSK-293) ---
@@ -3469,6 +3711,13 @@ async def _documents_put(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash_envelope(args)
     if governance_error:
         return _result_text(governance_error)
+    policy_error = _enforce_document_storage_policy(
+        operation="documents_put",
+        storage_target="docstore_api",
+        args=args,
+    )
+    if policy_error:
+        return _result_text(policy_error)
 
     body: Dict[str, Any] = {
         "project_id": args["project_id"],
@@ -3487,6 +3736,13 @@ async def _documents_patch(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash_envelope(args)
     if governance_error:
         return _result_text(governance_error)
+    policy_error = _enforce_document_storage_policy(
+        operation="documents_patch",
+        storage_target="docstore_api",
+        args=args,
+    )
+    if policy_error:
+        return _result_text(policy_error)
 
     document_id = str(args["document_id"]).strip()
     if not document_id:
@@ -3509,6 +3765,23 @@ async def _documents_patch(args: dict) -> list[TextContent]:
     encoded_id = urllib.parse.quote(document_id, safe="")
     result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=body)
     return _result_text(result)
+
+
+async def _check_document_policy(args: dict) -> list[TextContent]:
+    operation = str(args.get("operation") or "").strip()
+    storage_target = str(args.get("storage_target") or "").strip()
+    if not operation:
+        return _result_text(_error_payload("INVALID_INPUT", "operation is required"))
+    if not storage_target:
+        return _result_text(_error_payload("INVALID_INPUT", "storage_target is required"))
+
+    evaluation = _evaluate_document_policy(
+        operation=operation,
+        storage_target=storage_target,
+        args=args,
+    )
+    _record_compliance_event(evaluation=evaluation, args=args)
+    return _result_text(evaluation)
 
 
 # --- Reference Search (DVP-TSK-293) ---
@@ -3894,6 +4167,13 @@ async def _governance_update(args: dict) -> list[TextContent]:
     err = _require_governance_hash_envelope(args)
     if err:
         return _result_text(err)
+    policy_error = _enforce_document_storage_policy(
+        operation="governance_update",
+        storage_target="governance_s3",
+        args=args,
+    )
+    if policy_error:
+        return _result_text(policy_error)
 
     file_name = str(args.get("file_name") or "").strip()
     content = str(args.get("content") or "")
@@ -4145,6 +4425,7 @@ _TOOL_HANDLERS = {
     "documents_list": _documents_list,
     "documents_put": _documents_put,
     "documents_patch": _documents_patch,
+    "check_document_policy": _check_document_policy,
     "reference_search": _reference_search,
     "deploy_state_get": _deploy_state_get,
     "deploy_history": _deploy_history,
