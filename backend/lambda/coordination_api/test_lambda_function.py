@@ -209,6 +209,11 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
             caps["providers"]["openai_codex"]["mcp_server_configuration"]["auth_header"],
             "X-Coordination-Internal-Key",
         )
+        self.assertTrue(
+            caps["providers"]["openai_codex"]["mcp_server_configuration"]["url"].endswith(
+                "/api/v1/coordination/mcp"
+            )
+        )
 
     @patch.object(coordination_lambda, "_load_mcp_server_module")
     def test_mcp_http_initialize_and_tools_list(self, mock_load_module):

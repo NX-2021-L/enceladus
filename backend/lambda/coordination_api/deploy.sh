@@ -157,6 +157,22 @@ ensure_role() {
       "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${PROJECTS_TABLE}"
     },
     {
+      "Sid": "GovernanceAndReferenceS3Read",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::${S3_BUCKET}"
+    },
+    {
+      "Sid": "GovernanceAndReferenceS3Get",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": [
+        "arn:aws:s3:::${S3_BUCKET}/governance/*",
+        "arn:aws:s3:::${S3_BUCKET}/projects/*",
+        "arn:aws:s3:::${S3_BUCKET}/mobile/v1/reference/*"
+      ]
+    },
+    {
       "Sid": "SSMDispatch",
       "Effect": "Allow",
       "Action": [
@@ -325,6 +341,11 @@ package_lambda() {
   python3 -m pip install \
     --quiet \
     --upgrade \
+    --platform manylinux2014_x86_64 \
+    --implementation cp \
+    --python-version 3.11 \
+    --abi cp311 \
+    --only-binary=:all: \
     -r "${ROOT_DIR}/requirements.txt" \
     -t "${build_dir}" >/dev/null
 
@@ -363,7 +384,6 @@ ensure_lambda() {
 
   # Ensure all pending Lambda code updates have settled before we push configuration.
   aws lambda wait function-active-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
-  aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
   aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
 
   effective_internal_key="$(resolve_internal_api_key)"

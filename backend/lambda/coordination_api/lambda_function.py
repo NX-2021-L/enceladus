@@ -973,17 +973,27 @@ def _key_for_record_id(record_id: str) -> Tuple[str, str, str]:
 
 
 def _resolve_mcp_server_path() -> str:
-    candidates = [ENCELADUS_MCP_SERVER_PATH]
+    module_file = pathlib.Path(__file__).resolve()
+    candidates = [
+        ENCELADUS_MCP_SERVER_PATH,
+        str(module_file.with_name("server.py")),
+    ]
     cwd = pathlib.Path.cwd()
     candidates.extend(
         [
             str(cwd / "tools/enceladus-mcp-server/server.py"),
             str(cwd / "projects/enceladus/tools/enceladus-mcp-server/server.py"),
             str(cwd / "projects/devops/tools/enceladus-mcp-server/server.py"),
-            str(pathlib.Path(__file__).resolve().parents[3] / "enceladus-mcp-server/server.py"),
         ]
     )
+    if len(module_file.parents) > 3:
+        candidates.append(str(module_file.parents[3] / "enceladus-mcp-server/server.py"))
+
+    seen: set[str] = set()
     for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
         if candidate and os.path.isfile(candidate):
             return candidate
     raise RuntimeError(
