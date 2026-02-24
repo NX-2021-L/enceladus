@@ -8,8 +8,10 @@ This folder contains files moved out of `native-desktop-mcp-briefing/` because t
   - `HOST_V2_MCP_CONNECTOR_AND_FLEET_TEMPLATE.md`
   - `TERMINAL_MCP_BOOTSTRAP_CONTRACT.md`
   - `TERMINAL_MCP_VALIDATION_MATRIX.md`
-- Copied MCP server/tool assets retained for reference:
-  - `tools/enceladus-mcp-server/*`
+- Canonical MCP server/tool assets (no local copy):
+  - `../../server.py`
+  - `../../dispatch_plan_generator.py`
+  - `../../install_profile.sh`
 
 The active minimal startup templates now live in:
 
