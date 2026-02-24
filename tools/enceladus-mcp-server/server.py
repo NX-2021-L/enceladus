@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import ssl
 import sys
 import time
@@ -60,6 +61,37 @@ except ImportError:
     _BOTO_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
+# SSL context for HTTPS requests (macOS Python may lack default CA bundle)
+# ---------------------------------------------------------------------------
+
+def _build_ssl_context() -> ssl.SSLContext:
+    """Build an SSL context with proper CA certificates.
+
+    Python framework installs on macOS often lack the default CA bundle at
+    /Library/Frameworks/Python.framework/.../cert.pem. If SSL_CERT_FILE env
+    var is not set, fall back to certifi's CA bundle if available.
+    """
+    # If SSL_CERT_FILE is explicitly set, default context will use it
+    if os.environ.get("SSL_CERT_FILE"):
+        return ssl.create_default_context()
+
+    # Check if default OpenSSL CA paths exist
+    paths = ssl.get_default_verify_paths()
+    if paths.cafile and os.path.isfile(paths.cafile):
+        return ssl.create_default_context()
+
+    # Default CA bundle missing — try certifi
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        # Last resort: return default context (may fail on verify)
+        return ssl.create_default_context()
+
+
+_SSL_CTX = _build_ssl_context()
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -75,6 +107,8 @@ S3_DOCUMENTS_PREFIX = os.environ.get("ENCELADUS_S3_DOCUMENTS_PREFIX", "agent-doc
 GOVERNANCE_PROJECT_ID = os.environ.get("ENCELADUS_GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("ENCELADUS_GOVERNANCE_KEYWORD", "governance-file")
 GOVERNANCE_CATALOG_TTL_SECONDS = int(os.environ.get("ENCELADUS_GOVERNANCE_CATALOG_TTL_SECONDS", "300"))
+S3_GOVERNANCE_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_PREFIX", "governance/live")
+S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
 
 COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
@@ -149,45 +183,6 @@ _sqs_client = None
 _deploy_queue_url: Optional[str] = None
 _governance_catalog_cache: Dict[str, Dict[str, Any]] = {}
 _governance_catalog_cached_at: float = 0.0
-
-
-def _build_ssl_context() -> Optional[ssl.SSLContext]:
-    """Build an SSL context with certifi fallback for reliable HTTPS calls."""
-    cert_file = str(os.environ.get("SSL_CERT_FILE", "") or "").strip()
-    if cert_file:
-        try:
-            return ssl.create_default_context(cafile=cert_file)
-        except Exception as exc:
-            logger.warning("SSL_CERT_FILE %r is not usable: %s", cert_file, exc)
-
-    try:
-        import certifi  # type: ignore
-
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        try:
-            return ssl.create_default_context()
-        except Exception:
-            return None
-
-
-_SSL_CTX = _build_ssl_context()
-
-
-def _json_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": HTTP_USER_AGENT,
-    }
-    if extra:
-        headers.update(extra)
-    return headers
-
-
-def _urlopen(req: urllib.request.Request, timeout: int):
-    if _SSL_CTX is not None:
-        return urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX)
-    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def _get_ddb():
@@ -272,10 +267,34 @@ def _ser_s(val: str) -> Dict:
     return {"S": str(val)}
 
 
+def _ser_value(val: Any) -> Dict:
+    """Serialize supported Python values to DynamoDB typed format."""
+    if isinstance(val, dict):
+        return {"M": {str(k): _ser_value(v) for k, v in val.items()}}
+    if isinstance(val, list):
+        return {"L": [_ser_value(v) for v in val]}
+    if isinstance(val, bool):
+        return {"BOOL": val}
+    if isinstance(val, (int, float)):
+        return {"N": str(val)}
+    if val is None:
+        return {"NULL": True}
+    return _ser_s(str(val))
+
+
 # Record-ID to DynamoDB key mapping (mirrors tracker.py item_key logic)
 _ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature"}
 _PREFIX_MAP_CACHE: Optional[Dict[str, str]] = None
 _DEFAULT_STATUS_BY_TYPE = {"task": "open", "issue": "open", "feature": "planned"}
+_RELATION_ID_FIELDS = {
+    "related_task_ids",
+    "related_issue_ids",
+    "related_feature_ids",
+}
+_RELATION_FIELDS = set(_RELATION_ID_FIELDS) | {"depends_on"}
+_DEPENDENCY_TYPES = ("task", "issue", "feature")
+_SINGLE_CHAR_TOKEN_RE = re.compile(r"^[A-Za-z0-9,\-\s]$")
+_COORDINATION_REQUEST_ID_RE = re.compile(r"^(CRQ|DSP)-[A-Z0-9-]{3,64}$", re.IGNORECASE)
 _TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR"}
 _TRACKER_COUNTER_PREFIX = "counter#"
 _TRACKER_CREATE_MAX_ATTEMPTS = int(os.environ.get("ENCELADUS_TRACKER_CREATE_MAX_ATTEMPTS", "32"))
@@ -423,6 +442,155 @@ def _is_conditional_check_failed(exc: Exception) -> bool:
     return str(exc.response.get("Error", {}).get("Code", "")) == "ConditionalCheckFailedException"
 
 
+def _dedupe_preserve_order(values: List[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _looks_char_split(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) < 6:
+        return False
+    return all(
+        isinstance(part, str)
+        and len(part) == 1
+        and bool(_SINGLE_CHAR_TOKEN_RE.match(part))
+        for part in value
+    )
+
+
+def _try_parse_json_container(raw: str) -> Optional[Any]:
+    text = raw.strip()
+    if len(text) < 2:
+        return None
+    if not ((text[0] == "[" and text[-1] == "]") or (text[0] == "{" and text[-1] == "}")):
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _coerce_relation_id_list(value: Any, field_name: str) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        parsed = _try_parse_json_container(text)
+        if parsed is not None:
+            return _coerce_relation_id_list(parsed, field_name)
+        return _dedupe_preserve_order(
+            [token.strip().upper() for token in text.split(",") if token.strip()]
+        )
+    if isinstance(value, (tuple, set)):
+        value = list(value)
+    if isinstance(value, list):
+        if _looks_char_split(value):
+            return _coerce_relation_id_list("".join(value), field_name)
+        out: List[str] = []
+        for entry in value:
+            if entry is None:
+                continue
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"{field_name} expects relation IDs as strings; got {type(entry).__name__}"
+                )
+            text = entry.strip()
+            if not text:
+                continue
+            parsed = _try_parse_json_container(text)
+            if parsed is not None:
+                out.extend(_coerce_relation_id_list(parsed, field_name))
+                continue
+            out.extend(token.strip().upper() for token in text.split(",") if token.strip())
+        return _dedupe_preserve_order(out)
+    raise ValueError(f"{field_name} must be a string or list of strings")
+
+
+def _normalize_depends_on(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        parsed = _try_parse_json_container(text)
+        if parsed is not None:
+            return _normalize_depends_on(parsed)
+        value = _coerce_relation_id_list(text, "depends_on")
+
+    if isinstance(value, (tuple, set)):
+        value = list(value)
+
+    if isinstance(value, list):
+        if _looks_char_split(value):
+            return _normalize_depends_on("".join(value))
+
+        grouped: Dict[str, List[str]] = {rtype: [] for rtype in _DEPENDENCY_TYPES}
+        unknown: List[str] = []
+
+        for entry in value:
+            if entry is None:
+                continue
+            if isinstance(entry, dict):
+                dep_type = str(entry.get("type", "")).strip().lower()
+                if dep_type not in _DEPENDENCY_TYPES:
+                    raise ValueError(
+                        "depends_on object entries must include type in {task, issue, feature}"
+                    )
+                dep_ids = _coerce_relation_id_list(entry.get("ids"), "depends_on")
+                if dep_ids:
+                    grouped[dep_type].extend(dep_ids)
+                continue
+            if isinstance(entry, (str, list, tuple, set)):
+                dep_ids = _coerce_relation_id_list(entry, "depends_on")
+                for rid in dep_ids:
+                    parts = rid.split("-")
+                    rtype = _ID_SEGMENT_TO_TYPE.get(parts[1]) if len(parts) >= 3 else None
+                    if rtype:
+                        grouped[rtype].append(rid)
+                    else:
+                        unknown.append(rid)
+                continue
+            raise ValueError(
+                f"depends_on entries must be strings or {{type, ids}} objects; got {type(entry).__name__}"
+            )
+
+        out: List[Any] = []
+        for dep_type in _DEPENDENCY_TYPES:
+            dep_ids = _dedupe_preserve_order(grouped[dep_type])
+            if dep_ids:
+                out.append({"type": dep_type, "ids": dep_ids})
+        out.extend(_dedupe_preserve_order(unknown))
+        return out
+
+    raise ValueError("depends_on must be a string, list, or object list")
+
+
+def _normalize_relation_field(field: str, value: Any) -> Any:
+    if field in _RELATION_ID_FIELDS:
+        return _coerce_relation_id_list(value, field)
+    if field == "depends_on":
+        return _normalize_depends_on(value)
+    return value
+
+
+def _field_value_for_note(value: Any, max_len: int = 220) -> str:
+    if isinstance(value, (list, dict)):
+        rendered = json.dumps(value, separators=(", ", ": "))
+    else:
+        rendered = str(value)
+    if len(rendered) <= max_len:
+        return rendered
+    return rendered[: max_len - 3] + "..."
+
+
 def _normalize_string_list(value: Any) -> Optional[List[str]]:
     """Normalize a string/list[str] into non-empty trimmed strings."""
     if value is None:
@@ -442,6 +610,38 @@ def _normalize_string_list(value: Any) -> Optional[List[str]]:
         if stripped:
             out.append(stripped)
     return out
+
+
+def _normalize_optional_bool(value: Any, field_name: str) -> Optional[bool]:
+    """Normalize optional bool-like values."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "t", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "f", "0", "no", "n", "off"}:
+            return False
+    raise ValueError(f"{field_name} must be a boolean.")
+
+
+def _normalize_coordination_request_id(value: Any) -> str:
+    """Normalize coordination or dispatch request identifiers."""
+    if value is None:
+        return ""
+    text = str(value).strip().upper()
+    if not text:
+        return ""
+    if not _COORDINATION_REQUEST_ID_RE.fullmatch(text):
+        raise ValueError(
+            "coordination_request_id must match CRQ-* or DSP-* "
+            "with only uppercase letters, numbers, or hyphens."
+        )
+    return text
 
 
 def _result_text(data: Any) -> list:
@@ -564,6 +764,82 @@ def _require_governance_hash_envelope(args: dict) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _build_write_source(args: dict) -> Dict[str, Any]:
+    """Build a structured write_source map for DynamoDB attribution.
+
+    Stamps every MCP server write with channel + optional provider context,
+    enabling downstream anomaly detection (ENC-ISS-009 Phase 0B).
+    """
+    return {
+        "M": {
+            "channel": _ser_s("mcp_server"),
+            "provider": _ser_s(str(args.get("provider") or "")),
+            "dispatch_id": _ser_s(str(args.get("dispatch_id") or "")),
+            "coordination_request_id": _ser_s(
+                str(args.get("coordination_request_id") or "")
+            ),
+            "timestamp": _ser_s(_now_z()),
+        }
+    }
+
+
+def _write_source_note_suffix(args: dict) -> str:
+    """Build an optional suffix for last_update_note with provider context."""
+    provider = str(args.get("provider") or "")
+    dispatch_id = str(args.get("dispatch_id") or "")
+    parts = []
+    if provider:
+        parts.append(f"provider={provider}")
+    if dispatch_id:
+        parts.append(f"dispatch={dispatch_id}")
+    return f" [{', '.join(parts)}]" if parts else ""
+
+
+def _validate_session_ownership(
+    existing_item: Dict[str, Any],
+    args: dict,
+    record_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Validate caller has session ownership for writes to checked-out records.
+
+    ENC-ISS-009 Phase 3A: When a task has active_agent_session=true, only the
+    agent identified by active_agent_session_id may write to it. The caller
+    identity is matched against both ``provider`` and ``dispatch_id`` args —
+    dispatched sessions check out via dispatch_id, so either field matching
+    the owning agent is sufficient.
+
+    Returns an error payload if validation fails, None if the write is allowed.
+    """
+    item_data = _deser_item(existing_item)
+    if not item_data.get("active_agent_session"):
+        return None  # Not checked out — any caller can write
+
+    owning_agent = str(item_data.get("active_agent_session_id") or "").strip()
+    caller_provider = str(args.get("provider") or "").strip()
+    caller_dispatch = str(args.get("dispatch_id") or "").strip()
+
+    if not caller_provider and not caller_dispatch:
+        return _error_payload(
+            "SESSION_WRITE_REJECTED",
+            f"Record '{record_id}' is checked out by agent '{owning_agent}'. "
+            "You must provide your agent identity via the 'provider' or "
+            "'dispatch_id' parameter to write to a checked-out record.",
+        )
+
+    # Match on either provider or dispatch_id
+    if caller_provider == owning_agent or caller_dispatch == owning_agent:
+        return None  # Caller matches session owner — write allowed
+
+    caller_label = caller_provider or caller_dispatch
+    return _error_payload(
+        "SESSION_WRITE_REJECTED",
+        f"Record '{record_id}' is checked out by agent '{owning_agent}', "
+        f"but caller identifies as '{caller_label}'. Only the owning agent "
+        "may write to a checked-out record.",
+        retryable=True,
+    )
+
+
 def _error_code_from_http_status(status_code: int) -> str:
     if status_code == 404:
         return "NOT_FOUND"
@@ -615,7 +891,10 @@ def _deploy_api_request(
         encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
         if encoded_qs:
             url = f"{url}?{encoded_qs}"
-    headers = _json_headers()
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
     if DEPLOY_API_COOKIE:
         headers["Cookie"] = DEPLOY_API_COOKIE
     if payload is not None:
@@ -625,7 +904,7 @@ def _deploy_api_request(
         body = None
     req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
     try:
-        with _urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
             text = resp.read().decode("utf-8")
             return json.loads(text) if text else {"success": True}
     except urllib.error.HTTPError as exc:
@@ -655,7 +934,10 @@ def _document_api_request(
         if encoded_qs:
             url = f"{url}?{encoded_qs}"
 
-    headers = _json_headers()
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
     if DOCUMENT_API_INTERNAL_API_KEY:
         headers["X-Coordination-Internal-Key"] = DOCUMENT_API_INTERNAL_API_KEY
     if payload is not None:
@@ -666,7 +948,7 @@ def _document_api_request(
 
     req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
     try:
-        with _urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
             text = resp.read().decode("utf-8")
             return json.loads(text) if text else {"success": True}
     except urllib.error.HTTPError as exc:
@@ -698,17 +980,69 @@ def _governance_uri_from_file_name(file_name: str) -> Optional[str]:
     return None
 
 
-def _governance_catalog(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
-    global _governance_catalog_cache, _governance_catalog_cached_at
+def _governance_catalog_from_s3() -> Dict[str, Dict[str, Any]]:
+    """Build governance catalog from deterministic S3 prefix (ENC-TSK-474).
 
-    now = time.time()
-    if (
-        not force_refresh
-        and _governance_catalog_cache
-        and (now - _governance_catalog_cached_at) < GOVERNANCE_CATALOG_TTL_SECONDS
-    ):
-        return _governance_catalog_cache
+    Lists objects under ``S3_GOVERNANCE_PREFIX`` and derives governance URIs
+    from S3 key structure.  Content hash is SHA-256 of raw file content,
+    matching the hash algorithm used by docstore uploads.
+    """
+    try:
+        s3 = _get_s3()
+        prefix = S3_GOVERNANCE_PREFIX.rstrip("/") + "/"
+        resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
+        objects = list(resp.get("Contents", []))
+        while resp.get("IsTruncated"):
+            resp = s3.list_objects_v2(
+                Bucket=S3_BUCKET,
+                Prefix=prefix,
+                ContinuationToken=resp["NextContinuationToken"],
+            )
+            objects.extend(resp.get("Contents", []))
+    except Exception as exc:
+        logger.warning("S3 governance listing failed: %s", exc)
+        return {}
 
+    catalog: Dict[str, Dict[str, Any]] = {}
+    for obj in objects:
+        s3_key = obj["Key"]
+        rel_path = s3_key[len(prefix):]
+        if not rel_path or rel_path.endswith("/"):
+            continue
+
+        uri = _governance_uri_from_file_name(rel_path)
+        if not uri:
+            continue
+
+        try:
+            content_resp = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
+            content = content_resp["Body"].read()
+            content_hash = hashlib.sha256(content).hexdigest()
+        except Exception as exc:
+            logger.warning("Failed to read governance file s3://%s/%s: %s", S3_BUCKET, s3_key, exc)
+            continue
+
+        last_modified = obj.get("LastModified")
+        updated_at = last_modified.isoformat() if hasattr(last_modified, "isoformat") else str(last_modified or "")
+
+        catalog[uri] = {
+            "file_name": rel_path,
+            "s3_bucket": S3_BUCKET,
+            "s3_key": s3_key,
+            "content_hash": content_hash,
+            "updated_at": updated_at,
+        }
+
+    return catalog
+
+
+def _governance_catalog_from_docstore() -> Dict[str, Dict[str, Any]]:
+    """Legacy: build governance catalog from docstore DynamoDB scan.
+
+    Falls back to querying all documents in ``GOVERNANCE_PROJECT_ID`` and
+    filtering by ``GOVERNANCE_KEYWORD``.  Retained for backwards compatibility
+    before governance files are migrated to the deterministic S3 prefix.
+    """
     try:
         ddb = _get_ddb()
         items: List[Dict[str, Any]] = []
@@ -731,10 +1065,8 @@ def _governance_catalog(force_refresh: bool = False) -> Dict[str, Dict[str, Any]
             )
             items.extend(resp.get("Items", []))
     except Exception as exc:
-        logger.warning("governance catalog query failed: %s", exc)
-        _governance_catalog_cache = {}
-        _governance_catalog_cached_at = now
-        return _governance_catalog_cache
+        logger.warning("governance catalog docstore query failed: %s", exc)
+        return {}
 
     catalog: Dict[str, Dict[str, Any]] = {}
     for raw in items:
@@ -765,6 +1097,36 @@ def _governance_catalog(force_refresh: bool = False) -> Dict[str, Dict[str, Any]
             "content_hash": doc.get("content_hash"),
             "updated_at": doc.get("updated_at"),
         }
+
+    return catalog
+
+
+def _governance_catalog(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Build governance catalog with two-tier resolution (ENC-TSK-474).
+
+    Primary: deterministic S3 prefix (``governance/live/``).
+    Fallback: legacy docstore DynamoDB scan (``GOVERNANCE_PROJECT_ID``).
+    """
+    global _governance_catalog_cache, _governance_catalog_cached_at
+
+    now = time.time()
+    if (
+        not force_refresh
+        and _governance_catalog_cache
+        and (now - _governance_catalog_cached_at) < GOVERNANCE_CATALOG_TTL_SECONDS
+    ):
+        return _governance_catalog_cache
+
+    catalog = _governance_catalog_from_s3()
+
+    if not catalog:
+        logger.warning(
+            "No governance files at s3://%s/%s/ — falling back to docstore scan. "
+            "Migrate governance files to the deterministic S3 path.",
+            S3_BUCKET,
+            S3_GOVERNANCE_PREFIX,
+        )
+        catalog = _governance_catalog_from_docstore()
 
     _governance_catalog_cache = catalog
     _governance_catalog_cached_at = now
@@ -820,7 +1182,7 @@ app = Server(SERVER_NAME)
 async def list_resources() -> list[Resource]:
     resources = []
 
-    # Governance files (authoritative source: docstore)
+    # Governance files (authoritative source: S3 governance/live/, fallback: docstore)
     for uri, meta in sorted(_governance_catalog().items()):
         file_name = str(meta.get("file_name") or "")
         mime_type = "application/json" if file_name.endswith(".json") else "text/markdown"
@@ -850,15 +1212,17 @@ async def list_resource_templates() -> list[ResourceTemplate]:
 
 @app.read_resource()
 async def read_resource(uri: str) -> str:
-    # governance://... from docstore
-    if uri.startswith("governance://"):
+    uri_text = str(uri or "").strip()
+
+    # governance://... from deterministic S3 path (fallback: docstore)
+    if uri_text.startswith("governance://"):
         catalog = _governance_catalog()
-        meta = catalog.get(uri)
+        meta = catalog.get(uri_text)
         if not meta:
-            return f"# Governance resource not found in docstore: {uri}"
+            return f"# Governance resource not found: {uri_text}"
         s3_key = str(meta.get("s3_key") or "").strip()
         if not s3_key:
-            return f"# Governance resource missing s3_key: {uri}"
+            return f"# Governance resource missing s3_key: {uri_text}"
         try:
             resp = _get_s3().get_object(
                 Bucket=str(meta.get("s3_bucket") or S3_BUCKET),
@@ -866,11 +1230,11 @@ async def read_resource(uri: str) -> str:
             )
             return resp["Body"].read().decode("utf-8")
         except Exception as exc:
-            return f"# Failed to fetch governance resource {uri}: {exc}"
+            return f"# Failed to fetch governance resource {uri_text}: {exc}"
 
     # projects://reference/{project_id}
-    if uri.startswith("projects://reference/"):
-        project_id = uri.replace("projects://reference/", "")
+    if uri_text.startswith("projects://reference/"):
+        project_id = uri_text.replace("projects://reference/", "")
         s3_key = f"{S3_REFERENCE_PREFIX}/{project_id}.md"
         try:
             resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=s3_key)
@@ -878,7 +1242,7 @@ async def read_resource(uri: str) -> str:
         except Exception as exc:
             return f"# Failed to fetch reference for {project_id}: {exc}"
 
-    return f"# Unknown resource URI: {uri}"
+    return f"# Unknown resource URI: {uri_text}"
 
 
 # -------------------------------------------------------------------
@@ -961,6 +1325,23 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="tracker_pending_updates",
+            description="List tracker records with pending update notes. Supports single project or all projects.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "The project name (e.g., devops). Omit if all=true.",
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "description": "Scan all projects for pending updates. If true, project_id is ignored.",
+                    },
+                },
+            },
+        ),
+        Tool(
             name="tracker_set",
             description="Set a field value on a tracker record.",
             inputSchema={
@@ -985,6 +1366,13 @@ async def list_tools() -> list[Tool]:
                     "coordination_request_id": {
                         "type": "string",
                         "description": "Coordination request ID for write audit traceability.",
+                    },
+                    "coordination": {
+                        "type": "boolean",
+                        "description": (
+                            "Whether this record is coordination-scoped. "
+                            "If true, coordination_request_id is required."
+                        ),
                     },
                     "dispatch_id": {
                         "type": "string",
@@ -1063,8 +1451,57 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Acceptance criteria for task records. "
-                            "Required when record_type is 'task'."
+                            "Acceptance criteria. Required for tasks (min 1). "
+                            "Also accepted for features (governed field, min 1)."
+                        ),
+                    },
+                    "user_story": {
+                        "type": "string",
+                        "description": (
+                            "User story for feature records (governed field). "
+                            "Format: 'As a [USER/SYSTEM] I need/want to be able to [X] so that [Y]'. "
+                            "Required when record_type is 'feature'."
+                        ),
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "steps_to_duplicate": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "observed_by": {"type": "string"},
+                                "timestamp": {"type": "string"},
+                            },
+                            "required": ["description", "steps_to_duplicate"],
+                        },
+                        "description": (
+                            "Structured evidence for issue records (governed field, min 1). "
+                            "Each entry must include description and steps_to_duplicate."
+                        ),
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": (
+                            "Classification category. "
+                            "Features: epic|capability|enhancement|infrastructure. "
+                            "Tasks: implementation|investigation|documentation|maintenance|validation. "
+                            "Issues: bug|debt|risk|security|performance."
+                        ),
+                    },
+                    "intent": {
+                        "type": "string",
+                        "description": "Free-text WHY this record exists.",
+                    },
+                    "primary_task": {
+                        "type": "string",
+                        "description": (
+                            "Task ID of the execution entry-point task for features/issues (§5.5). "
+                            "Must reference a valid task ID (contains -TSK- segment). "
+                            "Only valid for feature and issue record types."
                         ),
                     },
                     "governance_hash": {
@@ -1085,6 +1522,59 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["project_id", "record_type", "title", "governance_hash"],
+            },
+        ),
+        # --- Acceptance Criteria Evidence Handshake (§7.1.1) ---
+        Tool(
+            name="tracker_set_acceptance_evidence",
+            description=(
+                "Set evidence on a specific acceptance criterion of a feature record. "
+                "Part of the governed evidence handshake: features cannot be completed "
+                "until ALL acceptance criteria have evidence and evidence_acceptance=true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "record_id": {
+                        "type": "string",
+                        "description": "The feature record ID (must be a feature).",
+                    },
+                    "criterion_index": {
+                        "type": "integer",
+                        "description": "Zero-based index of the acceptance criterion to update.",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": (
+                            "Evidence that the criterion was met in production. "
+                            "Should reference deployment IDs, test results, monitoring data, etc."
+                        ),
+                    },
+                    "evidence_acceptance": {
+                        "type": "boolean",
+                        "description": "Whether the criterion has been validated and accepted.",
+                    },
+                    "governance_hash": {
+                        "type": "string",
+                        "description": "Current governance hash for write authorization.",
+                    },
+                    "coordination_request_id": {
+                        "type": "string",
+                        "description": "Coordination request ID for write audit traceability.",
+                    },
+                    "dispatch_id": {
+                        "type": "string",
+                        "description": "Dispatch identifier associated with this write.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Provider name associated with this write.",
+                    },
+                },
+                "required": [
+                    "record_id", "criterion_index", "evidence",
+                    "evidence_acceptance", "governance_hash",
+                ],
             },
         ),
         # --- Documents (6.3) ---
@@ -1401,8 +1891,12 @@ async def list_tools() -> list[Tool]:
                         "type": "object",
                         "description": "Non-UI deployment config for infrastructure deployment types.",
                     },
+                    "governance_hash": {
+                        "type": "string",
+                        "description": "Current governance hash for write authorization.",
+                    },
                 },
-                "required": ["project_id", "change_type", "deployment_type", "summary", "changes"],
+                "required": ["project_id", "change_type", "deployment_type", "summary", "changes", "governance_hash"],
             },
         ),
         Tool(
@@ -1513,6 +2007,39 @@ async def list_tools() -> list[Tool]:
             },
         ),
         # --- Governance (8) ---
+        Tool(
+            name="governance_update",
+            description=(
+                "Update a governance resource with automatic version archival. "
+                "Archives the current version to governance/history/ before writing "
+                "the new content to governance/live/. Returns the new governance hash."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_name": {
+                        "type": "string",
+                        "description": (
+                            "Governance file name (e.g., 'agents.md' or 'agents/foo.md'). "
+                            "Must map to a valid governance:// URI."
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New markdown content for the governance file.",
+                    },
+                    "change_summary": {
+                        "type": "string",
+                        "description": "Brief description of what changed in this update.",
+                    },
+                    "governance_hash": {
+                        "type": "string",
+                        "description": "Current governance hash for write authorization.",
+                    },
+                },
+                "required": ["file_name", "content", "change_summary", "governance_hash"],
+            },
+        ),
         Tool(
             name="governance_hash",
             description="Compute and return the SHA-256 governance hash of loaded governance files.",
@@ -1672,6 +2199,120 @@ async def _projects_get(args: dict) -> list[TextContent]:
 # --- Tracker ---
 
 
+def _compute_completeness_score(item_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute ontology completeness score (0-100) for a tracker record.
+
+    Returns dict with score, max_points, earned_points, and missing_fields.
+    Scoring criteria per record type based on ENC-FTR-011 product ontology.
+    """
+    record_type = item_data.get("record_type", "")
+    earned = 0
+    total = 0
+    missing: List[str] = []
+
+    # Common fields (all types): title, description, priority, category, intent
+    common_checks = [
+        ("title", 10),
+        ("description", 5),
+        ("priority", 5),
+        ("category", 10),
+        ("intent", 5),
+    ]
+    for field_name, points in common_checks:
+        total += points
+        val = item_data.get(field_name)
+        if val and str(val).strip():
+            earned += points
+        else:
+            missing.append(field_name)
+
+    if record_type == "feature":
+        # Governed: user_story (15), acceptance_criteria (15), evidence_validated (15)
+        # Optional: owners (5), success_metrics (5), parent (5)
+        feature_checks = [
+            ("user_story", 15, True),
+            ("acceptance_criteria", 15, True),
+            ("owners", 5, False),
+            ("success_metrics", 5, False),
+            ("parent", 5, False),
+        ]
+        for field_name, points, governed in feature_checks:
+            total += points
+            val = item_data.get(field_name)
+            has_val = bool(val and (isinstance(val, list) and len(val) > 0 or isinstance(val, str) and val.strip()))
+            if has_val:
+                earned += points
+            elif governed:
+                missing.append(f"{field_name} (governed)")
+            else:
+                missing.append(field_name)
+        # Evidence validation score (governed, 15 points)
+        total += 15
+        ac_list = item_data.get("acceptance_criteria", [])
+        if ac_list:
+            validated_count = 0
+            for ac in ac_list:
+                if isinstance(ac, dict) and ac.get("evidence_acceptance", False):
+                    validated_count += 1
+            if validated_count == len(ac_list):
+                earned += 15
+            elif validated_count > 0:
+                earned += round(15 * validated_count / len(ac_list))
+                missing.append(f"evidence_validated ({validated_count}/{len(ac_list)} criteria)")
+            else:
+                missing.append("evidence_validated (0 criteria accepted — use tracker_set_acceptance_evidence)")
+        else:
+            missing.append("evidence_validated (no acceptance_criteria)")
+
+    elif record_type == "task":
+        # Governed: acceptance_criteria (15), active_agent_session fields (5 for presence)
+        # Optional: assigned_to (5), parent (10), checklist (5)
+        task_checks = [
+            ("acceptance_criteria", 15, True),
+            ("assigned_to", 5, False),
+            ("parent", 10, False),
+            ("checklist", 5, False),
+        ]
+        for field_name, points, governed in task_checks:
+            total += points
+            val = item_data.get(field_name)
+            has_val = bool(val and (isinstance(val, list) and len(val) > 0 or isinstance(val, str) and val.strip()))
+            if has_val:
+                earned += points
+            elif governed:
+                missing.append(f"{field_name} (governed)")
+            else:
+                missing.append(field_name)
+
+    elif record_type == "issue":
+        # Governed: evidence (25)
+        # Optional: severity (5), hypothesis (10), technical_notes (5)
+        issue_checks = [
+            ("evidence", 25, True),
+            ("severity", 5, False),
+            ("hypothesis", 10, False),
+            ("technical_notes", 5, False),
+        ]
+        for field_name, points, governed in issue_checks:
+            total += points
+            val = item_data.get(field_name)
+            has_val = bool(val and (isinstance(val, list) and len(val) > 0 or isinstance(val, str) and val.strip()))
+            if has_val:
+                earned += points
+            elif governed:
+                missing.append(f"{field_name} (governed)")
+            else:
+                missing.append(field_name)
+
+    score = round((earned / total) * 100) if total > 0 else 0
+    return {
+        "completeness_score": score,
+        "earned_points": earned,
+        "max_points": total,
+        "missing_fields": missing,
+    }
+
+
 async def _tracker_get(args: dict) -> list[TextContent]:
     record_id = args["record_id"]
     ddb = _get_ddb()
@@ -1686,9 +2327,10 @@ async def _tracker_get(args: dict) -> list[TextContent]:
     result = _deser_item(item)
     # Surface record_id as 'id' for consistency with tracker.py output
     if "record_id" in result and "id" not in result:
-        # Extract the human-readable ID from "task#DVP-TSK-245"
         sk = result["record_id"]
         result["id"] = sk.split("#", 1)[1] if "#" in sk else sk
+    # Add completeness score (ENC-FTR-013 ontology)
+    result["ontology"] = _compute_completeness_score(result)
     return _result_text(result)
 
 
@@ -1734,12 +2376,107 @@ async def _tracker_list(args: dict) -> list[TextContent]:
         sk = item.get("record_id", "")
         item["id"] = sk.split("#", 1)[1] if "#" in sk else sk
     items.sort(key=lambda x: x.get("id", ""))
-    summary = [
-        {"id": r.get("id"), "type": r.get("record_type"), "status": r.get("status"),
-         "priority": r.get("priority"), "title": (r.get("title", "")[:80])}
-        for r in items
-    ]
-    return _result_text({"records": summary, "count": len(items)})
+    # Orphan detection (ENC-FTR-013): flag tasks without Feature lineage
+    orphan_count = 0
+    summary = []
+    for r in items:
+        entry: Dict[str, Any] = {
+            "id": r.get("id"),
+            "type": r.get("record_type"),
+            "status": r.get("status"),
+            "priority": r.get("priority"),
+            "title": (r.get("title", "")[:80]),
+        }
+        if r.get("record_type") == "task":
+            has_parent = bool(r.get("parent"))
+            has_feature_link = bool(r.get("related_feature_ids"))
+            if not has_parent and not has_feature_link:
+                entry["orphan"] = True
+                orphan_count += 1
+        summary.append(entry)
+    result: Dict[str, Any] = {"records": summary, "count": len(items)}
+    if orphan_count > 0:
+        result["orphan_tasks"] = orphan_count
+        result["orphan_warning"] = (
+            f"{orphan_count} task(s) have no parent or feature lineage. "
+            "Consider linking them to a feature for traceability."
+        )
+    return _result_text(result)
+
+
+async def _tracker_pending_updates(args: dict) -> list[TextContent]:
+    """List tracker records with non-empty pending update notes.
+
+    Supports scanning a single project or all projects.
+    Used by MCP-only session initialization to check for pending PWA updates
+    without requiring tracker.py fallback.
+    """
+    project_id = args.get("project_id")
+    scan_all = args.get("all", False)
+
+    if not project_id and not scan_all:
+        return _result_text({"error": "Provide project_id or all=true"})
+
+    ddb = _get_ddb()
+
+    # Build filter expression for records with non-empty 'update' field
+    filter_expr = "attribute_exists(#upd)"
+    expr_names = {"#upd": "update"}
+    expr_vals = {}
+
+    if scan_all:
+        # Scan entire table for pending updates
+        scan_kwargs: Dict[str, Any] = {
+            "TableName": TRACKER_TABLE,
+            "FilterExpression": filter_expr,
+            "ExpressionAttributeNames": expr_names,
+        }
+    else:
+        # Scan with project filter
+        filter_expr += " AND project_id = :pid"
+        expr_vals[":pid"] = _ser_s(project_id)
+        scan_kwargs: Dict[str, Any] = {
+            "TableName": TRACKER_TABLE,
+            "FilterExpression": filter_expr,
+            "ExpressionAttributeNames": expr_names,
+            "ExpressionAttributeValues": expr_vals,
+        }
+
+    try:
+        items = []
+        # Support pagination for large result sets
+        last_evaluated_key = None
+        while True:
+            if last_evaluated_key:
+                scan_kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+            resp = ddb.scan(**scan_kwargs)
+            items.extend([_deser_item(i) for i in resp.get("Items", [])])
+
+            last_evaluated_key = resp.get("LastEvaluatedKey")
+            if not last_evaluated_key:
+                break
+    except (BotoCoreError, ClientError) as exc:
+        return _result_text({"error": f"DynamoDB scan failed: {exc}"})
+
+    # Format results
+    summary = []
+    for r in items:
+        sk = r.get("record_id", "")
+        entry = {
+            "id": sk.split("#", 1)[1] if "#" in sk else sk,
+            "type": r.get("record_type"),
+            "update": r.get("update", ""),
+        }
+        summary.append(entry)
+
+    # Sort by ID for consistency
+    summary.sort(key=lambda x: x.get("id", ""))
+
+    result: Dict[str, Any] = {"records": summary, "count": len(summary)}
+    if not summary:
+        result["message"] = "No pending updates found"
+    return _result_text(result)
 
 
 async def _tracker_set(args: dict) -> list[TextContent]:
@@ -1752,25 +2489,313 @@ async def _tracker_set(args: dict) -> list[TextContent]:
     value = args["value"]
     ddb = _get_ddb()
 
+    if field in _RELATION_FIELDS:
+        try:
+            value = _normalize_relation_field(field, value)
+        except ValueError as exc:
+            return _result_text(
+                _error_payload(
+                    "INVALID_RELATION_VALUE",
+                    f"Invalid value for {field}: {exc}",
+                )
+            )
+
     try:
         key = _tracker_key(record_id)
     except ValueError as exc:
         return _result_text({"error": str(exc)})
 
-    # Validate record exists
+    # Validate record exists and fetch for soft validation
     existing = ddb.get_item(TableName=TRACKER_TABLE, Key=key)
     if not existing.get("Item"):
         return _result_text({"error": f"Record '{record_id}' not found"})
 
+    # --- Session ownership enforcement (ENC-ISS-009 Phase 3A) ---
+    # Checkout/release operations handle their own validation; skip for those.
+    if field != "active_agent_session":
+        ownership_error = _validate_session_ownership(existing["Item"], args, record_id)
+        if ownership_error:
+            return _result_text(ownership_error)
+
+    # --- Parent same-kind constraint (ENC-TSK-460 §5.1) ---
+    if field == "parent" and value.strip():
+        item_data_for_parent = _deser_item(existing["Item"])
+        record_type_for_parent = item_data_for_parent.get("record_type", "")
+        # Determine parent record type from ID segment
+        parent_type = None
+        if "-TSK-" in value:
+            parent_type = "task"
+        elif "-ISS-" in value:
+            parent_type = "issue"
+        elif "-FTR-" in value:
+            parent_type = "feature"
+        if parent_type and parent_type != record_type_for_parent:
+            return _result_text(
+                _error_payload(
+                    "PARENT_KIND_MISMATCH",
+                    f"Cannot set parent: parent must be the same record type. "
+                    f"This record is a {record_type_for_parent} but parent '{value}' is a {parent_type}. "
+                    f"Use related_*_ids for cross-type references or primary_task for "
+                    f"feature/issue → task execution links (§5.5).",
+                )
+            )
+
+    # --- primary_task validation (ENC-TSK-460 §5.5) ---
+    if field == "primary_task":
+        item_data_for_pt = _deser_item(existing["Item"])
+        record_type_for_pt = item_data_for_pt.get("record_type", "")
+        if record_type_for_pt not in ("feature", "issue"):
+            return _result_text(
+                _error_payload(
+                    "INVALID_FIELD",
+                    f"primary_task is only valid on feature and issue records, "
+                    f"not {record_type_for_pt}.",
+                )
+            )
+        if value.strip() and "-TSK-" not in value:
+            return _result_text(
+                _error_payload(
+                    "INVALID_PRIMARY_TASK",
+                    f"primary_task must reference a task ID (contains -TSK- segment). "
+                    f"Got: '{value}'.",
+                )
+            )
+
+    # --- State machine enforcement + soft validation (ENC-FTR-013 ontology) ---
+    _VALID_TRANSITIONS = {
+        "feature": {
+            "planned": {"in-progress", "completed"},
+            "in-progress": {"completed"},
+        },
+        "task": {
+            "open": {"in-progress", "closed"},
+            "in-progress": {"closed"},
+        },
+        "issue": {
+            "open": {"in-progress", "closed"},
+            "in-progress": {"closed"},
+        },
+    }
+    warnings: List[str] = []
+    if field == "status":
+        item_data = _deser_item(existing["Item"])
+        record_type = item_data.get("record_type", "")
+        current_status = item_data.get("status", "").strip().lower()
+        new_lower = value.strip().lower()
+        closing = new_lower in ("closed", "completed", "complete")
+
+        # Enforce valid transitions (reject invalid ones)
+        if current_status != new_lower:
+            type_transitions = _VALID_TRANSITIONS.get(record_type, {})
+            valid_next = type_transitions.get(current_status)
+            if valid_next is not None and new_lower not in valid_next:
+                return _result_text(
+                    _error_payload(
+                        "INVALID_TRANSITION",
+                        f"Invalid status transition for {record_type}: "
+                        f"'{current_status}' -> '{value}'. "
+                        f"Valid next statuses: {sorted(valid_next)}",
+                    )
+                )
+
+        # --- Hard enforcement of governed fields on close (ENC-FTR-013 + ENC-ISS-018) ---
+        if record_type == "feature":
+            if closing:
+                if not item_data.get("user_story"):
+                    return _result_text(
+                        _error_payload(
+                            "GOVERNED_FIELD_MISSING",
+                            "Cannot complete feature: user_story is required. "
+                            "Set user_story before completing this feature.",
+                        )
+                    )
+                ac_list = item_data.get("acceptance_criteria", [])
+                if not ac_list:
+                    return _result_text(
+                        _error_payload(
+                            "GOVERNED_FIELD_MISSING",
+                            "Cannot complete feature: acceptance_criteria is required (min 1). "
+                            "Set acceptance_criteria before completing this feature.",
+                        )
+                    )
+                # Evidence handshake gate (§7.1.1): ALL criteria must have
+                # evidence + evidence_acceptance=true before completion
+                unvalidated = []
+                for i, ac in enumerate(ac_list):
+                    if isinstance(ac, dict):
+                        desc = ac.get("description", f"criterion[{i}]")
+                        if not ac.get("evidence_acceptance", False):
+                            unvalidated.append(f"[{i}] {desc}")
+                    elif isinstance(ac, str):
+                        # Legacy string format — not yet upgraded to structured
+                        unvalidated.append(f"[{i}] {ac}")
+                if unvalidated:
+                    return _result_text(
+                        _error_payload(
+                            "ACCEPTANCE_CRITERIA_NOT_VALIDATED",
+                            "Cannot complete feature: not all acceptance criteria have been "
+                            "validated in production. Use tracker_set_acceptance_evidence to "
+                            "provide evidence for each criterion. Unvalidated criteria:\n"
+                            + "\n".join(unvalidated),
+                        )
+                    )
+            else:
+                if not item_data.get("user_story"):
+                    warnings.append("Feature missing governed field: user_story")
+                if not item_data.get("acceptance_criteria"):
+                    warnings.append("Feature missing governed field: acceptance_criteria")
+            if closing and not item_data.get("category"):
+                warnings.append("Feature missing classification: category")
+        elif record_type == "task":
+            if not item_data.get("acceptance_criteria"):
+                warnings.append("Task missing governed field: acceptance_criteria")
+            if new_lower == "in-progress" and not item_data.get("active_agent_session"):
+                warnings.append(
+                    "Task moving to in-progress without active_agent_session=true. "
+                    "Consider checking out the task first."
+                )
+        elif record_type == "issue":
+            if closing and not item_data.get("evidence"):
+                return _result_text(
+                    _error_payload(
+                        "GOVERNED_FIELD_MISSING",
+                        "Cannot close issue: evidence is required (min 1). "
+                        "Add evidence before closing this issue.",
+                    )
+                )
+            elif not item_data.get("evidence"):
+                warnings.append("Issue missing governed field: evidence")
+            if new_lower == "in-progress" and not item_data.get("hypothesis"):
+                warnings.append(
+                    "Issue moving to in-progress without hypothesis populated."
+                )
+
     now = _now_z()
+    note_suffix = _write_source_note_suffix(args)
+
+    # --- Agent session checkout/release protocol (ENC-FTR-013 ontology) ---
+    if field == "active_agent_session":
+        checking_out = value.strip().lower() in ("true", "1", "yes")
+        agent_id = str(args.get("provider") or "").strip()
+
+        if checking_out:
+            # CHECKOUT: require agent identity
+            if not agent_id:
+                return _result_text(
+                    _error_payload(
+                        "AGENT_ID_REQUIRED",
+                        "Cannot check out task: 'provider' field is required as agent identity "
+                        "(active_agent_session_id). Provide your agent identity via the 'provider' parameter.",
+                    )
+                )
+            # Pessimistic lock: only succeed if not already checked out
+            checkout_note = f"Agent session checkout by {agent_id} via MCP server{note_suffix}"
+            history_entry = {
+                "M": {
+                    "timestamp": _ser_s(now),
+                    "status": _ser_s("worklog"),
+                    "description": _ser_s(checkout_note),
+                }
+            }
+            try:
+                ddb.update_item(
+                    TableName=TRACKER_TABLE,
+                    Key=key,
+                    UpdateExpression=(
+                        "SET active_agent_session = :t, "
+                        "active_agent_session_id = :aid, "
+                        "updated_at = :now, last_update_note = :note, "
+                        "write_source = :wsrc, "
+                        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+                        "history = list_append(if_not_exists(history, :empty), :hentry)"
+                    ),
+                    ConditionExpression=(
+                        "active_agent_session <> :t OR attribute_not_exists(active_agent_session)"
+                    ),
+                    ExpressionAttributeValues={
+                        ":t": {"BOOL": True},
+                        ":aid": _ser_s(agent_id),
+                        ":now": _ser_s(now),
+                        ":note": _ser_s(checkout_note),
+                        ":wsrc": _build_write_source(args),
+                        ":zero": {"N": "0"},
+                        ":one": {"N": "1"},
+                        ":hentry": {"L": [history_entry]},
+                        ":empty": {"L": []},
+                    },
+                )
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                    # Another agent already holds the session
+                    item_data = _deser_item(existing["Item"])
+                    current_agent = item_data.get("active_agent_session_id", "unknown")
+                    return _result_text(
+                        _error_payload(
+                            "SESSION_LOCKED",
+                            f"Task is already checked out by agent '{current_agent}'. "
+                            f"Wait for release or contact the owning agent.",
+                            retryable=True,
+                        )
+                    )
+                raise
+            return _result_text({
+                "success": True,
+                "record_id": record_id,
+                "checkout": True,
+                "active_agent_session_id": agent_id,
+                "updated_at": now,
+            })
+        else:
+            # RELEASE: clear session
+            release_note = f"Agent session released via MCP server{note_suffix}"
+            history_entry = {
+                "M": {
+                    "timestamp": _ser_s(now),
+                    "status": _ser_s("worklog"),
+                    "description": _ser_s(release_note),
+                }
+            }
+            ddb.update_item(
+                TableName=TRACKER_TABLE,
+                Key=key,
+                UpdateExpression=(
+                    "SET active_agent_session = :f, "
+                    "active_agent_session_id = :empty_s, "
+                    "updated_at = :now, last_update_note = :note, "
+                    "write_source = :wsrc, "
+                    "sync_version = if_not_exists(sync_version, :zero) + :one, "
+                    "history = list_append(if_not_exists(history, :empty_l), :hentry)"
+                ),
+                ExpressionAttributeValues={
+                    ":f": {"BOOL": False},
+                    ":empty_s": _ser_s(""),
+                    ":now": _ser_s(now),
+                    ":note": _ser_s(release_note),
+                    ":wsrc": _build_write_source(args),
+                    ":zero": {"N": "0"},
+                    ":one": {"N": "1"},
+                    ":hentry": {"L": [history_entry]},
+                    ":empty_l": {"L": []},
+                },
+            )
+            return _result_text({
+                "success": True,
+                "record_id": record_id,
+                "checkout": False,
+                "updated_at": now,
+            })
+
+    note_text = f"Field '{field}' set to '{_field_value_for_note(value)}' via MCP server{note_suffix}"
     update_expr = (
         "SET #fld = :val, updated_at = :now, last_update_note = :note, "
+        "write_source = :wsrc, "
         "sync_version = if_not_exists(sync_version, :zero) + :one"
     )
     expr_vals = {
-        ":val": _ser_s(value),
+        ":val": _ser_value(value),
         ":now": _ser_s(now),
-        ":note": _ser_s(f"Field '{field}' set to '{value}' via MCP server"),
+        ":note": _ser_s(note_text),
+        ":wsrc": _build_write_source(args),
         ":zero": {"N": "0"},
         ":one": {"N": "1"},
     }
@@ -1781,7 +2806,7 @@ async def _tracker_set(args: dict) -> list[TextContent]:
         "M": {
             "timestamp": _ser_s(now),
             "status": _ser_s("worklog"),
-            "description": _ser_s(f"Field '{field}' set to '{value}' via MCP server"),
+            "description": _ser_s(note_text),
         }
     }
     update_expr += ", history = list_append(if_not_exists(history, :empty), :hentry)"
@@ -1795,7 +2820,10 @@ async def _tracker_set(args: dict) -> list[TextContent]:
         ExpressionAttributeNames=expr_names,
         ExpressionAttributeValues=expr_vals,
     )
-    return _result_text({"success": True, "record_id": record_id, "field": field, "value": value, "updated_at": now})
+    result = {"success": True, "record_id": record_id, "field": field, "value": value, "updated_at": now}
+    if warnings:
+        result["warnings"] = warnings
+    return _result_text(result)
 
 
 async def _tracker_log(args: dict) -> list[TextContent]:
@@ -1816,6 +2844,11 @@ async def _tracker_log(args: dict) -> list[TextContent]:
     if not existing.get("Item"):
         return _result_text({"error": f"Record '{record_id}' not found"})
 
+    # --- Session ownership enforcement (ENC-ISS-009 Phase 3A) ---
+    ownership_error = _validate_session_ownership(existing["Item"], args, record_id)
+    if ownership_error:
+        return _result_text(ownership_error)
+
     now = _now_z()
     history_entry = {
         "M": {
@@ -1830,12 +2863,14 @@ async def _tracker_log(args: dict) -> list[TextContent]:
         UpdateExpression=(
             "SET updated_at = :now, "
             "last_update_note = :note, "
+            "write_source = :wsrc, "
             "sync_version = if_not_exists(sync_version, :zero) + :one, "
             "history = list_append(if_not_exists(history, :empty), :hentry)"
         ),
         ExpressionAttributeValues={
             ":now": _ser_s(now),
             ":note": _ser_s(description),
+            ":wsrc": _build_write_source(args),
             ":zero": {"N": "0"},
             ":one": {"N": "1"},
             ":hentry": {"L": [history_entry]},
@@ -1861,6 +2896,31 @@ async def _tracker_create(args: dict) -> list[TextContent]:
     hypothesis = str(args.get("hypothesis") or "")
     success_metrics = args.get("success_metrics") or []
     related_str = args.get("related", "")
+    dispatch_id = str(args.get("dispatch_id") or "").strip()
+    try:
+        coordination = _normalize_optional_bool(args.get("coordination"), "coordination")
+        coordination_request_id = _normalize_coordination_request_id(
+            args.get("coordination_request_id")
+        )
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if dispatch_id:
+        coordination = True
+    coordination_flag = bool(coordination) if coordination is not None else False
+    if coordination_flag and not coordination_request_id:
+        if dispatch_id and _COORDINATION_REQUEST_ID_RE.fullmatch(dispatch_id):
+            coordination_request_id = dispatch_id.upper()
+        else:
+            return _result_text(
+                {
+                    "error": (
+                        "coordination=true requires coordination_request_id "
+                        "matching CRQ-* or DSP-*."
+                    )
+                }
+            )
+
     acceptance_criteria = _normalize_string_list(args.get("acceptance_criteria"))
     if acceptance_criteria is None:
         return _result_text(
@@ -1879,6 +2939,89 @@ async def _tracker_create(args: dict) -> list[TextContent]:
                 )
             }
         )
+
+    # --- Ontology governed field validation (ENC-FTR-012) ---
+    user_story = str(args.get("user_story") or "").strip()
+    category = str(args.get("category") or "").strip()
+    intent = str(args.get("intent") or "").strip()
+    evidence = args.get("evidence") or []
+
+    # Feature: user_story required, acceptance_criteria required (min 1)
+    if record_type == "feature":
+        if not user_story:
+            return _result_text(
+                {
+                    "error": (
+                        "Feature creation requires user_story. "
+                        "Format: 'As a [USER/SYSTEM] I need/want to be able to [X] so that [Y]'."
+                    )
+                }
+            )
+        if not acceptance_criteria:
+            return _result_text(
+                {
+                    "error": (
+                        "Feature creation requires acceptance_criteria with at least one "
+                        "non-empty criterion."
+                    )
+                }
+            )
+
+    # Issue: evidence required (min 1, each with steps_to_duplicate)
+    if record_type == "issue":
+        if not isinstance(evidence, list) or len(evidence) == 0:
+            return _result_text(
+                {
+                    "error": (
+                        "Issue creation requires evidence with at least one entry. "
+                        "Each entry must include 'description' and 'steps_to_duplicate'."
+                    )
+                }
+            )
+        for i, ev in enumerate(evidence):
+            if not isinstance(ev, dict):
+                return _result_text({"error": f"evidence[{i}] must be an object."})
+            if not ev.get("description", "").strip():
+                return _result_text({"error": f"evidence[{i}].description is required."})
+            steps = ev.get("steps_to_duplicate")
+            if not isinstance(steps, list) or len(steps) == 0:
+                return _result_text(
+                    {"error": f"evidence[{i}].steps_to_duplicate requires at least one step."}
+                )
+
+    # primary_task validation (ENC-TSK-460 §5.5) — only features/issues
+    primary_task = str(args.get("primary_task") or "").strip()
+    if primary_task:
+        if record_type not in ("feature", "issue"):
+            return _result_text(
+                {
+                    "error": (
+                        f"primary_task is only valid on feature and issue records, "
+                        f"not {record_type}."
+                    )
+                }
+            )
+        if "-TSK-" not in primary_task:
+            return _result_text(
+                {
+                    "error": (
+                        f"primary_task must reference a task ID (contains -TSK- segment). "
+                        f"Got: '{primary_task}'."
+                    )
+                }
+            )
+
+    # Category validation (soft — warn in response but allow creation)
+    _VALID_CATEGORIES = {
+        "feature": {"epic", "capability", "enhancement", "infrastructure"},
+        "task": {"implementation", "investigation", "documentation", "maintenance", "validation"},
+        "issue": {"bug", "debt", "risk", "security", "performance"},
+    }
+    category_warning = ""
+    if category and category not in _VALID_CATEGORIES.get(record_type, set()):
+        valid = sorted(_VALID_CATEGORIES.get(record_type, set()))
+        category_warning = f"Warning: category '{category}' not in valid set for {record_type}: {valid}"
+
     ddb = _get_ddb()
 
     # Resolve prefix from projects table
@@ -1889,6 +3032,7 @@ async def _tracker_create(args: dict) -> list[TextContent]:
     prefix = _deser_val(proj.get("prefix", {"S": "UNK"}))
 
     now = _now_z()
+    note_suffix = _write_source_note_suffix(args)
     item: Dict[str, Any] = {
         "project_id": _ser_s(project_id),
         "record_type": _ser_s(record_type),
@@ -1897,18 +3041,24 @@ async def _tracker_create(args: dict) -> list[TextContent]:
         "sync_version": {"N": "1"},
         "created_at": _ser_s(now),
         "updated_at": _ser_s(now),
+        "coordination": {"BOOL": coordination_flag},
+        "write_source": _build_write_source(args),
         "history": {
             "L": [
                 {
                     "M": {
                         "timestamp": _ser_s(now),
                         "status": _ser_s("created"),
-                        "description": _ser_s(f"Created via MCP server: {title}"),
+                        "description": _ser_s(
+                            f"Created via MCP server{note_suffix}: {title}"
+                        ),
                     }
                 }
             ]
         },
     }
+    if coordination_request_id:
+        item["coordination_request_id"] = _ser_s(coordination_request_id)
 
     if description:
         item["description"] = _ser_s(description)
@@ -1923,8 +3073,61 @@ async def _tracker_create(args: dict) -> list[TextContent]:
             item["hypothesis"] = _ser_s(hypothesis)
     if record_type == "feature" and isinstance(success_metrics, list) and success_metrics:
         item["success_metrics"] = {"L": [_ser_s(str(x)) for x in success_metrics if str(x).strip()]}
-    if record_type == "task" and acceptance_criteria:
-        item["acceptance_criteria"] = {"L": [_ser_s(x) for x in acceptance_criteria]}
+    if acceptance_criteria:
+        if record_type == "feature":
+            # Features use structured acceptance criteria with evidence tracking
+            ac_items = []
+            for ac_text in acceptance_criteria:
+                ac_items.append({
+                    "M": {
+                        "description": _ser_s(ac_text),
+                        "evidence": _ser_s(""),
+                        "evidence_acceptance": {"BOOL": False},
+                    }
+                })
+            item["acceptance_criteria"] = {"L": ac_items}
+        else:
+            # Tasks use plain string acceptance criteria
+            item["acceptance_criteria"] = {"L": [_ser_s(x) for x in acceptance_criteria]}
+
+    # --- Ontology fields (ENC-FTR-012) ---
+
+    # Feature: user_story (governed, required — validated above)
+    if record_type == "feature" and user_story:
+        item["user_story"] = _ser_s(user_story)
+
+    # Issue: evidence (governed, required — validated above)
+    if record_type == "issue" and evidence:
+        ev_items = []
+        for ev in evidence:
+            ev_map: Dict[str, Any] = {
+                "description": _ser_s(str(ev.get("description", ""))),
+                "steps_to_duplicate": {
+                    "L": [_ser_s(str(s)) for s in ev.get("steps_to_duplicate", [])]
+                },
+            }
+            if ev.get("observed_by"):
+                ev_map["observed_by"] = _ser_s(str(ev["observed_by"]))
+            if ev.get("timestamp"):
+                ev_map["timestamp"] = _ser_s(str(ev["timestamp"]))
+            ev_items.append({"M": ev_map})
+        item["evidence"] = {"L": ev_items}
+
+    # Task: agent session defaults (governed, required on create)
+    if record_type == "task":
+        item["active_agent_session"] = {"BOOL": False}
+        item["active_agent_session_id"] = _ser_s("")
+        item["active_agent_session_parent"] = {"BOOL": False}
+
+    # Common optional ontology fields
+    if category:
+        item["category"] = _ser_s(category)
+    if intent:
+        item["intent"] = _ser_s(intent)
+
+    # primary_task (ENC-TSK-460 §5.5) — features/issues only, validated above
+    if primary_task and record_type in ("feature", "issue"):
+        item["primary_task"] = _ser_s(primary_task)
 
     if related_str:
         related_ids = [r.strip() for r in related_str.split(",") if r.strip()]
@@ -1944,20 +3147,220 @@ async def _tracker_create(args: dict) -> list[TextContent]:
                 Item=item,
                 ConditionExpression="attribute_not_exists(record_id)",
             )
-            return _result_text({"success": True, "record_id": new_id, "created_at": now})
+            break
         except ClientError as exc:
             if _is_conditional_check_failed(exc) and attempt < max_attempts:
                 continue
             raise
+    else:
+        return _result_text(
+            {
+                "error": (
+                    f"Failed to allocate a unique record ID for {record_type} in project "
+                    f"'{project_id}' after {max_attempts} attempts."
+                )
+            }
+        )
 
-    return _result_text(
-        {
-            "error": (
-                f"Failed to allocate a unique record ID for {record_type} in project "
-                f"'{project_id}' after {max_attempts} attempts."
+    # --- Bidirectional relationship enforcement (ENC-FTR-013 ontology) ---
+    # Best-effort: add inverse relationship on target records
+    bidi_warnings: List[str] = []
+    if related_str:
+        related_ids = [r.strip() for r in related_str.split(",") if r.strip()]
+        # Determine the relationship field name for the new record's type
+        inverse_field = f"related_{record_type}_ids"
+        for target_id in related_ids:
+            try:
+                target_key = _tracker_key(target_id)
+                # Append new_id to the target's inverse relationship list
+                ddb.update_item(
+                    TableName=TRACKER_TABLE,
+                    Key=target_key,
+                    UpdateExpression=(
+                        "SET #rel = list_append(if_not_exists(#rel, :empty), :new_id)"
+                    ),
+                    ExpressionAttributeNames={"#rel": inverse_field},
+                    ExpressionAttributeValues={
+                        ":new_id": {"L": [_ser_s(new_id)]},
+                        ":empty": {"L": []},
+                    },
+                    ConditionExpression="attribute_exists(record_id)",
+                )
+            except (ClientError, ValueError) as exc:
+                bidi_warnings.append(
+                    f"Could not add inverse relationship on {target_id}: {exc}"
+                )
+
+    result = {"success": True, "record_id": new_id, "created_at": now}
+    if category_warning:
+        result["warning"] = category_warning
+    if bidi_warnings:
+        result["bidi_warnings"] = bidi_warnings
+    return _result_text(result)
+
+
+# --- Acceptance Criteria Evidence Handshake (§7.1.1) ---
+
+
+async def _tracker_set_acceptance_evidence(args: dict) -> list[TextContent]:
+    """Set evidence on a specific acceptance criterion of a feature record."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = args["record_id"]
+    criterion_index = args["criterion_index"]
+    evidence = args["evidence"]
+    evidence_acceptance = args["evidence_acceptance"]
+    ddb = _get_ddb()
+
+    try:
+        key = _tracker_key(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    # Fetch the record
+    existing = ddb.get_item(TableName=TRACKER_TABLE, Key=key)
+    if not existing.get("Item"):
+        return _result_text({"error": f"Record '{record_id}' not found"})
+
+    item_data = _deser_item(existing["Item"])
+
+    # Must be a feature
+    if item_data.get("record_type") != "feature":
+        return _result_text(
+            _error_payload(
+                "WRONG_RECORD_TYPE",
+                f"tracker_set_acceptance_evidence only applies to features. "
+                f"Record '{record_id}' is a {item_data.get('record_type', 'unknown')}.",
             )
-        }
+        )
+
+    # Validate acceptance_criteria exists and has the index
+    ac_list = item_data.get("acceptance_criteria", [])
+    if not ac_list:
+        return _result_text(
+            _error_payload(
+                "NO_ACCEPTANCE_CRITERIA",
+                f"Feature '{record_id}' has no acceptance_criteria.",
+            )
+        )
+    if criterion_index < 0 or criterion_index >= len(ac_list):
+        return _result_text(
+            _error_payload(
+                "INDEX_OUT_OF_RANGE",
+                f"criterion_index {criterion_index} is out of range. "
+                f"Feature has {len(ac_list)} criteria (indices 0-{len(ac_list) - 1}).",
+            )
+        )
+
+    # Validate evidence is non-empty when accepting
+    if evidence_acceptance and not evidence.strip():
+        return _result_text(
+            _error_payload(
+                "EVIDENCE_REQUIRED",
+                "Cannot set evidence_acceptance=true without providing evidence text. "
+                "Describe how this criterion was validated in production.",
+            )
+        )
+
+    # Build the DynamoDB update for the specific criterion item.
+    # acceptance_criteria is stored as L[M{description, evidence, evidence_acceptance}]
+    # We need to handle both legacy (plain strings) and structured formats.
+    raw_ac = existing["Item"].get("acceptance_criteria", {}).get("L", [])
+    ac_item = raw_ac[criterion_index]
+
+    # Determine if this is a legacy string or structured map
+    if "S" in ac_item:
+        # Legacy string format — we need to upgrade it to structured
+        description = ac_item["S"]
+    elif "M" in ac_item:
+        description = ac_item["M"].get("description", {}).get("S", "")
+    else:
+        description = str(ac_list[criterion_index])
+
+    now = _now_z()
+    note_suffix = _write_source_note_suffix(args)
+
+    # Update the specific index in the acceptance_criteria list
+    update_expr = (
+        f"SET acceptance_criteria[{criterion_index}] = :ac_item, "
+        "updated_at = :now, last_update_note = :note, "
+        "write_source = :wsrc, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+        "history = list_append(if_not_exists(history, :empty), :hentry)"
     )
+    ac_updated = {
+        "M": {
+            "description": _ser_s(description),
+            "evidence": _ser_s(evidence),
+            "evidence_acceptance": {"BOOL": evidence_acceptance},
+        }
+    }
+    status_word = "accepted" if evidence_acceptance else "updated"
+    note_text = (
+        f"Acceptance criterion [{criterion_index}] evidence {status_word} "
+        f"via MCP server{note_suffix}: {description[:80]}"
+    )
+    history_entry = {
+        "M": {
+            "timestamp": _ser_s(now),
+            "status": _ser_s("worklog"),
+            "description": _ser_s(note_text),
+        }
+    }
+    expr_vals = {
+        ":ac_item": ac_updated,
+        ":now": _ser_s(now),
+        ":note": _ser_s(note_text),
+        ":wsrc": _build_write_source(args),
+        ":zero": {"N": "0"},
+        ":one": {"N": "1"},
+        ":hentry": {"L": [history_entry]},
+        ":empty": {"L": []},
+    }
+
+    ddb.update_item(
+        TableName=TRACKER_TABLE,
+        Key=key,
+        UpdateExpression=update_expr,
+        ExpressionAttributeValues=expr_vals,
+    )
+
+    # Build summary of all criteria status
+    criteria_summary = []
+    for i, ac in enumerate(ac_list):
+        if isinstance(ac, dict):
+            desc = ac.get("description", str(ac))
+            ev_acc = ac.get("evidence_acceptance", False)
+        elif isinstance(ac, str):
+            desc = ac
+            ev_acc = False
+        else:
+            desc = str(ac)
+            ev_acc = False
+        # Override the one we just updated
+        if i == criterion_index:
+            desc = description
+            ev_acc = evidence_acceptance
+        criteria_summary.append({
+            "index": i,
+            "description": desc[:100],
+            "evidence_acceptance": ev_acc,
+        })
+
+    all_accepted = all(c["evidence_acceptance"] for c in criteria_summary)
+
+    return _result_text({
+        "success": True,
+        "record_id": record_id,
+        "criterion_index": criterion_index,
+        "evidence_acceptance": evidence_acceptance,
+        "updated_at": now,
+        "criteria_summary": criteria_summary,
+        "all_criteria_accepted": all_accepted,
+        "completion_eligible": all_accepted,
+    })
 
 
 # --- Documents ---
@@ -2254,7 +3657,11 @@ async def _deploy_history(args: dict) -> list[TextContent]:
 
 
 async def _deploy_submit(args: dict) -> list[TextContent]:
-    """Submit a deployment request via deploy_intake API."""
+    """Submit a deployment request via deploy_intake API, governance-gated."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
     project_id = args["project_id"]
     change_type = args["change_type"]
     deployment_type = args["deployment_type"]
@@ -2451,13 +3858,13 @@ async def _deploy_history_list(args: dict) -> list[TextContent]:
 async def _coordination_capabilities(args: dict) -> list[TextContent]:
     """Fetch capabilities from the coordination API (public endpoint)."""
     try:
+        import urllib.request
+
         url = f"{COORDINATION_API_BASE}/capabilities"
-        req = urllib.request.Request(
-            url=url,
-            method="GET",
-            headers=_json_headers(),
-        )
-        with _urlopen(req, timeout=10) as resp:
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", HTTP_USER_AGENT)
+        with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         return _result_text(body)
     except Exception as exc:
@@ -2480,6 +3887,104 @@ async def _coordination_request_get(args: dict) -> list[TextContent]:
 
 
 # --- Governance ---
+
+
+async def _governance_update(args: dict) -> list[TextContent]:
+    """Update a governance resource with automatic version archival (ENC-TSK-474)."""
+    err = _require_governance_hash_envelope(args)
+    if err:
+        return _result_text(err)
+
+    file_name = str(args.get("file_name") or "").strip()
+    content = str(args.get("content") or "")
+    change_summary = str(args.get("change_summary") or "").strip()
+
+    if not file_name:
+        return _result_text(_error_payload("INVALID_INPUT", "file_name is required", retryable=False))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required", retryable=False))
+    if not change_summary:
+        return _result_text(_error_payload("INVALID_INPUT", "change_summary is required", retryable=False))
+
+    uri = _governance_uri_from_file_name(file_name)
+    if not uri:
+        return _result_text(_error_payload(
+            "INVALID_INPUT",
+            f"file_name '{file_name}' does not map to a valid governance:// URI. "
+            "Must be 'agents.md' or start with 'agents/'.",
+            retryable=False,
+        ))
+
+    live_key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{file_name}"
+    s3 = _get_s3()
+
+    # Archive current version (if it exists)
+    archive_key = None
+    try:
+        existing = s3.get_object(Bucket=S3_BUCKET, Key=live_key)
+        existing_content = existing["Body"].read()
+        timestamp = _now_z().replace(":", "-")
+        archive_key = f"{S3_GOVERNANCE_HISTORY_PREFIX.rstrip('/')}/{file_name}/{timestamp}.md"
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=archive_key,
+            Body=existing_content,
+            ContentType="text/markdown; charset=utf-8",
+            Metadata={
+                "change_summary": change_summary[:256],
+                "archived_at": _now_z(),
+                "previous_hash": hashlib.sha256(existing_content).hexdigest(),
+            },
+        )
+        logger.info("[GOVERNANCE] Archived %s → s3://%s/%s", uri, S3_BUCKET, archive_key)
+    except s3.exceptions.NoSuchKey:
+        logger.info("[GOVERNANCE] No existing version to archive for %s", uri)
+    except Exception as exc:
+        logger.warning("[GOVERNANCE] Archive failed for %s: %s — proceeding with update", uri, exc)
+
+    # Write new content to live path
+    content_bytes = content.encode("utf-8")
+    new_hash = hashlib.sha256(content_bytes).hexdigest()
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=live_key,
+            Body=content_bytes,
+            ContentType="text/markdown; charset=utf-8",
+            Metadata={
+                "change_summary": change_summary[:256],
+                "updated_at": _now_z(),
+                "content_sha256": new_hash,
+            },
+        )
+    except Exception as exc:
+        return _result_text(_error_payload(
+            "UPSTREAM_ERROR",
+            f"Failed to write governance file to S3: {exc}",
+            retryable=True,
+        ))
+
+    # Invalidate catalog cache so next governance_hash reflects the update
+    global _governance_catalog_cache, _governance_catalog_cached_at
+    _governance_catalog_cache = {}
+    _governance_catalog_cached_at = 0
+
+    new_governance_hash = _compute_governance_hash()
+    logger.info("[GOVERNANCE] Updated %s — new governance_hash: %s", uri, new_governance_hash)
+
+    result = {
+        "status": "updated",
+        "uri": uri,
+        "s3_key": live_key,
+        "content_hash": new_hash,
+        "content_size_bytes": len(content_bytes),
+        "governance_hash": new_governance_hash,
+        "updated_at": _now_z(),
+    }
+    if archive_key:
+        result["archived_to"] = f"s3://{S3_BUCKET}/{archive_key}"
+
+    return _result_text(result)
 
 
 async def _governance_hash(args: dict) -> list[TextContent]:
@@ -2630,9 +4135,11 @@ _TOOL_HANDLERS = {
     "projects_get": _projects_get,
     "tracker_get": _tracker_get,
     "tracker_list": _tracker_list,
+    "tracker_pending_updates": _tracker_pending_updates,
     "tracker_set": _tracker_set,
     "tracker_log": _tracker_log,
     "tracker_create": _tracker_create,
+    "tracker_set_acceptance_evidence": _tracker_set_acceptance_evidence,
     "documents_search": _documents_search,
     "documents_get": _documents_get,
     "documents_list": _documents_list,
@@ -2650,6 +4157,7 @@ _TOOL_HANDLERS = {
     "deploy_pending_requests": _deploy_pending_requests,
     "coordination_capabilities": _coordination_capabilities,
     "coordination_request_get": _coordination_request_get,
+    "governance_update": _governance_update,
     "governance_hash": _governance_hash,
     "connection_health": _connection_health,
     "dispatch_plan_generate": _dispatch_plan_generate,
