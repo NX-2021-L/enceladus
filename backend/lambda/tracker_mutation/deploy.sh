@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# deploy.sh — Deploy tracker_mutation Lambda (devops-tracker-api)
+# deploy.sh — Deploy tracker_mutation Lambda (devops-tracker-mutation-api)
 #
 # Updates the Lambda code only. Infrastructure (IAM role, API Gateway
 # route PATCH /api/v1/tracker/{projectId}/{recordType}/{recordId},
@@ -14,7 +14,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
-FUNCTION_NAME="devops-tracker-api"
+FUNCTION_NAME="devops-tracker-mutation-api"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
