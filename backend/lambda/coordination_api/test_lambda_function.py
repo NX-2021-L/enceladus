@@ -191,8 +191,106 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         caps = body["capabilities"]
         self.assertIn("mcp_bootstrap", caps["host_v2"])
         self.assertIn("fleet_template", caps["host_v2"])
+        self.assertIn("max_active_dispatches", caps["host_v2"]["fleet_template"])
+        self.assertIn("auto_terminate_on_terminal", caps["host_v2"]["fleet_template"])
         self.assertIn("profile_path", caps["enceladus_mcp_profile"])
         self.assertIn("marker_path", caps["enceladus_mcp_profile"])
+        self.assertEqual(
+            caps["mcp_remote_gateway"]["transport"],
+            "streamable_http",
+        )
+        self.assertTrue(caps["mcp_remote_gateway"]["compatibility"]["chatgpt_custom_gpt"])
+        self.assertTrue(caps["mcp_remote_gateway"]["compatibility"]["managed_codex_sessions"])
+        self.assertEqual(
+            caps["providers"]["openai_codex"]["mcp_server_configuration"]["transport"],
+            "streamable_http",
+        )
+        self.assertEqual(
+            caps["providers"]["openai_codex"]["mcp_server_configuration"]["auth_header"],
+            "X-Coordination-Internal-Key",
+        )
+
+    @patch.object(coordination_lambda, "_load_mcp_server_module")
+    def test_mcp_http_initialize_and_tools_list(self, mock_load_module):
+        class _FakeModule:
+            async def list_tools(self):
+                return [{"name": "connection_health", "description": "health"}]
+
+            async def call_tool(self, name, arguments):
+                return [{"type": "text", "text": json.dumps({"success": True, "name": name})}]
+
+            async def list_resources(self):
+                return [{"uri": "governance://agents.md", "name": "agents.md"}]
+
+            async def list_resource_templates(self):
+                return [{"uriTemplate": "projects://reference/{project_id}", "name": "Project reference document"}]
+
+            async def read_resource(self, uri):
+                return "# mock resource"
+
+        mock_load_module.return_value = _FakeModule()
+
+        init_event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/mcp",
+            "body": json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req-init",
+                    "method": "initialize",
+                    "params": {},
+                }
+            ),
+        }
+        init_resp = coordination_lambda._handle_mcp_http(init_event, {"auth_mode": "internal-key"})
+        self.assertEqual(init_resp["statusCode"], 200)
+        init_body = json.loads(init_resp["body"])
+        self.assertEqual(init_body["jsonrpc"], "2.0")
+        self.assertEqual(init_body["id"], "req-init")
+        self.assertEqual(init_body["result"]["protocolVersion"], "2024-11-05")
+        self.assertIn("tools", init_body["result"]["capabilities"])
+
+        list_tools_event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/mcp",
+            "body": json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req-tools",
+                    "method": "tools/list",
+                    "params": {},
+                }
+            ),
+        }
+        list_tools_resp = coordination_lambda._handle_mcp_http(list_tools_event, {"auth_mode": "internal-key"})
+        self.assertEqual(list_tools_resp["statusCode"], 200)
+        list_tools_body = json.loads(list_tools_resp["body"])
+        self.assertEqual(list_tools_body["id"], "req-tools")
+        self.assertGreaterEqual(len(list_tools_body["result"]["tools"]), 1)
+        self.assertEqual(list_tools_body["result"]["tools"][0]["name"], "connection_health")
+
+    @patch.object(coordination_lambda, "_authenticate", return_value=({"auth_mode": "internal-key"}, None))
+    @patch.object(coordination_lambda, "_handle_mcp_http")
+    def test_lambda_handler_routes_mcp_endpoint(self, mock_handle_mcp_http, _mock_auth):
+        mock_handle_mcp_http.return_value = coordination_lambda._response(
+            200,
+            {"jsonrpc": "2.0", "id": "req", "result": {"ok": True}},
+        )
+        event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/mcp",
+            "body": json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req",
+                    "method": "initialize",
+                    "params": {},
+                }
+            ),
+        }
+        resp = coordination_lambda.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        mock_handle_mcp_http.assert_called_once()
 
     @patch.object(coordination_lambda, "DISPATCH_TIMEOUT_CEILING_SECONDS", 1800)
     @patch.object(coordination_lambda, "HOST_V2_TIMEOUT_SECONDS", 9999)
@@ -220,6 +318,88 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
             kwargs["CloudWatchOutputConfig"]["CloudWatchLogGroupName"],
             coordination_lambda.WORKER_RUNTIME_LOG_GROUP,
         )
+
+    @patch.object(
+        coordination_lambda,
+        "_resolve_host_dispatch_target",
+        return_value={
+            "instance_id": "i-fleet123",
+            "host_kind": "fleet",
+            "host_allocation": "fleet",
+            "host_source": "launch_template",
+            "launch_template_id": "lt-abc123",
+            "launch_template_version": "$Latest",
+        },
+    )
+    @patch.object(coordination_lambda, "_build_ssm_commands", return_value=["echo ok"])
+    @patch.object(coordination_lambda, "_get_ssm")
+    def test_send_dispatch_uses_resolved_target_instance(
+        self,
+        mock_get_ssm,
+        _mock_build_commands,
+        _mock_resolve_target,
+    ):
+        mock_ssm = mock_get_ssm.return_value
+        mock_ssm.send_command.return_value = {"Command": {"CommandId": "cmd-fleet"}}
+        request = {"request_id": "CRQ-FLEET001", "project_id": "enceladus"}
+        result = coordination_lambda._send_dispatch(
+            request=request,
+            execution_mode="preflight",
+            prompt=None,
+            dispatch_id="DSP-FLEET001",
+            host_allocation="fleet",
+        )
+        _, kwargs = mock_ssm.send_command.call_args
+        self.assertEqual(kwargs["InstanceIds"], ["i-fleet123"])
+        self.assertEqual(result["instance_id"], "i-fleet123")
+        self.assertEqual(result["host_kind"], "fleet")
+        self.assertEqual(result["host_source"], "launch_template")
+
+    @patch.object(coordination_lambda, "_get_ec2")
+    def test_cleanup_dispatch_host_terminates_fleet_instance(self, mock_get_ec2):
+        request = {
+            "dispatch": {
+                "host_kind": "fleet",
+                "instance_id": "i-fleet123",
+            }
+        }
+        updated = coordination_lambda._cleanup_dispatch_host(request, "callback_terminal")
+        mock_get_ec2.return_value.terminate_instances.assert_called_once_with(
+            InstanceIds=["i-fleet123"]
+        )
+        self.assertEqual(updated["dispatch"]["host_cleanup_state"], "terminated")
+
+    @patch.object(coordination_lambda, "_sweep_orphan_fleet_hosts", return_value={"enabled": True, "terminated": 0})
+    @patch.object(coordination_lambda, "_count_active_host_dispatches", return_value=0)
+    @patch.object(
+        coordination_lambda,
+        "_launch_fleet_instance",
+        return_value={"instance_id": "i-fleet123", "launched_at": "2026-02-24T00:00:00Z"},
+    )
+    @patch.object(
+        coordination_lambda,
+        "_wait_for_fleet_instance_readiness",
+        return_value={"ready_at": "2026-02-24T00:01:00Z"},
+    )
+    @patch.object(coordination_lambda, "_fleet_launch_ready", return_value=True)
+    def test_resolve_host_dispatch_target_launches_fleet_instance(
+        self,
+        _mock_fleet_ready,
+        _mock_wait_ready,
+        _mock_launch,
+        _mock_count_active,
+        _mock_sweep,
+    ):
+        request = {"request_id": "CRQ-FLEET002", "project_id": "enceladus"}
+        target = coordination_lambda._resolve_host_dispatch_target(
+            request,
+            execution_mode="preflight",
+            dispatch_id="DSP-FLEET002",
+            host_allocation="auto",
+        )
+        self.assertEqual(target["instance_id"], "i-fleet123")
+        self.assertEqual(target["host_kind"], "fleet")
+        self.assertEqual(target["host_source"], "launch_template")
 
     def test_build_ssm_commands_claude(self):
         request = {
