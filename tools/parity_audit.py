@@ -80,8 +80,19 @@ def _resource_matches(name: str, resource_re: re.Pattern[str], include_names: se
 
 
 def _is_access_denied(err: ClientError) -> bool:
-    code = str(err.response.get("Error", {}).get("Code", "")).strip()
-    return code in {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation"}
+    code = str(err.response.get("Error", {}).get("Code", "")).strip().lower()
+    if not code:
+        return False
+    return any(
+        token in code
+        for token in (
+            "accessdenied",
+            "unauthorized",
+            "notauthorized",
+            "authorizationerror",
+            "forbidden",
+        )
+    )
 
 
 def _append_inventory_warning(

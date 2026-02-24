@@ -164,3 +164,16 @@ def test_inventory_dynamodb_access_denied_adds_warning_and_continues():
         and warning.get("region") == "us-west-2"
         for warning in warnings
     )
+
+
+def test_is_access_denied_accepts_authorization_error_codes():
+    err = ClientError(
+        {
+            "Error": {
+                "Code": "AuthorizationErrorException",
+                "Message": "not authorized",
+            }
+        },
+        "ListTopics",
+    )
+    assert parity_audit._is_access_denied(err) is True
