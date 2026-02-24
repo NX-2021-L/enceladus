@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 import asyncio
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -200,6 +201,7 @@ WORKER_RUNTIME_LOG_GROUP = os.environ.get("WORKER_RUNTIME_LOG_GROUP", "/enceladu
 MCP_SERVER_LOG_GROUP = os.environ.get("MCP_SERVER_LOG_GROUP", "/enceladus/mcp/server")
 MCP_AUDIT_CALLER_IDENTITY = os.environ.get("MCP_AUDIT_CALLER_IDENTITY", "devops-coordination-api")
 COORDINATION_PUBLIC_BASE_URL = os.environ.get("COORDINATION_PUBLIC_BASE_URL", "https://jreese.net")
+COORDINATION_MCP_HTTP_PATH = os.environ.get("COORDINATION_MCP_HTTP_PATH", "/api/v1/coordination/mcp")
 ENABLE_MCP_GOVERNANCE_PROMPT = os.environ.get("ENABLE_MCP_GOVERNANCE_PROMPT", "true").lower() == "true"
 GOVERNANCE_PROMPT_MAX_CHARS = int(os.environ.get("GOVERNANCE_PROMPT_MAX_CHARS", "120000"))
 GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK = (
@@ -942,17 +944,27 @@ def _key_for_record_id(record_id: str) -> Tuple[str, str, str]:
 
 
 def _resolve_mcp_server_path() -> str:
-    candidates = [ENCELADUS_MCP_SERVER_PATH]
+    module_file = pathlib.Path(__file__).resolve()
+    candidates = [
+        ENCELADUS_MCP_SERVER_PATH,
+        str(module_file.with_name("server.py")),
+    ]
     cwd = pathlib.Path.cwd()
     candidates.extend(
         [
             str(cwd / "tools/enceladus-mcp-server/server.py"),
             str(cwd / "projects/enceladus/tools/enceladus-mcp-server/server.py"),
             str(cwd / "projects/devops/tools/enceladus-mcp-server/server.py"),
-            str(pathlib.Path(__file__).resolve().parents[3] / "enceladus-mcp-server/server.py"),
         ]
     )
+    if len(module_file.parents) > 3:
+        candidates.append(str(module_file.parents[3] / "enceladus-mcp-server/server.py"))
+
+    seen: set[str] = set()
     for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
         if candidate and os.path.isfile(candidate):
             return candidate
     raise RuntimeError(
@@ -5369,6 +5381,221 @@ def _emit_callback_event(request: Dict[str, Any], callback_body: Dict[str, Any])
 # ---------------------------------------------------------------------------
 
 
+def _mcp_jsonrpc_response(request_id: Any, result: Dict[str, Any]) -> Dict[str, Any]:
+    return _response(
+        200,
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result,
+        },
+    )
+
+
+def _mcp_jsonrpc_error(
+    request_id: Any,
+    *,
+    code: int,
+    message: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+    if data:
+        body["error"]["data"] = data
+    return _response(200, body)
+
+
+def _mcp_to_plain(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_mcp_to_plain(item) for item in value]
+    if isinstance(value, tuple):
+        return [_mcp_to_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _mcp_to_plain(v) for k, v in value.items()}
+    if dataclasses.is_dataclass(value):
+        return {str(k): _mcp_to_plain(v) for k, v in dataclasses.asdict(value).items()}
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _mcp_to_plain(model_dump(exclude_none=True))
+    to_dict = getattr(value, "dict", None)
+    if callable(to_dict):
+        return _mcp_to_plain(to_dict())
+    return str(value)
+
+
+def _mcp_mime_type_for_uri(uri: str) -> str:
+    uri_text = str(uri or "").strip()
+    if uri_text.endswith(".json"):
+        return "application/json"
+    if uri_text.startswith("governance://") or uri_text.startswith("projects://reference/"):
+        return "text/markdown"
+    return "text/plain"
+
+
+def _run_async(coro: Any) -> Any:
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+
+def _dispatch_mcp_jsonrpc_method(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    method_name = str(method or "").strip()
+    params = params if isinstance(params, dict) else {}
+    module = _load_mcp_server_module()
+
+    if method_name == "initialize":
+        return {
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {
+                "name": "enceladus",
+                "version": "0.4.1",
+            },
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": False, "listChanged": False},
+            },
+        }
+
+    if method_name in {"initialized", "notifications/initialized", "ping"}:
+        return {}
+
+    if method_name in {"tools/list", "list_tools"}:
+        payload = _run_async(module.list_tools())
+        return {"tools": _mcp_to_plain(payload or [])}
+
+    if method_name in {"tools/call", "call_tool"}:
+        tool_name = str(params.get("name") or "").strip()
+        if not tool_name:
+            raise ValueError("tools/call requires params.name")
+
+        args = params.get("arguments")
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            raise ValueError("tools/call requires params.arguments to be an object")
+
+        call_args = dict(args)
+        call_args.setdefault("caller_identity", MCP_AUDIT_CALLER_IDENTITY)
+        result = _run_async(module.call_tool(tool_name, call_args))
+        content = _mcp_to_plain(result or [])
+        is_error = any(
+            isinstance(item, dict) and str(item.get("text") or "").startswith("ERROR:")
+            for item in (content if isinstance(content, list) else [])
+        )
+        return {
+            "content": content if isinstance(content, list) else [content],
+            "isError": is_error,
+        }
+
+    if method_name in {"resources/list", "list_resources"}:
+        payload = _run_async(module.list_resources())
+        return {"resources": _mcp_to_plain(payload or [])}
+
+    if method_name in {"resources/templates/list", "list_resource_templates"}:
+        payload = _run_async(module.list_resource_templates())
+        return {"resourceTemplates": _mcp_to_plain(payload or [])}
+
+    if method_name in {"resources/read", "read_resource"}:
+        uri = str(params.get("uri") or "").strip()
+        if not uri:
+            raise ValueError("resources/read requires params.uri")
+        text = _run_async(module.read_resource(uri))
+        return {
+            "contents": [
+                {
+                    "uri": uri,
+                    "mimeType": _mcp_mime_type_for_uri(uri),
+                    "text": str(text or ""),
+                }
+            ]
+        }
+
+    raise KeyError(method_name)
+
+
+def _handle_mcp_http(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    method, _ = _path_method(event)
+    if method == "GET":
+        return _response(
+            200,
+            {
+                "success": True,
+                "transport": "streamable_http",
+                "protocol": "jsonrpc-2.0",
+                "mcp_path": COORDINATION_MCP_HTTP_PATH,
+                "authenticated": bool(claims),
+                "methods_supported": [
+                    "initialize",
+                    "ping",
+                    "tools/list",
+                    "tools/call",
+                    "resources/list",
+                    "resources/templates/list",
+                    "resources/read",
+                ],
+            },
+        )
+
+    try:
+        request = _json_body(event)
+    except ValueError as exc:
+        return _mcp_jsonrpc_error(
+            None,
+            code=-32700,
+            message=f"Parse error: {exc}",
+        )
+
+    request_id = request.get("id")
+    method_name = request.get("method")
+    params = request.get("params", {})
+    jsonrpc = request.get("jsonrpc")
+
+    if jsonrpc != "2.0" or not isinstance(method_name, str):
+        return _mcp_jsonrpc_error(
+            request_id,
+            code=-32600,
+            message="Invalid Request",
+            data={"hint": "Expected JSON-RPC 2.0 object with string method"},
+        )
+
+    try:
+        result = _dispatch_mcp_jsonrpc_method(method_name, params if isinstance(params, dict) else {})
+        return _mcp_jsonrpc_response(request_id, result)
+    except KeyError:
+        return _mcp_jsonrpc_error(
+            request_id,
+            code=-32601,
+            message=f"Method not found: {method_name}",
+        )
+    except ValueError as exc:
+        return _mcp_jsonrpc_error(
+            request_id,
+            code=-32602,
+            message=f"Invalid params: {exc}",
+        )
+    except Exception as exc:
+        logger.exception("mcp http method failed: %s", method_name)
+        return _mcp_jsonrpc_error(
+            request_id,
+            code=-32603,
+            message=f"Internal error: {exc}",
+        )
+
+
 def _handle_capabilities() -> Dict[str, Any]:
     provider_secrets = _provider_secret_readiness()
     return _response(
@@ -5438,9 +5665,16 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "callback_mechanism": "Direct OpenAI Responses API response (synchronous)",
                         "governance_context_source": "enceladus_mcp_resources",
                         "mcp_server_configuration": {
-                            "url": f"{COORDINATION_PUBLIC_BASE_URL.rstrip('/')}/api/v1/coordination",
-                            "label": "Enceladus Coordination API",
+                            "url": f"{COORDINATION_PUBLIC_BASE_URL.rstrip('/')}{COORDINATION_MCP_HTTP_PATH}",
+                            "label": "Enceladus MCP Remote Gateway",
+                            "transport": "streamable_http",
+                            "auth_mode": "cognito_or_internal_key",
+                            "auth_header": "X-Coordination-Internal-Key",
                             "access_token_secret_ref": provider_secrets["openai_codex"].get("secret_ref"),
+                            "compatibility": {
+                                "chatgpt_custom_gpt": True,
+                                "managed_codex_sessions": True,
+                            },
                         },
                     },
                     "claude_agent_sdk": {
@@ -5527,6 +5761,25 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "transport": "stdio",
                         "tools_provided": 27,
                         "resources_provided": 3,
+                        "remote_gateway": {
+                            "url": f"{COORDINATION_PUBLIC_BASE_URL.rstrip('/')}{COORDINATION_MCP_HTTP_PATH}",
+                            "transport": "streamable_http",
+                            "auth_mode": "cognito_or_internal_key",
+                            "auth_header": "X-Coordination-Internal-Key",
+                            "methods_supported": [
+                                "initialize",
+                                "ping",
+                                "tools/list",
+                                "tools/call",
+                                "resources/list",
+                                "resources/templates/list",
+                                "resources/read",
+                            ],
+                            "compatibility": {
+                                "chatgpt_custom_gpt": True,
+                                "managed_codex_sessions": True,
+                            },
+                        },
                     },
                 },
                 "callback": {
@@ -5563,6 +5816,16 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "related_record_ids": "union_set",
                     },
                     "promotion": "on_read",
+                },
+                "mcp_remote_gateway": {
+                    "url": f"{COORDINATION_PUBLIC_BASE_URL.rstrip('/')}{COORDINATION_MCP_HTTP_PATH}",
+                    "transport": "streamable_http",
+                    "auth_mode": "cognito_or_internal_key",
+                    "auth_header": "X-Coordination-Internal-Key",
+                    "compatibility": {
+                        "chatgpt_custom_gpt": True,
+                        "managed_codex_sessions": True,
+                    },
                 },
                 "deterministic_completion_path": "GET /api/v1/coordination/requests/{requestId}",
             },
@@ -6844,6 +7107,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     claims, auth_err = _authenticate(event)
     if auth_err:
         return auth_err
+
+    # GET/POST /api/v1/coordination/mcp
+    # Auth required (Cognito cookie or X-Coordination-Internal-Key).
+    if method in {"GET", "POST"} and path == COORDINATION_MCP_HTTP_PATH:
+        return _handle_mcp_http(event, claims or {})
 
     # POST /api/v1/coordination/requests
     if method == "POST" and path == "/api/v1/coordination/requests":

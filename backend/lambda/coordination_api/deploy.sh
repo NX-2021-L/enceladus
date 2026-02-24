@@ -253,13 +253,48 @@ package_lambda() {
   local build_dir zip_path
   build_dir="$(mktemp -d /tmp/devops-coordination-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
+  local mcp_server_src="" mcp_dispatch_src=""
+
+  for candidate in \
+    "${ROOT_DIR}/../../../tools/enceladus-mcp-server/server.py" \
+    "${ROOT_DIR}/../../../../tools/enceladus-mcp-server/server.py" \
+    "/Users/jreese/agents-dev/projects/enceladus/repo/tools/enceladus-mcp-server/server.py" \
+    "/Users/jreese/agents-dev/tools/enceladus-mcp-server/server.py"; do
+    if [[ -f "${candidate}" ]]; then
+      mcp_server_src="${candidate}"
+      break
+    fi
+  done
+
+  for candidate in \
+    "${ROOT_DIR}/../../../tools/enceladus-mcp-server/dispatch_plan_generator.py" \
+    "${ROOT_DIR}/../../../../tools/enceladus-mcp-server/dispatch_plan_generator.py" \
+    "/Users/jreese/agents-dev/projects/enceladus/repo/tools/enceladus-mcp-server/dispatch_plan_generator.py" \
+    "/Users/jreese/agents-dev/tools/enceladus-mcp-server/dispatch_plan_generator.py"; do
+    if [[ -f "${candidate}" ]]; then
+      mcp_dispatch_src="${candidate}"
+      break
+    fi
+  done
+
+  if [[ -z "${mcp_server_src}" || -z "${mcp_dispatch_src}" ]]; then
+    echo "[ERROR] Unable to locate canonical Enceladus MCP runtime sources for packaging." >&2
+    exit 1
+  fi
 
   cp "${ROOT_DIR}/lambda_function.py" "${build_dir}/"
   cp "${ROOT_DIR}/mcp_client.py" "${build_dir}/"
+  cp "${mcp_server_src}" "${build_dir}/server.py"
+  cp "${mcp_dispatch_src}" "${build_dir}/dispatch_plan_generator.py"
 
   python3 -m pip install \
     --quiet \
     --upgrade \
+    --platform manylinux2014_x86_64 \
+    --implementation cp \
+    --python-version 3.11 \
+    --abi cp311 \
+    --only-binary=:all: \
     -r "${ROOT_DIR}/requirements.txt" \
     -t "${build_dir}" >/dev/null
 
@@ -296,7 +331,9 @@ ensure_lambda() {
       --zip-file "fileb://${zip_path}" >/dev/null
   fi
 
+  # Ensure all pending Lambda code updates have settled before we push configuration.
   aws lambda wait function-active-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
+  aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
 
   effective_internal_key="$(resolve_internal_api_key)"
   if [[ -z "${effective_internal_key}" ]]; then
@@ -390,13 +427,30 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump({"Variables": env_vars}, f)
 PY
 
-  aws lambda update-function-configuration \
-    --region "${REGION}" \
-    --function-name "${FUNCTION_NAME}" \
-    --role "${role_arn}" \
-    --timeout 120 \
-    --memory-size 512 \
-    --environment "file://${env_file}" >/dev/null
+  local cfg_attempt cfg_max cfg_sleep
+  cfg_attempt=1
+  cfg_max=6
+  cfg_sleep=10
+  while :; do
+    if aws lambda update-function-configuration \
+      --region "${REGION}" \
+      --function-name "${FUNCTION_NAME}" \
+      --role "${role_arn}" \
+      --timeout 120 \
+      --memory-size 512 \
+      --environment "file://${env_file}" >/dev/null; then
+      break
+    fi
+    if [[ "${cfg_attempt}" -ge "${cfg_max}" ]]; then
+      echo "[ERROR] update-function-configuration failed after ${cfg_attempt} attempts" >&2
+      rm -f "${env_file}"
+      return 1
+    fi
+    log "[WARNING] update-function-configuration conflict; retrying in ${cfg_sleep}s (attempt ${cfg_attempt}/${cfg_max})"
+    sleep "${cfg_sleep}"
+    aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}" || true
+    cfg_attempt=$((cfg_attempt + 1))
+  done
   rm -f "${env_file}"
 
   aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
@@ -410,6 +464,7 @@ ensure_api_integration_and_routes() {
   integration_id="$(aws apigatewayv2 get-integrations \
     --region "${REGION}" \
     --api-id "${API_ID}" \
+    --no-paginate \
     --query "Items[?IntegrationUri=='${target_arn}'].IntegrationId | [0]" \
     --output text)"
 
@@ -434,7 +489,10 @@ ensure_api_integration_and_routes() {
     "GET /api/v1/coordination/requests/{requestId}"
     "POST /api/v1/coordination/requests/{requestId}/dispatch"
     "POST /api/v1/coordination/requests/{requestId}/callback"
+    "GET /api/v1/coordination/mcp"
+    "POST /api/v1/coordination/mcp"
     "GET /api/v1/coordination/capabilities"
+    "OPTIONS /api/v1/coordination/mcp"
     "OPTIONS /api/v1/coordination/requests"
     "OPTIONS /api/v1/coordination/requests/{requestId}"
     "OPTIONS /api/v1/coordination/requests/{requestId}/dispatch"
@@ -442,15 +500,15 @@ ensure_api_integration_and_routes() {
     "OPTIONS /api/v1/coordination/capabilities"
   )
 
-  for route_key in "${routes[@]}"; do
-    local existing
-    existing="$(aws apigatewayv2 get-routes \
-      --region "${REGION}" \
-      --api-id "${API_ID}" \
-      --query "Items[?RouteKey=='${route_key}'].RouteId | [0]" \
-      --output text)"
+  local existing_route_keys
+  existing_route_keys="$(aws apigatewayv2 get-routes \
+    --region "${REGION}" \
+    --api-id "${API_ID}" \
+    --query 'Items[].RouteKey' \
+    --output text | tr '\t' '\n')"
 
-    if [[ -z "${existing}" || "${existing}" == "None" ]]; then
+  for route_key in "${routes[@]}"; do
+    if ! printf '%s\n' "${existing_route_keys}" | grep -Fqx "${route_key}"; then
       log "[START] creating route: ${route_key}"
       aws apigatewayv2 create-route \
         --region "${REGION}" \
@@ -458,6 +516,7 @@ ensure_api_integration_and_routes() {
         --route-key "${route_key}" \
         --target "integrations/${integration_id}" >/dev/null
       log "[END] route created: ${route_key}"
+      existing_route_keys="${existing_route_keys}"$'\n'"${route_key}"
     else
       log "[OK] route exists: ${route_key}"
     fi

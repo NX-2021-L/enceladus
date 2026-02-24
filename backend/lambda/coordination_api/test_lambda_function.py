@@ -193,6 +193,107 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertIn("fleet_template", caps["host_v2"])
         self.assertIn("profile_path", caps["enceladus_mcp_profile"])
         self.assertIn("marker_path", caps["enceladus_mcp_profile"])
+        self.assertEqual(
+            caps["mcp_remote_gateway"]["transport"],
+            "streamable_http",
+        )
+        self.assertTrue(caps["mcp_remote_gateway"]["compatibility"]["chatgpt_custom_gpt"])
+        self.assertTrue(caps["mcp_remote_gateway"]["compatibility"]["managed_codex_sessions"])
+        self.assertEqual(
+            caps["providers"]["openai_codex"]["mcp_server_configuration"]["transport"],
+            "streamable_http",
+        )
+        self.assertEqual(
+            caps["providers"]["openai_codex"]["mcp_server_configuration"]["auth_header"],
+            "X-Coordination-Internal-Key",
+        )
+        self.assertTrue(
+            caps["providers"]["openai_codex"]["mcp_server_configuration"]["url"].endswith(
+                "/api/v1/coordination/mcp"
+            )
+        )
+
+    @patch.object(coordination_lambda, "_load_mcp_server_module")
+    def test_mcp_http_initialize_and_tools_list(self, mock_load_module):
+        class _FakeModule:
+            async def list_tools(self):
+                return [{"name": "connection_health", "description": "health"}]
+
+            async def call_tool(self, name, arguments):
+                return [{"type": "text", "text": json.dumps({"success": True, "name": name})}]
+
+            async def list_resources(self):
+                return [{"uri": "governance://agents.md", "name": "agents.md"}]
+
+            async def list_resource_templates(self):
+                return [{"uriTemplate": "projects://reference/{project_id}", "name": "Project reference document"}]
+
+            async def read_resource(self, uri):
+                return "# mock resource"
+
+        mock_load_module.return_value = _FakeModule()
+
+        init_event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/mcp",
+            "body": json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req-init",
+                    "method": "initialize",
+                    "params": {},
+                }
+            ),
+        }
+        init_resp = coordination_lambda._handle_mcp_http(init_event, {"auth_mode": "internal-key"})
+        self.assertEqual(init_resp["statusCode"], 200)
+        init_body = json.loads(init_resp["body"])
+        self.assertEqual(init_body["jsonrpc"], "2.0")
+        self.assertEqual(init_body["id"], "req-init")
+        self.assertEqual(init_body["result"]["protocolVersion"], "2024-11-05")
+        self.assertIn("tools", init_body["result"]["capabilities"])
+
+        list_tools_event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/mcp",
+            "body": json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req-tools",
+                    "method": "tools/list",
+                    "params": {},
+                }
+            ),
+        }
+        list_tools_resp = coordination_lambda._handle_mcp_http(list_tools_event, {"auth_mode": "internal-key"})
+        self.assertEqual(list_tools_resp["statusCode"], 200)
+        list_tools_body = json.loads(list_tools_resp["body"])
+        self.assertEqual(list_tools_body["id"], "req-tools")
+        self.assertGreaterEqual(len(list_tools_body["result"]["tools"]), 1)
+        self.assertEqual(list_tools_body["result"]["tools"][0]["name"], "connection_health")
+
+    @patch.object(coordination_lambda, "_authenticate", return_value=({"auth_mode": "internal-key"}, None))
+    @patch.object(coordination_lambda, "_handle_mcp_http")
+    def test_lambda_handler_routes_mcp_endpoint(self, mock_handle_mcp_http, _mock_auth):
+        mock_handle_mcp_http.return_value = coordination_lambda._response(
+            200,
+            {"jsonrpc": "2.0", "id": "req", "result": {"ok": True}},
+        )
+        event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/mcp",
+            "body": json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req",
+                    "method": "initialize",
+                    "params": {},
+                }
+            ),
+        }
+        resp = coordination_lambda.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        mock_handle_mcp_http.assert_called_once()
 
     @patch.object(coordination_lambda, "DISPATCH_TIMEOUT_CEILING_SECONDS", 1800)
     @patch.object(coordination_lambda, "HOST_V2_TIMEOUT_SECONDS", 9999)
