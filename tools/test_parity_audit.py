@@ -46,6 +46,19 @@ class _EmptyDdb:
         return {"TableNames": []}
 
 
+class _DdbAccessDenied:
+    def list_tables(self, **_kwargs):
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": "AccessDeniedException",
+                    "Message": "Denied for ListTables",
+                }
+            },
+            "ListTables",
+        )
+
+
 class _EmptySqs:
     def list_queues(self, **_kwargs):
         return {}
@@ -76,12 +89,15 @@ class _EmptyLambda:
         return {"Functions": []}
 
 
-def _client_factory(s3_client):
+def _client_factory(s3_client, ddb_client=None):
+    if ddb_client is None:
+        ddb_client = _EmptyDdb()
+
     def _factory(service_name, **_kwargs):
         if service_name == "s3":
             return s3_client
         if service_name == "dynamodb":
-            return _EmptyDdb()
+            return ddb_client
         if service_name == "sqs":
             return _EmptySqs()
         if service_name == "sns":
@@ -126,3 +142,25 @@ def test_inventory_s3_non_access_denied_still_raises():
             assert False, "Expected ClientError for non-access-denied S3 failure"
         except ClientError as exc:
             assert exc.response["Error"]["Code"] == "ThrottlingException"
+
+
+def test_inventory_dynamodb_access_denied_adds_warning_and_continues():
+    with patch.object(
+        parity_audit.boto3,
+        "client",
+        side_effect=_client_factory(_S3AccessDenied(), ddb_client=_DdbAccessDenied()),
+    ):
+        inventory = parity_audit._inventory_resources(
+            regions=["us-west-2"],
+            resource_re=re.compile("enceladus", re.IGNORECASE),
+            include_names=set(),
+        )
+
+    warnings = inventory.get("inventory_warnings", [])
+    assert any(
+        warning.get("service") == "dynamodb"
+        and warning.get("operation") == "ListTables"
+        and warning.get("error_code") == "AccessDeniedException"
+        and warning.get("region") == "us-west-2"
+        for warning in warnings
+    )
