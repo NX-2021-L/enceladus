@@ -58,10 +58,11 @@ jobs:
           PARITY_AUDIT_SNS_TOPIC_ARN: ${{ secrets.PARITY_AUDIT_SNS_TOPIC_ARN }}
         run: |
           set -euo pipefail
-          python tools/parity_audit.py \
-            --output-dir infrastructure/parity/out \
-            --fail-on-drift \
-            ${PARITY_AUDIT_SNS_TOPIC_ARN:+--sns-topic-arn "${PARITY_AUDIT_SNS_TOPIC_ARN}"}
+          cmd=(python tools/parity_audit.py --output-dir infrastructure/parity/out --fail-on-drift)
+          if [[ -n "${PARITY_AUDIT_SNS_TOPIC_ARN:-}" ]]; then
+            cmd+=(--sns-topic-arn "${PARITY_AUDIT_SNS_TOPIC_ARN}")
+          fi
+          "${cmd[@]}"
 
       - name: Upload parity artifacts
         if: always()
