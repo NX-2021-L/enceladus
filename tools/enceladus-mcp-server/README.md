@@ -13,10 +13,11 @@ This directory is the canonical source for Enceladus MCP runtime assets used by:
 - `install_profile.sh`
 - `host_v2_first_bootstrap.sh`
 - `host_v2_user_data_template.sh`
+- `create_host_v2_launch_template.sh`
 
 ## Sync Rule
 
-Briefing bundle copies of the MCP assets must remain in lockstep with these canonical files to avoid profile/runtime drift that can surface as MCP `Transport closed` failures in Codex/desktop sessions.
+Briefing bundle wrappers must delegate to these canonical files to avoid profile/runtime drift that can surface as MCP `Transport closed` failures in Codex/desktop sessions.
 
 ## Deployment Policy
 
