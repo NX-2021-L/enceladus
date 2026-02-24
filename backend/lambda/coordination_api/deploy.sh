@@ -20,7 +20,19 @@ HOST_V2_MCP_BOOTSTRAP_SCRIPT="${HOST_V2_MCP_BOOTSTRAP_SCRIPT:-tools/enceladus-mc
 HOST_V2_FLEET_LAUNCH_TEMPLATE_ID="${HOST_V2_FLEET_LAUNCH_TEMPLATE_ID:-}"
 HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION="${HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION:-\$Default}"
 HOST_V2_FLEET_USER_DATA_TEMPLATE="${HOST_V2_FLEET_USER_DATA_TEMPLATE:-tools/enceladus-mcp-server/host_v2_user_data_template.sh}"
-ENCELADUS_MCP_SERVER_PATH="${ENCELADUS_MCP_SERVER_PATH:-tools/enceladus-mcp-server/server.py}"
+HOST_V2_FLEET_ENABLED="${HOST_V2_FLEET_ENABLED:-true}"
+HOST_V2_FLEET_FALLBACK_TO_STATIC="${HOST_V2_FLEET_FALLBACK_TO_STATIC:-true}"
+HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES="${HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES:-3}"
+HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS="${HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS:-420}"
+HOST_V2_FLEET_READINESS_POLL_SECONDS="${HOST_V2_FLEET_READINESS_POLL_SECONDS:-15}"
+HOST_V2_FLEET_INSTANCE_TTL_SECONDS="${HOST_V2_FLEET_INSTANCE_TTL_SECONDS:-3600}"
+HOST_V2_FLEET_SWEEP_ON_DISPATCH="${HOST_V2_FLEET_SWEEP_ON_DISPATCH:-true}"
+HOST_V2_FLEET_SWEEP_GRACE_SECONDS="${HOST_V2_FLEET_SWEEP_GRACE_SECONDS:-300}"
+HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL="${HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL:-true}"
+HOST_V2_FLEET_TAG_MANAGED_BY_VALUE="${HOST_V2_FLEET_TAG_MANAGED_BY_VALUE:-enceladus-coordination}"
+HOST_V2_FLEET_NAME_PREFIX="${HOST_V2_FLEET_NAME_PREFIX:-enceladus-host-v2-fleet}"
+HOST_V2_FLEET_PASSROLE_ARN="${HOST_V2_FLEET_PASSROLE_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/*}"
+ENCELADUS_MCP_SERVER_PATH="${ENCELADUS_MCP_SERVER_PATH:-server.py}"
 S3_BUCKET="${S3_BUCKET:-jreese-net}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 SECRETS_REGION="${SECRETS_REGION:-us-west-2}"
@@ -163,13 +175,26 @@ ensure_role() {
     {
       "Sid": "SSMDispatch",
       "Effect": "Allow",
-      "Action": ["ssm:SendCommand", "ssm:GetCommandInvocation", "ssm:ListCommands", "ssm:ListCommandInvocations"],
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommands",
+        "ssm:ListCommandInvocations",
+        "ssm:DescribeInstanceInformation"
+      ],
       "Resource": "*"
     },
     {
-      "Sid": "EC2Describe",
+      "Sid": "EC2FleetDispatch",
       "Effect": "Allow",
-      "Action": ["ec2:DescribeInstances"],
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeLaunchTemplates",
+        "ec2:DescribeLaunchTemplateVersions",
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:CreateTags"
+      ],
       "Resource": "*"
     },
     {
@@ -211,6 +236,17 @@ ensure_role() {
       "Condition": {
         "StringEquals": {
           "iam:PassedToService": "bedrock.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "FleetHostPassRole",
+      "Effect": "Allow",
+      "Action": ["iam:PassRole"],
+      "Resource": "${HOST_V2_FLEET_PASSROLE_ARN}",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
         }
       }
     }
@@ -298,8 +334,7 @@ package_lambda() {
     exit 1
   fi
 
-  cp "${ROOT_DIR}/lambda_function.py" "${build_dir}/"
-  cp "${ROOT_DIR}/mcp_client.py" "${build_dir}/"
+  find "${ROOT_DIR}" -maxdepth 1 -type f -name '*.py' ! -name 'test_*' -exec cp {} "${build_dir}/" \;
   cp "${mcp_server_src}" "${build_dir}/server.py"
   cp "${mcp_dispatch_src}" "${build_dir}/dispatch_plan_generator.py"
 
@@ -375,6 +410,17 @@ ensure_lambda() {
   HOST_V2_FLEET_LAUNCH_TEMPLATE_ID="${HOST_V2_FLEET_LAUNCH_TEMPLATE_ID}" \
   HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION="${HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION}" \
   HOST_V2_FLEET_USER_DATA_TEMPLATE="${HOST_V2_FLEET_USER_DATA_TEMPLATE}" \
+  HOST_V2_FLEET_ENABLED="${HOST_V2_FLEET_ENABLED}" \
+  HOST_V2_FLEET_FALLBACK_TO_STATIC="${HOST_V2_FLEET_FALLBACK_TO_STATIC}" \
+  HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES="${HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES}" \
+  HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS="${HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS}" \
+  HOST_V2_FLEET_READINESS_POLL_SECONDS="${HOST_V2_FLEET_READINESS_POLL_SECONDS}" \
+  HOST_V2_FLEET_INSTANCE_TTL_SECONDS="${HOST_V2_FLEET_INSTANCE_TTL_SECONDS}" \
+  HOST_V2_FLEET_SWEEP_ON_DISPATCH="${HOST_V2_FLEET_SWEEP_ON_DISPATCH}" \
+  HOST_V2_FLEET_SWEEP_GRACE_SECONDS="${HOST_V2_FLEET_SWEEP_GRACE_SECONDS}" \
+  HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL="${HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL}" \
+  HOST_V2_FLEET_TAG_MANAGED_BY_VALUE="${HOST_V2_FLEET_TAG_MANAGED_BY_VALUE}" \
+  HOST_V2_FLEET_NAME_PREFIX="${HOST_V2_FLEET_NAME_PREFIX}" \
   ENCELADUS_MCP_SERVER_PATH="${ENCELADUS_MCP_SERVER_PATH}" \
   DEBOUNCE_WINDOW_SECONDS="${DEBOUNCE_WINDOW_SECONDS}" \
   DISPATCH_LOCK_BUFFER_SECONDS="${DISPATCH_LOCK_BUFFER_SECONDS}" \
@@ -419,6 +465,17 @@ env_vars = {
     "HOST_V2_FLEET_LAUNCH_TEMPLATE_ID": os.environ["HOST_V2_FLEET_LAUNCH_TEMPLATE_ID"],
     "HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION": os.environ["HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION"],
     "HOST_V2_FLEET_USER_DATA_TEMPLATE": os.environ["HOST_V2_FLEET_USER_DATA_TEMPLATE"],
+    "HOST_V2_FLEET_ENABLED": os.environ["HOST_V2_FLEET_ENABLED"],
+    "HOST_V2_FLEET_FALLBACK_TO_STATIC": os.environ["HOST_V2_FLEET_FALLBACK_TO_STATIC"],
+    "HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES": os.environ["HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES"],
+    "HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS": os.environ["HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS"],
+    "HOST_V2_FLEET_READINESS_POLL_SECONDS": os.environ["HOST_V2_FLEET_READINESS_POLL_SECONDS"],
+    "HOST_V2_FLEET_INSTANCE_TTL_SECONDS": os.environ["HOST_V2_FLEET_INSTANCE_TTL_SECONDS"],
+    "HOST_V2_FLEET_SWEEP_ON_DISPATCH": os.environ["HOST_V2_FLEET_SWEEP_ON_DISPATCH"],
+    "HOST_V2_FLEET_SWEEP_GRACE_SECONDS": os.environ["HOST_V2_FLEET_SWEEP_GRACE_SECONDS"],
+    "HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL": os.environ["HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL"],
+    "HOST_V2_FLEET_TAG_MANAGED_BY_VALUE": os.environ["HOST_V2_FLEET_TAG_MANAGED_BY_VALUE"],
+    "HOST_V2_FLEET_NAME_PREFIX": os.environ["HOST_V2_FLEET_NAME_PREFIX"],
     "ENCELADUS_MCP_SERVER_PATH": os.environ["ENCELADUS_MCP_SERVER_PATH"],
     "HOST_V2_PROJECT": "devops",
     "HOST_V2_WORK_ROOT": "/home/ec2-user/claude-code-dev",

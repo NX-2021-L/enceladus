@@ -191,6 +191,8 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         caps = body["capabilities"]
         self.assertIn("mcp_bootstrap", caps["host_v2"])
         self.assertIn("fleet_template", caps["host_v2"])
+        self.assertIn("max_active_dispatches", caps["host_v2"]["fleet_template"])
+        self.assertIn("auto_terminate_on_terminal", caps["host_v2"]["fleet_template"])
         self.assertIn("profile_path", caps["enceladus_mcp_profile"])
         self.assertIn("marker_path", caps["enceladus_mcp_profile"])
         self.assertEqual(
@@ -321,6 +323,88 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
             kwargs["CloudWatchOutputConfig"]["CloudWatchLogGroupName"],
             coordination_lambda.WORKER_RUNTIME_LOG_GROUP,
         )
+
+    @patch.object(
+        coordination_lambda,
+        "_resolve_host_dispatch_target",
+        return_value={
+            "instance_id": "i-fleet123",
+            "host_kind": "fleet",
+            "host_allocation": "fleet",
+            "host_source": "launch_template",
+            "launch_template_id": "lt-abc123",
+            "launch_template_version": "$Latest",
+        },
+    )
+    @patch.object(coordination_lambda, "_build_ssm_commands", return_value=["echo ok"])
+    @patch.object(coordination_lambda, "_get_ssm")
+    def test_send_dispatch_uses_resolved_target_instance(
+        self,
+        mock_get_ssm,
+        _mock_build_commands,
+        _mock_resolve_target,
+    ):
+        mock_ssm = mock_get_ssm.return_value
+        mock_ssm.send_command.return_value = {"Command": {"CommandId": "cmd-fleet"}}
+        request = {"request_id": "CRQ-FLEET001", "project_id": "enceladus"}
+        result = coordination_lambda._send_dispatch(
+            request=request,
+            execution_mode="preflight",
+            prompt=None,
+            dispatch_id="DSP-FLEET001",
+            host_allocation="fleet",
+        )
+        _, kwargs = mock_ssm.send_command.call_args
+        self.assertEqual(kwargs["InstanceIds"], ["i-fleet123"])
+        self.assertEqual(result["instance_id"], "i-fleet123")
+        self.assertEqual(result["host_kind"], "fleet")
+        self.assertEqual(result["host_source"], "launch_template")
+
+    @patch.object(coordination_lambda, "_get_ec2")
+    def test_cleanup_dispatch_host_terminates_fleet_instance(self, mock_get_ec2):
+        request = {
+            "dispatch": {
+                "host_kind": "fleet",
+                "instance_id": "i-fleet123",
+            }
+        }
+        updated = coordination_lambda._cleanup_dispatch_host(request, "callback_terminal")
+        mock_get_ec2.return_value.terminate_instances.assert_called_once_with(
+            InstanceIds=["i-fleet123"]
+        )
+        self.assertEqual(updated["dispatch"]["host_cleanup_state"], "terminated")
+
+    @patch.object(coordination_lambda, "_sweep_orphan_fleet_hosts", return_value={"enabled": True, "terminated": 0})
+    @patch.object(coordination_lambda, "_count_active_host_dispatches", return_value=0)
+    @patch.object(
+        coordination_lambda,
+        "_launch_fleet_instance",
+        return_value={"instance_id": "i-fleet123", "launched_at": "2026-02-24T00:00:00Z"},
+    )
+    @patch.object(
+        coordination_lambda,
+        "_wait_for_fleet_instance_readiness",
+        return_value={"ready_at": "2026-02-24T00:01:00Z"},
+    )
+    @patch.object(coordination_lambda, "_fleet_launch_ready", return_value=True)
+    def test_resolve_host_dispatch_target_launches_fleet_instance(
+        self,
+        _mock_fleet_ready,
+        _mock_wait_ready,
+        _mock_launch,
+        _mock_count_active,
+        _mock_sweep,
+    ):
+        request = {"request_id": "CRQ-FLEET002", "project_id": "enceladus"}
+        target = coordination_lambda._resolve_host_dispatch_target(
+            request,
+            execution_mode="preflight",
+            dispatch_id="DSP-FLEET002",
+            host_allocation="auto",
+        )
+        self.assertEqual(target["instance_id"], "i-fleet123")
+        self.assertEqual(target["host_kind"], "fleet")
+        self.assertEqual(target["host_source"], "launch_template")
 
     def test_build_ssm_commands_claude(self):
         request = {
