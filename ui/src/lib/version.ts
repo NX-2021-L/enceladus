@@ -18,7 +18,7 @@
  */
 
 /** Current release version — update this on every deployment */
-export const APP_VERSION = '0.16.1'
+export const APP_VERSION = '0.17.0'
 
 /** Structured release history — newest first */
 export interface ReleaseNote {
@@ -30,6 +30,22 @@ export interface ReleaseNote {
 }
 
 export const RELEASE_NOTES: ReleaseNote[] = [
+  {
+    version: '0.17.0',
+    date: '2026-02-23',
+    type: 'minor',
+    summary: 'Active session and coordination badges with feed_query boolean fix (ENC-TSK-488)',
+    changes: [
+      'ActiveSessionBadge component (green animated pill) on task cards',
+      'CoordinationFlagBadge component (blue animated pill) on all card types',
+      'Type extensions for Task/Issue/Feature with boolean badge fields',
+      'feed_query Lambda: add _ddb_bool() helper for DynamoDB BOOL and string type handling',
+      'feed_query Lambda: surface active_agent_session, active_agent_session_parent, coordination fields in task transform',
+      'feed_query Lambda: surface coordination field in issue and feature transforms',
+      'feed_utils.py: harden _ddb_item_to_yaml_record() with explicit _to_bool() on boolean fields',
+      'feed_query Lambda source added to repo as api/lambda/feed_query/',
+    ],
+  },
   {
     version: '0.16.1',
     date: '2026-02-20',
