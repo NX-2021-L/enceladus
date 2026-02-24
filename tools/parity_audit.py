@@ -420,6 +420,7 @@ def _audit_lambda_parity(
         "MISSING_LIVE_FUNCTION": 0,
         "MISSING_REPO_ENTRY": 0,
         "MISSING_LIVE_ENTRY": 0,
+        "ACCESS_DENIED": 0,
         "ERROR": 0,
     }
 
@@ -454,6 +455,13 @@ def _audit_lambda_parity(
                 if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
                     result["status"] = "MISSING_LIVE_FUNCTION"
                     stats["MISSING_LIVE_FUNCTION"] += 1
+                    results.append(result)
+                    continue
+                if _is_access_denied(exc):
+                    result["status"] = "ACCESS_DENIED"
+                    result["error_code"] = str(exc.response.get("Error", {}).get("Code") or "")
+                    result["error"] = str(exc.response.get("Error", {}).get("Message") or str(exc))
+                    stats["ACCESS_DENIED"] += 1
                     results.append(result)
                     continue
                 raise
@@ -520,6 +528,7 @@ def _emit_markdown_summary(
         f"- MISSING_REPO_ENTRY: {stats.get('MISSING_REPO_ENTRY', 0)}",
         f"- MISSING_LIVE_FUNCTION: {stats.get('MISSING_LIVE_FUNCTION', 0)}",
         f"- MISSING_LIVE_ENTRY: {stats.get('MISSING_LIVE_ENTRY', 0)}",
+        f"- ACCESS_DENIED: {stats.get('ACCESS_DENIED', 0)}",
         f"- ERROR: {stats.get('ERROR', 0)}",
         "",
         "## Inventory Counts",
