@@ -79,6 +79,11 @@ def _resource_matches(name: str, resource_re: re.Pattern[str], include_names: se
     return name in include_names or bool(resource_re.search(name))
 
 
+def _is_access_denied(err: ClientError) -> bool:
+    code = str(err.response.get("Error", {}).get("Code", "")).strip()
+    return code in {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation"}
+
+
 def _inventory_resources(
     regions: Iterable[str],
     resource_re: re.Pattern[str],
@@ -97,15 +102,29 @@ def _inventory_resources(
         "eventbridge_pipes": [],
         "apigw_v2_apis": [],
         "lambda_functions": [],
+        "inventory_warnings": [],
     }
 
     # S3 is global.
     s3 = boto3.client("s3")
-    buckets = s3.list_buckets().get("Buckets", [])
-    for b in buckets:
-        name = str(b.get("Name") or "")
-        if _resource_matches(name, resource_re, include_names):
-            inventory["s3_buckets"].append({"name": name, "created": str(b.get("CreationDate") or "")})
+    try:
+        buckets = s3.list_buckets().get("Buckets", [])
+        for b in buckets:
+            name = str(b.get("Name") or "")
+            if _resource_matches(name, resource_re, include_names):
+                inventory["s3_buckets"].append({"name": name, "created": str(b.get("CreationDate") or "")})
+    except ClientError as exc:
+        if _is_access_denied(exc):
+            inventory["inventory_warnings"].append(
+                {
+                    "service": "s3",
+                    "operation": "ListBuckets",
+                    "error_code": str(exc.response.get("Error", {}).get("Code", "")),
+                    "message": str(exc.response.get("Error", {}).get("Message", "")),
+                }
+            )
+        else:
+            raise
 
     for region in regions:
         ddb = boto3.client("dynamodb", region_name=region)
@@ -401,7 +420,21 @@ def _emit_markdown_summary(
         f"- EventBridge pipes (filtered): {len(inventory.get('eventbridge_pipes', []))}",
         f"- API Gateway v2 APIs (filtered): {len(inventory.get('apigw_v2_apis', []))}",
         "",
+        "## Inventory Warnings",
+        f"- Count: {len(inventory.get('inventory_warnings', []))}",
+        "",
     ]
+
+    warnings = inventory.get("inventory_warnings", [])
+    if warnings:
+        lines.append("### Warning Details")
+        for warning in warnings:
+            lines.append(
+                "- "
+                f"{warning.get('service', '?')}:{warning.get('operation', '?')} "
+                f"{warning.get('error_code', '')} {warning.get('message', '')}".strip()
+            )
+        lines.append("")
 
     mismatches = [r for r in parity.get("results", []) if r.get("status") != "MATCH"]
     if mismatches:
