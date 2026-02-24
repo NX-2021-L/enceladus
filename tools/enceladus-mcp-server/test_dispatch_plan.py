@@ -694,6 +694,139 @@ def test_deploy_auth_fallback_direct_reads():
     _pass("deploy_state_get/history_list fall back to direct data path on auth-required errors")
 
 
+def test_document_api_internal_key_header():
+    _header("Document API Internal-Key Header")
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    import server
+
+    captured_headers = {}
+    original_urlopen = urllib.request.urlopen
+    original_key = server.DOCUMENT_API_INTERNAL_API_KEY
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"success": true}'
+
+    def _fake_urlopen(req, timeout=0, context=None):
+        captured_headers.update({k.lower(): v for k, v in req.header_items()})
+        return _FakeResponse()
+
+    try:
+        server.DOCUMENT_API_INTERNAL_API_KEY = "enc-doc-key"
+        urllib.request.urlopen = _fake_urlopen
+        result = server._document_api_request("PUT", payload={"project_id": "enceladus"})
+    finally:
+        urllib.request.urlopen = original_urlopen
+        server.DOCUMENT_API_INTERNAL_API_KEY = original_key
+
+    assert result.get("success") is True
+    assert captured_headers.get("x-coordination-internal-key") == "enc-doc-key"
+    _pass("_document_api_request attaches X-Coordination-Internal-Key when configured")
+
+
+def test_documents_put_auth_fallback_direct_write():
+    _header("documents_put Auth Fallback")
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    import server
+
+    original_api_request = server._document_api_request
+    original_put_direct = server._document_put_direct
+
+    def _deny(*_args, **_kwargs):
+        return server._error_payload(
+            "PERMISSION_DENIED",
+            "Authentication required. Please sign in.",
+            retryable=False,
+        )
+
+    try:
+        server._document_api_request = _deny
+        server._document_put_direct = lambda _payload: {
+            "success": True,
+            "document_id": "DOC-UNIT-PUT",
+            "write_mode": "direct_fallback",
+        }
+
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(
+                server._documents_put(
+                    {
+                        "project_id": "enceladus",
+                        "title": "unit fallback",
+                        "content": "# unit",
+                        "governance_hash": server._compute_governance_hash(),
+                    }
+                )
+            )
+        finally:
+            loop.close()
+    finally:
+        server._document_api_request = original_api_request
+        server._document_put_direct = original_put_direct
+
+    payload = json.loads(result[0].text)
+    assert payload.get("success") is True
+    assert payload.get("write_mode") == "direct_fallback"
+    _pass("documents_put falls back to direct write path on auth-required errors")
+
+
+def test_documents_patch_auth_fallback_direct_write():
+    _header("documents_patch Auth Fallback")
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    import server
+
+    original_api_request = server._document_api_request
+    original_patch_direct = server._document_patch_direct
+
+    def _deny(*_args, **_kwargs):
+        return server._error_payload(
+            "PERMISSION_DENIED",
+            "Authentication required. Please sign in.",
+            retryable=False,
+        )
+
+    try:
+        server._document_api_request = _deny
+        server._document_patch_direct = lambda doc_id, _payload: {
+            "success": True,
+            "document_id": doc_id,
+            "write_mode": "direct_fallback",
+        }
+
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(
+                server._documents_patch(
+                    {
+                        "document_id": "DOC-UNIT-PATCH",
+                        "description": "patched",
+                        "governance_hash": server._compute_governance_hash(),
+                    }
+                )
+            )
+        finally:
+            loop.close()
+    finally:
+        server._document_api_request = original_api_request
+        server._document_patch_direct = original_patch_direct
+
+    payload = json.loads(result[0].text)
+    assert payload.get("success") is True
+    assert payload.get("write_mode") == "direct_fallback"
+    assert payload.get("document_id") == "DOC-UNIT-PATCH"
+    _pass("documents_patch falls back to direct write path on auth-required errors")
+
+
 # =================================================================
 # Test: Bedrock Agent Provider (DVP-TSK-338)
 # =================================================================
@@ -1034,6 +1167,9 @@ if __name__ == "__main__":
     test_deploy_adapter_contract()
     test_deploy_api_internal_key_header()
     test_deploy_auth_fallback_direct_reads()
+    test_document_api_internal_key_header()
+    test_documents_put_auth_fallback_direct_write()
+    test_documents_patch_auth_fallback_direct_write()
 
     print(f"\n{'='*60}")
     if _failures:
