@@ -20,7 +20,19 @@ HOST_V2_MCP_BOOTSTRAP_SCRIPT="${HOST_V2_MCP_BOOTSTRAP_SCRIPT:-tools/enceladus-mc
 HOST_V2_FLEET_LAUNCH_TEMPLATE_ID="${HOST_V2_FLEET_LAUNCH_TEMPLATE_ID:-}"
 HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION="${HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION:-\$Default}"
 HOST_V2_FLEET_USER_DATA_TEMPLATE="${HOST_V2_FLEET_USER_DATA_TEMPLATE:-tools/enceladus-mcp-server/host_v2_user_data_template.sh}"
-ENCELADUS_MCP_SERVER_PATH="${ENCELADUS_MCP_SERVER_PATH:-tools/enceladus-mcp-server/server.py}"
+HOST_V2_FLEET_ENABLED="${HOST_V2_FLEET_ENABLED:-true}"
+HOST_V2_FLEET_FALLBACK_TO_STATIC="${HOST_V2_FLEET_FALLBACK_TO_STATIC:-true}"
+HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES="${HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES:-3}"
+HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS="${HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS:-420}"
+HOST_V2_FLEET_READINESS_POLL_SECONDS="${HOST_V2_FLEET_READINESS_POLL_SECONDS:-15}"
+HOST_V2_FLEET_INSTANCE_TTL_SECONDS="${HOST_V2_FLEET_INSTANCE_TTL_SECONDS:-3600}"
+HOST_V2_FLEET_SWEEP_ON_DISPATCH="${HOST_V2_FLEET_SWEEP_ON_DISPATCH:-true}"
+HOST_V2_FLEET_SWEEP_GRACE_SECONDS="${HOST_V2_FLEET_SWEEP_GRACE_SECONDS:-300}"
+HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL="${HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL:-true}"
+HOST_V2_FLEET_TAG_MANAGED_BY_VALUE="${HOST_V2_FLEET_TAG_MANAGED_BY_VALUE:-enceladus-coordination}"
+HOST_V2_FLEET_NAME_PREFIX="${HOST_V2_FLEET_NAME_PREFIX:-enceladus-host-v2-fleet}"
+HOST_V2_FLEET_PASSROLE_ARN="${HOST_V2_FLEET_PASSROLE_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/*}"
+ENCELADUS_MCP_SERVER_PATH="${ENCELADUS_MCP_SERVER_PATH:-server.py}"
 S3_BUCKET="${S3_BUCKET:-jreese-net}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 SECRETS_REGION="${SECRETS_REGION:-us-west-2}"
@@ -147,13 +159,26 @@ ensure_role() {
     {
       "Sid": "SSMDispatch",
       "Effect": "Allow",
-      "Action": ["ssm:SendCommand", "ssm:GetCommandInvocation", "ssm:ListCommands", "ssm:ListCommandInvocations"],
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommands",
+        "ssm:ListCommandInvocations",
+        "ssm:DescribeInstanceInformation"
+      ],
       "Resource": "*"
     },
     {
-      "Sid": "EC2Describe",
+      "Sid": "EC2FleetDispatch",
       "Effect": "Allow",
-      "Action": ["ec2:DescribeInstances"],
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeLaunchTemplates",
+        "ec2:DescribeLaunchTemplateVersions",
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:CreateTags"
+      ],
       "Resource": "*"
     },
     {
@@ -195,6 +220,17 @@ ensure_role() {
       "Condition": {
         "StringEquals": {
           "iam:PassedToService": "bedrock.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "FleetHostPassRole",
+      "Effect": "Allow",
+      "Action": ["iam:PassRole"],
+      "Resource": "${HOST_V2_FLEET_PASSROLE_ARN}",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
         }
       }
     }
@@ -253,9 +289,39 @@ package_lambda() {
   local build_dir zip_path
   build_dir="$(mktemp -d /tmp/devops-coordination-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
+  local mcp_server_src="" mcp_dispatch_src=""
+
+  for candidate in \
+    "${ROOT_DIR}/../../../tools/enceladus-mcp-server/server.py" \
+    "${ROOT_DIR}/../../../../tools/enceladus-mcp-server/server.py" \
+    "/Users/jreese/agents-dev/projects/enceladus/repo/tools/enceladus-mcp-server/server.py" \
+    "/Users/jreese/agents-dev/tools/enceladus-mcp-server/server.py"; do
+    if [[ -f "${candidate}" ]]; then
+      mcp_server_src="${candidate}"
+      break
+    fi
+  done
+
+  for candidate in \
+    "${ROOT_DIR}/../../../tools/enceladus-mcp-server/dispatch_plan_generator.py" \
+    "${ROOT_DIR}/../../../../tools/enceladus-mcp-server/dispatch_plan_generator.py" \
+    "/Users/jreese/agents-dev/projects/enceladus/repo/tools/enceladus-mcp-server/dispatch_plan_generator.py" \
+    "/Users/jreese/agents-dev/tools/enceladus-mcp-server/dispatch_plan_generator.py"; do
+    if [[ -f "${candidate}" ]]; then
+      mcp_dispatch_src="${candidate}"
+      break
+    fi
+  done
+
+  if [[ -z "${mcp_server_src}" || -z "${mcp_dispatch_src}" ]]; then
+    echo "[ERROR] Unable to locate canonical Enceladus MCP runtime sources for packaging." >&2
+    exit 1
+  fi
 
   cp "${ROOT_DIR}/lambda_function.py" "${build_dir}/"
   cp "${ROOT_DIR}/mcp_client.py" "${build_dir}/"
+  cp "${mcp_server_src}" "${build_dir}/server.py"
+  cp "${mcp_dispatch_src}" "${build_dir}/dispatch_plan_generator.py"
 
   python3 -m pip install \
     --quiet \
@@ -296,7 +362,10 @@ ensure_lambda() {
       --zip-file "fileb://${zip_path}" >/dev/null
   fi
 
+  # Ensure all pending Lambda code updates have settled before we push configuration.
   aws lambda wait function-active-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
+  aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
+  aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
 
   effective_internal_key="$(resolve_internal_api_key)"
   if [[ -z "${effective_internal_key}" ]]; then
@@ -322,6 +391,17 @@ ensure_lambda() {
   HOST_V2_FLEET_LAUNCH_TEMPLATE_ID="${HOST_V2_FLEET_LAUNCH_TEMPLATE_ID}" \
   HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION="${HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION}" \
   HOST_V2_FLEET_USER_DATA_TEMPLATE="${HOST_V2_FLEET_USER_DATA_TEMPLATE}" \
+  HOST_V2_FLEET_ENABLED="${HOST_V2_FLEET_ENABLED}" \
+  HOST_V2_FLEET_FALLBACK_TO_STATIC="${HOST_V2_FLEET_FALLBACK_TO_STATIC}" \
+  HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES="${HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES}" \
+  HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS="${HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS}" \
+  HOST_V2_FLEET_READINESS_POLL_SECONDS="${HOST_V2_FLEET_READINESS_POLL_SECONDS}" \
+  HOST_V2_FLEET_INSTANCE_TTL_SECONDS="${HOST_V2_FLEET_INSTANCE_TTL_SECONDS}" \
+  HOST_V2_FLEET_SWEEP_ON_DISPATCH="${HOST_V2_FLEET_SWEEP_ON_DISPATCH}" \
+  HOST_V2_FLEET_SWEEP_GRACE_SECONDS="${HOST_V2_FLEET_SWEEP_GRACE_SECONDS}" \
+  HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL="${HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL}" \
+  HOST_V2_FLEET_TAG_MANAGED_BY_VALUE="${HOST_V2_FLEET_TAG_MANAGED_BY_VALUE}" \
+  HOST_V2_FLEET_NAME_PREFIX="${HOST_V2_FLEET_NAME_PREFIX}" \
   ENCELADUS_MCP_SERVER_PATH="${ENCELADUS_MCP_SERVER_PATH}" \
   DEBOUNCE_WINDOW_SECONDS="${DEBOUNCE_WINDOW_SECONDS}" \
   DISPATCH_LOCK_BUFFER_SECONDS="${DISPATCH_LOCK_BUFFER_SECONDS}" \
@@ -366,6 +446,17 @@ env_vars = {
     "HOST_V2_FLEET_LAUNCH_TEMPLATE_ID": os.environ["HOST_V2_FLEET_LAUNCH_TEMPLATE_ID"],
     "HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION": os.environ["HOST_V2_FLEET_LAUNCH_TEMPLATE_VERSION"],
     "HOST_V2_FLEET_USER_DATA_TEMPLATE": os.environ["HOST_V2_FLEET_USER_DATA_TEMPLATE"],
+    "HOST_V2_FLEET_ENABLED": os.environ["HOST_V2_FLEET_ENABLED"],
+    "HOST_V2_FLEET_FALLBACK_TO_STATIC": os.environ["HOST_V2_FLEET_FALLBACK_TO_STATIC"],
+    "HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES": os.environ["HOST_V2_FLEET_MAX_ACTIVE_DISPATCHES"],
+    "HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS": os.environ["HOST_V2_FLEET_READINESS_TIMEOUT_SECONDS"],
+    "HOST_V2_FLEET_READINESS_POLL_SECONDS": os.environ["HOST_V2_FLEET_READINESS_POLL_SECONDS"],
+    "HOST_V2_FLEET_INSTANCE_TTL_SECONDS": os.environ["HOST_V2_FLEET_INSTANCE_TTL_SECONDS"],
+    "HOST_V2_FLEET_SWEEP_ON_DISPATCH": os.environ["HOST_V2_FLEET_SWEEP_ON_DISPATCH"],
+    "HOST_V2_FLEET_SWEEP_GRACE_SECONDS": os.environ["HOST_V2_FLEET_SWEEP_GRACE_SECONDS"],
+    "HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL": os.environ["HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL"],
+    "HOST_V2_FLEET_TAG_MANAGED_BY_VALUE": os.environ["HOST_V2_FLEET_TAG_MANAGED_BY_VALUE"],
+    "HOST_V2_FLEET_NAME_PREFIX": os.environ["HOST_V2_FLEET_NAME_PREFIX"],
     "ENCELADUS_MCP_SERVER_PATH": os.environ["ENCELADUS_MCP_SERVER_PATH"],
     "HOST_V2_PROJECT": "devops",
     "HOST_V2_WORK_ROOT": "/home/ec2-user/claude-code-dev",
@@ -390,13 +481,30 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump({"Variables": env_vars}, f)
 PY
 
-  aws lambda update-function-configuration \
-    --region "${REGION}" \
-    --function-name "${FUNCTION_NAME}" \
-    --role "${role_arn}" \
-    --timeout 120 \
-    --memory-size 512 \
-    --environment "file://${env_file}" >/dev/null
+  local cfg_attempt cfg_max cfg_sleep
+  cfg_attempt=1
+  cfg_max=6
+  cfg_sleep=10
+  while :; do
+    if aws lambda update-function-configuration \
+      --region "${REGION}" \
+      --function-name "${FUNCTION_NAME}" \
+      --role "${role_arn}" \
+      --timeout 120 \
+      --memory-size 512 \
+      --environment "file://${env_file}" >/dev/null; then
+      break
+    fi
+    if [[ "${cfg_attempt}" -ge "${cfg_max}" ]]; then
+      echo "[ERROR] update-function-configuration failed after ${cfg_attempt} attempts" >&2
+      rm -f "${env_file}"
+      return 1
+    fi
+    log "[WARNING] update-function-configuration conflict; retrying in ${cfg_sleep}s (attempt ${cfg_attempt}/${cfg_max})"
+    sleep "${cfg_sleep}"
+    aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}" || true
+    cfg_attempt=$((cfg_attempt + 1))
+  done
   rm -f "${env_file}"
 
   aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
@@ -434,7 +542,10 @@ ensure_api_integration_and_routes() {
     "GET /api/v1/coordination/requests/{requestId}"
     "POST /api/v1/coordination/requests/{requestId}/dispatch"
     "POST /api/v1/coordination/requests/{requestId}/callback"
+    "GET /api/v1/coordination/mcp"
+    "POST /api/v1/coordination/mcp"
     "GET /api/v1/coordination/capabilities"
+    "OPTIONS /api/v1/coordination/mcp"
     "OPTIONS /api/v1/coordination/requests"
     "OPTIONS /api/v1/coordination/requests/{requestId}"
     "OPTIONS /api/v1/coordination/requests/{requestId}/dispatch"
