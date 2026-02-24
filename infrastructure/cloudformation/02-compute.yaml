@@ -1,0 +1,761 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus Compute Layer — Lambda functions, EventBridge rules, Pipes.
+  Part of ENC-TSK-532: IaC templates for Enceladus AWS resources.
+
+  NOTE: These resources already exist. Use resource import to adopt them.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+  DataStackName:
+    Type: String
+    Default: enceladus-data
+    Description: Name of the 01-data stack for cross-stack references.
+  S3Bucket:
+    Type: String
+    Default: jreese-net
+  CognitoUserPoolId:
+    Type: String
+    Default: us-east-1_b2D0V3E1k
+  CognitoClientId:
+    Type: String
+    Default: 6q607dk3liirhtecgps7hifmlk
+  CorsOrigin:
+    Type: String
+    Default: https://jreese.net
+  SharedLayerArn:
+    Type: String
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:2
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Lambda Functions — API Tier (Cognito-authenticated, API GW proxied)
+  # ---------------------------------------------------------------------------
+
+  CoordinationApiFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-coordination-api
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 120
+      Architectures: [x86_64]
+      Role: !GetAtt CoordinationApiRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          COORDINATION_TABLE: coordination-requests
+          TRACKER_TABLE: devops-project-tracker
+          PROJECTS_TABLE: projects
+          DYNAMODB_REGION: !Ref AWS::Region
+          SSM_REGION: !Ref AWS::Region
+          SECRETS_REGION: !Ref AWS::Region
+          CORS_ORIGIN: !Ref CorsOrigin
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+
+  TrackerMutationFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-tracker-mutation-api
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Architectures: [x86_64]
+      Role: !GetAtt TrackerMutationRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          DYNAMODB_TABLE: devops-project-tracker
+          DYNAMODB_REGION: !Ref AWS::Region
+          PROJECTS_TABLE: projects
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: tracker
+
+  DocumentApiFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-document-api
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Architectures: [x86_64]
+      Role: !GetAtt DocumentApiRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          DOCUMENTS_TABLE: documents
+          PROJECTS_TABLE: projects
+          TRACKER_TABLE: devops-project-tracker
+          DYNAMODB_REGION: !Ref AWS::Region
+          S3_BUCKET: !Ref S3Bucket
+          S3_PREFIX: agent-documents
+          S3_REFERENCE_PREFIX: mobile/v1/reference
+          S3_GOVERNANCE_PREFIX: governance/live
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: documents
+
+  ProjectServiceFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-project-service
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Architectures: [x86_64]
+      Role: !GetAtt ProjectServiceRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          PROJECTS_TABLE: projects
+          TRACKER_TABLE: devops-project-tracker
+          DYNAMODB_REGION: !Ref AWS::Region
+          S3_BUCKET: !Ref S3Bucket
+          S3_REFERENCE_PREFIX: mobile/v1/reference
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: projects
+
+  FeedQueryFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-feed-query-api
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 15
+      Architectures: [x86_64]
+      Role: !GetAtt FeedQueryRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          DYNAMODB_TABLE: devops-project-tracker
+          DYNAMODB_REGION: !Ref AWS::Region
+          PROJECTS_TABLE: projects
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: feed
+
+  CoordinationMonitorFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-coordination-monitor-api
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Architectures: [x86_64]
+      Role: !GetAtt CoordinationMonitorRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          COORDINATION_TABLE: coordination-requests
+          DYNAMODB_REGION: !Ref AWS::Region
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+
+  DeployIntakeFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-deploy-intake
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 120
+      Architectures: [x86_64]
+      Role: !GetAtt DeployIntakeRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          DEPLOY_TABLE: devops-deployment-manager
+          DEPLOY_REGION: !Ref AWS::Region
+          PROJECTS_TABLE: projects
+          CONFIG_BUCKET: !Ref S3Bucket
+          CONFIG_PREFIX: deployment-config
+          CORS_ORIGIN: !Ref CorsOrigin
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: deployment
+
+  ReferenceSearchFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-reference-search
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Architectures: [x86_64]
+      Role: !GetAtt ReferenceSearchRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          S3_BUCKET: !Ref S3Bucket
+          S3_REFERENCE_PREFIX: mobile/v1/reference
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: reference
+
+  AuthRefreshFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: auth-refresh
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 128
+      Timeout: 10
+      Architectures: [x86_64]
+      Role: !GetAtt AuthRefreshRole.Arn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          COGNITO_REGION: us-east-1
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: auth
+
+  # ---------------------------------------------------------------------------
+  # Lambda Functions — Backend Tier (event-driven, no direct API)
+  # ---------------------------------------------------------------------------
+
+  DeployOrchestratorFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-deploy-orchestrator
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 120
+      Architectures: [x86_64]
+      Role: !GetAtt DeployOrchestratorRole.Arn
+      Environment:
+        Variables:
+          DEPLOY_TABLE: devops-deployment-manager
+          DEPLOY_REGION: !Ref AWS::Region
+          PROJECTS_TABLE: projects
+          CONFIG_BUCKET: !Ref S3Bucket
+          CONFIG_PREFIX: deployment-config
+          CODEBUILD_PROJECT: devops-ui-deploy-builder
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: deployment
+
+  DeployFinalizeFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-deploy-finalize
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 120
+      Architectures: [x86_64]
+      Role: !GetAtt DeployFinalizeRole.Arn
+      Environment:
+        Variables:
+          DEPLOY_TABLE: devops-deployment-manager
+          DEPLOY_REGION: !Ref AWS::Region
+          PROJECTS_TABLE: projects
+          TRACKER_TABLE: devops-project-tracker
+          CONFIG_BUCKET: !Ref S3Bucket
+          CONFIG_PREFIX: deployment-config
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: deployment
+
+  FeedPublisherFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-feed-publisher
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      MemorySize: 512
+      Timeout: 600
+      Architectures: [x86_64]
+      Role: !GetAtt FeedPublisherRole.Arn
+      Description: Event-driven mobile feed publisher triggered by DynamoDB Streams via SQS FIFO
+      Environment:
+        Variables:
+          TRACKER_TABLE: devops-project-tracker
+          TRACKER_REGION: !Ref AWS::Region
+          PROJECTS_TABLE: projects
+          PROJECTS_REGION: !Ref AWS::Region
+          FEED_BUCKET: !Ref S3Bucket
+          FEED_PREFIX: mobile/v1
+          EVENT_BUS: default
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: feed
+
+  GovernanceAuditFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: enceladus-governance-audit
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      MemorySize: 128
+      Timeout: 30
+      Architectures: [x86_64]
+      Role: !GetAtt GovernanceAuditRole.Arn
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance
+
+  DocPrepFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-doc-prep
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Architectures: [x86_64]
+      Role: !GetAtt DocPrepRole.Arn
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: documents
+          PROJECTS_TABLE: projects
+          TRACKER_TABLE: devops-project-tracker
+          DYNAMODB_REGION: !Ref AWS::Region
+          S3_BUCKET: !Ref S3Bucket
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: documents
+
+  BedrockAgentActionsFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: enceladus-bedrock-agent-actions
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 30
+      Architectures: [x86_64]
+      Role: !GetAtt BedrockActionsRole.Arn
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: documents
+          PROJECTS_TABLE: projects
+          TRACKER_TABLE: devops-project-tracker
+          DEPLOY_TABLE: devops-deployment-manager
+          DYNAMODB_REGION: !Ref AWS::Region
+          S3_BUCKET: !Ref S3Bucket
+          GOVERNANCE_POLICIES_TABLE: governance-policies
+          AGENT_COMPLIANCE_TABLE: agent-compliance-violations
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: bedrock
+
+  # ---------------------------------------------------------------------------
+  # SQS -> Lambda Event Source Mappings
+  # ---------------------------------------------------------------------------
+
+  DeployOrchestratorSqsTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-DeployQueueArn
+      FunctionName: !Ref DeployOrchestratorFunction
+      BatchSize: 1
+      Enabled: true
+
+  FeedPublisherSqsTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-FeedPublishQueueArn
+      FunctionName: !Ref FeedPublisherFunction
+      BatchSize: 10
+      Enabled: true
+
+  # ---------------------------------------------------------------------------
+  # DynamoDB Stream -> Lambda (Governance Audit)
+  # ---------------------------------------------------------------------------
+
+  GovernanceAuditStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      FunctionName: !Ref GovernanceAuditFunction
+      BatchSize: 25
+      MaximumBatchingWindowInSeconds: 30
+      StartingPosition: LATEST
+      Enabled: true
+
+  # ---------------------------------------------------------------------------
+  # EventBridge Rules
+  # ---------------------------------------------------------------------------
+
+  CoordinationBatchPollerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: devops-coordination-batch-poller
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CoordinationApiFunction.Arn
+          Id: coordination-batch-poll
+
+  DeployCodeBuildFinalizeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: devops-deploy-codebuild-finalize
+      EventPattern:
+        source:
+          - aws.codebuild
+        detail-type:
+          - CodeBuild Build State Change
+        detail:
+          project-name:
+            - devops-ui-deploy-builder
+          build-status:
+            - SUCCEEDED
+            - FAILED
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DeployFinalizeFunction.Arn
+          Id: deploy-finalize-target
+
+  ProjectJsonSyncRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: on-project-json-sync
+      EventPattern:
+        source:
+          - devops.json-sync
+        detail-type:
+          - project-json-sync
+      State: ENABLED
+      Targets:
+        - Arn: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-json-to-parquet-transformer
+          Id: devops-json-to-parquet-transformer
+
+  # ---------------------------------------------------------------------------
+  # EventBridge Pipe (Tracker Stream -> Feed Queue)
+  # ---------------------------------------------------------------------------
+
+  TrackerToFeedPipe:
+    Type: AWS::Pipes::Pipe
+    Properties:
+      Name: devops-tracker-to-feed-queue
+      RoleArn: !GetAtt FeedPipeRole.Arn
+      Source: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+      Target: !ImportValue
+        Fn::Sub: ${DataStackName}-FeedPublishQueueArn
+      TargetParameters:
+        SqsQueueParameters:
+          MessageGroupId: $.dynamodb.NewImage.project_id.S
+          MessageDeduplicationId: $.dynamodb.Keys.record_id.S
+
+  # ---------------------------------------------------------------------------
+  # IAM Roles (placeholder — full policies in each Lambda's deploy.sh)
+  # ---------------------------------------------------------------------------
+
+  CoordinationApiRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-coordination-api-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  TrackerMutationRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-tracker-mutation-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  DocumentApiRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-document-api-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  ProjectServiceRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-project-service-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  FeedQueryRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-feed-query-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  CoordinationMonitorRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-coordination-monitor-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  DeployIntakeRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-deploy-intake-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  DeployOrchestratorRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-deploy-orchestrator-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  DeployFinalizeRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-deploy-finalize-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  ReferenceSearchRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-reference-search-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  FeedPublisherRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-feed-publisher-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  GovernanceAuditRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: enceladus-governance-audit-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  DocPrepRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-doc-prep-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  BedrockActionsRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: enceladus-bedrock-actions-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  AuthRefreshRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: auth-refresh-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  FeedPipeRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-feed-pipe-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pipes.amazonaws.com
+            Action: sts:AssumeRole
+
+Outputs:
+  CoordinationApiFunctionArn:
+    Value: !GetAtt CoordinationApiFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CoordinationApiFunctionArn
+  DocumentApiFunctionArn:
+    Value: !GetAtt DocumentApiFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DocumentApiFunctionArn
