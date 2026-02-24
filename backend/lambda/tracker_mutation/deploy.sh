@@ -27,12 +27,9 @@ package_lambda() {
 
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
-  # Install PyJWT with crypto support (required for Cognito JWT validation)
-  python3 -m pip install \
-    --quiet \
-    --upgrade \
-    "PyJWT[crypto]>=2.8.0" \
-    -t "${build_dir}" >/dev/null
+  # NOTE: PyJWT is provided by the enceladus-shared Lambda layer (shared_layer/deploy.sh).
+  # Do NOT bundle dependencies here - cross-platform binary compatibility issues.
+  # This script may run on macOS but Lambda runs on Linux; ensure layer is attached.
 
   (
     cd "${build_dir}"
