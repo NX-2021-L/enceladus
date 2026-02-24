@@ -318,8 +318,7 @@ package_lambda() {
     exit 1
   fi
 
-  cp "${ROOT_DIR}/lambda_function.py" "${build_dir}/"
-  cp "${ROOT_DIR}/mcp_client.py" "${build_dir}/"
+  find "${ROOT_DIR}" -maxdepth 1 -type f -name '*.py' ! -name 'test_*' -exec cp {} "${build_dir}/" \;
   cp "${mcp_server_src}" "${build_dir}/server.py"
   cp "${mcp_dispatch_src}" "${build_dir}/dispatch_plan_generator.py"
 
@@ -518,6 +517,7 @@ ensure_api_integration_and_routes() {
   integration_id="$(aws apigatewayv2 get-integrations \
     --region "${REGION}" \
     --api-id "${API_ID}" \
+    --no-paginate \
     --query "Items[?IntegrationUri=='${target_arn}'].IntegrationId | [0]" \
     --output text)"
 
@@ -553,15 +553,15 @@ ensure_api_integration_and_routes() {
     "OPTIONS /api/v1/coordination/capabilities"
   )
 
-  for route_key in "${routes[@]}"; do
-    local existing
-    existing="$(aws apigatewayv2 get-routes \
-      --region "${REGION}" \
-      --api-id "${API_ID}" \
-      --query "Items[?RouteKey=='${route_key}'].RouteId | [0]" \
-      --output text)"
+  local existing_route_keys
+  existing_route_keys="$(aws apigatewayv2 get-routes \
+    --region "${REGION}" \
+    --api-id "${API_ID}" \
+    --query 'Items[].RouteKey' \
+    --output text | tr '\t' '\n')"
 
-    if [[ -z "${existing}" || "${existing}" == "None" ]]; then
+  for route_key in "${routes[@]}"; do
+    if ! printf '%s\n' "${existing_route_keys}" | grep -Fqx "${route_key}"; then
       log "[START] creating route: ${route_key}"
       aws apigatewayv2 create-route \
         --region "${REGION}" \
@@ -569,6 +569,7 @@ ensure_api_integration_and_routes() {
         --route-key "${route_key}" \
         --target "integrations/${integration_id}" >/dev/null
       log "[END] route created: ${route_key}"
+      existing_route_keys="${existing_route_keys}"$'\n'"${route_key}"
     else
       log "[OK] route exists: ${route_key}"
     fi
