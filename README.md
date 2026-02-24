@@ -7,6 +7,30 @@ Monorepo for Enceladus components:
 - `tools/enceladus-mcp-server/` - Enceladus MCP server source + briefing templates
 - `infrastructure/` - deployment metadata, parity audit mappings, and generated evidence
 
+## ⚠️ CRITICAL: JWT & Lambda Deployment Requirements
+
+**🚨 NEVER build Lambda deployment packages on macOS.**
+
+Compiled dependencies (PyJWT, cryptography, cffi) built on macOS produce Mach-O binaries incompatible with Lambda's Linux ELF runtime. This causes silent JWT import failures (`_JWT_AVAILABLE=False`), resulting in all authenticated requests returning 401.
+
+**Solution for all Lambda functions**:
+```bash
+# Use --platform targeting for Linux compatibility
+pip install \
+  --platform manylinux2014_x86_64 \
+  --only-binary=:all: \
+  -r requirements.txt -t build_dir
+```
+
+**Related Incidents**:
+- ENC-ISS-041: Tracker API JWT library missing (2026-02-24, FIXED)
+- DVP-ISS-059: tracker-mutation-api JWT library missing (2026-02-20, FIXED)
+- DVP-ISS-071: Project service auth fails (2026-02-21, FIXED)
+
+**See**: `JWT_AUTHENTICATION_FORENSICS.md` for complete incident analysis and prevention framework.
+
+---
+
 ## Status
 
 API and MCP source files are now stored in this repo so the full Enceladus codebase is available in GitHub.
