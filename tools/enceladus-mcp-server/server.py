@@ -142,6 +142,10 @@ DEPLOY_API_BASE = os.environ.get(
     "ENCELADUS_DEPLOY_API_BASE",
     "https://jreese.net/api/v1/deploy",
 )
+DEPLOY_API_INTERNAL_API_KEY = os.environ.get(
+    "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
+    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
+)
 DEPLOY_QUEUE_NAME = os.environ.get("ENCELADUS_DEPLOY_QUEUE", "devops-deploy-queue.fifo")
 DEPLOY_CONFIG_BUCKET = os.environ.get("ENCELADUS_DEPLOY_CONFIG_BUCKET", "jreese-net")
 DEPLOY_CONFIG_PREFIX = os.environ.get("ENCELADUS_DEPLOY_CONFIG_PREFIX", "deploy-config")
@@ -911,6 +915,8 @@ def _deploy_api_request(
         "Accept": "application/json",
         "User-Agent": HTTP_USER_AGENT,
     }
+    if DEPLOY_API_INTERNAL_API_KEY:
+        headers["X-Coordination-Internal-Key"] = DEPLOY_API_INTERNAL_API_KEY
     if DEPLOY_API_COOKIE:
         headers["Cookie"] = DEPLOY_API_COOKIE
     if payload is not None:
@@ -934,6 +940,91 @@ def _deploy_api_request(
         return _error_payload("UPSTREAM_ERROR", f"Deployment API unreachable: {exc}", retryable=True)
     except Exception as exc:  # pragma: no cover - defensive fallback
         return _error_payload("INTERNAL_ERROR", f"Deployment API request failed: {exc}", retryable=False)
+
+
+def _is_authentication_required_error(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    code = ""
+    message = ""
+    error_obj = payload.get("error")
+    if isinstance(error_obj, dict):
+        code = str(error_obj.get("code") or "").strip().upper()
+        message = str(error_obj.get("message") or "")
+    elif isinstance(error_obj, str):
+        message = error_obj
+
+    envelope = payload.get("error_envelope")
+    if isinstance(envelope, dict):
+        if not code:
+            code = str(envelope.get("code") or "").strip().upper()
+        if not message:
+            message = str(envelope.get("message") or "")
+
+    return code == "PERMISSION_DENIED" and "authentication required" in message.lower()
+
+
+def _deploy_state_get_direct(project_id: str) -> Dict[str, Any]:
+    key = f"{DEPLOY_CONFIG_PREFIX}/{project_id}/state.json"
+    try:
+        s3 = _get_s3()
+        resp = s3.get_object(Bucket=DEPLOY_CONFIG_BUCKET, Key=key)
+        payload = json.loads(resp["Body"].read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            payload = {}
+        return {"success": True, "project_id": project_id, **payload}
+    except ClientError as exc:
+        code = (exc.response or {}).get("Error", {}).get("Code", "")
+        if code in {"NoSuchKey", "404", "NotFound"}:
+            return {
+                "success": True,
+                "project_id": project_id,
+                "state": "ACTIVE",
+                "updated_at": None,
+                "updated_by": "default",
+                "reason": None,
+            }
+        return _error_payload(
+            "UPSTREAM_ERROR",
+            f"Failed to read deployment state directly: {exc}",
+            retryable=True,
+        )
+    except Exception as exc:
+        return _error_payload(
+            "INTERNAL_ERROR",
+            f"Failed to read deployment state directly: {exc}",
+            retryable=False,
+        )
+
+
+def _deploy_history_direct(project_id: str, limit: int = 10) -> Dict[str, Any]:
+    ddb = _get_ddb()
+    results: List[Dict[str, Any]] = []
+    kwargs: Dict[str, Any] = {
+        "TableName": DEPLOY_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
+        "ExpressionAttributeValues": {
+            ":pid": _ser_s(project_id),
+            ":prefix": _ser_s("deploy#"),
+        },
+        "ScanIndexForward": False,
+    }
+    try:
+        while True:
+            resp = ddb.query(**kwargs)
+            results.extend([_deser_item(item) for item in resp.get("Items", [])])
+            if len(results) >= limit or "LastEvaluatedKey" not in resp:
+                break
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    except Exception as exc:
+        return _error_payload(
+            "UPSTREAM_ERROR",
+            f"Failed to read deployment history directly: {exc}",
+            retryable=True,
+        )
+    results.sort(key=lambda r: r.get("deployed_at", ""), reverse=True)
+    return {"success": True, "project_id": project_id, "deployments": results[:limit]}
 
 
 def _document_api_request(
@@ -3919,13 +4010,29 @@ async def _reference_search(args: dict) -> list[TextContent]:
 async def _deploy_state_get(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
     result = _deploy_api_request("GET", f"/state/{project_id}")
+    if _is_authentication_required_error(result):
+        logger.info(
+            "[INFO] deploy_state_get received PERMISSION_DENIED from deploy API; using direct fallback for project %s",
+            project_id,
+        )
+        result = _deploy_state_get_direct(project_id)
     return _result_text(result)
 
 
 async def _deploy_history(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
-    limit = args.get("limit", 10)
+    try:
+        limit = int(args.get("limit", 10))
+    except (TypeError, ValueError):
+        limit = 10
+    limit = max(1, min(limit, 50))
     result = _deploy_api_request("GET", f"/history/{project_id}", query={"limit": limit})
+    if _is_authentication_required_error(result):
+        logger.info(
+            "[INFO] deploy_history received PERMISSION_DENIED from deploy API; using direct fallback for project %s",
+            project_id,
+        )
+        result = _deploy_history_direct(project_id, limit)
     return _result_text(result)
 
 

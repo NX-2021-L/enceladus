@@ -19,6 +19,8 @@ CONFIG_PREFIX="${CONFIG_PREFIX:-deploy-config}"
 SQS_QUEUE_URL="${SQS_QUEUE_URL:-https://sqs.us-west-2.amazonaws.com/356364570033/devops-deploy-queue.fifo}"
 COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_b2D0V3E1k}"
 COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
+COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
+COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
 DOC_PREP_LAMBDA_NAME="${DOC_PREP_LAMBDA_NAME:-devops-doc-prep}"
 CORS_ORIGIN="${CORS_ORIGIN:-https://jreese.net}"
 
@@ -128,11 +130,48 @@ package_lambda() {
   echo "${zip_path}"
 }
 
+resolve_internal_api_key() {
+  if [[ -n "${COORDINATION_INTERNAL_API_KEY}" ]]; then
+    printf '%s' "${COORDINATION_INTERNAL_API_KEY}"
+    return
+  fi
+
+  local existing
+  existing="$(aws lambda get-function-configuration \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
+    --output text 2>/dev/null || true)"
+  if [[ "${existing}" == "None" ]]; then
+    existing=""
+  fi
+  if [[ -n "${existing}" ]]; then
+    printf '%s' "${existing}"
+    return
+  fi
+
+  local coordination_key
+  coordination_key="$(aws lambda get-function-configuration \
+    --function-name "${COORDINATION_API_FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
+    --output text 2>/dev/null || true)"
+  if [[ "${coordination_key}" == "None" ]]; then
+    coordination_key=""
+  fi
+  printf '%s' "${coordination_key}"
+}
+
 deploy_lambda() {
   local zip_path="$1"
   local role_arn="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
+  local effective_internal_key
+  effective_internal_key="$(resolve_internal_api_key)"
+  if [[ -z "${effective_internal_key}" ]]; then
+    log "[WARNING] COORDINATION_INTERNAL_API_KEY resolved empty; deploy_intake will remain cookie-only."
+  fi
   local env_vars
-  env_vars="{DEPLOY_TABLE=${DEPLOY_TABLE},DEPLOY_REGION=${REGION},PROJECTS_TABLE=${PROJECTS_TABLE},CONFIG_BUCKET=${CONFIG_BUCKET},CONFIG_PREFIX=${CONFIG_PREFIX},SQS_QUEUE_URL=${SQS_QUEUE_URL},COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID},DOC_PREP_LAMBDA_NAME=${DOC_PREP_LAMBDA_NAME},CORS_ORIGIN=${CORS_ORIGIN}}"
+  env_vars="{DEPLOY_TABLE=${DEPLOY_TABLE},DEPLOY_REGION=${REGION},PROJECTS_TABLE=${PROJECTS_TABLE},CONFIG_BUCKET=${CONFIG_BUCKET},CONFIG_PREFIX=${CONFIG_PREFIX},SQS_QUEUE_URL=${SQS_QUEUE_URL},COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID},COORDINATION_INTERNAL_API_KEY=${effective_internal_key},DOC_PREP_LAMBDA_NAME=${DOC_PREP_LAMBDA_NAME},CORS_ORIGIN=${CORS_ORIGIN}}"
 
   if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION}" >/dev/null 2>&1; then
     log "[START] updating Lambda code: ${FUNCTION_NAME}"

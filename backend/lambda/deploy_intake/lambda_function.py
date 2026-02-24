@@ -15,6 +15,8 @@ Routes (via API Gateway proxy):
 Auth:
     Reads the `enceladus_id_token` cookie from the Cookie header.
     Validates the JWT using Cognito JWKS (RS256, cached module-level).
+    Optional service-to-service auth via X-Coordination-Internal-Key when
+    COORDINATION_INTERNAL_API_KEY is set.
 
 Environment variables:
     COGNITO_USER_POOL_ID   us-east-1_b2D0V3E1k
@@ -37,7 +39,7 @@ import os
 import re
 import secrets
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import urllib.request
 from urllib.parse import unquote
 
@@ -62,6 +64,7 @@ DEPLOY_REGION = os.environ.get("DEPLOY_REGION", "us-west-2")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E1k")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk")
+COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
 CONFIG_BUCKET = os.environ.get("CONFIG_BUCKET", "jreese-net")
 CONFIG_PREFIX = os.environ.get("CONFIG_PREFIX", "deploy-config")
 SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
@@ -189,7 +192,7 @@ def _cors_headers() -> Dict[str, str]:
     return {
         "Access-Control-Allow-Origin": CORS_ORIGIN,
         "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Cookie",
+        "Access-Control-Allow-Headers": "Content-Type, Cookie, X-Coordination-Internal-Key",
         "Access-Control-Allow-Credentials": "true",
     }
 
@@ -320,6 +323,31 @@ def _extract_token(event: Dict) -> Optional[str]:
         if part.startswith("enceladus_id_token="):
             return unquote(part[len("enceladus_id_token="):])
     return None
+
+
+def _authenticate(event: Dict) -> Tuple[Optional[Dict[str, Any]], Optional[Dict]]:
+    """Authenticate request. Returns (claims, None) or (None, error_response)."""
+    headers = event.get("headers") or {}
+    if COORDINATION_INTERNAL_API_KEY:
+        internal_key = (
+            headers.get("x-coordination-internal-key")
+            or headers.get("X-Coordination-Internal-Key")
+            or ""
+        )
+        if internal_key and internal_key == COORDINATION_INTERNAL_API_KEY:
+            return {"auth_mode": "internal-key", "sub": "internal-key"}, None
+
+    token = _extract_token(event)
+    if not token:
+        logger.warning("No enceladus_id_token cookie found")
+        return None, _error(401, "Authentication required")
+
+    try:
+        claims = _verify_token(token)
+        return claims, None
+    except ValueError as exc:
+        logger.warning("Auth failed: %s", exc)
+        return None, _error(401, str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -769,17 +797,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
     if method == "OPTIONS":
         return _response(204, "")
 
-    # Auth
-    token = _extract_token(event)
-    if not token:
-        logger.warning("No enceladus_id_token cookie found")
-        return _error(401, "Authentication required")
-
-    try:
-        _verify_token(token)
-    except ValueError as e:
-        logger.warning(f"Auth failed: {e}")
-        return _error(401, str(e))
+    # Auth (Cognito cookie or internal service key)
+    _claims, auth_error = _authenticate(event)
+    if auth_error:
+        return auth_error
 
     # Parse body
     body = {}

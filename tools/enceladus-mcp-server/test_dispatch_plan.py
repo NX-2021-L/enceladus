@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import sys
+import urllib.request
 import uuid
 from typing import Dict
 
@@ -601,6 +602,98 @@ def test_deploy_adapter_contract():
     _pass("deploy adapter route mapping uses deploy_intake API paths")
 
 
+def test_deploy_api_internal_key_header():
+    _header("Deployment API Internal-Key Header")
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    import server
+
+    captured_headers = {}
+    original_urlopen = urllib.request.urlopen
+    original_key = server.DEPLOY_API_INTERNAL_API_KEY
+    original_cookie = server.DEPLOY_API_COOKIE
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"success": true}'
+
+    def _fake_urlopen(req, timeout=0, context=None):
+        captured_headers.update({k.lower(): v for k, v in req.header_items()})
+        return _FakeResponse()
+
+    try:
+        server.DEPLOY_API_INTERNAL_API_KEY = "enc-test-key"
+        server.DEPLOY_API_COOKIE = ""
+        urllib.request.urlopen = _fake_urlopen
+        result = server._deploy_api_request("GET", "/state/devops")
+    finally:
+        urllib.request.urlopen = original_urlopen
+        server.DEPLOY_API_INTERNAL_API_KEY = original_key
+        server.DEPLOY_API_COOKIE = original_cookie
+
+    assert result.get("success") is True
+    assert captured_headers.get("x-coordination-internal-key") == "enc-test-key"
+    _pass("_deploy_api_request attaches X-Coordination-Internal-Key when configured")
+
+
+def test_deploy_auth_fallback_direct_reads():
+    _header("Deploy Auth Fallback to Direct Reads")
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    import server
+
+    original_api_request = server._deploy_api_request
+    original_state_direct = server._deploy_state_get_direct
+    original_history_direct = server._deploy_history_direct
+
+    def _deny(*_args, **_kwargs):
+        return server._error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
+
+    try:
+        server._deploy_api_request = _deny
+        server._deploy_state_get_direct = lambda project_id: {
+            "success": True,
+            "project_id": project_id,
+            "state": "ACTIVE",
+            "source": "direct",
+        }
+        server._deploy_history_direct = lambda project_id, limit: {
+            "success": True,
+            "project_id": project_id,
+            "deployments": [],
+            "source": "direct",
+            "limit": limit,
+        }
+
+        loop = asyncio.new_event_loop()
+        try:
+            state = loop.run_until_complete(server._deploy_state_get({"project_id": "devops"}))
+            history = loop.run_until_complete(
+                server._deploy_history_list({"project_id": "devops", "limit": 7})
+            )
+        finally:
+            loop.close()
+    finally:
+        server._deploy_api_request = original_api_request
+        server._deploy_state_get_direct = original_state_direct
+        server._deploy_history_direct = original_history_direct
+
+    state_payload = json.loads(state[0].text)
+    history_payload = json.loads(history[0].text)
+    assert state_payload.get("success") is True
+    assert state_payload.get("source") == "direct"
+    assert history_payload.get("success") is True
+    assert history_payload.get("source") == "direct"
+    assert history_payload.get("limit") == 7
+    _pass("deploy_state_get/history_list fall back to direct data path on auth-required errors")
+
+
 # =================================================================
 # Test: Bedrock Agent Provider (DVP-TSK-338)
 # =================================================================
@@ -939,6 +1032,8 @@ if __name__ == "__main__":
     test_manifest_provider_mapping()
     test_manifest_keyword_completeness()
     test_deploy_adapter_contract()
+    test_deploy_api_internal_key_header()
+    test_deploy_auth_fallback_direct_reads()
 
     print(f"\n{'='*60}")
     if _failures:
