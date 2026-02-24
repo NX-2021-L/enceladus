@@ -1,0 +1,403 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus Data Layer — DynamoDB tables, SQS queues, SNS topics.
+  Part of ENC-TSK-532: IaC templates for Enceladus AWS resources.
+
+  NOTE: These resources already exist. Use `aws cloudformation create-stack
+  --import-resources` with resource-import.json to adopt them.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+  DynamoDBRegion:
+    Type: String
+    Default: us-west-2
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # DynamoDB Tables
+  # ---------------------------------------------------------------------------
+
+  CoordinationRequestsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: coordination-requests
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+        - AttributeName: project_id
+          AttributeType: S
+        - AttributeName: updated_epoch
+          AttributeType: N
+        - AttributeName: idempotency_key
+          AttributeType: S
+        - AttributeName: created_epoch
+          AttributeType: N
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: project-updated-index
+          KeySchema:
+            - AttributeName: project_id
+              KeyType: HASH
+            - AttributeName: updated_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: idempotency-index
+          KeySchema:
+            - AttributeName: idempotency_key
+              KeyType: HASH
+            - AttributeName: created_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+
+  TrackerTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: devops-project-tracker
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        - AttributeName: project_id
+          AttributeType: S
+        - AttributeName: record_id
+          AttributeType: S
+        - AttributeName: record_type
+          AttributeType: S
+        - AttributeName: updated_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: project_id
+          KeyType: HASH
+        - AttributeName: record_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: type-updated-index
+          KeySchema:
+            - AttributeName: record_type
+              KeyType: HASH
+            - AttributeName: updated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - project_id
+              - update
+              - item_id
+              - title
+              - status
+        - IndexName: project-type-index
+          KeySchema:
+            - AttributeName: project_id
+              KeyType: HASH
+            - AttributeName: record_type
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: tracker
+
+  ProjectsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: projects
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      AttributeDefinitions:
+        - AttributeName: project_id
+          AttributeType: S
+        - AttributeName: prefix
+          AttributeType: S
+      KeySchema:
+        - AttributeName: project_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: prefix-index
+          KeySchema:
+            - AttributeName: prefix
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: projects
+
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: documents
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      AttributeDefinitions:
+        - AttributeName: document_id
+          AttributeType: S
+        - AttributeName: project_id
+          AttributeType: S
+        - AttributeName: updated_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: document_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: project-updated-index
+          KeySchema:
+            - AttributeName: project_id
+              KeyType: HASH
+            - AttributeName: updated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: documents
+
+  DeploymentManagerTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: devops-deployment-manager
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: project_id
+          AttributeType: S
+        - AttributeName: record_id
+          AttributeType: S
+        - AttributeName: record_type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: project_id
+          KeyType: HASH
+        - AttributeName: record_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: record-type-index
+          KeySchema:
+            - AttributeName: project_id
+              KeyType: HASH
+            - AttributeName: record_type
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: deployment
+
+  GovernancePoliciesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: governance-policies
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: policy_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: policy_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance
+
+  AgentComplianceViolationsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: agent-compliance-violations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: violation_id
+          AttributeType: S
+        - AttributeName: provider
+          AttributeType: S
+        - AttributeName: event_epoch
+          AttributeType: N
+        - AttributeName: policy_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: violation_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: provider-timestamp-index
+          KeySchema:
+            - AttributeName: provider
+              KeyType: HASH
+            - AttributeName: event_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: policy-timestamp-index
+          KeySchema:
+            - AttributeName: policy_id
+              KeyType: HASH
+            - AttributeName: event_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance
+
+  # ---------------------------------------------------------------------------
+  # SQS Queues
+  # ---------------------------------------------------------------------------
+
+  DeployQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: devops-deploy-queue.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 86400
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: deployment
+
+  FeedPublishQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: devops-feed-publish-queue.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 86400
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: feed
+
+  # ---------------------------------------------------------------------------
+  # SNS Topics
+  # ---------------------------------------------------------------------------
+
+  CoordinationDeadLetterTopic:
+    Type: AWS::SNS::Topic
+    DeletionPolicy: Retain
+    Properties:
+      TopicName: coordination-dead-letter
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+
+  FeedAlertsTopic:
+    Type: AWS::SNS::Topic
+    DeletionPolicy: Retain
+    Properties:
+      TopicName: devops-feed-alerts
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: feed
+
+  ParquetReadyTopic:
+    Type: AWS::SNS::Topic
+    DeletionPolicy: Retain
+    Properties:
+      TopicName: devops-json-parquet-ready
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: analytics
+
+  ProjectJsonSyncTopic:
+    Type: AWS::SNS::Topic
+    DeletionPolicy: Retain
+    Properties:
+      TopicName: devops-project-json-sync
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: feed
+
+Outputs:
+  CoordinationTableName:
+    Value: !Ref CoordinationRequestsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-CoordinationTable
+  CoordinationTableArn:
+    Value: !GetAtt CoordinationRequestsTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CoordinationTableArn
+  TrackerTableName:
+    Value: !Ref TrackerTable
+    Export:
+      Name: !Sub ${AWS::StackName}-TrackerTable
+  TrackerTableArn:
+    Value: !GetAtt TrackerTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-TrackerTableArn
+  TrackerStreamArn:
+    Value: !GetAtt TrackerTable.StreamArn
+    Export:
+      Name: !Sub ${AWS::StackName}-TrackerStreamArn
+  ProjectsTableName:
+    Value: !Ref ProjectsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-ProjectsTable
+  DocumentsTableName:
+    Value: !Ref DocumentsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-DocumentsTable
+  DeployQueueUrl:
+    Value: !Ref DeployQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-DeployQueueUrl
+  DeployQueueArn:
+    Value: !GetAtt DeployQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DeployQueueArn
+  FeedPublishQueueUrl:
+    Value: !Ref FeedPublishQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-FeedPublishQueueUrl
+  FeedPublishQueueArn:
+    Value: !GetAtt FeedPublishQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-FeedPublishQueueArn
+  DeadLetterTopicArn:
+    Value: !Ref CoordinationDeadLetterTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-DeadLetterTopicArn

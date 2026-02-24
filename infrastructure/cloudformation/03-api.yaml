@@ -1,0 +1,369 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus API Layer — API Gateway HTTP API, routes, integrations.
+  Part of ENC-TSK-532: IaC templates for Enceladus AWS resources.
+
+  NOTE: API Gateway already exists. Use resource import to adopt it.
+
+Parameters:
+  ComputeStackName:
+    Type: String
+    Default: enceladus-compute
+  ApiName:
+    Type: String
+    Default: devops-tracker-api
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # HTTP API
+  # ---------------------------------------------------------------------------
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Ref ApiName
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - https://jreese.net
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - Cookie
+        AllowCredentials: true
+
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+
+  # ---------------------------------------------------------------------------
+  # Integrations (Lambda proxy)
+  # ---------------------------------------------------------------------------
+
+  CoordinationApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-api
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  TrackerMutationIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  DocumentApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-document-api
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  ProjectServiceIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-project-service
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  FeedQueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-query-api
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  CoordinationMonitorIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-monitor-api
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  DeployIntakeIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-intake
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  ReferenceSearchIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-reference-search
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  DocPrepIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-doc-prep
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  AuthRefreshIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:auth-refresh
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # ---------------------------------------------------------------------------
+  # Routes — Coordination API
+  # ---------------------------------------------------------------------------
+
+  RouteCoordinationCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/requests
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/requests/{requestId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationDispatch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/requests/{requestId}/dispatch
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationCallback:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/requests/{requestId}/callback
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationCapabilities:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/capabilities
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationMcpGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/mcp
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationMcpPost:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/mcp
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Routes — Tracker Mutation
+  # ---------------------------------------------------------------------------
+
+  RouteTrackerMutationLegacy:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteTrackerMutationV1:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Routes — Document API
+  # ---------------------------------------------------------------------------
+
+  RouteDocumentsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/documents
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/documents/{documentId}
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsSearch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/documents/search
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /api/v1/documents
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteDocumentsPatch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/documents/{documentId}
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Routes — Project Service
+  # ---------------------------------------------------------------------------
+
+  RouteProjectsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/projects
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  RouteProjectsGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/projects/{projectName}
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  RouteProjectsCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/projects
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Routes — Feed, Monitor, Deploy, Reference, DocPrep, Auth
+  # ---------------------------------------------------------------------------
+
+  RouteFeedQuery:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/feed
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  RouteMonitorList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/monitor
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteMonitorGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/monitor/{requestId}
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteDeploySubmit:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/deploy/submit
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployStatus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/status/{specId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployHistory:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/history/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployStateGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/state/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployStatePatch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/deploy/state/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteReferenceSearch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/reference/search
+      Target: !Sub integrations/${ReferenceSearchIntegration}
+
+  RouteDocPrep:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/doc-prep/{projectName}
+      AuthorizationType: AWS_IAM
+      Target: !Sub integrations/${DocPrepIntegration}
+
+  RouteAuthRefresh:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/auth/refresh
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+Outputs:
+  ApiEndpoint:
+    Value: !GetAtt HttpApi.ApiEndpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiEndpoint
+  ApiId:
+    Value: !Ref HttpApi
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiId
