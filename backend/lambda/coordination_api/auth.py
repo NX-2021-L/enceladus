@@ -32,10 +32,14 @@ from config import COGNITO_CLIENT_ID, COGNITO_USER_POOL_ID, COORDINATION_INTERNA
 from http_utils import _error
 
 __all__ = [
+    "_CERT_BUNDLE",
+    "_JWT_AVAILABLE",
     "_JWKS_TTL",
     "_authenticate",
     "_extract_token",
     "_get_jwks",
+    "_jwks_cache",
+    "_jwks_fetched_at",
     "_verify_token",
 ]
 
