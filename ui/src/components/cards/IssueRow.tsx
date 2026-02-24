@@ -3,6 +3,7 @@ import type { Issue } from '../../types/feeds'
 import { StatusChip } from '../shared/StatusChip'
 import { PriorityBadge } from '../shared/PriorityBadge'
 import { SeverityBadge } from '../shared/SeverityBadge'
+import { CoordinationFlagBadge } from '../shared/CoordinationFlagBadge'
 import { timeAgo } from '../../lib/formatters'
 
 export function IssueRow({ issue }: { issue: Issue }) {
@@ -21,10 +22,11 @@ export function IssueRow({ issue }: { issue: Issue }) {
         </div>
         <span className="text-xs text-slate-500 flex-shrink-0">{timeAgo(issue.updated_at)}</span>
       </div>
-      <div className="flex items-center gap-2 mt-1.5">
+      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
         <StatusChip status={issue.status} />
         <PriorityBadge priority={issue.priority} />
         <SeverityBadge severity={issue.severity} />
+        {issue.coordination && <CoordinationFlagBadge isCoordination />}
       </div>
     </Link>
   )

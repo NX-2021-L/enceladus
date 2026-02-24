@@ -44,6 +44,12 @@ export interface Task {
   updated_at: string | null
   last_update_note: string | null
   created_at: string | null
+  // Active agent session fields
+  active_agent_session?: boolean
+  active_agent_session_id?: string
+  active_agent_session_parent?: boolean
+  // Coordination flag
+  coordination?: boolean
 }
 
 export interface Issue {
@@ -63,6 +69,8 @@ export interface Issue {
   updated_at: string | null
   last_update_note: string | null
   created_at: string | null
+  // Coordination flag
+  coordination?: boolean
 }
 
 export interface Feature {
@@ -82,6 +90,8 @@ export interface Feature {
   updated_at: string | null
   last_update_note: string | null
   created_at: string | null
+  // Coordination flag
+  coordination?: boolean
 }
 
 export interface FeedEnvelope<T> {

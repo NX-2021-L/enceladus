@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import type { Feature } from '../../types/feeds'
 import { StatusChip } from '../shared/StatusChip'
+import { CoordinationFlagBadge } from '../shared/CoordinationFlagBadge'
 import { timeAgo } from '../../lib/formatters'
 
 export function FeatureRow({ feature }: { feature: Feature }) {
@@ -19,8 +20,9 @@ export function FeatureRow({ feature }: { feature: Feature }) {
         </div>
         <span className="text-xs text-slate-500 flex-shrink-0">{timeAgo(feature.updated_at)}</span>
       </div>
-      <div className="flex items-center gap-2 mt-1.5">
+      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
         <StatusChip status={feature.status} />
+        {feature.coordination && <CoordinationFlagBadge isCoordination />}
         {feature.success_metrics_count > 0 && (
           <span className="text-xs text-slate-500">{feature.success_metrics_count} metrics</span>
         )}
