@@ -3,7 +3,12 @@
  *
  * Handles project creation via POST /api/v1/projects with Cognito JWT auth.
  * The enceladus_id_token cookie is automatically sent via credentials:'include'.
+ *
+ * On 401, automatically attempts credential refresh and retries up to 3 cycles
+ * (matching the retry pattern in mutations.ts).
  */
+
+import { refreshCredentials } from './auth'
 
 export type CreateProjectRequest = {
   name: string;
@@ -19,7 +24,7 @@ export type CreateProjectResponse = {
   project: {
     project_id: string;
     prefix: string;
-    path: string;
+    path?: string;
     repo?: string;
     summary: string;
     status: string;
@@ -77,46 +82,75 @@ async function postCreateProject(
   return { response, body };
 }
 
+const MAX_CREATE_CYCLES = 3;
+
 /**
  * Create a new project via devops-project-service Lambda
- * Cognito JWT is automatically sent via enceladus_id_token cookie
+ * Cognito JWT is automatically sent via enceladus_id_token cookie.
+ *
+ * On 401, attempts credential refresh and retries (up to 3 cycles)
+ * before surfacing the auth error to the caller.
  */
 export async function createProject(
   data: CreateProjectRequest
 ): Promise<CreateProjectResponse> {
   const primaryUrl = `${BASE_URL}/projects`;
 
-  try {
-    let { response, body } = await postCreateProject(primaryUrl, data);
-    if (response.status === 404 && primaryUrl !== CANONICAL_PROJECTS_URL) {
-      ({ response, body } = await postCreateProject(CANONICAL_PROJECTS_URL, data));
+  for (let cycle = 1; cycle <= MAX_CREATE_CYCLES; cycle++) {
+    try {
+      let { response, body } = await postCreateProject(primaryUrl, data);
+      if (response.status === 404 && primaryUrl !== CANONICAL_PROJECTS_URL) {
+        ({ response, body } = await postCreateProject(CANONICAL_PROJECTS_URL, data));
+      }
+
+      if (response.status === 401) {
+        // Attempt credential refresh before next cycle
+        const refreshed = await refreshCredentials();
+        if (refreshed && cycle < MAX_CREATE_CYCLES) {
+          continue; // retry with refreshed credentials
+        }
+        // Refresh failed or final cycle — surface the auth error
+        throw new ProjectServiceError(
+          401,
+          'Your session has expired. Please log in again.',
+          body
+        );
+      }
+
+      if (!response.ok) {
+        const errorMessage =
+          body.error ||
+          body.message ||
+          `HTTP ${response.status}: ${response.statusText}`;
+
+        throw new ProjectServiceError(
+          response.status,
+          String(errorMessage),
+          body
+        );
+      }
+
+      return body as unknown as CreateProjectResponse;
+    } catch (error) {
+      if (error instanceof ProjectServiceError) {
+        throw error;
+      }
+
+      if (error instanceof Error) {
+        // Network errors on non-final cycle: attempt refresh and retry
+        if (cycle < MAX_CREATE_CYCLES) {
+          await refreshCredentials();
+          continue;
+        }
+        throw new ProjectServiceError(0, `Network error: ${error.message}`);
+      }
+
+      throw new ProjectServiceError(0, 'Unknown error occurred');
     }
-
-    if (!response.ok) {
-      const errorMessage =
-        body.error ||
-        body.message ||
-        `HTTP ${response.status}: ${response.statusText}`;
-
-      throw new ProjectServiceError(
-        response.status,
-        String(errorMessage),
-        body
-      );
-    }
-
-    return body as unknown as CreateProjectResponse;
-  } catch (error) {
-    if (error instanceof ProjectServiceError) {
-      throw error;
-    }
-
-    if (error instanceof Error) {
-      throw new ProjectServiceError(0, `Network error: ${error.message}`);
-    }
-
-    throw new ProjectServiceError(0, 'Unknown error occurred');
   }
+
+  // Should not reach here, but satisfy TypeScript
+  throw new ProjectServiceError(0, 'All retry cycles exhausted');
 }
 
 /**
