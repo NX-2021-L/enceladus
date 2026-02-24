@@ -2,6 +2,8 @@ import { Link } from 'react-router-dom'
 import type { Task } from '../../types/feeds'
 import { StatusChip } from '../shared/StatusChip'
 import { PriorityBadge } from '../shared/PriorityBadge'
+import { ActiveSessionBadge } from '../shared/ActiveSessionBadge'
+import { CoordinationFlagBadge } from '../shared/CoordinationFlagBadge'
 import { timeAgo } from '../../lib/formatters'
 
 export function TaskRow({ task }: { task: Task }) {
@@ -20,12 +22,19 @@ export function TaskRow({ task }: { task: Task }) {
         </div>
         <span className="text-xs text-slate-500 flex-shrink-0">{timeAgo(task.updated_at)}</span>
       </div>
-      <div className="flex items-center gap-2 mt-1.5">
+      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
         <StatusChip status={task.status} />
         <PriorityBadge priority={task.priority} />
+        {task.active_agent_session && <ActiveSessionBadge isActive agentSessionId={task.active_agent_session_id} />}
+        {task.coordination && <CoordinationFlagBadge isCoordination />}
         {task.checklist_total > 0 && (
           <span className="text-xs text-slate-500">
             {task.checklist_done}/{task.checklist_total}
+          </span>
+        )}
+        {task.parent && (
+          <span className="text-xs text-blue-400 truncate" title={`Parent: ${task.parent}`}>
+            Parent: {task.parent}
           </span>
         )}
       </div>

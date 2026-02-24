@@ -137,6 +137,23 @@ export const COORDINATION_STATE_LABELS: Record<string, string> = {
   dead_letter: 'Dead Letter',
 }
 
+// ---------------------------------------------------------------------------
+// Active agent session and coordination flags
+// ---------------------------------------------------------------------------
+
+export const ACTIVE_SESSION_COLORS: Record<string, string> = {
+  active: 'bg-emerald-500/20 text-emerald-400',
+  inactive: 'bg-slate-500/20 text-slate-400',
+}
+
+export const ACTIVE_SESSION_LABELS: Record<string, string> = {
+  active: 'Active',
+  inactive: 'Inactive',
+}
+
+export const COORDINATION_FLAG_COLOR = 'bg-cyan-500/20 text-cyan-400'
+export const COORDINATION_FLAG_LABEL = 'Coordination'
+
 export const SORT_OPTIONS_COORDINATION = [
   { value: 'updated', label: 'Last Updated' },
   { value: 'created', label: 'Created' },
