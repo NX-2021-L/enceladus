@@ -27,9 +27,13 @@ This folder contains Lambda-based API components sourced from the canonical DevO
 
 ## Deployment Policy
 
-- This repo currently enables GitHub Actions deployment for UI only.
-- API code in this folder is source-managed in GitHub, but non-UI auto-deploy is intentionally not enabled.
+- UI deployment remains managed by `.github/workflows/ui-backend-deploy.yml`.
+- API + MCP runtime deployment is managed by `.github/workflows/api-mcp-backend-deploy.yml`,
+  which executes `backend/lambda/coordination_api/deploy.sh`.
+- Non-UI requests routed through deployment-manager (`queued_non_ui`) are not the canonical
+  execution path for API/MCP runtime updates in this repo.
 
 ## Baseline Notes
 
 See `backend/SOURCE_BASELINE_2026-02-21.md` for the initial cloud/local parity review captured during migration.
+See `backend/API_MCP_DEPLOY_PROCESS.md` for the current API+MCP deployment runbook.
