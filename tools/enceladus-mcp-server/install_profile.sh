@@ -17,6 +17,11 @@ SERVER_PY="${SCRIPT_DIR}/server.py"
 
 # Workspace root auto-detection
 WORKSPACE_ROOT="${ENCELADUS_WORKSPACE_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
+MCP_PRIMARY_ALIAS="${ENCELADUS_MCP_PRIMARY_ALIAS:-enceladus}"
+MCP_SECONDARY_ALIAS="${ENCELADUS_MCP_SECONDARY_ALIAS:-enceladus-local}"
+MCP_INCLUDE_SECONDARY_ALIAS="${ENCELADUS_MCP_INCLUDE_SECONDARY_ALIAS:-true}"
+CLAUDE_SETTINGS_DIR="${ENCELADUS_MCP_CLAUDE_SETTINGS_DIR:-${HOME}/.claude}"
+CODEX_SETTINGS_DIR="${ENCELADUS_MCP_CODEX_SETTINGS_DIR:-${HOME}/.codex}"
 
 # Resolve a stable Python interpreter for MCP runtime.
 PYTHON_BIN="${ENCELADUS_MCP_PYTHON_BIN:-$(command -v python3 || true)}"
@@ -39,6 +44,8 @@ echo "[INFO] Enceladus MCP profile installer"
 echo "[INFO] Server: ${SERVER_PY}"
 echo "[INFO] Workspace root: ${WORKSPACE_ROOT}"
 echo "[INFO] Python: ${PYTHON_BIN}"
+echo "[INFO] Primary alias: ${MCP_PRIMARY_ALIAS}"
+echo "[INFO] Secondary alias: ${MCP_SECONDARY_ALIAS} (enabled=${MCP_INCLUDE_SECONDARY_ALIAS})"
 
 # Verify server.py exists
 if [ ! -f "${SERVER_PY}" ]; then
@@ -87,8 +94,7 @@ fi
 # agent process itself runs under the scoped read-only dispatch session role.
 MCP_WRITER_ROLE_ARN="${ENCELADUS_MCP_WRITER_ROLE_ARN:-arn:aws:iam::356364570033:role/enceladus-mcp-writer-role}"
 MCP_WRITER_PROFILE="enceladus-mcp-writer"
-MCP_WRITER_ENV=""
-MCP_BASE_AWS_PROFILE_ENV=""
+MCP_WRITER_ACTIVE="false"
 
 if [ -n "${ENCELADUS_MCP_WRITER_ROLE_ARN:-}" ] || [ "${ENCELADUS_ENABLE_CREDENTIAL_SEPARATION:-false}" = "true" ]; then
     echo "[INFO] Configuring MCP writer profile: ${MCP_WRITER_PROFILE}"
@@ -99,63 +105,78 @@ if [ -n "${ENCELADUS_MCP_WRITER_ROLE_ARN:-}" ] || [ "${ENCELADUS_ENABLE_CREDENTI
     # Verify the writer profile can assume the role
     if aws sts get-caller-identity --profile "${MCP_WRITER_PROFILE}" >/dev/null 2>&1; then
         echo "[SUCCESS] MCP writer profile configured and verified"
-        MCP_WRITER_ENV="\"AWS_PROFILE\": \"${MCP_WRITER_PROFILE}\","
+        MCP_WRITER_ACTIVE="true"
     else
         echo "[WARNING] MCP writer profile configured but role assumption failed — falling back to ambient credentials"
     fi
 fi
 
-if [ -z "${MCP_WRITER_ENV}" ] && [ -n "${RESOLVED_AWS_PROFILE}" ]; then
-    MCP_BASE_AWS_PROFILE_ENV="\"AWS_PROFILE\": \"${RESOLVED_AWS_PROFILE}\","
+MCP_RUNTIME_AWS_PROFILE=""
+if [ "${MCP_WRITER_ACTIVE}" = "true" ]; then
+    MCP_RUNTIME_AWS_PROFILE="${MCP_WRITER_PROFILE}"
+elif [ -n "${RESOLVED_AWS_PROFILE}" ]; then
+    MCP_RUNTIME_AWS_PROFILE="${RESOLVED_AWS_PROFILE}"
 fi
 
 # Build the MCP server configuration JSON
-MCP_CONFIG=$(cat <<EOCONFIG
-{
-  "mcpServers": {
-    "enceladus": {
-      "command": "${PYTHON_BIN}",
-      "args": ["${SERVER_PY}"],
-      "env": {
-        ${MCP_WRITER_ENV}
-        ${MCP_BASE_AWS_PROFILE_ENV}
-        "PYTHONUNBUFFERED": "1",
-        "PYTHONPATH": "${MCP_PYTHONPATH}",
-        "ENCELADUS_WORKSPACE_ROOT": "${WORKSPACE_ROOT}",
-        "ENCELADUS_REGION": "us-west-2",
-        "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
-        "ENCELADUS_PROJECTS_TABLE": "projects",
-        "ENCELADUS_DOCUMENTS_TABLE": "documents",
-        "ENCELADUS_S3_BUCKET": "jreese-net",
-        "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
-        "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history"
-      }
-    },
-    "enceladus-local": {
-      "command": "${PYTHON_BIN}",
-      "args": ["${SERVER_PY}"],
-      "env": {
-        ${MCP_WRITER_ENV}
-        ${MCP_BASE_AWS_PROFILE_ENV}
-        "PYTHONUNBUFFERED": "1",
-        "PYTHONPATH": "${MCP_PYTHONPATH}",
-        "ENCELADUS_WORKSPACE_ROOT": "${WORKSPACE_ROOT}",
-        "ENCELADUS_REGION": "us-west-2",
-        "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
-        "ENCELADUS_PROJECTS_TABLE": "projects",
-        "ENCELADUS_DOCUMENTS_TABLE": "documents",
-        "ENCELADUS_S3_BUCKET": "jreese-net",
-        "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
-        "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history"
-      }
-    }
-  }
+MCP_CONFIG=$(PYTHON_BIN="${PYTHON_BIN}" \
+    SERVER_PY="${SERVER_PY}" \
+    MCP_PYTHONPATH="${MCP_PYTHONPATH}" \
+    WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
+    MCP_RUNTIME_AWS_PROFILE="${MCP_RUNTIME_AWS_PROFILE}" \
+    MCP_PRIMARY_ALIAS="${MCP_PRIMARY_ALIAS}" \
+    MCP_SECONDARY_ALIAS="${MCP_SECONDARY_ALIAS}" \
+    MCP_INCLUDE_SECONDARY_ALIAS="${MCP_INCLUDE_SECONDARY_ALIAS}" \
+    "${PYTHON_BIN}" - <<'PY'
+import json
+import os
+
+
+def to_bool(value: str) -> bool:
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+env_block = {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONPATH": os.environ["MCP_PYTHONPATH"],
+    "ENCELADUS_WORKSPACE_ROOT": os.environ["WORKSPACE_ROOT"],
+    "ENCELADUS_REGION": "us-west-2",
+    "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
+    "ENCELADUS_PROJECTS_TABLE": "projects",
+    "ENCELADUS_DOCUMENTS_TABLE": "documents",
+    "ENCELADUS_S3_BUCKET": "jreese-net",
+    "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
+    "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
 }
-EOCONFIG
+
+aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
+if aws_profile:
+    env_block["AWS_PROFILE"] = aws_profile
+
+command = os.environ["PYTHON_BIN"]
+server_py = os.environ["SERVER_PY"]
+servers = {
+    os.environ["MCP_PRIMARY_ALIAS"]: {
+        "command": command,
+        "args": [server_py],
+        "env": env_block,
+    }
+}
+
+secondary_alias = os.environ.get("MCP_SECONDARY_ALIAS", "").strip()
+include_secondary = to_bool(os.environ.get("MCP_INCLUDE_SECONDARY_ALIAS", "true"))
+if include_secondary and secondary_alias and secondary_alias not in servers:
+    servers[secondary_alias] = {
+        "command": command,
+        "args": [server_py],
+        "env": env_block,
+    }
+
+print(json.dumps({"mcpServers": servers}, indent=2))
+PY
 )
 
 # Try to install into Claude Code settings
-CLAUDE_SETTINGS_DIR="${HOME}/.claude"
 CLAUDE_MCP_FILE="${CLAUDE_SETTINGS_DIR}/mcp.json"
 
 if [ -d "${CLAUDE_SETTINGS_DIR}" ] || command -v claude >/dev/null 2>&1; then
@@ -193,14 +214,8 @@ else
 fi
 
 # Best-effort: upsert Codex MCP profile section for desktop sessions.
-CODEX_SETTINGS_DIR="${HOME}/.codex"
 CODEX_CONFIG_FILE="${CODEX_SETTINGS_DIR}/config.toml"
 mkdir -p "${CODEX_SETTINGS_DIR}"
-
-MCP_RUNTIME_AWS_PROFILE="${MCP_WRITER_PROFILE}"
-if [ -z "${MCP_WRITER_ENV}" ]; then
-    MCP_RUNTIME_AWS_PROFILE="${RESOLVED_AWS_PROFILE}"
-fi
 
 if CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE}" \
     PYTHON_BIN="${PYTHON_BIN}" \
@@ -208,6 +223,9 @@ if CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE}" \
     MCP_PYTHONPATH="${MCP_PYTHONPATH}" \
     WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
     MCP_RUNTIME_AWS_PROFILE="${MCP_RUNTIME_AWS_PROFILE}" \
+    MCP_PRIMARY_ALIAS="${MCP_PRIMARY_ALIAS}" \
+    MCP_SECONDARY_ALIAS="${MCP_SECONDARY_ALIAS}" \
+    MCP_INCLUDE_SECONDARY_ALIAS="${MCP_INCLUDE_SECONDARY_ALIAS}" \
     "${PYTHON_BIN}" - <<'PY'
 import os
 import pathlib
@@ -216,9 +234,13 @@ import re
 cfg = pathlib.Path(os.environ["CODEX_CONFIG_FILE"])
 text = cfg.read_text() if cfg.exists() else ""
 
-# Remove prior managed block and any direct enceladus/enceladus-local sections to avoid duplicate TOML keys.
+# Remove prior managed block and direct server sections to avoid duplicate TOML keys.
 text = re.sub(r"(?ms)^# BEGIN ENCELADUS MCP PROFILE \(managed\)\n.*?# END ENCELADUS MCP PROFILE \(managed\)\n?", "", text)
-for section in ("enceladus", "enceladus-local"):
+aliases = [os.environ["MCP_PRIMARY_ALIAS"]]
+secondary = os.environ.get("MCP_SECONDARY_ALIAS", "").strip()
+if secondary and os.environ.get("MCP_INCLUDE_SECONDARY_ALIAS", "true").strip().lower() not in {"", "0", "false", "no", "off"}:
+    aliases.append(secondary)
+for section in aliases:
     text = re.sub(
         rf"(?ms)^\[mcp_servers\.{re.escape(section)}\]\n.*?(?=^\[|\Z)",
         "",
@@ -268,13 +290,12 @@ def _server_block(name: str) -> str:
         lines.append(f"{k} = {_toml_str(v)}")
     return "\n".join(lines)
 
-managed = (
-    "# BEGIN ENCELADUS MCP PROFILE (managed)\n"
-    + _server_block("enceladus-local")
-    + "\n\n"
-    + _server_block("enceladus")
-    + "\n# END ENCELADUS MCP PROFILE (managed)\n"
-)
+server_blocks = [_server_block(aliases[0])]
+for alias in aliases[1:]:
+    if alias != aliases[0]:
+        server_blocks.append(_server_block(alias))
+
+managed = "# BEGIN ENCELADUS MCP PROFILE (managed)\n" + "\n\n".join(server_blocks) + "\n# END ENCELADUS MCP PROFILE (managed)\n"
 cfg.write_text(text + managed)
 print(f"[SUCCESS] Enceladus MCP profile upserted in {cfg}")
 PY

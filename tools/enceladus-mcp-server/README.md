@@ -4,7 +4,7 @@ This directory is the canonical source for Enceladus MCP runtime assets used by:
 
 - local/desktop MCP sessions
 - host-v2 bootstrap flows
-- bundled native briefing packages under `briefings/*/tools/enceladus-mcp-server/`
+- briefing templates under `briefings/` (via canonical installer wrapper)
 
 ## Core Files
 
@@ -17,7 +17,9 @@ This directory is the canonical source for Enceladus MCP runtime assets used by:
 
 ## Sync Rule
 
-Briefing bundle wrappers must delegate to these canonical files to avoid profile/runtime drift that can surface as MCP `Transport closed` failures in Codex/desktop sessions.
+Briefing templates and wrappers must call this canonical installer/runtime path.
+Do not copy `server.py` or `dispatch_plan_generator.py` into briefing subfolders;
+that drift caused historical MCP transport mismatches.
 
 ## Deployment Policy
 

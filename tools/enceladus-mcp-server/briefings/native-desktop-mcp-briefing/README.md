@@ -8,8 +8,6 @@ This folder contains the minimum files needed to initialize MCP-only native desk
 - `NEW_MACHINE_SETUP.md`
 - `README.md`
 - `tools/enceladus-mcp-server/install_profile.sh`
-- `tools/enceladus-mcp-server/server.py`
-- `tools/enceladus-mcp-server/dispatch_plan_generator.py`
 
 ## Session Start
 
@@ -19,4 +17,4 @@ This folder contains the minimum files needed to initialize MCP-only native desk
 
 ## Path Rule
 
-All operational file paths used by this desktop briefing set are local to this folder.
+Installer path is local to this folder, but runtime MCP assets are resolved from the canonical repository path `tools/enceladus-mcp-server/`.

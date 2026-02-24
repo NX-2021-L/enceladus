@@ -8,16 +8,16 @@ Prepare a machine so native desktop UI sessions can start with Enceladus MCP and
 
 - Python 3.11+
 - AWS credentials with access to Enceladus resources
-- This briefing folder cloned/copied as a standalone package
+- Full Enceladus repo checkout (briefing wrappers resolve canonical MCP source in-repo)
 
 ## Setup Steps
 
-1. From this folder, verify bundled MCP assets:
+1. From the repository root, verify canonical MCP assets:
 
 ```bash
-ls -la ./tools/enceladus-mcp-server/server.py \
-       ./tools/enceladus-mcp-server/install_profile.sh \
-       ./tools/enceladus-mcp-server/dispatch_plan_generator.py
+ls -la tools/enceladus-mcp-server/server.py \
+       tools/enceladus-mcp-server/install_profile.sh \
+       tools/enceladus-mcp-server/dispatch_plan_generator.py
 ```
 
 2. Install required Python packages (if missing):
@@ -43,7 +43,7 @@ aws sts get-caller-identity
 
 ```bash
 ENCELADUS_WORKSPACE_ROOT="$(pwd)" \
-./tools/enceladus-mcp-server/install_profile.sh
+tools/enceladus-mcp-server/install_profile.sh
 ```
 
 5. Restart the desktop client (or start a fresh session) so the MCP server process reloads updated profile/runtime paths.
