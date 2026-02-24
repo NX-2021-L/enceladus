@@ -19,7 +19,7 @@ export type CreateProjectResponse = {
   project: {
     project_id: string;
     prefix: string;
-    path: string;
+    path?: string;
     repo?: string;
     summary: string;
     status: string;
