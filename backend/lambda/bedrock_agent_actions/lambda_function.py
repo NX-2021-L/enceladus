@@ -18,6 +18,7 @@ Supported actions (mapped via apiPath + httpMethod):
     GET  /projects                    - List all projects
     GET  /documents/search            - Search documents by keyword
     GET  /documents/{documentId}      - Fetch document content
+    FUNCTION check_document_policy    - Validate proposed document writes
     GET  /deployment/{projectId}      - Get deployment state
 
 Environment variables:
@@ -36,6 +37,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -56,6 +59,13 @@ PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 DEPLOY_TABLE = os.environ.get("DEPLOY_TABLE", "devops-deployment-manager")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
+GOVERNANCE_POLICIES_TABLE = os.environ.get("GOVERNANCE_POLICIES_TABLE", "governance-policies")
+AGENT_COMPLIANCE_TABLE = os.environ.get("AGENT_COMPLIANCE_TABLE", "agent-compliance-violations")
+DOCUMENT_STORAGE_POLICY_ID = os.environ.get(
+    "DOCUMENT_STORAGE_POLICY_ID",
+    "document_storage_cloud_only",
+)
+COMPLIANCE_ENFORCEMENT_DEFAULT = os.environ.get("COMPLIANCE_ENFORCEMENT_DEFAULT", "enforce")
 S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 
 # ---------------------------------------------------------------------------
@@ -89,6 +99,20 @@ def _now_z() -> str:
 
 def _ser_s(val: str) -> Dict:
     return {"S": str(val)}
+
+
+def _ser_value(val: Any) -> Dict:
+    if isinstance(val, dict):
+        return {"M": {str(k): _ser_value(v) for k, v in val.items()}}
+    if isinstance(val, list):
+        return {"L": [_ser_value(v) for v in val]}
+    if isinstance(val, bool):
+        return {"BOOL": val}
+    if isinstance(val, (int, float)):
+        return {"N": str(val)}
+    if val is None:
+        return {"NULL": True}
+    return _ser_s(str(val))
 
 
 def _deser_val(v: Dict) -> Any:
@@ -132,6 +156,150 @@ def _normalize_string_list(value: Any) -> Optional[List[str]]:
         if stripped:
             out.append(stripped)
     return out
+
+
+def _default_document_storage_policy() -> Dict[str, Any]:
+    return {
+        "policy_id": DOCUMENT_STORAGE_POLICY_ID,
+        "status": "active",
+        "enforcement_mode": COMPLIANCE_ENFORCEMENT_DEFAULT,
+        "allowed_targets": ["docstore_api", "governance_s3", "mcp_validator", "bedrock_action"],
+    }
+
+
+def _load_document_storage_policy(policy_id: str = DOCUMENT_STORAGE_POLICY_ID) -> Dict[str, Any]:
+    fallback = _default_document_storage_policy()
+    fallback["policy_source"] = "default"
+    fallback["policy_id"] = policy_id or DOCUMENT_STORAGE_POLICY_ID
+    try:
+        resp = _get_ddb().get_item(
+            TableName=GOVERNANCE_POLICIES_TABLE,
+            Key={"policy_id": _ser_s(fallback["policy_id"])},
+            ConsistentRead=True,
+        )
+        item = resp.get("Item")
+        if not item:
+            return fallback
+        loaded = _deser_item(item)
+        if not isinstance(loaded, dict):
+            return fallback
+        loaded.setdefault("policy_id", fallback["policy_id"])
+        loaded.setdefault("status", "active")
+        loaded.setdefault("enforcement_mode", COMPLIANCE_ENFORCEMENT_DEFAULT)
+        loaded.setdefault("allowed_targets", fallback["allowed_targets"])
+        loaded["policy_source"] = "dynamodb"
+        return loaded
+    except Exception as exc:
+        logger.warning(
+            "[POLICY] Failed to load policy '%s' from %s: %s",
+            fallback["policy_id"],
+            GOVERNANCE_POLICIES_TABLE,
+            exc,
+        )
+        return fallback
+
+
+def _looks_like_local_path(path_value: str) -> bool:
+    text = str(path_value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(("/", "~/", "../", "./", "\\\\")):
+        return True
+    return bool(re.match(r"^[a-z]:[\\/]", lowered))
+
+
+def _evaluate_document_policy(
+    *,
+    operation: str,
+    storage_target: str,
+    file_name: str = "",
+    provider: str = "",
+    project_id: str = "",
+    request_id: str = "",
+    dispatch_id: str = "",
+) -> Dict[str, Any]:
+    policy = _load_document_storage_policy()
+    allowed_targets_raw = policy.get("allowed_targets")
+    if isinstance(allowed_targets_raw, list):
+        allowed_targets = {
+            str(entry).strip().lower()
+            for entry in allowed_targets_raw
+            if str(entry).strip()
+        }
+    else:
+        allowed_targets = set()
+    if not allowed_targets:
+        allowed_targets = {"docstore_api", "governance_s3", "mcp_validator", "bedrock_action"}
+
+    op_name = str(operation or "").strip().lower()
+    target_name = str(storage_target or "").strip().lower()
+    policy_status = str(policy.get("status") or "active").strip().lower()
+    enforcement_mode = str(policy.get("enforcement_mode") or COMPLIANCE_ENFORCEMENT_DEFAULT).strip().lower()
+
+    reasons: List[str] = []
+    if target_name not in allowed_targets:
+        reasons.append(f"storage_target '{target_name}' is not allowlisted")
+    if file_name and _looks_like_local_path(file_name):
+        reasons.append(f"file_name '{file_name}' resolves to local filesystem path")
+    if op_name.startswith("documents_") and file_name and ("/" in file_name or "\\" in file_name):
+        reasons.append("documents_* file_name must be basename only (no path segments)")
+
+    should_enforce = policy_status == "active" and enforcement_mode == "enforce"
+    denied = should_enforce and bool(reasons)
+    decision = "denied" if denied else "allowed"
+
+    evaluation = {
+        "success": True,
+        "policy_id": str(policy.get("policy_id") or DOCUMENT_STORAGE_POLICY_ID),
+        "policy_source": str(policy.get("policy_source") or "unknown"),
+        "policy_status": policy_status,
+        "enforcement_mode": enforcement_mode,
+        "operation": op_name,
+        "storage_target": target_name,
+        "allowed_targets": sorted(allowed_targets),
+        "decision": decision,
+        "allowed": not denied,
+        "reasons": reasons,
+        "checked_at": _now_z(),
+    }
+
+    details = {
+        "operation": op_name,
+        "storage_target": target_name,
+        "file_name": file_name,
+        "provider": provider,
+        "project_id": project_id,
+        "coordination_request_id": request_id,
+        "dispatch_id": dispatch_id,
+        "decision": decision,
+        "reasons": reasons,
+        "policy_source": evaluation["policy_source"],
+        "policy_status": policy_status,
+        "enforcement_mode": enforcement_mode,
+    }
+    event_id = f"CMP-{uuid.uuid4().hex[:20].upper()}"
+    now = _now_z()
+    epoch = int(time.time())
+    item = {
+        "violation_id": _ser_s(event_id),
+        "policy_id": _ser_s(evaluation["policy_id"]),
+        "event_epoch": {"N": str(epoch)},
+        "event_time": _ser_s(now),
+        "result": _ser_s(decision),
+        "provider": _ser_s(provider or "bedrock"),
+        "project_id": _ser_s(project_id or ""),
+        "coordination_request_id": _ser_s(request_id or ""),
+        "dispatch_id": _ser_s(dispatch_id or ""),
+        "details": _ser_value(details),
+        "created_at": _ser_s(now),
+    }
+    try:
+        _get_ddb().put_item(TableName=AGENT_COMPLIANCE_TABLE, Item=item)
+    except Exception as exc:
+        logger.warning("[POLICY] Failed to persist compliance event %s: %s", event_id, exc)
+
+    return evaluation
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +732,32 @@ def _handle_document_get(parameters: List[Dict]) -> Dict[str, Any]:
     return meta
 
 
+def _handle_check_document_policy(parameters: List[Dict]) -> Dict[str, Any]:
+    """Validate document storage operation against governance policy."""
+    operation = _get_param(parameters, "operation")
+    storage_target = _get_param(parameters, "storageTarget")
+    file_name = _get_param(parameters, "fileName") or ""
+    provider = _get_param(parameters, "provider") or "bedrock"
+    project_id = _get_param(parameters, "projectId") or ""
+    request_id = _get_param(parameters, "coordinationRequestId") or ""
+    dispatch_id = _get_param(parameters, "dispatchId") or ""
+
+    if not operation:
+        return {"error": "operation parameter required"}
+    if not storage_target:
+        return {"error": "storageTarget parameter required"}
+
+    return _evaluate_document_policy(
+        operation=operation,
+        storage_target=storage_target,
+        file_name=file_name,
+        provider=provider,
+        project_id=project_id,
+        request_id=request_id,
+        dispatch_id=dispatch_id,
+    )
+
+
 def _handle_deployment_state(parameters: List[Dict]) -> Dict[str, Any]:
     """GET /deployment/{projectId} — Get deployment state."""
     project_id = _get_param(parameters, "projectId")
@@ -623,6 +817,8 @@ def _dispatch_function_call(function_name: str, parameters: List[Dict]) -> Dict[
         return _handle_documents_search(parameters)
     if function_name == "document_get":
         return _handle_document_get(parameters)
+    if function_name == "check_document_policy":
+        return _handle_check_document_policy(parameters)
     if function_name == "deployment_state_get":
         return _handle_deployment_state(parameters)
     return {"error": f"Unknown function: {function_name}"}

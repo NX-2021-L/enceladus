@@ -266,6 +266,7 @@ _ENCELADUS_ALLOWED_TOOLS = {
     "documents_search",
     "documents_get",
     "documents_list",
+    "check_document_policy",
     "documents_put",
     "documents_patch",
     "deploy_state_get",

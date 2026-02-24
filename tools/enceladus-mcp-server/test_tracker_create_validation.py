@@ -279,3 +279,51 @@ def test_read_resource_project_reference_accepts_anyurl_object():
     assert content == "# project reference"
     assert fake_s3.calls
     assert fake_s3.calls[0]["Key"] == f"{server.S3_REFERENCE_PREFIX}/enceladus.md"
+
+
+class _PolicyDdb:
+    def __init__(self):
+        self.put_calls = []
+
+    def get_item(self, TableName, Key, **_kwargs):  # noqa: N803
+        if TableName == server.GOVERNANCE_POLICIES_TABLE:
+            return {
+                "Item": {
+                    "policy_id": {"S": server.DOCUMENT_STORAGE_POLICY_ID},
+                    "status": {"S": "active"},
+                    "enforcement_mode": {"S": "enforce"},
+                    "allowed_targets": {"L": [{"S": "docstore_api"}, {"S": "governance_s3"}]},
+                }
+            }
+        return {}
+
+    def put_item(self, **kwargs):
+        self.put_calls.append(kwargs)
+
+
+def test_document_policy_denies_local_paths_for_documents_put():
+    fake_ddb = _PolicyDdb()
+    with patch.object(server, "_get_ddb", return_value=fake_ddb):
+        denial = server._enforce_document_storage_policy(
+            operation="documents_put",
+            storage_target="docstore_api",
+            args={"file_name": "/tmp/illegal.md", "project_id": "enceladus"},
+        )
+
+    assert denial is not None
+    assert denial["error"]["code"] == "POLICY_DENIED"
+    assert fake_ddb.put_calls
+    assert fake_ddb.put_calls[0]["TableName"] == server.AGENT_COMPLIANCE_TABLE
+
+
+def test_document_policy_allows_docstore_basename_file():
+    fake_ddb = _PolicyDdb()
+    with patch.object(server, "_get_ddb", return_value=fake_ddb):
+        denial = server._enforce_document_storage_policy(
+            operation="documents_put",
+            storage_target="docstore_api",
+            args={"file_name": "summary.md", "project_id": "enceladus"},
+        )
+
+    assert denial is None
+    assert fake_ddb.put_calls

@@ -17,6 +17,15 @@ class _FakeDdb:
         self.put_calls = []
 
     def get_item(self, TableName, Key):  # noqa: N803
+        if TableName == bedrock_lambda.GOVERNANCE_POLICIES_TABLE:
+            return {
+                "Item": {
+                    "policy_id": {"S": bedrock_lambda.DOCUMENT_STORAGE_POLICY_ID},
+                    "status": {"S": "active"},
+                    "enforcement_mode": {"S": "enforce"},
+                    "allowed_targets": {"L": [{"S": "docstore_api"}, {"S": "governance_s3"}]},
+                }
+            }
         if TableName == bedrock_lambda.PROJECTS_TABLE:
             return {
                 "Item": {
@@ -63,3 +72,36 @@ def test_handle_tracker_create_stores_acceptance_criteria():
     assert "acceptance_criteria" in item
     criteria = [entry["S"] for entry in item["acceptance_criteria"]["L"]]
     assert criteria == ["first", "second"]
+
+
+def test_check_document_policy_denies_local_path():
+    fake_ddb = _FakeDdb()
+    with patch.object(bedrock_lambda, "_get_ddb", return_value=fake_ddb):
+        result = bedrock_lambda._handle_check_document_policy(
+            [
+                {"name": "operation", "value": "documents_put"},
+                {"name": "storageTarget", "value": "docstore_api"},
+                {"name": "fileName", "value": "/tmp/local.md"},
+                {"name": "projectId", "value": "enceladus"},
+            ]
+        )
+
+    assert result["allowed"] is False
+    assert result["decision"] == "denied"
+    assert fake_ddb.put_calls
+
+
+def test_check_document_policy_allows_docstore_basename():
+    fake_ddb = _FakeDdb()
+    with patch.object(bedrock_lambda, "_get_ddb", return_value=fake_ddb):
+        result = bedrock_lambda._handle_check_document_policy(
+            [
+                {"name": "operation", "value": "documents_put"},
+                {"name": "storageTarget", "value": "docstore_api"},
+                {"name": "fileName", "value": "summary.md"},
+                {"name": "projectId", "value": "enceladus"},
+            ]
+        )
+
+    assert result["allowed"] is True
+    assert result["decision"] == "allowed"
