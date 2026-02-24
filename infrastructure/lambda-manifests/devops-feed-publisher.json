@@ -1,0 +1,40 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-feed-publisher",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "ShPMx6g/l8xf/Idd7+32GShRDMMMhs7kRWhaSpx/Tks=",
+    "environment": {
+      "ANALYTICS_BUCKET": "devops-agentcli-compute",
+      "ANALYTICS_REGION": "us-west-2",
+      "CF_DISTRIBUTION": "E2BOQXCW1TA6Y4",
+      "DRY_RUN": "false",
+      "EVENT_BUS": "default",
+      "FEED_BUCKET": "jreese-net",
+      "FEED_PREFIX": "mobile/v1",
+      "PROJECTS_REGION": "us-west-2",
+      "PROJECTS_TABLE": "projects",
+      "SNS_TOPIC": "arn:aws:sns:us-west-2:356364570033:devops-project-json-sync",
+      "TRACKER_REGION": "us-west-2",
+      "TRACKER_TABLE": "devops-project-tracker"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-feed-publisher",
+    "handler": "lambda_function.handler",
+    "last_modified": "2026-02-23T13:09:50.000+0000",
+    "layers": [],
+    "memory_size": 512,
+    "role": "arn:aws:iam::356364570033:role/devops-feed-publisher-lambda-role",
+    "runtime": "python3.11",
+    "timeout": 600,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "lambda_function.py",
+  "live_entry_sha256": "300b4fa45b09fb62831f5c50bcb6a9adf86766593a421f91565b4a8741efcbb5",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/feed_publisher/lambda_function.py",
+  "repo_entry_sha256": "300b4fa45b09fb62831f5c50bcb6a9adf86766593a421f91565b4a8741efcbb5"
+}

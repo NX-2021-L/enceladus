@@ -1,0 +1,38 @@
+{
+  "entry_file": "handler.py",
+  "function_name": "devops-json-to-parquet-transformer",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "pdYh/r0H2Z1254r5l9LUC8kmY2RKE3V/TCr7nKkYI1I=",
+    "environment": {
+      "DEST_BASE_PREFIX": "projects/sync",
+      "DEST_BUCKET": "devops-agentcli-compute",
+      "EVENT_BUS_NAME": "default",
+      "EVENT_DETAIL_TYPE": "parquet-ready",
+      "EVENT_SOURCE": "devops.parquet-ready",
+      "PARQUET_COMPRESSION": "snappy",
+      "PARQUET_READY_TOPIC_ARN": "arn:aws:sns:us-west-2:356364570033:devops-json-parquet-ready"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-json-to-parquet-transformer",
+    "handler": "handler.lambda_handler",
+    "last_modified": "2026-02-17T04:14:57.000+0000",
+    "layers": [
+      "arn:aws:lambda:us-west-2:356364570033:layer:devops-json-to-parquet-pyarrow:3",
+      "arn:aws:lambda:us-west-2:356364570033:layer:devops-json-to-parquet-numpy:2"
+    ],
+    "memory_size": 128,
+    "role": "arn:aws:iam::356364570033:role/devops-json-parquet-lambda",
+    "runtime": "python3.11",
+    "timeout": 3,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "handler.py",
+  "live_entry_sha256": "70e701dc50c126eeffda0e150a3877d74f03b92d77476cb210dac9c26c9a0b34",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/json_to_parquet_transformer/handler.py",
+  "repo_entry_sha256": "70e701dc50c126eeffda0e150a3877d74f03b92d77476cb210dac9c26c9a0b34"
+}

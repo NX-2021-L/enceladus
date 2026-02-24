@@ -1,0 +1,41 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-document-api",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "eHaYCUpQf3QjMQXUxSLSDr6p7R5KtYaBeQlYB+BfDxE=",
+    "environment": {
+      "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
+      "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
+      "DOCUMENTS_TABLE": "documents",
+      "DYNAMODB_REGION": "us-west-2",
+      "GOVERNANCE_KEYWORD": "governance-file",
+      "GOVERNANCE_PROJECT_ID": "devops",
+      "PROJECTS_TABLE": "projects",
+      "PROJECT_REFERENCE_KEYWORD": "project-reference",
+      "S3_BUCKET": "jreese-net",
+      "S3_GOVERNANCE_PREFIX": "governance/live",
+      "S3_PREFIX": "agent-documents",
+      "S3_REFERENCE_PREFIX": "mobile/v1/reference",
+      "TRACKER_TABLE": "devops-project-tracker"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-document-api",
+    "handler": "lambda_function.lambda_handler",
+    "last_modified": "2026-02-24T02:12:40.000+0000",
+    "layers": [],
+    "memory_size": 256,
+    "role": "arn:aws:iam::356364570033:role/devops-document-api-lambda-role",
+    "runtime": "python3.11",
+    "timeout": 30,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "lambda_function.py",
+  "live_entry_sha256": "96aa5c9c8aa96918b9f2760b07b898cf82a98758fb3dc1597c67bea1fcba7b2f",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/document_api/lambda_function.py",
+  "repo_entry_sha256": "96aa5c9c8aa96918b9f2760b07b898cf82a98758fb3dc1597c67bea1fcba7b2f"
+}

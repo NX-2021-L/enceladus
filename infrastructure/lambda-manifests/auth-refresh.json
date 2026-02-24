@@ -1,0 +1,31 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "auth-refresh",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "WtmJ0h8nC6EOYFOphg0ZsHm/vVXafysHkzpAigsG2Ro=",
+    "environment": {
+      "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
+      "COGNITO_REGION": "us-east-1",
+      "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:auth-refresh",
+    "handler": "lambda_function.lambda_handler",
+    "last_modified": "2026-02-19T14:06:34.000+0000",
+    "layers": [],
+    "memory_size": 128,
+    "role": "arn:aws:iam::356364570033:role/auth-refresh-lambda-role",
+    "runtime": "python3.11",
+    "timeout": 10,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "lambda_function.py",
+  "live_entry_sha256": "c9f108bd02498388ffa649bdef97bff1cdb3f5ff921354c1d962b27d318e728e",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/auth_refresh/lambda_function.py",
+  "repo_entry_sha256": "c9f108bd02498388ffa649bdef97bff1cdb3f5ff921354c1d962b27d318e728e"
+}

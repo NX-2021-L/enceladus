@@ -1,0 +1,38 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-deploy-intake",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "WuBetWPdbdJ9faa1RjJa6Rf0SLQ7KDxqeLwQv9s+Idg=",
+    "environment": {
+      "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
+      "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
+      "CONFIG_BUCKET": "jreese-net",
+      "CONFIG_PREFIX": "deploy-config",
+      "CORS_ORIGIN": "https://jreese.net",
+      "DEPLOY_REGION": "us-west-2",
+      "DEPLOY_TABLE": "devops-deployment-manager",
+      "DOC_PREP_LAMBDA_NAME": "devops-doc-prep",
+      "PROJECTS_TABLE": "projects",
+      "SQS_QUEUE_URL": "https://sqs.us-west-2.amazonaws.com/356364570033/devops-deploy-queue.fifo"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-deploy-intake",
+    "handler": "lambda_function.lambda_handler",
+    "last_modified": "2026-02-24T02:12:26.000+0000",
+    "layers": [],
+    "memory_size": 512,
+    "role": "arn:aws:iam::356364570033:role/devops-deploy-intake-lambda-role",
+    "runtime": "python3.11",
+    "timeout": 120,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "lambda_function.py",
+  "live_entry_sha256": "7b4155b04b15ff9e3fbf2c1e6a8e2b905108f87acf48e01f0eb9e4e4d7d345bc",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/deploy_intake/lambda_function.py",
+  "repo_entry_sha256": "7b4155b04b15ff9e3fbf2c1e6a8e2b905108f87acf48e01f0eb9e4e4d7d345bc"
+}

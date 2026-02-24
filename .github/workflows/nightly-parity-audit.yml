@@ -1,0 +1,82 @@
+name: Nightly Parity Audit
+
+on:
+  schedule:
+    - cron: "25 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+
+jobs:
+  parity-audit:
+    name: Inventory + Lambda Parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3
+
+      - name: Configure AWS credentials (OIDC role)
+        id: aws_oidc
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (static keys fallback)
+        if: ${{ steps.aws_oidc.outcome != 'success' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Run parity audit
+        id: audit
+        continue-on-error: true
+        env:
+          PARITY_AUDIT_SNS_TOPIC_ARN: ${{ secrets.PARITY_AUDIT_SNS_TOPIC_ARN }}
+        run: |
+          set -euo pipefail
+          python tools/parity_audit.py \
+            --output-dir infrastructure/parity/out \
+            --fail-on-drift \
+            ${PARITY_AUDIT_SNS_TOPIC_ARN:+--sns-topic-arn "${PARITY_AUDIT_SNS_TOPIC_ARN}"}
+
+      - name: Upload parity artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-audit-output
+          path: |
+            infrastructure/parity/out/resource_inventory.json
+            infrastructure/parity/out/lambda_parity.json
+            infrastructure/parity/out/summary.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail on parity drift
+        if: ${{ steps.audit.outcome != 'success' }}
+        run: |
+          echo "Parity audit detected drift, missing coverage, or runtime errors."
+          exit 1

@@ -1,0 +1,34 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-doc-prep",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "J1/PRLxVBD7ZfZsRnKq7L8RKM2qaOdSgg4hdy1XvFEY=",
+    "environment": {
+      "CACHE_BUST": "1",
+      "DOCUMENTS_TABLE": "documents",
+      "DYNAMODB_REGION": "us-west-2",
+      "PROJECTS_TABLE": "projects",
+      "S3_BUCKET": "jreese-net",
+      "TRACKER_TABLE": "devops-project-tracker"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-doc-prep",
+    "handler": "lambda_function.lambda_handler",
+    "last_modified": "2026-02-19T15:41:12.000+0000",
+    "layers": [],
+    "memory_size": 256,
+    "role": "arn:aws:iam::356364570033:role/devops-doc-prep-lambda-role",
+    "runtime": "python3.11",
+    "timeout": 30,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "lambda_function.py",
+  "live_entry_sha256": "1e2357387c3bc1cb2df6e49fcf0d2f5bac433981bedfd045dae538b4763d4623",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/doc_prep/lambda_function.py",
+  "repo_entry_sha256": "1e2357387c3bc1cb2df6e49fcf0d2f5bac433981bedfd045dae538b4763d4623"
+}

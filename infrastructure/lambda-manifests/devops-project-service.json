@@ -1,0 +1,35 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-project-service",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "G6gQy8ddZ5zJ2jdfYuMG4qGjkhzvrMGjZzDrmB1k3VE=",
+    "environment": {
+      "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
+      "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
+      "DYNAMODB_REGION": "us-west-2",
+      "PROJECTS_TABLE": "projects",
+      "S3_BUCKET": "jreese-net",
+      "S3_REFERENCE_PREFIX": "mobile/v1/reference",
+      "TRACKER_TABLE": "devops-project-tracker"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-project-service",
+    "handler": "lambda_function.lambda_handler",
+    "last_modified": "2026-02-21T20:03:42.000+0000",
+    "layers": [],
+    "memory_size": 256,
+    "role": "arn:aws:iam::356364570033:role/devops-project-service-lambda-role",
+    "runtime": "python3.11",
+    "timeout": 30,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "lambda_function.py",
+  "live_entry_sha256": "bb9354723600f8f38443bb7fcc334a635441e6855207df50dd179f7f6d0c3edc",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/project_service/lambda_function.py",
+  "repo_entry_sha256": "bb9354723600f8f38443bb7fcc334a635441e6855207df50dd179f7f6d0c3edc"
+}

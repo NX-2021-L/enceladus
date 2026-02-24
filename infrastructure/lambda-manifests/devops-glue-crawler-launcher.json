@@ -1,0 +1,31 @@
+{
+  "entry_file": "handler.py",
+  "function_name": "devops-glue-crawler-launcher",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "fd/St1GIr40pxmhbiXwDxft1S1sXRcOAtS6/WvUnRNY=",
+    "environment": {
+      "CRAWLER_COOLDOWN_SECONDS": "180",
+      "CRAWLER_MAP": "{\"features\":\"features-sync\",\"tasks\":\"tasks-sync\",\"issues\":\"issues-sync\"}",
+      "MIN_CRAWL_INTERVAL_SECONDS": "7200"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-glue-crawler-launcher",
+    "handler": "handler.lambda_handler",
+    "last_modified": "2026-02-21T01:01:52.000+0000",
+    "layers": [],
+    "memory_size": 128,
+    "role": "arn:aws:iam::356364570033:role/devops-glue-crawler-lambda",
+    "runtime": "python3.11",
+    "timeout": 3,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "handler.py",
+  "live_entry_sha256": "61cbde5fb88d8f9feb6e774ef0cefb2ba1f68358ee7f0e2e76a00201cca8a6fc",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/glue_crawler_launcher/handler.py",
+  "repo_entry_sha256": "61cbde5fb88d8f9feb6e774ef0cefb2ba1f68358ee7f0e2e76a00201cca8a6fc"
+}
