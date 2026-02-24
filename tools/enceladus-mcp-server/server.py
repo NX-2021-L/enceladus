@@ -150,6 +150,18 @@ DEPLOY_QUEUE_NAME = os.environ.get("ENCELADUS_DEPLOY_QUEUE", "devops-deploy-queu
 DEPLOY_CONFIG_BUCKET = os.environ.get("ENCELADUS_DEPLOY_CONFIG_BUCKET", "jreese-net")
 DEPLOY_CONFIG_PREFIX = os.environ.get("ENCELADUS_DEPLOY_CONFIG_PREFIX", "deploy-config")
 DEPLOY_CHANGE_TYPES = ("patch", "minor", "major")
+DOCUMENT_ALLOWED_FILE_EXTENSIONS = (".md", ".markdown")
+DOCUMENT_MAX_TITLE_LENGTH = int(os.environ.get("ENCELADUS_DOCUMENT_MAX_TITLE_LENGTH", "500"))
+DOCUMENT_MAX_DESCRIPTION_LENGTH = int(
+    os.environ.get("ENCELADUS_DOCUMENT_MAX_DESCRIPTION_LENGTH", "5000")
+)
+DOCUMENT_MAX_CONTENT_SIZE_BYTES = int(
+    os.environ.get("ENCELADUS_DOCUMENT_MAX_CONTENT_BYTES", "1048576")
+)
+DOCUMENT_MAX_KEYWORDS = int(os.environ.get("ENCELADUS_DOCUMENT_MAX_KEYWORDS", "50"))
+DOCUMENT_MAX_RELATED_ITEMS = int(
+    os.environ.get("ENCELADUS_DOCUMENT_MAX_RELATED_ITEMS", "100")
+)
 DEPLOYMENT_TYPES = (
     "github_public_static",
     "github_private_sst",
@@ -1069,6 +1081,354 @@ def _document_api_request(
         return _error_payload("UPSTREAM_ERROR", f"Document API unreachable: {exc}", retryable=True)
     except Exception as exc:  # pragma: no cover - defensive fallback
         return _error_payload("INTERNAL_ERROR", f"Document API request failed: {exc}", retryable=False)
+
+
+def _is_allowed_document_file_name(file_name: str) -> bool:
+    name = str(file_name or "").strip()
+    if not name:
+        return False
+    if "/" in name or "\\" in name:
+        return False
+    lowered = name.lower()
+    return any(lowered.endswith(ext) for ext in DOCUMENT_ALLOWED_FILE_EXTENSIONS)
+
+
+def _normalize_document_string_list(
+    value: Any,
+    *,
+    field_name: str,
+    max_items: int,
+    lower: bool = False,
+) -> tuple[Optional[List[str]], Optional[Dict[str, Any]]]:
+    if value is None:
+        return [], None
+    if not isinstance(value, list):
+        return None, _error_payload(
+            "INVALID_INPUT",
+            f"Field '{field_name}' must be an array of strings.",
+            retryable=False,
+        )
+    normalized: List[str] = []
+    for raw in value[:max_items]:
+        token = str(raw).strip()
+        if not token:
+            continue
+        normalized.append(token.lower() if lower else token)
+    return normalized, None
+
+
+def _project_exists(project_id: str) -> tuple[bool, Optional[Dict[str, Any]]]:
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=PROJECTS_TABLE,
+            Key={"project_id": _ser_s(project_id)},
+            ProjectionExpression="project_id",
+        )
+    except Exception as exc:
+        return False, _error_payload(
+            "UPSTREAM_ERROR",
+            f"Project lookup failed: {exc}",
+            retryable=True,
+        )
+    return bool(resp.get("Item")), None
+
+
+def _document_put_direct(payload: Dict[str, Any]) -> Dict[str, Any]:
+    project_id = str(payload.get("project_id") or "").strip()
+    title = str(payload.get("title") or "").strip()
+    content = payload.get("content")
+
+    if not project_id:
+        return _error_payload("INVALID_INPUT", "Field 'project_id' is required.", retryable=False)
+    if not title:
+        return _error_payload("INVALID_INPUT", "Field 'title' is required.", retryable=False)
+    if len(title) > DOCUMENT_MAX_TITLE_LENGTH:
+        return _error_payload(
+            "INVALID_INPUT",
+            f"Title exceeds {DOCUMENT_MAX_TITLE_LENGTH} characters.",
+            retryable=False,
+        )
+    if content is None or not isinstance(content, str) or not content:
+        return _error_payload(
+            "INVALID_INPUT",
+            "Field 'content' is required (document body).",
+            retryable=False,
+        )
+    content_bytes = content.encode("utf-8")
+    if len(content_bytes) > DOCUMENT_MAX_CONTENT_SIZE_BYTES:
+        return _error_payload(
+            "INVALID_INPUT",
+            f"Content exceeds {DOCUMENT_MAX_CONTENT_SIZE_BYTES} bytes.",
+            retryable=False,
+        )
+
+    project_ok, project_error = _project_exists(project_id)
+    if project_error:
+        return project_error
+    if not project_ok:
+        return _error_payload(
+            "NOT_FOUND",
+            f"Project '{project_id}' is not registered.",
+            retryable=False,
+        )
+
+    description = str(payload.get("description") or "").strip()[:DOCUMENT_MAX_DESCRIPTION_LENGTH]
+    file_name = str(payload.get("file_name") or "").strip()
+    if file_name and not _is_allowed_document_file_name(file_name):
+        return _error_payload(
+            "INVALID_INPUT",
+            "file_name must end with .md or .markdown and include no path separators.",
+            retryable=False,
+        )
+
+    related_items, rel_error = _normalize_document_string_list(
+        payload.get("related_items"),
+        field_name="related_items",
+        max_items=DOCUMENT_MAX_RELATED_ITEMS,
+        lower=False,
+    )
+    if rel_error:
+        return rel_error
+    keywords, kw_error = _normalize_document_string_list(
+        payload.get("keywords"),
+        field_name="keywords",
+        max_items=DOCUMENT_MAX_KEYWORDS,
+        lower=True,
+    )
+    if kw_error:
+        return kw_error
+
+    document_id = f"DOC-{uuid.uuid4().hex[:12].upper()}"
+    now = _now_z()
+    s3_key = f"{S3_DOCUMENTS_PREFIX}/{project_id}/{document_id}.md"
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+
+    s3 = _get_s3()
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=s3_key,
+            Body=content_bytes,
+            ContentType="text/markdown; charset=utf-8",
+        )
+    except Exception as exc:
+        return _error_payload(
+            "UPSTREAM_ERROR",
+            f"Failed to store document content: {exc}",
+            retryable=True,
+        )
+
+    item = {
+        "document_id": _ser_s(document_id),
+        "project_id": _ser_s(project_id),
+        "title": _ser_s(title),
+        "description": _ser_s(description),
+        "file_name": _ser_s(file_name or f"{document_id}.md"),
+        "s3_bucket": _ser_s(S3_BUCKET),
+        "s3_key": _ser_s(s3_key),
+        "content_type": _ser_s("text/markdown"),
+        "content_hash": _ser_s(content_hash),
+        "size_bytes": {"N": str(len(content_bytes))},
+        "related_items": _ser_value(related_items or []),
+        "keywords": _ser_value(keywords or []),
+        "created_by": _ser_s("mcp-server-direct-fallback"),
+        "created_at": _ser_s(now),
+        "updated_at": _ser_s(now),
+        "status": _ser_s("active"),
+        "version": {"N": "1"},
+    }
+
+    ddb = _get_ddb()
+    try:
+        ddb.put_item(
+            TableName=DOCUMENTS_TABLE,
+            Item=item,
+            ConditionExpression="attribute_not_exists(document_id)",
+        )
+    except Exception as exc:
+        try:
+            s3.delete_object(Bucket=S3_BUCKET, Key=s3_key)
+        except Exception:
+            pass
+        return _error_payload(
+            "UPSTREAM_ERROR",
+            f"Failed to save document metadata: {exc}",
+            retryable=True,
+        )
+
+    return {
+        "success": True,
+        "document_id": document_id,
+        "s3_location": f"s3://{S3_BUCKET}/{s3_key}",
+        "content_hash": content_hash,
+        "size_bytes": len(content_bytes),
+        "created_at": now,
+        "write_mode": "direct_fallback",
+    }
+
+
+def _document_patch_direct(document_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return _error_payload("INVALID_INPUT", "document_id is required", retryable=False)
+
+    ddb = _get_ddb()
+    try:
+        existing_resp = ddb.get_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": _ser_s(doc_id)},
+            ConsistentRead=True,
+        )
+    except Exception as exc:
+        return _error_payload("UPSTREAM_ERROR", f"Database read failed: {exc}", retryable=True)
+    existing_item = existing_resp.get("Item")
+    if not existing_item:
+        return _error_payload("NOT_FOUND", f"Document not found: {doc_id}", retryable=False)
+
+    existing = _deser_item(existing_item)
+    project_id = str(existing.get("project_id") or "").strip()
+    if not project_id:
+        return _error_payload(
+            "UPSTREAM_ERROR",
+            f"Document '{doc_id}' has no project_id metadata.",
+            retryable=False,
+        )
+
+    now = _now_z()
+    current_version = int(existing.get("version") or 0)
+    expr_parts = ["updated_at = :ts", "#ver = if_not_exists(#ver, :zero) + :one"]
+    attr_names: Dict[str, str] = {"#ver": "version"}
+    attr_values: Dict[str, Any] = {
+        ":ts": _ser_s(now),
+        ":one": {"N": "1"},
+        ":zero": {"N": "0"},
+    }
+
+    if "title" in payload:
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            return _error_payload(
+                "INVALID_INPUT",
+                f"Title must be 1-{DOCUMENT_MAX_TITLE_LENGTH} characters.",
+                retryable=False,
+            )
+        if len(title) > DOCUMENT_MAX_TITLE_LENGTH:
+            return _error_payload(
+                "INVALID_INPUT",
+                f"Title must be 1-{DOCUMENT_MAX_TITLE_LENGTH} characters.",
+                retryable=False,
+            )
+        expr_parts.append("title = :title")
+        attr_values[":title"] = _ser_s(title)
+
+    if "description" in payload:
+        expr_parts.append("description = :desc")
+        attr_values[":desc"] = _ser_s(
+            str(payload.get("description") or "").strip()[:DOCUMENT_MAX_DESCRIPTION_LENGTH]
+        )
+
+    if "related_items" in payload:
+        related_items, rel_error = _normalize_document_string_list(
+            payload.get("related_items"),
+            field_name="related_items",
+            max_items=DOCUMENT_MAX_RELATED_ITEMS,
+            lower=False,
+        )
+        if rel_error:
+            return rel_error
+        expr_parts.append("related_items = :ri")
+        attr_values[":ri"] = _ser_value(related_items or [])
+
+    if "keywords" in payload:
+        keywords, kw_error = _normalize_document_string_list(
+            payload.get("keywords"),
+            field_name="keywords",
+            max_items=DOCUMENT_MAX_KEYWORDS,
+            lower=True,
+        )
+        if kw_error:
+            return kw_error
+        expr_parts.append("keywords = :kw")
+        attr_values[":kw"] = _ser_value(keywords or [])
+
+    if "status" in payload:
+        status = str(payload.get("status") or "").strip().lower()
+        if status not in {"active", "archived"}:
+            return _error_payload(
+                "INVALID_INPUT",
+                "Status must be 'active' or 'archived'.",
+                retryable=False,
+            )
+        expr_parts.append("#status = :status")
+        attr_names["#status"] = "status"
+        attr_values[":status"] = _ser_s(status)
+
+    if "file_name" in payload:
+        file_name = str(payload.get("file_name") or "").strip()
+        if not _is_allowed_document_file_name(file_name):
+            return _error_payload(
+                "INVALID_INPUT",
+                "file_name must end with .md or .markdown and include no path separators.",
+                retryable=False,
+            )
+        expr_parts.append("file_name = :file_name")
+        attr_values[":file_name"] = _ser_s(file_name)
+
+    if "content" in payload:
+        content = payload.get("content")
+        if content is None or not isinstance(content, str) or not content:
+            return _error_payload(
+                "INVALID_INPUT",
+                "Field 'content' must be a non-empty string.",
+                retryable=False,
+            )
+        content_bytes = content.encode("utf-8")
+        if len(content_bytes) > DOCUMENT_MAX_CONTENT_SIZE_BYTES:
+            return _error_payload(
+                "INVALID_INPUT",
+                f"Content must be 1-{DOCUMENT_MAX_CONTENT_SIZE_BYTES} bytes.",
+                retryable=False,
+            )
+        s3_key = str(existing.get("s3_key") or f"{S3_DOCUMENTS_PREFIX}/{project_id}/{doc_id}.md")
+        content_hash = hashlib.sha256(content_bytes).hexdigest()
+        try:
+            _get_s3().put_object(
+                Bucket=S3_BUCKET,
+                Key=s3_key,
+                Body=content_bytes,
+                ContentType="text/markdown; charset=utf-8",
+            )
+        except Exception as exc:
+            return _error_payload(
+                "UPSTREAM_ERROR",
+                f"Failed to update document content: {exc}",
+                retryable=True,
+            )
+        expr_parts.extend(["content_hash = :hash", "size_bytes = :size", "s3_key = :s3k"])
+        attr_values[":hash"] = _ser_s(content_hash)
+        attr_values[":size"] = {"N": str(len(content_bytes))}
+        attr_values[":s3k"] = _ser_s(s3_key)
+
+    update_expr = "SET " + ", ".join(expr_parts)
+    try:
+        ddb.update_item(
+            TableName=DOCUMENTS_TABLE,
+            Key={"document_id": _ser_s(doc_id)},
+            UpdateExpression=update_expr,
+            ExpressionAttributeNames=attr_names,
+            ExpressionAttributeValues=attr_values,
+        )
+    except Exception as exc:
+        return _error_payload("UPSTREAM_ERROR", f"Database write failed: {exc}", retryable=True)
+
+    return {
+        "success": True,
+        "document_id": doc_id,
+        "updated_at": now,
+        "version": current_version + 1,
+        "write_mode": "direct_fallback",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3820,6 +4180,12 @@ async def _documents_put(args: dict) -> list[TextContent]:
             body[key] = args.get(key)
 
     result = _document_api_request("PUT", payload=body)
+    if _is_authentication_required_error(result):
+        logger.info(
+            "[INFO] documents_put received auth-required response from document API; using direct fallback for project %s",
+            body.get("project_id"),
+        )
+        result = _document_put_direct(body)
     return _result_text(result)
 
 
@@ -3855,6 +4221,12 @@ async def _documents_patch(args: dict) -> list[TextContent]:
 
     encoded_id = urllib.parse.quote(document_id, safe="")
     result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=body)
+    if _is_authentication_required_error(result):
+        logger.info(
+            "[INFO] documents_patch received auth-required response from document API; using direct fallback for document %s",
+            document_id,
+        )
+        result = _document_patch_direct(document_id, body)
     return _result_text(result)
 
 

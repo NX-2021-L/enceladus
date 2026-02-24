@@ -148,6 +148,14 @@ env_block = {
     "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
     "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
 }
+for key in (
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+    "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
+    "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
+):
+    value = os.environ.get(key, "").strip()
+    if value:
+        env_block[key] = value
 
 aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
 if aws_profile:
@@ -268,6 +276,14 @@ env_items = {
     "ENCELADUS_DOCUMENTS_TABLE": "documents",
     "ENCELADUS_S3_BUCKET": "jreese-net",
 }
+for key in (
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+    "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
+    "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
+):
+    value = os.environ.get(key, "").strip()
+    if value:
+        env_items[key] = value
 aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
 if aws_profile:
     env_items["AWS_PROFILE"] = aws_profile
@@ -330,6 +346,14 @@ async def main() -> None:
         "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
         "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
     }
+    for key in (
+        "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+        "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
+        "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
+    ):
+        value = os.environ.get(key, "").strip()
+        if value:
+            server_env[key] = value
     aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
     if aws_profile:
         server_env["AWS_PROFILE"] = aws_profile
