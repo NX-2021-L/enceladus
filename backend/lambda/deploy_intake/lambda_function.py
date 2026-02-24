@@ -567,7 +567,8 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
         state_data = json.loads(resp["Body"].read().decode("utf-8"))
         deploy_state = state_data.get("state", "ACTIVE")
     except ClientError as e:
-        if e.response["Error"]["Code"] == "NoSuchKey":
+        err_code = (e.response or {}).get("Error", {}).get("Code", "")
+        if err_code in {"NoSuchKey", "404", "NotFound"}:
             deploy_state = "ACTIVE"
         else:
             return _error(500, "Failed to read deployment state")
@@ -646,7 +647,8 @@ def _handle_get_state(project_id: str) -> Dict:
         data = json.loads(resp["Body"].read().decode("utf-8"))
         return _ok({"project_id": project_id, **data})
     except ClientError as e:
-        if e.response["Error"]["Code"] == "NoSuchKey":
+        err_code = (e.response or {}).get("Error", {}).get("Code", "")
+        if err_code in {"NoSuchKey", "404", "NotFound"}:
             return _ok({
                 "project_id": project_id,
                 "state": "ACTIVE",

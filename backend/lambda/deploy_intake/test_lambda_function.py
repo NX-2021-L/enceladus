@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import unittest
+from botocore.exceptions import ClientError
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -118,6 +119,27 @@ class DeployIntakeAuthTests(unittest.TestCase):
 
         self.assertEqual(resp["statusCode"], 200)
         mock_get_state.assert_called_once_with("enceladus")
+
+    @patch.object(deploy_intake, "_get_s3")
+    def test_state_get_404_defaults_to_active(self, mock_get_s3) -> None:
+        deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        mock_get_s3.return_value.get_object.side_effect = ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"}},
+            "GetObject",
+        )
+
+        resp = deploy_intake.lambda_handler(
+            _event(
+                method="GET",
+                path="/api/v1/deploy/state/enceladus",
+                headers={"X-Coordination-Internal-Key": "test-internal-key"},
+            ),
+            None,
+        )
+
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertEqual(body.get("state"), "ACTIVE")
 
 
 if __name__ == "__main__":
