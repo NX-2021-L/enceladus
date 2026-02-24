@@ -121,6 +121,7 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         "task_complexity",
         "thinking",
         "stream",
+        "batch_eligible",
     }
     unknown = sorted(k for k in raw.keys() if k not in allowed)
     if unknown:
@@ -261,6 +262,13 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         if not isinstance(stream, bool):
             raise ValueError("'provider_preferences.stream' must be a boolean")
         out["stream"] = stream
+
+    # batch_eligible — signals dispatch can be deferred to batch API for cost savings
+    batch_eligible = raw.get("batch_eligible")
+    if batch_eligible is not None:
+        if not isinstance(batch_eligible, bool):
+            raise ValueError("'provider_preferences.batch_eligible' must be a boolean")
+        out["batch_eligible"] = batch_eligible
 
     return out
 

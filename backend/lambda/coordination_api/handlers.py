@@ -487,6 +487,14 @@ def _handle_capabilities() -> Dict[str, Any]:
                             "streaming": True,
                             "token_counting": True,
                             "cost_attribution": True,
+                            "batch_processing": {
+                                "supported": True,
+                                "description": "Deferred batch execution via Anthropic Message Batches API for 50% cost savings",
+                                "max_timeout_hours": 24,
+                                "cost_savings_estimate": "50%",
+                                "incompatible_modes": ["preflight"],
+                                "preference_field": "provider_preferences.batch_eligible",
+                            },
                         },
                         "secret_ref_configured": provider_secrets["claude_agent_sdk"].get("secret_ref_configured"),
                         "secret_ref": provider_secrets["claude_agent_sdk"].get("secret_ref"),
@@ -646,6 +654,9 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
         provider_prefs_raw = body.get("provider_preferences") or body.get("provider_session")
         provider_session = _validate_provider_session(provider_prefs_raw)
         execution_mode = _coerce_execution_mode(body.get("execution_mode"))
+        # Cross-field validation: batch_eligible is incompatible with preflight
+        if provider_session.get("batch_eligible") and execution_mode == "preflight":
+            raise ValueError("'batch_eligible' cannot be true when execution_mode is 'preflight' (preflight is inherently synchronous)")
         _load_project_meta(project_id)
     except (ValueError, RuntimeError) as exc:
         return _error(400, str(exc))
@@ -1023,7 +1034,23 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                 request.get("related_record_ids") or []
             )
 
-        if execution_mode == "claude_agent_sdk":
+        # Check if batch mode is requested via provider_preferences
+        is_batch = bool((request.get("provider_session") or {}).get("batch_eligible"))
+
+        if is_batch and execution_mode == "claude_agent_sdk":
+            # Batch mode: set batch_context metadata, dispatch async
+            request["batch_context"] = {
+                "batch_eligible": True,
+                "batch_submitted_at": now,
+                "batch_max_timeout_hours": 24,
+                "cost_savings_estimate": "50%",
+            }
+            dispatch_meta = _dispatch_claude_api(
+                request=request,
+                prompt=prompt,
+                dispatch_id=dispatch_id,
+            )
+        elif execution_mode == "claude_agent_sdk":
             dispatch_meta = _dispatch_claude_api(
                 request=request,
                 prompt=prompt,
