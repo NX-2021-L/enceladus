@@ -25,6 +25,39 @@ This folder contains Lambda-based API components sourced from the canonical DevO
 - `lambda/auth_edge`
 - `lambda/governance_audit`
 
+## ⚠️ CRITICAL: Lambda Dependency Build Requirements
+
+**All Lambda functions with requirements.txt must use the shared layer (`backend/lambda/shared_layer/`).**
+
+Never bundle compiled dependencies directly in Lambda function packages. macOS-built binaries are incompatible with Lambda's Linux runtime.
+
+### Building Lambda Packages
+
+Use platform-specific targeting:
+```bash
+pip install \
+  --platform manylinux2014_x86_64 \
+  --only-binary=:all: \
+  -r requirements.txt \
+  -t lambda_build_dir
+```
+
+### Shared Layer Deployment
+```bash
+cd backend/lambda/shared_layer
+./deploy.sh --attach-all  # Attach to all Enceladus Lambdas
+```
+
+### Cookie Parsing Requirement
+
+All auth-checking Lambda functions MUST parse cookies from BOTH sources:
+- `headers.cookie` (standard HTTP)
+- `event.cookies` (API Gateway v2)
+
+Failure to parse both causes auth failures with modern API Gateway versions (see DVP-ISS-071).
+
+See `JWT_AUTHENTICATION_FORENSICS.md` for complete prevention framework.
+
 ## Deployment Policy
 
 - This repo currently enables GitHub Actions deployment for UI only.
