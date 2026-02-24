@@ -59,6 +59,7 @@ PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 CORS_ORIGIN = "https://jreese.net"
+FEED_CACHE_CONTROL = "max-age=0, s-maxage=300, must-revalidate"
 
 CLOSED_ITEM_MAX_AGE_DAYS = 0
 MAX_SCOPE_RECORD_IDS = 500
@@ -247,7 +248,7 @@ def _cors_headers() -> Dict[str, str]:
 def _response(status_code: int, body: Any) -> Dict[str, Any]:
     return {
         "statusCode": status_code,
-        "headers": {**_cors_headers(), "Content-Type": "application/json"},
+        "headers": {**_cors_headers(), "Content-Type": "application/json", "Cache-Control": FEED_CACHE_CONTROL},
         "body": json.dumps(body),
     }
 
