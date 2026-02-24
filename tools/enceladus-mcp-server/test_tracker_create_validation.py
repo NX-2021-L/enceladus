@@ -1,11 +1,14 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
+import io
 import json
 import pathlib
 import sys
 import threading
 from unittest.mock import patch
+
+from pydantic import AnyUrl, TypeAdapter
 
 
 MODULE_PATH = pathlib.Path(__file__).with_name("server.py")
@@ -168,6 +171,47 @@ def test_tracker_create_task_stores_acceptance_criteria():
     assert criteria == ["first criterion", "second criterion"]
 
 
+def test_tracker_create_rejects_coordination_without_request_id():
+    gov_hash = server._compute_governance_hash()
+    with patch.object(server, "_get_ddb") as mock_get_ddb:
+        result = _call_tracker_create(
+            {
+                "project_id": "devops",
+                "record_type": "task",
+                "title": "Coordination task missing request id",
+                "governance_hash": gov_hash,
+                "acceptance_criteria": ["first criterion"],
+                "coordination": True,
+            }
+        )
+
+    assert "error" in result
+    assert "coordination=true requires coordination_request_id" in result["error"]
+    mock_get_ddb.assert_not_called()
+
+
+def test_tracker_create_dispatch_sets_coordination_fields():
+    gov_hash = server._compute_governance_hash()
+    fake_ddb = _FakeDdb()
+    with patch.object(server, "_get_ddb", return_value=fake_ddb):
+        result = _call_tracker_create(
+            {
+                "project_id": "devops",
+                "record_type": "task",
+                "title": "Dispatch-created task",
+                "governance_hash": gov_hash,
+                "acceptance_criteria": ["first criterion"],
+                "dispatch_id": "DSP-ABC123",
+                "coordination": False,
+            }
+        )
+
+    assert result.get("success") is True
+    item = fake_ddb.put_requests[0]["Item"]
+    assert item["coordination"] == {"BOOL": True}
+    assert item["coordination_request_id"] == {"S": "DSP-ABC123"}
+
+
 def test_tracker_create_concurrent_ids_are_unique_for_100_plus_requests():
     gov_hash = server._compute_governance_hash()
     fake_ddb = _ConcurrentIdFakeDdb(existing_max=500)
@@ -194,3 +238,44 @@ def test_tracker_create_concurrent_ids_are_unique_for_100_plus_requests():
     numeric = sorted(int(record_id.split("-")[2]) for record_id in ids)
     assert numeric[0] == 501
     assert numeric[-1] == 620
+
+
+class _FakeS3:
+    def __init__(self, payload: str):
+        self.payload = payload.encode("utf-8")
+        self.calls = []
+
+    def get_object(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"Body": io.BytesIO(self.payload)}
+
+
+def test_read_resource_governance_accepts_anyurl_object():
+    fake_s3 = _FakeS3("# agents governance")
+    governance_uri = TypeAdapter(AnyUrl).validate_python("governance://agents.md")
+    with patch.object(
+        server,
+        "_governance_catalog",
+        return_value={
+            "governance://agents.md": {
+                "s3_bucket": "jreese-net",
+                "s3_key": "governance/live/agents.md",
+            }
+        },
+    ), patch.object(server, "_get_s3", return_value=fake_s3):
+        content = _run(server.read_resource(governance_uri))
+
+    assert content == "# agents governance"
+    assert fake_s3.calls
+    assert fake_s3.calls[0]["Key"] == "governance/live/agents.md"
+
+
+def test_read_resource_project_reference_accepts_anyurl_object():
+    fake_s3 = _FakeS3("# project reference")
+    ref_uri = TypeAdapter(AnyUrl).validate_python("projects://reference/enceladus")
+    with patch.object(server, "_get_s3", return_value=fake_s3):
+        content = _run(server.read_resource(ref_uri))
+
+    assert content == "# project reference"
+    assert fake_s3.calls
+    assert fake_s3.calls[0]["Key"] == f"{server.S3_REFERENCE_PREFIX}/enceladus.md"

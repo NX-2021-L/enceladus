@@ -1,38 +1,25 @@
-# MCP Server
+# Enceladus MCP Server Assets
 
-Enceladus MCP server source mirror.
+This directory is the canonical source for Enceladus MCP runtime assets used by:
 
-## Scope
+- local/desktop MCP sessions
+- host-v2 bootstrap flows
+- bundled native briefing packages under `briefings/*/tools/enceladus-mcp-server/`
 
-This folder mirrors the canonical MCP source from:
-
-- `/Users/jreese/agents-dev/projects/devops/tools/enceladus-mcp-server`
-
-Included artifacts:
+## Core Files
 
 - `server.py`
 - `dispatch_plan_generator.py`
 - `install_profile.sh`
-- integration/unit tests
-- `briefings/` canonical native MCP session briefing templates
+- `host_v2_first_bootstrap.sh`
+- `host_v2_user_data_template.sh`
+
+## Sync Rule
+
+Briefing bundle copies of the MCP assets must remain in lockstep with these canonical files to avoid profile/runtime drift that can surface as MCP `Transport closed` failures in Codex/desktop sessions.
 
 ## Deployment Policy
 
-- MCP source is kept in GitHub for full-codebase visibility and collaboration.
-- No GitHub Actions auto-deploy is configured for MCP components in this repo.
-
-## Tracker ID Allocation
-
-`tracker_create` now uses an atomic DynamoDB counter per `(project_id, record_type)` instead of scan-and-increment ID allocation.
-
-- Counter records are stored in the tracker table with `record_id` keys prefixed by `counter#`.
-- New IDs are allocated via atomic `UpdateItem` increments to prevent concurrent collisions.
-- Creation still uses conditional puts; if an ID collision is detected, the server retries with a fresh counter increment.
-
-## Briefing Templates
-
-Native MCP briefing templates are now managed in Git at:
-
-- `tools/enceladus-mcp-server/briefings/native-desktop-mcp-briefing`
-- `tools/enceladus-mcp-server/briefings/native-terminal-mcp-briefing`
-- `tools/enceladus-mcp-server/briefings/native-desktop-mcp-briefing-extras`
+- Keep MCP source versioned in Git.
+- Deploy coordination/runtime lambdas through their normal deploy scripts.
+- Run MCP stdio smoke validation after installer or path changes.

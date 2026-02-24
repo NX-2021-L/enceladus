@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # install_profile.sh — Install the Enceladus MCP server profile for provider sessions.
 #
-# Registers the Enceladus MCP server with Claude Code (or compatible MCP clients)
+# Registers the Enceladus MCP server with Claude Code/Codex (or compatible MCP clients)
 # so provider sessions can access governed Enceladus system resources.
 #
 # Usage:
-#   ./install_profile.sh                    # Auto-detect workspace root
-#   ENCELADUS_WORKSPACE_ROOT=/path ./install_profile.sh   # Override root
+#   ./install_profile.sh
+#   ENCELADUS_WORKSPACE_ROOT=/path ./install_profile.sh
 #
-# Related: DVP-TSK-245, DVP-FTR-023
+# Related: DVP-TSK-245, DVP-FTR-023, ENC-TSK-511
 
 set -euo pipefail
 
@@ -18,9 +18,27 @@ SERVER_PY="${SCRIPT_DIR}/server.py"
 # Workspace root auto-detection
 WORKSPACE_ROOT="${ENCELADUS_WORKSPACE_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 
+# Resolve a stable Python interpreter for MCP runtime.
+PYTHON_BIN="${ENCELADUS_MCP_PYTHON_BIN:-$(command -v python3 || true)}"
+if [ -z "${PYTHON_BIN}" ]; then
+    echo "[ERROR] python3 not found in PATH"
+    exit 1
+fi
+
+PYTHON_USER_SITE="$("${PYTHON_BIN}" - <<'PY'
+import site
+print(site.getusersitepackages())
+PY
+)"
+MCP_PYTHONPATH="${PYTHON_USER_SITE}"
+if [ -n "${PYTHONPATH:-}" ]; then
+    MCP_PYTHONPATH="${MCP_PYTHONPATH}:${PYTHONPATH}"
+fi
+
 echo "[INFO] Enceladus MCP profile installer"
 echo "[INFO] Server: ${SERVER_PY}"
 echo "[INFO] Workspace root: ${WORKSPACE_ROOT}"
+echo "[INFO] Python: ${PYTHON_BIN}"
 
 # Verify server.py exists
 if [ ! -f "${SERVER_PY}" ]; then
@@ -29,9 +47,9 @@ if [ ! -f "${SERVER_PY}" ]; then
 fi
 
 # Verify Python + dependencies
-if ! python3 -c "import mcp, boto3" >/dev/null 2>&1; then
+if ! "${PYTHON_BIN}" -c "import mcp, boto3" >/dev/null 2>&1; then
     echo "[INFO] Installing required Python packages..."
-    python3 -m pip install --user --quiet mcp boto3 PyYAML 2>/dev/null || {
+    "${PYTHON_BIN}" -m pip install --user --quiet mcp boto3 PyYAML 2>/dev/null || {
         echo "[ERROR] Failed to install required packages (mcp, boto3, PyYAML)"
         exit 1
     }
@@ -96,11 +114,31 @@ MCP_CONFIG=$(cat <<EOCONFIG
 {
   "mcpServers": {
     "enceladus": {
-      "command": "python3",
+      "command": "${PYTHON_BIN}",
       "args": ["${SERVER_PY}"],
       "env": {
         ${MCP_WRITER_ENV}
         ${MCP_BASE_AWS_PROFILE_ENV}
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPATH": "${MCP_PYTHONPATH}",
+        "ENCELADUS_WORKSPACE_ROOT": "${WORKSPACE_ROOT}",
+        "ENCELADUS_REGION": "us-west-2",
+        "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
+        "ENCELADUS_PROJECTS_TABLE": "projects",
+        "ENCELADUS_DOCUMENTS_TABLE": "documents",
+        "ENCELADUS_S3_BUCKET": "jreese-net",
+        "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
+        "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history"
+      }
+    },
+    "enceladus-local": {
+      "command": "${PYTHON_BIN}",
+      "args": ["${SERVER_PY}"],
+      "env": {
+        ${MCP_WRITER_ENV}
+        ${MCP_BASE_AWS_PROFILE_ENV}
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPATH": "${MCP_PYTHONPATH}",
         "ENCELADUS_WORKSPACE_ROOT": "${WORKSPACE_ROOT}",
         "ENCELADUS_REGION": "us-west-2",
         "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
@@ -126,8 +164,8 @@ if [ -d "${CLAUDE_SETTINGS_DIR}" ] || command -v claude >/dev/null 2>&1; then
     if [ -f "${CLAUDE_MCP_FILE}" ]; then
         # Merge with existing config
         echo "[INFO] Merging into existing ${CLAUDE_MCP_FILE}"
-        python3 -c "
-import json, sys
+        "${PYTHON_BIN}" -c "
+import json
 existing = {}
 try:
     with open('${CLAUDE_MCP_FILE}', 'r') as f:
@@ -152,6 +190,149 @@ else
     echo "${MCP_CONFIG}"
     echo ""
     echo "[INFO] Add the above to your MCP client's configuration file."
+fi
+
+# Best-effort: upsert Codex MCP profile section for desktop sessions.
+CODEX_SETTINGS_DIR="${HOME}/.codex"
+CODEX_CONFIG_FILE="${CODEX_SETTINGS_DIR}/config.toml"
+mkdir -p "${CODEX_SETTINGS_DIR}"
+
+MCP_RUNTIME_AWS_PROFILE="${MCP_WRITER_PROFILE}"
+if [ -z "${MCP_WRITER_ENV}" ]; then
+    MCP_RUNTIME_AWS_PROFILE="${RESOLVED_AWS_PROFILE}"
+fi
+
+if CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE}" \
+    PYTHON_BIN="${PYTHON_BIN}" \
+    SERVER_PY="${SERVER_PY}" \
+    MCP_PYTHONPATH="${MCP_PYTHONPATH}" \
+    WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
+    MCP_RUNTIME_AWS_PROFILE="${MCP_RUNTIME_AWS_PROFILE}" \
+    "${PYTHON_BIN}" - <<'PY'
+import os
+import pathlib
+import re
+
+cfg = pathlib.Path(os.environ["CODEX_CONFIG_FILE"])
+text = cfg.read_text() if cfg.exists() else ""
+
+# Remove prior managed block and any direct enceladus/enceladus-local sections to avoid duplicate TOML keys.
+text = re.sub(r"(?ms)^# BEGIN ENCELADUS MCP PROFILE \(managed\)\n.*?# END ENCELADUS MCP PROFILE \(managed\)\n?", "", text)
+for section in ("enceladus", "enceladus-local"):
+    text = re.sub(
+        rf"(?ms)^\[mcp_servers\.{re.escape(section)}\]\n.*?(?=^\[|\Z)",
+        "",
+        text,
+    )
+    text = re.sub(
+        rf"(?ms)^\[mcp_servers\.{re.escape(section)}\.env\]\n.*?(?=^\[|\Z)",
+        "",
+        text,
+    )
+
+text = text.rstrip()
+if text:
+    text += "\n\n"
+
+py_bin = os.environ["PYTHON_BIN"]
+server_py = os.environ["SERVER_PY"]
+env_items = {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONPATH": os.environ["MCP_PYTHONPATH"],
+    "ENCELADUS_WORKSPACE_ROOT": os.environ["WORKSPACE_ROOT"],
+    "ENCELADUS_REGION": "us-west-2",
+    "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
+    "ENCELADUS_PROJECTS_TABLE": "projects",
+    "ENCELADUS_DOCUMENTS_TABLE": "documents",
+    "ENCELADUS_S3_BUCKET": "jreese-net",
+}
+aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
+if aws_profile:
+    env_items["AWS_PROFILE"] = aws_profile
+
+
+def _toml_str(value: str) -> str:
+    escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _server_block(name: str) -> str:
+    lines = [
+        f"[mcp_servers.{name}]",
+        f"command = {_toml_str(py_bin)}",
+        f"args = [{_toml_str(server_py)}]",
+        "",
+        f"[mcp_servers.{name}.env]",
+    ]
+    for k, v in sorted(env_items.items()):
+        lines.append(f"{k} = {_toml_str(v)}")
+    return "\n".join(lines)
+
+managed = (
+    "# BEGIN ENCELADUS MCP PROFILE (managed)\n"
+    + _server_block("enceladus-local")
+    + "\n\n"
+    + _server_block("enceladus")
+    + "\n# END ENCELADUS MCP PROFILE (managed)\n"
+)
+cfg.write_text(text + managed)
+print(f"[SUCCESS] Enceladus MCP profile upserted in {cfg}")
+PY
+then
+    :
+else
+    echo "[WARNING] Failed to update ${CODEX_CONFIG_FILE}; continuing"
+fi
+
+# Optional stdio smoke test so install failures surface immediately.
+if [ "${ENCELADUS_SKIP_MCP_SMOKE_TEST:-false}" != "true" ]; then
+    echo "[INFO] Running MCP stdio smoke test"
+    if ! PYTHON_BIN="${PYTHON_BIN}" \
+        SERVER_PY="${SERVER_PY}" \
+        WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
+        MCP_RUNTIME_AWS_PROFILE="${MCP_RUNTIME_AWS_PROFILE}" \
+        "${PYTHON_BIN}" - <<'PY'
+import os
+import anyio
+from mcp.client.session import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+
+
+async def main() -> None:
+    server_env = {
+        "ENCELADUS_WORKSPACE_ROOT": os.environ["WORKSPACE_ROOT"],
+        "ENCELADUS_REGION": "us-west-2",
+        "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
+        "ENCELADUS_PROJECTS_TABLE": "projects",
+        "ENCELADUS_DOCUMENTS_TABLE": "documents",
+        "ENCELADUS_S3_BUCKET": "jreese-net",
+        "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
+        "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
+    }
+    aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
+    if aws_profile:
+        server_env["AWS_PROFILE"] = aws_profile
+
+    params = StdioServerParameters(
+        command=os.environ["PYTHON_BIN"],
+        args=[os.environ["SERVER_PY"]],
+        env=server_env,
+    )
+
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            await session.call_tool("connection_health", {})
+            await session.call_tool("governance_hash", {})
+
+
+anyio.run(main)
+print("[SUCCESS] MCP stdio smoke test passed")
+PY
+    then
+        echo "[ERROR] MCP stdio smoke test failed"
+        exit 1
+    fi
 fi
 
 echo "[DONE] Enceladus MCP profile installation complete"

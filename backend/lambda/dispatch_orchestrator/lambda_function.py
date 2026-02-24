@@ -73,7 +73,7 @@ ANTHROPIC_API_KEY_SECRET_ID = os.environ.get("ANTHROPIC_API_KEY_SECRET_ID", "")
 # MCP profile installer path on host-v2
 HOST_V2_ENCELADUS_MCP_INSTALLER = os.environ.get(
     "HOST_V2_ENCELADUS_MCP_INSTALLER",
-    f"{HOST_V2_WORK_ROOT}/projects/devops/tools/enceladus-mcp-server/install_profile.sh",
+    f"{HOST_V2_WORK_ROOT}/tools/enceladus-mcp-server/install_profile.sh",
 )
 
 # AWS profile on host-v2
@@ -378,8 +378,23 @@ def _build_ssm_commands_for_dispatch(
             "python3 -m pip install --user --break-system-packages --quiet boto3 PyYAML >/dev/null 2>&1 || true; "
             "fi"
         ),
-        # Install Enceladus MCP profile
-        f"if [ -x '{HOST_V2_ENCELADUS_MCP_INSTALLER}' ]; then bash '{HOST_V2_ENCELADUS_MCP_INSTALLER}'; fi",
+        # Install/repair Enceladus MCP profile from first valid installer path.
+        (
+            "COORD_MCP_INSTALLER=\"\"; "
+            "for _candidate in "
+            f"'{HOST_V2_ENCELADUS_MCP_INSTALLER}' "
+            "'tools/enceladus-mcp-server/install_profile.sh' "
+            "'projects/enceladus/repo/tools/enceladus-mcp-server/install_profile.sh' "
+            "'projects/enceladus/tools/enceladus-mcp-server/install_profile.sh' "
+            "'projects/devops/tools/enceladus-mcp-server/install_profile.sh'; do "
+            "if [ -x \"$_candidate\" ]; then COORD_MCP_INSTALLER=\"$_candidate\"; break; fi; "
+            "done; "
+            "if [ -n \"$COORD_MCP_INSTALLER\" ]; then "
+            "ENCELADUS_WORKSPACE_ROOT=\"$(pwd)\" bash \"$COORD_MCP_INSTALLER\"; "
+            "else "
+            "echo '[WARNING] Enceladus MCP installer not found in candidate paths'; "
+            "fi"
+        ),
         # Context sync
         (
             "if python3 -c \"import boto3, yaml\" >/dev/null 2>&1; then "
