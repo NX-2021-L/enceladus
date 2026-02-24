@@ -362,7 +362,10 @@ ensure_lambda() {
       --zip-file "fileb://${zip_path}" >/dev/null
   fi
 
+  # Ensure all pending Lambda code updates have settled before we push configuration.
   aws lambda wait function-active-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
+  aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
+  aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
 
   effective_internal_key="$(resolve_internal_api_key)"
   if [[ -z "${effective_internal_key}" ]]; then
@@ -478,13 +481,30 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump({"Variables": env_vars}, f)
 PY
 
-  aws lambda update-function-configuration \
-    --region "${REGION}" \
-    --function-name "${FUNCTION_NAME}" \
-    --role "${role_arn}" \
-    --timeout 120 \
-    --memory-size 512 \
-    --environment "file://${env_file}" >/dev/null
+  local cfg_attempt cfg_max cfg_sleep
+  cfg_attempt=1
+  cfg_max=6
+  cfg_sleep=10
+  while :; do
+    if aws lambda update-function-configuration \
+      --region "${REGION}" \
+      --function-name "${FUNCTION_NAME}" \
+      --role "${role_arn}" \
+      --timeout 120 \
+      --memory-size 512 \
+      --environment "file://${env_file}" >/dev/null; then
+      break
+    fi
+    if [[ "${cfg_attempt}" -ge "${cfg_max}" ]]; then
+      echo "[ERROR] update-function-configuration failed after ${cfg_attempt} attempts" >&2
+      rm -f "${env_file}"
+      return 1
+    fi
+    log "[WARNING] update-function-configuration conflict; retrying in ${cfg_sleep}s (attempt ${cfg_attempt}/${cfg_max})"
+    sleep "${cfg_sleep}"
+    aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}" || true
+    cfg_attempt=$((cfg_attempt + 1))
+  done
   rm -f "${env_file}"
 
   aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
