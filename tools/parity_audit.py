@@ -84,6 +84,25 @@ def _is_access_denied(err: ClientError) -> bool:
     return code in {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation"}
 
 
+def _append_inventory_warning(
+    inventory: Dict[str, Any],
+    *,
+    service: str,
+    operation: str,
+    exc: ClientError,
+    region: str = "",
+) -> None:
+    warning = {
+        "service": service,
+        "operation": operation,
+        "error_code": str(exc.response.get("Error", {}).get("Code", "")),
+        "message": str(exc.response.get("Error", {}).get("Message", "")),
+    }
+    if region:
+        warning["region"] = region
+    inventory.setdefault("inventory_warnings", []).append(warning)
+
+
 def _inventory_resources(
     regions: Iterable[str],
     resource_re: re.Pattern[str],
@@ -115,13 +134,11 @@ def _inventory_resources(
                 inventory["s3_buckets"].append({"name": name, "created": str(b.get("CreationDate") or "")})
     except ClientError as exc:
         if _is_access_denied(exc):
-            inventory["inventory_warnings"].append(
-                {
-                    "service": "s3",
-                    "operation": "ListBuckets",
-                    "error_code": str(exc.response.get("Error", {}).get("Code", "")),
-                    "message": str(exc.response.get("Error", {}).get("Message", "")),
-                }
+            _append_inventory_warning(
+                inventory,
+                service="s3",
+                operation="ListBuckets",
+                exc=exc,
             )
         else:
             raise
@@ -136,124 +153,208 @@ def _inventory_resources(
         lam = boto3.client("lambda", region_name=region)
 
         # DynamoDB
-        start = None
-        while True:
-            kwargs = {}
-            if start:
-                kwargs["ExclusiveStartTableName"] = start
-            resp = ddb.list_tables(**kwargs)
-            for table in resp.get("TableNames", []):
-                if _resource_matches(table, resource_re, include_names):
-                    inventory["dynamodb_tables"].append({"region": region, "name": table})
-            start = resp.get("LastEvaluatedTableName")
-            if not start:
-                break
+        try:
+            start = None
+            while True:
+                kwargs = {}
+                if start:
+                    kwargs["ExclusiveStartTableName"] = start
+                resp = ddb.list_tables(**kwargs)
+                for table in resp.get("TableNames", []):
+                    if _resource_matches(table, resource_re, include_names):
+                        inventory["dynamodb_tables"].append({"region": region, "name": table})
+                start = resp.get("LastEvaluatedTableName")
+                if not start:
+                    break
+        except ClientError as exc:
+            if _is_access_denied(exc):
+                _append_inventory_warning(
+                    inventory,
+                    service="dynamodb",
+                    operation="ListTables",
+                    exc=exc,
+                    region=region,
+                )
+            else:
+                raise
 
         # SQS
-        next_token = None
-        while True:
-            kwargs = {"MaxResults": 1000}
-            if next_token:
-                kwargs["NextToken"] = next_token
-            resp = sqs.list_queues(**kwargs)
-            for url in resp.get("QueueUrls", []):
-                name = url.rsplit("/", 1)[-1]
-                if _resource_matches(name, resource_re, include_names):
-                    inventory["sqs_queues"].append({"region": region, "name": name, "url": url})
-            next_token = resp.get("NextToken")
-            if not next_token:
-                break
+        try:
+            next_token = None
+            while True:
+                kwargs = {"MaxResults": 1000}
+                if next_token:
+                    kwargs["NextToken"] = next_token
+                resp = sqs.list_queues(**kwargs)
+                for url in resp.get("QueueUrls", []):
+                    name = url.rsplit("/", 1)[-1]
+                    if _resource_matches(name, resource_re, include_names):
+                        inventory["sqs_queues"].append({"region": region, "name": name, "url": url})
+                next_token = resp.get("NextToken")
+                if not next_token:
+                    break
+        except ClientError as exc:
+            if _is_access_denied(exc):
+                _append_inventory_warning(
+                    inventory,
+                    service="sqs",
+                    operation="ListQueues",
+                    exc=exc,
+                    region=region,
+                )
+            else:
+                raise
 
         # SNS
-        token = None
-        while True:
-            kwargs = {}
-            if token:
-                kwargs["NextToken"] = token
-            resp = sns.list_topics(**kwargs)
-            for topic in resp.get("Topics", []):
-                arn = str(topic.get("TopicArn") or "")
-                name = arn.rsplit(":", 1)[-1]
-                if _resource_matches(name, resource_re, include_names):
-                    inventory["sns_topics"].append({"region": region, "name": name, "arn": arn})
-            token = resp.get("NextToken")
-            if not token:
-                break
+        try:
+            token = None
+            while True:
+                kwargs = {}
+                if token:
+                    kwargs["NextToken"] = token
+                resp = sns.list_topics(**kwargs)
+                for topic in resp.get("Topics", []):
+                    arn = str(topic.get("TopicArn") or "")
+                    name = arn.rsplit(":", 1)[-1]
+                    if _resource_matches(name, resource_re, include_names):
+                        inventory["sns_topics"].append({"region": region, "name": name, "arn": arn})
+                token = resp.get("NextToken")
+                if not token:
+                    break
+        except ClientError as exc:
+            if _is_access_denied(exc):
+                _append_inventory_warning(
+                    inventory,
+                    service="sns",
+                    operation="ListTopics",
+                    exc=exc,
+                    region=region,
+                )
+            else:
+                raise
 
         # EventBridge rules
-        token = None
-        while True:
-            kwargs = {}
-            if token:
-                kwargs["NextToken"] = token
-            resp = events.list_rules(**kwargs)
-            for rule in resp.get("Rules", []):
-                name = str(rule.get("Name") or "")
-                if _resource_matches(name, resource_re, include_names):
-                    inventory["eventbridge_rules"].append(
-                        {"region": region, "name": name, "arn": str(rule.get("Arn") or "")}
-                    )
-            token = resp.get("NextToken")
-            if not token:
-                break
+        try:
+            token = None
+            while True:
+                kwargs = {}
+                if token:
+                    kwargs["NextToken"] = token
+                resp = events.list_rules(**kwargs)
+                for rule in resp.get("Rules", []):
+                    name = str(rule.get("Name") or "")
+                    if _resource_matches(name, resource_re, include_names):
+                        inventory["eventbridge_rules"].append(
+                            {"region": region, "name": name, "arn": str(rule.get("Arn") or "")}
+                        )
+                token = resp.get("NextToken")
+                if not token:
+                    break
+        except ClientError as exc:
+            if _is_access_denied(exc):
+                _append_inventory_warning(
+                    inventory,
+                    service="events",
+                    operation="ListRules",
+                    exc=exc,
+                    region=region,
+                )
+            else:
+                raise
 
         # EventBridge pipes
-        token = None
-        while True:
-            kwargs = {}
-            if token:
-                kwargs["NextToken"] = token
-            resp = pipes.list_pipes(**kwargs)
-            for pipe in resp.get("Pipes", []):
-                name = str(pipe.get("Name") or "")
-                if _resource_matches(name, resource_re, include_names):
-                    inventory["eventbridge_pipes"].append(
-                        {"region": region, "name": name, "arn": str(pipe.get("Arn") or "")}
-                    )
-            token = resp.get("NextToken")
-            if not token:
-                break
+        try:
+            token = None
+            while True:
+                kwargs = {}
+                if token:
+                    kwargs["NextToken"] = token
+                resp = pipes.list_pipes(**kwargs)
+                for pipe in resp.get("Pipes", []):
+                    name = str(pipe.get("Name") or "")
+                    if _resource_matches(name, resource_re, include_names):
+                        inventory["eventbridge_pipes"].append(
+                            {"region": region, "name": name, "arn": str(pipe.get("Arn") or "")}
+                        )
+                token = resp.get("NextToken")
+                if not token:
+                    break
+        except ClientError as exc:
+            if _is_access_denied(exc):
+                _append_inventory_warning(
+                    inventory,
+                    service="pipes",
+                    operation="ListPipes",
+                    exc=exc,
+                    region=region,
+                )
+            else:
+                raise
 
         # API Gateway v2
-        token = None
-        while True:
-            kwargs = {"MaxResults": "500"}
-            if token:
-                kwargs["NextToken"] = token
-            resp = apigw.get_apis(**kwargs)
-            for api in resp.get("Items", []):
-                name = str(api.get("Name") or "")
-                api_id = str(api.get("ApiId") or "")
-                if _resource_matches(name, resource_re, include_names) or _resource_matches(api_id, resource_re, include_names):
-                    inventory["apigw_v2_apis"].append(
-                        {"region": region, "name": name, "api_id": api_id, "protocol_type": str(api.get("ProtocolType") or "")}
-                    )
-            token = resp.get("NextToken")
-            if not token:
-                break
+        try:
+            token = None
+            while True:
+                kwargs = {"MaxResults": "500"}
+                if token:
+                    kwargs["NextToken"] = token
+                resp = apigw.get_apis(**kwargs)
+                for api in resp.get("Items", []):
+                    name = str(api.get("Name") or "")
+                    api_id = str(api.get("ApiId") or "")
+                    if _resource_matches(name, resource_re, include_names) or _resource_matches(api_id, resource_re, include_names):
+                        inventory["apigw_v2_apis"].append(
+                            {"region": region, "name": name, "api_id": api_id, "protocol_type": str(api.get("ProtocolType") or "")}
+                        )
+                token = resp.get("NextToken")
+                if not token:
+                    break
+        except ClientError as exc:
+            if _is_access_denied(exc):
+                _append_inventory_warning(
+                    inventory,
+                    service="apigatewayv2",
+                    operation="GetApis",
+                    exc=exc,
+                    region=region,
+                )
+            else:
+                raise
 
         # Lambda inventory
-        marker = None
-        while True:
-            kwargs = {}
-            if marker:
-                kwargs["Marker"] = marker
-            resp = lam.list_functions(**kwargs)
-            for fn in resp.get("Functions", []):
-                name = str(fn.get("FunctionName") or "")
-                if _resource_matches(name, resource_re, include_names):
-                    inventory["lambda_functions"].append(
-                        {
-                            "region": region,
-                            "name": name,
-                            "runtime": str(fn.get("Runtime") or ""),
-                            "last_modified": str(fn.get("LastModified") or ""),
-                            "code_sha256": str(fn.get("CodeSha256") or ""),
-                        }
-                    )
-            marker = resp.get("NextMarker")
-            if not marker:
-                break
+        try:
+            marker = None
+            while True:
+                kwargs = {}
+                if marker:
+                    kwargs["Marker"] = marker
+                resp = lam.list_functions(**kwargs)
+                for fn in resp.get("Functions", []):
+                    name = str(fn.get("FunctionName") or "")
+                    if _resource_matches(name, resource_re, include_names):
+                        inventory["lambda_functions"].append(
+                            {
+                                "region": region,
+                                "name": name,
+                                "runtime": str(fn.get("Runtime") or ""),
+                                "last_modified": str(fn.get("LastModified") or ""),
+                                "code_sha256": str(fn.get("CodeSha256") or ""),
+                            }
+                        )
+                marker = resp.get("NextMarker")
+                if not marker:
+                    break
+        except ClientError as exc:
+            if _is_access_denied(exc):
+                _append_inventory_warning(
+                    inventory,
+                    service="lambda",
+                    operation="ListFunctions",
+                    exc=exc,
+                    region=region,
+                )
+            else:
+                raise
 
     return inventory
 
