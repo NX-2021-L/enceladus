@@ -89,6 +89,19 @@ class _EmptyLambda:
         return {"Functions": []}
 
 
+class _LambdaGetFunctionAccessDenied:
+    def get_function(self, **_kwargs):
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": "AccessDeniedException",
+                    "Message": "missing lambda:GetFunction permission",
+                }
+            },
+            "GetFunction",
+        )
+
+
 def _client_factory(s3_client, ddb_client=None):
     if ddb_client is None:
         ddb_client = _EmptyDdb()
@@ -177,3 +190,30 @@ def test_is_access_denied_accepts_authorization_error_codes():
         "ListTopics",
     )
     assert parity_audit._is_access_denied(err) is True
+
+
+def test_lambda_parity_get_function_access_denied_is_non_fatal(tmp_path):
+    entry = tmp_path / "handlers" / "auth.py"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("def handler(event, context):\n    return {'ok': True}\n", encoding="utf-8")
+
+    mappings = [
+        {
+            "function_name": "auth-refresh",
+            "region": "us-west-2",
+            "repo_entry_path": str(entry.relative_to(tmp_path)),
+            "entry_file": "auth.py",
+        }
+    ]
+
+    def _lambda_factory(service_name, **_kwargs):
+        assert service_name == "lambda"
+        return _LambdaGetFunctionAccessDenied()
+
+    with patch.object(parity_audit.boto3, "client", side_effect=_lambda_factory):
+        parity = parity_audit._audit_lambda_parity(mappings=mappings, repo_root=tmp_path)
+
+    assert parity["stats"]["ACCESS_DENIED"] == 1
+    assert parity["stats"]["ERROR"] == 0
+    assert parity["results"][0]["status"] == "ACCESS_DENIED"
+    assert parity["results"][0]["function_name"] == "auth-refresh"
