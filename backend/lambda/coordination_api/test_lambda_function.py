@@ -1252,6 +1252,190 @@ class WorkerRuntimeHardeningTests(unittest.TestCase):
         self.assertEqual(changed, ["JAP-TASK-412"])
 
 
+class DispatchPlanLifecycleTests(unittest.TestCase):
+    def test_promote_expired_intake_requests_generates_dispatch_plan(self):
+        now_epoch = int(time.time())
+        request_id = "CRQ-PLANPROMO1"
+        intake_item = {
+            "request_id": request_id,
+            "project_id": "enceladus",
+            "state": "intake_received",
+            "state_history": [
+                {
+                    "timestamp": "2026-02-24T00:00:00Z",
+                    "from": None,
+                    "to": "intake_received",
+                    "reason": "created",
+                }
+            ],
+            "debounce_window_expires_epoch": now_epoch - 5,
+            "updated_epoch": now_epoch - 30,
+            "updated_at": "2026-02-24T00:00:00Z",
+            "sync_version": 1,
+            "dispatch_outcomes": {},
+        }
+
+        class _FakeDdb:
+            def query(self, **_kwargs):
+                return {"Items": [coordination_lambda._serialize(intake_item)["M"]]}
+
+        generated_plan = {
+            "plan_id": "plan-promoted-1",
+            "dispatches": [
+                {
+                    "dispatch_id": "dsp-plan-promoted-1",
+                    "sequence_order": 0,
+                    "provider": "openai_codex",
+                    "execution_mode": "codex_full_auto",
+                    "outcomes": ["Outcome A"],
+                }
+            ],
+        }
+        updated_items = []
+
+        with patch.object(coordination_lambda, "_get_ddb", return_value=_FakeDdb()),              patch.object(coordination_lambda, "_generate_dispatch_plan_for_request", return_value=generated_plan),              patch.object(coordination_lambda, "_update_request", side_effect=lambda item: updated_items.append(dict(item))):
+            promoted = coordination_lambda._promote_expired_intake_requests("enceladus")
+
+        self.assertEqual(promoted, [request_id])
+        self.assertGreaterEqual(len(updated_items), 1)
+        final = updated_items[-1]
+        self.assertEqual(final.get("state"), "queued")
+        self.assertEqual(final.get("dispatch_plan"), generated_plan)
+        self.assertEqual((final.get("dispatch_plan") or {}).get("dispatches", [])[0]["dispatch_id"], "dsp-plan-promoted-1")
+
+    def test_dispatch_uses_dispatch_plan_entry_execution_mode_and_dispatch_id(self):
+        request = {
+            "request_id": "CRQ-PLAN-DISPATCH",
+            "project_id": "enceladus",
+            "state": "queued",
+            "dispatch_attempts": 0,
+            "execution_mode": "preflight",
+            "provider_session": {
+                "preferred_provider": "openai_codex",
+                "model": "gpt-4o-mini",
+            },
+            "dispatch_plan": {
+                "dispatches": [
+                    {
+                        "dispatch_id": "dsp-plan-route-1",
+                        "sequence_order": 0,
+                        "provider": "openai_codex",
+                        "execution_mode": "codex_app_server",
+                        "provider_config": {
+                            "model": "gpt-5.1-codex-max",
+                            "thread_id": "thread-plan-1",
+                        },
+                    }
+                ]
+            },
+            "dispatch_outcomes": {},
+            "task_ids": [],
+            "feature_id": None,
+            "issue_ids": [],
+        }
+        updated_items = []
+        event = {
+            "body": json.dumps(
+                {
+                    "prompt": "route by plan",
+                }
+            )
+        }
+
+        with patch.object(coordination_lambda, "_get_request", return_value=request),              patch.object(coordination_lambda, "_acquire_dispatch_lock", return_value=True),              patch.object(coordination_lambda, "_lambda_provider_preflight", return_value={"passed": True, "results": []}),              patch.object(
+                 coordination_lambda,
+                 "_dispatch_openai_codex_api",
+                 return_value={
+                     "dispatch_id": "dsp-plan-route-1",
+                     "execution_id": "resp-plan-route-1",
+                     "execution_mode": "codex_app_server",
+                     "provider": "openai_codex",
+                     "transport": "openai_responses_api",
+                     "api_endpoint": "https://api.openai.com/v1/responses",
+                     "sent_at": "2026-02-24T00:00:00Z",
+                     "completed_at": "2026-02-24T00:00:02Z",
+                     "status": "succeeded",
+                     "provider_result": {
+                         "session_id": "conv-plan-route-1",
+                         "thread_id": "thread-plan-1",
+                         "provider_session_id": "resp-plan-route-1",
+                         "model": "gpt-5.1-codex-max",
+                         "response_status": "completed",
+                         "summary": "plan route ok",
+                         "usage": {"input_tokens": 9, "output_tokens": 6},
+                         "completed_at": "2026-02-24T00:00:02Z",
+                     },
+                 },
+             ) as mock_direct_dispatch,              patch.object(coordination_lambda, "_send_dispatch") as mock_send_dispatch,              patch.object(coordination_lambda, "_find_active_host_dispatch") as mock_find_host_dispatch,              patch.object(coordination_lambda, "_finalize_tracker_from_request"),              patch.object(coordination_lambda, "_update_request", side_effect=lambda item: updated_items.append(dict(item))):
+            resp = coordination_lambda._handle_dispatch_request(event, "CRQ-PLAN-DISPATCH")
+
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        mock_direct_dispatch.assert_called_once()
+        _args, kwargs = mock_direct_dispatch.call_args
+        self.assertEqual(kwargs["dispatch_id"], "dsp-plan-route-1")
+        self.assertEqual(kwargs["execution_mode"], "codex_app_server")
+        routed_request = kwargs["request"]
+        routed_provider_session = routed_request.get("provider_session") or {}
+        self.assertEqual(routed_provider_session.get("thread_id"), "thread-plan-1")
+        self.assertEqual(routed_provider_session.get("model"), "gpt-5.1-codex-max")
+        mock_send_dispatch.assert_not_called()
+        mock_find_host_dispatch.assert_not_called()
+        self.assertGreaterEqual(len(updated_items), 1)
+        final = updated_items[-1]
+        self.assertEqual(final.get("state"), "succeeded")
+        self.assertEqual((final.get("dispatch") or {}).get("dispatch_id"), "dsp-plan-route-1")
+
+    def test_callback_uses_dispatch_plan_execution_mode_for_worklog(self):
+        request = {
+            "request_id": "CRQ-PLAN-CALLBACK",
+            "project_id": "enceladus",
+            "state": "running",
+            "callback_token": "cb-plan-token",
+            "callback_token_expires_epoch": int(time.time()) + 3600,
+            "dispatch_plan": {
+                "dispatches": [
+                    {
+                        "dispatch_id": "dsp-plan-callback-1",
+                        "sequence_order": 0,
+                        "provider": "openai_codex",
+                        "execution_mode": "codex_full_auto",
+                    }
+                ]
+            },
+            "dispatch_outcomes": {},
+        }
+        updated_items = []
+        event = {
+            "headers": {"x-coordination-callback-token": "cb-plan-token"},
+            "body": json.dumps(
+                {
+                    "provider": "openai_codex",
+                    "dispatch_id": "dsp-plan-callback-1",
+                    "state": "succeeded",
+                    "execution_id": "exe-plan-cb-1",
+                    "summary": "callback complete",
+                }
+            ),
+        }
+
+        with patch.object(coordination_lambda, "_get_request", return_value=request),              patch.object(coordination_lambda, "_finalize_tracker_from_request"),              patch.object(coordination_lambda, "_emit_callback_event"),              patch.object(coordination_lambda, "_update_request", side_effect=lambda item: updated_items.append(dict(item))):
+            resp = coordination_lambda._handle_callback(event, "CRQ-PLAN-CALLBACK")
+
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertEqual((body.get("plan_status") or {}).get("completed"), 1)
+        self.assertEqual((body.get("plan_status") or {}).get("total"), 1)
+
+        self.assertGreaterEqual(len(updated_items), 1)
+        final = updated_items[-1]
+        last_worklog = (final.get("dispatch_worklogs") or [])[-1]
+        self.assertEqual(last_worklog.get("dispatch_id"), "dsp-plan-callback-1")
+        self.assertEqual(last_worklog.get("execution_mode"), "codex_full_auto")
+
+
 class SessionBridgeIntegrationTests(unittest.TestCase):
     def test_dispatch_codex_full_auto_routes_to_direct_api(self):
         request = {
