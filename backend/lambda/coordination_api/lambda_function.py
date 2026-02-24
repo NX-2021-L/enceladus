@@ -842,6 +842,7 @@ _project_cache: Dict[str, Dict[str, Any]] = {}
 _project_cache_at: float = 0.0
 _PROJECT_CACHE_TTL = 300.0
 _ENCELADUS_MCP_SERVER_MODULE = None
+_DISPATCH_PLAN_GENERATOR_MODULE = None
 _MCP_RESOURCE_CACHE: Dict[str, str] = {}
 
 
@@ -1004,6 +1005,122 @@ def _load_mcp_server_module():
     spec.loader.exec_module(module)
     _ENCELADUS_MCP_SERVER_MODULE = module
     return _ENCELADUS_MCP_SERVER_MODULE
+
+
+def _resolve_dispatch_plan_generator_path() -> str:
+    candidates = [
+        "dispatch_plan_generator.py",
+        str(pathlib.Path(__file__).with_name("dispatch_plan_generator.py")),
+        str(pathlib.Path(__file__).resolve().parents[3] / "tools/enceladus-mcp-server/dispatch_plan_generator.py"),
+        str(pathlib.Path.cwd() / "tools/enceladus-mcp-server/dispatch_plan_generator.py"),
+        str(pathlib.Path.cwd() / "projects/enceladus/repo/tools/enceladus-mcp-server/dispatch_plan_generator.py"),
+        str(pathlib.Path.cwd() / "projects/enceladus/tools/enceladus-mcp-server/dispatch_plan_generator.py"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    raise RuntimeError(
+        "Dispatch plan generator module not found; ensure dispatch_plan_generator.py is packaged with coordination_api"
+    )
+
+
+def _load_dispatch_plan_generator_module():
+    global _DISPATCH_PLAN_GENERATOR_MODULE
+    if _DISPATCH_PLAN_GENERATOR_MODULE is not None:
+        return _DISPATCH_PLAN_GENERATOR_MODULE
+
+    try:
+        import dispatch_plan_generator as dispatch_plan_module  # type: ignore
+
+        _DISPATCH_PLAN_GENERATOR_MODULE = dispatch_plan_module
+        return _DISPATCH_PLAN_GENERATOR_MODULE
+    except ModuleNotFoundError:
+        pass
+
+    module_path = _resolve_dispatch_plan_generator_path()
+    spec = importlib.util.spec_from_file_location(
+        "coordination_dispatch_plan_generator_runtime",
+        module_path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load dispatch plan generator module from {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _DISPATCH_PLAN_GENERATOR_MODULE = module
+    return _DISPATCH_PLAN_GENERATOR_MODULE
+
+
+def _generate_dispatch_plan_for_request(request_id: str) -> Dict[str, Any]:
+    module = _load_dispatch_plan_generator_module()
+    generate_fn = getattr(module, "generate_dispatch_plan", None)
+    if not callable(generate_fn):
+        raise RuntimeError("dispatch_plan_generator module missing generate_dispatch_plan")
+    plan = generate_fn(request_id)
+    if not isinstance(plan, dict):
+        raise RuntimeError("dispatch_plan_generator returned non-object plan")
+    return plan
+
+
+def _ensure_request_dispatch_plan(request: Dict[str, Any], *, persist: bool = False) -> Dict[str, Any]:
+    dispatch_plan = request.get("dispatch_plan") or {}
+    dispatches = dispatch_plan.get("dispatches") if isinstance(dispatch_plan, dict) else None
+    if isinstance(dispatches, list) and dispatches:
+        return request
+
+    request_id = str(request.get("request_id") or "").strip()
+    if not request_id:
+        raise RuntimeError("Cannot generate dispatch_plan without request_id")
+
+    request["dispatch_plan"] = _generate_dispatch_plan_for_request(request_id)
+    request.setdefault("dispatch_outcomes", {})
+    request["updated_at"] = _now_z()
+    request["updated_epoch"] = _unix_now()
+    if persist:
+        _update_request(request)
+    return request
+
+
+def _resolve_dispatch_entry_from_plan(request: Dict[str, Any], requested_dispatch_id: str) -> Optional[Dict[str, Any]]:
+    dispatch_plan = request.get("dispatch_plan") or {}
+    dispatches = dispatch_plan.get("dispatches") if isinstance(dispatch_plan, dict) else None
+    if not isinstance(dispatches, list) or not dispatches:
+        return None
+
+    dispatch_outcomes = request.get("dispatch_outcomes") or {}
+
+    def _outcome_state(dispatch_id: str) -> str:
+        outcome = dispatch_outcomes.get(dispatch_id) or {}
+        return str(outcome.get("state") or "").strip().lower()
+
+    requested = str(requested_dispatch_id or "").strip()
+    if requested:
+        for dispatch in dispatches:
+            dispatch_id = str(dispatch.get("dispatch_id") or "").strip()
+            if dispatch_id != requested:
+                continue
+            state = _outcome_state(dispatch_id)
+            if state in _VALID_TERMINAL_STATES:
+                raise ValueError(f"Dispatch '{dispatch_id}' already completed with state '{state}'")
+            return dispatch
+        raise ValueError(f"Dispatch '{requested}' is not present in request dispatch_plan")
+
+    def _sort_key(entry: Dict[str, Any]) -> Tuple[int, str]:
+        try:
+            sequence_order = int(entry.get("sequence_order") or 0)
+        except (TypeError, ValueError):
+            sequence_order = 0
+        return sequence_order, str(entry.get("dispatch_id") or "")
+
+    for dispatch in sorted(dispatches, key=_sort_key):
+        dispatch_id = str(dispatch.get("dispatch_id") or "").strip()
+        if not dispatch_id:
+            continue
+        if _outcome_state(dispatch_id) in _VALID_TERMINAL_STATES:
+            continue
+        return dispatch
+
+    raise RuntimeError("All dispatches in dispatch_plan already reached terminal states")
 
 
 def _parse_mcp_result(result: Any) -> Dict[str, Any]:
@@ -2489,9 +2606,24 @@ def _promote_expired_intake_requests(project_id: str) -> List[str]:
                     "Debounce window expired — promoted to queued",
                     extra={"debounce_expires_epoch": expires, "promoted_at_epoch": now_epoch},
                 )
+                dispatch_plan_ready = False
+                try:
+                    item = _ensure_request_dispatch_plan(item, persist=False)
+                    dispatches = ((item.get("dispatch_plan") or {}).get("dispatches") or [])
+                    dispatch_plan_ready = bool(dispatches)
+                except Exception as plan_exc:
+                    logger.warning(
+                        "dispatch_plan generation failed for promoted request %s: %s",
+                        item.get("request_id"),
+                        plan_exc,
+                    )
                 _update_request(item)
                 promoted.append(item["request_id"])
-                logger.info("[INFO] promoted intake_received -> queued: %s", item["request_id"])
+                logger.info(
+                    "[INFO] promoted intake_received -> queued: %s (dispatch_plan=%s)",
+                    item["request_id"],
+                    "ready" if dispatch_plan_ready else "missing",
+                )
             except Exception as exc:
                 logger.warning("failed to promote request %s: %s", item.get("request_id"), exc)
 
@@ -6509,15 +6641,80 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
         return _error(400, str(exc))
 
     try:
-        execution_mode = _coerce_execution_mode(body.get("execution_mode") or request.get("execution_mode"))
-    except ValueError as exc:
-        return _error(400, str(exc))
-
-    try:
         provider_prefs_raw = body.get("provider_preferences") or body.get("provider_session")
         provider_session = _validate_provider_session(provider_prefs_raw)
     except ValueError as exc:
         return _error(400, str(exc))
+
+    if request.get("state") == _STATE_QUEUED:
+        try:
+            request = _ensure_request_dispatch_plan(request, persist=True)
+        except Exception as exc:
+            logger.warning(
+                "dispatch_plan generation before dispatch failed for %s (falling back to legacy routing): %s",
+                request_id,
+                exc,
+            )
+
+    requested_dispatch_id = str(body.get("dispatch_id") or "").strip()
+    if requested_dispatch_id and not re.fullmatch(r"[A-Za-z0-9-]{6,64}", requested_dispatch_id):
+        return _error(400, "'dispatch_id' must match [A-Za-z0-9-]{6,64}")
+
+    plan_entry = None
+    try:
+        plan_entry = _resolve_dispatch_entry_from_plan(request, requested_dispatch_id)
+    except ValueError as exc:
+        return _error(400, str(exc))
+    except RuntimeError as exc:
+        return _error(409, str(exc), request=_redact_request(request))
+
+    planned_provider = ""
+    if plan_entry:
+        dispatch_id = str(plan_entry.get("dispatch_id") or "").strip()
+        if not dispatch_id:
+            return _error(500, "Dispatch plan entry is missing dispatch_id")
+        if not re.fullmatch(r"[A-Za-z0-9-]{6,64}", dispatch_id):
+            return _error(500, f"Dispatch plan entry has invalid dispatch_id '{dispatch_id}'")
+
+        planned_provider = str(plan_entry.get("provider") or "").strip().lower()
+        try:
+            execution_mode = _coerce_execution_mode(
+                plan_entry.get("execution_mode") or body.get("execution_mode") or request.get("execution_mode")
+            )
+        except ValueError as exc:
+            return _error(400, str(exc))
+
+        requested_mode_raw = str(body.get("execution_mode") or "").strip()
+        if requested_mode_raw:
+            try:
+                requested_mode = _coerce_execution_mode(requested_mode_raw)
+            except ValueError as exc:
+                return _error(400, str(exc))
+            if requested_mode != execution_mode:
+                return _error(
+                    409,
+                    f"Dispatch '{dispatch_id}' is pinned to execution_mode '{execution_mode}' by dispatch_plan",
+                    requested_execution_mode=requested_mode,
+                    plan_execution_mode=execution_mode,
+                )
+
+        provider_config = plan_entry.get("provider_config") or {}
+        if isinstance(provider_config, dict):
+            merged_provider_session = {
+                **(request.get("provider_session") or {}),
+                **provider_session,
+            }
+            for key in ("model", "thread_id", "fork_from_thread_id", "max_turns"):
+                value = provider_config.get(key)
+                if value not in (None, ""):
+                    merged_provider_session[key] = value
+            provider_session = merged_provider_session
+    else:
+        try:
+            execution_mode = _coerce_execution_mode(body.get("execution_mode") or request.get("execution_mode"))
+        except ValueError as exc:
+            return _error(400, str(exc))
+        dispatch_id = requested_dispatch_id or _new_dispatch_id()
 
     preflight = _lambda_provider_preflight(execution_mode, timeout_seconds=5)
     if not preflight.get("passed"):
@@ -6548,9 +6745,8 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
     host_allocation = str(body.get("host_allocation") or "auto").strip().lower()
     if host_allocation not in {"auto", "static", "fleet"}:
         return _error(400, "'host_allocation' must be one of ['auto', 'static', 'fleet']")
-    dispatch_id = str(body.get("dispatch_id") or _new_dispatch_id()).strip().upper()
-    if not re.fullmatch(r"[A-Z0-9-]{6,64}", dispatch_id):
-        return _error(400, "'dispatch_id' must match [A-Z0-9-]{6,64}")
+    if not re.fullmatch(r"[A-Za-z0-9-]{6,64}", dispatch_id):
+        return _error(400, "'dispatch_id' must match [A-Za-z0-9-]{6,64}")
 
     now = _now_z()
     now_epoch = _unix_now()
@@ -6648,17 +6844,17 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
 
         running_reason = "SSM dispatch accepted"
         running_extra: Dict[str, Any] = {"command_id": dispatch_meta.get("command_id")}
-        running_provider = "host_v2"
+        running_provider = planned_provider or "host_v2"
         running_summary = f"Dispatch started (command_id={dispatch_meta.get('command_id')})"
         if execution_mode == "claude_agent_sdk":
             running_reason = "Claude API dispatch accepted"
             running_extra = {"execution_id": dispatch_meta.get("execution_id")}
-            running_provider = "claude_agent_sdk"
+            running_provider = planned_provider or "claude_agent_sdk"
             running_summary = f"Dispatch started (execution_id={dispatch_meta.get('execution_id')})"
         elif execution_mode in {"codex_app_server", "codex_full_auto"}:
             running_reason = "OpenAI Responses API dispatch accepted"
             running_extra = {"execution_id": dispatch_meta.get("execution_id")}
-            running_provider = "openai_codex"
+            running_provider = planned_provider or "openai_codex"
             running_summary = f"Dispatch started (execution_id={dispatch_meta.get('execution_id')})"
         else:
             running_extra.update(
@@ -6879,9 +7075,12 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
             request,
             dispatch_id=dispatch_id,
             provider=(
-                "claude_agent_sdk"
-                if execution_mode == "claude_agent_sdk"
-                else ("openai_codex" if execution_mode in {"codex_app_server", "codex_full_auto"} else "host_v2")
+                planned_provider
+                or (
+                    "claude_agent_sdk"
+                    if execution_mode == "claude_agent_sdk"
+                    else ("openai_codex" if execution_mode in {"codex_app_server", "codex_full_auto"} else "host_v2")
+                )
             ),
             execution_mode=execution_mode,
             outcome_state="failed",
