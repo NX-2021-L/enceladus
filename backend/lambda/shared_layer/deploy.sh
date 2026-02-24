@@ -46,10 +46,17 @@ build_layer() {
     # Copy shared module.
     cp -r "${ROOT_DIR}/python" "${build_dir}/"
 
-    # Install dependencies into layer structure.
+    # CRITICAL: Install dependencies with platform targeting for Linux Lambda runtime.
+    # 🚨 NEVER build on macOS without --platform flag!
+    # Issue: macOS produces Mach-O binaries; Lambda runs Linux ELF.
+    # Silent failure: import jwt sets _JWT_AVAILABLE=False → all auth requests return 401.
+    # See: JWT_AUTHENTICATION_FORENSICS.md for ENC-ISS-041 root cause analysis.
+    # https://github.com/NX-2021-L/enceladus/commit/de33817
     python3 -m pip install \
         --quiet \
         --upgrade \
+        --platform manylinux2014_x86_64 \
+        --only-binary=:all: \
         -r "${ROOT_DIR}/requirements.txt" \
         -t "${build_dir}/python" >/dev/null
 

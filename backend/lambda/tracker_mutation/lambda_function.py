@@ -45,6 +45,11 @@ try:
     _JWT_AVAILABLE = True
 except ImportError:
     _JWT_AVAILABLE = False
+    # 🚨 CRITICAL: If this happens, check Lambda layer attachment.
+    # Issue: JWT import fails when enceladus-shared layer is missing or contains
+    # macOS binaries instead of Linux ELF. See JWT_AUTHENTICATION_FORENSICS.md
+    # for ENC-ISS-041 detailed root cause analysis.
+    # Run shared_layer/deploy.sh with --platform manylinux2014_x86_64 flag.
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -179,14 +184,26 @@ def _verify_token(token: str) -> Dict[str, Any]:
 
 
 def _extract_token(event: Dict) -> Optional[str]:
-    """Extract enceladus_id_token from Cookie header or API Gateway v2 cookies."""
+    """Extract enceladus_id_token from Cookie header or API Gateway v2 cookies.
+
+    🚨 CRITICAL: Must parse BOTH sources!
+    - headers.cookie: Traditional HTTP Cookie header (API Gateway v1, REST API)
+    - event.cookies: API Gateway v2 array (newer HTTP API format)
+
+    Issue: If only headers.cookie is checked, API Gateway v2 requests will fail
+    with 401 "no enceladus_id_token cookie" (see DVP-ISS-071, DVP-ISS-015).
+
+    See: JWT_AUTHENTICATION_FORENSICS.md for pattern analysis.
+    """
     headers = event.get("headers") or {}
     cookie_parts = []
 
+    # Parse headers.cookie (standard HTTP)
     cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
     if cookie_header:
         cookie_parts.extend(part.strip() for part in cookie_header.split(";") if part.strip())
 
+    # Parse event.cookies (API Gateway v2) — CRITICAL DO NOT REMOVE
     event_cookies = event.get("cookies") or []
     if isinstance(event_cookies, list):
         cookie_parts.extend(part.strip() for part in event_cookies if isinstance(part, str) and part.strip())
