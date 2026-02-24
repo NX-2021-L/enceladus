@@ -458,6 +458,24 @@ def _is_conditional_check_failed(exc: Exception) -> bool:
     return str(exc.response.get("Error", {}).get("Code", "")) == "ConditionalCheckFailedException"
 
 
+def _is_s3_not_found_error(exc: Exception) -> bool:
+    """Return True when an S3 exception represents a missing object."""
+    if isinstance(exc, ClientError):
+        code = str(exc.response.get("Error", {}).get("Code", "")).strip()
+        if code in {"NoSuchKey", "NotFound", "404"}:
+            return True
+        status = str(exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode", "")).strip()
+        if status == "404":
+            return True
+
+    msg = str(exc)
+    return (
+        "NoSuchKey" in msg
+        or "NotFound" in msg
+        or "404" in msg
+    )
+
+
 def _dedupe_preserve_order(values: List[str]) -> List[str]:
     seen: set[str] = set()
     out: List[str] = []
@@ -4198,29 +4216,45 @@ async def _governance_update(args: dict) -> list[TextContent]:
     live_key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{file_name}"
     s3 = _get_s3()
 
-    # Archive current version (if it exists)
+    # Archive current version if present. Fail closed on archive errors so
+    # version-history guarantees are preserved.
     archive_key = None
+    existing_content: Optional[bytes] = None
     try:
         existing = s3.get_object(Bucket=S3_BUCKET, Key=live_key)
         existing_content = existing["Body"].read()
+    except Exception as exc:
+        if _is_s3_not_found_error(exc):
+            logger.info("[GOVERNANCE] No existing version to archive for %s", uri)
+        else:
+            return _result_text(_error_payload(
+                "UPSTREAM_ERROR",
+                f"Failed to read existing governance file for archival safety: {exc}",
+                retryable=True,
+            ))
+
+    if existing_content is not None:
         timestamp = _now_z().replace(":", "-")
         archive_key = f"{S3_GOVERNANCE_HISTORY_PREFIX.rstrip('/')}/{file_name}/{timestamp}.md"
-        s3.put_object(
-            Bucket=S3_BUCKET,
-            Key=archive_key,
-            Body=existing_content,
-            ContentType="text/markdown; charset=utf-8",
-            Metadata={
-                "change_summary": change_summary[:256],
-                "archived_at": _now_z(),
-                "previous_hash": hashlib.sha256(existing_content).hexdigest(),
-            },
-        )
-        logger.info("[GOVERNANCE] Archived %s → s3://%s/%s", uri, S3_BUCKET, archive_key)
-    except s3.exceptions.NoSuchKey:
-        logger.info("[GOVERNANCE] No existing version to archive for %s", uri)
-    except Exception as exc:
-        logger.warning("[GOVERNANCE] Archive failed for %s: %s — proceeding with update", uri, exc)
+        try:
+            s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=archive_key,
+                Body=existing_content,
+                ContentType="text/markdown; charset=utf-8",
+                Metadata={
+                    "change_summary": change_summary[:256],
+                    "archived_at": _now_z(),
+                    "previous_hash": hashlib.sha256(existing_content).hexdigest(),
+                },
+            )
+            logger.info("[GOVERNANCE] Archived %s → s3://%s/%s", uri, S3_BUCKET, archive_key)
+        except Exception as exc:
+            return _result_text(_error_payload(
+                "UPSTREAM_ERROR",
+                f"Failed to archive existing governance file; update aborted: {exc}",
+                retryable=True,
+            ))
 
     # Write new content to live path
     content_bytes = content.encode("utf-8")
