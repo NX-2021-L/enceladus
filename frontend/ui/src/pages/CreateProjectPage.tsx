@@ -17,6 +17,7 @@ import {
   validateRepo,
   ProjectServiceError,
 } from '../api/projects';
+import { useAuthState } from '../lib/authState';
 
 interface FormData {
   project_id: string;
@@ -52,6 +53,7 @@ const STATUS_OPTIONS = [
 
 export function CreateProjectPage() {
   const navigate = useNavigate();
+  const { setAuthExpired } = useAuthState();
   const redirectTimeoutRef = useRef<number | null>(null);
   const [formData, setFormData] = useState<FormData>({
     project_id: '',
@@ -180,7 +182,10 @@ export function CreateProjectPage() {
 
       if (error instanceof ProjectServiceError) {
         if (error.status === 401) {
-          errorMessage = 'Your session has expired. Please log in again.';
+          // Trigger the SessionExpiredOverlay (which attempts automatic refresh)
+          // instead of just showing an inline error message.
+          setAuthExpired();
+          errorMessage = 'Your session has expired. Attempting to refresh...';
         } else if (error.status === 409) {
           errorMessage = `Project "${formData.project_id}" already exists.`;
         } else if (error.status === 400) {
