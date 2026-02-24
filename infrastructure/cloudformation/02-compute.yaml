@@ -3,7 +3,10 @@ Description: >
   Enceladus Compute Layer — Lambda functions, EventBridge rules, Pipes.
   Part of ENC-TSK-532: IaC templates for Enceladus AWS resources.
 
-  NOTE: These resources already exist. Use resource import to adopt them.
+  WARNING: Lambda Code properties use placeholder ZipFile values. Actual code
+  is deployed via each Lambda's deploy.sh script. NEVER change the ZipFile
+  values — doing so will cause CloudFormation to overwrite deployed code.
+  The EarlyValidation hook requires Code to be present for import operations.
 
 Parameters:
   Environment:
@@ -39,6 +42,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-coordination-api
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 512
@@ -69,6 +74,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-tracker-mutation-api
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 256
@@ -95,6 +102,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-document-api
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 256
@@ -126,6 +135,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-project-service
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 256
@@ -154,6 +165,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-feed-query-api
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 256
@@ -180,6 +193,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-coordination-monitor-api
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 256
@@ -205,6 +220,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-deploy-intake
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 512
@@ -234,6 +251,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-reference-search
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 256
@@ -259,6 +278,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: auth-refresh
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 128
@@ -285,6 +306,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-deploy-orchestrator
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.handler
       MemorySize: 256
@@ -310,6 +333,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-deploy-finalize
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.handler
       MemorySize: 256
@@ -335,6 +360,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-feed-publisher
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.handler
       MemorySize: 512
@@ -362,6 +389,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: enceladus-governance-audit
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.handler
       MemorySize: 128
@@ -379,6 +408,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: devops-doc-prep
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       MemorySize: 256
@@ -403,6 +434,8 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: enceladus-bedrock-agent-actions
+      Code:
+        ZipFile: "# managed outside CloudFormation"
       Runtime: python3.11
       Handler: lambda_function.handler
       MemorySize: 256
@@ -431,6 +464,7 @@ Resources:
 
   DeployOrchestratorSqsTrigger:
     Type: AWS::Lambda::EventSourceMapping
+    DeletionPolicy: Retain
     Properties:
       EventSourceArn: !ImportValue
         Fn::Sub: ${DataStackName}-DeployQueueArn
@@ -440,6 +474,7 @@ Resources:
 
   FeedPublisherSqsTrigger:
     Type: AWS::Lambda::EventSourceMapping
+    DeletionPolicy: Retain
     Properties:
       EventSourceArn: !ImportValue
         Fn::Sub: ${DataStackName}-FeedPublishQueueArn
@@ -453,6 +488,7 @@ Resources:
 
   GovernanceAuditStreamTrigger:
     Type: AWS::Lambda::EventSourceMapping
+    DeletionPolicy: Retain
     Properties:
       EventSourceArn: !ImportValue
         Fn::Sub: ${DataStackName}-TrackerStreamArn
@@ -468,6 +504,7 @@ Resources:
 
   CoordinationBatchPollerRule:
     Type: AWS::Events::Rule
+    DeletionPolicy: Retain
     Properties:
       Name: devops-coordination-batch-poller
       ScheduleExpression: rate(5 minutes)
@@ -478,6 +515,7 @@ Resources:
 
   DeployCodeBuildFinalizeRule:
     Type: AWS::Events::Rule
+    DeletionPolicy: Retain
     Properties:
       Name: devops-deploy-codebuild-finalize
       EventPattern:
@@ -498,6 +536,7 @@ Resources:
 
   ProjectJsonSyncRule:
     Type: AWS::Events::Rule
+    DeletionPolicy: Retain
     Properties:
       Name: on-project-json-sync
       EventPattern:
@@ -516,6 +555,7 @@ Resources:
 
   TrackerToFeedPipe:
     Type: AWS::Pipes::Pipe
+    DeletionPolicy: Retain
     Properties:
       Name: devops-tracker-to-feed-queue
       RoleArn: !GetAtt FeedPipeRole.Arn

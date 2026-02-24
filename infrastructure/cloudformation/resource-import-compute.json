@@ -1,0 +1,192 @@
+[
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "CoordinationApiFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-coordination-api" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "TrackerMutationFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-tracker-mutation-api" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "DocumentApiFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-document-api" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "ProjectServiceFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-project-service" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "FeedQueryFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-feed-query-api" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "CoordinationMonitorFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-coordination-monitor-api" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "DeployIntakeFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-deploy-intake" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "ReferenceSearchFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-reference-search" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "AuthRefreshFunction",
+    "ResourceIdentifier": { "FunctionName": "auth-refresh" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "DeployOrchestratorFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-deploy-orchestrator" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "DeployFinalizeFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-deploy-finalize" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "FeedPublisherFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-feed-publisher" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "GovernanceAuditFunction",
+    "ResourceIdentifier": { "FunctionName": "enceladus-governance-audit" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "DocPrepFunction",
+    "ResourceIdentifier": { "FunctionName": "devops-doc-prep" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "BedrockAgentActionsFunction",
+    "ResourceIdentifier": { "FunctionName": "enceladus-bedrock-agent-actions" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::EventSourceMapping",
+    "LogicalResourceId": "DeployOrchestratorSqsTrigger",
+    "ResourceIdentifier": { "Id": "659716e0-702b-4e79-82c0-23ba86c04da6" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::EventSourceMapping",
+    "LogicalResourceId": "FeedPublisherSqsTrigger",
+    "ResourceIdentifier": { "Id": "47777561-8817-41fd-bffa-5b4481fce200" }
+  },
+  {
+    "ResourceType": "AWS::Lambda::EventSourceMapping",
+    "LogicalResourceId": "GovernanceAuditStreamTrigger",
+    "ResourceIdentifier": { "Id": "d9733acd-914c-41fa-ace1-2787ee02c184" }
+  },
+  {
+    "ResourceType": "AWS::Events::Rule",
+    "LogicalResourceId": "CoordinationBatchPollerRule",
+    "ResourceIdentifier": { "Arn": "arn:aws:events:us-west-2:356364570033:rule/devops-coordination-batch-poller" }
+  },
+  {
+    "ResourceType": "AWS::Events::Rule",
+    "LogicalResourceId": "DeployCodeBuildFinalizeRule",
+    "ResourceIdentifier": { "Arn": "arn:aws:events:us-west-2:356364570033:rule/devops-deploy-codebuild-finalize" }
+  },
+  {
+    "ResourceType": "AWS::Events::Rule",
+    "LogicalResourceId": "ProjectJsonSyncRule",
+    "ResourceIdentifier": { "Arn": "arn:aws:events:us-west-2:356364570033:rule/on-project-json-sync" }
+  },
+  {
+    "ResourceType": "AWS::Pipes::Pipe",
+    "LogicalResourceId": "TrackerToFeedPipe",
+    "ResourceIdentifier": { "Name": "devops-tracker-to-feed-queue" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "CoordinationApiRole",
+    "ResourceIdentifier": { "RoleName": "devops-coordination-api-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "TrackerMutationRole",
+    "ResourceIdentifier": { "RoleName": "devops-tracker-mutation-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "DocumentApiRole",
+    "ResourceIdentifier": { "RoleName": "devops-document-api-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "ProjectServiceRole",
+    "ResourceIdentifier": { "RoleName": "devops-project-service-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "FeedQueryRole",
+    "ResourceIdentifier": { "RoleName": "devops-feed-query-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "CoordinationMonitorRole",
+    "ResourceIdentifier": { "RoleName": "devops-coordination-monitor-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "DeployIntakeRole",
+    "ResourceIdentifier": { "RoleName": "devops-deploy-intake-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "DeployOrchestratorRole",
+    "ResourceIdentifier": { "RoleName": "devops-deploy-orchestrator-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "DeployFinalizeRole",
+    "ResourceIdentifier": { "RoleName": "devops-deploy-finalize-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "ReferenceSearchRole",
+    "ResourceIdentifier": { "RoleName": "devops-reference-search-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "FeedPublisherRole",
+    "ResourceIdentifier": { "RoleName": "devops-feed-publisher-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "GovernanceAuditRole",
+    "ResourceIdentifier": { "RoleName": "enceladus-governance-audit-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "DocPrepRole",
+    "ResourceIdentifier": { "RoleName": "devops-doc-prep-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "BedrockActionsRole",
+    "ResourceIdentifier": { "RoleName": "enceladus-bedrock-actions-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "AuthRefreshRole",
+    "ResourceIdentifier": { "RoleName": "auth-refresh-lambda-role" }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "FeedPipeRole",
+    "ResourceIdentifier": { "RoleName": "devops-feed-pipe-role" }
+  }
+]
