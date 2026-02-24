@@ -2,5 +2,4 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-"${repo_root}/scripts/secrets_guard.sh"
-
+"${repo_root}/tools/secrets_guard.sh"

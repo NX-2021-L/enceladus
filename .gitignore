@@ -41,6 +41,7 @@ coverage/
 .terraform/
 .serverless/
 .DS_Store
+infrastructure/parity/out/
 
 # Ensure agent-reference content stays out of repos
 ../agent-reference/

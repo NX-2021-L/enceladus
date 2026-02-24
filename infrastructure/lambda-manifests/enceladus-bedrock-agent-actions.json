@@ -1,0 +1,34 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "enceladus-bedrock-agent-actions",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "dDYE5v3HiPcNa8iz3MuO77uiWKsu5j6Dr8k9ubr62jo=",
+    "environment": {
+      "DEPLOY_TABLE": "devops-deployment-manager",
+      "DOCUMENTS_TABLE": "documents",
+      "DYNAMODB_REGION": "us-west-2",
+      "PROJECTS_TABLE": "projects",
+      "S3_BUCKET": "jreese-net",
+      "TRACKER_TABLE": "devops-project-tracker"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:enceladus-bedrock-agent-actions",
+    "handler": "lambda_function.handler",
+    "last_modified": "2026-02-20T20:55:31.000+0000",
+    "layers": [],
+    "memory_size": 256,
+    "role": "arn:aws:iam::356364570033:role/enceladus-bedrock-actions-lambda-role",
+    "runtime": "python3.11",
+    "timeout": 30,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "lambda_function.py",
+  "live_entry_sha256": "0f049e447004cc4d9021170c779850b7db869bc4d3d3cf6918c970133675ed8e",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/bedrock_agent_actions/lambda_function.py",
+  "repo_entry_sha256": "0f049e447004cc4d9021170c779850b7db869bc4d3d3cf6918c970133675ed8e"
+}

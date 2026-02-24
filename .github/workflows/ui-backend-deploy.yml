@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths:
-      - "ui/**"
-      - "scripts/submit_backend_ui_deploy.py"
+      - "frontend/ui/**"
+      - "tools/submit_backend_ui_deploy.py"
       - ".github/workflows/ui-backend-deploy.yml"
   workflow_dispatch:
     inputs:
@@ -126,10 +126,10 @@ jobs:
           files_changed=""
           zero_sha="0000000000000000000000000000000000000000"
           if [[ -n "${BEFORE_SHA:-}" && "${BEFORE_SHA}" != "${zero_sha}" ]]; then
-            files_changed="$(git diff --name-only "${BEFORE_SHA}" "${CURRENT_SHA}" -- ui | paste -sd, - || true)"
+            files_changed="$(git diff --name-only "${BEFORE_SHA}" "${CURRENT_SHA}" -- frontend/ui | paste -sd, - || true)"
           fi
           if [[ -z "${files_changed}" ]]; then
-            files_changed="$(git ls-files ui | paste -sd, - || true)"
+            files_changed="$(git ls-files frontend/ui | paste -sd, - || true)"
           fi
 
           wait_flag="--wait"
@@ -148,14 +148,14 @@ jobs:
       - name: Submit deployment request
         run: |
           set -euo pipefail
-          python scripts/submit_backend_ui_deploy.py \
+          python tools/submit_backend_ui_deploy.py \
             --project-id "${DEPLOY_PROJECT_ID}" \
             --region "${AWS_REGION}" \
             --deploy-table "${DEPLOY_TABLE}" \
             --config-bucket "${CONFIG_BUCKET}" \
             --config-prefix "${CONFIG_PREFIX}" \
             --queue-name "${DEPLOY_QUEUE_NAME}" \
-            --ui-dir ui \
+            --ui-dir frontend/ui \
             --deployment-type "${DEPLOYMENT_TYPE}" \
             --change-type "${{ steps.meta.outputs.change_type }}" \
             --summary "${{ steps.meta.outputs.summary }}" \

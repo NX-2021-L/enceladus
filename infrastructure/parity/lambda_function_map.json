@@ -1,0 +1,114 @@
+{
+  "description": "Enceladus Lambda-to-repo entry mapping for live parity audits",
+  "functions": [
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "auth-refresh",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/auth_refresh/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-coordination-api",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/coordination_api/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-coordination-monitor-api",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/coordination_monitor_api/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-deploy-finalize",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/deploy_finalize/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-deploy-intake",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/deploy_intake/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-deploy-orchestrator",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/deploy_orchestrator/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-doc-prep",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/doc_prep/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-document-api",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/document_api/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-feed-publisher",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/feed_publisher/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-feed-query-api",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/feed_query/lambda_function.py"
+    },
+    {
+      "entry_file": "handler.py",
+      "function_name": "devops-glue-crawler-launcher",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/glue_crawler_launcher/handler.py"
+    },
+    {
+      "entry_file": "handler.py",
+      "function_name": "devops-json-to-parquet-transformer",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/json_to_parquet_transformer/handler.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-project-service",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/project_service/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-reference-search",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/reference_search/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-tracker-mutation-api",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/tracker_mutation/lambda_function.py"
+    },
+    {
+      "entry_file": "index.js",
+      "function_name": "enceladus-auth-edge",
+      "region": "us-east-1",
+      "repo_entry_path": "backend/lambda/auth_edge/index.js"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "enceladus-bedrock-agent-actions",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/bedrock_agent_actions/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "enceladus-governance-audit",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/governance_audit/lambda_function.py"
+    }
+  ],
+  "generated_at": "2026-02-24T02:10:00Z"
+}

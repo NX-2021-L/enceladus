@@ -1,0 +1,34 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-deploy-orchestrator",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "geqwreY3RABUey3GeN+ZIBrSlXkMWCVOsHRl0n7JlhM=",
+    "environment": {
+      "CODEBUILD_PROJECT": "devops-ui-deploy-builder",
+      "CONFIG_BUCKET": "jreese-net",
+      "CONFIG_PREFIX": "deploy-config",
+      "DEPLOY_REGION": "us-west-2",
+      "DEPLOY_TABLE": "devops-deployment-manager",
+      "PROJECTS_TABLE": "projects"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-deploy-orchestrator",
+    "handler": "lambda_function.handler",
+    "last_modified": "2026-02-20T03:33:23.000+0000",
+    "layers": [],
+    "memory_size": 256,
+    "role": "arn:aws:iam::356364570033:role/devops-deploy-orchestrator-lambda-role",
+    "runtime": "python3.11",
+    "timeout": 120,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "lambda_function.py",
+  "live_entry_sha256": "50ccb7ecee8a857841d85ba0aa9a20649e16065c50f13f49b84702bf67df4156",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/deploy_orchestrator/lambda_function.py",
+  "repo_entry_sha256": "50ccb7ecee8a857841d85ba0aa9a20649e16065c50f13f49b84702bf67df4156"
+}

@@ -1,0 +1,29 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "enceladus-governance-audit",
+  "generated_at": "2026-02-24T02:13:48Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "code_sha256": "IwgGJutk3e/FH6EH2iddcqDdq2zPuzm6MvG4RDJztAw=",
+    "environment": {
+      "GOVERNANCE_ALERT_SNS_ARN": "arn:aws:sns:us-west-2:356364570033:devops-project-json-sync"
+    },
+    "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:enceladus-governance-audit",
+    "handler": "lambda_function.handler",
+    "last_modified": "2026-02-23T09:52:31.276+0000",
+    "layers": [],
+    "memory_size": 128,
+    "role": "arn:aws:iam::356364570033:role/enceladus-governance-audit-role",
+    "runtime": "python3.11",
+    "timeout": 30,
+    "version": "$LATEST"
+  },
+  "live_entry_path": "lambda_function.py",
+  "live_entry_sha256": "db543177685630cf1d8ccf7412edaf8775c5d813f9fd214ad0e327e679497b10",
+  "parity_status": "MATCH",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/governance_audit/lambda_function.py",
+  "repo_entry_sha256": "db543177685630cf1d8ccf7412edaf8775c5d813f9fd214ad0e327e679497b10"
+}
