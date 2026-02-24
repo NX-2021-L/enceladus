@@ -145,6 +145,22 @@ ensure_role() {
       "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${PROJECTS_TABLE}"
     },
     {
+      "Sid": "GovernanceAndReferenceS3Read",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::${S3_BUCKET}"
+    },
+    {
+      "Sid": "GovernanceAndReferenceS3Get",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": [
+        "arn:aws:s3:::${S3_BUCKET}/governance/*",
+        "arn:aws:s3:::${S3_BUCKET}/projects/*",
+        "arn:aws:s3:::${S3_BUCKET}/mobile/v1/reference/*"
+      ]
+    },
+    {
       "Sid": "SSMDispatch",
       "Effect": "Allow",
       "Action": ["ssm:SendCommand", "ssm:GetCommandInvocation", "ssm:ListCommands", "ssm:ListCommandInvocations"],
