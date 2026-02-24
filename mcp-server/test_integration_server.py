@@ -52,6 +52,10 @@ def test_projects_and_connection_health_handlers():
     assert project["project"]["project_id"] == "devops"
     assert project["project"]["prefix"] == "DVP"
 
+    capabilities = _call_tool("coordination_capabilities", {})
+    assert capabilities.get("success") is True
+    assert capabilities.get("capabilities", {}).get("contract_version")
+
     health = _call_tool("connection_health", {})
     assert health["dynamodb"] == "ok"
     assert "governance_hash" in health
