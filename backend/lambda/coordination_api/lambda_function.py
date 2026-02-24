@@ -2497,6 +2497,7 @@ def _build_mcp_profile_bootstrap_commands() -> List[str]:
     for candidate in (
         HOST_V2_ENCELADUS_MCP_INSTALLER,
         "tools/enceladus-mcp-server/install_profile.sh",
+        "projects/enceladus/repo/tools/enceladus-mcp-server/install_profile.sh",
         "projects/enceladus/tools/enceladus-mcp-server/install_profile.sh",
         "projects/devops/tools/enceladus-mcp-server/install_profile.sh",
     ):
@@ -5517,6 +5518,15 @@ def _handle_capabilities() -> Dict[str, Any]:
                     "server_name": "enceladus",
                     "profile_path": HOST_V2_MCP_PROFILE_PATH,
                     "marker_path": HOST_V2_MCP_MARKER_PATH,
+                    "mcp_server_configuration": {
+                        "server_name": "enceladus",
+                        "server_label": "Enceladus Governance & System Resource API",
+                        "auth_mode": "profile_entry",
+                        "description": "Stdio-based MCP server for agent sessions. Installed via .claude/mcp.json profile. Provides access to DynamoDB tracker (tasks/issues/features), projects, documents, governance resources, and deployment APIs.",
+                        "transport": "stdio",
+                        "tools_provided": 27,
+                        "resources_provided": 3,
+                    },
                 },
                 "callback": {
                     "endpoint": "POST /api/v1/coordination/requests/{requestId}/callback",
