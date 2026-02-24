@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import uuid
+from typing import Dict
 
 # Ensure dispatch_plan_generator is importable from this directory
 sys.path.insert(0, os.path.dirname(__file__))
@@ -737,6 +738,178 @@ def test_plan_with_bedrock_provider():
 
 
 # =================================================================
+# Tests: Agent Manifest Integration (ENC-FTR-015)
+# =================================================================
+
+
+def test_manifest_loading():
+    """Validate load_agent_manifest() loads valid manifest and handles missing files."""
+    _header("Manifest Loading (ENC-FTR-015)")
+
+    # Reset cache before testing
+    dpg._reset_manifest_cache()
+
+    # Test 1: Load valid manifest from default path
+    manifest = dpg.load_agent_manifest()
+    if manifest is not None:
+        _pass(f"loaded manifest v{manifest.get('version', '?')} with {len(manifest.get('agents', []))} agents")
+    else:
+        _fail("load_agent_manifest()", "returned None for default path")
+
+    # Test 2: Manifest has expected v2.0 structure
+    if manifest:
+        agents = manifest.get("agents", [])
+        assert len(agents) >= 6, f"expected >= 6 agents, got {len(agents)}"
+        _pass(f"manifest has {len(agents)} agents (>= 6 required)")
+
+        # Test 3: Each agent has required dispatch fields
+        for agent in agents:
+            assert "task_type" in agent, f"agent {agent.get('name')} missing task_type"
+            assert "keywords" in agent, f"agent {agent.get('name')} missing keywords"
+            assert "provider_affinity" in agent, f"agent {agent.get('name')} missing provider_affinity"
+            assert len(agent["keywords"]) >= 1, f"agent {agent.get('name')} has no keywords"
+        _pass("all agents have required dispatch fields (task_type, keywords, provider_affinity)")
+
+    # Test 4: Missing file returns None
+    result = dpg.load_agent_manifest("/nonexistent/path/manifest.json")
+    assert result is None, "expected None for missing file"
+    _pass("missing file returns None (graceful fallback)")
+
+    # Test 5: _get_manifest() caching works
+    dpg._reset_manifest_cache()
+    m1 = dpg._get_manifest()
+    m2 = dpg._get_manifest()
+    assert m1 is m2, "expected same object reference from cache"
+    _pass("_get_manifest() returns cached instance")
+
+
+def test_manifest_classification_parity():
+    """Verify manifest-driven classification produces identical results to hardcoded."""
+    _header("Manifest Classification Parity (ENC-FTR-015)")
+
+    # Reset and ensure manifest is loaded
+    dpg._reset_manifest_cache()
+
+    # Same test cases as test_classify_outcome()
+    cases = [
+        ("Implement new REST API endpoint for user authentication", "code"),
+        ("Design architecture contract for multi-tenant support", "architecture"),
+        ("Deploy Lambda function to production", "infrastructure"),
+        ("Write unit tests for the payment module", "test"),
+        ("Bulk update tracker records for sprint closure", "tracker_crud"),
+        ("Refactor the database access layer", "code"),
+        ("Investigate root cause of memory leak", "architecture"),
+        ("Provision new S3 bucket for analytics pipeline", "infrastructure"),
+        ("Create integration test suite for the API", "test"),
+    ]
+
+    # Manifest-driven results
+    manifest = dpg._get_manifest()
+    assert manifest is not None, "manifest must be loaded for parity test"
+
+    for text, expected in cases:
+        manifest_result = dpg._classify_from_manifest(text, manifest["agents"])
+        hardcoded_result = dpg._classify_from_hardcoded(text)
+        if manifest_result == hardcoded_result == expected:
+            _pass(f"parity: '{text[:45]}...' -> '{manifest_result}'")
+        else:
+            _fail(
+                f"parity: '{text[:45]}...'",
+                f"manifest='{manifest_result}', hardcoded='{hardcoded_result}', expected='{expected}'",
+            )
+
+    # Also test bedrock cases
+    bedrock_cases = [
+        ("Use bedrock agent to orchestrate multi-step AWS operations", "bedrock_agent"),
+        ("Perform RAG retrieval from the knowledge base", "bedrock_agent"),
+        ("Bedrock agent service integration for the pipeline", "bedrock_agent"),
+    ]
+    for text, expected in bedrock_cases:
+        manifest_result = dpg._classify_from_manifest(text, manifest["agents"])
+        hardcoded_result = dpg._classify_from_hardcoded(text)
+        if manifest_result == hardcoded_result == expected:
+            _pass(f"parity: '{text[:45]}...' -> '{manifest_result}'")
+        else:
+            _fail(
+                f"parity: '{text[:45]}...'",
+                f"manifest='{manifest_result}', hardcoded='{hardcoded_result}', expected='{expected}'",
+            )
+
+
+def test_manifest_provider_mapping():
+    """Verify manifest provider_affinity matches hardcoded task_type-to-provider mapping."""
+    _header("Manifest Provider Mapping (ENC-FTR-015)")
+
+    expected_mapping = {
+        "code": "openai_codex",
+        "architecture": "claude_agent_sdk",
+        "infrastructure": "aws_native",
+        "test": "openai_codex",
+        "tracker_crud": "aws_native",
+        "bedrock_agent": "aws_bedrock_agent",
+    }
+
+    manifest = dpg._get_manifest()
+    assert manifest is not None, "manifest must be loaded"
+
+    # Build mapping from manifest
+    manifest_mapping = {}
+    for agent in manifest["agents"]:
+        task_type = agent["task_type"]
+        manifest_mapping[task_type] = agent["provider_affinity"]
+
+    for task_type, expected_provider in expected_mapping.items():
+        manifest_provider = manifest_mapping.get(task_type)
+        if manifest_provider == expected_provider:
+            _pass(f"task_type '{task_type}' -> provider '{manifest_provider}'")
+        else:
+            _fail(
+                f"task_type '{task_type}'",
+                f"manifest='{manifest_provider}', expected='{expected_provider}'",
+            )
+
+
+def test_manifest_keyword_completeness():
+    """Verify all hardcoded keywords appear in the manifest (no silent regressions)."""
+    _header("Manifest Keyword Completeness (ENC-FTR-015)")
+
+    manifest = dpg._get_manifest()
+    assert manifest is not None, "manifest must be loaded"
+
+    # Build task_type -> keywords mapping from manifest
+    manifest_keywords: Dict[str, set] = {}
+    for agent in manifest["agents"]:
+        task_type = agent["task_type"]
+        kws = set(agent.get("keywords", []))
+        manifest_keywords[task_type] = manifest_keywords.get(task_type, set()) | kws
+
+    # Compare against hardcoded keyword sets
+    hardcoded_sets = {
+        "code": dpg._CODE_KEYWORDS,
+        "architecture": dpg._ARCHITECTURE_KEYWORDS,
+        "infrastructure": dpg._INFRASTRUCTURE_KEYWORDS,
+        "test": dpg._TEST_KEYWORDS,
+        "tracker_crud": dpg._TRACKER_KEYWORDS,
+        "bedrock_agent": dpg._BEDROCK_AGENT_KEYWORDS,
+    }
+
+    for task_type, hardcoded_kws in hardcoded_sets.items():
+        manifest_kws = manifest_keywords.get(task_type, set())
+        missing = hardcoded_kws - manifest_kws
+        extra = manifest_kws - hardcoded_kws
+        if not missing and not extra:
+            _pass(f"'{task_type}': {len(manifest_kws)} keywords match exactly")
+        elif not missing:
+            # Extra keywords in manifest are OK (manifest can be superset)
+            _pass(f"'{task_type}': {len(manifest_kws)} keywords (superset of hardcoded, +{len(extra)} extra)")
+        else:
+            _fail(
+                f"'{task_type}'",
+                f"missing from manifest: {missing}",
+            )
+
+
+# =================================================================
 # Run all tests
 # =================================================================
 
@@ -761,6 +934,10 @@ if __name__ == "__main__":
     test_bedrock_failover_chain()
     test_plan_with_bedrock_provider()
     test_mcp_tool_handlers()
+    test_manifest_loading()
+    test_manifest_classification_parity()
+    test_manifest_provider_mapping()
+    test_manifest_keyword_completeness()
     test_deploy_adapter_contract()
 
     print(f"\n{'='*60}")

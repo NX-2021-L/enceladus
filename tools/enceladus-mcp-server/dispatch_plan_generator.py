@@ -49,6 +49,7 @@ AWS_REGION = os.environ.get("ENCELADUS_REGION", "us-west-2")
 S3_BUCKET = os.environ.get("ENCELADUS_S3_BUCKET", "jreese-net")
 GOVERNANCE_PROJECT_ID = os.environ.get("ENCELADUS_GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("ENCELADUS_GOVERNANCE_KEYWORD", "governance-file")
+S3_GOVERNANCE_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_PREFIX", "governance/live")
 
 COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
@@ -148,6 +149,76 @@ DISPATCH_TIMEOUT_BOUNDS = (5, 120)  # min, max minutes
 
 
 # ---------------------------------------------------------------------------
+# Agent Manifest Loading (ENC-FTR-015 — ontology-driven dispatch)
+# ---------------------------------------------------------------------------
+
+_MANIFEST: Optional[Dict[str, Any]] = None
+
+
+def load_agent_manifest(manifest_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Load agent manifest from local file.
+
+    Falls back to None if file not found or invalid JSON, allowing
+    hardcoded constants to serve as fallback.
+
+    Args:
+        manifest_path: Path to agent-manifest.json. If None, uses the
+            default location relative to this file's parent directory.
+
+    Returns:
+        Parsed manifest dict, or None if unavailable.
+    """
+    if manifest_path is None:
+        # Default: <repo_root>/agent-manifest.json
+        manifest_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "agent-manifest.json",
+        )
+    try:
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        # Basic structural validation
+        if not isinstance(manifest, dict) or "agents" not in manifest:
+            logger.warning("Manifest at %s missing 'agents' key — using hardcoded defaults", manifest_path)
+            return None
+        agents = manifest["agents"]
+        if not isinstance(agents, list) or len(agents) == 0:
+            logger.warning("Manifest at %s has empty agents list — using hardcoded defaults", manifest_path)
+            return None
+        # Validate each agent has required dispatch fields
+        for agent in agents:
+            if not all(k in agent for k in ("task_type", "keywords", "provider_affinity")):
+                logger.warning(
+                    "Agent '%s' missing dispatch fields — using hardcoded defaults",
+                    agent.get("name", "unknown"),
+                )
+                return None
+        logger.info("Loaded agent manifest v%s with %d agents from %s",
+                     manifest.get("version", "?"), len(agents), manifest_path)
+        return manifest
+    except FileNotFoundError:
+        logger.warning("Agent manifest not found at %s — using hardcoded defaults", manifest_path)
+        return None
+    except json.JSONDecodeError as exc:
+        logger.warning("Agent manifest at %s is not valid JSON: %s — using hardcoded defaults", manifest_path, exc)
+        return None
+
+
+def _get_manifest() -> Optional[Dict[str, Any]]:
+    """Return cached manifest, loading on first call."""
+    global _MANIFEST
+    if _MANIFEST is None:
+        _MANIFEST = load_agent_manifest()
+    return _MANIFEST
+
+
+def _reset_manifest_cache() -> None:
+    """Reset the manifest cache (used in tests)."""
+    global _MANIFEST
+    _MANIFEST = None
+
+
+# ---------------------------------------------------------------------------
 # Lazy boto3
 # ---------------------------------------------------------------------------
 
@@ -222,8 +293,57 @@ def _deser_item(item: Dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def compute_governance_hash() -> str:
-    """SHA-256 of governance resources resolved from docstore metadata."""
+def _uri_from_file_name(name: str) -> Optional[str]:
+    """Map a governance file name to its governance:// URI."""
+    fn = str(name or "").strip()
+    if fn == "agents.md":
+        return "governance://agents.md"
+    if fn.startswith("agents/"):
+        return f"governance://{fn}"
+    return None
+
+
+def _governance_catalog_from_s3() -> Dict[str, Dict[str, Any]]:
+    """Build governance catalog from deterministic S3 prefix (ENC-TSK-474)."""
+    try:
+        s3 = _get_s3()
+        prefix = S3_GOVERNANCE_PREFIX.rstrip("/") + "/"
+        resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
+        objects = list(resp.get("Contents", []))
+        while resp.get("IsTruncated"):
+            resp = s3.list_objects_v2(
+                Bucket=S3_BUCKET,
+                Prefix=prefix,
+                ContinuationToken=resp["NextContinuationToken"],
+            )
+            objects.extend(resp.get("Contents", []))
+    except Exception as exc:
+        logger.warning("S3 governance listing failed: %s", exc)
+        return {}
+
+    catalog: Dict[str, Dict[str, Any]] = {}
+    for obj in objects:
+        s3_key = obj["Key"]
+        rel_path = s3_key[len(prefix):]
+        if not rel_path or rel_path.endswith("/"):
+            continue
+        uri = _uri_from_file_name(rel_path)
+        if not uri:
+            continue
+        try:
+            content_resp = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
+            content = content_resp["Body"].read()
+            content_hash = hashlib.sha256(content).hexdigest()
+        except Exception as exc:
+            logger.warning("Failed to read governance file s3://%s/%s: %s", S3_BUCKET, s3_key, exc)
+            continue
+        catalog[uri] = {"content_hash": content_hash}
+
+    return catalog
+
+
+def _governance_catalog_from_docstore() -> Dict[str, Dict[str, Any]]:
+    """Legacy: build governance catalog from docstore DynamoDB scan."""
     ddb = _get_ddb()
     resp = ddb.query(
         TableName=DOCUMENTS_TABLE,
@@ -244,14 +364,6 @@ def compute_governance_hash() -> str:
         )
         items.extend(resp.get("Items", []))
 
-    def _uri_from_file_name(name: str) -> Optional[str]:
-        fn = str(name or "").strip()
-        if fn == "agents.md":
-            return "governance://agents.md"
-        if fn.startswith("agents/"):
-            return f"governance://{fn}"
-        return None
-
     selected: Dict[str, Dict[str, Any]] = {}
     for raw in items:
         doc = _deser_item(raw)
@@ -268,17 +380,46 @@ def compute_governance_hash() -> str:
             continue
         selected[uri] = doc
 
+    return selected
+
+
+def compute_governance_hash() -> str:
+    """SHA-256 of governance resources — two-tier resolution (ENC-TSK-474).
+
+    Primary: deterministic S3 prefix (governance/live/).
+    Fallback: legacy docstore DynamoDB scan.
+    """
+    catalog = _governance_catalog_from_s3()
+
+    if not catalog:
+        logger.warning(
+            "No governance files at s3://%s/%s/ — falling back to docstore scan.",
+            S3_BUCKET, S3_GOVERNANCE_PREFIX,
+        )
+        catalog = _governance_catalog_from_docstore()
+
     h = hashlib.sha256()
-    if not selected:
+    if not catalog:
         h.update(b"enceladus-governance-docstore-empty")
         return h.hexdigest()
 
-    for uri in sorted(selected.keys()):
-        content_hash = str(selected[uri].get("content_hash") or "").strip()
+    for uri in sorted(catalog.keys()):
+        content_hash = str(catalog[uri].get("content_hash") or "").strip()
         if not content_hash:
-            content_hash = hashlib.sha256(
-                str(selected[uri].get("document_id") or "").encode("utf-8")
-            ).hexdigest()
+            # Fallback: read S3 content (docstore path) or hash document_id
+            s3_key = str(catalog[uri].get("s3_key") or "").strip()
+            if s3_key:
+                try:
+                    resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=s3_key)
+                    content_hash = hashlib.sha256(resp["Body"].read()).hexdigest()
+                except Exception:
+                    content_hash = hashlib.sha256(
+                        str(catalog[uri].get("document_id") or "").encode("utf-8")
+                    ).hexdigest()
+            else:
+                content_hash = hashlib.sha256(
+                    str(catalog[uri].get("document_id") or "").encode("utf-8")
+                ).hexdigest()
         h.update(uri.encode("utf-8"))
         h.update(b"\n")
         h.update(content_hash.encode("utf-8"))
@@ -417,8 +558,33 @@ def query_active_dispatches(project_id: str) -> List[Dict[str, Any]]:
 def classify_outcome(outcome_text: str) -> str:
     """Classify an outcome string into a task type using keyword analysis.
 
-    Returns: 'code', 'architecture', 'infrastructure', 'test', 'tracker_crud'
+    Uses agent manifest keywords if available (ENC-FTR-015 ontology-driven dispatch),
+    falling back to hardcoded keyword sets if the manifest cannot be loaded.
+
+    Returns: 'code', 'architecture', 'infrastructure', 'test', 'tracker_crud', 'bedrock_agent'
     """
+    manifest = _get_manifest()
+    if manifest and manifest.get("agents"):
+        return _classify_from_manifest(outcome_text, manifest["agents"])
+    return _classify_from_hardcoded(outcome_text)
+
+
+def _classify_from_manifest(outcome_text: str, agents: List[Dict[str, Any]]) -> str:
+    """Classify outcome using manifest agent keyword sets."""
+    lower = outcome_text.lower()
+    scores: Dict[str, int] = {}
+    for agent in agents:
+        task_type = agent["task_type"]
+        score = sum(1 for kw in agent.get("keywords", []) if kw in lower)
+        scores[task_type] = scores.get(task_type, 0) + score
+    if not scores:
+        return "code"
+    best = max(scores, key=lambda k: scores[k])
+    return best if scores[best] > 0 else "code"
+
+
+def _classify_from_hardcoded(outcome_text: str) -> str:
+    """Classify outcome using hardcoded keyword sets (fallback)."""
     lower = outcome_text.lower()
 
     # Score each category
@@ -457,8 +623,18 @@ def classify_outcome(outcome_text: str) -> str:
 
 
 def select_provider_for_task_type(task_type: str) -> str:
-    """Map task type to recommended provider (dispatch-heuristics.md §2.4)."""
-    mapping = {
+    """Map task type to recommended provider (dispatch-heuristics.md §2.4).
+
+    Uses agent manifest provider_affinity if available (ENC-FTR-015),
+    falling back to hardcoded mapping.
+    """
+    manifest = _get_manifest()
+    if manifest and manifest.get("agents"):
+        for agent in manifest["agents"]:
+            if agent.get("task_type") == task_type:
+                return agent.get("provider_affinity", DEFAULT_PROVIDER)
+    # Hardcoded fallback
+    _HARDCODED_TASK_TYPE_MAPPING = {
         "code": "openai_codex",
         "architecture": "claude_agent_sdk",
         "infrastructure": "aws_native",
@@ -466,7 +642,7 @@ def select_provider_for_task_type(task_type: str) -> str:
         "tracker_crud": "aws_native",
         "bedrock_agent": "aws_bedrock_agent",
     }
-    return mapping.get(task_type, DEFAULT_PROVIDER)
+    return _HARDCODED_TASK_TYPE_MAPPING.get(task_type, DEFAULT_PROVIDER)
 
 
 def select_provider(
