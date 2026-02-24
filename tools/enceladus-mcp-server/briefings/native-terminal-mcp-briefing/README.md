@@ -8,8 +8,6 @@ This folder contains terminal-optimized init files for MCP-only Enceladus sessio
 - `NEW_MACHINE_SETUP.md`
 - `README.md`
 - `tools/enceladus-mcp-server/install_profile.sh`
-- `tools/enceladus-mcp-server/server.py`
-- `tools/enceladus-mcp-server/dispatch_plan_generator.py`
 
 ## Session Start
 
@@ -21,4 +19,4 @@ The terminal template enforces setup-if-missing MCP bootstrap before governance 
 
 ## Path Rule
 
-All file paths referenced by this terminal briefing set are local to this folder.
+Installer path is local to this folder, but runtime MCP assets are resolved from the canonical repository path `tools/enceladus-mcp-server/`.

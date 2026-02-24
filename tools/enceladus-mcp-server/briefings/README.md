@@ -10,7 +10,7 @@ Canonical, Git-managed briefing templates for MCP session initialization now liv
 
 ## Scope
 
-These folders are intended to be self-contained briefing packages. Paths used in templates should resolve within each package.
+These folders are template packs that resolve runtime paths through the canonical MCP source at `tools/enceladus-mcp-server/`.
 
 ## Source Control Rule
 
