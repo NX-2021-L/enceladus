@@ -19,11 +19,14 @@ from aws_clients import _get_ddb
 __all__ = [
     "ProjectMeta",
     "_ENCELADUS_MCP_SERVER_MODULE",
+    "_MCP_RESOURCE_CACHE",
     "_PROJECT_CACHE_TTL",
     "_build_record_id",
     "_key_for_record_id",
     "_load_project_meta",
     "_next_tracker_sequence",
+    "_project_cache",
+    "_project_cache_at",
 ]
 
 # ---------------------------------------------------------------------------
