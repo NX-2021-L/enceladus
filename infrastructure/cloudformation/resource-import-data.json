@@ -1,0 +1,67 @@
+[
+  {
+    "ResourceType": "AWS::DynamoDB::Table",
+    "LogicalResourceId": "CoordinationRequestsTable",
+    "ResourceIdentifier": { "TableName": "coordination-requests" }
+  },
+  {
+    "ResourceType": "AWS::DynamoDB::Table",
+    "LogicalResourceId": "TrackerTable",
+    "ResourceIdentifier": { "TableName": "devops-project-tracker" }
+  },
+  {
+    "ResourceType": "AWS::DynamoDB::Table",
+    "LogicalResourceId": "ProjectsTable",
+    "ResourceIdentifier": { "TableName": "projects" }
+  },
+  {
+    "ResourceType": "AWS::DynamoDB::Table",
+    "LogicalResourceId": "DocumentsTable",
+    "ResourceIdentifier": { "TableName": "documents" }
+  },
+  {
+    "ResourceType": "AWS::DynamoDB::Table",
+    "LogicalResourceId": "DeploymentManagerTable",
+    "ResourceIdentifier": { "TableName": "devops-deployment-manager" }
+  },
+  {
+    "ResourceType": "AWS::DynamoDB::Table",
+    "LogicalResourceId": "GovernancePoliciesTable",
+    "ResourceIdentifier": { "TableName": "governance-policies" }
+  },
+  {
+    "ResourceType": "AWS::DynamoDB::Table",
+    "LogicalResourceId": "AgentComplianceViolationsTable",
+    "ResourceIdentifier": { "TableName": "agent-compliance-violations" }
+  },
+  {
+    "ResourceType": "AWS::SQS::Queue",
+    "LogicalResourceId": "DeployQueue",
+    "ResourceIdentifier": { "QueueUrl": "https://sqs.us-west-2.amazonaws.com/356364570033/devops-deploy-queue.fifo" }
+  },
+  {
+    "ResourceType": "AWS::SQS::Queue",
+    "LogicalResourceId": "FeedPublishQueue",
+    "ResourceIdentifier": { "QueueUrl": "https://sqs.us-west-2.amazonaws.com/356364570033/devops-feed-publish-queue.fifo" }
+  },
+  {
+    "ResourceType": "AWS::SNS::Topic",
+    "LogicalResourceId": "CoordinationDeadLetterTopic",
+    "ResourceIdentifier": { "TopicArn": "arn:aws:sns:us-west-2:356364570033:coordination-dead-letter" }
+  },
+  {
+    "ResourceType": "AWS::SNS::Topic",
+    "LogicalResourceId": "FeedAlertsTopic",
+    "ResourceIdentifier": { "TopicArn": "arn:aws:sns:us-west-2:356364570033:devops-feed-alerts" }
+  },
+  {
+    "ResourceType": "AWS::SNS::Topic",
+    "LogicalResourceId": "ParquetReadyTopic",
+    "ResourceIdentifier": { "TopicArn": "arn:aws:sns:us-west-2:356364570033:devops-json-parquet-ready" }
+  },
+  {
+    "ResourceType": "AWS::SNS::Topic",
+    "LogicalResourceId": "ProjectJsonSyncTopic",
+    "ResourceIdentifier": { "TopicArn": "arn:aws:sns:us-west-2:356364570033:devops-project-json-sync" }
+  }
+]

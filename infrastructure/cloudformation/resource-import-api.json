@@ -1,0 +1,313 @@
+[
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Api",
+    "LogicalResourceId": "HttpApi",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "CoordinationApiIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "kbvzvie"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "TrackerMutationIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "t0kta4k"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "DocumentApiIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "w68vrr1"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "ProjectServiceIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "vz2xmz7"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "FeedQueryIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "2jokxwl"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "CoordinationMonitorIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "9br2p3d"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "DeployIntakeIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "97dh84s"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "ReferenceSearchIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "f5j0912"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "DocPrepIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "es2dwuj"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "AuthRefreshIntegration",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "7g2lg0h"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteCoordinationCreate",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "9tn7hjo"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteCoordinationGet",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "xrgxc19"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteCoordinationDispatch",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "jgrn6uu"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteCoordinationCallback",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "izqivn2"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteCoordinationCapabilities",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "kvgf3th"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteCoordinationMcpGet",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "4yg74ho"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteCoordinationMcpPost",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "peyb8qc"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteTrackerMutationLegacy",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "qk8jo5e"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteTrackerMutationV1",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "qeymb4h"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDocumentsList",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "2o6ihsp"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDocumentsGet",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "cthvt85"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDocumentsSearch",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "h169dol"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDocumentsCreate",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "ln0z2tg"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDocumentsPatch",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "h8yl1jp"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteProjectsList",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "g6dvz97"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteProjectsGet",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "qog6e8a"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteProjectsCreate",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "1hwa6q9"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteFeedQuery",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "8aqd4uh"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteMonitorList",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "xtyrate"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteMonitorGet",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "dly5pju"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDeploySubmit",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "oybr8ft"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDeployStatus",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "j65o4bb"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDeployHistory",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "jcu41n1"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDeployStateGet",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "rqw25bh"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDeployStatePatch",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "p4glilj"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteReferenceSearch",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "w5ktyu2"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteDocPrep",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "e91bs4g"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteAuthRefresh",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "ur6y7wq"
+    }
+  }
+]

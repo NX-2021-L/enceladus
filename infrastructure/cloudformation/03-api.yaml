@@ -40,12 +40,9 @@ Resources:
           - Cookie
         AllowCredentials: true
 
-  DefaultStage:
-    Type: AWS::ApiGatewayV2::Stage
-    Properties:
-      ApiId: !Ref HttpApi
-      StageName: $default
-      AutoDeploy: true
+  # NOTE: $default stage exists but AWS::ApiGatewayV2::Stage does not support
+  # CloudFormation import. The stage is managed directly via API Gateway console.
+  # AutoDeploy is enabled on the $default stage.
 
   # ---------------------------------------------------------------------------
   # Integrations (Lambda proxy)
