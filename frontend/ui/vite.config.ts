@@ -58,4 +58,40 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('/node_modules/react/')) return 'react-core'
+            if (id.includes('/node_modules/react-dom/')) return 'react-core'
+            if (id.includes('/node_modules/react-router-dom/')) return 'react-router'
+            if (id.includes('/node_modules/react-router/')) return 'react-router'
+            if (id.includes('/node_modules/@remix-run/router/')) return 'react-router'
+            if (id.includes('/@tanstack/react-query/')) return 'query'
+            if (
+              id.includes('/react-markdown/') ||
+              id.includes('/react-syntax-highlighter/')
+            ) {
+              return 'markdown'
+            }
+            if (id.includes('/react-window/')) return 'virtualized'
+            return undefined
+          }
+
+          if (id.includes('/src/lib/routes.tsx')) return 'routes'
+          if (
+            id.includes('/src/components/layout/AppShell.tsx') ||
+            id.includes('/src/hooks/useSessionLifecycle.ts') ||
+            id.includes('/src/lib/authState.tsx') ||
+            id.includes('/src/lib/queryClient.ts')
+          ) {
+            return 'shell'
+          }
+
+          return undefined
+        },
+      },
+    },
+  },
 })
