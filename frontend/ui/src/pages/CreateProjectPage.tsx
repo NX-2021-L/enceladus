@@ -176,7 +176,7 @@ export function CreateProjectPage() {
         });
         setSubmission({ isLoading: false, success: false });
         navigate(`/projects/${createdProjectId}`, { replace: true });
-      }, 2000);
+      }, 3000);
     } catch (error) {
       let errorMessage = 'Failed to create project';
 
