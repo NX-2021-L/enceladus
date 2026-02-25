@@ -18,7 +18,7 @@ function parseSort(raw?: string): { field: string; dir: 1 | -1 } {
 
 export function useFeatures(filters?: FeatureFilters) {
   // Live data from the global delta-polling provider (ENC-TSK-609).
-  const { features: liveFeatures, isPending: livePending, isError: liveError } = useLiveFeed()
+  const { features: liveFeatures } = useLiveFeed()
 
   // S3 feed as fallback for initial load before LiveFeedProvider hydrates.
   const s3Query = useQuery({ queryKey: feedKeys.features, queryFn: fetchFeatures })

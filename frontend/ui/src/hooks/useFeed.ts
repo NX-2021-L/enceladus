@@ -26,7 +26,7 @@ interface UseFeedOptions {
 
 export function useFeed(filters?: FeedFilters, _options?: UseFeedOptions) {
   // Live data from the global delta-polling provider (ENC-TSK-609).
-  const { tasks: liveTasks, issues: liveIssues, features: liveFeatures, generatedAt: liveGeneratedAt, isPending: livePending, isError: liveError } = useLiveFeed()
+  const { tasks: liveTasks, issues: liveIssues, features: liveFeatures, generatedAt: liveGeneratedAt } = useLiveFeed()
 
   // S3 feeds as fallback for initial load before LiveFeedProvider hydrates.
   const tasksQuery = useQuery({ queryKey: feedKeys.tasks, queryFn: fetchTasks })
