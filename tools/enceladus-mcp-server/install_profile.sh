@@ -147,11 +147,19 @@ env_block = {
     "ENCELADUS_S3_BUCKET": "jreese-net",
     "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
     "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
+    # HTTP API base URLs (Phase 2d migration — MCP routes through HTTP APIs)
+    "ENCELADUS_TRACKER_API_BASE": "https://jreese.net/api/v1/tracker",
+    "ENCELADUS_GOVERNANCE_API_BASE": "https://jreese.net/api/v1/governance",
+    "ENCELADUS_PROJECTS_API_BASE": "https://jreese.net/api/v1/coordination/projects",
+    "ENCELADUS_HEALTH_API_URL": "https://jreese.net/api/v1/health",
 }
 for key in (
     "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
     "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
     "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
+    "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
+    "ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY",
+    "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
 ):
     value = os.environ.get(key, "").strip()
     if value:
@@ -275,11 +283,19 @@ env_items = {
     "ENCELADUS_PROJECTS_TABLE": "projects",
     "ENCELADUS_DOCUMENTS_TABLE": "documents",
     "ENCELADUS_S3_BUCKET": "jreese-net",
+    # HTTP API base URLs (Phase 2d migration)
+    "ENCELADUS_TRACKER_API_BASE": "https://jreese.net/api/v1/tracker",
+    "ENCELADUS_GOVERNANCE_API_BASE": "https://jreese.net/api/v1/governance",
+    "ENCELADUS_PROJECTS_API_BASE": "https://jreese.net/api/v1/coordination/projects",
+    "ENCELADUS_HEALTH_API_URL": "https://jreese.net/api/v1/health",
 }
 for key in (
     "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
     "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
     "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
+    "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
+    "ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY",
+    "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
 ):
     value = os.environ.get(key, "").strip()
     if value:
@@ -345,11 +361,19 @@ async def main() -> None:
         "ENCELADUS_S3_BUCKET": "jreese-net",
         "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
         "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
+        # HTTP API base URLs (Phase 2d migration)
+        "ENCELADUS_TRACKER_API_BASE": "https://jreese.net/api/v1/tracker",
+        "ENCELADUS_GOVERNANCE_API_BASE": "https://jreese.net/api/v1/governance",
+        "ENCELADUS_PROJECTS_API_BASE": "https://jreese.net/api/v1/coordination/projects",
+        "ENCELADUS_HEALTH_API_URL": "https://jreese.net/api/v1/health",
     }
     for key in (
         "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
         "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
         "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
+        "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
+        "ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY",
+        "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
     ):
         value = os.environ.get(key, "").strip()
         if value:
