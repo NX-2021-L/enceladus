@@ -11,6 +11,8 @@ COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 GITHUB_APP_ID="${GITHUB_APP_ID:-}"
 GITHUB_INSTALLATION_ID="${GITHUB_INSTALLATION_ID:-}"
 ALLOWED_REPOS="${ALLOWED_REPOS:-NX-2021-L/enceladus}"
+GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET:-devops/github-app/webhook-secret}"
+TRACKER_API_BASE="${TRACKER_API_BASE:-https://jreese.net/api/v1/tracker}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -187,6 +189,8 @@ ensure_lambda() {
     "GITHUB_APP_ID": "${effective_app_id}",
     "GITHUB_INSTALLATION_ID": "${effective_install_id}",
     "GITHUB_PRIVATE_KEY_SECRET": "devops/github-app/enceladus-private-key",
+    "GITHUB_WEBHOOK_SECRET": "${GITHUB_WEBHOOK_SECRET}",
+    "TRACKER_API_BASE": "${TRACKER_API_BASE}",
     "DYNAMODB_REGION": "${REGION}",
     "ALLOWED_REPOS": "${ALLOWED_REPOS}"
   }
@@ -249,6 +253,7 @@ ensure_api_route() {
 
   local routes=(
     "POST /api/v1/github/issues"
+    "POST /api/v1/github/webhook"
     "OPTIONS /api/v1/github/{proxy+}"
   )
 
