@@ -839,11 +839,38 @@ def _audit_tool_invocation(
     logger.info("[AUDIT] %s", json.dumps(payload, sort_keys=True))
 
 
+_governance_hash_api_cache: Optional[str] = None
+_governance_hash_api_cache_at: float = 0.0
+_GOVERNANCE_HASH_API_TTL = 60.0  # seconds
+
+
+def _get_governance_hash_via_api() -> str:
+    """Fetch governance hash from HTTP API with short TTL cache.
+
+    Falls back to local computation if the API is unreachable.
+    """
+    global _governance_hash_api_cache, _governance_hash_api_cache_at
+    now = time.time()
+    if _governance_hash_api_cache and (now - _governance_hash_api_cache_at) < _GOVERNANCE_HASH_API_TTL:
+        return _governance_hash_api_cache
+    try:
+        resp = _governance_api_request("GET", "/hash")
+        h = str(resp.get("governance_hash") or "").strip()
+        if h:
+            _governance_hash_api_cache = h
+            _governance_hash_api_cache_at = now
+            return h
+    except Exception:
+        pass
+    # Fallback to local computation
+    return _compute_governance_hash()
+
+
 def _require_governance_hash(args: dict) -> Optional[str]:
     provided = str(args.get("governance_hash") or "").strip()
     if not provided:
         return "Missing governance_hash for write-capable MCP tool call"
-    current = _compute_governance_hash()
+    current = _get_governance_hash_via_api()
     if provided != current:
         return "GOVERNANCE_STALE: provided governance_hash does not match current governance bundle"
     return None
@@ -857,7 +884,7 @@ def _require_governance_hash_envelope(args: dict) -> Optional[Dict[str, Any]]:
             "Missing governance_hash for write-capable MCP tool call",
             retryable=False,
         )
-    current = _compute_governance_hash()
+    current = _get_governance_hash_via_api()
     if provided != current:
         return _error_payload(
             "GOVERNANCE_STALE",
