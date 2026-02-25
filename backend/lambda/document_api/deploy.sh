@@ -22,6 +22,8 @@ S3_REFERENCE_PREFIX="${S3_REFERENCE_PREFIX:-mobile/v1/reference}"
 S3_GOVERNANCE_PREFIX="${S3_GOVERNANCE_PREFIX:-governance/live}"
 COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_b2D0V3E1k}"
 COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
+COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
+COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
 GOVERNANCE_PROJECT_ID="${GOVERNANCE_PROJECT_ID:-devops}"
 GOVERNANCE_KEYWORD="${GOVERNANCE_KEYWORD:-governance-file}"
 PROJECT_REFERENCE_KEYWORD="${PROJECT_REFERENCE_KEYWORD:-project-reference}"
@@ -148,11 +150,48 @@ package_lambda() {
   echo "${zip_path}"
 }
 
+resolve_internal_api_key() {
+  if [[ -n "${COORDINATION_INTERNAL_API_KEY}" ]]; then
+    printf '%s' "${COORDINATION_INTERNAL_API_KEY}"
+    return
+  fi
+
+  local existing
+  existing="$(aws lambda get-function-configuration \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
+    --output text 2>/dev/null || true)"
+  if [[ "${existing}" == "None" ]]; then
+    existing=""
+  fi
+  if [[ -n "${existing}" ]]; then
+    printf '%s' "${existing}"
+    return
+  fi
+
+  local coordination_key
+  coordination_key="$(aws lambda get-function-configuration \
+    --function-name "${COORDINATION_API_FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
+    --output text 2>/dev/null || true)"
+  if [[ "${coordination_key}" == "None" ]]; then
+    coordination_key=""
+  fi
+  printf '%s' "${coordination_key}"
+}
+
 deploy_lambda() {
   local zip_path="$1"
   local role_arn="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
+  local effective_internal_key
+  effective_internal_key="$(resolve_internal_api_key)"
+  if [[ -z "${effective_internal_key}" ]]; then
+    log "[WARNING] COORDINATION_INTERNAL_API_KEY resolved empty; document_api will remain cookie-only."
+  fi
   local env_vars
-  env_vars="{DOCUMENTS_TABLE=${DOCUMENTS_TABLE},PROJECTS_TABLE=${PROJECTS_TABLE},TRACKER_TABLE=${TRACKER_TABLE},DYNAMODB_REGION=${DYNAMODB_REGION},S3_BUCKET=${S3_BUCKET},S3_PREFIX=${S3_PREFIX},S3_REFERENCE_PREFIX=${S3_REFERENCE_PREFIX},S3_GOVERNANCE_PREFIX=${S3_GOVERNANCE_PREFIX},COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID},GOVERNANCE_PROJECT_ID=${GOVERNANCE_PROJECT_ID},GOVERNANCE_KEYWORD=${GOVERNANCE_KEYWORD},PROJECT_REFERENCE_KEYWORD=${PROJECT_REFERENCE_KEYWORD}}"
+  env_vars="{DOCUMENTS_TABLE=${DOCUMENTS_TABLE},PROJECTS_TABLE=${PROJECTS_TABLE},TRACKER_TABLE=${TRACKER_TABLE},DYNAMODB_REGION=${DYNAMODB_REGION},S3_BUCKET=${S3_BUCKET},S3_PREFIX=${S3_PREFIX},S3_REFERENCE_PREFIX=${S3_REFERENCE_PREFIX},S3_GOVERNANCE_PREFIX=${S3_GOVERNANCE_PREFIX},COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID},COORDINATION_INTERNAL_API_KEY=${effective_internal_key},GOVERNANCE_PROJECT_ID=${GOVERNANCE_PROJECT_ID},GOVERNANCE_KEYWORD=${GOVERNANCE_KEYWORD},PROJECT_REFERENCE_KEYWORD=${PROJECT_REFERENCE_KEYWORD}}"
 
   if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION}" >/dev/null 2>&1; then
     log "[START] updating Lambda code: ${FUNCTION_NAME}"
