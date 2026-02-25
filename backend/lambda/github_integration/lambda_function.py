@@ -75,7 +75,8 @@ GITHUB_WEBHOOK_SECRET_NAME = os.environ.get(
     "GITHUB_WEBHOOK_SECRET", "devops/github-app/webhook-secret"
 )
 TRACKER_API_BASE = os.environ.get(
-    "TRACKER_API_BASE", "https://jreese.net/api/v1/tracker"
+    "TRACKER_API_BASE",
+    "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker",
 )
 
 # Record ID parsing: prefix → project, type suffix → record type
