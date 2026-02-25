@@ -6,6 +6,8 @@ Authenticates to GitHub using RS256 JWT → installation access token flow.
 Routes (via API Gateway proxy):
     POST   /api/v1/github/issues        — create a GitHub issue
     POST   /api/v1/github/webhook       — receive GitHub webhook events
+    GET    /api/v1/github/projects       — list org projects (Projects v2)
+    POST   /api/v1/github/projects/sync  — sync issue to project board
     OPTIONS /api/v1/github/*             — CORS preflight
 
 Auth:
@@ -23,7 +25,7 @@ Environment variables:
     DYNAMODB_REGION             default: us-west-2
     COORDINATION_INTERNAL_API_KEY  (service auth key)
 
-ENC-FTR-021 Phase 2 (ENC-TSK-575) + Phase 3 (ENC-TSK-569).
+ENC-FTR-021 Phase 2 (ENC-TSK-575) + Phase 3 (ENC-TSK-569) + Phase 4 (ENC-TSK-570).
 """
 
 from __future__ import annotations
@@ -265,6 +267,104 @@ def _github_create_issue(
 
 
 # ---------------------------------------------------------------------------
+# GitHub GraphQL API (Phase 4 — Projects v2)
+# ---------------------------------------------------------------------------
+
+GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
+
+
+def _graphql_request(query: str, variables: Optional[Dict] = None) -> Dict[str, Any]:
+    """Execute a GitHub GraphQL query/mutation using installation token."""
+    token = _get_installation_token()
+    payload: Dict[str, Any] = {"query": query}
+    if variables:
+        payload["variables"] = variables
+
+    req = urllib.request.Request(
+        GITHUB_GRAPHQL_URL,
+        method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        body_text = exc.read().decode("utf-8", errors="replace")
+        logger.error("GraphQL request failed: %s %s", exc.code, body_text)
+        raise ValueError(f"GraphQL request failed ({exc.code}): {body_text}") from exc
+
+    if data.get("errors"):
+        err_msgs = "; ".join(e.get("message", "") for e in data["errors"])
+        raise ValueError(f"GraphQL errors: {err_msgs}")
+    return data.get("data", {})
+
+
+# ---------------------------------------------------------------------------
+# Project field cache (5-min TTL)
+# ---------------------------------------------------------------------------
+
+_project_fields_cache: Dict[str, Dict] = {}  # project_node_id -> field data
+_project_fields_fetched_at: Dict[str, float] = {}
+_PROJECT_FIELDS_TTL: float = 300.0  # 5 minutes
+
+_GQL_PROJECT_FIELDS = """
+query($projectId: ID!) {
+  node(id: $projectId) {
+    ... on ProjectV2 {
+      fields(first: 30) {
+        nodes {
+          ... on ProjectV2SingleSelectField {
+            id
+            name
+            options { id name }
+          }
+          ... on ProjectV2Field {
+            id
+            name
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _get_project_fields(project_node_id: str) -> Dict[str, Any]:
+    """Get project field definitions (cached). Returns {field_name: {id, options}}."""
+    now = time.time()
+    cached_at = _project_fields_fetched_at.get(project_node_id, 0.0)
+    if project_node_id in _project_fields_cache and (now - cached_at) < _PROJECT_FIELDS_TTL:
+        return _project_fields_cache[project_node_id]
+
+    data = _graphql_request(_GQL_PROJECT_FIELDS, {"projectId": project_node_id})
+    node = data.get("node") or {}
+    fields_nodes = (node.get("fields") or {}).get("nodes") or []
+
+    result: Dict[str, Any] = {}
+    for f in fields_nodes:
+        name = f.get("name", "")
+        if not name:
+            continue
+        entry: Dict[str, Any] = {"id": f["id"], "name": name}
+        if "options" in f:
+            entry["options"] = {
+                opt["name"].lower(): opt["id"] for opt in f["options"]
+            }
+        result[name.lower()] = entry
+
+    _project_fields_cache[project_node_id] = result
+    _project_fields_fetched_at[project_node_id] = now
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Cognito JWT auth (same pattern as tracker_mutation / document_api)
 # ---------------------------------------------------------------------------
 
@@ -378,7 +478,7 @@ def _authenticate(event: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
 def _cors_headers() -> Dict[str, str]:
     return {
         "Access-Control-Allow-Origin": CORS_ORIGIN,
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Cookie, X-Coordination-Internal-Key",
         "Access-Control-Allow-Credentials": "true",
     }
@@ -840,6 +940,258 @@ def _webhook_comment_created(
 
 
 # ---------------------------------------------------------------------------
+# GET /api/v1/github/projects — List org projects (Phase 4)
+# ---------------------------------------------------------------------------
+
+_GQL_LIST_PROJECTS = """
+query($org: String!, $first: Int!) {
+  organization(login: $org) {
+    projectsV2(first: $first) {
+      nodes {
+        id
+        title
+        shortDescription
+        url
+        closed
+        fields(first: 30) {
+          nodes {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+              options { id name }
+            }
+            ... on ProjectV2Field {
+              id
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _handle_list_projects(event: Dict, claims: Dict) -> Dict:
+    """List GitHub Projects v2 for an organization."""
+    qs = event.get("queryStringParameters") or {}
+    org = qs.get("org", "NX-2021-L")
+    include_closed = qs.get("include_closed", "false").lower() == "true"
+
+    try:
+        data = _graphql_request(_GQL_LIST_PROJECTS, {"org": org, "first": 20})
+    except ValueError as exc:
+        return _error(502, f"GitHub GraphQL error: {exc}")
+
+    org_data = data.get("organization") or {}
+    projects_nodes = (org_data.get("projectsV2") or {}).get("nodes") or []
+
+    projects = []
+    for p in projects_nodes:
+        if not include_closed and p.get("closed"):
+            continue
+        fields = []
+        for f in (p.get("fields") or {}).get("nodes") or []:
+            entry = {"id": f.get("id"), "name": f.get("name", "")}
+            if "options" in f:
+                entry["options"] = [
+                    {"id": o["id"], "name": o["name"]} for o in f["options"]
+                ]
+            fields.append(entry)
+        projects.append({
+            "node_id": p["id"],
+            "title": p.get("title", ""),
+            "description": p.get("shortDescription", ""),
+            "url": p.get("url", ""),
+            "closed": p.get("closed", False),
+            "fields": fields,
+        })
+
+    return _response(200, {"success": True, "projects": projects})
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/github/projects/sync — Add issue to project board (Phase 4)
+# ---------------------------------------------------------------------------
+
+_GQL_GET_ISSUE_NODE_ID = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      id
+      title
+      url
+    }
+  }
+}
+"""
+
+_GQL_ADD_TO_PROJECT = """
+mutation($projectId: ID!, $contentId: ID!) {
+  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+    item {
+      id
+    }
+  }
+}
+"""
+
+_GQL_UPDATE_FIELD = """
+mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $projectId,
+    itemId: $itemId,
+    fieldId: $fieldId,
+    value: {singleSelectOptionId: $optionId}
+  }) {
+    projectV2Item { id }
+  }
+}
+"""
+
+# Enceladus status → GitHub Projects v2 option name (case-insensitive lookup)
+_STATUS_MAP = {
+    "open": ["todo", "backlog", "open"],
+    "in_progress": ["in progress", "in-progress", "doing"],
+    "in-progress": ["in progress", "in-progress", "doing"],
+    "closed": ["done", "closed", "complete"],
+}
+
+# Priority: Enceladus P0/P1/P2 → possible option names
+_PRIORITY_MAP = {
+    "p0": ["p0", "urgent", "critical"],
+    "p1": ["p1", "high"],
+    "p2": ["p2", "medium"],
+    "p3": ["p3", "low"],
+}
+
+
+def _find_option_id(
+    field_entry: Dict, value: str, mapping: Dict[str, List[str]]
+) -> Optional[str]:
+    """Find a single-select option ID by mapping Enceladus value to GitHub option name."""
+    options = field_entry.get("options", {})  # {lower_name: option_id}
+    # Direct match first
+    if value.lower() in options:
+        return options[value.lower()]
+    # Mapped aliases
+    aliases = mapping.get(value.lower(), [])
+    for alias in aliases:
+        if alias.lower() in options:
+            return options[alias.lower()]
+    return None
+
+
+def _handle_sync_to_project(event: Dict, claims: Dict) -> Dict:
+    """Add an issue to a GitHub Projects v2 board and set field values."""
+    body = _parse_body(event)
+    if not body:
+        return _error(400, "Invalid JSON body.")
+
+    owner = str(body.get("owner", "")).strip()
+    repo = str(body.get("repo", "")).strip()
+    issue_number = body.get("issue_number")
+    project_node_id = str(body.get("project_id", "")).strip()
+    status_value = str(body.get("status", "")).strip()
+    priority_value = str(body.get("priority", "")).strip()
+
+    # Allow issue_url as alternative to owner/repo/number
+    issue_url = str(body.get("issue_url", "")).strip()
+    if issue_url and not (owner and repo and issue_number):
+        m = re.match(
+            r"https://github\.com/([^/]+)/([^/]+)/issues/(\d+)", issue_url
+        )
+        if m:
+            owner, repo, issue_number = m.group(1), m.group(2), int(m.group(3))
+
+    if not owner or not repo or not issue_number:
+        return _error(400, "Provide owner, repo, issue_number (or issue_url).")
+    if not project_node_id:
+        return _error(400, "Field 'project_id' (node ID) is required.")
+
+    issue_number = int(issue_number)
+
+    # Step 1: Get issue node ID
+    try:
+        issue_data = _graphql_request(
+            _GQL_GET_ISSUE_NODE_ID,
+            {"owner": owner, "repo": repo, "number": issue_number},
+        )
+    except ValueError as exc:
+        return _error(502, f"Failed to get issue node ID: {exc}")
+
+    issue_node = (issue_data.get("repository") or {}).get("issue")
+    if not issue_node:
+        return _error(404, f"Issue {owner}/{repo}#{issue_number} not found.")
+    issue_node_id = issue_node["id"]
+
+    # Step 2: Add issue to project
+    try:
+        add_data = _graphql_request(
+            _GQL_ADD_TO_PROJECT,
+            {"projectId": project_node_id, "contentId": issue_node_id},
+        )
+    except ValueError as exc:
+        return _error(502, f"Failed to add issue to project: {exc}")
+
+    item_id = (add_data.get("addProjectV2ItemById") or {}).get("item", {}).get("id")
+    if not item_id:
+        return _error(502, "Project item creation returned no item ID.")
+
+    # Step 3: Set field values (Status, Priority)
+    field_updates = []
+    if status_value or priority_value:
+        try:
+            fields = _get_project_fields(project_node_id)
+        except ValueError as exc:
+            logger.warning("Failed to fetch project fields: %s", exc)
+            fields = {}
+
+        if status_value and "status" in fields:
+            option_id = _find_option_id(fields["status"], status_value, _STATUS_MAP)
+            if option_id:
+                try:
+                    _graphql_request(_GQL_UPDATE_FIELD, {
+                        "projectId": project_node_id,
+                        "itemId": item_id,
+                        "fieldId": fields["status"]["id"],
+                        "optionId": option_id,
+                    })
+                    field_updates.append({"field": "Status", "value": status_value})
+                except ValueError as exc:
+                    logger.warning("Failed to set Status field: %s", exc)
+
+        if priority_value and "priority" in fields:
+            option_id = _find_option_id(fields["priority"], priority_value, _PRIORITY_MAP)
+            if option_id:
+                try:
+                    _graphql_request(_GQL_UPDATE_FIELD, {
+                        "projectId": project_node_id,
+                        "itemId": item_id,
+                        "fieldId": fields["priority"]["id"],
+                        "optionId": option_id,
+                    })
+                    field_updates.append({"field": "Priority", "value": priority_value})
+                except ValueError as exc:
+                    logger.warning("Failed to set Priority field: %s", exc)
+
+    logger.info(
+        "Synced issue %s/%s#%d to project, item_id=%s fields=%s user=%s",
+        owner, repo, issue_number, item_id, field_updates,
+        claims.get("email") or claims.get("sub", "unknown"),
+    )
+
+    return _response(200, {
+        "success": True,
+        "item_id": item_id,
+        "issue_node_id": issue_node_id,
+        "issue": f"{owner}/{repo}#{issue_number}",
+        "field_updates": field_updates,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
@@ -861,7 +1213,11 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         return auth_err
 
     # Route
-    if method == "POST" and "/github/issues" in path:
+    if method == "POST" and "/github/projects/sync" in path:
+        return _handle_sync_to_project(event, claims)
+    elif method == "GET" and "/github/projects" in path:
+        return _handle_list_projects(event, claims)
+    elif method == "POST" and "/github/issues" in path:
         return _handle_create_issue(event, claims)
     else:
         return _error(404, f"Route not found: {method} {path}")
