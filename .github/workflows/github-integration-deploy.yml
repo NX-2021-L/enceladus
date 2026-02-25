@@ -1,0 +1,68 @@
+name: GitHub Integration Lambda Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/github_integration/**"
+      - ".github/workflows/github-integration-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  DEPLOY_FUNCTION_NAME: devops-github-integration
+
+jobs:
+  deploy:
+    name: Deploy GitHub Integration Lambda
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: github-integration-deploy-main
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC backend deploy role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy GitHub integration Lambda
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+          GITHUB_APP_ID: ${{ secrets.GITHUB_APP_ID }}
+          GITHUB_INSTALLATION_ID: ${{ secrets.GITHUB_INSTALLATION_ID }}
+        run: |
+          set -euo pipefail
+          chmod +x backend/lambda/github_integration/deploy.sh
+          backend/lambda/github_integration/deploy.sh
+
+      - name: Validate deployed Lambda state
+        run: |
+          set -euo pipefail
+          aws lambda get-function-configuration \
+            --region "${AWS_REGION}" \
+            --function-name "${DEPLOY_FUNCTION_NAME}" \
+            --query '{FunctionName:FunctionName,LastModified:LastModified,Runtime:Runtime,State:State,LastUpdateStatus:LastUpdateStatus}' \
+            --output table
