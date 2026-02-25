@@ -1498,6 +1498,153 @@ class DispatchPlanLifecycleTests(unittest.TestCase):
         self.assertEqual(last_worklog.get("dispatch_id"), "dsp-plan-callback-1")
         self.assertEqual(last_worklog.get("execution_mode"), "codex_full_auto")
 
+    def test_normalize_anthropic_batch_result_item_succeeded(self):
+        item = {
+            "custom_id": "DSP-BATCH-001",
+            "result": {
+                "type": "succeeded",
+                "message": {
+                    "id": "msg_batch_1",
+                    "model": "claude-sonnet-4-6",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 120, "output_tokens": 30},
+                    "content": [{"type": "text", "text": "Batch dispatch complete"}],
+                },
+            },
+        }
+        out = coordination_lambda._normalize_anthropic_batch_result_item(
+            item,
+            default_model="claude-sonnet-4-6",
+            batch_id="batch_123",
+        )
+
+        self.assertEqual(out["provider"], "claude_agent_sdk")
+        self.assertEqual(out["state"], "succeeded")
+        self.assertEqual(out["dispatch_id"], "DSP-BATCH-001")
+        self.assertEqual(out["execution_id"], "msg_batch_1")
+        self.assertIn("Batch dispatch complete", out["summary"])
+        self.assertEqual(out["details"]["batch_id"], "batch_123")
+        self.assertEqual(out["details"]["batch_result_type"], "succeeded")
+        self.assertEqual(out["details"]["model"], "claude-sonnet-4-6")
+        self.assertEqual(out["details"]["usage"]["input_tokens"], 120)
+
+    def test_normalize_anthropic_batch_result_item_errored(self):
+        item = {
+            "custom_id": "DSP-BATCH-002",
+            "result": {
+                "type": "errored",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "prompt too long",
+                },
+            },
+        }
+        out = coordination_lambda._normalize_anthropic_batch_result_item(
+            item,
+            default_model="claude-sonnet-4-6",
+            batch_id="batch_123",
+        )
+
+        self.assertEqual(out["state"], "failed")
+        self.assertEqual(out["dispatch_id"], "DSP-BATCH-002")
+        self.assertIn("invalid_request_error", out["summary"])
+        self.assertEqual(out["details"]["error_type"], "invalid_request_error")
+        self.assertEqual(out["details"]["batch_result_type"], "errored")
+
+    def test_handle_anthropic_batch_results_callback_fans_out_and_aggregates(self):
+        request = {
+            "request_id": "CRQ-BATCH-001",
+            "project_id": "enceladus",
+            "state": "running",
+            "callback_token": "cb-batch-token",
+            "callback_token_expires_epoch": int(time.time()) + 3600,
+            "provider_session": {"model": "claude-sonnet-4-6"},
+            "batch_context": {"batch_id": "batch_123"},
+            "dispatch_plan": {
+                "dispatches": [
+                    {"dispatch_id": "DSP-BATCH-001"},
+                    {"dispatch_id": "DSP-BATCH-002"},
+                ]
+            },
+            "dispatch_outcomes": {},
+        }
+        latest_request = dict(request)
+        updated_items = []
+        callback_events = []
+
+        event = {
+            "headers": {"x-coordination-callback-token": "cb-batch-token"},
+            "body": json.dumps(
+                {
+                    "batch_id": "batch_123",
+                    "results": [
+                        {
+                            "custom_id": "DSP-BATCH-001",
+                            "result": {
+                                "type": "succeeded",
+                                "message": {
+                                    "id": "msg_batch_1",
+                                    "model": "claude-sonnet-4-6",
+                                    "usage": {"input_tokens": 100, "output_tokens": 40},
+                                    "content": [{"type": "text", "text": "first ok"}],
+                                },
+                            },
+                        },
+                        {
+                            "custom_id": "DSP-BATCH-002",
+                            "result": {
+                                "type": "errored",
+                                "error": {
+                                    "type": "invalid_request_error",
+                                    "message": "bad input",
+                                },
+                            },
+                        },
+                    ],
+                }
+            ),
+        }
+
+        def _fake_callback(cb_event, cb_request_id):
+            callback_events.append(cb_event)
+            self.assertEqual(cb_request_id, "CRQ-BATCH-001")
+            return {"statusCode": 200, "body": json.dumps({"success": True})}
+
+        def _fake_update(item):
+            updated_items.append(dict(item))
+
+        with patch.object(coordination_lambda, "_get_request", side_effect=[request, latest_request]), \
+             patch.object(coordination_lambda, "_handle_callback", side_effect=_fake_callback), \
+             patch.object(coordination_lambda, "_update_request", side_effect=_fake_update):
+            resp = coordination_lambda._handle_anthropic_batch_results_callback(
+                event,
+                "CRQ-BATCH-001",
+            )
+
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertEqual(body["processed"], 2)
+        self.assertEqual(body["batch_metrics"]["succeeded_count"], 1)
+        self.assertEqual(body["batch_metrics"]["failed_count"], 1)
+        self.assertEqual(body["batch_metrics"]["aggregate_state"], "partial")
+        self.assertGreater(body["batch_metrics"]["total_cost_usd"], 0)
+        self.assertEqual(len(callback_events), 2)
+
+        first_payload = json.loads(callback_events[0]["body"])
+        second_payload = json.loads(callback_events[1]["body"])
+        self.assertEqual(first_payload["dispatch_id"], "DSP-BATCH-001")
+        self.assertEqual(second_payload["dispatch_id"], "DSP-BATCH-002")
+        self.assertEqual(first_payload["provider"], "claude_agent_sdk")
+        self.assertEqual(second_payload["provider"], "claude_agent_sdk")
+
+        self.assertGreaterEqual(len(updated_items), 1)
+        final = updated_items[-1]
+        self.assertEqual(
+            ((final.get("batch_context") or {}).get("results_metrics") or {}).get("aggregate_state"),
+            "partial",
+        )
+
 
 class SessionBridgeIntegrationTests(unittest.TestCase):
     def test_dispatch_codex_full_auto_routes_to_direct_api(self):

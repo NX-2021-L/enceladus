@@ -5652,6 +5652,144 @@ def _normalize_claude_sdk_callback(body: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _parse_anthropic_batch_results_jsonl(results_jsonl: str) -> List[Dict[str, Any]]:
+    """Parse Anthropic batch results JSONL into a list of objects."""
+    parsed: List[Dict[str, Any]] = []
+    for line_no, line in enumerate(str(results_jsonl or "").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSONL at line {line_no}: {exc.msg}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid JSONL at line {line_no}: expected object")
+        parsed.append(payload)
+    return parsed
+
+
+def _normalize_anthropic_batch_result_item(
+    item: Dict[str, Any],
+    *,
+    default_model: str = "",
+    batch_id: str = "",
+) -> Dict[str, Any]:
+    """Normalize one Anthropic batch result line into callback schema."""
+    if not isinstance(item, dict):
+        raise ValueError("Batch result item must be an object")
+
+    dispatch_id = str(item.get("custom_id") or item.get("dispatch_id") or "").strip()
+    raw_result = item.get("result")
+    result_obj = raw_result if isinstance(raw_result, dict) else {}
+    result_type = str(
+        result_obj.get("type")
+        or item.get("type")
+        or item.get("status")
+        or ""
+    ).strip().lower()
+
+    message_payload = (
+        result_obj.get("message")
+        if isinstance(result_obj.get("message"), dict)
+        else (item.get("message") if isinstance(item.get("message"), dict) else {})
+    )
+    error_payload = (
+        result_obj.get("error")
+        if isinstance(result_obj.get("error"), dict)
+        else (item.get("error") if isinstance(item.get("error"), dict) else {})
+    )
+
+    if result_type in {"succeeded", "completed", "success"}:
+        state = "succeeded"
+    elif result_type in {"cancelled", "canceled"}:
+        state = "cancelled"
+    else:
+        state = "failed"
+
+    execution_id = str(
+        (
+            message_payload.get("id")
+            if isinstance(message_payload, dict)
+            else ""
+        )
+        or result_obj.get("id")
+        or item.get("id")
+        or (f"{batch_id}:{dispatch_id}" if (batch_id and dispatch_id) else "")
+    ).strip()
+
+    summary = ""
+    if state == "succeeded" and isinstance(message_payload, dict):
+        summary = _extract_claude_text_response(message_payload)
+    elif error_payload:
+        error_type = str(error_payload.get("type") or "batch_error").strip()
+        error_message = str(error_payload.get("message") or "Anthropic batch item failed").strip()
+        summary = f"{error_type}: {error_message}"
+    if not summary:
+        summary = (
+            f"Anthropic batch item {result_type}"
+            if result_type
+            else "Anthropic batch item failed"
+        )
+
+    details: Dict[str, Any] = {
+        "batch_result_type": result_type or "unknown",
+    }
+    if batch_id:
+        details["batch_id"] = batch_id
+
+    if isinstance(message_payload, dict):
+        usage = message_payload.get("usage")
+        if isinstance(usage, dict):
+            details["usage"] = usage
+        resolved_model = str(message_payload.get("model") or default_model or "").strip()
+        if resolved_model:
+            details["model"] = resolved_model
+        stop_reason = str(message_payload.get("stop_reason") or "").strip()
+        if stop_reason:
+            details["stop_reason"] = stop_reason
+        thinking_summary = _extract_claude_thinking_response(message_payload)
+        if thinking_summary:
+            details["thinking_summary"] = thinking_summary
+
+    if error_payload:
+        details["error_type"] = str(error_payload.get("type") or "").strip()
+        details["error_message"] = str(error_payload.get("message") or "").strip()
+
+    normalized_feed_updates = item.get("feed_updates")
+    if not isinstance(normalized_feed_updates, dict):
+        normalized_feed_updates = {}
+
+    return {
+        "provider": "claude_agent_sdk",
+        "state": state,
+        "dispatch_id": dispatch_id,
+        "summary": summary[:2000],
+        "execution_id": execution_id,
+        "details": details,
+        "feed_updates": normalized_feed_updates,
+    }
+
+
+def _classify_batch_aggregate_state(metrics: Dict[str, Any]) -> str:
+    succeeded = int(metrics.get("succeeded_count") or 0)
+    failed = int(metrics.get("failed_count") or 0)
+    cancelled = int(metrics.get("cancelled_count") or 0)
+    processed = int(metrics.get("processed_count") or 0)
+
+    if processed == 0:
+        return "failed"
+    if failed > 0 and succeeded > 0:
+        return "partial"
+    if failed > 0 and succeeded == 0 and cancelled == 0:
+        return "failed"
+    if cancelled > 0 and succeeded == 0 and failed == 0:
+        return "cancelled"
+    if failed == 0 and cancelled == 0:
+        return "succeeded"
+    return "partial"
+
+
 def _normalize_codex_callback(body: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize OpenAI Codex completion event.
 
@@ -7440,6 +7578,159 @@ def _handle_callback(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
     )
 
 
+def _handle_anthropic_batch_results_callback(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
+    """Process Anthropic batch results and fan out per-dispatch callbacks."""
+    request = _get_request(request_id)
+    if not request:
+        return _error(404, f"Request '{request_id}' not found")
+
+    headers = event.get("headers") or {}
+    token = (
+        headers.get("x-coordination-callback-token")
+        or headers.get("X-Coordination-Callback-Token")
+        or ""
+    )
+    expected = str(request.get("callback_token") or "")
+    if not expected or token != expected:
+        return _error(401, "Invalid callback token")
+    if _unix_now() > int(request.get("callback_token_expires_epoch") or 0):
+        return _error(401, "Callback token expired")
+
+    if request.get("state") not in {"dispatching", "running"}:
+        return _error(409, f"Cannot process batch results for request in state '{request.get('state')}'")
+
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc))
+
+    batch_id = str(
+        body.get("batch_id")
+        or ((request.get("batch_context") or {}).get("batch_id") if isinstance(request.get("batch_context"), dict) else "")
+        or ""
+    ).strip()
+    default_model = str(
+        body.get("model")
+        or ((request.get("provider_session") or {}).get("model") if isinstance(request.get("provider_session"), dict) else "")
+        or DEFAULT_CLAUDE_AGENT_MODEL
+    ).strip()
+
+    raw_results = body.get("results")
+    if isinstance(raw_results, list):
+        result_items = [item for item in raw_results if isinstance(item, dict)]
+    elif isinstance(body.get("results_jsonl"), str):
+        try:
+            result_items = _parse_anthropic_batch_results_jsonl(body.get("results_jsonl") or "")
+        except ValueError as exc:
+            return _error(400, str(exc))
+    else:
+        return _error(400, "Batch results payload requires 'results' (list) or 'results_jsonl' (string)")
+
+    metrics: Dict[str, Any] = {
+        "processed_count": 0,
+        "succeeded_count": 0,
+        "failed_count": 0,
+        "cancelled_count": 0,
+        "total_cost_usd": 0.0,
+    }
+    callback_results: List[Dict[str, Any]] = []
+    failures: List[str] = []
+
+    for index, item in enumerate(result_items, start=1):
+        try:
+            normalized = _normalize_anthropic_batch_result_item(
+                item,
+                default_model=default_model,
+                batch_id=batch_id,
+            )
+        except Exception as exc:
+            failures.append(f"line {index}: normalize failed: {exc}")
+            continue
+
+        dispatch_id = str(normalized.get("dispatch_id") or "").strip()
+        if not dispatch_id:
+            failures.append(f"line {index}: missing custom_id/dispatch_id")
+            continue
+
+        callback_event = {
+            "headers": {"x-coordination-callback-token": token},
+            "body": json.dumps(normalized),
+        }
+        callback_resp = _handle_callback(callback_event, request_id)
+        status_code = int(callback_resp.get("statusCode") or 500)
+        callback_body: Dict[str, Any] = {}
+        raw_cb_body = callback_resp.get("body")
+        if isinstance(raw_cb_body, str) and raw_cb_body.strip():
+            try:
+                parsed_cb_body = json.loads(raw_cb_body)
+                if isinstance(parsed_cb_body, dict):
+                    callback_body = parsed_cb_body
+            except json.JSONDecodeError:
+                callback_body = {}
+
+        if status_code < 200 or status_code >= 300:
+            failures.append(
+                f"line {index} dispatch={dispatch_id}: callback failed ({status_code}) "
+                f"{str(callback_body.get('error') or '')[:240]}".strip()
+            )
+            continue
+
+        state = str(normalized.get("state") or "").strip().lower()
+        metrics["processed_count"] += 1
+        if state == "succeeded":
+            metrics["succeeded_count"] += 1
+        elif state == "cancelled":
+            metrics["cancelled_count"] += 1
+        else:
+            metrics["failed_count"] += 1
+
+        details = normalized.get("details") if isinstance(normalized.get("details"), dict) else {}
+        usage = details.get("usage") if isinstance(details.get("usage"), dict) else {}
+        if usage:
+            cost_model = str(details.get("model") or default_model or DEFAULT_CLAUDE_AGENT_MODEL).strip()
+            try:
+                cost = _calculate_claude_cost(usage, cost_model)
+                metrics["total_cost_usd"] += float(cost.get("total_cost_usd") or 0.0)
+            except Exception:
+                pass
+
+        callback_results.append(
+            {
+                "dispatch_id": dispatch_id,
+                "state": state,
+                "execution_id": str(normalized.get("execution_id") or ""),
+            }
+        )
+
+    metrics["total_cost_usd"] = round(float(metrics.get("total_cost_usd") or 0.0), 6)
+    metrics["aggregate_state"] = _classify_batch_aggregate_state(metrics)
+    metrics["batch_id"] = batch_id
+    metrics["processed_at"] = _now_z()
+
+    latest_request = _get_request(request_id) or request
+    latest_request["updated_at"] = _now_z()
+    latest_request["updated_epoch"] = _unix_now()
+    batch_context = dict(latest_request.get("batch_context") or {})
+    if batch_id:
+        batch_context["batch_id"] = batch_id
+    batch_context["results_metrics"] = metrics
+    latest_request["batch_context"] = batch_context
+    _update_request(latest_request)
+
+    return _response(
+        200,
+        {
+            "success": len(failures) == 0,
+            "processed": metrics["processed_count"],
+            "results": callback_results,
+            "failures": failures,
+            "batch_metrics": metrics,
+            "request": _redact_request(latest_request),
+            "plan_status": _compute_plan_status(latest_request),
+        },
+    )
+
+
 def _handle_eventbridge_callback(event: Dict[str, Any]) -> Dict[str, Any]:
     """Process an EventBridge-delivered callback event.
 
@@ -8017,6 +8308,16 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if method == "POST" and match_callback:
         request_id = match_callback.group(1)
         return _handle_callback(event, request_id)
+
+    # POST /api/v1/coordination/requests/{requestId}/batch-results
+    # Auth is enforced via per-request callback token.
+    match_batch_results = re.fullmatch(
+        r"/api/v1/coordination/requests/([A-Za-z0-9\-]+)/batch-results",
+        path,
+    )
+    if method == "POST" and match_batch_results:
+        request_id = match_batch_results.group(1)
+        return _handle_anthropic_batch_results_callback(event, request_id)
 
     # Auth all other routes.
     claims, auth_err = _authenticate(event)
