@@ -186,7 +186,7 @@ ensure_lambda() {
     "COORDINATION_INTERNAL_API_KEY": "${effective_key}",
     "GITHUB_APP_ID": "${effective_app_id}",
     "GITHUB_INSTALLATION_ID": "${effective_install_id}",
-    "GITHUB_PRIVATE_KEY_SECRET": "devops/github-app/private-key",
+    "GITHUB_PRIVATE_KEY_SECRET": "devops/github-app/enceladus-private-key",
     "DYNAMODB_REGION": "${REGION}",
     "ALLOWED_REPOS": "${ALLOWED_REPOS}"
   }
