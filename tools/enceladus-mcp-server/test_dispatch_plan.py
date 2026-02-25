@@ -95,6 +95,88 @@ def test_conn_health():
     _pass(f"connection_health returned: ddb={health['dynamodb']}, s3={health['s3']}, api={health['api_gateway']}")
 
 
+def test_conn_health_prefers_api_health():
+    _header("Connection Health API Preference")
+
+    original_http_json_get = dpg._http_json_get
+    original_get_ddb = dpg._get_ddb
+    original_get_s3 = dpg._get_s3
+    original_urlopen = urllib.request.urlopen
+
+    calls = {"ddb": 0, "s3": 0}
+
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def _fake_urlopen(_req, timeout=0):
+        return _FakeResponse()
+
+    def _fake_get_ddb():
+        calls["ddb"] += 1
+        raise AssertionError("DynamoDB fallback should not run when API health is available")
+
+    def _fake_get_s3():
+        calls["s3"] += 1
+        raise AssertionError("S3 fallback should not run when API health is available")
+
+    try:
+        dpg._http_json_get = lambda _url, timeout=10: {"dynamodb": "ok", "s3": "ok"}
+        dpg._get_ddb = _fake_get_ddb
+        dpg._get_s3 = _fake_get_s3
+        urllib.request.urlopen = _fake_urlopen
+
+        health = dpg.test_connection_health()
+    finally:
+        dpg._http_json_get = original_http_json_get
+        dpg._get_ddb = original_get_ddb
+        dpg._get_s3 = original_get_s3
+        urllib.request.urlopen = original_urlopen
+
+    assert health["dynamodb"] == "ok"
+    assert health["s3"] == "ok"
+    assert health["api_gateway"] == "ok"
+    assert calls["ddb"] == 0
+    assert calls["s3"] == 0
+    _pass("test_connection_health uses API health values before direct AWS fallbacks")
+
+
+def test_load_coordination_request_api_fallback():
+    _header("Coordination Request API Fallback")
+
+    original_get_ddb = dpg._get_ddb
+    original_http_json_get = dpg._http_json_get
+
+    def _deny_ddb():
+        raise RuntimeError("AccessDeniedException: not authorized to read coordination table")
+
+    try:
+        dpg._get_ddb = _deny_ddb
+        dpg._http_json_get = lambda _url, timeout=15: {
+            "request": {
+                "request_id": "CRQ-UNIT-0001",
+                "project_id": "enceladus",
+                "outcomes": ["validate host-v2 session bootstrap"],
+            }
+        }
+        request = dpg.load_coordination_request("CRQ-UNIT-0001")
+    finally:
+        dpg._get_ddb = original_get_ddb
+        dpg._http_json_get = original_http_json_get
+
+    assert request["request_id"] == "CRQ-UNIT-0001"
+    assert request["project_id"] == "enceladus"
+    _pass("load_coordination_request falls back to coordination API on DynamoDB denial")
+
+
 # =================================================================
 # Test: Outcome Classification
 # =================================================================
@@ -640,6 +722,53 @@ def test_deploy_api_internal_key_header():
     assert result.get("success") is True
     assert captured_headers.get("x-coordination-internal-key") == "enc-test-key"
     _pass("_deploy_api_request attaches X-Coordination-Internal-Key when configured")
+
+
+def test_coordination_request_get_internal_key_header():
+    _header("Coordination Request Internal-Key Header")
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    import server
+
+    captured_headers = {}
+    captured_url = {"value": ""}
+    original_urlopen = urllib.request.urlopen
+    original_key = server.COORDINATION_API_INTERNAL_API_KEY
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"request": {"request_id": "CRQ-UNIT-0002"}}'
+
+    def _fake_urlopen(req, timeout=0, context=None):
+        captured_headers.update({k.lower(): v for k, v in req.header_items()})
+        captured_url["value"] = req.full_url
+        return _FakeResponse()
+
+    try:
+        server.COORDINATION_API_INTERNAL_API_KEY = "enc-coord-key"
+        urllib.request.urlopen = _fake_urlopen
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(
+                server._coordination_request_get({"request_id": "CRQ-UNIT-0002"})
+            )
+        finally:
+            loop.close()
+    finally:
+        urllib.request.urlopen = original_urlopen
+        server.COORDINATION_API_INTERNAL_API_KEY = original_key
+
+    payload = json.loads(result[0].text)
+    assert payload.get("request", {}).get("request_id") == "CRQ-UNIT-0002"
+    assert captured_headers.get("x-coordination-internal-key") == "enc-coord-key"
+    assert "/requests/CRQ-UNIT-0002" in captured_url["value"]
+    _pass("_coordination_request_get attaches X-Coordination-Internal-Key when configured")
 
 
 def test_deploy_auth_fallback_direct_reads():
