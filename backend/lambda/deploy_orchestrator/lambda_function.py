@@ -359,6 +359,20 @@ def _resolve_batch_deployment_type(requests: List[Dict[str, Any]]) -> Optional[s
     return next(iter(types))
 
 
+def _group_requests_by_type(
+    requests: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Group pending requests by deployment_type so mixed batches can be
+    processed in separate passes instead of being rejected outright."""
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for req in requests:
+        if not req.get("request_id"):
+            continue
+        dtype = str(req.get("deployment_type") or "github_public_static").strip()
+        groups.setdefault(dtype, []).append(req)
+    return groups
+
+
 def _parse_non_ui_config(req: Dict[str, Any]) -> Dict[str, Any]:
     raw = req.get("non_ui_config")
     if isinstance(raw, dict):
@@ -577,7 +591,14 @@ def handler(event: Dict[str, Any], context: Any) -> None:
 
 
 def _orchestrate_deployment(project_id: str) -> None:
-    """Orchestrate a deployment for a single project."""
+    """Orchestrate a deployment for a single project.
+
+    When pending requests span multiple deployment types (e.g. a
+    ``github_public_static`` UI deploy **and** a ``lambda_update`` in the same
+    batch), the orchestrator processes each type in a separate pass rather than
+    rejecting the entire batch.  This prevents a deadlock where neither type
+    can proceed.
+    """
     logger.info(f"[START] Orchestrating deployment for project: {project_id}")
 
     # Check state — don't deploy if PAUSED
@@ -593,14 +614,40 @@ def _orchestrate_deployment(project_id: str) -> None:
         return
 
     logger.info(f"[INFO] Found {len(pending)} pending request(s) for {project_id}")
-    deployment_type = _resolve_batch_deployment_type(pending)
-    if not deployment_type:
-        logger.error("[ERROR] Deployment batch skipped due to mixed deployment types.")
-        return
-    logger.info(f"[INFO] Deployment type batch: {deployment_type}")
+
+    # Group by deployment type so mixed batches are processed separately.
+    groups = _group_requests_by_type(pending)
+    if len(groups) > 1:
+        logger.info(
+            "[INFO] Mixed deployment types detected: %s — processing each type separately",
+            sorted(groups.keys()),
+        )
+
+    for deployment_type, group_requests in groups.items():
+        try:
+            _orchestrate_typed_batch(project_id, deployment_type, group_requests)
+        except Exception as e:
+            logger.error(
+                "[ERROR] Orchestration failed for %s type=%s: %s",
+                project_id,
+                deployment_type,
+                e,
+                exc_info=True,
+            )
+
+    logger.info(f"[END] Orchestration complete for {project_id}")
+
+
+def _orchestrate_typed_batch(
+    project_id: str,
+    deployment_type: str,
+    requests: List[Dict[str, Any]],
+) -> None:
+    """Orchestrate a single deployment-type batch within a project."""
+    logger.info(f"[INFO] Deployment type batch: {deployment_type} ({len(requests)} request(s))")
 
     # Integration analysis
-    analysis = _analyze_integration(pending)
+    analysis = _analyze_integration(requests)
     logger.info(f"[INFO] Integration analysis: {analysis['status']}")
     for w in analysis.get("warnings", []):
         logger.warning(f"[WARNING] {w}")
@@ -611,15 +658,15 @@ def _orchestrate_deployment(project_id: str) -> None:
         return
 
     # Aggregate
-    all_changes, agg_summary, all_related = _aggregate_requests(pending)
-    request_ids = [r["request_id"] for r in pending]
+    all_changes, agg_summary, all_related = _aggregate_requests(requests)
+    request_ids = [r["request_id"] for r in requests]
 
     # Generate spec ID
     spec_id = f"SPEC-{_utc_now_compact()}"
     logger.info(f"[INFO] Spec ID: {spec_id}")
 
     if deployment_type in NON_UI_SERVICE_GROUP_BY_TYPE:
-        valid, targets, errors = _validate_non_ui_requests(deployment_type, pending)
+        valid, targets, errors = _validate_non_ui_requests(deployment_type, requests)
         if not valid:
             logger.error("[ERROR] Non-UI validation failed for %s", deployment_type)
             for err in errors:
@@ -647,7 +694,6 @@ def _orchestrate_deployment(project_id: str) -> None:
             spec_id,
             deployment_type,
         )
-        logger.info(f"[END] Orchestration complete for {project_id}")
         return
 
     if deployment_type not in UI_DEPLOYMENT_TYPES:
@@ -658,7 +704,7 @@ def _orchestrate_deployment(project_id: str) -> None:
     config = _read_deploy_config(project_id)
     current_version = _get_current_version(project_id, config)
     logger.info(f"[INFO] Current version: {current_version}")
-    new_version, change_type = _resolve_version(current_version, pending)
+    new_version, change_type = _resolve_version(current_version, requests)
     logger.info(f"[INFO] Resolved version: {current_version} → {new_version} ({change_type})")
 
     # Write deployment spec
@@ -711,5 +757,3 @@ def _orchestrate_deployment(project_id: str) -> None:
             },
         )
         raise
-
-    logger.info(f"[END] Orchestration complete for {project_id}")
