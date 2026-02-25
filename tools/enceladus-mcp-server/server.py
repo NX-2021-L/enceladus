@@ -146,6 +146,34 @@ DEPLOY_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
     os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
 )
+TRACKER_API_BASE = os.environ.get(
+    "ENCELADUS_TRACKER_API_BASE",
+    "https://jreese.net/api/v1/tracker",
+)
+TRACKER_API_INTERNAL_API_KEY = os.environ.get(
+    "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
+    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
+)
+GOVERNANCE_API_BASE = os.environ.get(
+    "ENCELADUS_GOVERNANCE_API_BASE",
+    "https://jreese.net/api/v1/governance",
+)
+GOVERNANCE_API_INTERNAL_API_KEY = os.environ.get(
+    "ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY",
+    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
+)
+PROJECTS_API_BASE = os.environ.get(
+    "ENCELADUS_PROJECTS_API_BASE",
+    "https://jreese.net/api/v1/coordination/projects",
+)
+PROJECTS_API_INTERNAL_API_KEY = os.environ.get(
+    "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
+    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
+)
+HEALTH_API_URL = os.environ.get(
+    "ENCELADUS_HEALTH_API_URL",
+    "https://jreese.net/api/v1/health",
+)
 DEPLOY_QUEUE_NAME = os.environ.get("ENCELADUS_DEPLOY_QUEUE", "devops-deploy-queue.fifo")
 DEPLOY_CONFIG_BUCKET = os.environ.get("ENCELADUS_DEPLOY_CONFIG_BUCKET", "jreese-net")
 DEPLOY_CONFIG_PREFIX = os.environ.get("ENCELADUS_DEPLOY_CONFIG_PREFIX", "deploy-config")
@@ -333,23 +361,41 @@ _TRACKER_CREATE_MAX_ATTEMPTS = int(os.environ.get("ENCELADUS_TRACKER_CREATE_MAX_
 
 
 def _get_prefix_map() -> Dict[str, str]:
-    """Build prefix -> project_name map from projects table."""
+    """Build prefix -> project_name map via projects HTTP API."""
     global _PREFIX_MAP_CACHE
     if _PREFIX_MAP_CACHE is not None:
         return _PREFIX_MAP_CACHE
-    ddb = _get_ddb()
-    resp = ddb.scan(
-        TableName=PROJECTS_TABLE,
-        ProjectionExpression="project_id, prefix",
-    )
+    resp = _projects_api_request("GET")
+    projects = resp.get("projects", [])
     mapping = {}
-    for item in resp.get("Items", []):
-        pid = item.get("project_id", {}).get("S", "")
-        pfx = item.get("prefix", {}).get("S", "")
+    for proj in projects:
+        pid = str(proj.get("project_id") or proj.get("name") or "").strip()
+        pfx = str(proj.get("prefix") or "").strip().upper()
         if pid and pfx:
             mapping[pfx] = pid
     _PREFIX_MAP_CACHE = mapping
     return mapping
+
+
+def _parse_record_id(record_id: str) -> Tuple[str, str, str]:
+    """Parse 'ENC-TSK-564' into (project_id, record_type, record_id).
+
+    Returns (project_id, record_type, normalized_record_id).
+    Raises ValueError if format is invalid or prefix unknown.
+    """
+    record_id = record_id.strip().upper()
+    parts = record_id.split("-")
+    if len(parts) != 3:
+        raise ValueError(f"Invalid record ID format: {record_id!r}. Expected PREFIX-TYPE-NNN")
+    prefix, type_seg, _num = parts
+    prefix_map = _get_prefix_map()
+    if prefix not in prefix_map:
+        raise ValueError(f"Unknown project prefix {prefix!r}. Known: {sorted(prefix_map)}")
+    project_id = prefix_map[prefix]
+    record_type = _ID_SEGMENT_TO_TYPE.get(type_seg)
+    if not record_type:
+        raise ValueError(f"Unknown type segment {type_seg!r} in {record_id!r}")
+    return project_id, record_type, record_id
 
 
 def _tracker_key(record_id: str) -> Dict[str, Dict]:
@@ -1099,6 +1145,136 @@ def _document_api_request(
         return _error_payload("UPSTREAM_ERROR", f"Document API unreachable: {exc}", retryable=True)
     except Exception as exc:  # pragma: no cover - defensive fallback
         return _error_payload("INTERNAL_ERROR", f"Document API request failed: {exc}", retryable=False)
+
+
+def _tracker_api_request(
+    method: str,
+    path: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+    query: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """HTTP request to the tracker CRUD API (Phase 2a)."""
+    base = TRACKER_API_BASE.rstrip("/")
+    route = path if path.startswith("/") else (f"/{path}" if path else "")
+    url = f"{base}{route}"
+    if query:
+        encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+        if encoded_qs:
+            url = f"{url}?{encoded_qs}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if TRACKER_API_INTERNAL_API_KEY:
+        headers["X-Coordination-Internal-Key"] = TRACKER_API_INTERNAL_API_KEY
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload).encode("utf-8")
+    else:
+        body = None
+    req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
+            text = resp.read().decode("utf-8")
+            return json.loads(text) if text else {"success": True}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {"error": raw or str(exc)}
+        return _normalize_legacy_error_payload(parsed, exc.code)
+    except urllib.error.URLError as exc:
+        return _error_payload("UPSTREAM_ERROR", f"Tracker API unreachable: {exc}", retryable=True)
+    except Exception as exc:
+        return _error_payload("INTERNAL_ERROR", f"Tracker API request failed: {exc}", retryable=False)
+
+
+def _governance_api_request(
+    method: str,
+    path: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """HTTP request to the governance API (Phase 2b)."""
+    base = GOVERNANCE_API_BASE.rstrip("/")
+    route = path if path.startswith("/") else (f"/{path}" if path else "")
+    url = f"{base}{route}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if GOVERNANCE_API_INTERNAL_API_KEY:
+        headers["X-Coordination-Internal-Key"] = GOVERNANCE_API_INTERNAL_API_KEY
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload).encode("utf-8")
+    else:
+        body = None
+    req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+            text = resp.read().decode("utf-8")
+            return json.loads(text) if text else {"success": True}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {"error": raw or str(exc)}
+        return _normalize_legacy_error_payload(parsed, exc.code)
+    except urllib.error.URLError as exc:
+        return _error_payload("UPSTREAM_ERROR", f"Governance API unreachable: {exc}", retryable=True)
+    except Exception as exc:
+        return _error_payload("INTERNAL_ERROR", f"Governance API request failed: {exc}", retryable=False)
+
+
+def _projects_api_request(
+    method: str,
+    path: str = "",
+    query: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """HTTP request to the projects API (Phase 2b, read-only)."""
+    base = PROJECTS_API_BASE.rstrip("/")
+    route = path if path.startswith("/") else (f"/{path}" if path else "")
+    url = f"{base}{route}"
+    if query:
+        encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+        if encoded_qs:
+            url = f"{url}?{encoded_qs}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if PROJECTS_API_INTERNAL_API_KEY:
+        headers["X-Coordination-Internal-Key"] = PROJECTS_API_INTERNAL_API_KEY
+    req = urllib.request.Request(url=url, method=method.upper(), headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp:
+            text = resp.read().decode("utf-8")
+            return json.loads(text) if text else {"success": True}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {"error": raw or str(exc)}
+        return _normalize_legacy_error_payload(parsed, exc.code)
+    except urllib.error.URLError as exc:
+        return _error_payload("UPSTREAM_ERROR", f"Projects API unreachable: {exc}", retryable=True)
+    except Exception as exc:
+        return _error_payload("INTERNAL_ERROR", f"Projects API request failed: {exc}", retryable=False)
+
+
+def _health_api_request() -> Dict[str, Any]:
+    """HTTP request to the health API (Phase 2b)."""
+    headers = {"Accept": "application/json", "User-Agent": HTTP_USER_AGENT}
+    req = urllib.request.Request(url=HEALTH_API_URL, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp:
+            text = resp.read().decode("utf-8")
+            return json.loads(text) if text else {}
+    except Exception as exc:
+        return {"error": str(exc), "dynamodb": "unknown", "s3": "unknown"}
 
 
 def _is_allowed_document_file_name(file_name: str) -> bool:
@@ -2863,48 +3039,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 
 async def _projects_list(args: dict) -> list[TextContent]:
-    ddb = _get_ddb()
-    scan_kwargs: Dict[str, Any] = {"TableName": PROJECTS_TABLE}
-
-    filter_parts: List[str] = []
-    expr_vals: Dict[str, Any] = {}
-
+    query_params: Dict[str, Any] = {}
     status = args.get("status")
     active = args.get("active")
-
     if status:
-        filter_parts.append("#st = :status")
-        expr_vals[":status"] = _ser_s(status)
+        query_params["status"] = status
     elif active:
-        filter_parts.append("#st = :active_prod")
-        expr_vals[":active_prod"] = _ser_s("active_production")
-
-    if filter_parts:
-        scan_kwargs["FilterExpression"] = " AND ".join(filter_parts)
-        scan_kwargs["ExpressionAttributeValues"] = expr_vals
-        scan_kwargs["ExpressionAttributeNames"] = {"#st": "status"}
-
-    resp = ddb.scan(**scan_kwargs)
-    items = [_deser_item(i) for i in resp.get("Items", [])]
-    # Normalize: projects table uses 'project_id' as PK, surface as 'name' for consistency
-    for item in items:
-        if "project_id" in item and "name" not in item:
-            item["name"] = item["project_id"]
-    return _result_text({"projects": items, "count": len(items)})
+        query_params["active"] = "true"
+    resp = _projects_api_request("GET", query=query_params or None)
+    return _result_text(resp)
 
 
 async def _projects_get(args: dict) -> list[TextContent]:
     name = args["project_name"]
-    ddb = _get_ddb()
-    # Projects table uses 'project_id' as the partition key
-    resp = ddb.get_item(TableName=PROJECTS_TABLE, Key={"project_id": _ser_s(name)})
-    item = resp.get("Item")
-    if not item:
-        return _result_text({"error": f"Project '{name}' not found"})
-    project = _deser_item(item)
-    if "project_id" in project and "name" not in project:
-        project["name"] = project["project_id"]
-    return _result_text({"project": project})
+    resp = _projects_api_request("GET", f"/{name}")
+    return _result_text(resp)
 
 
 # --- Tracker ---
@@ -3026,73 +3175,38 @@ def _compute_completeness_score(item_data: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _tracker_get(args: dict) -> list[TextContent]:
     record_id = args["record_id"]
-    ddb = _get_ddb()
     try:
-        key = _tracker_key(record_id)
+        project_id, record_type, rid = _parse_record_id(record_id)
     except ValueError as exc:
         return _result_text({"error": str(exc)})
-    resp = ddb.get_item(TableName=TRACKER_TABLE, Key=key)
-    item = resp.get("Item")
-    if not item:
-        return _result_text({"error": f"Record '{record_id}' not found"})
-    result = _deser_item(item)
-    # Surface record_id as 'id' for consistency with tracker.py output
-    if "record_id" in result and "id" not in result:
-        sk = result["record_id"]
-        result["id"] = sk.split("#", 1)[1] if "#" in sk else sk
+    resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
+    if resp.get("error"):
+        return _result_text(resp)
+    record = resp.get("record", resp)
     # Add completeness score (ENC-FTR-013 ontology)
-    result["ontology"] = _compute_completeness_score(result)
-    return _result_text(result)
+    record["ontology"] = _compute_completeness_score(record)
+    return _result_text(record)
 
 
 async def _tracker_list(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
     record_type = args.get("record_type")
     status_filter = args.get("status")
-    ddb = _get_ddb()
-
+    query_params: Dict[str, Any] = {}
     if record_type:
-        # Use GSI project-type-index
-        key_expr = "project_id = :pid AND record_type = :rtype"
-        expr_vals = {":pid": _ser_s(project_id), ":rtype": _ser_s(record_type)}
-        query_kwargs: Dict[str, Any] = {
-            "TableName": TRACKER_TABLE,
-            "IndexName": GSI_PROJECT_TYPE,
-            "KeyConditionExpression": key_expr,
-            "ExpressionAttributeValues": expr_vals,
-        }
-        if status_filter:
-            query_kwargs["FilterExpression"] = "#st = :st"
-            query_kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
-            query_kwargs["ExpressionAttributeNames"] = {"#st": "status"}
-        resp = ddb.query(**query_kwargs)
-    else:
-        # Scan with project filter
-        filter_expr = "project_id = :pid"
-        expr_vals = {":pid": _ser_s(project_id)}
-        scan_kwargs: Dict[str, Any] = {
-            "TableName": TRACKER_TABLE,
-            "FilterExpression": filter_expr,
-            "ExpressionAttributeValues": expr_vals,
-        }
-        if status_filter:
-            scan_kwargs["FilterExpression"] += " AND #st = :st"
-            scan_kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
-            scan_kwargs["ExpressionAttributeNames"] = {"#st": "status"}
-        resp = ddb.scan(**scan_kwargs)
-
-    items = [_deser_item(i) for i in resp.get("Items", [])]
-    # Extract human-readable ID from record_id sort key
-    for item in items:
-        sk = item.get("record_id", "")
-        item["id"] = sk.split("#", 1)[1] if "#" in sk else sk
-    items.sort(key=lambda x: x.get("id", ""))
+        query_params["type"] = record_type
+    if status_filter:
+        query_params["status"] = status_filter
+    resp = _tracker_api_request("GET", f"/{project_id}", query=query_params or None)
+    if resp.get("error"):
+        return _result_text(resp)
+    items = resp.get("records", [])
     # Orphan detection (ENC-FTR-013): flag tasks without Feature lineage
     orphan_count = 0
     summary = []
     for r in items:
         entry: Dict[str, Any] = {
-            "id": r.get("id"),
+            "id": r.get("id") or r.get("item_id", ""),
             "type": r.get("record_type"),
             "status": r.get("status"),
             "priority": r.get("priority"),
@@ -3116,78 +3230,20 @@ async def _tracker_list(args: dict) -> list[TextContent]:
 
 
 async def _tracker_pending_updates(args: dict) -> list[TextContent]:
-    """List tracker records with non-empty pending update notes.
-
-    Supports scanning a single project or all projects.
-    Used by MCP-only session initialization to check for pending PWA updates
-    without requiring tracker.py fallback.
-    """
+    """List tracker records with non-empty pending update notes."""
     project_id = args.get("project_id")
     scan_all = args.get("all", False)
 
     if not project_id and not scan_all:
         return _result_text({"error": "Provide project_id or all=true"})
 
-    ddb = _get_ddb()
-
-    # Build filter expression for records with non-empty 'update' field
-    filter_expr = "attribute_exists(#upd)"
-    expr_names = {"#upd": "update"}
-    expr_vals = {}
-
+    query_params: Dict[str, Any] = {}
+    if project_id:
+        query_params["project"] = project_id
     if scan_all:
-        # Scan entire table for pending updates
-        scan_kwargs: Dict[str, Any] = {
-            "TableName": TRACKER_TABLE,
-            "FilterExpression": filter_expr,
-            "ExpressionAttributeNames": expr_names,
-        }
-    else:
-        # Scan with project filter
-        filter_expr += " AND project_id = :pid"
-        expr_vals[":pid"] = _ser_s(project_id)
-        scan_kwargs: Dict[str, Any] = {
-            "TableName": TRACKER_TABLE,
-            "FilterExpression": filter_expr,
-            "ExpressionAttributeNames": expr_names,
-            "ExpressionAttributeValues": expr_vals,
-        }
-
-    try:
-        items = []
-        # Support pagination for large result sets
-        last_evaluated_key = None
-        while True:
-            if last_evaluated_key:
-                scan_kwargs["ExclusiveStartKey"] = last_evaluated_key
-
-            resp = ddb.scan(**scan_kwargs)
-            items.extend([_deser_item(i) for i in resp.get("Items", [])])
-
-            last_evaluated_key = resp.get("LastEvaluatedKey")
-            if not last_evaluated_key:
-                break
-    except (BotoCoreError, ClientError) as exc:
-        return _result_text({"error": f"DynamoDB scan failed: {exc}"})
-
-    # Format results
-    summary = []
-    for r in items:
-        sk = r.get("record_id", "")
-        entry = {
-            "id": sk.split("#", 1)[1] if "#" in sk else sk,
-            "type": r.get("record_type"),
-            "update": r.get("update", ""),
-        }
-        summary.append(entry)
-
-    # Sort by ID for consistency
-    summary.sort(key=lambda x: x.get("id", ""))
-
-    result: Dict[str, Any] = {"records": summary, "count": len(summary)}
-    if not summary:
-        result["message"] = "No pending updates found"
-    return _result_text(result)
+        query_params["all"] = "true"
+    resp = _tracker_api_request("GET", "/pending-updates", query=query_params)
+    return _result_text(resp)
 
 
 async def _tracker_set(args: dict) -> list[TextContent]:
@@ -3198,343 +3254,31 @@ async def _tracker_set(args: dict) -> list[TextContent]:
     record_id = args["record_id"]
     field = args["field"]
     value = args["value"]
-    ddb = _get_ddb()
 
-    if field in _RELATION_FIELDS:
-        try:
-            value = _normalize_relation_field(field, value)
-        except ValueError as exc:
-            return _result_text(
-                _error_payload(
-                    "INVALID_RELATION_VALUE",
-                    f"Invalid value for {field}: {exc}",
-                )
-            )
-
+    # --- Phase 2d: HTTP API migration ---
+    # All business logic (field validation, status transitions, session ownership,
+    # write source tracking, history append) is handled by the tracker Lambda.
     try:
-        key = _tracker_key(record_id)
+        project_id, record_type, rid = _parse_record_id(record_id)
     except ValueError as exc:
         return _result_text({"error": str(exc)})
 
-    # Validate record exists and fetch for soft validation
-    existing = ddb.get_item(TableName=TRACKER_TABLE, Key=key)
-    if not existing.get("Item"):
-        return _result_text({"error": f"Record '{record_id}' not found"})
-
-    # --- Session ownership enforcement (ENC-ISS-009 Phase 3A) ---
-    # Checkout/release operations handle their own validation; skip for those.
-    if field != "active_agent_session":
-        ownership_error = _validate_session_ownership(existing["Item"], args, record_id)
-        if ownership_error:
-            return _result_text(ownership_error)
-
-    # --- Parent same-kind constraint (ENC-TSK-460 §5.1) ---
-    if field == "parent" and value.strip():
-        item_data_for_parent = _deser_item(existing["Item"])
-        record_type_for_parent = item_data_for_parent.get("record_type", "")
-        # Determine parent record type from ID segment
-        parent_type = None
-        if "-TSK-" in value:
-            parent_type = "task"
-        elif "-ISS-" in value:
-            parent_type = "issue"
-        elif "-FTR-" in value:
-            parent_type = "feature"
-        if parent_type and parent_type != record_type_for_parent:
-            return _result_text(
-                _error_payload(
-                    "PARENT_KIND_MISMATCH",
-                    f"Cannot set parent: parent must be the same record type. "
-                    f"This record is a {record_type_for_parent} but parent '{value}' is a {parent_type}. "
-                    f"Use related_*_ids for cross-type references or primary_task for "
-                    f"feature/issue → task execution links (§5.5).",
-                )
-            )
-
-    # --- primary_task validation (ENC-TSK-460 §5.5) ---
-    if field == "primary_task":
-        item_data_for_pt = _deser_item(existing["Item"])
-        record_type_for_pt = item_data_for_pt.get("record_type", "")
-        if record_type_for_pt not in ("feature", "issue"):
-            return _result_text(
-                _error_payload(
-                    "INVALID_FIELD",
-                    f"primary_task is only valid on feature and issue records, "
-                    f"not {record_type_for_pt}.",
-                )
-            )
-        if value.strip() and "-TSK-" not in value:
-            return _result_text(
-                _error_payload(
-                    "INVALID_PRIMARY_TASK",
-                    f"primary_task must reference a task ID (contains -TSK- segment). "
-                    f"Got: '{value}'.",
-                )
-            )
-
-    # --- State machine enforcement + soft validation (ENC-FTR-013 ontology) ---
-    _VALID_TRANSITIONS = {
-        "feature": {
-            "planned": {"in-progress", "completed"},
-            "in-progress": {"completed"},
-        },
-        "task": {
-            "open": {"in-progress", "closed"},
-            "in-progress": {"closed"},
-        },
-        "issue": {
-            "open": {"in-progress", "closed"},
-            "in-progress": {"closed"},
-        },
+    payload: Dict[str, Any] = {
+        "field": field,
+        "value": value,
+        "governance_hash": args.get("governance_hash", ""),
     }
-    warnings: List[str] = []
-    if field == "status":
-        item_data = _deser_item(existing["Item"])
-        record_type = item_data.get("record_type", "")
-        current_status = item_data.get("status", "").strip().lower()
-        new_lower = value.strip().lower()
-        closing = new_lower in ("closed", "completed", "complete")
+    if args.get("coordination_request_id"):
+        payload["coordination_request_id"] = args["coordination_request_id"]
+    if args.get("dispatch_id"):
+        payload["dispatch_id"] = args["dispatch_id"]
+    if args.get("provider"):
+        payload["provider"] = args["provider"]
+    if args.get("coordination") is not None:
+        payload["coordination"] = args["coordination"]
 
-        # Enforce valid transitions (reject invalid ones)
-        if current_status != new_lower:
-            type_transitions = _VALID_TRANSITIONS.get(record_type, {})
-            valid_next = type_transitions.get(current_status)
-            if valid_next is not None and new_lower not in valid_next:
-                return _result_text(
-                    _error_payload(
-                        "INVALID_TRANSITION",
-                        f"Invalid status transition for {record_type}: "
-                        f"'{current_status}' -> '{value}'. "
-                        f"Valid next statuses: {sorted(valid_next)}",
-                    )
-                )
-
-        # --- Hard enforcement of governed fields on close (ENC-FTR-013 + ENC-ISS-018) ---
-        if record_type == "feature":
-            if closing:
-                if not item_data.get("user_story"):
-                    return _result_text(
-                        _error_payload(
-                            "GOVERNED_FIELD_MISSING",
-                            "Cannot complete feature: user_story is required. "
-                            "Set user_story before completing this feature.",
-                        )
-                    )
-                ac_list = item_data.get("acceptance_criteria", [])
-                if not ac_list:
-                    return _result_text(
-                        _error_payload(
-                            "GOVERNED_FIELD_MISSING",
-                            "Cannot complete feature: acceptance_criteria is required (min 1). "
-                            "Set acceptance_criteria before completing this feature.",
-                        )
-                    )
-                # Evidence handshake gate (§7.1.1): ALL criteria must have
-                # evidence + evidence_acceptance=true before completion
-                unvalidated = []
-                for i, ac in enumerate(ac_list):
-                    if isinstance(ac, dict):
-                        desc = ac.get("description", f"criterion[{i}]")
-                        if not ac.get("evidence_acceptance", False):
-                            unvalidated.append(f"[{i}] {desc}")
-                    elif isinstance(ac, str):
-                        # Legacy string format — not yet upgraded to structured
-                        unvalidated.append(f"[{i}] {ac}")
-                if unvalidated:
-                    return _result_text(
-                        _error_payload(
-                            "ACCEPTANCE_CRITERIA_NOT_VALIDATED",
-                            "Cannot complete feature: not all acceptance criteria have been "
-                            "validated in production. Use tracker_set_acceptance_evidence to "
-                            "provide evidence for each criterion. Unvalidated criteria:\n"
-                            + "\n".join(unvalidated),
-                        )
-                    )
-            else:
-                if not item_data.get("user_story"):
-                    warnings.append("Feature missing governed field: user_story")
-                if not item_data.get("acceptance_criteria"):
-                    warnings.append("Feature missing governed field: acceptance_criteria")
-            if closing and not item_data.get("category"):
-                warnings.append("Feature missing classification: category")
-        elif record_type == "task":
-            if not item_data.get("acceptance_criteria"):
-                warnings.append("Task missing governed field: acceptance_criteria")
-            if new_lower == "in-progress" and not item_data.get("active_agent_session"):
-                warnings.append(
-                    "Task moving to in-progress without active_agent_session=true. "
-                    "Consider checking out the task first."
-                )
-        elif record_type == "issue":
-            if closing and not item_data.get("evidence"):
-                return _result_text(
-                    _error_payload(
-                        "GOVERNED_FIELD_MISSING",
-                        "Cannot close issue: evidence is required (min 1). "
-                        "Add evidence before closing this issue.",
-                    )
-                )
-            elif not item_data.get("evidence"):
-                warnings.append("Issue missing governed field: evidence")
-            if new_lower == "in-progress" and not item_data.get("hypothesis"):
-                warnings.append(
-                    "Issue moving to in-progress without hypothesis populated."
-                )
-
-    now = _now_z()
-    note_suffix = _write_source_note_suffix(args)
-
-    # --- Agent session checkout/release protocol (ENC-FTR-013 ontology) ---
-    if field == "active_agent_session":
-        checking_out = value.strip().lower() in ("true", "1", "yes")
-        agent_id = str(args.get("provider") or "").strip()
-
-        if checking_out:
-            # CHECKOUT: require agent identity
-            if not agent_id:
-                return _result_text(
-                    _error_payload(
-                        "AGENT_ID_REQUIRED",
-                        "Cannot check out task: 'provider' field is required as agent identity "
-                        "(active_agent_session_id). Provide your agent identity via the 'provider' parameter.",
-                    )
-                )
-            # Pessimistic lock: only succeed if not already checked out
-            checkout_note = f"Agent session checkout by {agent_id} via MCP server{note_suffix}"
-            history_entry = {
-                "M": {
-                    "timestamp": _ser_s(now),
-                    "status": _ser_s("worklog"),
-                    "description": _ser_s(checkout_note),
-                }
-            }
-            try:
-                ddb.update_item(
-                    TableName=TRACKER_TABLE,
-                    Key=key,
-                    UpdateExpression=(
-                        "SET active_agent_session = :t, "
-                        "active_agent_session_id = :aid, "
-                        "updated_at = :now, last_update_note = :note, "
-                        "write_source = :wsrc, "
-                        "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                        "history = list_append(if_not_exists(history, :empty), :hentry)"
-                    ),
-                    ConditionExpression=(
-                        "active_agent_session <> :t OR attribute_not_exists(active_agent_session)"
-                    ),
-                    ExpressionAttributeValues={
-                        ":t": {"BOOL": True},
-                        ":aid": _ser_s(agent_id),
-                        ":now": _ser_s(now),
-                        ":note": _ser_s(checkout_note),
-                        ":wsrc": _build_write_source(args),
-                        ":zero": {"N": "0"},
-                        ":one": {"N": "1"},
-                        ":hentry": {"L": [history_entry]},
-                        ":empty": {"L": []},
-                    },
-                )
-            except ClientError as exc:
-                if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                    # Another agent already holds the session
-                    item_data = _deser_item(existing["Item"])
-                    current_agent = item_data.get("active_agent_session_id", "unknown")
-                    return _result_text(
-                        _error_payload(
-                            "SESSION_LOCKED",
-                            f"Task is already checked out by agent '{current_agent}'. "
-                            f"Wait for release or contact the owning agent.",
-                            retryable=True,
-                        )
-                    )
-                raise
-            return _result_text({
-                "success": True,
-                "record_id": record_id,
-                "checkout": True,
-                "active_agent_session_id": agent_id,
-                "updated_at": now,
-            })
-        else:
-            # RELEASE: clear session
-            release_note = f"Agent session released via MCP server{note_suffix}"
-            history_entry = {
-                "M": {
-                    "timestamp": _ser_s(now),
-                    "status": _ser_s("worklog"),
-                    "description": _ser_s(release_note),
-                }
-            }
-            ddb.update_item(
-                TableName=TRACKER_TABLE,
-                Key=key,
-                UpdateExpression=(
-                    "SET active_agent_session = :f, "
-                    "active_agent_session_id = :empty_s, "
-                    "updated_at = :now, last_update_note = :note, "
-                    "write_source = :wsrc, "
-                    "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                    "history = list_append(if_not_exists(history, :empty_l), :hentry)"
-                ),
-                ExpressionAttributeValues={
-                    ":f": {"BOOL": False},
-                    ":empty_s": _ser_s(""),
-                    ":now": _ser_s(now),
-                    ":note": _ser_s(release_note),
-                    ":wsrc": _build_write_source(args),
-                    ":zero": {"N": "0"},
-                    ":one": {"N": "1"},
-                    ":hentry": {"L": [history_entry]},
-                    ":empty_l": {"L": []},
-                },
-            )
-            return _result_text({
-                "success": True,
-                "record_id": record_id,
-                "checkout": False,
-                "updated_at": now,
-            })
-
-    note_text = f"Field '{field}' set to '{_field_value_for_note(value)}' via MCP server{note_suffix}"
-    update_expr = (
-        "SET #fld = :val, updated_at = :now, last_update_note = :note, "
-        "write_source = :wsrc, "
-        "sync_version = if_not_exists(sync_version, :zero) + :one"
-    )
-    expr_vals = {
-        ":val": _ser_value(value),
-        ":now": _ser_s(now),
-        ":note": _ser_s(note_text),
-        ":wsrc": _build_write_source(args),
-        ":zero": {"N": "0"},
-        ":one": {"N": "1"},
-    }
-    expr_names = {"#fld": field}
-
-    # Append to history
-    history_entry = {
-        "M": {
-            "timestamp": _ser_s(now),
-            "status": _ser_s("worklog"),
-            "description": _ser_s(note_text),
-        }
-    }
-    update_expr += ", history = list_append(if_not_exists(history, :empty), :hentry)"
-    expr_vals[":hentry"] = {"L": [history_entry]}
-    expr_vals[":empty"] = {"L": []}
-
-    ddb.update_item(
-        TableName=TRACKER_TABLE,
-        Key=key,
-        UpdateExpression=update_expr,
-        ExpressionAttributeNames=expr_names,
-        ExpressionAttributeValues=expr_vals,
-    )
-    result = {"success": True, "record_id": record_id, "field": field, "value": value, "updated_at": now}
-    if warnings:
-        result["warnings"] = warnings
-    return _result_text(result)
+    resp = _tracker_api_request("PATCH", f"/{project_id}/{record_type}/{rid}", payload=payload)
+    return _result_text(resp)
 
 
 async def _tracker_log(args: dict) -> list[TextContent]:
@@ -3544,51 +3288,26 @@ async def _tracker_log(args: dict) -> list[TextContent]:
 
     record_id = args["record_id"]
     description = args["description"]
-    ddb = _get_ddb()
 
+    # --- Phase 2d: HTTP API migration ---
     try:
-        key = _tracker_key(record_id)
+        project_id, record_type, rid = _parse_record_id(record_id)
     except ValueError as exc:
         return _result_text({"error": str(exc)})
 
-    existing = ddb.get_item(TableName=TRACKER_TABLE, Key=key)
-    if not existing.get("Item"):
-        return _result_text({"error": f"Record '{record_id}' not found"})
-
-    # --- Session ownership enforcement (ENC-ISS-009 Phase 3A) ---
-    ownership_error = _validate_session_ownership(existing["Item"], args, record_id)
-    if ownership_error:
-        return _result_text(ownership_error)
-
-    now = _now_z()
-    history_entry = {
-        "M": {
-            "timestamp": _ser_s(now),
-            "status": _ser_s("worklog"),
-            "description": _ser_s(description),
-        }
+    payload: Dict[str, Any] = {
+        "description": description,
+        "governance_hash": args.get("governance_hash", ""),
     }
-    ddb.update_item(
-        TableName=TRACKER_TABLE,
-        Key=key,
-        UpdateExpression=(
-            "SET updated_at = :now, "
-            "last_update_note = :note, "
-            "write_source = :wsrc, "
-            "sync_version = if_not_exists(sync_version, :zero) + :one, "
-            "history = list_append(if_not_exists(history, :empty), :hentry)"
-        ),
-        ExpressionAttributeValues={
-            ":now": _ser_s(now),
-            ":note": _ser_s(description),
-            ":wsrc": _build_write_source(args),
-            ":zero": {"N": "0"},
-            ":one": {"N": "1"},
-            ":hentry": {"L": [history_entry]},
-            ":empty": {"L": []},
-        },
-    )
-    return _result_text({"success": True, "record_id": record_id, "updated_at": now})
+    if args.get("coordination_request_id"):
+        payload["coordination_request_id"] = args["coordination_request_id"]
+    if args.get("dispatch_id"):
+        payload["dispatch_id"] = args["dispatch_id"]
+    if args.get("provider"):
+        payload["provider"] = args["provider"]
+
+    resp = _tracker_api_request("POST", f"/{project_id}/{record_type}/{rid}/log", payload=payload)
+    return _result_text(resp)
 
 
 async def _tracker_create(args: dict) -> list[TextContent]:
@@ -3598,317 +3317,24 @@ async def _tracker_create(args: dict) -> list[TextContent]:
 
     project_id = args["project_id"]
     record_type = args["record_type"]
-    title = args["title"]
-    priority = args.get("priority")
-    description = str(args.get("description") or "")
-    assigned_to = str(args.get("assigned_to") or "")
-    status = str(args.get("status") or _DEFAULT_STATUS_BY_TYPE.get(record_type, "open"))
-    severity = str(args.get("severity") or "")
-    hypothesis = str(args.get("hypothesis") or "")
-    success_metrics = args.get("success_metrics") or []
-    related_str = args.get("related", "")
-    dispatch_id = str(args.get("dispatch_id") or "").strip()
-    try:
-        coordination = _normalize_optional_bool(args.get("coordination"), "coordination")
-        coordination_request_id = _normalize_coordination_request_id(
-            args.get("coordination_request_id")
-        )
-    except ValueError as exc:
-        return _result_text({"error": str(exc)})
 
-    if dispatch_id:
-        coordination = True
-    coordination_flag = bool(coordination) if coordination is not None else False
-    if coordination_flag and not coordination_request_id:
-        if dispatch_id and _COORDINATION_REQUEST_ID_RE.fullmatch(dispatch_id):
-            coordination_request_id = dispatch_id.upper()
-        else:
-            return _result_text(
-                {
-                    "error": (
-                        "coordination=true requires coordination_request_id "
-                        "matching CRQ-* or DSP-*."
-                    )
-                }
-            )
-
-    acceptance_criteria = _normalize_string_list(args.get("acceptance_criteria"))
-    if acceptance_criteria is None:
-        return _result_text(
-            {
-                "error": (
-                    "Invalid acceptance_criteria: expected a string or list of strings."
-                )
-            }
-        )
-    if record_type == "task" and not acceptance_criteria:
-        return _result_text(
-            {
-                "error": (
-                    "Task creation requires acceptance_criteria with at least one "
-                    "non-empty criterion."
-                )
-            }
-        )
-
-    # --- Ontology governed field validation (ENC-FTR-012) ---
-    user_story = str(args.get("user_story") or "").strip()
-    category = str(args.get("category") or "").strip()
-    intent = str(args.get("intent") or "").strip()
-    evidence = args.get("evidence") or []
-
-    # Feature: user_story required, acceptance_criteria required (min 1)
-    if record_type == "feature":
-        if not user_story:
-            return _result_text(
-                {
-                    "error": (
-                        "Feature creation requires user_story. "
-                        "Format: 'As a [USER/SYSTEM] I need/want to be able to [X] so that [Y]'."
-                    )
-                }
-            )
-        if not acceptance_criteria:
-            return _result_text(
-                {
-                    "error": (
-                        "Feature creation requires acceptance_criteria with at least one "
-                        "non-empty criterion."
-                    )
-                }
-            )
-
-    # Issue: evidence required (min 1, each with steps_to_duplicate)
-    if record_type == "issue":
-        if not isinstance(evidence, list) or len(evidence) == 0:
-            return _result_text(
-                {
-                    "error": (
-                        "Issue creation requires evidence with at least one entry. "
-                        "Each entry must include 'description' and 'steps_to_duplicate'."
-                    )
-                }
-            )
-        for i, ev in enumerate(evidence):
-            if not isinstance(ev, dict):
-                return _result_text({"error": f"evidence[{i}] must be an object."})
-            if not ev.get("description", "").strip():
-                return _result_text({"error": f"evidence[{i}].description is required."})
-            steps = ev.get("steps_to_duplicate")
-            if not isinstance(steps, list) or len(steps) == 0:
-                return _result_text(
-                    {"error": f"evidence[{i}].steps_to_duplicate requires at least one step."}
-                )
-
-    # primary_task validation (ENC-TSK-460 §5.5) — only features/issues
-    primary_task = str(args.get("primary_task") or "").strip()
-    if primary_task:
-        if record_type not in ("feature", "issue"):
-            return _result_text(
-                {
-                    "error": (
-                        f"primary_task is only valid on feature and issue records, "
-                        f"not {record_type}."
-                    )
-                }
-            )
-        if "-TSK-" not in primary_task:
-            return _result_text(
-                {
-                    "error": (
-                        f"primary_task must reference a task ID (contains -TSK- segment). "
-                        f"Got: '{primary_task}'."
-                    )
-                }
-            )
-
-    # Category validation (soft — warn in response but allow creation)
-    _VALID_CATEGORIES = {
-        "feature": {"epic", "capability", "enhancement", "infrastructure"},
-        "task": {"implementation", "investigation", "documentation", "maintenance", "validation"},
-        "issue": {"bug", "debt", "risk", "security", "performance"},
+    # --- Phase 2d: HTTP API migration ---
+    # All validation (ontology, governed fields, ID generation, bidirectional relations)
+    # is handled by the tracker Lambda.
+    payload: Dict[str, Any] = {
+        "title": args["title"],
+        "governance_hash": args.get("governance_hash", ""),
     }
-    category_warning = ""
-    if category and category not in _VALID_CATEGORIES.get(record_type, set()):
-        valid = sorted(_VALID_CATEGORIES.get(record_type, set()))
-        category_warning = f"Warning: category '{category}' not in valid set for {record_type}: {valid}"
+    for key in ("priority", "description", "assigned_to", "status", "severity",
+                "hypothesis", "success_metrics", "related", "dispatch_id",
+                "coordination", "coordination_request_id", "acceptance_criteria",
+                "user_story", "category", "intent", "evidence", "primary_task",
+                "provider"):
+        if args.get(key) is not None:
+            payload[key] = args[key]
 
-    ddb = _get_ddb()
-
-    # Resolve prefix from projects table
-    proj_resp = ddb.get_item(TableName=PROJECTS_TABLE, Key={"project_id": _ser_s(project_id)})
-    proj = proj_resp.get("Item")
-    if not proj:
-        return _result_text({"error": f"Project '{project_id}' not found in projects table"})
-    prefix = _deser_val(proj.get("prefix", {"S": "UNK"}))
-
-    now = _now_z()
-    note_suffix = _write_source_note_suffix(args)
-    item: Dict[str, Any] = {
-        "project_id": _ser_s(project_id),
-        "record_type": _ser_s(record_type),
-        "title": _ser_s(title),
-        "status": _ser_s(status),
-        "sync_version": {"N": "1"},
-        "created_at": _ser_s(now),
-        "updated_at": _ser_s(now),
-        "coordination": {"BOOL": coordination_flag},
-        "write_source": _build_write_source(args),
-        "history": {
-            "L": [
-                {
-                    "M": {
-                        "timestamp": _ser_s(now),
-                        "status": _ser_s("created"),
-                        "description": _ser_s(
-                            f"Created via MCP server{note_suffix}: {title}"
-                        ),
-                    }
-                }
-            ]
-        },
-    }
-    if coordination_request_id:
-        item["coordination_request_id"] = _ser_s(coordination_request_id)
-
-    if description:
-        item["description"] = _ser_s(description)
-    if priority:
-        item["priority"] = _ser_s(priority)
-    if assigned_to:
-        item["assigned_to"] = _ser_s(assigned_to)
-    if record_type == "issue":
-        if severity:
-            item["severity"] = _ser_s(severity)
-        if hypothesis:
-            item["hypothesis"] = _ser_s(hypothesis)
-    if record_type == "feature" and isinstance(success_metrics, list) and success_metrics:
-        item["success_metrics"] = {"L": [_ser_s(str(x)) for x in success_metrics if str(x).strip()]}
-    if acceptance_criteria:
-        if record_type == "feature":
-            # Features use structured acceptance criteria with evidence tracking
-            ac_items = []
-            for ac_text in acceptance_criteria:
-                ac_items.append({
-                    "M": {
-                        "description": _ser_s(ac_text),
-                        "evidence": _ser_s(""),
-                        "evidence_acceptance": {"BOOL": False},
-                    }
-                })
-            item["acceptance_criteria"] = {"L": ac_items}
-        else:
-            # Tasks use plain string acceptance criteria
-            item["acceptance_criteria"] = {"L": [_ser_s(x) for x in acceptance_criteria]}
-
-    # --- Ontology fields (ENC-FTR-012) ---
-
-    # Feature: user_story (governed, required — validated above)
-    if record_type == "feature" and user_story:
-        item["user_story"] = _ser_s(user_story)
-
-    # Issue: evidence (governed, required — validated above)
-    if record_type == "issue" and evidence:
-        ev_items = []
-        for ev in evidence:
-            ev_map: Dict[str, Any] = {
-                "description": _ser_s(str(ev.get("description", ""))),
-                "steps_to_duplicate": {
-                    "L": [_ser_s(str(s)) for s in ev.get("steps_to_duplicate", [])]
-                },
-            }
-            if ev.get("observed_by"):
-                ev_map["observed_by"] = _ser_s(str(ev["observed_by"]))
-            if ev.get("timestamp"):
-                ev_map["timestamp"] = _ser_s(str(ev["timestamp"]))
-            ev_items.append({"M": ev_map})
-        item["evidence"] = {"L": ev_items}
-
-    # Task: agent session defaults (governed, required on create)
-    if record_type == "task":
-        item["active_agent_session"] = {"BOOL": False}
-        item["active_agent_session_id"] = _ser_s("")
-        item["active_agent_session_parent"] = {"BOOL": False}
-
-    # Common optional ontology fields
-    if category:
-        item["category"] = _ser_s(category)
-    if intent:
-        item["intent"] = _ser_s(intent)
-
-    # primary_task (ENC-TSK-460 §5.5) — features/issues only, validated above
-    if primary_task and record_type in ("feature", "issue"):
-        item["primary_task"] = _ser_s(primary_task)
-
-    if related_str:
-        related_ids = [r.strip() for r in related_str.split(",") if r.strip()]
-        for field, ids in _classify_related_ids(related_ids).items():
-            if ids:
-                item[field] = {"L": [_ser_s(i) for i in ids]}
-
-    max_attempts = max(1, _TRACKER_CREATE_MAX_ATTEMPTS)
-    for attempt in range(1, max_attempts + 1):
-        new_id = _next_tracker_record_id(ddb, project_id, prefix, record_type)
-        sk = f"{record_type}#{new_id}"
-        item["record_id"] = _ser_s(sk)
-        item["item_id"] = _ser_s(new_id)
-        try:
-            ddb.put_item(
-                TableName=TRACKER_TABLE,
-                Item=item,
-                ConditionExpression="attribute_not_exists(record_id)",
-            )
-            break
-        except ClientError as exc:
-            if _is_conditional_check_failed(exc) and attempt < max_attempts:
-                continue
-            raise
-    else:
-        return _result_text(
-            {
-                "error": (
-                    f"Failed to allocate a unique record ID for {record_type} in project "
-                    f"'{project_id}' after {max_attempts} attempts."
-                )
-            }
-        )
-
-    # --- Bidirectional relationship enforcement (ENC-FTR-013 ontology) ---
-    # Best-effort: add inverse relationship on target records
-    bidi_warnings: List[str] = []
-    if related_str:
-        related_ids = [r.strip() for r in related_str.split(",") if r.strip()]
-        # Determine the relationship field name for the new record's type
-        inverse_field = f"related_{record_type}_ids"
-        for target_id in related_ids:
-            try:
-                target_key = _tracker_key(target_id)
-                # Append new_id to the target's inverse relationship list
-                ddb.update_item(
-                    TableName=TRACKER_TABLE,
-                    Key=target_key,
-                    UpdateExpression=(
-                        "SET #rel = list_append(if_not_exists(#rel, :empty), :new_id)"
-                    ),
-                    ExpressionAttributeNames={"#rel": inverse_field},
-                    ExpressionAttributeValues={
-                        ":new_id": {"L": [_ser_s(new_id)]},
-                        ":empty": {"L": []},
-                    },
-                    ConditionExpression="attribute_exists(record_id)",
-                )
-            except (ClientError, ValueError) as exc:
-                bidi_warnings.append(
-                    f"Could not add inverse relationship on {target_id}: {exc}"
-                )
-
-    result = {"success": True, "record_id": new_id, "created_at": now}
-    if category_warning:
-        result["warning"] = category_warning
-    if bidi_warnings:
-        result["bidi_warnings"] = bidi_warnings
-    return _result_text(result)
-
+    resp = _tracker_api_request("POST", f"/{project_id}/{record_type}", payload=payload)
+    return _result_text(resp)
 
 # --- Acceptance Criteria Evidence Handshake (§7.1.1) ---
 
@@ -3920,159 +3346,28 @@ async def _tracker_set_acceptance_evidence(args: dict) -> list[TextContent]:
         return _result_text({"error": governance_error})
 
     record_id = args["record_id"]
-    criterion_index = args["criterion_index"]
-    evidence = args["evidence"]
-    evidence_acceptance = args["evidence_acceptance"]
-    ddb = _get_ddb()
 
+    # --- Phase 2d: HTTP API migration ---
     try:
-        key = _tracker_key(record_id)
+        project_id, record_type, rid = _parse_record_id(record_id)
     except ValueError as exc:
         return _result_text({"error": str(exc)})
 
-    # Fetch the record
-    existing = ddb.get_item(TableName=TRACKER_TABLE, Key=key)
-    if not existing.get("Item"):
-        return _result_text({"error": f"Record '{record_id}' not found"})
-
-    item_data = _deser_item(existing["Item"])
-
-    # Must be a feature
-    if item_data.get("record_type") != "feature":
-        return _result_text(
-            _error_payload(
-                "WRONG_RECORD_TYPE",
-                f"tracker_set_acceptance_evidence only applies to features. "
-                f"Record '{record_id}' is a {item_data.get('record_type', 'unknown')}.",
-            )
-        )
-
-    # Validate acceptance_criteria exists and has the index
-    ac_list = item_data.get("acceptance_criteria", [])
-    if not ac_list:
-        return _result_text(
-            _error_payload(
-                "NO_ACCEPTANCE_CRITERIA",
-                f"Feature '{record_id}' has no acceptance_criteria.",
-            )
-        )
-    if criterion_index < 0 or criterion_index >= len(ac_list):
-        return _result_text(
-            _error_payload(
-                "INDEX_OUT_OF_RANGE",
-                f"criterion_index {criterion_index} is out of range. "
-                f"Feature has {len(ac_list)} criteria (indices 0-{len(ac_list) - 1}).",
-            )
-        )
-
-    # Validate evidence is non-empty when accepting
-    if evidence_acceptance and not evidence.strip():
-        return _result_text(
-            _error_payload(
-                "EVIDENCE_REQUIRED",
-                "Cannot set evidence_acceptance=true without providing evidence text. "
-                "Describe how this criterion was validated in production.",
-            )
-        )
-
-    # Build the DynamoDB update for the specific criterion item.
-    # acceptance_criteria is stored as L[M{description, evidence, evidence_acceptance}]
-    # We need to handle both legacy (plain strings) and structured formats.
-    raw_ac = existing["Item"].get("acceptance_criteria", {}).get("L", [])
-    ac_item = raw_ac[criterion_index]
-
-    # Determine if this is a legacy string or structured map
-    if "S" in ac_item:
-        # Legacy string format — we need to upgrade it to structured
-        description = ac_item["S"]
-    elif "M" in ac_item:
-        description = ac_item["M"].get("description", {}).get("S", "")
-    else:
-        description = str(ac_list[criterion_index])
-
-    now = _now_z()
-    note_suffix = _write_source_note_suffix(args)
-
-    # Update the specific index in the acceptance_criteria list
-    update_expr = (
-        f"SET acceptance_criteria[{criterion_index}] = :ac_item, "
-        "updated_at = :now, last_update_note = :note, "
-        "write_source = :wsrc, "
-        "sync_version = if_not_exists(sync_version, :zero) + :one, "
-        "history = list_append(if_not_exists(history, :empty), :hentry)"
-    )
-    ac_updated = {
-        "M": {
-            "description": _ser_s(description),
-            "evidence": _ser_s(evidence),
-            "evidence_acceptance": {"BOOL": evidence_acceptance},
-        }
+    payload: Dict[str, Any] = {
+        "criterion_index": args["criterion_index"],
+        "evidence": args["evidence"],
+        "evidence_acceptance": args["evidence_acceptance"],
+        "governance_hash": args.get("governance_hash", ""),
     }
-    status_word = "accepted" if evidence_acceptance else "updated"
-    note_text = (
-        f"Acceptance criterion [{criterion_index}] evidence {status_word} "
-        f"via MCP server{note_suffix}: {description[:80]}"
-    )
-    history_entry = {
-        "M": {
-            "timestamp": _ser_s(now),
-            "status": _ser_s("worklog"),
-            "description": _ser_s(note_text),
-        }
-    }
-    expr_vals = {
-        ":ac_item": ac_updated,
-        ":now": _ser_s(now),
-        ":note": _ser_s(note_text),
-        ":wsrc": _build_write_source(args),
-        ":zero": {"N": "0"},
-        ":one": {"N": "1"},
-        ":hentry": {"L": [history_entry]},
-        ":empty": {"L": []},
-    }
+    if args.get("coordination_request_id"):
+        payload["coordination_request_id"] = args["coordination_request_id"]
+    if args.get("dispatch_id"):
+        payload["dispatch_id"] = args["dispatch_id"]
+    if args.get("provider"):
+        payload["provider"] = args["provider"]
 
-    ddb.update_item(
-        TableName=TRACKER_TABLE,
-        Key=key,
-        UpdateExpression=update_expr,
-        ExpressionAttributeValues=expr_vals,
-    )
-
-    # Build summary of all criteria status
-    criteria_summary = []
-    for i, ac in enumerate(ac_list):
-        if isinstance(ac, dict):
-            desc = ac.get("description", str(ac))
-            ev_acc = ac.get("evidence_acceptance", False)
-        elif isinstance(ac, str):
-            desc = ac
-            ev_acc = False
-        else:
-            desc = str(ac)
-            ev_acc = False
-        # Override the one we just updated
-        if i == criterion_index:
-            desc = description
-            ev_acc = evidence_acceptance
-        criteria_summary.append({
-            "index": i,
-            "description": desc[:100],
-            "evidence_acceptance": ev_acc,
-        })
-
-    all_accepted = all(c["evidence_acceptance"] for c in criteria_summary)
-
-    return _result_text({
-        "success": True,
-        "record_id": record_id,
-        "criterion_index": criterion_index,
-        "evidence_acceptance": evidence_acceptance,
-        "updated_at": now,
-        "criteria_summary": criteria_summary,
-        "all_criteria_accepted": all_accepted,
-        "completion_eligible": all_accepted,
-    })
-
+    resp = _tracker_api_request("POST", f"/{project_id}/{record_type}/{rid}/acceptance-evidence", payload=payload)
+    return _result_text(resp)
 
 # --- Documents ---
 
@@ -4642,18 +3937,20 @@ async def _coordination_capabilities(args: dict) -> list[TextContent]:
 
 
 async def _coordination_request_get(args: dict) -> list[TextContent]:
-    """Get coordination request by ID from DynamoDB (direct read)."""
+    """Get coordination request by ID via coordination API."""
     request_id = args["request_id"]
-    ddb = _get_ddb()
-
-    resp = ddb.get_item(
-        TableName=COORDINATION_TABLE,
-        Key={"request_id": _ser_s(request_id)},
-    )
-    item = resp.get("Item")
-    if not item:
-        return _result_text({"error": f"Coordination request '{request_id}' not found"})
-    return _result_text(_deser_item(item))
+    try:
+        import urllib.request
+        url = f"{COORDINATION_API_BASE}/request/{urllib.parse.quote(request_id, safe='')}"
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", HTTP_USER_AGENT)
+        req.add_header("X-Coordination-Internal-Key", COORDINATION_INTERNAL_API_KEY)
+        with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp_obj:
+            body = json.loads(resp_obj.read().decode("utf-8"))
+        return _result_text(body)
+    except Exception as exc:
+        return _result_text({"error": f"Failed to fetch coordination request: {exc}"})
 
 
 # --- Governance ---
@@ -4673,150 +3970,41 @@ async def _governance_update(args: dict) -> list[TextContent]:
         return _result_text(policy_error)
 
     file_name = str(args.get("file_name") or "").strip()
-    content = str(args.get("content") or "")
+    content_text = str(args.get("content") or "")
     change_summary = str(args.get("change_summary") or "").strip()
 
     if not file_name:
         return _result_text(_error_payload("INVALID_INPUT", "file_name is required", retryable=False))
-    if not content:
+    if not content_text:
         return _result_text(_error_payload("INVALID_INPUT", "content is required", retryable=False))
     if not change_summary:
         return _result_text(_error_payload("INVALID_INPUT", "change_summary is required", retryable=False))
 
-    uri = _governance_uri_from_file_name(file_name)
-    if not uri:
-        return _result_text(_error_payload(
-            "INVALID_INPUT",
-            f"file_name '{file_name}' does not map to a valid governance:// URI. "
-            "Must be 'agents.md' or start with 'agents/'.",
-            retryable=False,
-        ))
-
-    live_key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{file_name}"
-    s3 = _get_s3()
-
-    # Archive current version if present. Fail closed on archive errors so
-    # version-history guarantees are preserved.
-    archive_key = None
-    existing_content: Optional[bytes] = None
-    try:
-        existing = s3.get_object(Bucket=S3_BUCKET, Key=live_key)
-        existing_content = existing["Body"].read()
-    except Exception as exc:
-        if _is_s3_not_found_error(exc):
-            logger.info("[GOVERNANCE] No existing version to archive for %s", uri)
-        else:
-            return _result_text(_error_payload(
-                "UPSTREAM_ERROR",
-                f"Failed to read existing governance file for archival safety: {exc}",
-                retryable=True,
-            ))
-
-    if existing_content is not None:
-        timestamp = _now_z().replace(":", "-")
-        archive_key = f"{S3_GOVERNANCE_HISTORY_PREFIX.rstrip('/')}/{file_name}/{timestamp}.md"
-        try:
-            s3.put_object(
-                Bucket=S3_BUCKET,
-                Key=archive_key,
-                Body=existing_content,
-                ContentType="text/markdown; charset=utf-8",
-                Metadata={
-                    "change_summary": change_summary[:256],
-                    "archived_at": _now_z(),
-                    "previous_hash": hashlib.sha256(existing_content).hexdigest(),
-                },
-            )
-            logger.info("[GOVERNANCE] Archived %s → s3://%s/%s", uri, S3_BUCKET, archive_key)
-        except Exception as exc:
-            return _result_text(_error_payload(
-                "UPSTREAM_ERROR",
-                f"Failed to archive existing governance file; update aborted: {exc}",
-                retryable=True,
-            ))
-
-    # Write new content to live path
-    content_bytes = content.encode("utf-8")
-    new_hash = hashlib.sha256(content_bytes).hexdigest()
-    try:
-        s3.put_object(
-            Bucket=S3_BUCKET,
-            Key=live_key,
-            Body=content_bytes,
-            ContentType="text/markdown; charset=utf-8",
-            Metadata={
-                "change_summary": change_summary[:256],
-                "updated_at": _now_z(),
-                "content_sha256": new_hash,
-            },
-        )
-    except Exception as exc:
-        return _result_text(_error_payload(
-            "UPSTREAM_ERROR",
-            f"Failed to write governance file to S3: {exc}",
-            retryable=True,
-        ))
-
-    # Invalidate catalog cache so next governance_hash reflects the update
-    global _governance_catalog_cache, _governance_catalog_cached_at
-    _governance_catalog_cache = {}
-    _governance_catalog_cached_at = 0
-
-    new_governance_hash = _compute_governance_hash()
-    logger.info("[GOVERNANCE] Updated %s — new governance_hash: %s", uri, new_governance_hash)
-
-    result = {
-        "status": "updated",
-        "uri": uri,
-        "s3_key": live_key,
-        "content_hash": new_hash,
-        "content_size_bytes": len(content_bytes),
-        "governance_hash": new_governance_hash,
-        "updated_at": _now_z(),
+    # --- Phase 2d: HTTP API migration ---
+    # Archival, hash computation, and S3 writes are handled by the coordination Lambda.
+    payload: Dict[str, Any] = {
+        "content": content_text,
+        "change_summary": change_summary,
+        "governance_hash": args.get("governance_hash", ""),
     }
-    if archive_key:
-        result["archived_to"] = f"s3://{S3_BUCKET}/{archive_key}"
-
-    return _result_text(result)
-
+    encoded_name = urllib.parse.quote(file_name, safe="/")
+    resp = _governance_api_request("PUT", f"/{encoded_name}", payload=payload)
+    return _result_text(resp)
 
 async def _governance_hash(args: dict) -> list[TextContent]:
-    h = _compute_governance_hash()
-    return _result_text({"governance_hash": h, "computed_at": _now_z()})
+    # --- Phase 2d: HTTP API migration ---
+    resp = _governance_api_request("GET", "/hash")
+    return _result_text(resp)
 
 
 # --- System ---
 
 
 async def _connection_health(args: dict) -> list[TextContent]:
-    health: Dict[str, str] = {}
-
-    # DynamoDB
-    try:
-        ddb = _get_ddb()
-        ddb.describe_table(TableName=TRACKER_TABLE)
-        health["dynamodb"] = "ok"
-    except Exception as exc:
-        health["dynamodb"] = f"unreachable: {exc}"
-
-    # S3
-    try:
-        s3 = _get_s3()
-        s3.head_bucket(Bucket=S3_BUCKET)
-        health["s3"] = "ok"
-    except Exception as exc:
-        health["s3"] = f"unreachable: {exc}"
-
-    # Governance hash
-    try:
-        gov_hash = _compute_governance_hash()
-        health["governance_hash"] = gov_hash
-    except Exception as exc:
-        health["governance_hash"] = f"error: {exc}"
-
-    health["checked_at"] = _now_z()
-    health["server_version"] = SERVER_VERSION
-    return _result_text(health)
+    # --- Phase 2d: HTTP API migration ---
+    resp = _health_api_request()
+    resp["server_version"] = SERVER_VERSION
+    return _result_text(resp)
 
 
 # --- Dispatch Plan Generation ---
