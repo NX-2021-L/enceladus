@@ -144,7 +144,7 @@ ensure_role() {
     {
       "Sid": "TrackerTableAccess",
       "Effect": "Allow",
-      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:Scan"],
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:DescribeTable"],
       "Resource": [
         "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TRACKER_TABLE}",
         "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TRACKER_TABLE}/index/*"
@@ -155,6 +155,15 @@ ensure_role() {
       "Effect": "Allow",
       "Action": ["dynamodb:GetItem", "dynamodb:Scan", "dynamodb:Query"],
       "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${PROJECTS_TABLE}"
+    },
+    {
+      "Sid": "DocumentsTableRead",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:Query"],
+      "Resource": [
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/documents",
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/documents/index/*"
+      ]
     },
     {
       "Sid": "GovernanceAndReferenceS3Read",
@@ -171,6 +180,21 @@ ensure_role() {
         "arn:aws:s3:::${S3_BUCKET}/projects/*",
         "arn:aws:s3:::${S3_BUCKET}/mobile/v1/reference/*"
       ]
+    },
+    {
+      "Sid": "GovernanceS3Write",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject"],
+      "Resource": [
+        "arn:aws:s3:::${S3_BUCKET}/governance/live/*",
+        "arn:aws:s3:::${S3_BUCKET}/governance/history/*"
+      ]
+    },
+    {
+      "Sid": "S3HeadBucket",
+      "Effect": "Allow",
+      "Action": ["s3:HeadBucket", "s3:GetBucketLocation"],
+      "Resource": "arn:aws:s3:::${S3_BUCKET}"
     },
     {
       "Sid": "SSMDispatch",
@@ -481,6 +505,10 @@ env_vars = {
     "HOST_V2_WORK_ROOT": "/home/ec2-user/claude-code-dev",
     "HOST_V2_AWS_PROFILE": "ec2-role",
     "CORS_ORIGIN": "https://jreese.net",
+    "S3_BUCKET": "jreese-net",
+    "S3_GOVERNANCE_PREFIX": "governance/live",
+    "S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
+    "DOCUMENTS_TABLE": "documents",
     "DEBOUNCE_WINDOW_SECONDS": os.environ["DEBOUNCE_WINDOW_SECONDS"],
     "DISPATCH_LOCK_BUFFER_SECONDS": os.environ["DISPATCH_LOCK_BUFFER_SECONDS"],
     "DEAD_LETTER_TIMEOUT_MULTIPLIER": os.environ["DEAD_LETTER_TIMEOUT_MULTIPLIER"],
@@ -558,6 +586,7 @@ ensure_api_integration_and_routes() {
   fi
 
   local routes=(
+    # Existing coordination routes
     "POST /api/v1/coordination/requests"
     "GET /api/v1/coordination/requests/{requestId}"
     "POST /api/v1/coordination/requests/{requestId}/dispatch"
@@ -571,6 +600,19 @@ ensure_api_integration_and_routes() {
     "OPTIONS /api/v1/coordination/requests/{requestId}/dispatch"
     "OPTIONS /api/v1/coordination/requests/{requestId}/callback"
     "OPTIONS /api/v1/coordination/capabilities"
+    # Phase 2b: Governance routes
+    "GET /api/v1/governance/hash"
+    "PUT /api/v1/governance/{fileName}"
+    "OPTIONS /api/v1/governance/hash"
+    "OPTIONS /api/v1/governance/{fileName}"
+    # Phase 2b: Projects routes (read-only, via coordination API)
+    "GET /api/v1/coordination/projects"
+    "GET /api/v1/coordination/projects/{projectId}"
+    "OPTIONS /api/v1/coordination/projects"
+    "OPTIONS /api/v1/coordination/projects/{projectId}"
+    # Phase 2b: Health route
+    "GET /api/v1/health"
+    "OPTIONS /api/v1/health"
   )
 
   local existing_route_keys
@@ -595,19 +637,27 @@ ensure_api_integration_and_routes() {
     fi
   done
 
-  local stmt_id
-  stmt_id="allow-apigw-${API_ID}-${FUNCTION_NAME}"
-  if aws lambda add-permission \
-    --region "${REGION}" \
-    --function-name "${FUNCTION_NAME}" \
-    --statement-id "${stmt_id}" \
-    --action lambda:InvokeFunction \
-    --principal apigateway.amazonaws.com \
-    --source-arn "arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/*/*/api/v1/coordination/*" >/dev/null 2>&1; then
-    log "[OK] lambda invoke permission added"
-  else
-    log "[OK] lambda invoke permission already present"
-  fi
+  # Lambda invoke permissions for each route prefix
+  local permissions=(
+    "allow-apigw-${API_ID}-${FUNCTION_NAME}:arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/*/*/api/v1/coordination/*"
+    "allow-apigw-${API_ID}-governance:arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/*/*/api/v1/governance/*"
+    "allow-apigw-${API_ID}-health:arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/*/*/api/v1/health"
+  )
+  for perm in "${permissions[@]}"; do
+    local stmt_id="${perm%%:*}"
+    local source_arn="${perm#*:}"
+    if aws lambda add-permission \
+      --region "${REGION}" \
+      --function-name "${FUNCTION_NAME}" \
+      --statement-id "${stmt_id}" \
+      --action lambda:InvokeFunction \
+      --principal apigateway.amazonaws.com \
+      --source-arn "${source_arn}" >/dev/null 2>&1; then
+      log "[OK] lambda invoke permission added: ${stmt_id}"
+    else
+      log "[OK] lambda invoke permission already present: ${stmt_id}"
+    fi
+  done
 
   aws apigatewayv2 create-deployment \
     --region "${REGION}" \
