@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -54,6 +55,29 @@ S3_GOVERNANCE_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_PREFIX", "governa
 COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
     "https://jreese.net/api/v1/coordination",
+)
+COORDINATION_API_INTERNAL_API_KEY = os.environ.get(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
+    os.environ.get(
+        "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+        os.environ.get("COORDINATION_INTERNAL_API_KEY", ""),
+    ),
+)
+PROJECTS_API_BASE = os.environ.get(
+    "ENCELADUS_PROJECTS_API_BASE",
+    f"{COORDINATION_API_BASE.rstrip('/')}/projects",
+)
+DEPLOY_API_BASE = os.environ.get(
+    "ENCELADUS_DEPLOY_API_BASE",
+    "https://jreese.net/api/v1/deploy",
+)
+HEALTH_API_URL = os.environ.get(
+    "ENCELADUS_HEALTH_API_URL",
+    "https://jreese.net/api/v1/health",
+)
+HTTP_USER_AGENT = os.environ.get(
+    "ENCELADUS_HTTP_USER_AGENT",
+    "enceladus-mcp-server/dispatch-plan-generator",
 )
 
 PLAN_VERSION = "0.3.0"
@@ -288,6 +312,38 @@ def _deser_item(item: Dict) -> Dict[str, Any]:
     return {k: _deser_val(v) for k, v in item.items()}
 
 
+def _status_token(value: Any) -> str:
+    """Normalize API/health status fields to canonical tokens."""
+    token = str(value or "").strip().lower()
+    if not token:
+        return "unknown"
+    if token == "ok" or token.startswith("ok"):
+        return "ok"
+    if token in {"degraded", "unknown"}:
+        return token
+    if (
+        "unreachable" in token
+        or "error" in token
+        or "accessdenied" in token
+        or "denied" in token
+    ):
+        return "unreachable"
+    return token
+
+
+def _http_json_get(url: str, *, timeout: int = 10) -> Dict[str, Any]:
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if COORDINATION_API_INTERNAL_API_KEY:
+        headers["X-Coordination-Internal-Key"] = COORDINATION_API_INTERNAL_API_KEY
+    req = urllib.request.Request(url, method="GET", headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        text = resp.read().decode("utf-8")
+    return json.loads(text) if text else {}
+
+
 # ---------------------------------------------------------------------------
 # Step 1: Governance Hash
 # ---------------------------------------------------------------------------
@@ -437,29 +493,42 @@ def test_connection_health() -> Dict[str, str]:
     """Test connectivity to DynamoDB, S3, and API Gateway."""
     health: Dict[str, str] = {}
 
-    # DynamoDB
+    # Prefer API-backed health so dry-run/generation aligns with MCP connection_health.
     try:
-        ddb = _get_ddb()
-        ddb.describe_table(TableName=TRACKER_TABLE)
-        health["dynamodb"] = "ok"
+        api_health = _http_json_get(HEALTH_API_URL, timeout=10)
+        health["dynamodb"] = _status_token(api_health.get("dynamodb"))
+        health["s3"] = _status_token(api_health.get("s3"))
     except Exception as exc:
-        logger.warning("DynamoDB health check failed: %s", exc)
-        health["dynamodb"] = "unreachable"
+        logger.warning("Health API check failed: %s", exc)
 
-    # S3 — use list_objects_v2 with prefix instead of head_bucket (ec2-role lacks HeadBucket)
-    try:
-        s3 = _get_s3()
-        s3.list_objects_v2(Bucket=S3_BUCKET, Prefix="mobile/v1/", MaxKeys=1)
-        health["s3"] = "ok"
-    except Exception as exc:
-        logger.warning("S3 health check failed: %s", exc)
-        health["s3"] = "unreachable"
+    # DynamoDB fallback (legacy/local mode)
+    if health.get("dynamodb", "unknown") == "unknown":
+        try:
+            ddb = _get_ddb()
+            ddb.describe_table(TableName=TRACKER_TABLE)
+            health["dynamodb"] = "ok"
+        except Exception as exc:
+            logger.warning("DynamoDB health check failed: %s", exc)
+            health["dynamodb"] = "unreachable"
+
+    # S3 fallback (legacy/local mode)
+    if health.get("s3", "unknown") == "unknown":
+        try:
+            s3 = _get_s3()
+            s3.list_objects_v2(Bucket=S3_BUCKET, Prefix="mobile/v1/", MaxKeys=1)
+            health["s3"] = "ok"
+        except Exception as exc:
+            logger.warning("S3 health check failed: %s", exc)
+            health["s3"] = "unreachable"
 
     # API Gateway
     try:
         url = f"{COORDINATION_API_BASE}/capabilities"
         req = urllib.request.Request(url, method="GET")
         req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", HTTP_USER_AGENT)
+        if COORDINATION_API_INTERNAL_API_KEY:
+            req.add_header("X-Coordination-Internal-Key", COORDINATION_API_INTERNAL_API_KEY)
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
                 health["api_gateway"] = "ok"
@@ -479,45 +548,103 @@ def test_connection_health() -> Dict[str, str]:
 
 def load_coordination_request(request_id: str) -> Dict[str, Any]:
     """Fetch coordination request from DynamoDB."""
-    ddb = _get_ddb()
-    resp = ddb.get_item(
-        TableName=COORDINATION_TABLE,
-        Key={"request_id": _ser_s(request_id)},
-    )
-    item = resp.get("Item")
-    if not item:
-        raise ValueError(f"Coordination request '{request_id}' not found")
-    return _deser_item(item)
+    ddb_error: Optional[Exception] = None
+    try:
+        ddb = _get_ddb()
+        resp = ddb.get_item(
+            TableName=COORDINATION_TABLE,
+            Key={"request_id": _ser_s(request_id)},
+        )
+        item = resp.get("Item")
+        if item:
+            return _deser_item(item)
+    except Exception as exc:
+        ddb_error = exc
+        logger.warning("Coordination request DynamoDB lookup failed for %s: %s", request_id, exc)
+
+    # IAM-locked sessions may not have direct table reads; use coordination API fallback.
+    try:
+        encoded = urllib.parse.quote(request_id, safe="")
+        body = _http_json_get(f"{COORDINATION_API_BASE.rstrip('/')}/requests/{encoded}", timeout=15)
+        request = body.get("request") if isinstance(body, dict) else None
+        if isinstance(request, dict) and request:
+            return request
+    except Exception as exc:
+        logger.warning("Coordination request API fallback failed for %s: %s", request_id, exc)
+        if ddb_error:
+            raise ValueError(
+                f"Coordination request '{request_id}' unavailable; "
+                f"DynamoDB read failed ({ddb_error}) and API fallback failed ({exc})"
+            ) from exc
+        raise ValueError(
+            f"Coordination request '{request_id}' unavailable via API fallback: {exc}"
+        ) from exc
+
+    if ddb_error:
+        raise ValueError(
+            f"Coordination request '{request_id}' not found; DynamoDB lookup failed ({ddb_error}) "
+            "and API fallback returned no request"
+        )
+    raise ValueError(f"Coordination request '{request_id}' not found")
 
 
 def load_project_metadata(project_id: str) -> Dict[str, Any]:
     """Fetch project metadata from projects table."""
-    ddb = _get_ddb()
-    resp = ddb.get_item(
-        TableName=PROJECTS_TABLE,
-        Key={"project_id": _ser_s(project_id)},
-    )
-    item = resp.get("Item")
-    if not item:
-        raise ValueError(f"Project '{project_id}' not found")
-    return _deser_item(item)
+    try:
+        ddb = _get_ddb()
+        resp = ddb.get_item(
+            TableName=PROJECTS_TABLE,
+            Key={"project_id": _ser_s(project_id)},
+        )
+        item = resp.get("Item")
+        if item:
+            return _deser_item(item)
+    except Exception as exc:
+        logger.warning("Project metadata DynamoDB lookup failed for %s: %s", project_id, exc)
+
+    try:
+        encoded = urllib.parse.quote(project_id, safe="")
+        body = _http_json_get(f"{PROJECTS_API_BASE.rstrip('/')}/{encoded}", timeout=10)
+        project = body.get("project") if isinstance(body, dict) else None
+        if isinstance(project, dict) and project:
+            return project
+    except Exception as exc:
+        logger.warning("Project metadata API fallback failed for %s: %s", project_id, exc)
+
+    # Metadata is advisory for planning and currently not consumed downstream.
+    return {"project_id": project_id, "status": "unknown", "_metadata_source": "fallback"}
 
 
 def load_deployment_state(project_id: str) -> str:
     """Check if project deployment is ACTIVE or PAUSED."""
-    ddb = _get_ddb()
-    resp = ddb.get_item(
-        TableName=DEPLOY_TABLE,
-        Key={
-            "project_id": _ser_s(project_id),
-            "record_id": _ser_s("STATE"),
-        },
-    )
-    item = resp.get("Item")
-    if not item:
-        return "ACTIVE"  # default if no state record
-    state_item = _deser_item(item)
-    return state_item.get("state", "ACTIVE")
+    try:
+        ddb = _get_ddb()
+        resp = ddb.get_item(
+            TableName=DEPLOY_TABLE,
+            Key={
+                "project_id": _ser_s(project_id),
+                "record_id": _ser_s("STATE"),
+            },
+        )
+        item = resp.get("Item")
+        if not item:
+            return "ACTIVE"  # default if no state record
+        state_item = _deser_item(item)
+        state = str(state_item.get("state", "ACTIVE")).upper()
+        return state if state in {"ACTIVE", "PAUSED"} else "ACTIVE"
+    except Exception as exc:
+        logger.warning("Deployment state DynamoDB lookup failed for %s: %s", project_id, exc)
+
+    try:
+        encoded = urllib.parse.quote(project_id, safe="")
+        body = _http_json_get(f"{DEPLOY_API_BASE.rstrip('/')}/state/{encoded}", timeout=10)
+        state = str(body.get("state") or "ACTIVE").upper()
+        if state in {"ACTIVE", "PAUSED"}:
+            return state
+    except Exception as exc:
+        logger.warning("Deployment state API fallback failed for %s: %s", project_id, exc)
+
+    return "ACTIVE"
 
 
 def query_active_dispatches(project_id: str) -> List[Dict[str, Any]]:
@@ -1133,6 +1260,7 @@ def validate_dispatch_plan(
 def generate_dispatch_plan(
     request_id: str,
     override_plan: Optional[Dict[str, Any]] = None,
+    connection_health: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Generate a complete dispatch-plan for a coordination request.
 
@@ -1142,6 +1270,7 @@ def generate_dispatch_plan(
     Args:
         request_id: The coordination request ID to generate a plan for.
         override_plan: Optional pre-built plan that bypasses auto-generation.
+        connection_health: Optional precomputed health map to avoid duplicate checks.
 
     Returns:
         Dict containing the dispatch-plan JSON.
@@ -1157,7 +1286,10 @@ def generate_dispatch_plan(
     logger.info("[INFO] Governance hash: %s", gov_hash[:16])
 
     # --- Step 2: Connection health ---
-    conn_health = test_connection_health()
+    conn_health = dict(connection_health or test_connection_health())
+    conn_health["dynamodb"] = _status_token(conn_health.get("dynamodb"))
+    conn_health["s3"] = _status_token(conn_health.get("s3"))
+    conn_health["api_gateway"] = _status_token(conn_health.get("api_gateway"))
     logger.info("[INFO] Connection health: %s", json.dumps(conn_health))
 
     # Quality gate: DynamoDB must be reachable
