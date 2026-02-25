@@ -223,6 +223,14 @@ NON_UI_SERVICE_GROUP_BY_TYPE = {
     "step_function_update": "step_function",
 }
 DEPLOY_API_COOKIE = os.environ.get("ENCELADUS_DEPLOY_COOKIE", "")
+GITHUB_API_BASE = os.environ.get(
+    "ENCELADUS_GITHUB_API_BASE",
+    "https://jreese.net/api/v1/github",
+)
+GITHUB_API_INTERNAL_API_KEY = os.environ.get(
+    "ENCELADUS_GITHUB_API_INTERNAL_API_KEY",
+    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
+)
 
 # GSI names
 GSI_PROJECT_TYPE = "project-type-index"
@@ -1016,6 +1024,44 @@ def _deploy_api_request(
         return _error_payload("UPSTREAM_ERROR", f"Deployment API unreachable: {exc}", retryable=True)
     except Exception as exc:  # pragma: no cover - defensive fallback
         return _error_payload("INTERNAL_ERROR", f"Deployment API request failed: {exc}", retryable=False)
+
+
+def _github_api_request(
+    method: str,
+    path: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """HTTP request to the GitHub integration API."""
+    base = GITHUB_API_BASE.rstrip("/")
+    route = path if path.startswith("/") else f"/{path}"
+    url = f"{base}{route}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if GITHUB_API_INTERNAL_API_KEY:
+        headers["X-Coordination-Internal-Key"] = GITHUB_API_INTERNAL_API_KEY
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload).encode("utf-8")
+    else:
+        body = None
+    req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
+            text = resp.read().decode("utf-8")
+            return json.loads(text) if text else {"success": True}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {"error": raw or str(exc)}
+        return _normalize_legacy_error_payload(parsed, exc.code)
+    except urllib.error.URLError as exc:
+        return _error_payload("UPSTREAM_ERROR", f"GitHub API unreachable: {exc}", retryable=True)
+    except Exception as exc:
+        return _error_payload("INTERNAL_ERROR", f"GitHub API request failed: {exc}", retryable=False)
 
 
 def _is_authentication_required_error(payload: Dict[str, Any]) -> bool:
@@ -2989,6 +3035,52 @@ async def list_tools() -> list[Tool]:
                 "required": ["project_id", "outcomes"],
             },
         ),
+        # ---------------------------------------------------------------
+        # GitHub Integration (ENC-FTR-021 Phase 2)
+        # ---------------------------------------------------------------
+        Tool(
+            name="github_create_issue",
+            description=(
+                "Create a GitHub issue in a repository via the Enceladus GitHub integration. "
+                "The issue is created through the registered GitHub App. Optionally links the "
+                "issue back to an Enceladus tracker record."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "owner": {
+                        "type": "string",
+                        "description": "GitHub repository owner (organization or user).",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "GitHub repository name.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Issue title.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Issue body/description (markdown).",
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional labels to assign to the issue.",
+                    },
+                    "record_id": {
+                        "type": "string",
+                        "description": "Optional Enceladus tracker record ID to link (e.g., ENC-TSK-575).",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional Enceladus project ID for traceability.",
+                    },
+                },
+                "required": ["owner", "repo", "title"],
+            },
+        ),
     ]
 
 
@@ -4108,6 +4200,45 @@ async def _dispatch_plan_dry_run(args: dict) -> list[TextContent]:
 
 
 # -------------------------------------------------------------------
+# GitHub integration (ENC-FTR-021 Phase 2)
+# -------------------------------------------------------------------
+
+
+async def _github_create_issue(args: dict) -> list[TextContent]:
+    """Create a GitHub issue via the GitHub integration Lambda."""
+    owner = str(args.get("owner", "")).strip()
+    repo = str(args.get("repo", "")).strip()
+    title = str(args.get("title", "")).strip()
+
+    if not owner or not repo or not title:
+        return _result_text(_error_payload(
+            "INVALID_INPUT",
+            "Fields 'owner', 'repo', and 'title' are required.",
+        ))
+
+    payload: Dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "title": title,
+    }
+    body = str(args.get("body", "")).strip()
+    if body:
+        payload["body"] = body
+    labels = args.get("labels")
+    if labels and isinstance(labels, list):
+        payload["labels"] = [str(l).strip() for l in labels if str(l).strip()]
+    record_id = str(args.get("record_id", "")).strip()
+    if record_id:
+        payload["record_id"] = record_id
+    project_id = str(args.get("project_id", "")).strip()
+    if project_id:
+        payload["project_id"] = project_id
+
+    resp = _github_api_request("POST", "/issues", payload=payload)
+    return _result_text(resp)
+
+
+# -------------------------------------------------------------------
 # Handler dispatch map
 # -------------------------------------------------------------------
 
@@ -4144,6 +4275,7 @@ _TOOL_HANDLERS = {
     "connection_health": _connection_health,
     "dispatch_plan_generate": _dispatch_plan_generate,
     "dispatch_plan_dry_run": _dispatch_plan_dry_run,
+    "github_create_issue": _github_create_issue,
 }
 
 

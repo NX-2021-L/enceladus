@@ -1,0 +1,31 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-github-integration",
+  "generated_at": "2026-02-25T20:00:00Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "environment": {
+      "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
+      "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
+      "DYNAMODB_REGION": "us-west-2",
+      "GITHUB_APP_ID": "",
+      "GITHUB_INSTALLATION_ID": "",
+      "GITHUB_PRIVATE_KEY_SECRET": "devops/github-app/private-key",
+      "ALLOWED_REPOS": "NX-2021-L/enceladus"
+    },
+    "function_arn": "",
+    "handler": "lambda_function.lambda_handler",
+    "last_modified": "",
+    "layers": [],
+    "memory_size": 256,
+    "role": "",
+    "runtime": "python3.11",
+    "timeout": 30,
+    "version": "$LATEST"
+  },
+  "parity_status": "PENDING_DEPLOY",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/github_integration/lambda_function.py"
+}
