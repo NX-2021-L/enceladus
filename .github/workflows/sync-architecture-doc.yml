@@ -6,6 +6,10 @@ on:
     paths: ['docs/ARCHITECTURE.md']
   workflow_dispatch:
 
+permissions:
+  contents: read
+  id-token: write
+
 concurrency:
   group: sync-architecture-doc-main
 
@@ -16,15 +20,6 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
-          aws-region: us-west-2
-
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
 
       - name: Sync to docstore
         env:
