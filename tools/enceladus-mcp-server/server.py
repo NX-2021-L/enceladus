@@ -130,6 +130,10 @@ COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
     "https://jreese.net/api/v1/coordination",
 )
+COORDINATION_API_INTERNAL_API_KEY = os.environ.get(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
+    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
+)
 DOCUMENT_API_BASE = os.environ.get(
     "ENCELADUS_DOCUMENT_API_BASE",
     "https://jreese.net/api/v1/documents",
@@ -2301,6 +2305,16 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Provider name associated with this write.",
                     },
+                    "transition_evidence": {
+                        "type": "object",
+                        "description": (
+                            "Evidence for gated status transitions (ENC-FTR-022). "
+                            "task->pushed: {commit_sha, owner?, repo?}. "
+                            "task->merged-main: {merge_evidence}. "
+                            "task->deployed: {deployment_ref}. "
+                            "Any revert: {revert_reason}."
+                        ),
+                    },
                 },
                 "required": ["record_id", "field", "value", "governance_hash"],
             },
@@ -3461,6 +3475,8 @@ async def _tracker_set(args: dict) -> list[TextContent]:
         payload["provider"] = args["provider"]
     if args.get("coordination") is not None:
         payload["coordination"] = args["coordination"]
+    if args.get("transition_evidence"):
+        payload["transition_evidence"] = args["transition_evidence"]
 
     resp = _tracker_api_request("PATCH", f"/{project_id}/{record_type}/{rid}", payload=payload)
     return _result_text(resp)
@@ -4126,11 +4142,12 @@ async def _coordination_request_get(args: dict) -> list[TextContent]:
     request_id = args["request_id"]
     try:
         import urllib.request
-        url = f"{COORDINATION_API_BASE}/request/{urllib.parse.quote(request_id, safe='')}"
+        url = f"{COORDINATION_API_BASE}/requests/{urllib.parse.quote(request_id, safe='')}"
         req = urllib.request.Request(url, method="GET")
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", HTTP_USER_AGENT)
-        req.add_header("X-Coordination-Internal-Key", COORDINATION_INTERNAL_API_KEY)
+        if COORDINATION_API_INTERNAL_API_KEY:
+            req.add_header("X-Coordination-Internal-Key", COORDINATION_API_INTERNAL_API_KEY)
         with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp_obj:
             body = json.loads(resp_obj.read().decode("utf-8"))
         return _result_text(body)
