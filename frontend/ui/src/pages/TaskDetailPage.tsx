@@ -151,7 +151,21 @@ export function TaskDetailPage() {
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <StatusChip status={task.status} />
           <PriorityBadge priority={task.priority} />
+          {task.category && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-violet-500/20 text-violet-400">
+              {task.category}
+            </span>
+          )}
           <GitHubLinkBadge url={task.github_issue_url} />
+          {task.coordination && (
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-cyan-500/20 text-cyan-400" title="Part of multi-agent coordination">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-current opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-current" />
+              </span>
+              Coordination
+            </span>
+          )}
           {task.assigned_to && (
             <span className="text-xs text-slate-400">→ {task.assigned_to}</span>
           )}
@@ -267,6 +281,16 @@ export function TaskDetailPage() {
         allFeatures={allFeatures}
       />
 
+      {/* Intent (ENC-FTR-017 philosophy) */}
+      {task.intent && (
+        <div className="bg-slate-800 rounded-lg p-4">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
+            Intent
+          </h3>
+          <p className="text-sm text-slate-300 leading-relaxed">{task.intent}</p>
+        </div>
+      )}
+
       {/* Description */}
       {task.description && (
         <div className="bg-slate-800 rounded-lg p-4">
@@ -274,6 +298,23 @@ export function TaskDetailPage() {
             Description
           </h3>
           <MarkdownRenderer content={task.description} />
+        </div>
+      )}
+
+      {/* Acceptance Criteria (ENC-FTR-017 philosophy) */}
+      {task.acceptance_criteria && task.acceptance_criteria.length > 0 && (
+        <div className="bg-slate-800 rounded-lg p-4">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
+            Acceptance Criteria
+          </h3>
+          <ul className="space-y-1.5">
+            {task.acceptance_criteria.map((criterion, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm">
+                <span className="text-blue-400 flex-shrink-0 mt-0.5">&#x2022;</span>
+                <span className="text-slate-300">{criterion}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

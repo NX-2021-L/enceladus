@@ -188,7 +188,21 @@ export function FeatureDetailPage() {
         <h1 className="text-lg font-semibold text-slate-100 mb-2">{feature.title}</h1>
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <StatusChip status={feature.status} />
+          {feature.category && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-violet-500/20 text-violet-400">
+              {feature.category}
+            </span>
+          )}
           <GitHubLinkBadge url={feature.github_issue_url} />
+          {feature.coordination && (
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-cyan-500/20 text-cyan-400" title="Part of multi-agent coordination">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-current opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-current" />
+              </span>
+              Coordination
+            </span>
+          )}
           {feature.owners.length > 0 && (
             <span className="text-xs text-slate-400">
               {feature.owners.join(', ')}
@@ -306,6 +320,46 @@ export function FeatureDetailPage() {
         allFeatures={allFeatures}
       />
 
+      {/* User Story (ENC-FTR-017 philosophy) */}
+      {feature.user_story && (
+        <div className="bg-slate-800 rounded-lg p-4">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
+            User Story
+          </h3>
+          <p className="text-sm text-slate-300 leading-relaxed italic">{feature.user_story}</p>
+        </div>
+      )}
+
+      {/* Intent (ENC-FTR-017 philosophy) */}
+      {feature.intent && (
+        <div className="bg-slate-800 rounded-lg p-4">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
+            Intent
+          </h3>
+          <p className="text-sm text-slate-300 leading-relaxed">{feature.intent}</p>
+        </div>
+      )}
+
+      {/* Primary Task (ENC-FTR-017 philosophy) */}
+      {feature.primary_task && (
+        <div className="bg-slate-800 rounded-lg p-4">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
+            Primary Task
+          </h3>
+          <Link
+            to={`/tasks/${feature.primary_task}`}
+            className="text-sm text-blue-400 hover:text-blue-300 font-mono"
+          >
+            {feature.primary_task}
+            {recordMap[feature.primary_task] && (
+              <span className="text-slate-400 font-sans ml-2">
+                {recordMap[feature.primary_task].title}
+              </span>
+            )}
+          </Link>
+        </div>
+      )}
+
       {/* Description */}
       {feature.description && (
         <div className="bg-slate-800 rounded-lg p-4">
@@ -316,16 +370,44 @@ export function FeatureDetailPage() {
         </div>
       )}
 
-      {/* Success Metrics / Acceptance Criteria */}
-      {feature.success_metrics && feature.success_metrics.length > 0 && (
+      {/* Acceptance Criteria with Evidence (ENC-FTR-017 philosophy) */}
+      {feature.acceptance_criteria && feature.acceptance_criteria.length > 0 && (
+        <div className="bg-slate-800 rounded-lg p-4">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
+            Acceptance Criteria
+          </h3>
+          <ul className="space-y-3">
+            {feature.acceptance_criteria.map((ac, i) => (
+              <li key={i} className="flex items-start gap-2.5">
+                <span className={`flex-shrink-0 mt-0.5 text-sm ${ac.evidence_acceptance ? 'text-emerald-400' : 'text-slate-600'}`}>
+                  {ac.evidence_acceptance ? '●' : '○'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm ${ac.evidence_acceptance ? 'text-slate-300' : 'text-slate-400'}`}>
+                    {ac.description}
+                  </p>
+                  {ac.evidence && (
+                    <p className="text-xs text-slate-500 mt-1 pl-2 border-l border-emerald-500/30">
+                      {ac.evidence}
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Success Metrics (legacy, shown when no structured AC) */}
+      {(!feature.acceptance_criteria || feature.acceptance_criteria.length === 0) && feature.success_metrics && feature.success_metrics.length > 0 && (
         <div className="bg-slate-800 rounded-lg p-4">
           <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
-            Success Metrics / Acceptance Criteria
+            Success Metrics
           </h3>
           <ul className="space-y-1.5">
             {feature.success_metrics.map((metric, i) => (
               <li key={i} className="flex items-start gap-2 text-sm">
-                <span className="text-emerald-400 flex-shrink-0 mt-0.5">•</span>
+                <span className="text-emerald-400 flex-shrink-0 mt-0.5">&#x2022;</span>
                 <MarkdownRenderer content={metric} className="text-slate-300 leading-relaxed inline" />
               </li>
             ))}

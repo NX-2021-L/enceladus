@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { feedKeys, fetchFeatures } from '../api/feeds'
+import { useLiveFeed } from '../contexts/LiveFeedContext'
 import type { FeatureFilters } from '../types/filters'
 
 function compareDates(a: string | null, b: string | null): number {
@@ -16,11 +17,19 @@ function parseSort(raw?: string): { field: string; dir: 1 | -1 } {
 }
 
 export function useFeatures(filters?: FeatureFilters) {
-  const query = useQuery({ queryKey: feedKeys.features, queryFn: fetchFeatures })
+  // Live data from the global delta-polling provider (ENC-TSK-609).
+  const { features: liveFeatures, isPending: livePending, isError: liveError } = useLiveFeed()
+
+  // S3 feed as fallback for initial load before LiveFeedProvider hydrates.
+  const s3Query = useQuery({ queryKey: feedKeys.features, queryFn: fetchFeatures })
+
+  const allFeatures = liveFeatures.length > 0 ? liveFeatures : (s3Query.data?.features ?? [])
+  const isPending = liveFeatures.length === 0 && s3Query.isPending
+  const isError = liveFeatures.length === 0 && s3Query.isError
 
   const filtered = useMemo(() => {
-    if (!query.data?.features) return []
-    let items = query.data.features
+    if (!allFeatures.length) return []
+    let items = allFeatures
     if (filters?.projectId) items = items.filter((f) => f.project_id === filters.projectId)
     if (filters?.status?.length) items = items.filter((f) => filters.status!.includes(f.status))
     if (filters?.search) {
@@ -36,12 +45,15 @@ export function useFeatures(filters?: FeatureFilters) {
       else cmp = compareDates(a.updated_at, b.updated_at)
       return cmp * dir
     })
-  }, [query.data?.features, filters?.projectId, filters?.status, filters?.search, filters?.sortBy])
+  }, [allFeatures, filters?.projectId, filters?.status, filters?.search, filters?.sortBy])
 
   return {
     features: filtered,
-    allFeatures: query.data?.features ?? [],
-    generatedAt: query.data?.generated_at ?? null,
-    ...query,
+    allFeatures,
+    generatedAt: s3Query.data?.generated_at ?? null,
+    isPending,
+    isError,
+    isLoading: isPending,
+    data: s3Query.data,
   }
 }

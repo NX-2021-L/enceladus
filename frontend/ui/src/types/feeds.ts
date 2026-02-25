@@ -52,6 +52,10 @@ export interface Task {
   coordination?: boolean
   // GitHub integration (ENC-FTR-021)
   github_issue_url?: string
+  // Philosophy fields (ENC-FTR-017)
+  category?: string | null
+  intent?: string | null
+  acceptance_criteria?: string[]
 }
 
 export interface Issue {
@@ -75,6 +79,16 @@ export interface Issue {
   coordination?: boolean
   // GitHub integration (ENC-FTR-021)
   github_issue_url?: string
+  // Philosophy fields (ENC-FTR-017)
+  category?: string | null
+  intent?: string | null
+  primary_task?: string | null
+  evidence?: Array<{
+    description: string
+    steps_to_duplicate: string[]
+    observed_by?: string
+    timestamp?: string
+  }>
 }
 
 export interface Feature {
@@ -98,6 +112,16 @@ export interface Feature {
   coordination?: boolean
   // GitHub integration (ENC-FTR-021)
   github_issue_url?: string
+  // Philosophy fields (ENC-FTR-017)
+  category?: string | null
+  intent?: string | null
+  user_story?: string | null
+  primary_task?: string | null
+  acceptance_criteria?: Array<{
+    description: string
+    evidence: string
+    evidence_acceptance: boolean
+  }>
 }
 
 export interface FeedEnvelope<T> {
