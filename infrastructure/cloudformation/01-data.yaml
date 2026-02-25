@@ -148,6 +148,8 @@ Resources:
     Properties:
       TableName: documents
       BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
       DeletionProtectionEnabled: true
       AttributeDefinitions:
         - AttributeName: document_id
@@ -381,6 +383,10 @@ Outputs:
     Value: !Ref DocumentsTable
     Export:
       Name: !Sub ${AWS::StackName}-DocumentsTable
+  DocumentsStreamArn:
+    Value: !GetAtt DocumentsTable.StreamArn
+    Export:
+      Name: !Sub ${AWS::StackName}-DocumentsStreamArn
   DeployQueueUrl:
     Value: !Ref DeployQueue
     Export:

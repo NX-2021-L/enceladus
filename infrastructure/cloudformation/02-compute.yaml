@@ -550,7 +550,7 @@ Resources:
           Id: devops-json-to-parquet-transformer
 
   # ---------------------------------------------------------------------------
-  # EventBridge Pipe (Tracker Stream -> Feed Queue)
+  # EventBridge Pipes (Tracker/Documents Streams -> Feed Queue)
   # ---------------------------------------------------------------------------
 
   TrackerToFeedPipe:
@@ -574,6 +574,28 @@ Resources:
         SqsQueueParameters:
           MessageGroupId: $.dynamodb.NewImage.project_id.S
           MessageDeduplicationId: $.dynamodb.Keys.record_id.S
+
+  DocumentsToFeedPipe:
+    Type: AWS::Pipes::Pipe
+    DeletionPolicy: Retain
+    Properties:
+      Name: devops-documents-to-feed-queue
+      RoleArn: !GetAtt FeedPipeRole.Arn
+      Source: !ImportValue
+        Fn::Sub: ${DataStackName}-DocumentsStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+      Target: !ImportValue
+        Fn::Sub: ${DataStackName}-FeedPublishQueueArn
+      TargetParameters:
+        SqsQueueParameters:
+          MessageGroupId: $.dynamodb.NewImage.project_id.S
+          MessageDeduplicationId: $.dynamodb.Keys.document_id.S
 
   # ---------------------------------------------------------------------------
   # IAM Roles (placeholder — full policies in each Lambda's deploy.sh)
