@@ -5,12 +5,12 @@ Authenticates to GitHub using RS256 JWT → installation access token flow.
 
 Routes (via API Gateway proxy):
     POST   /api/v1/github/issues        — create a GitHub issue
+    POST   /api/v1/github/webhook       — receive GitHub webhook events
     OPTIONS /api/v1/github/*             — CORS preflight
 
 Auth:
-    Reads `enceladus_id_token` cookie from Cookie header.
-    Validates JWT using Cognito JWKS (RS256, cached module-level).
-    Optional service-to-service auth via X-Coordination-Internal-Key.
+    /issues: Cognito JWT cookie or X-Coordination-Internal-Key header.
+    /webhook: GitHub HMAC-SHA256 signature (X-Hub-Signature-256).
 
 Environment variables:
     COGNITO_USER_POOL_ID        us-east-1_b2D0V3E1k
@@ -18,18 +18,23 @@ Environment variables:
     GITHUB_APP_ID               GitHub App numeric ID
     GITHUB_INSTALLATION_ID      Installation ID for NX-2021-L org
     GITHUB_PRIVATE_KEY_SECRET   Secrets Manager secret name (default: devops/github-app/private-key)
+    GITHUB_WEBHOOK_SECRET       Secrets Manager secret name for webhook HMAC key
+    TRACKER_API_BASE            Tracker mutation API base URL
     DYNAMODB_REGION             default: us-west-2
     COORDINATION_INTERNAL_API_KEY  (service auth key)
 
-Part of ENC-FTR-021 Phase 2 (ENC-TSK-575).
+ENC-FTR-021 Phase 2 (ENC-TSK-575) + Phase 3 (ENC-TSK-569).
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
+import re
 import time
 import urllib.request
 import urllib.error
@@ -64,6 +69,25 @@ GITHUB_API_BASE = "https://api.github.com"
 
 # Allowed owner/repo pairs for issue creation (safety guardrail)
 ALLOWED_REPOS = os.environ.get("ALLOWED_REPOS", "NX-2021-L/enceladus").split(",")
+
+# Webhook configuration (Phase 3)
+GITHUB_WEBHOOK_SECRET_NAME = os.environ.get(
+    "GITHUB_WEBHOOK_SECRET", "devops/github-app/webhook-secret"
+)
+TRACKER_API_BASE = os.environ.get(
+    "TRACKER_API_BASE", "https://jreese.net/api/v1/tracker"
+)
+
+# Record ID parsing: prefix → project, type suffix → record type
+_PREFIX_TO_PROJECT = {"ENC": "enceladus", "DVP": "devops"}
+_TYPE_SUFFIX_TO_RECORD_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature"}
+
+# Regex to extract Enceladus record ID from GitHub issue body footer.
+# Handles both Lambda-created (**Enceladus Record**: `X`) and
+# frontend-created (Enceladus Record: `X`) formats.
+_RE_RECORD_ID = re.compile(
+    r"(?:\*\*)?Enceladus Record(?:\*\*)?:\s*`([A-Z]+-(?:TSK|ISS|FTR)-\d{3,})`"
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -111,6 +135,29 @@ def _get_github_private_key() -> str:
     _private_key_cache = resp["SecretString"]
     _private_key_fetched_at = now
     return _private_key_cache
+
+
+# ---------------------------------------------------------------------------
+# Webhook secret cache
+# ---------------------------------------------------------------------------
+
+_webhook_secret_cache: Optional[str] = None
+_webhook_secret_fetched_at: float = 0.0
+_WEBHOOK_SECRET_TTL: float = 3600.0
+
+
+def _get_webhook_secret() -> str:
+    """Fetch GitHub webhook HMAC secret from Secrets Manager (cached)."""
+    global _webhook_secret_cache, _webhook_secret_fetched_at
+    now = time.time()
+    if _webhook_secret_cache and (now - _webhook_secret_fetched_at) < _WEBHOOK_SECRET_TTL:
+        return _webhook_secret_cache
+
+    sm = _get_secretsmanager()
+    resp = sm.get_secret_value(SecretId=GITHUB_WEBHOOK_SECRET_NAME)
+    _webhook_secret_cache = resp["SecretString"]
+    _webhook_secret_fetched_at = now
+    return _webhook_secret_cache
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +502,343 @@ def _handle_create_issue(event: Dict, claims: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Webhook signature verification
+# ---------------------------------------------------------------------------
+
+
+def _verify_webhook_signature(event: Dict) -> bool:
+    """Verify GitHub webhook HMAC-SHA256 signature."""
+    headers = event.get("headers") or {}
+    signature_header = (
+        headers.get("x-hub-signature-256")
+        or headers.get("X-Hub-Signature-256")
+        or ""
+    )
+    if not signature_header.startswith("sha256="):
+        return False
+
+    raw_body = event.get("body") or ""
+    if event.get("isBase64Encoded"):
+        raw_body = base64.b64decode(raw_body).decode("utf-8")
+
+    secret = _get_webhook_secret()
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        raw_body.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    received = signature_header[len("sha256="):]
+    return hmac.compare_digest(expected, received)
+
+
+# ---------------------------------------------------------------------------
+# Record ID parsing helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_record_id(issue_body: str) -> Optional[str]:
+    """Extract Enceladus record ID from GitHub issue body footer."""
+    if not issue_body:
+        return None
+    m = _RE_RECORD_ID.search(issue_body)
+    return m.group(1) if m else None
+
+
+def _parse_record_id(record_id: str) -> Optional[Dict[str, str]]:
+    """Parse record ID into project_id, record_type, record_id.
+
+    E.g. 'ENC-TSK-564' -> {project_id: 'enceladus', record_type: 'task', ...}
+    """
+    parts = record_id.split("-")
+    if len(parts) != 3:
+        return None
+    prefix, type_suffix, _number = parts
+    record_type = _TYPE_SUFFIX_TO_RECORD_TYPE.get(type_suffix)
+    project_id = _PREFIX_TO_PROJECT.get(prefix)
+    if not record_type or not project_id:
+        return None
+    return {
+        "project_id": project_id,
+        "record_type": record_type,
+        "record_id": record_id,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tracker API client (HTTPS with internal key auth)
+# ---------------------------------------------------------------------------
+
+
+def _tracker_api_call(
+    method: str, path: str, body: Optional[Dict] = None
+) -> Tuple[int, Dict]:
+    """Call the tracker mutation API. Returns (status_code, response_dict)."""
+    url = f"{TRACKER_API_BASE}/{path}"
+    data = json.dumps(body).encode("utf-8") if body else None
+
+    req = urllib.request.Request(
+        url,
+        method=method,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "X-Coordination-Internal-Key": COORDINATION_INTERNAL_API_KEY,
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        resp_text = exc.read().decode("utf-8", errors="replace")
+        try:
+            return exc.code, json.loads(resp_text)
+        except (json.JSONDecodeError, TypeError):
+            return exc.code, {"error": resp_text}
+    except Exception as exc:
+        logger.error("Tracker API call failed: %s %s — %s", method, url, exc)
+        return 0, {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/github/webhook — GitHub webhook receiver
+# ---------------------------------------------------------------------------
+
+
+def _handle_webhook(event: Dict) -> Dict:
+    """Process incoming GitHub webhook events.
+
+    Uses HMAC signature verification — NOT Cognito/internal-key auth.
+    """
+    if not _verify_webhook_signature(event):
+        logger.warning("Webhook signature verification failed")
+        return _error(401, "Invalid webhook signature.")
+
+    body = _parse_body(event)
+    if not body:
+        return _error(400, "Invalid JSON payload.")
+
+    headers = event.get("headers") or {}
+    gh_event = (
+        headers.get("x-github-event")
+        or headers.get("X-GitHub-Event")
+        or ""
+    )
+    action = body.get("action", "")
+    delivery_id = (
+        headers.get("x-github-delivery")
+        or headers.get("X-GitHub-Delivery")
+        or "unknown"
+    )
+
+    logger.info(
+        "Webhook received: event=%s action=%s delivery=%s",
+        gh_event, action, delivery_id,
+    )
+
+    # Extract issue data and linked record
+    issue = body.get("issue") or {}
+    issue_body_text = issue.get("body") or ""
+    issue_number = issue.get("number", 0)
+    issue_url = issue.get("html_url", "")
+    repo_full = body.get("repository", {}).get("full_name", "")
+
+    record_id = _extract_record_id(issue_body_text)
+    if not record_id:
+        logger.info(
+            "Webhook %s/%s on %s#%d: no linked Enceladus record",
+            gh_event, action, repo_full, issue_number,
+        )
+        return _response(200, {
+            "processed": False,
+            "reason": "no_linked_record",
+            "event": gh_event,
+            "action": action,
+        })
+
+    parsed = _parse_record_id(record_id)
+    if not parsed:
+        logger.warning("Webhook: unparseable record_id '%s'", record_id)
+        return _response(200, {
+            "processed": False,
+            "reason": "unparseable_record_id",
+            "record_id": record_id,
+        })
+
+    project_id = parsed["project_id"]
+    record_type = parsed["record_type"]
+
+    # Dispatch by event type + action
+    if gh_event == "issues" and action == "closed":
+        return _webhook_issue_closed(
+            project_id, record_type, record_id,
+            issue_number, repo_full, body,
+        )
+    elif gh_event == "issues" and action == "reopened":
+        return _webhook_issue_reopened(
+            project_id, record_type, record_id,
+            issue_number, repo_full,
+        )
+    elif gh_event == "issue_comment" and action == "created":
+        return _webhook_comment_created(
+            project_id, record_type, record_id,
+            issue_number, repo_full, body,
+        )
+    else:
+        logger.info(
+            "Webhook %s/%s on %s#%d (record %s): ignored",
+            gh_event, action, repo_full, issue_number, record_id,
+        )
+        return _response(200, {
+            "processed": False,
+            "reason": "action_not_handled",
+            "event": gh_event,
+            "action": action,
+            "record_id": record_id,
+        })
+
+
+def _webhook_issue_closed(
+    project_id: str, record_type: str, record_id: str,
+    issue_number: int, repo_full: str, payload: Dict,
+) -> Dict:
+    """Handle issues.closed → close the linked Enceladus record."""
+    closed_by = payload.get("sender", {}).get("login", "unknown")
+    api_path = f"{project_id}/{record_type}/{record_id}"
+
+    status, resp = _tracker_api_call("PATCH", api_path, {
+        "action": "close",
+        "note": f"Closed via GitHub ({repo_full}#{issue_number}) by @{closed_by}",
+    })
+
+    logger.info(
+        "Webhook issues.closed: record=%s tracker_status=%d",
+        record_id, status,
+    )
+
+    if status == 200:
+        return _response(200, {
+            "processed": True, "event": "issues.closed",
+            "record_id": record_id, "tracker_status": status,
+        })
+    elif status == 404:
+        return _response(200, {
+            "processed": False, "reason": "record_not_found",
+            "record_id": record_id,
+        })
+    elif 400 <= status < 500:
+        return _response(200, {
+            "processed": False, "reason": "tracker_rejected",
+            "record_id": record_id, "tracker_status": status,
+            "tracker_error": resp.get("error", ""),
+        })
+    else:
+        return _error(502, f"Tracker API error (status {status})")
+
+
+def _webhook_issue_reopened(
+    project_id: str, record_type: str, record_id: str,
+    issue_number: int, repo_full: str,
+) -> Dict:
+    """Handle issues.reopened → reopen the linked Enceladus record."""
+    api_path = f"{project_id}/{record_type}/{record_id}"
+
+    status, resp = _tracker_api_call("PATCH", api_path, {"action": "reopen"})
+
+    logger.info(
+        "Webhook issues.reopened: record=%s tracker_status=%d",
+        record_id, status,
+    )
+
+    if status == 200:
+        return _response(200, {
+            "processed": True, "event": "issues.reopened",
+            "record_id": record_id, "tracker_status": status,
+        })
+    elif status == 404:
+        return _response(200, {
+            "processed": False, "reason": "record_not_found",
+            "record_id": record_id,
+        })
+    elif 400 <= status < 500:
+        return _response(200, {
+            "processed": False, "reason": "tracker_rejected",
+            "record_id": record_id, "tracker_status": status,
+            "tracker_error": resp.get("error", ""),
+        })
+    else:
+        return _error(502, f"Tracker API error (status {status})")
+
+
+def _webhook_comment_created(
+    project_id: str, record_type: str, record_id: str,
+    issue_number: int, repo_full: str, payload: Dict,
+) -> Dict:
+    """Handle issue_comment.created → append worklog to linked record."""
+    comment = payload.get("comment", {})
+    comment_author = comment.get("user", {}).get("login", "unknown")
+    comment_body = comment.get("body", "").strip()
+    comment_url = comment.get("html_url", "")
+
+    # Skip comments from our own bot to prevent feedback loops
+    comment_user = comment.get("user", {})
+    if comment_user.get("type") == "Bot":
+        via_app = comment.get("performed_via_github_app") or {}
+        if str(via_app.get("id", "")) == GITHUB_APP_ID:
+            return _response(200, {
+                "processed": False, "reason": "self_bot_comment",
+                "record_id": record_id,
+            })
+
+    if not comment_body:
+        return _response(200, {
+            "processed": False, "reason": "empty_comment",
+            "record_id": record_id,
+        })
+
+    # Truncate long comments
+    max_len = 1500
+    if len(comment_body) > max_len:
+        comment_body = comment_body[:max_len] + "... (truncated)"
+
+    description = (
+        f"[GitHub] @{comment_author} commented on "
+        f"{repo_full}#{issue_number}:\n\n{comment_body}"
+    )
+    if comment_url:
+        description += f"\n\n[View comment]({comment_url})"
+
+    api_path = f"{project_id}/{record_type}/{record_id}/log"
+    status, resp = _tracker_api_call("POST", api_path, {
+        "description": description,
+    })
+
+    logger.info(
+        "Webhook issue_comment.created: record=%s tracker_status=%d",
+        record_id, status,
+    )
+
+    if status == 200:
+        return _response(200, {
+            "processed": True, "event": "issue_comment.created",
+            "record_id": record_id, "tracker_status": status,
+        })
+    elif status == 404:
+        return _response(200, {
+            "processed": False, "reason": "record_not_found",
+            "record_id": record_id,
+        })
+    elif 400 <= status < 500:
+        return _response(200, {
+            "processed": False, "reason": "tracker_rejected",
+            "record_id": record_id, "tracker_status": status,
+        })
+    else:
+        return _error(502, f"Tracker API error (status {status})")
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
@@ -466,7 +850,11 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     if method == "OPTIONS":
         return {"statusCode": 204, "headers": _cors_headers(), "body": ""}
 
-    # Authenticate
+    # Webhook endpoint — uses HMAC signature, NOT Cognito/internal-key auth
+    if method == "POST" and "/github/webhook" in path:
+        return _handle_webhook(event)
+
+    # Authenticate (all other routes)
     claims, auth_err = _authenticate(event)
     if auth_err:
         return auth_err
