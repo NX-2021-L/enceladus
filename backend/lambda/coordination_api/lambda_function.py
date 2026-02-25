@@ -859,6 +859,7 @@ _PROJECT_CACHE_TTL = 300.0
 _ENCELADUS_MCP_SERVER_MODULE = None
 _DISPATCH_PLAN_GENERATOR_MODULE = None
 _MCP_RESOURCE_CACHE: Dict[str, str] = {}
+_TRACKER_COUNTER_PREFIX = "counter#"
 
 
 @dataclass
@@ -904,38 +905,76 @@ def _load_project_meta(project_id: str) -> ProjectMeta:
 
 
 def _next_tracker_sequence(project_id: str, record_type: str) -> int:
-    ddb = _get_ddb()
-    max_num = 0
-
-    paginator = ddb.get_paginator("query")
-    try:
-        pages = paginator.paginate(
-            TableName=TRACKER_TABLE,
-            IndexName=TRACKER_GSI_PROJECT_TYPE,
-            KeyConditionExpression="project_id = :pid AND record_type = :rt",
-            ExpressionAttributeValues={
+    def _max_existing_tracker_sequence() -> int:
+        max_num = 0
+        kwargs: Dict[str, Any] = {
+            "TableName": TRACKER_TABLE,
+            "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :rtype_prefix)",
+            "ExpressionAttributeValues": {
                 ":pid": _serialize(project_id),
-                ":rt": _serialize(record_type),
+                ":rtype_prefix": _serialize(f"{record_type}#"),
             },
-            ProjectionExpression="item_id",
+            "ProjectionExpression": "item_id",
+            "ConsistentRead": True,
+        }
+        while True:
+            query_resp = ddb.query(**kwargs)
+            for raw in query_resp.get("Items", []):
+                iid = _deserialize(raw).get("item_id", "")
+                parts = iid.split("-")
+                if len(parts) < 3:
+                    continue
+                try:
+                    n = int(parts[-1])
+                except ValueError:
+                    continue
+                if n > max_num:
+                    max_num = n
+            last_key = query_resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+        return max_num
+
+    ddb = _get_ddb()
+    counter_key = {
+        "project_id": _serialize(project_id),
+        "record_id": _serialize(f"{_TRACKER_COUNTER_PREFIX}{record_type}"),
+    }
+    seed_num = 0
+    try:
+        counter_item = ddb.get_item(
+            TableName=TRACKER_TABLE,
+            Key=counter_key,
+            ConsistentRead=True,
+        ).get("Item")
+        if not counter_item:
+            seed_num = _max_existing_tracker_sequence()
+
+        update_resp = ddb.update_item(
+            TableName=TRACKER_TABLE,
+            Key=counter_key,
+            UpdateExpression=(
+                "SET next_num = if_not_exists(next_num, :seed) + :one, "
+                "record_type = if_not_exists(record_type, :counter_type), "
+                "item_id = if_not_exists(item_id, :counter_item_id)"
+            ),
+            ExpressionAttributeValues={
+                ":seed": _serialize(seed_num),
+                ":one": _serialize(1),
+                ":counter_type": _serialize("counter"),
+                ":counter_item_id": _serialize(f"COUNTER-{record_type.upper()}"),
+            },
+            ReturnValues="UPDATED_NEW",
         )
     except (BotoCoreError, ClientError) as exc:
-        raise RuntimeError(f"Failed querying tracker for next ID: {exc}") from exc
+        raise RuntimeError(f"Failed allocating tracker sequence: {exc}") from exc
 
-    for page in pages:
-        for raw in page.get("Items", []):
-            iid = _deserialize(raw).get("item_id", "")
-            parts = iid.split("-")
-            if len(parts) < 3:
-                continue
-            try:
-                n = int(parts[-1])
-            except ValueError:
-                continue
-            if n > max_num:
-                max_num = n
-
-    return max_num + 1
+    attrs = update_resp.get("Attributes", {})
+    try:
+        return int(attrs.get("next_num", {}).get("N", str(seed_num + 1)))
+    except (TypeError, ValueError):
+        return seed_num + 1
 
 
 def _build_record_id(prefix: str, record_type: str, seq: int) -> str:

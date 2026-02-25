@@ -681,6 +681,64 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertIn("acceptance_criteria", str(ctx.exception))
         mock_get_ddb.assert_not_called()
 
+    @patch.object(coordination_lambda, "_get_ddb")
+    def test_next_tracker_sequence_seeds_counter_from_existing_records_when_missing(
+        self,
+        mock_get_ddb,
+    ):
+        class _FakeDdb:
+            def __init__(self):
+                self.query_calls = 0
+                self.last_update_kwargs = None
+
+            def get_item(self, **_kwargs):
+                return {}
+
+            def query(self, **_kwargs):
+                self.query_calls += 1
+                return {
+                    "Items": [
+                        {"item_id": {"S": "DVP-TSK-098"}},
+                        {"item_id": {"S": "DVP-TSK-104"}},
+                    ]
+                }
+
+            def update_item(self, **kwargs):
+                self.last_update_kwargs = kwargs
+                return {"Attributes": {"next_num": {"N": "105"}}}
+
+        fake_ddb = _FakeDdb()
+        mock_get_ddb.return_value = fake_ddb
+
+        seq = coordination_lambda._next_tracker_sequence("devops", "task")
+
+        self.assertEqual(seq, 105)
+        self.assertEqual(fake_ddb.query_calls, 1)
+        self.assertEqual(
+            fake_ddb.last_update_kwargs["Key"]["record_id"]["S"],
+            "counter#task",
+        )
+
+    @patch.object(coordination_lambda, "_get_ddb")
+    def test_next_tracker_sequence_uses_existing_counter_without_scan(
+        self,
+        mock_get_ddb,
+    ):
+        class _FakeDdb:
+            def get_item(self, **_kwargs):
+                return {"Item": {"record_id": {"S": "counter#task"}, "next_num": {"N": "212"}}}
+
+            def query(self, **_kwargs):
+                raise AssertionError("query should not run when counter exists")
+
+            def update_item(self, **_kwargs):
+                return {"Attributes": {"next_num": {"N": "213"}}}
+
+        mock_get_ddb.return_value = _FakeDdb()
+
+        seq = coordination_lambda._next_tracker_sequence("devops", "task")
+        self.assertEqual(seq, 213)
+
     def test_build_ssm_commands_claude_agent_sdk(self):
         request = {
             "request_id": "CRQ-ABC123",
