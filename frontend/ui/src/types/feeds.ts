@@ -50,6 +50,8 @@ export interface Task {
   active_agent_session_parent?: boolean
   // Coordination flag
   coordination?: boolean
+  // GitHub integration (ENC-FTR-021)
+  github_issue_url?: string
 }
 
 export interface Issue {
@@ -71,6 +73,8 @@ export interface Issue {
   created_at: string | null
   // Coordination flag
   coordination?: boolean
+  // GitHub integration (ENC-FTR-021)
+  github_issue_url?: string
 }
 
 export interface Feature {
@@ -92,6 +96,8 @@ export interface Feature {
   created_at: string | null
   // Coordination flag
   coordination?: boolean
+  // GitHub integration (ENC-FTR-021)
+  github_issue_url?: string
 }
 
 export interface FeedEnvelope<T> {
