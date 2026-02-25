@@ -80,7 +80,7 @@ if [ -n "${AWS_PROFILE:-}" ]; then
 fi
 
 if [ -z "${RESOLVED_AWS_PROFILE}" ]; then
-    for candidate in personal default ec2-role; do
+    for candidate in enceladus-agent personal default ec2-role; do
         if aws sts get-caller-identity --profile "${candidate}" >/dev/null 2>&1; then
             RESOLVED_AWS_PROFILE="${candidate}"
             echo "[INFO] Auto-detected AWS profile for MCP runtime: ${RESOLVED_AWS_PROFILE}"
