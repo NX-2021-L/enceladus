@@ -85,6 +85,9 @@ SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
+S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
+S3_GOVERNANCE_PREFIX = os.environ.get("S3_GOVERNANCE_PREFIX", "governance/live")
+S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
 
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
@@ -494,6 +497,7 @@ def _classify_mcp_error(exc: Exception) -> str:
 _ddb = None
 _ssm = None
 _ec2 = None
+_s3 = None
 _eb = None
 _sqs = None
 _sns = None
@@ -535,6 +539,17 @@ def _get_ec2():
             config=Config(retries={"max_attempts": 5, "mode": "standard"}),
         )
     return _ec2
+
+
+def _get_s3():
+    global _s3
+    if _s3 is None:
+        _s3 = boto3.client(
+            "s3",
+            region_name=DYNAMODB_REGION,
+            config=Config(retries={"max_attempts": 5, "mode": "standard"}),
+        )
+    return _s3
 
 
 def _get_eb():
@@ -750,7 +765,7 @@ def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Opti
 def _cors_headers() -> Dict[str, str]:
     return {
         "Access-Control-Allow-Origin": CORS_ORIGIN,
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": (
             "Accept, Authorization, Content-Type, Cookie, X-Coordination-Callback-Token, "
             "X-Coordination-Internal-Key"
@@ -7692,6 +7707,230 @@ def _handle_sqs_callback(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2b: Governance, Projects (read-only), and Health HTTP handlers
+# ---------------------------------------------------------------------------
+
+
+def _handle_governance_hash() -> Dict[str, Any]:
+    """GET /api/v1/governance/hash — compute and return governance hash."""
+    try:
+        h = _compute_governance_hash_local()
+        return _response(200, {"governance_hash": h, "computed_at": _now_z()})
+    except Exception as exc:
+        logger.exception("governance hash computation failed")
+        return _error(500, f"Failed to compute governance hash: {exc}")
+
+
+def _governance_uri_from_file_name(file_name: str) -> Optional[str]:
+    fn = str(file_name or "").strip()
+    if fn == "agents.md":
+        return "governance://agents.md"
+    if fn.startswith("agents/"):
+        return f"governance://{fn}"
+    return None
+
+
+def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
+    """PUT /api/v1/governance/{file_name} — update governance file with archival."""
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return _error(400, "Invalid JSON body")
+
+    file_name = str(body.get("file_name") or "").strip()
+    content = str(body.get("content") or "")
+    change_summary = str(body.get("change_summary") or "").strip()
+    governance_hash = str(body.get("governance_hash") or "").strip()
+
+    if not file_name:
+        return _error(400, "file_name is required")
+    if not content:
+        return _error(400, "content is required")
+    if not change_summary:
+        return _error(400, "change_summary is required")
+    if not governance_hash:
+        return _error(400, "governance_hash is required")
+
+    uri = _governance_uri_from_file_name(file_name)
+    if not uri:
+        return _error(400, f"file_name '{file_name}' does not map to a valid governance:// URI. Must be 'agents.md' or start with 'agents/'.")
+
+    live_key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{file_name}"
+    s3 = _get_s3()
+
+    # Archive current version if present
+    archive_key = None
+    existing_content: Optional[bytes] = None
+    try:
+        existing = s3.get_object(Bucket=S3_BUCKET, Key=live_key)
+        existing_content = existing["Body"].read()
+    except s3.exceptions.NoSuchKey:
+        logger.info("[GOVERNANCE] No existing version to archive for %s", uri)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "NoSuchKey":
+            logger.info("[GOVERNANCE] No existing version to archive for %s", uri)
+        else:
+            logger.exception("Failed to read existing governance file")
+            return _error(500, f"Failed to read existing governance file for archival: {exc}")
+    except Exception as exc:
+        logger.exception("Failed to read existing governance file")
+        return _error(500, f"Failed to read existing governance file for archival: {exc}")
+
+    if existing_content is not None:
+        timestamp = _now_z().replace(":", "-")
+        archive_key = f"{S3_GOVERNANCE_HISTORY_PREFIX.rstrip('/')}/{file_name}/{timestamp}.md"
+        try:
+            s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=archive_key,
+                Body=existing_content,
+                ContentType="text/markdown; charset=utf-8",
+                Metadata={
+                    "change_summary": change_summary[:256],
+                    "archived_at": _now_z(),
+                    "previous_hash": hashlib.sha256(existing_content).hexdigest(),
+                },
+            )
+            logger.info("[GOVERNANCE] Archived %s -> s3://%s/%s", uri, S3_BUCKET, archive_key)
+        except Exception as exc:
+            logger.exception("Failed to archive governance file")
+            return _error(500, f"Failed to archive existing governance file; update aborted: {exc}")
+
+    # Write new content to live path
+    content_bytes = content.encode("utf-8")
+    new_hash = hashlib.sha256(content_bytes).hexdigest()
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=live_key,
+            Body=content_bytes,
+            ContentType="text/markdown; charset=utf-8",
+            Metadata={
+                "change_summary": change_summary[:256],
+                "updated_at": _now_z(),
+                "content_sha256": new_hash,
+            },
+        )
+    except Exception as exc:
+        logger.exception("Failed to write governance file to S3")
+        return _error(500, f"Failed to write governance file to S3: {exc}")
+
+    # Recompute governance hash after update
+    new_governance_hash = _compute_governance_hash_local()
+    logger.info("[GOVERNANCE] Updated %s — new governance_hash: %s", uri, new_governance_hash)
+
+    result = {
+        "status": "updated",
+        "uri": uri,
+        "s3_key": live_key,
+        "content_hash": new_hash,
+        "content_size_bytes": len(content_bytes),
+        "governance_hash": new_governance_hash,
+        "updated_at": _now_z(),
+    }
+    if archive_key:
+        result["archived_to"] = f"s3://{S3_BUCKET}/{archive_key}"
+
+    return _response(200, result)
+
+
+def _handle_projects_list(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/projects — list projects (read-only)."""
+    qs = event.get("queryStringParameters") or {}
+    status_filter = (qs.get("status") or "").strip()
+    active_filter = (qs.get("active") or "").strip().lower()
+
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {"TableName": PROJECTS_TABLE}
+
+    filter_parts: List[str] = []
+    expr_vals: Dict[str, Any] = {}
+
+    if status_filter:
+        filter_parts.append("#st = :status")
+        expr_vals[":status"] = _serialize(status_filter)
+    elif active_filter in ("true", "1"):
+        filter_parts.append("#st = :active_prod")
+        expr_vals[":active_prod"] = _serialize("active_production")
+
+    if filter_parts:
+        scan_kwargs["FilterExpression"] = " AND ".join(filter_parts)
+        scan_kwargs["ExpressionAttributeValues"] = expr_vals
+        scan_kwargs["ExpressionAttributeNames"] = {"#st": "status"}
+
+    try:
+        resp = ddb.scan(**scan_kwargs)
+        items = [_deserialize(i) for i in resp.get("Items", [])]
+        while resp.get("LastEvaluatedKey"):
+            scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+            resp = ddb.scan(**scan_kwargs)
+            items.extend([_deserialize(i) for i in resp.get("Items", [])])
+    except Exception as exc:
+        logger.exception("Failed to scan projects table")
+        return _error(500, f"Failed to list projects: {exc}")
+
+    for item in items:
+        if "project_id" in item and "name" not in item:
+            item["name"] = item["project_id"]
+
+    return _response(200, {"projects": items, "count": len(items)})
+
+
+def _handle_projects_get(project_id: str) -> Dict[str, Any]:
+    """GET /api/v1/projects/{project_id} — get single project (read-only)."""
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=PROJECTS_TABLE,
+            Key={"project_id": _serialize(project_id)},
+        )
+    except Exception as exc:
+        logger.exception("Failed to get project %s", project_id)
+        return _error(500, f"Failed to get project: {exc}")
+
+    item = resp.get("Item")
+    if not item:
+        return _error(404, f"Project '{project_id}' not found")
+
+    project = _deserialize(item)
+    if "project_id" in project and "name" not in project:
+        project["name"] = project["project_id"]
+
+    return _response(200, {"project": project})
+
+
+def _handle_health() -> Dict[str, Any]:
+    """GET /api/v1/health — connection health check."""
+    health: Dict[str, Any] = {}
+
+    # DynamoDB - tracker table
+    try:
+        ddb = _get_ddb()
+        ddb.describe_table(TableName=TRACKER_TABLE)
+        health["dynamodb"] = "ok"
+    except Exception as exc:
+        health["dynamodb"] = f"unreachable: {exc}"
+
+    # S3
+    try:
+        s3 = _get_s3()
+        s3.head_bucket(Bucket=S3_BUCKET)
+        health["s3"] = "ok"
+    except Exception as exc:
+        health["s3"] = f"unreachable: {exc}"
+
+    # Governance hash
+    try:
+        gov_hash = _compute_governance_hash_local()
+        health["governance_hash"] = gov_hash
+    except Exception as exc:
+        health["governance_hash"] = f"error: {exc}"
+
+    health["checked_at"] = _now_z()
+    return _response(200, health)
+
+
+# ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
 
@@ -7729,6 +7968,10 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if method == "GET" and path == "/api/v1/coordination/capabilities":
         return _handle_capabilities()
 
+    # GET /api/v1/health is intentionally public.
+    if method == "GET" and path == "/api/v1/health":
+        return _handle_health()
+
     # POST /api/v1/coordination/requests/{requestId}/callback
     # Callback auth is enforced via per-request callback token.
     match_callback = re.fullmatch(r"/api/v1/coordination/requests/([A-Za-z0-9\-]+)/callback", path)
@@ -7740,6 +7983,30 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     claims, auth_err = _authenticate(event)
     if auth_err:
         return auth_err
+
+    # --- Phase 2b: Governance routes (auth required) ---
+
+    # GET /api/v1/governance/hash
+    if method == "GET" and path == "/api/v1/governance/hash":
+        return _handle_governance_hash()
+
+    # PUT /api/v1/governance/{file_name...}
+    match_gov_update = re.fullmatch(r"/api/v1/governance/(.+)", path)
+    if method == "PUT" and match_gov_update:
+        return _handle_governance_update(event)
+
+    # --- Phase 2b: Projects routes (auth required, read-only) ---
+
+    # GET /api/v1/coordination/projects
+    if method == "GET" and path == "/api/v1/coordination/projects":
+        return _handle_projects_list(event)
+
+    # GET /api/v1/coordination/projects/{projectId}
+    match_project = re.fullmatch(r"/api/v1/coordination/projects/([a-z0-9_-]+)", path)
+    if method == "GET" and match_project:
+        return _handle_projects_get(match_project.group(1))
+
+    # --- Existing coordination routes ---
 
     # GET/POST /api/v1/coordination/mcp
     # Auth required (Cognito cookie or X-Coordination-Internal-Key).
