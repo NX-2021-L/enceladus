@@ -1,0 +1,33 @@
+name: Sync Architecture Doc to Docstore
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/ARCHITECTURE.md']
+  workflow_dispatch:
+
+concurrency:
+  group: sync-architecture-doc-main
+
+jobs:
+  sync:
+    name: Sync ARCHITECTURE.md to Enceladus Docstore
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Sync to docstore
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+          ARCHITECTURE_DOC_ID: DOC-BC7A97216DF8
+        run: python tools/sync_architecture_doc.py
