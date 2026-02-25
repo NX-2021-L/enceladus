@@ -2,11 +2,11 @@
 """devops-feed-publisher Lambda — Event-driven mobile feed publisher.
 
 Triggered by SQS FIFO queue (devops-feed-publish-queue.fifo) which receives
-events from an EventBridge Pipe connected to DynamoDB Streams on the
-devops-project-tracker table.
+events from EventBridge Pipes connected to DynamoDB Streams on the
+devops-project-tracker and documents tables.
 
 Flow:
-  DynamoDB Streams → EventBridge Pipe → SQS FIFO (5-min visibility = debounce)
+  DynamoDB Streams → EventBridge Pipes → SQS FIFO (5-min visibility = debounce)
   → This Lambda → generate mobile feeds → publish to S3 → CloudFront invalidation
   → write analytics sync-stage JSON → SNS signal
   → per-project EventBridge events (Trino/Superset analytics pipeline)
