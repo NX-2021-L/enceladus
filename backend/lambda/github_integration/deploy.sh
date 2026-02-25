@@ -12,7 +12,7 @@ GITHUB_APP_ID="${GITHUB_APP_ID:-}"
 GITHUB_INSTALLATION_ID="${GITHUB_INSTALLATION_ID:-}"
 ALLOWED_REPOS="${ALLOWED_REPOS:-NX-2021-L/enceladus}"
 GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET:-devops/github-app/webhook-secret}"
-TRACKER_API_BASE="${TRACKER_API_BASE:-https://jreese.net/api/v1/tracker}"
+TRACKER_API_BASE="${TRACKER_API_BASE:-https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
