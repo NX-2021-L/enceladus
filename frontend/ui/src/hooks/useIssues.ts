@@ -19,7 +19,7 @@ function parseSort(raw?: string): { field: string; dir: 1 | -1 } {
 
 export function useIssues(filters?: IssueFilters) {
   // Live data from the global delta-polling provider (ENC-TSK-609).
-  const { issues: liveIssues, isPending: livePending, isError: liveError } = useLiveFeed()
+  const { issues: liveIssues } = useLiveFeed()
 
   // S3 feed as fallback for initial load before LiveFeedProvider hydrates.
   const s3Query = useQuery({ queryKey: feedKeys.issues, queryFn: fetchIssues })

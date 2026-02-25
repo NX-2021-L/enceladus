@@ -58,21 +58,22 @@ const FULL_REFRESH_AGE_MS = 30 * 60 * 1_000 // 30 min
  * Upsert `delta` into `existing` by `idKey`, removing any IDs in `closedIds`.
  * Returns a new array only when contents actually changed.
  */
-function mergeById<T extends Record<string, unknown>>(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mergeById<T extends Record<string, any>>(
   existing: T[],
   delta: T[],
-  idKey: string,
+  idKey: keyof T & string,
   closedIds: Set<string>,
 ): T[] {
   if (delta.length === 0 && closedIds.size === 0) return existing
 
   const map = new Map<string, T>()
   for (const item of existing) {
-    const id = item[idKey] as string
+    const id = String(item[idKey])
     if (!closedIds.has(id)) map.set(id, item)
   }
   for (const item of delta) {
-    map.set(item[idKey] as string, item)
+    map.set(String(item[idKey]), item)
   }
 
   const merged = Array.from(map.values())
