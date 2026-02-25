@@ -1,0 +1,77 @@
+name: API MCP Backend Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/coordination_api/**"
+      - "tools/enceladus-mcp-server/**"
+      - ".github/workflows/api-mcp-backend-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  DEPLOY_FUNCTION_NAME: devops-coordination-api
+
+jobs:
+  deploy:
+    name: Deploy Coordination API + MCP Runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: api-mcp-backend-deploy-main
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC role)
+        id: aws_oidc
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (static keys fallback)
+        if: ${{ steps.aws_oidc.outcome != 'success' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy coordination API and embedded MCP server runtime
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          set -euo pipefail
+          chmod +x backend/lambda/coordination_api/deploy.sh
+          backend/lambda/coordination_api/deploy.sh
+
+      - name: Validate deployed Lambda state
+        run: |
+          set -euo pipefail
+          aws lambda get-function-configuration \
+            --region "${AWS_REGION}" \
+            --function-name "${DEPLOY_FUNCTION_NAME}" \
+            --query '{FunctionName:FunctionName,LastModified:LastModified,Runtime:Runtime,State:State,LastUpdateStatus:LastUpdateStatus}' \
+            --output table
