@@ -254,6 +254,8 @@ ensure_api_route() {
   local routes=(
     "POST /api/v1/github/issues"
     "POST /api/v1/github/webhook"
+    "GET /api/v1/github/projects"
+    "POST /api/v1/github/projects/sync"
     "OPTIONS /api/v1/github/{proxy+}"
   )
 

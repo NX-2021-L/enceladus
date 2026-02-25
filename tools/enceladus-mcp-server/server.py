@@ -3108,6 +3108,72 @@ async def list_tools() -> list[Tool]:
                 "required": ["owner", "repo", "title"],
             },
         ),
+        # ---------------------------------------------------------------
+        # GitHub Projects v2 (ENC-FTR-021 Phase 4)
+        # ---------------------------------------------------------------
+        Tool(
+            name="github_projects_sync",
+            description=(
+                "Add a GitHub issue to a GitHub Projects v2 board and optionally set "
+                "Status and Priority fields. Requires the issue to already exist. "
+                "Use github_create_issue first if needed."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "owner": {
+                        "type": "string",
+                        "description": "GitHub repository owner (organization or user).",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "GitHub repository name.",
+                    },
+                    "issue_number": {
+                        "type": "integer",
+                        "description": "GitHub issue number.",
+                    },
+                    "issue_url": {
+                        "type": "string",
+                        "description": "GitHub issue URL (alternative to owner/repo/issue_number).",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "GitHub Projects v2 node ID (starts with PVT_). Get from github_projects_list.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Optional status to set (e.g., open, in_progress, closed).",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "Optional priority to set (e.g., P0, P1, P2).",
+                    },
+                },
+                "required": ["project_id"],
+            },
+        ),
+        Tool(
+            name="github_projects_list",
+            description=(
+                "List GitHub Projects v2 boards for an organization, including field "
+                "definitions and option IDs. Use to discover project_id (node ID) for "
+                "github_projects_sync."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "org": {
+                        "type": "string",
+                        "description": "GitHub organization login. Default: NX-2021-L.",
+                    },
+                    "include_closed": {
+                        "type": "boolean",
+                        "description": "Include closed projects. Default: false.",
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -4265,6 +4331,56 @@ async def _github_create_issue(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+async def _github_projects_sync(args: dict) -> list[TextContent]:
+    """Sync a GitHub issue to a Projects v2 board."""
+    project_id = str(args.get("project_id", "")).strip()
+    if not project_id:
+        return _result_text(_error_payload(
+            "INVALID_INPUT", "Field 'project_id' (Projects v2 node ID) is required.",
+        ))
+
+    payload: Dict[str, Any] = {"project_id": project_id}
+
+    owner = str(args.get("owner", "")).strip()
+    if owner:
+        payload["owner"] = owner
+    repo = str(args.get("repo", "")).strip()
+    if repo:
+        payload["repo"] = repo
+    issue_number = args.get("issue_number")
+    if issue_number is not None:
+        payload["issue_number"] = int(issue_number)
+    issue_url = str(args.get("issue_url", "")).strip()
+    if issue_url:
+        payload["issue_url"] = issue_url
+    status = str(args.get("status", "")).strip()
+    if status:
+        payload["status"] = status
+    priority = str(args.get("priority", "")).strip()
+    if priority:
+        payload["priority"] = priority
+
+    resp = _github_api_request("POST", "/projects/sync", payload=payload)
+    return _result_text(resp)
+
+
+async def _github_projects_list(args: dict) -> list[TextContent]:
+    """List GitHub Projects v2 for an organization."""
+    params = []
+    org = str(args.get("org", "")).strip()
+    if org:
+        params.append(f"org={org}")
+    if args.get("include_closed"):
+        params.append("include_closed=true")
+
+    path = "/projects"
+    if params:
+        path += "?" + "&".join(params)
+
+    resp = _github_api_request("GET", path)
+    return _result_text(resp)
+
+
 # -------------------------------------------------------------------
 # Handler dispatch map
 # -------------------------------------------------------------------
@@ -4303,6 +4419,8 @@ _TOOL_HANDLERS = {
     "dispatch_plan_generate": _dispatch_plan_generate,
     "dispatch_plan_dry_run": _dispatch_plan_dry_run,
     "github_create_issue": _github_create_issue,
+    "github_projects_sync": _github_projects_sync,
+    "github_projects_list": _github_projects_list,
 }
 
 
