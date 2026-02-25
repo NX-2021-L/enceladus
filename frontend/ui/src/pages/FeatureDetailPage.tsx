@@ -9,6 +9,7 @@ import { StatusChip } from '../components/shared/StatusChip'
 import { GitHubLinkBadge } from '../components/shared/GitHubLinkBadge'
 import { GitHubOverlay } from '../components/shared/GitHubOverlay'
 import { MarkdownRenderer } from '../components/shared/MarkdownRenderer'
+import { LifecycleActions } from '../components/shared/LifecycleActions'
 import { HistoryFeed } from '../components/shared/HistoryFeed'
 import { RelatedItems } from '../components/shared/RelatedItems'
 import type { RecordInfo } from '../components/shared/RelatedItems'
@@ -26,8 +27,6 @@ export function FeatureDetailPage() {
   const { allIssues } = useIssues()
   const { mutate, isPending: isMutating } = useRecordMutation()
 
-  const [confirming, setConfirming] = useState(false)
-  const [confirmingReopen, setConfirmingReopen] = useState(false)
   const [showNote, setShowNote] = useState(false)
   const [showGitHubLink, setShowGitHubLink] = useState(false)
   const [note, setNote] = useState('')
@@ -99,53 +98,6 @@ export function FeatureDetailPage() {
   if (isError) return <ErrorState />
   if (!feature) return <ErrorState message="Feature not found" />
 
-  const canClose = !['completed', 'closed'].includes(feature.status)
-  const canReopen = ['completed', 'closed'].includes(feature.status)
-
-  function handleReopen() {
-    setMutationError(null)
-    mutate(
-      { projectId: feature!.project_id, recordType: 'feature', recordId: feature!.feature_id, action: 'reopen' },
-      {
-        onSuccess: () => {
-          setConfirmingReopen(false)
-          setMutationSuccess('Feature reopened.')
-          setTimeout(() => setMutationSuccess(null), 3000)
-        },
-        onError: (err) => {
-          setConfirmingReopen(false)
-          setMutationError(
-            isMutationRetryExhaustedError(err)
-              ? err.toDebugString()
-              : (err.message ?? 'Reopen failed. Please try again.')
-          )
-        },
-      }
-    )
-  }
-
-  function handleClose() {
-    setMutationError(null)
-    mutate(
-      { projectId: feature!.project_id, recordType: 'feature', recordId: feature!.feature_id, action: 'close' },
-      {
-        onSuccess: () => {
-          setConfirming(false)
-          setMutationSuccess('Feature marked complete.')
-          setTimeout(() => setMutationSuccess(null), 3000)
-        },
-        onError: (err) => {
-          setConfirming(false)
-          setMutationError(
-            isMutationRetryExhaustedError(err)
-              ? err.toDebugString()
-              : (err.message ?? 'Close failed. Please try again.')
-          )
-        },
-      }
-    )
-  }
-
   function handleSubmitNote() {
     if (!note.trim()) return
     setMutationError(null)
@@ -215,59 +167,15 @@ export function FeatureDetailPage() {
         </div>
 
         {/* Action bar */}
-        <div className="flex items-center gap-2 mt-3">
-          {canClose && !confirming && (
-            <button
-              onClick={() => setConfirming(true)}
-              className="text-xs px-3 py-1.5 rounded-full bg-emerald-900/60 text-emerald-300 border border-emerald-700 hover:bg-emerald-800/70 transition-colors"
-            >
-              ✓ Complete
-            </button>
-          )}
-          {confirming && (
-            <span className="text-xs text-slate-300 flex items-center gap-2">
-              Mark as completed?
-              <button
-                onClick={handleClose}
-                disabled={isMutating}
-                className="text-emerald-400 hover:text-emerald-300 disabled:opacity-50"
-              >
-                {isMutating ? 'Saving…' : 'Confirm'}
-              </button>
-              <button
-                onClick={() => setConfirming(false)}
-                className="text-slate-500 hover:text-slate-400"
-              >
-                Cancel
-              </button>
-            </span>
-          )}
-          {canReopen && !confirmingReopen && (
-            <button
-              onClick={() => setConfirmingReopen(true)}
-              className="text-xs px-3 py-1.5 rounded-full bg-amber-900/60 text-amber-300 border border-amber-700 hover:bg-amber-800/70 transition-colors"
-            >
-              Reopen
-            </button>
-          )}
-          {confirmingReopen && (
-            <span className="text-xs text-slate-300 flex items-center gap-2">
-              Reopen this feature?
-              <button
-                onClick={handleReopen}
-                disabled={isMutating}
-                className="text-amber-400 hover:text-amber-300 disabled:opacity-50"
-              >
-                {isMutating ? 'Reopening…' : 'Confirm'}
-              </button>
-              <button
-                onClick={() => setConfirmingReopen(false)}
-                className="text-slate-500 hover:text-slate-400"
-              >
-                Cancel
-              </button>
-            </span>
-          )}
+        <div className="flex items-center gap-2 mt-3 flex-wrap">
+          <LifecycleActions
+            recordType="feature"
+            currentStatus={feature.status}
+            projectId={feature.project_id}
+            recordId={feature.feature_id}
+            onSuccess={(msg) => { setMutationSuccess(msg); setTimeout(() => setMutationSuccess(null), 3000) }}
+            onError={(msg) => setMutationError(msg)}
+          />
           <button
             onClick={() => { setShowNote(true); setMutationError(null) }}
             className="text-xs px-3 py-1.5 rounded-full bg-slate-700 text-slate-300 border border-slate-600 hover:bg-slate-600 transition-colors"

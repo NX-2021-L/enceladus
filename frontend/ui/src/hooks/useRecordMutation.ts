@@ -22,6 +22,7 @@ interface MutationVars {
   note?: string
   field?: string
   value?: string
+  transitionEvidence?: Record<string, unknown>
 }
 
 /**
@@ -52,31 +53,32 @@ export function useRecordMutation() {
   }
 
   return useMutation<MutationResult, Error, MutationVars, { snapshot: unknown; feedKey: readonly unknown[] }>({
-    mutationFn: ({ projectId, recordType, recordId, action, note, field, value }) => {
+    mutationFn: ({ projectId, recordType, recordId, action, note, field, value, transitionEvidence }) => {
       if (action === 'close') return closeRecord(projectId, recordType, recordId)
       if (action === 'reopen') return reopenRecord(projectId, recordType, recordId)
-      if (action === 'set_field') return setField(projectId, recordType, recordId, field!, value!)
+      if (action === 'set_field') {
+        const extras = transitionEvidence ? { transition_evidence: transitionEvidence } : undefined
+        return setField(projectId, recordType, recordId, field!, value!, extras)
+      }
       return submitNote(projectId, recordType, recordId, note ?? '')
     },
 
-    onMutate: async ({ recordType, recordId, action }) => {
-      if (action !== 'close' && action !== 'reopen') return { snapshot: undefined, feedKey: [] }
+    onMutate: async ({ recordType, recordId, action, field, value }) => {
+      // Determine target status for optimistic update
+      let targetStatus: string | undefined
+      if (action === 'close') {
+        const closedStatusMap: Record<RecordType, string> = { task: 'closed', issue: 'closed', feature: 'completed' }
+        targetStatus = closedStatusMap[recordType]
+      } else if (action === 'reopen') {
+        const defaultStatusMap: Record<RecordType, string> = { task: 'open', issue: 'open', feature: 'planned' }
+        targetStatus = defaultStatusMap[recordType]
+      } else if (action === 'set_field' && field === 'status' && value) {
+        targetStatus = value
+      }
 
-      // Choose the correct feed key and field name
-      const closedStatusMap: Record<RecordType, string> = {
-        task: 'closed',
-        issue: 'closed',
-        feature: 'completed',
-      }
-      const defaultStatusMap: Record<RecordType, string> = {
-        task: 'open',
-        issue: 'open',
-        feature: 'planned',
-      }
+      if (!targetStatus) return { snapshot: undefined, feedKey: [] }
+
       const feedKey = feedKeyMap[recordType]
-      const targetStatus = action === 'close'
-        ? closedStatusMap[recordType]
-        : defaultStatusMap[recordType]
       const idField = idFieldMap[recordType]
 
       // Cancel any in-flight refetches so they don't clobber our optimistic update
@@ -109,12 +111,13 @@ export function useRecordMutation() {
       }
     },
 
-    onSuccess: (data, { recordType, recordId, action }) => {
+    onSuccess: (data, { recordType, recordId, action, field }) => {
       const feedKey = feedKeyMap[recordType]
+      const isStatusChange = action === 'close' || action === 'reopen' || (action === 'set_field' && field === 'status')
 
       // Keep local status aligned with mutation response and avoid immediate
       // overwrite by stale S3 feeds while sync propagation catches up.
-      if ((action === 'close' || action === 'reopen') && data.updated_status) {
+      if (isStatusChange && data.updated_status) {
         const idField = idFieldMap[recordType]
         const listKey = pluralMap[recordType]
         qc.setQueryData(feedKey, (old: any) => {
