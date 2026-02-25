@@ -37,6 +37,7 @@ import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import urllib.parse
 import urllib.request
 from urllib.parse import unquote
 
@@ -61,6 +62,7 @@ PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+GITHUB_INTEGRATION_API_BASE = os.environ.get("GITHUB_INTEGRATION_API_BASE", "")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 MAX_NOTE_LENGTH = 2000
 
@@ -78,19 +80,46 @@ _VALID_CATEGORIES = {
     "issue": {"bug", "debt", "risk", "security", "performance"},
 }
 
-# Status transition rules
+# Status transition rules — strictly sequential, one step forward only (ENC-FTR-022)
 _VALID_TRANSITIONS = {
     "feature": {
-        "planned": {"in-progress", "completed"},
+        "planned": {"in-progress"},
         "in-progress": {"completed"},
+        "completed": {"production"},
+        "production": {"deprecated"},
     },
     "task": {
-        "open": {"in-progress", "closed"},
-        "in-progress": {"closed"},
+        "open": {"in-progress"},
+        "in-progress": {"coding-complete"},
+        "coding-complete": {"committed"},
+        "committed": {"pushed"},
+        "pushed": {"merged-main"},
+        "merged-main": {"deployed"},
+        "deployed": {"closed"},
     },
     "issue": {
         "open": {"in-progress", "closed"},
         "in-progress": {"closed"},
+    },
+}
+
+# Backward (revert) transitions — allowed only with transition_evidence.revert_reason
+_REVERT_TRANSITIONS = {
+    "feature": {
+        "in-progress": {"planned"},
+        "completed": {"in-progress"},
+        "production": {"completed"},
+        "deprecated": {"production"},
+    },
+    "task": {
+        "in-progress": {"open"},
+        "coding-complete": {"in-progress"},
+        "committed": {"coding-complete"},
+        "pushed": {"committed"},
+        "merged-main": {"pushed"},
+    },
+    "issue": {
+        "in-progress": {"open"},
     },
 }
 
@@ -963,6 +992,117 @@ def _get_prefix_map_cached() -> Dict[str, str]:
         return _prefix_map_cache or {}
 
 
+# ---------------------------------------------------------------------------
+# Lifecycle governance helpers (ENC-FTR-022)
+# ---------------------------------------------------------------------------
+
+
+def _validate_commit_via_github(owner: str, repo: str, sha: str) -> Tuple[bool, str]:
+    """Call github_integration Lambda's /commits/validate endpoint."""
+    if not GITHUB_INTEGRATION_API_BASE:
+        logger.warning("GITHUB_INTEGRATION_API_BASE not set; skipping commit validation")
+        return True, "validation_skipped"
+    url = (
+        f"{GITHUB_INTEGRATION_API_BASE}/commits/validate"
+        f"?owner={urllib.parse.quote(owner)}"
+        f"&repo={urllib.parse.quote(repo)}"
+        f"&sha={urllib.parse.quote(sha)}"
+    )
+    req = urllib.request.Request(url, method="GET", headers={
+        "X-Coordination-Internal-Key": COORDINATION_INTERNAL_API_KEY,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            if data.get("valid"):
+                return True, data.get("message", "")
+            return False, data.get("reason", "commit_not_found")
+    except Exception as exc:
+        logger.error("Commit validation call failed: %s", exc)
+        return False, f"validation_service_error: {exc}"
+
+
+def _query_all_project_tasks(project_id: str) -> List[Dict]:
+    """Query all task records for a project. Returns deserialized items."""
+    ddb = _get_ddb()
+    items: List[Dict] = []
+    kwargs = {
+        "TableName": DYNAMODB_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
+        "ExpressionAttributeValues": {
+            ":pid": {"S": project_id},
+            ":prefix": {"S": "task#"},
+        },
+        "ProjectionExpression": "record_id, item_id, #s, parent",
+        "ExpressionAttributeNames": {"#s": "status"},
+    }
+    while True:
+        resp = ddb.query(**kwargs)
+        for raw in resp.get("Items", []):
+            items.append(_deser_item(raw))
+        if "LastEvaluatedKey" not in resp:
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return items
+
+
+def _validate_feature_production_gate(project_id: str, feature_data: Dict) -> Optional[Dict]:
+    """Enforce: feature -> production requires >=1 child task, all deployed/closed recursively."""
+    primary = (feature_data.get("primary_task") or "").strip()
+    related = feature_data.get("related_task_ids") or []
+    root_ids: set = set()
+    if primary:
+        root_ids.add(primary)
+    for r in related:
+        rid = r.strip() if isinstance(r, str) else ""
+        if rid:
+            root_ids.add(rid)
+
+    if not root_ids:
+        return _error(400,
+            "Cannot transition to 'production': feature has no child tasks. "
+            "Set primary_task or related_task_ids first.")
+
+    all_tasks = _query_all_project_tasks(project_id)
+    task_map = {t.get("item_id", ""): t for t in all_tasks}
+
+    # Build parent -> children graph
+    parent_children: Dict[str, List[str]] = {}
+    for t in all_tasks:
+        p = (t.get("parent") or "").strip()
+        if p:
+            parent_children.setdefault(p, []).append(t.get("item_id", ""))
+
+    # BFS: expand root_ids through parent->child relationships
+    visited: set = set()
+    queue = list(root_ids)
+    while queue:
+        tid = queue.pop(0)
+        if tid in visited:
+            continue
+        visited.add(tid)
+        for child_id in parent_children.get(tid, []):
+            queue.append(child_id)
+
+    # Check all visited tasks are deployed or closed
+    not_ready = []
+    for tid in sorted(visited):
+        task = task_map.get(tid)
+        if not task:
+            not_ready.append(f"{tid} (not_found)")
+            continue
+        status = (task.get("status") or "unknown").strip().lower()
+        if status not in ("deployed", "closed"):
+            not_ready.append(f"{tid} ({status})")
+
+    if not_ready:
+        return _error(400,
+            f"Cannot transition to 'production': "
+            f"{len(not_ready)} task(s) not deployed/closed:\n"
+            + "\n".join(not_ready[:20]))
+    return None
+
+
 def _handle_update_field(project_id: str, record_type: str, record_id: str, body: Dict) -> Dict:
     """PATCH /{project}/{type}/{id} — update a single field on a record.
 
@@ -1009,15 +1149,63 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
         current_status = item_data.get("status", "").strip().lower()
         new_lower = value.strip().lower()
         closing = new_lower in ("closed", "completed", "complete")
+        transition_evidence = body.get("transition_evidence", {})
 
-        # Enforce valid transitions
+        # Enforce valid transitions — forward + revert (ENC-FTR-022)
         if current_status != new_lower:
             type_transitions = _VALID_TRANSITIONS.get(record_type, {})
-            valid_next = type_transitions.get(current_status)
-            if valid_next is not None and new_lower not in valid_next:
+            valid_next = type_transitions.get(current_status, set())
+            revert_targets = _REVERT_TRANSITIONS.get(record_type, {}).get(current_status, set())
+
+            if new_lower in valid_next:
+                pass  # valid forward transition
+            elif new_lower in revert_targets:
+                revert_reason = transition_evidence.get("revert_reason", "").strip()
+                if not revert_reason:
+                    return _error(400,
+                        f"Reverting {record_type} from '{current_status}' to '{new_lower}' "
+                        f"requires transition_evidence.revert_reason")
+            elif valid_next or revert_targets:
                 return _error(400,
                     f"Invalid status transition for {record_type}: "
-                    f"'{current_status}' -> '{value}'. Valid next: {sorted(valid_next)}")
+                    f"'{current_status}' -> '{value}'. "
+                    f"Valid forward: {sorted(valid_next)}. "
+                    f"Valid revert (with revert_reason): {sorted(revert_targets)}")
+
+        # --- Evidence-gated forward transitions (ENC-FTR-022) ---
+        if record_type == "task" and new_lower == "pushed":
+            commit_sha = transition_evidence.get("commit_sha", "").strip()
+            if not commit_sha:
+                return _error(400,
+                    "Cannot transition to 'pushed': transition_evidence.commit_sha required")
+            if not re.match(r'^[0-9a-f]{40}$', commit_sha.lower()):
+                return _error(400,
+                    f"Invalid commit_sha: expected 40-char hex. Got: '{commit_sha}'")
+            owner = transition_evidence.get("owner", "NX-2021-L")
+            repo = transition_evidence.get("repo", "enceladus")
+            valid, reason = _validate_commit_via_github(owner, repo, commit_sha)
+            if not valid:
+                return _error(400,
+                    f"GitHub commit validation failed for {commit_sha}: {reason}")
+
+        if record_type == "task" and new_lower == "merged-main":
+            merge_evidence = transition_evidence.get("merge_evidence", "").strip()
+            if not merge_evidence:
+                return _error(400,
+                    "Cannot transition to 'merged-main': "
+                    "transition_evidence.merge_evidence required")
+
+        if record_type == "task" and new_lower == "deployed":
+            deployment_ref = transition_evidence.get("deployment_ref", "").strip()
+            if not deployment_ref:
+                return _error(400,
+                    "Cannot transition to 'deployed': "
+                    "transition_evidence.deployment_ref required")
+
+        if record_type == "feature" and new_lower == "production":
+            prod_err = _validate_feature_production_gate(project_id, item_data)
+            if prod_err:
+                return prod_err
 
         # Hard enforcement of governed fields on close
         if record_type == "feature" and closing:
@@ -1140,27 +1328,64 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
     # --- Generic field update ---
     note_val = value if len(str(value)) <= 100 else str(value)[:100] + "..."
     note_text = f"Field '{field}' set to '{note_val}'{note_suffix}"
+
+    # Enrich worklog with evidence details (ENC-FTR-022)
+    transition_evidence = body.get("transition_evidence", {})
+    if field == "status" and transition_evidence:
+        evidence_parts = []
+        if transition_evidence.get("commit_sha"):
+            evidence_parts.append(f"commit: {transition_evidence['commit_sha'][:12]}")
+        if transition_evidence.get("deployment_ref"):
+            evidence_parts.append(f"deploy: {transition_evidence['deployment_ref']}")
+        if transition_evidence.get("merge_evidence"):
+            evidence_parts.append(f"merge: {transition_evidence['merge_evidence'][:80]}")
+        if transition_evidence.get("revert_reason"):
+            evidence_parts.append(f"revert: {transition_evidence['revert_reason'][:80]}")
+        if evidence_parts:
+            note_text += f" [evidence: {', '.join(evidence_parts)}]"
+
     history_entry = {"M": {
         "timestamp": _ser_s(now), "status": _ser_s("worklog"),
         "description": _ser_s(note_text),
     }}
 
+    # Build extra SET clauses for evidence fields (ENC-FTR-022)
+    extra_sets = []
+    extra_vals = {}
+    if field == "status" and transition_evidence:
+        if transition_evidence.get("commit_sha"):
+            extra_sets.append("commit_sha = :commit_sha")
+            extra_vals[":commit_sha"] = {"S": transition_evidence["commit_sha"].strip().lower()}
+        if transition_evidence.get("deployment_ref"):
+            extra_sets.append("deployment_ref = :deploy_ref")
+            extra_vals[":deploy_ref"] = {"S": transition_evidence["deployment_ref"].strip()}
+        if transition_evidence.get("merge_evidence"):
+            extra_sets.append("merge_evidence = :merge_ev")
+            extra_vals[":merge_ev"] = {"S": transition_evidence["merge_evidence"].strip()}
+
+    update_expr = (
+        "SET #fld = :val, updated_at = :now, last_update_note = :note, "
+        "write_source = :wsrc, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+        "history = list_append(if_not_exists(history, :empty), :hentry)"
+    )
+    if extra_sets:
+        update_expr += ", " + ", ".join(extra_sets)
+
+    attr_values = {
+        ":val": _ser_value(value), ":now": _ser_s(now),
+        ":note": _ser_s(note_text), ":wsrc": _build_write_source(body),
+        ":zero": {"N": "0"}, ":one": {"N": "1"},
+        ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
+    }
+    attr_values.update(extra_vals)
+
     try:
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression=(
-                "SET #fld = :val, updated_at = :now, last_update_note = :note, "
-                "write_source = :wsrc, "
-                "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                "history = list_append(if_not_exists(history, :empty), :hentry)"
-            ),
+            UpdateExpression=update_expr,
             ExpressionAttributeNames={"#fld": field},
-            ExpressionAttributeValues={
-                ":val": _ser_value(value), ":now": _ser_s(now),
-                ":note": _ser_s(note_text), ":wsrc": _build_write_source(body),
-                ":zero": {"N": "0"}, ":one": {"N": "1"},
-                ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
-            },
+            ExpressionAttributeValues=attr_values,
         )
     except Exception as exc:
         logger.error("update_item failed: %s", exc)

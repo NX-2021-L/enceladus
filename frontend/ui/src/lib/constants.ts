@@ -25,6 +25,13 @@ export const STATUS_COLORS: Record<string, string> = {
   blocked: 'bg-red-500/20 text-red-400',
   active: 'bg-emerald-500/20 text-emerald-400',
   archived: 'bg-slate-500/20 text-slate-400',
+  'coding-complete': 'bg-cyan-500/20 text-cyan-400',
+  committed: 'bg-indigo-500/20 text-indigo-400',
+  pushed: 'bg-violet-500/20 text-violet-400',
+  'merged-main': 'bg-fuchsia-500/20 text-fuchsia-400',
+  deployed: 'bg-emerald-500/20 text-emerald-400',
+  production: 'bg-green-500/20 text-green-400',
+  deprecated: 'bg-slate-500/20 text-slate-400',
 }
 
 export const PRIORITY_COLORS: Record<string, string> = {
@@ -55,11 +62,18 @@ export const STATUS_LABELS: Record<string, string> = {
   blocked: 'Blocked',
   active: 'Active',
   archived: 'Archived',
+  'coding-complete': 'Coding Complete',
+  committed: 'Committed',
+  pushed: 'Pushed',
+  'merged-main': 'Merged (Main)',
+  deployed: 'Deployed',
+  production: 'Production',
+  deprecated: 'Deprecated',
 }
 
-export const TASK_STATUSES = ['open', 'in_progress', 'planned', 'closed'] as const
-export const ISSUE_STATUSES = ['open', 'closed'] as const
-export const FEATURE_STATUSES = ['planned', 'in_progress', 'completed', 'closed'] as const
+export const TASK_STATUSES = ['open', 'in-progress', 'coding-complete', 'committed', 'pushed', 'merged-main', 'deployed', 'closed'] as const
+export const ISSUE_STATUSES = ['open', 'in-progress', 'closed'] as const
+export const FEATURE_STATUSES = ['planned', 'in-progress', 'completed', 'production', 'deprecated'] as const
 export const PRIORITIES = ['P0', 'P1', 'P2', 'P3'] as const
 export const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
 
