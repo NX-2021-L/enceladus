@@ -34,3 +34,10 @@ Compared deployed Lambda `lambda_function.py` in `us-west-2` against local sourc
 
 Local files for `DIFF` entries had newer local mtimes than currently deployed functions at migration time, so this repo import used local canonical source from `projects/devops/tools/lambda/*`.
 
+## Update (2026-02-24)
+
+`ENC-TSK-325` established a production-safe API+MCP deployment process without relying on the non-UI deployment-manager executor path:
+
+- Added `.github/workflows/api-mcp-backend-deploy.yml` to deploy `devops-coordination-api` from `main` when API/MCP runtime sources change.
+- Codified runbook in `backend/API_MCP_DEPLOY_PROCESS.md`.
+- Updated backend deployment policy references in `backend/README.md`.
