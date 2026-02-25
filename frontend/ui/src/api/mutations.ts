@@ -84,7 +84,7 @@ async function mutateWithRetry(
   projectId: string,
   recordType: 'task' | 'issue' | 'feature',
   recordId: string,
-  body: Record<string, string | undefined>,
+  body: Record<string, unknown>,
 ): Promise<MutationResult> {
   const url = `${BASE}/${projectId}/${recordType}/${recordId}`
   const attempts: MutationAttempt[] = []
@@ -226,6 +226,7 @@ export async function setField(
   recordId: string,
   field: string,
   value: string,
+  extras?: Record<string, unknown>,
 ): Promise<MutationResult> {
-  return mutateWithRetry(projectId, recordType, recordId, { field, value })
+  return mutateWithRetry(projectId, recordType, recordId, { field, value, ...extras })
 }
