@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { Outlet } from 'react-router-dom'
 import { Header } from './Header'
 import { BottomNav } from './BottomNav'
+import { LiveFeedProvider } from '../../contexts/LiveFeedContext'
 import { useSessionLifecycle } from '../../hooks/useSessionLifecycle'
 import { useSessionTimer } from '../../hooks/useSessionTimer'
 import { useAuthState } from '../../lib/authState'
@@ -34,9 +35,11 @@ export function AppShell() {
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
       <Header />
-      <main className="flex-1 pb-16 overflow-y-auto">
-        <Outlet />
-      </main>
+      <LiveFeedProvider>
+        <main className="flex-1 pb-16 overflow-y-auto">
+          <Outlet />
+        </main>
+      </LiveFeedProvider>
       <BottomNav />
     </div>
   )

@@ -21,10 +21,21 @@ export interface LiveFeedResponse {
   features: Feature[]
 }
 
+export interface LiveFeedDeltaResponse extends LiveFeedResponse {
+  closed_ids?: string[]
+}
+
 export async function fetchLiveFeed(): Promise<LiveFeedResponse> {
   const url = '/api/v1/feed'
   const res = await fetchWithAuth(url)
   if (!res.ok) throw new Error(`Failed to fetch live feed: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchLiveFeedDelta(since: string): Promise<LiveFeedDeltaResponse> {
+  const url = `/api/v1/feed?since=${encodeURIComponent(since)}`
+  const res = await fetchWithAuth(url)
+  if (!res.ok) throw new Error(`Failed to fetch feed delta: ${res.status}`)
   return res.json()
 }
 

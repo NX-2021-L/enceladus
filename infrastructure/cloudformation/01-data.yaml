@@ -296,7 +296,7 @@ Resources:
       QueueName: devops-feed-publish-queue.fifo
       FifoQueue: true
       ContentBasedDeduplication: true
-      VisibilityTimeout: 900
+      VisibilityTimeout: 60
       MessageRetentionPeriod: 86400
       ReceiveMessageWaitTimeSeconds: 20
       SqsManagedSseEnabled: true

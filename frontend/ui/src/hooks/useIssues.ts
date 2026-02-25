@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { feedKeys, fetchIssues } from '../api/feeds'
+import { useLiveFeed } from '../contexts/LiveFeedContext'
 import { PRIORITY_ORDER } from '../lib/constants'
 import type { IssueFilters } from '../types/filters'
 
@@ -17,11 +18,19 @@ function parseSort(raw?: string): { field: string; dir: 1 | -1 } {
 }
 
 export function useIssues(filters?: IssueFilters) {
-  const query = useQuery({ queryKey: feedKeys.issues, queryFn: fetchIssues })
+  // Live data from the global delta-polling provider (ENC-TSK-609).
+  const { issues: liveIssues, isPending: livePending, isError: liveError } = useLiveFeed()
+
+  // S3 feed as fallback for initial load before LiveFeedProvider hydrates.
+  const s3Query = useQuery({ queryKey: feedKeys.issues, queryFn: fetchIssues })
+
+  const allIssues = liveIssues.length > 0 ? liveIssues : (s3Query.data?.issues ?? [])
+  const isPending = liveIssues.length === 0 && s3Query.isPending
+  const isError = liveIssues.length === 0 && s3Query.isError
 
   const filtered = useMemo(() => {
-    if (!query.data?.issues) return []
-    let items = query.data.issues
+    if (!allIssues.length) return []
+    let items = allIssues
     if (filters?.projectId) items = items.filter((i) => i.project_id === filters.projectId)
     if (filters?.status?.length) items = items.filter((i) => filters.status!.includes(i.status))
     if (filters?.severity?.length) items = items.filter((i) => filters.severity!.includes(i.severity))
@@ -41,7 +50,7 @@ export function useIssues(filters?: IssueFilters) {
       return cmp * dir
     })
   }, [
-    query.data?.issues,
+    allIssues,
     filters?.projectId,
     filters?.status,
     filters?.severity,
@@ -51,8 +60,11 @@ export function useIssues(filters?: IssueFilters) {
 
   return {
     issues: filtered,
-    allIssues: query.data?.issues ?? [],
-    generatedAt: query.data?.generated_at ?? null,
-    ...query,
+    allIssues,
+    generatedAt: s3Query.data?.generated_at ?? null,
+    isPending,
+    isError,
+    isLoading: isPending,
+    data: s3Query.data,
   }
 }

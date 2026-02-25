@@ -329,6 +329,41 @@ def _ddb_str_set(item: Dict[str, Any], key: str) -> List[str]:
     return []
 
 
+def _ddb_list_of_maps(item: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+    """Extract a list of maps from a DynamoDB item (L type containing M types).
+
+    Handles nested S, N, BOOL, and L-of-S values within each map entry.
+    Used for structured attributes like acceptance_criteria and evidence.
+    """
+    attr = item.get(key, {})
+    raw_list = attr.get("L")
+    if not isinstance(raw_list, list):
+        return []
+    result: List[Dict[str, Any]] = []
+    for entry in raw_list:
+        if not isinstance(entry, dict) or "M" not in entry:
+            continue
+        m = entry["M"]
+        obj: Dict[str, Any] = {}
+        for k, v in m.items():
+            if "S" in v:
+                obj[k] = v["S"]
+            elif "N" in v:
+                try:
+                    obj[k] = int(v["N"])
+                except (ValueError, TypeError):
+                    obj[k] = v["N"]
+            elif "BOOL" in v:
+                obj[k] = bool(v["BOOL"])
+            elif "L" in v:
+                obj[k] = [
+                    sub.get("S", "") for sub in v["L"]
+                    if isinstance(sub, dict) and "S" in sub
+                ]
+        result.append(obj)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Project discovery
 # ---------------------------------------------------------------------------
@@ -780,6 +815,10 @@ def _transform_task_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
         "active_agent_session": _ddb_bool(item, "active_agent_session"),
         "active_agent_session_parent": _ddb_bool(item, "active_agent_session_parent"),
         "coordination": _ddb_bool(item, "coordination"),
+        # Philosophy fields (ENC-FTR-017 / ENC-TSK-606)
+        "category": _ddb_str(item, "category") or None,
+        "intent": _ddb_str(item, "intent") or None,
+        "acceptance_criteria": _ddb_str_set(item, "acceptance_criteria"),
     }
     session_id = _ddb_str(item, "active_agent_session_id")
     if session_id:
@@ -806,6 +845,11 @@ def _transform_issue_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str
         "created_at": _ddb_str(item, "created_at") or None,
         "parent": _ddb_str(item, "parent") or None,
         "coordination": _ddb_bool(item, "coordination"),
+        # Philosophy fields (ENC-FTR-017 / ENC-TSK-606)
+        "category": _ddb_str(item, "category") or None,
+        "intent": _ddb_str(item, "intent") or None,
+        "primary_task": _ddb_str(item, "primary_task") or None,
+        "evidence": _ddb_list_of_maps(item, "evidence"),
     }
 
 
@@ -828,6 +872,12 @@ def _transform_feature_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[s
         "created_at": _ddb_str(item, "created_at") or None,
         "parent": _ddb_str(item, "parent") or None,
         "coordination": _ddb_bool(item, "coordination"),
+        # Philosophy fields (ENC-FTR-017 / ENC-TSK-606)
+        "category": _ddb_str(item, "category") or None,
+        "intent": _ddb_str(item, "intent") or None,
+        "user_story": _ddb_str(item, "user_story") or None,
+        "primary_task": _ddb_str(item, "primary_task") or None,
+        "acceptance_criteria": _ddb_list_of_maps(item, "acceptance_criteria"),
     }
 
 
@@ -880,6 +930,118 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
     all_features.sort(key=lambda x: x.get("feature_id", ""))
 
     return all_tasks, all_issues, all_features
+
+
+def _query_incremental(
+    since_iso: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+    """Query records updated since *since_iso* using the type-updated-index GSI.
+
+    Strategy (ENC-TSK-605):
+      1. For each record_type (task, issue, feature), query the GSI with
+         ``updated_at > :since`` to collect (project_id, record_id) keys.
+      2. BatchGetItem on the main table for full attributes.
+      3. Transform via ``_TRANSFORM`` — records filtered by ``_is_stale_closed``
+         are captured in *closed_ids* so the client can evict them.
+
+    Returns (tasks, issues, features, closed_ids).
+    """
+    ddb = _get_ddb()
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
+
+    # Step 1: Collect keys of recently changed records from the GSI.
+    # Table keys (project_id, record_id) are always projected into any GSI.
+    changed_keys: List[Dict[str, Dict[str, str]]] = []
+    key_to_type: Dict[str, str] = {}  # "project_id#record_id" -> record_type
+
+    for rtype in ("task", "issue", "feature"):
+        try:
+            paginator = ddb.get_paginator("query")
+            for page in paginator.paginate(
+                TableName=DYNAMODB_TABLE,
+                IndexName="type-updated-index",
+                KeyConditionExpression="record_type = :rt AND updated_at > :since",
+                ExpressionAttributeValues={
+                    ":rt": {"S": rtype},
+                    ":since": {"S": since_iso},
+                },
+                ProjectionExpression="project_id, record_id, record_type",
+            ):
+                for item in page.get("Items", []):
+                    pid = _ddb_str(item, "project_id")
+                    rid = _ddb_str(item, "record_id")
+                    if pid and rid:
+                        changed_keys.append({
+                            "project_id": {"S": pid},
+                            "record_id": {"S": rid},
+                        })
+                        key_to_type[f"{pid}#{rid}"] = rtype
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("Incremental GSI query failed for %s: %s", rtype, exc)
+
+    if not changed_keys:
+        return [], [], [], []
+
+    # Step 2: BatchGetItem for full records (max 100 per request).
+    all_tasks: List[Dict[str, Any]] = []
+    all_issues: List[Dict[str, Any]] = []
+    all_features: List[Dict[str, Any]] = []
+    closed_ids: List[str] = []
+
+    for batch_start in range(0, len(changed_keys), 100):
+        batch = changed_keys[batch_start : batch_start + 100]
+        try:
+            resp = ddb.batch_get_item(
+                RequestItems={
+                    DYNAMODB_TABLE: {"Keys": batch, "ConsistentRead": False}
+                }
+            )
+            items_to_process = resp.get("Responses", {}).get(DYNAMODB_TABLE, [])
+
+            # One retry for unprocessed keys (DynamoDB throughput back-off).
+            unprocessed = (
+                resp.get("UnprocessedKeys", {})
+                .get(DYNAMODB_TABLE, {})
+                .get("Keys", [])
+            )
+            if unprocessed:
+                resp2 = ddb.batch_get_item(
+                    RequestItems={
+                        DYNAMODB_TABLE: {"Keys": unprocessed, "ConsistentRead": False}
+                    }
+                )
+                items_to_process.extend(
+                    resp2.get("Responses", {}).get(DYNAMODB_TABLE, [])
+                )
+
+            for raw_item in items_to_process:
+                record_type = _ddb_str(raw_item, "record_type")
+                pid = _ddb_str(raw_item, "project_id")
+                if record_type not in _TRANSFORM:
+                    continue
+
+                item_id = _ddb_str(raw_item, "item_id")
+                if _is_stale_closed(raw_item, cutoff):
+                    if item_id:
+                        closed_ids.append(item_id)
+                    continue
+
+                transformed = _TRANSFORM[record_type](raw_item, pid)
+                if record_type == "task":
+                    all_tasks.append(transformed)
+                elif record_type == "issue":
+                    all_issues.append(transformed)
+                elif record_type == "feature":
+                    all_features.append(transformed)
+
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("BatchGetItem failed: %s", exc)
+
+    all_tasks.sort(key=lambda x: x.get("task_id", ""))
+    all_issues.sort(key=lambda x: x.get("issue_id", ""))
+    all_features.sort(key=lambda x: x.get("feature_id", ""))
+
+    return all_tasks, all_issues, all_features, closed_ids
 
 
 # ---------------------------------------------------------------------------
@@ -951,13 +1113,45 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if method != "GET" or not re.search(r"/api/v1/feed/?$", path):
         return _error(404, f"Unsupported route: {method} {path}")
 
+    qs = event.get("queryStringParameters") or {}
+
+    # --- Incremental delta query (ENC-TSK-607) ---
+    since_param = str(qs.get("since") or "").strip()
+    if since_param:
+        parsed_since = _parse_iso8601(since_param)
+        if parsed_since is None:
+            return _error(400, "'since' must be ISO-8601 UTC (e.g. 2026-02-25T12:00:00Z)")
+        try:
+            tasks, issues, features, closed_ids = _query_incremental(since_param)
+        except Exception as exc:
+            logger.error("incremental feed query failed: %s", exc)
+            return _error(500, "Failed to query feed delta. Please try again.")
+
+        body = {
+            "generated_at": _now_z(),
+            "version": "1.0",
+            "tasks": tasks,
+            "issues": issues,
+            "features": features,
+            "closed_ids": closed_ids,
+        }
+        return {
+            "statusCode": 200,
+            "headers": {
+                **_cors_headers(),
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+            },
+            "body": json.dumps(body),
+        }
+
+    # --- Full query (existing behaviour, unchanged) ---
     try:
         tasks, issues, features = _query_all_records()
     except Exception as exc:
         logger.error("feed query failed: %s", exc)
         return _error(500, "Failed to query feed data. Please try again.")
 
-    qs = event.get("queryStringParameters") or {}
     subscription_meta = {
         "subscription_id": None,
         "scope_applied": False,

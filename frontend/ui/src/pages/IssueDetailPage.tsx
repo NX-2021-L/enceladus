@@ -153,7 +153,21 @@ export function IssueDetailPage() {
           <StatusChip status={issue.status} />
           <PriorityBadge priority={issue.priority} />
           <SeverityBadge severity={issue.severity} />
+          {issue.category && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-violet-500/20 text-violet-400">
+              {issue.category}
+            </span>
+          )}
           <GitHubLinkBadge url={issue.github_issue_url} />
+          {issue.coordination && (
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-cyan-500/20 text-cyan-400" title="Part of multi-agent coordination">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-current opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-current" />
+              </span>
+              Coordination
+            </span>
+          )}
         </div>
         <div className="flex gap-4 text-xs text-slate-500">
           <span>Created {formatDate(issue.created_at)}</span>
@@ -266,6 +280,36 @@ export function IssueDetailPage() {
         allFeatures={allFeatures}
       />
 
+      {/* Intent (ENC-FTR-017 philosophy) */}
+      {issue.intent && (
+        <div className="bg-slate-800 rounded-lg p-4">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
+            Intent
+          </h3>
+          <p className="text-sm text-slate-300 leading-relaxed">{issue.intent}</p>
+        </div>
+      )}
+
+      {/* Primary Task (ENC-FTR-017 philosophy) */}
+      {issue.primary_task && (
+        <div className="bg-slate-800 rounded-lg p-4">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
+            Primary Task
+          </h3>
+          <Link
+            to={`/tasks/${issue.primary_task}`}
+            className="text-sm text-blue-400 hover:text-blue-300 font-mono"
+          >
+            {issue.primary_task}
+            {recordMap[issue.primary_task] && (
+              <span className="text-slate-400 font-sans ml-2">
+                {recordMap[issue.primary_task].title}
+              </span>
+            )}
+          </Link>
+        </div>
+      )}
+
       {/* Description */}
       {issue.description && (
         <div className="bg-slate-800 rounded-lg p-4">
@@ -283,6 +327,38 @@ export function IssueDetailPage() {
             Hypothesis
           </h3>
           <MarkdownRenderer content={issue.hypothesis} />
+        </div>
+      )}
+
+      {/* Evidence (ENC-FTR-017 philosophy) */}
+      {issue.evidence && issue.evidence.length > 0 && (
+        <div className="bg-slate-800 rounded-lg p-4">
+          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
+            Evidence
+          </h3>
+          <div className="space-y-4">
+            {issue.evidence.map((ev, i) => (
+              <div key={i} className="border-l-2 border-red-500/40 pl-3">
+                <p className="text-sm text-slate-300 mb-1">{ev.description}</p>
+                {ev.steps_to_duplicate && ev.steps_to_duplicate.length > 0 && (
+                  <div className="mt-1.5">
+                    <span className="text-xs text-slate-500 font-medium">Steps to duplicate:</span>
+                    <ol className="mt-1 space-y-0.5 list-decimal list-inside">
+                      {ev.steps_to_duplicate.map((step, si) => (
+                        <li key={si} className="text-xs text-slate-400">{step}</li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+                {(ev.observed_by || ev.timestamp) && (
+                  <div className="flex gap-3 mt-1.5 text-xs text-slate-500">
+                    {ev.observed_by && <span>Observed by: {ev.observed_by}</span>}
+                    {ev.timestamp && <span>{ev.timestamp}</span>}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

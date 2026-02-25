@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { feedKeys, fetchTasks } from '../api/feeds'
+import { useLiveFeed } from '../contexts/LiveFeedContext'
 import { PRIORITY_ORDER } from '../lib/constants'
 import type { TaskFilters } from '../types/filters'
 
@@ -17,11 +18,20 @@ function parseSort(raw?: string): { field: string; dir: 1 | -1 } {
 }
 
 export function useTasks(filters?: TaskFilters) {
-  const query = useQuery({ queryKey: feedKeys.tasks, queryFn: fetchTasks })
+  // Live data from the global delta-polling provider (ENC-TSK-609).
+  const { tasks: liveTasks, isPending: livePending, isError: liveError } = useLiveFeed()
+
+  // S3 feed as fallback for initial load before LiveFeedProvider hydrates.
+  const s3Query = useQuery({ queryKey: feedKeys.tasks, queryFn: fetchTasks })
+
+  // Prefer live data; fall back to S3 when live context hasn't loaded yet.
+  const allTasks = liveTasks.length > 0 ? liveTasks : (s3Query.data?.tasks ?? [])
+  const isPending = liveTasks.length === 0 && s3Query.isPending
+  const isError = liveTasks.length === 0 && s3Query.isError
 
   const filtered = useMemo(() => {
-    if (!query.data?.tasks) return []
-    let items = query.data.tasks
+    if (!allTasks.length) return []
+    let items = allTasks
     if (filters?.projectId) items = items.filter((t) => t.project_id === filters.projectId)
     if (filters?.status?.length) items = items.filter((t) => filters.status!.includes(t.status))
     if (filters?.priority?.length) items = items.filter((t) => filters.priority!.includes(t.priority))
@@ -41,7 +51,7 @@ export function useTasks(filters?: TaskFilters) {
       return cmp * dir
     })
   }, [
-    query.data?.tasks,
+    allTasks,
     filters?.projectId,
     filters?.status,
     filters?.priority,
@@ -51,8 +61,11 @@ export function useTasks(filters?: TaskFilters) {
 
   return {
     tasks: filtered,
-    allTasks: query.data?.tasks ?? [],
-    generatedAt: query.data?.generated_at ?? null,
-    ...query,
+    allTasks,
+    generatedAt: s3Query.data?.generated_at ?? null,
+    isPending,
+    isError,
+    isLoading: isPending,
+    data: s3Query.data,
   }
 }
