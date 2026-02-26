@@ -10,6 +10,7 @@ exists in the repository.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Set
@@ -91,6 +92,15 @@ def _validate(manifest: List[Dict[str, object]], production: List[str]) -> List[
                     errors.append(
                         f"{function_name}: workflow file does not reference function name: {workflow_file}"
                     )
+                if "uses: ./.github/workflows/lambda-deploy-reusable.yml" in text:
+                    if not re.search(r"(?m)^permissions:\s*$", text):
+                        errors.append(
+                            f"{function_name}: reusable workflow caller must declare top-level permissions: {workflow_file}"
+                        )
+                    if not re.search(r"(?m)^\s*id-token:\s*write\s*$", text):
+                        errors.append(
+                            f"{function_name}: reusable workflow caller must grant id-token: write: {workflow_file}"
+                        )
 
         if isinstance(deploy_script, str) and deploy_script:
             deploy_script_path = REPO_ROOT / deploy_script

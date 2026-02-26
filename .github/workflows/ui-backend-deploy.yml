@@ -63,6 +63,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -129,7 +131,10 @@ jobs:
             files_changed="$(git diff --name-only "${BEFORE_SHA}" "${CURRENT_SHA}" -- frontend/ui | paste -sd, - || true)"
           fi
           if [[ -z "${files_changed}" ]]; then
-            files_changed="$(git ls-files frontend/ui | paste -sd, - || true)"
+            files_changed="$(git show --pretty='' --name-only "${CURRENT_SHA}" -- frontend/ui | paste -sd, - || true)"
+          fi
+          if [[ -z "${files_changed}" ]]; then
+            files_changed="frontend/ui/src/lib/version.ts"
           fi
 
           wait_flag="--wait"
