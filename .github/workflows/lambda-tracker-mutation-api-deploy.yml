@@ -1,0 +1,26 @@
+name: Lambda Deploy - devops-tracker-mutation-api
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/tracker_mutation/**"
+      - ".github/workflows/lambda-tracker-mutation-api-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "devops-tracker-mutation-api"
+      lambda_dir: "backend/lambda/tracker_mutation"
+      deploy_script: "backend/lambda/tracker_mutation/deploy.sh"
+    secrets: inherit

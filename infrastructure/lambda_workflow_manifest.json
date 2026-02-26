@@ -1,0 +1,93 @@
+{
+  "source_of_truth": "infrastructure/cloudformation/02-compute.yaml",
+  "functions": [
+    {
+      "function_name": "auth-refresh",
+      "lambda_dir": "backend/lambda/auth_refresh",
+      "workflow_file": ".github/workflows/lambda-auth-refresh-deploy.yml"
+    },
+    {
+      "function_name": "devops-coordination-api",
+      "lambda_dir": "backend/lambda/coordination_api",
+      "workflow_file": ".github/workflows/api-mcp-backend-deploy.yml",
+      "deploy_script": "backend/lambda/coordination_api/deploy.sh"
+    },
+    {
+      "function_name": "devops-coordination-monitor-api",
+      "lambda_dir": "backend/lambda/coordination_monitor_api",
+      "workflow_file": ".github/workflows/lambda-coordination-monitor-api-deploy.yml",
+      "deploy_script": "backend/lambda/coordination_monitor_api/deploy.sh"
+    },
+    {
+      "function_name": "devops-deploy-finalize",
+      "lambda_dir": "backend/lambda/deploy_finalize",
+      "workflow_file": ".github/workflows/lambda-deploy-finalize-deploy.yml"
+    },
+    {
+      "function_name": "devops-deploy-intake",
+      "lambda_dir": "backend/lambda/deploy_intake",
+      "workflow_file": ".github/workflows/lambda-deploy-intake-deploy.yml",
+      "deploy_script": "backend/lambda/deploy_intake/deploy.sh"
+    },
+    {
+      "function_name": "devops-deploy-orchestrator",
+      "lambda_dir": "backend/lambda/deploy_orchestrator",
+      "workflow_file": ".github/workflows/lambda-deploy-orchestrator-deploy.yml"
+    },
+    {
+      "function_name": "devops-doc-prep",
+      "lambda_dir": "backend/lambda/doc_prep",
+      "workflow_file": ".github/workflows/lambda-doc-prep-deploy.yml"
+    },
+    {
+      "function_name": "devops-document-api",
+      "lambda_dir": "backend/lambda/document_api",
+      "workflow_file": ".github/workflows/lambda-document-api-deploy.yml",
+      "deploy_script": "backend/lambda/document_api/deploy.sh"
+    },
+    {
+      "function_name": "devops-feed-publisher",
+      "lambda_dir": "backend/lambda/feed_publisher",
+      "workflow_file": ".github/workflows/lambda-feed-publisher-deploy.yml",
+      "package_extra_files": [
+        "feed_utils.py"
+      ]
+    },
+    {
+      "function_name": "devops-feed-query-api",
+      "lambda_dir": "backend/lambda/feed_query",
+      "workflow_file": ".github/workflows/lambda-feed-query-api-deploy.yml",
+      "deploy_script": "backend/lambda/feed_query/deploy.sh"
+    },
+    {
+      "function_name": "devops-project-service",
+      "lambda_dir": "backend/lambda/project_service",
+      "workflow_file": ".github/workflows/lambda-project-service-deploy.yml",
+      "deploy_script": "backend/lambda/project_service/deploy.sh"
+    },
+    {
+      "function_name": "devops-reference-search",
+      "lambda_dir": "backend/lambda/reference_search",
+      "workflow_file": ".github/workflows/lambda-reference-search-deploy.yml",
+      "deploy_script": "backend/lambda/reference_search/deploy.sh"
+    },
+    {
+      "function_name": "devops-tracker-mutation-api",
+      "lambda_dir": "backend/lambda/tracker_mutation",
+      "workflow_file": ".github/workflows/lambda-tracker-mutation-api-deploy.yml",
+      "deploy_script": "backend/lambda/tracker_mutation/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-bedrock-agent-actions",
+      "lambda_dir": "backend/lambda/bedrock_agent_actions",
+      "workflow_file": ".github/workflows/lambda-bedrock-agent-actions-deploy.yml",
+      "deploy_script": "backend/lambda/bedrock_agent_actions/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-governance-audit",
+      "lambda_dir": "backend/lambda/governance_audit",
+      "workflow_file": ".github/workflows/lambda-governance-audit-deploy.yml",
+      "deploy_script": "backend/lambda/governance_audit/deploy.sh"
+    }
+  ]
+}

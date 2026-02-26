@@ -1,0 +1,26 @@
+name: Lambda Deploy - devops-deploy-intake
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/deploy_intake/**"
+      - ".github/workflows/lambda-deploy-intake-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "devops-deploy-intake"
+      lambda_dir: "backend/lambda/deploy_intake"
+      deploy_script: "backend/lambda/deploy_intake/deploy.sh"
+    secrets: inherit

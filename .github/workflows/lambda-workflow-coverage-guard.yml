@@ -1,0 +1,43 @@
+name: Lambda Workflow Coverage Guard
+
+on:
+  pull_request:
+    paths:
+      - "backend/lambda/**"
+      - "infrastructure/cloudformation/02-compute.yaml"
+      - "infrastructure/lambda_workflow_manifest.json"
+      - ".github/workflows/*.yml"
+      - "tools/verify_lambda_workflow_coverage.py"
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/**"
+      - "infrastructure/cloudformation/02-compute.yaml"
+      - "infrastructure/lambda_workflow_manifest.json"
+      - ".github/workflows/*.yml"
+      - "tools/verify_lambda_workflow_coverage.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate production Lambda workflow coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify workflow coverage manifest
+        run: |
+          set -euo pipefail
+          python tools/verify_lambda_workflow_coverage.py

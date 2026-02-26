@@ -1,0 +1,26 @@
+name: Lambda Deploy - enceladus-governance-audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/governance_audit/**"
+      - ".github/workflows/lambda-governance-audit-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "enceladus-governance-audit"
+      lambda_dir: "backend/lambda/governance_audit"
+      deploy_script: "backend/lambda/governance_audit/deploy.sh"
+    secrets: inherit

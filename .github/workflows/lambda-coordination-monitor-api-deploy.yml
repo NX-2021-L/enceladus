@@ -1,0 +1,26 @@
+name: Lambda Deploy - devops-coordination-monitor-api
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/coordination_monitor_api/**"
+      - ".github/workflows/lambda-coordination-monitor-api-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "devops-coordination-monitor-api"
+      lambda_dir: "backend/lambda/coordination_monitor_api"
+      deploy_script: "backend/lambda/coordination_monitor_api/deploy.sh"
+    secrets: inherit

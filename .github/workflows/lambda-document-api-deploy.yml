@@ -1,0 +1,26 @@
+name: Lambda Deploy - devops-document-api
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/document_api/**"
+      - ".github/workflows/lambda-document-api-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "devops-document-api"
+      lambda_dir: "backend/lambda/document_api"
+      deploy_script: "backend/lambda/document_api/deploy.sh"
+    secrets: inherit

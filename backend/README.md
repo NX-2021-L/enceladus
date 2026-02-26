@@ -63,8 +63,26 @@ See `JWT_AUTHENTICATION_FORENSICS.md` for complete prevention framework.
 - UI deployment remains managed by `.github/workflows/ui-backend-deploy.yml`.
 - API + MCP runtime deployment is managed by `.github/workflows/api-mcp-backend-deploy.yml`,
   which executes `backend/lambda/coordination_api/deploy.sh`.
+- Every production Lambda declared in `infrastructure/cloudformation/02-compute.yaml`
+  must have a mapped workflow entry in `infrastructure/lambda_workflow_manifest.json`.
+- Dedicated Lambda deploy workflows are under `.github/workflows/lambda-*-deploy.yml`
+  and use `.github/workflows/lambda-deploy-reusable.yml`.
+- Workflow coverage is enforced by `.github/workflows/lambda-workflow-coverage-guard.yml`
+  running `tools/verify_lambda_workflow_coverage.py` on PRs and pushes.
 - Non-UI requests routed through deployment-manager (`queued_non_ui`) are not the canonical
   execution path for API/MCP runtime updates in this repo.
+
+## New Lambda Process
+
+When adding a new production Lambda:
+
+1. Add the Lambda definition to `infrastructure/cloudformation/02-compute.yaml`.
+2. Add a matching entry in `infrastructure/lambda_workflow_manifest.json`.
+3. Add a deploy workflow file under `.github/workflows/lambda-*-deploy.yml` mapped to
+   either a dedicated `deploy.sh` or the reusable generic package path.
+4. Run `python tools/verify_lambda_workflow_coverage.py` locally before opening a PR.
+
+The coverage guard will fail CI if any production Lambda lacks workflow mapping.
 
 ## Baseline Notes
 
