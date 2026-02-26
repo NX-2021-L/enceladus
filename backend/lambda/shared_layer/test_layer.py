@@ -47,7 +47,11 @@ class AuthTests(unittest.TestCase):
         import enceladus_shared.auth as auth_mod
 
         orig = auth_mod.INTERNAL_API_KEY
+        orig_prev = auth_mod.INTERNAL_API_KEY_PREVIOUS
+        orig_keys = auth_mod.INTERNAL_API_KEYS
         auth_mod.INTERNAL_API_KEY = "test-key-123"
+        auth_mod.INTERNAL_API_KEY_PREVIOUS = ""
+        auth_mod.INTERNAL_API_KEYS = ("test-key-123",)
         try:
             event = {"headers": {"x-coordination-internal-key": "test-key-123"}}
             claims, err = _authenticate(event)
@@ -56,12 +60,38 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(claims["auth_mode"], "internal-key")
         finally:
             auth_mod.INTERNAL_API_KEY = orig
+            auth_mod.INTERNAL_API_KEY_PREVIOUS = orig_prev
+            auth_mod.INTERNAL_API_KEYS = orig_keys
+
+    def test_authenticate_previous_internal_key(self):
+        import enceladus_shared.auth as auth_mod
+
+        orig = auth_mod.INTERNAL_API_KEY
+        orig_prev = auth_mod.INTERNAL_API_KEY_PREVIOUS
+        orig_keys = auth_mod.INTERNAL_API_KEYS
+        auth_mod.INTERNAL_API_KEY = "active-key"
+        auth_mod.INTERNAL_API_KEY_PREVIOUS = "previous-key"
+        auth_mod.INTERNAL_API_KEYS = ("active-key", "previous-key")
+        try:
+            event = {"headers": {"x-coordination-internal-key": "previous-key"}}
+            claims, err = _authenticate(event)
+            self.assertIsNotNone(claims)
+            self.assertIsNone(err)
+            self.assertEqual(claims["auth_mode"], "internal-key")
+        finally:
+            auth_mod.INTERNAL_API_KEY = orig
+            auth_mod.INTERNAL_API_KEY_PREVIOUS = orig_prev
+            auth_mod.INTERNAL_API_KEYS = orig_keys
 
     def test_authenticate_no_token(self):
         import enceladus_shared.auth as auth_mod
 
         orig = auth_mod.INTERNAL_API_KEY
+        orig_prev = auth_mod.INTERNAL_API_KEY_PREVIOUS
+        orig_keys = auth_mod.INTERNAL_API_KEYS
         auth_mod.INTERNAL_API_KEY = ""
+        auth_mod.INTERNAL_API_KEY_PREVIOUS = ""
+        auth_mod.INTERNAL_API_KEYS = ()
         try:
             event = {"headers": {}}
             claims, err = _authenticate(event)
@@ -70,6 +100,8 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(err["statusCode"], 401)
         finally:
             auth_mod.INTERNAL_API_KEY = orig
+            auth_mod.INTERNAL_API_KEY_PREVIOUS = orig_prev
+            auth_mod.INTERNAL_API_KEYS = orig_keys
 
 
 class HttpUtilsTests(unittest.TestCase):

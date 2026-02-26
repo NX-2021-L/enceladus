@@ -58,6 +58,22 @@ try:
 except ImportError:
     _JWT_AVAILABLE = False
 
+
+def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
+    """Return deduplicated, non-empty key values from scalar/csv env sources."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -68,6 +84,12 @@ PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E1k")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk")
 COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
+    os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+    COORDINATION_INTERNAL_API_KEY,
+    COORDINATION_INTERNAL_API_KEY_PREVIOUS,
+)
 CONFIG_BUCKET = os.environ.get("CONFIG_BUCKET", "jreese-net")
 CONFIG_PREFIX = os.environ.get("CONFIG_PREFIX", "deploy-config")
 SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
@@ -339,13 +361,13 @@ def _extract_token(event: Dict) -> Optional[str]:
 def _authenticate(event: Dict) -> Tuple[Optional[Dict[str, Any]], Optional[Dict]]:
     """Authenticate request. Returns (claims, None) or (None, error_response)."""
     headers = event.get("headers") or {}
-    if COORDINATION_INTERNAL_API_KEY:
+    if COORDINATION_INTERNAL_API_KEYS:
         internal_key = (
             headers.get("x-coordination-internal-key")
             or headers.get("X-Coordination-Internal-Key")
             or ""
         )
-        if internal_key and internal_key == COORDINATION_INTERNAL_API_KEY:
+        if internal_key and internal_key in COORDINATION_INTERNAL_API_KEYS:
             return {"auth_mode": "internal-key", "sub": "internal-key"}, None
 
     token = _extract_token(event)

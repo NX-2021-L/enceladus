@@ -10,6 +10,8 @@ Requires environment variables:
 
 Optional:
     COORDINATION_INTERNAL_API_KEY — enables X-Coordination-Internal-Key header auth
+    COORDINATION_INTERNAL_API_KEY_PREVIOUS — optional rollover key accepted during rotation
+    COORDINATION_INTERNAL_API_KEYS — optional comma-separated allowlist (active + rollover)
 
 Part of ENC-TSK-525: Extract shared Lambda layer.
 """
@@ -33,6 +35,22 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
+    """Return deduplicated, non-empty key values from scalar/csv env sources."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
 # ---------------------------------------------------------------------------
 # Configuration (read from env; callers may override at import time)
 # ---------------------------------------------------------------------------
@@ -42,6 +60,16 @@ COGNITO_CLIENT_ID: str = os.environ.get("COGNITO_CLIENT_ID", "")
 INTERNAL_API_KEY: str = os.environ.get(
     "COORDINATION_INTERNAL_API_KEY",
     os.environ.get("DOCUMENT_API_INTERNAL_API_KEY", ""),
+)
+INTERNAL_API_KEY_PREVIOUS: str = os.environ.get(
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+    os.environ.get("DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS", ""),
+)
+INTERNAL_API_KEYS: tuple[str, ...] = _normalize_api_keys(
+    os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+    os.environ.get("DOCUMENT_API_INTERNAL_API_KEYS", ""),
+    INTERNAL_API_KEY,
+    INTERNAL_API_KEY_PREVIOUS,
 )
 
 # ---------------------------------------------------------------------------
@@ -164,14 +192,14 @@ def _authenticate(
         error_fn = _default_error
 
     # Internal key auth path for trusted orchestrators / smoke tests.
-    if INTERNAL_API_KEY:
+    if INTERNAL_API_KEYS:
         headers = event.get("headers") or {}
         internal_key = (
             headers.get("x-coordination-internal-key")
             or headers.get("X-Coordination-Internal-Key")
             or ""
         )
-        if internal_key and internal_key == INTERNAL_API_KEY:
+        if internal_key and internal_key in INTERNAL_API_KEYS:
             return {"auth_mode": "internal-key"}, None
 
     token = _extract_token(event)

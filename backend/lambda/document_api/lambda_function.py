@@ -55,6 +55,22 @@ except Exception as _jwt_import_err:
     _JWT_AVAILABLE = False
     logging.getLogger().error("jwt import failed: %s", _jwt_import_err)
 
+
+def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
+    """Return deduplicated, non-empty key values from scalar/csv env sources."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -72,6 +88,16 @@ COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 DOCUMENT_API_INTERNAL_API_KEY = os.environ.get(
     "DOCUMENT_API_INTERNAL_API_KEY",
     os.environ.get("COORDINATION_INTERNAL_API_KEY", ""),
+)
+DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS = os.environ.get(
+    "DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS",
+    os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""),
+)
+DOCUMENT_API_INTERNAL_API_KEYS = _normalize_api_keys(
+    os.environ.get("DOCUMENT_API_INTERNAL_API_KEYS", ""),
+    os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+    DOCUMENT_API_INTERNAL_API_KEY,
+    DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS,
 )
 GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file").strip().lower()
@@ -192,13 +218,13 @@ def _extract_token(event: Dict) -> Optional[str]:
 def _authenticate(event: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
     """Authenticate request. Returns (claims, None) or (None, error_response)."""
     headers = event.get("headers") or {}
-    if DOCUMENT_API_INTERNAL_API_KEY:
+    if DOCUMENT_API_INTERNAL_API_KEYS:
         internal_key = (
             headers.get("x-coordination-internal-key")
             or headers.get("X-Coordination-Internal-Key")
             or ""
         )
-        if internal_key and internal_key == DOCUMENT_API_INTERNAL_API_KEY:
+        if internal_key and internal_key in DOCUMENT_API_INTERNAL_API_KEYS:
             return {"auth_mode": "internal-key", "sub": "internal-key"}, None
 
     cookie_header = headers.get("cookie") or headers.get("Cookie") or ""

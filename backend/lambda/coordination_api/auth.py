@@ -28,7 +28,7 @@ try:
 except Exception:
     _CERT_BUNDLE = None
 
-from config import COGNITO_CLIENT_ID, COGNITO_USER_POOL_ID, COORDINATION_INTERNAL_API_KEY
+from config import COGNITO_CLIENT_ID, COGNITO_USER_POOL_ID, COORDINATION_INTERNAL_API_KEYS
 from http_utils import _error
 
 __all__ = [
@@ -138,14 +138,14 @@ def _verify_token(token: str) -> Dict[str, Any]:
 
 def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     # Optional internal auth path for trusted orchestrators / smoke tests.
-    if COORDINATION_INTERNAL_API_KEY:
+    if COORDINATION_INTERNAL_API_KEYS:
         headers = event.get("headers") or {}
         internal_key = (
             headers.get("x-coordination-internal-key")
             or headers.get("X-Coordination-Internal-Key")
             or ""
         )
-        if internal_key and internal_key == COORDINATION_INTERNAL_API_KEY:
+        if internal_key and internal_key in COORDINATION_INTERNAL_API_KEYS:
             return {"auth_mode": "internal-key"}, None
 
     token = _extract_token(event)
@@ -157,5 +157,4 @@ def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Opti
         return claims, None
     except ValueError as exc:
         return None, _error(401, str(exc))
-
 

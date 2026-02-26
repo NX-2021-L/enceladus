@@ -53,6 +53,22 @@ try:
 except ImportError:
     _JWT_AVAILABLE = False
 
+
+def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
+    """Return deduplicated, non-empty key values from scalar/csv env sources."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -60,6 +76,12 @@ except ImportError:
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
+    os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+    COORDINATION_INTERNAL_API_KEY,
+    COORDINATION_INTERNAL_API_KEY_PREVIOUS,
+)
 GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID", "")
 GITHUB_INSTALLATION_ID = os.environ.get("GITHUB_INSTALLATION_ID", "")
 GITHUB_PRIVATE_KEY_SECRET = os.environ.get(
@@ -451,13 +473,13 @@ def _extract_token(event: Dict) -> Optional[str]:
 def _authenticate(event: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
     """Authenticate request. Returns (claims, None) or (None, error_response)."""
     headers = event.get("headers") or {}
-    if COORDINATION_INTERNAL_API_KEY:
+    if COORDINATION_INTERNAL_API_KEYS:
         internal_key = (
             headers.get("x-coordination-internal-key")
             or headers.get("X-Coordination-Internal-Key")
             or ""
         )
-        if internal_key and internal_key == COORDINATION_INTERNAL_API_KEY:
+        if internal_key and internal_key in COORDINATION_INTERNAL_API_KEYS:
             return {"auth_mode": "internal-key", "sub": "internal-key"}, None
 
     token = _extract_token(event)

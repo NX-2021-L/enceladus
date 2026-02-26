@@ -72,6 +72,22 @@ except Exception:
     _CERT_BUNDLE = None
 
 
+def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
+    """Return deduplicated, non-empty key values from scalar/csv env sources."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -92,6 +108,12 @@ S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("S3_GOVERNANCE_HISTORY_PREFIX", "g
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
+    os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+    COORDINATION_INTERNAL_API_KEY,
+    COORDINATION_INTERNAL_API_KEY_PREVIOUS,
+)
 
 HOST_V2_INSTANCE_ID = os.environ.get("HOST_V2_INSTANCE_ID", "i-0523f94e99ec15a1e")
 HOST_V2_WORK_ROOT = os.environ.get("HOST_V2_WORK_ROOT", "/home/ec2-user/claude-code-dev")
@@ -736,14 +758,14 @@ def _verify_token(token: str) -> Dict[str, Any]:
 
 def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     # Optional internal auth path for trusted orchestrators / smoke tests.
-    if COORDINATION_INTERNAL_API_KEY:
+    if COORDINATION_INTERNAL_API_KEYS:
         headers = event.get("headers") or {}
         internal_key = (
             headers.get("x-coordination-internal-key")
             or headers.get("X-Coordination-Internal-Key")
             or ""
         )
-        if internal_key and internal_key == COORDINATION_INTERNAL_API_KEY:
+        if internal_key and internal_key in COORDINATION_INTERNAL_API_KEYS:
             return {"auth_mode": "internal-key"}, None
 
     token = _extract_token(event)

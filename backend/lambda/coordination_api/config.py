@@ -8,6 +8,22 @@ import logging
 import os
 import re
 
+
+def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
+    """Return deduplicated, non-empty key values from scalar/csv env sources."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
 __all__ = [
     "ANTHROPIC_API_BASE_URL",
     "ANTHROPIC_API_KEY_SECRET_ID",
@@ -31,6 +47,8 @@ __all__ = [
     "COORDINATION_GSI_IDEMPOTENCY",
     "COORDINATION_GSI_PROJECT",
     "COORDINATION_INTERNAL_API_KEY",
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+    "COORDINATION_INTERNAL_API_KEYS",
     "COORDINATION_MCP_HTTP_PATH",
     "COORDINATION_PUBLIC_BASE_URL",
     "COORDINATION_TABLE",
@@ -149,6 +167,12 @@ GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
+    os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+    COORDINATION_INTERNAL_API_KEY,
+    COORDINATION_INTERNAL_API_KEY_PREVIOUS,
+)
 
 HOST_V2_INSTANCE_ID = os.environ.get("HOST_V2_INSTANCE_ID", "i-0523f94e99ec15a1e")
 HOST_V2_WORK_ROOT = os.environ.get("HOST_V2_WORK_ROOT", "/home/ec2-user/claude-code-dev")
@@ -403,5 +427,4 @@ _DEFAULT_STATUS = {
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
 

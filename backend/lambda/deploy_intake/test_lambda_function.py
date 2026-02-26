@@ -46,10 +46,14 @@ def _event(
 class DeployIntakeAuthTests(unittest.TestCase):
     def setUp(self) -> None:
         self._original_internal_key = deploy_intake.COORDINATION_INTERNAL_API_KEY
+        self._original_internal_key_previous = deploy_intake.COORDINATION_INTERNAL_API_KEY_PREVIOUS
+        self._original_internal_keys = deploy_intake.COORDINATION_INTERNAL_API_KEYS
         self._original_sqs_queue_url = deploy_intake.SQS_QUEUE_URL
 
     def tearDown(self) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = self._original_internal_key
+        deploy_intake.COORDINATION_INTERNAL_API_KEY_PREVIOUS = self._original_internal_key_previous
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = self._original_internal_keys
         deploy_intake.SQS_QUEUE_URL = self._original_sqs_queue_url
 
     def test_cors_allows_internal_key_header(self) -> None:
@@ -59,6 +63,7 @@ class DeployIntakeAuthTests(unittest.TestCase):
     @patch.object(deploy_intake, "_handle_get_state")
     def test_internal_key_allows_state_route(self, mock_get_state) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("test-internal-key",)
         mock_get_state.return_value = deploy_intake._ok({"project_id": "enceladus", "state": "ACTIVE"})
 
         resp = deploy_intake.lambda_handler(
@@ -76,6 +81,7 @@ class DeployIntakeAuthTests(unittest.TestCase):
     @patch.object(deploy_intake, "_handle_get_history")
     def test_internal_key_allows_history_route(self, mock_get_history) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("test-internal-key",)
         mock_get_history.return_value = deploy_intake._ok({"project_id": "enceladus", "deployments": []})
 
         resp = deploy_intake.lambda_handler(
@@ -94,6 +100,7 @@ class DeployIntakeAuthTests(unittest.TestCase):
     @patch.object(deploy_intake, "_handle_get_pending")
     def test_internal_key_allows_pending_route(self, mock_get_pending) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("test-internal-key",)
         mock_get_pending.return_value = deploy_intake._ok({"project_id": "enceladus", "requests": []})
 
         resp = deploy_intake.lambda_handler(
@@ -112,6 +119,7 @@ class DeployIntakeAuthTests(unittest.TestCase):
     @patch.object(deploy_intake, "_handle_trigger")
     def test_internal_key_allows_trigger_route(self, mock_handle_trigger) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("test-internal-key",)
         mock_handle_trigger.return_value = deploy_intake._ok({"project_id": "enceladus", "triggered": True})
 
         resp = deploy_intake.lambda_handler(
@@ -129,6 +137,7 @@ class DeployIntakeAuthTests(unittest.TestCase):
     @patch.object(deploy_intake, "_handle_get_history")
     def test_history_invalid_limit_defaults(self, mock_get_history) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("test-internal-key",)
         mock_get_history.return_value = deploy_intake._ok({"project_id": "enceladus", "deployments": []})
 
         resp = deploy_intake.lambda_handler(
@@ -146,6 +155,7 @@ class DeployIntakeAuthTests(unittest.TestCase):
 
     def test_invalid_internal_key_returns_401(self) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = "expected-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("expected-key",)
         resp = deploy_intake.lambda_handler(
             _event(
                 method="GET",
@@ -162,6 +172,7 @@ class DeployIntakeAuthTests(unittest.TestCase):
     @patch.object(deploy_intake, "_handle_get_state")
     def test_cookie_auth_still_supported(self, mock_get_state, _mock_verify) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = "expected-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("expected-key",)
         mock_get_state.return_value = deploy_intake._ok({"project_id": "enceladus", "state": "ACTIVE"})
 
         resp = deploy_intake.lambda_handler(
@@ -179,6 +190,7 @@ class DeployIntakeAuthTests(unittest.TestCase):
     @patch.object(deploy_intake, "_get_s3")
     def test_state_get_404_defaults_to_active(self, mock_get_s3) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("test-internal-key",)
         mock_get_s3.return_value.get_object.side_effect = ClientError(
             {"Error": {"Code": "404", "Message": "Not Found"}},
             "GetObject",
@@ -196,6 +208,25 @@ class DeployIntakeAuthTests(unittest.TestCase):
         self.assertEqual(resp["statusCode"], 200)
         body = json.loads(resp["body"])
         self.assertEqual(body.get("state"), "ACTIVE")
+
+    @patch.object(deploy_intake, "_handle_get_state")
+    def test_previous_internal_key_allows_state_route(self, mock_get_state) -> None:
+        deploy_intake.COORDINATION_INTERNAL_API_KEY = "active-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEY_PREVIOUS = "previous-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("active-key", "previous-key")
+        mock_get_state.return_value = deploy_intake._ok({"project_id": "enceladus", "state": "ACTIVE"})
+
+        resp = deploy_intake.lambda_handler(
+            _event(
+                method="GET",
+                path="/api/v1/deploy/state/enceladus",
+                headers={"X-Coordination-Internal-Key": "previous-key"},
+            ),
+            None,
+        )
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_get_state.assert_called_once_with("enceladus")
 
     @patch.object(deploy_intake, "_resolve_deploy_state", return_value=("PAUSED", None))
     @patch.object(deploy_intake, "_get_sqs")
