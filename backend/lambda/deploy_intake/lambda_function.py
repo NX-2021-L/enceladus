@@ -10,6 +10,8 @@ Routes (via API Gateway proxy):
     PATCH  /api/v1/deploy/state/{projectId}    — Set PAUSED/ACTIVE
     GET    /api/v1/deploy/status/{specId}      — Check spec status
     GET    /api/v1/deploy/history/{projectId}  — List recent deployments
+    GET    /api/v1/deploy/pending/{projectId}  — List pending deployment requests
+    POST   /api/v1/deploy/trigger/{projectId}  — Trigger deploy orchestration pipeline
     OPTIONS /api/v1/deploy/*                   — CORS preflight
 
 Auth:
@@ -39,6 +41,7 @@ import os
 import re
 import secrets
 import time
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 import urllib.request
 from urllib.parse import unquote
@@ -201,7 +204,7 @@ def _response(status_code: int, body: Any) -> Dict:
     return {
         "statusCode": status_code,
         "headers": {**_cors_headers(), "Content-Type": "application/json"},
-        "body": json.dumps(body),
+        "body": json.dumps(body, default=_json_default),
     }
 
 
@@ -242,6 +245,14 @@ def _ok(body: Any) -> Dict:
     if isinstance(body, dict) and "success" not in body:
         body["success"] = True
     return _response(200, body)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +408,29 @@ def _utc_now() -> str:
 def _utc_now_compact() -> str:
     import datetime as dt
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _resolve_deploy_state(project_id: str) -> Tuple[Optional[str], Optional[Dict]]:
+    try:
+        s3 = _get_s3()
+        key = f"{CONFIG_PREFIX}/{project_id}/state.json"
+        resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
+        state_data = json.loads(resp["Body"].read().decode("utf-8"))
+        state = str(state_data.get("state", "ACTIVE")).strip().upper() or "ACTIVE"
+        return state, None
+    except ClientError as exc:
+        err_code = (exc.response or {}).get("Error", {}).get("Code", "")
+        if err_code in {"NoSuchKey", "404", "NotFound"}:
+            return "ACTIVE", None
+        return None, _error(500, "Failed to read deployment state")
+
+
+def _parse_limit(raw_value: Any, *, default: int, min_value: int = 1, max_value: int = 50) -> int:
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(parsed, max_value))
 
 
 def _validate_service_group_rules(
@@ -560,18 +594,9 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
             )
 
     # Read deploy state
-    try:
-        s3 = _get_s3()
-        key = f"{CONFIG_PREFIX}/{project_id}/state.json"
-        resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
-        state_data = json.loads(resp["Body"].read().decode("utf-8"))
-        deploy_state = state_data.get("state", "ACTIVE")
-    except ClientError as e:
-        err_code = (e.response or {}).get("Error", {}).get("Code", "")
-        if err_code in {"NoSuchKey", "404", "NotFound"}:
-            deploy_state = "ACTIVE"
-        else:
-            return _error(500, "Failed to read deployment state")
+    deploy_state, state_error = _resolve_deploy_state(project_id)
+    if state_error:
+        return state_error
 
     # Generate request ID
     request_id = f"REQ-{_utc_now_compact()}-{secrets.token_hex(3)}"
@@ -755,6 +780,7 @@ def _handle_get_status(spec_id: str, project_id: str) -> Dict:
 def _handle_get_history(project_id: str, limit: int = 10) -> Dict:
     ddb = _get_ddb()
     results = []
+    limit = _parse_limit(limit, default=10, min_value=1, max_value=50)
     kwargs = {
         "TableName": DEPLOY_TABLE,
         "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
@@ -776,6 +802,103 @@ def _handle_get_history(project_id: str, limit: int = 10) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Route: GET /api/v1/deploy/pending/{projectId}
+# ---------------------------------------------------------------------------
+
+
+def _handle_get_pending(project_id: str, limit: int = 50) -> Dict:
+    ddb = _get_ddb()
+    results: List[Dict[str, Any]] = []
+    limit = _parse_limit(limit, default=50, min_value=1, max_value=200)
+    kwargs: Dict[str, Any] = {
+        "TableName": DEPLOY_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
+        "FilterExpression": "#st = :pending",
+        "ExpressionAttributeNames": {"#st": "status"},
+        "ExpressionAttributeValues": {
+            ":pid": {"S": project_id},
+            ":prefix": {"S": "request#"},
+            ":pending": {"S": "pending"},
+        },
+        "ScanIndexForward": True,
+    }
+    while True:
+        resp = ddb.query(**kwargs)
+        for item in resp.get("Items", []):
+            data = _ddb_deser(item)
+            results.append(
+                {
+                    "request_id": data.get("request_id"),
+                    "status": data.get("status"),
+                    "change_type": data.get("change_type"),
+                    "deployment_type": data.get("deployment_type"),
+                    "summary": data.get("summary"),
+                    "submitted_at": data.get("submitted_at"),
+                    "submitted_by": data.get("submitted_by"),
+                }
+            )
+            if len(results) >= limit:
+                break
+        if len(results) >= limit or "LastEvaluatedKey" not in resp:
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+    results.sort(key=lambda r: r.get("submitted_at") or "")
+    return _ok({"project_id": project_id, "count": len(results), "requests": results})
+
+
+# ---------------------------------------------------------------------------
+# Route: POST /api/v1/deploy/trigger/{projectId}
+# ---------------------------------------------------------------------------
+
+
+def _handle_trigger(project_id: str) -> Dict:
+    if not SQS_QUEUE_URL:
+        return _error(500, "Deploy trigger queue is not configured", code="CONFIGURATION_ERROR", retryable=False)
+
+    deploy_state, state_error = _resolve_deploy_state(project_id)
+    if state_error:
+        return state_error
+
+    if deploy_state == "PAUSED":
+        return _ok(
+            {
+                "project_id": project_id,
+                "project_state": deploy_state,
+                "triggered": False,
+                "queued_paused": True,
+                "message": "Deployments are currently PAUSED. Trigger was not sent.",
+            }
+        )
+
+    try:
+        sqs = _get_sqs()
+        message = {
+            "project_id": project_id,
+            "trigger": "manual_api",
+            "ts": _utc_now_compact(),
+        }
+        resp = sqs.send_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MessageBody=json.dumps(message),
+            MessageGroupId=project_id,
+        )
+        return _ok(
+            {
+                "project_id": project_id,
+                "project_state": deploy_state,
+                "triggered": True,
+                "queued_paused": False,
+                "message_id": resp.get("MessageId", ""),
+                "triggered_at": _utc_now(),
+            }
+        )
+    except Exception:
+        logger.warning("Manual deploy trigger failed", exc_info=True)
+        return _error(500, "Failed to send deploy trigger", code="UPSTREAM_ERROR", retryable=True)
+
+
+# ---------------------------------------------------------------------------
 # Path routing
 # ---------------------------------------------------------------------------
 
@@ -784,6 +907,8 @@ _SUBMIT_PATTERN = re.compile(r"(?:/api/v1/deploy)?/submit$")
 _STATE_PATTERN = re.compile(r"(?:/api/v1/deploy)?/state/(?P<projectId>[a-z0-9_-]+)$")
 _STATUS_PATTERN = re.compile(r"(?:/api/v1/deploy)?/status/(?P<specId>[A-Z0-9_-]+)$")
 _HISTORY_PATTERN = re.compile(r"(?:/api/v1/deploy)?/history/(?P<projectId>[a-z0-9_-]+)$")
+_PENDING_PATTERN = re.compile(r"(?:/api/v1/deploy)?/pending/(?P<projectId>[a-z0-9_-]+)$")
+_TRIGGER_PATTERN = re.compile(r"(?:/api/v1/deploy)?/trigger/(?P<projectId>[a-z0-9_-]+)$")
 _OPTIONS_PATTERN = re.compile(r"(?:/api/v1/deploy)?/")
 
 
@@ -848,8 +973,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
             if m:
                 project_id = m.group("projectId")
                 qs = event.get("queryStringParameters") or {}
-                limit = min(int(qs.get("limit", "10")), 50)
+                limit = _parse_limit(qs.get("limit"), default=10, min_value=1, max_value=50)
                 return _handle_get_history(project_id, limit)
+
+        # GET /pending/{projectId}
+        if method == "GET":
+            m = _PENDING_PATTERN.search(path)
+            if m:
+                project_id = m.group("projectId")
+                qs = event.get("queryStringParameters") or {}
+                limit = _parse_limit(qs.get("limit"), default=50, min_value=1, max_value=200)
+                return _handle_get_pending(project_id, limit)
+
+        # POST /trigger/{projectId}
+        if method == "POST":
+            m = _TRIGGER_PATTERN.search(path)
+            if m:
+                project_id = m.group("projectId")
+                return _handle_trigger(project_id)
 
         return _error(404, f"Route not found: {method} {path}")
 

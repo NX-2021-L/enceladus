@@ -602,6 +602,8 @@ def test_deploy_adapter_contract():
         return {"success": True, "method": method, "path": path}
 
     # Monkeypatch helpers
+    original_deploy_api_request = server._deploy_api_request
+    original_compute_hash = server._compute_governance_hash
     server._deploy_api_request = fake_deploy_api_request
     server._compute_governance_hash = lambda: "a" * 64
 
@@ -616,6 +618,7 @@ def test_deploy_adapter_contract():
                     "deployment_type": "invalid_type",
                     "summary": "bad type",
                     "changes": ["x"],
+                    "governance_hash": "a" * 64,
                 }
             )
         )
@@ -634,6 +637,7 @@ def test_deploy_adapter_contract():
                     "summary": "lambda deploy",
                     "changes": ["update handler"],
                     "non_ui_config": {"service_group": "lambda"},
+                    "governance_hash": "a" * 64,
                 }
             )
         )
@@ -660,6 +664,7 @@ def test_deploy_adapter_contract():
                     "deployment_type": "github_public_static",
                     "summary": "ok submit",
                     "changes": ["build"],
+                    "governance_hash": "a" * 64,
                 }
             )
         )
@@ -674,13 +679,23 @@ def test_deploy_adapter_contract():
         _ = loop.run_until_complete(
             server._deploy_history_list({"project_id": "devops", "limit": 7})
         )
+        _ = loop.run_until_complete(
+            server._deploy_pending_requests({"project_id": "devops", "limit": 12})
+        )
+        _ = loop.run_until_complete(
+            server._deploy_trigger({"project_id": "devops"})
+        )
     finally:
         loop.close()
+        server._deploy_api_request = original_deploy_api_request
+        server._compute_governance_hash = original_compute_hash
 
     assert any(c["method"] == "POST" and c["path"] == "/submit" for c in calls)
     assert any(c["method"] == "GET" and c["path"] == "/state/devops" for c in calls)
     assert any(c["method"] == "GET" and c["path"] == "/status/SPEC-ABC123" for c in calls)
     assert any(c["method"] == "GET" and c["path"] == "/history/devops" for c in calls)
+    assert any(c["method"] == "GET" and c["path"] == "/pending/devops" for c in calls)
+    assert any(c["method"] == "POST" and c["path"] == "/trigger/devops" for c in calls)
     _pass("deploy adapter route mapping uses deploy_intake API paths")
 
 
