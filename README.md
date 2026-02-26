@@ -42,6 +42,9 @@ Important deployment boundary:
   production Lambda functions. Coverage is tracked in
   `infrastructure/lambda_workflow_manifest.json` and enforced by
   `.github/workflows/lambda-workflow-coverage-guard.yml`.
+- CloudFormation API stack updates (`infrastructure/cloudformation/03-api.yaml`) are
+  deployed via `.github/workflows/cloudformation-api-stack-deploy.yml` targeting
+  stack `enceladus-api` with a privileged OIDC role.
 
 ## UI Deployment Integration
 

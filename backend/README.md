@@ -67,6 +67,9 @@ See `JWT_AUTHENTICATION_FORENSICS.md` for complete prevention framework.
   must have a mapped workflow entry in `infrastructure/lambda_workflow_manifest.json`.
 - Dedicated Lambda deploy workflows are under `.github/workflows/lambda-*-deploy.yml`
   and use `.github/workflows/lambda-deploy-reusable.yml`.
+- API Gateway/route CloudFormation updates are managed by
+  `.github/workflows/cloudformation-api-stack-deploy.yml` for
+  `infrastructure/cloudformation/03-api.yaml` (stack: `enceladus-api`).
 - Workflow coverage is enforced by `.github/workflows/lambda-workflow-coverage-guard.yml`
   running `tools/verify_lambda_workflow_coverage.py` on PRs and pushes.
 - Non-UI requests routed through deployment-manager (`queued_non_ui`) are not the canonical
