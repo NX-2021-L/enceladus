@@ -166,7 +166,7 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
       const nextIssues = mergeById(prev.issues, data.issues, 'issue_id', closedSet)
       const nextFeatures = mergeById(prev.features, data.features, 'feature_id', closedSet)
 
-      // Only trigger a re-render if something actually changed.
+      // Only trigger a re-render when record content changes.
       if (
         !arraysEqual(nextTasks, prev.tasks) ||
         !arraysEqual(nextIssues, prev.issues) ||
@@ -180,9 +180,6 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
           isPending: false,
           isError: false,
         })
-      } else if (prev.generatedAt !== data.generated_at) {
-        // Update timestamp even when records are identical.
-        setState((s) => ({ ...s, generatedAt: data.generated_at }))
       }
     } catch (err) {
       if (!mountedRef.current) return
