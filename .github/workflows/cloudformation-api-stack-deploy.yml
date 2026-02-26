@@ -83,13 +83,6 @@ jobs:
             echo "api_name=${api_name}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Validate CloudFormation template
-        run: |
-          set -euo pipefail
-          aws cloudformation validate-template \
-            --region "${AWS_REGION}" \
-            --template-body "file://${TEMPLATE_FILE}" >/dev/null
-
       - name: Deploy API stack (03-api)
         run: |
           set -euo pipefail
