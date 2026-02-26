@@ -60,6 +60,7 @@ COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 CORS_ORIGIN = "https://jreese.net"
 FEED_CACHE_CONTROL = "max-age=0, s-maxage=300, must-revalidate"
+INCREMENTAL_LOOKBACK_SECONDS = 10
 
 CLOSED_ITEM_MAX_AGE_DAYS = 0
 MAX_SCOPE_RECORD_IDS = 500
@@ -130,6 +131,11 @@ def _parse_iso8601(raw: str) -> Optional[dt.datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(dt.timezone.utc)
+
+
+def _to_iso8601_z(ts: dt.datetime) -> str:
+    """Format timestamp in canonical UTC Zulu form (second precision)."""
+    return ts.astimezone(dt.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _json_body(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -1121,8 +1127,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         parsed_since = _parse_iso8601(since_param)
         if parsed_since is None:
             return _error(400, "'since' must be ISO-8601 UTC (e.g. 2026-02-25T12:00:00Z)")
+        # Add a small overlap window to avoid permanently missing updates when
+        # GSI propagation lags behind the client watermark by a few seconds.
+        incremental_since = _to_iso8601_z(
+            parsed_since - dt.timedelta(seconds=INCREMENTAL_LOOKBACK_SECONDS)
+        )
         try:
-            tasks, issues, features, closed_ids = _query_incremental(since_param)
+            tasks, issues, features, closed_ids = _query_incremental(incremental_since)
         except Exception as exc:
             logger.error("incremental feed query failed: %s", exc)
             return _error(500, "Failed to query feed delta. Please try again.")
