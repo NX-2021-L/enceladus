@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# deploy.sh — Deploy project_service Lambda (devops-project-service-api)
+# deploy.sh — Deploy project_service Lambda (devops-project-service)
 #
 # Updates the Lambda code only. Infrastructure (IAM role, API Gateway
 # routes GET/POST /api/v1/projects, CloudFront behavior) already exists.
@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
-FUNCTION_NAME="devops-project-service-api"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-project-service}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
