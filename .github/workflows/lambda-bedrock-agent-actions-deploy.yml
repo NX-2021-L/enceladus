@@ -1,0 +1,26 @@
+name: Lambda Deploy - enceladus-bedrock-agent-actions
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/bedrock_agent_actions/**"
+      - ".github/workflows/lambda-bedrock-agent-actions-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "enceladus-bedrock-agent-actions"
+      lambda_dir: "backend/lambda/bedrock_agent_actions"
+      deploy_script: "backend/lambda/bedrock_agent_actions/deploy.sh"
+    secrets: inherit

@@ -38,7 +38,10 @@ API and MCP source files are now stored in this repo so the full Enceladus codeb
 Important deployment boundary:
 
 - UI: auto-deploy enabled through GitHub Actions + backend deployment manager.
-- API/MCP: source-only in this repo; no GitHub Actions auto-deploy is configured for non-UI components.
+- API/MCP + production Lambdas: GitHub Actions deploy workflows are configured for
+  production Lambda functions. Coverage is tracked in
+  `infrastructure/lambda_workflow_manifest.json` and enforced by
+  `.github/workflows/lambda-workflow-coverage-guard.yml`.
 
 ## UI Deployment Integration
 
@@ -51,6 +54,8 @@ The UI deployment now integrates with the backend Deployment Manager using GitHu
   - Manual `workflow_dispatch`
 
 Non-UI paths (`backend/**`, `tools/enceladus-mcp-server/**`) do not trigger this workflow.
+Production Lambda paths under `backend/lambda/**` are handled by the dedicated
+`lambda-*-deploy.yml` workflows.
 
 ### Required Repository Secrets
 

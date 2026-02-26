@@ -1,0 +1,26 @@
+name: Lambda Deploy - devops-reference-search
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/reference_search/**"
+      - ".github/workflows/lambda-reference-search-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "devops-reference-search"
+      lambda_dir: "backend/lambda/reference_search"
+      deploy_script: "backend/lambda/reference_search/deploy.sh"
+    secrets: inherit

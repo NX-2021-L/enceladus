@@ -1,0 +1,25 @@
+name: Lambda Deploy - devops-deploy-orchestrator
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/deploy_orchestrator/**"
+      - ".github/workflows/lambda-deploy-orchestrator-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "devops-deploy-orchestrator"
+      lambda_dir: "backend/lambda/deploy_orchestrator"
+    secrets: inherit

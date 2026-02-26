@@ -1,0 +1,25 @@
+name: Lambda Deploy - devops-doc-prep
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/doc_prep/**"
+      - ".github/workflows/lambda-doc-prep-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "devops-doc-prep"
+      lambda_dir: "backend/lambda/doc_prep"
+    secrets: inherit

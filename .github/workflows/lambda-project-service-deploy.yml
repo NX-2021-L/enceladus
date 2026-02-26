@@ -1,0 +1,26 @@
+name: Lambda Deploy - devops-project-service
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/project_service/**"
+      - ".github/workflows/lambda-project-service-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "devops-project-service"
+      lambda_dir: "backend/lambda/project_service"
+      deploy_script: "backend/lambda/project_service/deploy.sh"
+    secrets: inherit

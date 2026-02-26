@@ -1,0 +1,142 @@
+name: Lambda Deploy (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      function_name:
+        description: Lambda function name in AWS
+        required: true
+        type: string
+      lambda_dir:
+        description: Relative path to lambda source directory
+        required: true
+        type: string
+      deploy_script:
+        description: Optional deploy script path; if omitted, generic code-only update is used
+        required: false
+        type: string
+        default: ""
+      package_extra_files:
+        description: Optional comma-separated extra files to include for generic packaging
+        required: false
+        type: string
+        default: ""
+    secrets:
+      AWS_BACKEND_ROLE_TO_ASSUME:
+        required: true
+      COORDINATION_INTERNAL_API_KEY:
+        required: false
+      GH_APP_ID:
+        required: false
+      GH_INSTALLATION_ID:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.function_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: lambda-deploy-${{ inputs.function_name }}-main
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC backend deploy role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy via explicit script
+        if: ${{ inputs.deploy_script != '' }}
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_INSTALLATION_ID: ${{ secrets.GH_INSTALLATION_ID }}
+        run: |
+          set -euo pipefail
+          chmod +x "${{ inputs.deploy_script }}"
+          "${{ inputs.deploy_script }}"
+
+      - name: Deploy via generic code-only package update
+        if: ${{ inputs.deploy_script == '' }}
+        run: |
+          set -euo pipefail
+
+          function_name="${{ inputs.function_name }}"
+          lambda_dir="${{ inputs.lambda_dir }}"
+          extra_files="${{ inputs.package_extra_files }}"
+
+          if [[ ! -f "${lambda_dir}/lambda_function.py" ]]; then
+            echo "Expected ${lambda_dir}/lambda_function.py for generic package deployment" >&2
+            exit 1
+          fi
+
+          build_dir="$(mktemp -d /tmp/${function_name}-build-XXXXXX)"
+          zip_file="/tmp/${function_name}.zip"
+
+          cp "${lambda_dir}/lambda_function.py" "${build_dir}/"
+
+          if [[ -f "${lambda_dir}/requirements.txt" ]]; then
+            python3 -m pip install \
+              --quiet \
+              --upgrade \
+              --platform manylinux2014_x86_64 \
+              --implementation cp \
+              --python-version 3.11 \
+              --abi cp311 \
+              --only-binary=:all: \
+              -r "${lambda_dir}/requirements.txt" \
+              -t "${build_dir}" >/dev/null
+          fi
+
+          if [[ -n "${extra_files}" ]]; then
+            IFS=',' read -ra files <<< "${extra_files}"
+            for rel in "${files[@]}"; do
+              rel="$(echo "${rel}" | xargs)"
+              [[ -n "${rel}" ]] || continue
+              src="${lambda_dir}/${rel}"
+              dst="${build_dir}/${rel}"
+              if [[ ! -f "${src}" ]]; then
+                echo "Missing extra package file: ${src}" >&2
+                exit 1
+              fi
+              mkdir -p "$(dirname "${dst}")"
+              cp "${src}" "${dst}"
+            done
+          fi
+
+          (
+            cd "${build_dir}"
+            zip -qr "${zip_file}" .
+          )
+
+          aws lambda update-function-code \
+            --region "us-west-2" \
+            --function-name "${function_name}" \
+            --zip-file "fileb://${zip_file}" >/dev/null
+
+          aws lambda wait function-updated-v2 \
+            --region "us-west-2" \
+            --function-name "${function_name}"
+
+          rm -rf "${build_dir}" "${zip_file}"
+
+      - name: Validate deployed Lambda state
+        run: |
+          set -euo pipefail
+          aws lambda get-function-configuration \
+            --region "us-west-2" \
+            --function-name "${{ inputs.function_name }}" \
+            --query '{FunctionName:FunctionName,LastModified:LastModified,Runtime:Runtime,State:State,LastUpdateStatus:LastUpdateStatus}' \
+            --output table

@@ -1,0 +1,26 @@
+name: Lambda Deploy - devops-feed-publisher
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/feed_publisher/**"
+      - ".github/workflows/lambda-feed-publisher-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "devops-feed-publisher"
+      lambda_dir: "backend/lambda/feed_publisher"
+      package_extra_files: "feed_utils.py"
+    secrets: inherit
