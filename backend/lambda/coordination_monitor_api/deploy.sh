@@ -235,12 +235,24 @@ ensure_api_routes() {
 ensure_cloudfront_behavior() {
   log "[START] checking CloudFront behavior for /api/v1/coordination/monitor*"
 
-  local etag config_file updated_file
+  local etag config_file updated_file cf_err_file
   config_file="$(mktemp /tmp/cf-config-XXXXXX.json)"
   updated_file="$(mktemp /tmp/cf-config-updated-XXXXXX.json)"
+  cf_err_file="$(mktemp /tmp/cf-err-XXXXXX.log)"
 
-  aws cloudfront get-distribution-config \
-    --id "${CF_DIST_ID}" > "${config_file}"
+  if ! aws cloudfront get-distribution-config \
+    --id "${CF_DIST_ID}" > "${config_file}" 2>"${cf_err_file}"; then
+    if grep -qi "AccessDenied" "${cf_err_file}"; then
+      log "[WARNING] skipping CloudFront behavior update: missing cloudfront:GetDistributionConfig permission for ${CF_DIST_ID}"
+      rm -f "${config_file}" "${updated_file}" "${cf_err_file}"
+      return
+    fi
+    log "[ERROR] failed reading CloudFront distribution config"
+    cat "${cf_err_file}" >&2
+    rm -f "${config_file}" "${updated_file}" "${cf_err_file}"
+    return 1
+  fi
+  rm -f "${cf_err_file}"
 
   etag="$(python3 -c "import json; d=json.load(open('${config_file}')); print(d['ETag'])")"
 
@@ -298,12 +310,23 @@ with open(updated_file, "w") as f:
 print("[OK] Updated config written")
 PYEOF
 
-  aws cloudfront update-distribution \
+  cf_err_file="$(mktemp /tmp/cf-err-XXXXXX.log)"
+  if ! aws cloudfront update-distribution \
     --id "${CF_DIST_ID}" \
     --if-match "${etag}" \
-    --distribution-config "file://${updated_file}" >/dev/null
+    --distribution-config "file://${updated_file}" >/dev/null 2>"${cf_err_file}"; then
+    if grep -qi "AccessDenied" "${cf_err_file}"; then
+      log "[WARNING] skipping CloudFront behavior update: missing cloudfront:UpdateDistribution permission for ${CF_DIST_ID}"
+      rm -f "${config_file}" "${updated_file}" "${cf_err_file}"
+      return
+    fi
+    log "[ERROR] failed updating CloudFront distribution config"
+    cat "${cf_err_file}" >&2
+    rm -f "${config_file}" "${updated_file}" "${cf_err_file}"
+    return 1
+  fi
 
-  rm -f "${config_file}" "${updated_file}"
+  rm -f "${config_file}" "${updated_file}" "${cf_err_file}"
   log "[END] CloudFront behavior added: /api/v1/coordination/monitor*"
 }
 
