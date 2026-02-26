@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import unittest
+from decimal import Decimal
 from botocore.exceptions import ClientError
 from unittest.mock import patch
 
@@ -45,9 +46,11 @@ def _event(
 class DeployIntakeAuthTests(unittest.TestCase):
     def setUp(self) -> None:
         self._original_internal_key = deploy_intake.COORDINATION_INTERNAL_API_KEY
+        self._original_sqs_queue_url = deploy_intake.SQS_QUEUE_URL
 
     def tearDown(self) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = self._original_internal_key
+        deploy_intake.SQS_QUEUE_URL = self._original_sqs_queue_url
 
     def test_cors_allows_internal_key_header(self) -> None:
         headers = deploy_intake._cors_headers()
@@ -87,6 +90,59 @@ class DeployIntakeAuthTests(unittest.TestCase):
 
         self.assertEqual(resp["statusCode"], 200)
         mock_get_history.assert_called_once_with("enceladus", 5)
+
+    @patch.object(deploy_intake, "_handle_get_pending")
+    def test_internal_key_allows_pending_route(self, mock_get_pending) -> None:
+        deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        mock_get_pending.return_value = deploy_intake._ok({"project_id": "enceladus", "requests": []})
+
+        resp = deploy_intake.lambda_handler(
+            _event(
+                method="GET",
+                path="/api/v1/deploy/pending/enceladus",
+                headers={"X-Coordination-Internal-Key": "test-internal-key"},
+                query={"limit": "3"},
+            ),
+            None,
+        )
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_get_pending.assert_called_once_with("enceladus", 3)
+
+    @patch.object(deploy_intake, "_handle_trigger")
+    def test_internal_key_allows_trigger_route(self, mock_handle_trigger) -> None:
+        deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        mock_handle_trigger.return_value = deploy_intake._ok({"project_id": "enceladus", "triggered": True})
+
+        resp = deploy_intake.lambda_handler(
+            _event(
+                method="POST",
+                path="/api/v1/deploy/trigger/enceladus",
+                headers={"X-Coordination-Internal-Key": "test-internal-key"},
+            ),
+            None,
+        )
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_handle_trigger.assert_called_once_with("enceladus")
+
+    @patch.object(deploy_intake, "_handle_get_history")
+    def test_history_invalid_limit_defaults(self, mock_get_history) -> None:
+        deploy_intake.COORDINATION_INTERNAL_API_KEY = "test-internal-key"
+        mock_get_history.return_value = deploy_intake._ok({"project_id": "enceladus", "deployments": []})
+
+        resp = deploy_intake.lambda_handler(
+            _event(
+                method="GET",
+                path="/api/v1/deploy/history/enceladus",
+                headers={"X-Coordination-Internal-Key": "test-internal-key"},
+                query={"limit": "not-a-number"},
+            ),
+            None,
+        )
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_get_history.assert_called_once_with("enceladus", 10)
 
     def test_invalid_internal_key_returns_401(self) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = "expected-key"
@@ -140,6 +196,42 @@ class DeployIntakeAuthTests(unittest.TestCase):
         self.assertEqual(resp["statusCode"], 200)
         body = json.loads(resp["body"])
         self.assertEqual(body.get("state"), "ACTIVE")
+
+    @patch.object(deploy_intake, "_resolve_deploy_state", return_value=("PAUSED", None))
+    @patch.object(deploy_intake, "_get_sqs")
+    def test_trigger_paused_does_not_send_sqs(self, mock_get_sqs, _mock_state) -> None:
+        deploy_intake.SQS_QUEUE_URL = "https://sqs.us-west-2.amazonaws.com/123/test.fifo"
+        resp = deploy_intake._handle_trigger("enceladus")
+
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertEqual(body.get("project_state"), "PAUSED")
+        self.assertFalse(body.get("triggered"))
+        mock_get_sqs.assert_not_called()
+
+    @patch.object(deploy_intake, "_resolve_deploy_state", return_value=("ACTIVE", None))
+    @patch.object(deploy_intake, "_get_sqs")
+    def test_trigger_active_sends_sqs_message(self, mock_get_sqs, _mock_state) -> None:
+        deploy_intake.SQS_QUEUE_URL = "https://sqs.us-west-2.amazonaws.com/123/test.fifo"
+        mock_get_sqs.return_value.send_message.return_value = {"MessageId": "msg-123"}
+
+        resp = deploy_intake._handle_trigger("enceladus")
+
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body.get("triggered"))
+        self.assertEqual(body.get("message_id"), "msg-123")
+        mock_get_sqs.return_value.send_message.assert_called_once()
+
+    def test_response_serializes_decimal_values(self) -> None:
+        resp = deploy_intake._response(
+            200,
+            {"count": Decimal("4"), "ratio": Decimal("1.25")},
+        )
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertEqual(body["count"], 4)
+        self.assertEqual(body["ratio"], 1.25)
 
 
 if __name__ == "__main__":

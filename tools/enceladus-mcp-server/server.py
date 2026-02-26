@@ -178,7 +178,6 @@ HEALTH_API_URL = os.environ.get(
     "ENCELADUS_HEALTH_API_URL",
     "https://jreese.net/api/v1/health",
 )
-DEPLOY_QUEUE_NAME = os.environ.get("ENCELADUS_DEPLOY_QUEUE", "devops-deploy-queue.fifo")
 DEPLOY_CONFIG_BUCKET = os.environ.get("ENCELADUS_DEPLOY_CONFIG_BUCKET", "jreese-net")
 DEPLOY_CONFIG_PREFIX = os.environ.get("ENCELADUS_DEPLOY_CONFIG_PREFIX", "deploy-config")
 DEPLOY_CHANGE_TYPES = ("patch", "minor", "major")
@@ -251,8 +250,6 @@ logger = logging.getLogger(SERVER_NAME)
 
 _ddb_client = None
 _s3_client = None
-_sqs_client = None
-_deploy_queue_url: Optional[str] = None
 _governance_catalog_cache: Dict[str, Dict[str, Any]] = {}
 _governance_catalog_cached_at: float = 0.0
 
@@ -277,26 +274,6 @@ def _get_s3():
             raise RuntimeError("boto3 is not installed. Run: pip install boto3")
         _s3_client = boto3.client("s3", region_name=AWS_REGION)
     return _s3_client
-
-
-def _get_sqs():
-    global _sqs_client
-    if _sqs_client is None:
-        if not _BOTO_AVAILABLE:
-            raise RuntimeError("boto3 is not installed. Run: pip install boto3")
-        _sqs_client = boto3.client("sqs", region_name=AWS_REGION)
-    return _sqs_client
-
-
-def _get_deploy_queue_url() -> str:
-    """Resolve SQS FIFO queue URL from queue name (cached)."""
-    global _deploy_queue_url
-    if _deploy_queue_url is not None:
-        return _deploy_queue_url
-    sqs = _get_sqs()
-    resp = sqs.get_queue_url(QueueName=DEPLOY_QUEUE_NAME)
-    _deploy_queue_url = resp["QueueUrl"]
-    return _deploy_queue_url
 
 
 def _now_z() -> str:
@@ -2934,7 +2911,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="deploy_trigger",
-            description="Manually trigger the deploy orchestration pipeline by sending a message to the SQS FIFO queue. Use when requests are pending but the pipeline wasn't triggered automatically.",
+            description="Manually trigger the deploy orchestration pipeline through the deploy intake API. Use when requests are pending but the pipeline wasn't triggered automatically.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2955,6 +2932,10 @@ async def list_tools() -> list[Tool]:
                     "project_id": {
                         "type": "string",
                         "description": "The project name.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum pending requests to return (default 50, max 200).",
                     },
                 },
                 "required": ["project_id"],
@@ -4045,69 +4026,22 @@ async def _deploy_status(args: dict) -> list[TextContent]:
 
 
 async def _deploy_trigger(args: dict) -> list[TextContent]:
-    """Manually trigger the deploy orchestration pipeline via SQS."""
+    """Manually trigger the deploy orchestration pipeline via deploy_intake API."""
     project_id = args["project_id"]
-
-    try:
-        queue_url = _get_deploy_queue_url()
-        sqs = _get_sqs()
-        body = json.dumps({
-            "project_id": project_id,
-            "trigger": "manual_mcp",
-            "ts": _now_compact(),
-        })
-        resp = sqs.send_message(
-            QueueUrl=queue_url,
-            MessageBody=body,
-            MessageGroupId=project_id,
-        )
-        return _result_text({
-            "success": True,
-            "project_id": project_id,
-            "sqs_message_id": resp.get("MessageId", ""),
-            "triggered_at": _now_z(),
-        })
-    except Exception as exc:
-        return _result_text(_error_payload("UPSTREAM_ERROR", f"Failed to send SQS trigger: {exc}", retryable=True))
+    result = _deploy_api_request("POST", f"/trigger/{project_id}")
+    return _result_text(result)
 
 
 async def _deploy_pending_requests(args: dict) -> list[TextContent]:
     """List all pending deployment requests for a project."""
     project_id = args["project_id"]
-    ddb = _get_ddb()
-
-    results = []
-    kwargs: Dict[str, Any] = {
-        "TableName": DEPLOY_TABLE,
-        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
-        "FilterExpression": "#st = :pending",
-        "ExpressionAttributeNames": {"#st": "status"},
-        "ExpressionAttributeValues": {
-            ":pid": _ser_s(project_id),
-            ":prefix": _ser_s("request#"),
-            ":pending": _ser_s("pending"),
-        },
-    }
-    while True:
-        resp = ddb.query(**kwargs)
-        results.extend([_deser_item(i) for i in resp.get("Items", [])])
-        if "LastEvaluatedKey" not in resp:
-            break
-        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
-
-    # Sort by submitted_at
-    results.sort(key=lambda r: r.get("submitted_at", ""))
-    summary = [
-        {
-            "request_id": r.get("request_id"),
-            "change_type": r.get("change_type"),
-            "summary": r.get("summary"),
-            "submitted_at": r.get("submitted_at"),
-            "submitted_by": r.get("submitted_by"),
-        }
-        for r in results
-    ]
-    return _result_text({"requests": summary, "count": len(summary), "project_id": project_id})
+    try:
+        limit = int(args.get("limit", 50))
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 200))
+    result = _deploy_api_request("GET", f"/pending/{project_id}", query={"limit": limit})
+    return _result_text(result)
 
 
 async def _deploy_status_get(args: dict) -> list[TextContent]:
