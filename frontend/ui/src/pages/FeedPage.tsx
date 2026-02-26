@@ -8,7 +8,6 @@ import { FeedRow } from '../components/cards/FeedRow'
 import { AnimatedList } from '../components/shared/AnimatedList'
 import { SearchInput } from '../components/shared/SearchInput'
 import { FilterBar } from '../components/shared/FilterBar'
-import { RecentItemsDisplay } from '../components/shared/RecentItemsDisplay'
 import { ScrollSentinel } from '../components/shared/ScrollSentinel'
 import { FreshnessBadge } from '../components/shared/FreshnessBadge'
 import { LoadingState } from '../components/shared/LoadingState'
@@ -173,9 +172,6 @@ export function FeedPage() {
           colorMap={STATUS_COLORS}
         />
       )}
-
-      {/* Recent Items Display (replaces SortPicker) */}
-      <RecentItemsDisplay items={items} />
 
       {visible.length ? (
         <>
