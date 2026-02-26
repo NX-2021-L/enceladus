@@ -1,0 +1,25 @@
+{
+  "entry_file": "server.py",
+  "function_name": "enceladus-mcp-streamable",
+  "generated_at": "2026-02-26T00:00:00Z",
+  "live_configuration": {
+    "architectures": [
+      "arm64"
+    ],
+    "environment": {
+      "ENCELADUS_MCP_TRANSPORT": "streamable_http"
+    },
+    "function_arn": "",
+    "handler": "server.lambda_handler",
+    "last_modified": "",
+    "layers": [],
+    "memory_size": 512,
+    "role": "",
+    "runtime": "python3.12",
+    "timeout": 30,
+    "version": "$LATEST"
+  },
+  "parity_status": "PENDING_DEPLOY",
+  "region": "us-west-2",
+  "repo_entry_path": "tools/enceladus-mcp-server/server.py"
+}
