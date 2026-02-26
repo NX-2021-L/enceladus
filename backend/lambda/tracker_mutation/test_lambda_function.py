@@ -317,13 +317,51 @@ class CheckoutRouteTests(unittest.TestCase):
             subresource="checkout",
             method="POST",
         )
-        with patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"):
+        with patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"), patch.object(
+            tracker_mutation,
+            "COORDINATION_INTERNAL_API_KEYS",
+            ("valid-key",),
+        ):
             resp = tracker_mutation.lambda_handler(event, None)
 
         self.assertEqual(resp["statusCode"], 200)
         parsed = json.loads(resp["body"])
         self.assertTrue(parsed.get("checkout"))
         self.assertEqual(parsed.get("active_agent_session_id"), "codex-helper")
+
+    @patch.object(tracker_mutation, "_validate_project_exists", return_value=None)
+    @patch.object(tracker_mutation, "_get_ddb")
+    def test_checkout_accepts_previous_internal_key(self, mock_ddb, _mock_proj):
+        fake_ddb = MagicMock()
+        mock_ddb.return_value = fake_ddb
+        fake_ddb.get_item.return_value = {
+            "Item": {
+                "status": {"S": "open"},
+                "sync_version": {"N": "1"},
+                "record_type": {"S": "task"},
+                "updated_at": {"S": "2026-01-01T00:00:00Z"},
+                "active_agent_session": {"BOOL": False},
+                "active_agent_session_id": {"S": ""},
+            }
+        }
+        fake_ddb.update_item.return_value = {}
+
+        event = _make_subresource_event(
+            body={"provider": "codex-helper"},
+            subresource="checkout",
+            method="POST",
+            internal_key="legacy-key",
+        )
+        with patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "active-key"), patch.object(
+            tracker_mutation,
+            "COORDINATION_INTERNAL_API_KEYS",
+            ("active-key", "legacy-key"),
+        ):
+            resp = tracker_mutation.lambda_handler(event, None)
+
+        self.assertEqual(resp["statusCode"], 200)
+        parsed = json.loads(resp["body"])
+        self.assertTrue(parsed.get("checkout"))
 
 
 if __name__ == "__main__":

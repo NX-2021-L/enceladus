@@ -73,7 +73,11 @@ class AuthTests(unittest.TestCase):
     def test_internal_key_auth(self, _mock_verify):
         """Internal API key bypasses JWT validation."""
         orig = document_api.DOCUMENT_API_INTERNAL_API_KEY
+        orig_prev = document_api.DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS
+        orig_keys = document_api.DOCUMENT_API_INTERNAL_API_KEYS
         document_api.DOCUMENT_API_INTERNAL_API_KEY = "test-key-123"
+        document_api.DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS = ""
+        document_api.DOCUMENT_API_INTERNAL_API_KEYS = ("test-key-123",)
         try:
             event = _make_event(cookie="")
             event["headers"] = {"x-coordination-internal-key": "test-key-123"}
@@ -82,6 +86,27 @@ class AuthTests(unittest.TestCase):
             self.assertNotEqual(resp["statusCode"], 401)
         finally:
             document_api.DOCUMENT_API_INTERNAL_API_KEY = orig
+            document_api.DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS = orig_prev
+            document_api.DOCUMENT_API_INTERNAL_API_KEYS = orig_keys
+
+    @patch.object(document_api, "_verify_token", return_value={"sub": "user1"})
+    def test_previous_internal_key_auth(self, _mock_verify):
+        """Previous rollout key is accepted during rotation window."""
+        orig = document_api.DOCUMENT_API_INTERNAL_API_KEY
+        orig_prev = document_api.DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS
+        orig_keys = document_api.DOCUMENT_API_INTERNAL_API_KEYS
+        document_api.DOCUMENT_API_INTERNAL_API_KEY = "active-key"
+        document_api.DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS = "previous-key"
+        document_api.DOCUMENT_API_INTERNAL_API_KEYS = ("active-key", "previous-key")
+        try:
+            event = _make_event(cookie="")
+            event["headers"] = {"x-coordination-internal-key": "previous-key"}
+            resp = document_api.lambda_handler(event, None)
+            self.assertNotEqual(resp["statusCode"], 401)
+        finally:
+            document_api.DOCUMENT_API_INTERNAL_API_KEY = orig
+            document_api.DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS = orig_prev
+            document_api.DOCUMENT_API_INTERNAL_API_KEYS = orig_keys
 
 
 class UploadValidationTests(unittest.TestCase):

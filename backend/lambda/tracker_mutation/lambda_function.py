@@ -52,6 +52,22 @@ try:
 except ImportError:
     _JWT_AVAILABLE = False
 
+
+def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
+    """Return deduplicated, non-empty key values from scalar/csv env sources."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -62,6 +78,12 @@ PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
+    os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+    COORDINATION_INTERNAL_API_KEY,
+    COORDINATION_INTERNAL_API_KEY_PREVIOUS,
+)
 GITHUB_INTEGRATION_API_BASE = os.environ.get("GITHUB_INTEGRATION_API_BASE", "")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 MAX_NOTE_LENGTH = 2000
@@ -400,7 +422,7 @@ def _authenticate(event: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
         or headers.get("X-Coordination-Internal-Key")
         or ""
     )
-    if internal_key and COORDINATION_INTERNAL_API_KEY and internal_key == COORDINATION_INTERNAL_API_KEY:
+    if internal_key and COORDINATION_INTERNAL_API_KEYS and internal_key in COORDINATION_INTERNAL_API_KEYS:
         return {"auth_mode": "internal-key"}, None
 
     # Fall back to Cognito JWT
