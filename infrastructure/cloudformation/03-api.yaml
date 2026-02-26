@@ -342,6 +342,20 @@ Resources:
       RouteKey: PATCH /api/v1/deploy/state/{projectId}
       Target: !Sub integrations/${DeployIntakeIntegration}
 
+  RouteDeployPending:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/pending/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployTrigger:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/deploy/trigger/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
   RouteReferenceSearch:
     Type: AWS::ApiGatewayV2::Route
     Properties:
