@@ -16,10 +16,18 @@ on:
         required: false
         default: "manual deploy"
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   deploy:
     uses: ./.github/workflows/lambda-deploy-reusable.yml
     with:
       function_name: "devops-deploy-orchestrator"
       lambda_dir: "backend/lambda/deploy_orchestrator"
-    secrets: inherit
+    secrets:
+      AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+      COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_INSTALLATION_ID: ${{ secrets.GH_INSTALLATION_ID }}

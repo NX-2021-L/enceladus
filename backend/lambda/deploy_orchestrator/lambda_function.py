@@ -318,10 +318,15 @@ def _analyze_integration(requests: List[Dict]) -> Dict[str, Any]:
         if len(sums) > 1:
             warnings.append(f"Record {rid} referenced by {len(sums)} requests")
 
-    has_version_conflict = any("version.ts" in o["file"].lower() for o in file_overlaps)
+    has_version_overlap = any("version.ts" in o["file"].lower() for o in file_overlaps)
+    if has_version_overlap:
+        warnings.append(
+            "Detected overlapping version.ts updates across pending requests; "
+            "continuing with warning to avoid deadlocking pending UI deployments."
+        )
 
     return {
-        "status": "fail" if has_version_conflict else ("warning" if warnings else "pass"),
+        "status": "warning" if warnings else "pass",
         "file_overlaps": file_overlaps,
         "warnings": warnings,
     }
