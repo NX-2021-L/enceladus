@@ -8,7 +8,7 @@
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { closeRecord, submitNote, reopenRecord, setField } from '../api/mutations'
+import { closeRecord, submitNote, reopenRecord, setField, setCheckout } from '../api/mutations'
 import type { MutationResult } from '../api/mutations'
 import { feedKeys } from '../api/feeds'
 
@@ -18,7 +18,7 @@ interface MutationVars {
   projectId: string
   recordType: RecordType
   recordId: string
-  action: 'close' | 'note' | 'reopen' | 'set_field'
+  action: 'close' | 'note' | 'reopen' | 'set_field' | 'checkout' | 'release'
   note?: string
   field?: string
   value?: string
@@ -56,6 +56,8 @@ export function useRecordMutation() {
     mutationFn: ({ projectId, recordType, recordId, action, note, field, value, transitionEvidence }) => {
       if (action === 'close') return closeRecord(projectId, recordType, recordId)
       if (action === 'reopen') return reopenRecord(projectId, recordType, recordId)
+      if (action === 'checkout') return setCheckout(projectId, recordType, recordId, true)
+      if (action === 'release') return setCheckout(projectId, recordType, recordId, false)
       if (action === 'set_field') {
         const extras = transitionEvidence ? { transition_evidence: transitionEvidence } : undefined
         return setField(projectId, recordType, recordId, field!, value!, extras)

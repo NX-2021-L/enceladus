@@ -3,6 +3,7 @@ import type { Task } from '../../types/feeds'
 import { StatusChip } from '../shared/StatusChip'
 import { PriorityBadge } from '../shared/PriorityBadge'
 import { ActiveSessionBadge } from '../shared/ActiveSessionBadge'
+import { CheckoutStateBadge } from '../shared/CheckoutStateBadge'
 import { CoordinationFlagBadge } from '../shared/CoordinationFlagBadge'
 import { timeAgo } from '../../lib/formatters'
 
@@ -26,6 +27,14 @@ export function TaskRow({ task }: { task: Task }) {
         <StatusChip status={task.status} />
         <PriorityBadge priority={task.priority} />
         {task.active_agent_session && <ActiveSessionBadge isActive agentSessionId={task.active_agent_session_id} />}
+        <CheckoutStateBadge
+          activeSession={task.active_agent_session}
+          checkoutState={task.checkout_state}
+          checkedOutBy={task.checked_out_by}
+          checkedOutAt={task.checked_out_at}
+          checkedInBy={task.checked_in_by}
+          checkedInAt={task.checked_in_at}
+        />
         {task.coordination && <CoordinationFlagBadge isCoordination />}
         {task.checklist_total > 0 && (
           <span className="text-xs text-slate-500">

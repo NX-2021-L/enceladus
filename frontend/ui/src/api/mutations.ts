@@ -15,12 +15,15 @@ const BASE = import.meta.env.VITE_MUTATION_BASE_URL ?? '/api/v1/tracker'
 
 export interface MutationResult {
   success: boolean
-  action?: 'close' | 'note' | 'reopen'
+  action?: 'close' | 'note' | 'reopen' | 'checkout' | 'release'
   field?: string
   value?: string
   record_id: string
   updated_at: string
   updated_status?: string
+  checkout?: boolean
+  checkout_state?: 'checked_out' | 'checked_in'
+  active_agent_session_id?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -80,13 +83,11 @@ export function isMutationRetryExhaustedError(
 const MAX_CYCLES = 3
 const CYCLE_TIMEOUT_MS = 10_000
 
-async function mutateWithRetry(
-  projectId: string,
-  recordType: 'task' | 'issue' | 'feature',
-  recordId: string,
-  body: Record<string, unknown>,
+async function requestWithRetry(
+  url: string,
+  method: 'PATCH' | 'POST' | 'DELETE',
+  body?: Record<string, unknown>,
 ): Promise<MutationResult> {
-  const url = `${BASE}/${projectId}/${recordType}/${recordId}`
   const attempts: MutationAttempt[] = []
 
   for (let cycle = 1; cycle <= MAX_CYCLES; cycle++) {
@@ -95,10 +96,10 @@ async function mutateWithRetry(
       const timeout = setTimeout(() => controller.abort(), CYCLE_TIMEOUT_MS)
 
       const res = await fetch(url, {
-        method: 'PATCH',
+        method,
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        ...(body ? { body: JSON.stringify(body) } : {}),
         signal: controller.signal,
       })
       clearTimeout(timeout)
@@ -126,7 +127,7 @@ async function mutateWithRetry(
         const refreshed = await refreshCredentials()
         if (!refreshed && cycle === MAX_CYCLES) {
           throw new MutationRetryExhaustedError(
-            url, body, attempts, 'Credential refresh failed'
+            url, body ?? {}, attempts, 'Credential refresh failed'
           )
         }
         continue // retry with (possibly) refreshed credentials
@@ -150,7 +151,7 @@ async function mutateWithRetry(
         })
         if (cycle === MAX_CYCLES) {
           throw new MutationRetryExhaustedError(
-            url, body, attempts, 'Server returned error'
+            url, body ?? {}, attempts, 'Server returned error'
           )
         }
         // Attempt refresh in case it's a transient auth issue
@@ -176,7 +177,7 @@ async function mutateWithRetry(
 
       if (cycle === MAX_CYCLES) {
         throw new MutationRetryExhaustedError(
-          url, body, attempts, 'All retry cycles exhausted'
+          url, body ?? {}, attempts, 'All retry cycles exhausted'
         )
       }
 
@@ -187,8 +188,18 @@ async function mutateWithRetry(
 
   // Should not reach here, but satisfy TypeScript
   throw new MutationRetryExhaustedError(
-    url, body, attempts, 'All retry cycles exhausted'
+    url, body ?? {}, attempts, 'All retry cycles exhausted'
   )
+}
+
+async function mutateWithRetry(
+  projectId: string,
+  recordType: 'task' | 'issue' | 'feature',
+  recordId: string,
+  body: Record<string, unknown>,
+): Promise<MutationResult> {
+  const url = `${BASE}/${projectId}/${recordType}/${recordId}`
+  return requestWithRetry(url, 'PATCH', body)
 }
 
 // ---------------------------------------------------------------------------
@@ -229,4 +240,14 @@ export async function setField(
   extras?: Record<string, unknown>,
 ): Promise<MutationResult> {
   return mutateWithRetry(projectId, recordType, recordId, { field, value, ...extras })
+}
+
+export async function setCheckout(
+  projectId: string,
+  recordType: 'task' | 'issue' | 'feature',
+  recordId: string,
+  checkedOut: boolean,
+): Promise<MutationResult> {
+  const url = `${BASE}/${projectId}/${recordType}/${recordId}/checkout`
+  return requestWithRetry(url, checkedOut ? 'POST' : 'DELETE')
 }

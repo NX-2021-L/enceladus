@@ -48,6 +48,11 @@ export interface Task {
   active_agent_session?: boolean
   active_agent_session_id?: string
   active_agent_session_parent?: boolean
+  checkout_state?: 'checked_out' | 'checked_in' | null
+  checked_out_by?: string | null
+  checked_out_at?: string | null
+  checked_in_by?: string | null
+  checked_in_at?: string | null
   // Coordination flag
   coordination?: boolean
   // GitHub integration (ENC-FTR-021)

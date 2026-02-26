@@ -59,6 +59,25 @@ def _make_event(
     }
 
 
+def _make_subresource_event(
+    project_id="devops",
+    record_type="task",
+    record_id="TSK-001",
+    subresource="checkout",
+    method="POST",
+    body=None,
+    internal_key="valid-key",
+):
+    """Build a mock API Gateway v2 event for sub-resource routes."""
+    path = f"/api/v1/tracker/{project_id}/{record_type}/{record_id}/{subresource}"
+    return {
+        "requestContext": {"http": {"method": method, "path": path}},
+        "headers": {"x-coordination-internal-key": internal_key, "host": "example.com"},
+        "body": json.dumps(body or {}),
+        "rawPath": path,
+    }
+
+
 class OptionsTests(unittest.TestCase):
     """CORS preflight returns 204 with no body."""
 
@@ -70,8 +89,10 @@ class OptionsTests(unittest.TestCase):
 
 
 class MethodValidationTests(unittest.TestCase):
-    def test_get_rejected(self):
-        event = _make_event(method="GET")
+    @patch.object(tracker_mutation, "_validate_project_exists", return_value=None)
+    @patch.object(tracker_mutation, "_verify_token", return_value={"sub": "user1"})
+    def test_get_rejected(self, _mock_verify, _mock_proj):
+        event = _make_event(method="PUT")
         resp = tracker_mutation.lambda_handler(event, None)
         self.assertEqual(resp["statusCode"], 405)
 
@@ -79,13 +100,12 @@ class MethodValidationTests(unittest.TestCase):
 class PathParsingTests(unittest.TestCase):
     def test_invalid_path(self):
         event = _make_event()
-        event["requestContext"]["http"]["path"] = "/invalid"
-        event["rawPath"] = "/invalid"
-        # Need to mock auth/project validation since they come after path parse
+        event["requestContext"]["http"]["path"] = "/invalid/path/too/many"
+        event["rawPath"] = "/invalid/path/too/many"
         resp = tracker_mutation.lambda_handler(event, None)
-        self.assertEqual(resp["statusCode"], 400)
+        self.assertEqual(resp["statusCode"], 404)
         body = json.loads(resp["body"])
-        self.assertIn("Invalid path", body["error"])
+        self.assertIn("No route matched", body["error"])
 
 
 class AuthTests(unittest.TestCase):
@@ -110,7 +130,8 @@ class AuthTests(unittest.TestCase):
 class ProjectValidationTests(unittest.TestCase):
     @patch.object(tracker_mutation, "_validate_project_exists",
                   return_value="Project 'bogus' is not registered.")
-    def test_unregistered_project_returns_404(self, _mock_proj):
+    @patch.object(tracker_mutation, "_verify_token", return_value={"sub": "user1"})
+    def test_unregistered_project_returns_404(self, _mock_verify, _mock_proj):
         event = _make_event(project_id="bogus")
         resp = tracker_mutation.lambda_handler(event, None)
         self.assertEqual(resp["statusCode"], 404)
@@ -271,6 +292,38 @@ class LegacyPathTests(unittest.TestCase):
         event = _make_event(action="close", path_style="legacy")
         resp = tracker_mutation.lambda_handler(event, None)
         self.assertEqual(resp["statusCode"], 200)
+
+
+class CheckoutRouteTests(unittest.TestCase):
+    @patch.object(tracker_mutation, "_validate_project_exists", return_value=None)
+    @patch.object(tracker_mutation, "_get_ddb")
+    def test_checkout_uses_top_level_provider_identity(self, mock_ddb, _mock_proj):
+        fake_ddb = MagicMock()
+        mock_ddb.return_value = fake_ddb
+        fake_ddb.get_item.return_value = {
+            "Item": {
+                "status": {"S": "open"},
+                "sync_version": {"N": "1"},
+                "record_type": {"S": "task"},
+                "updated_at": {"S": "2026-01-01T00:00:00Z"},
+                "active_agent_session": {"BOOL": False},
+                "active_agent_session_id": {"S": ""},
+            }
+        }
+        fake_ddb.update_item.return_value = {}
+
+        event = _make_subresource_event(
+            body={"provider": "codex-helper"},
+            subresource="checkout",
+            method="POST",
+        )
+        with patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"):
+            resp = tracker_mutation.lambda_handler(event, None)
+
+        self.assertEqual(resp["statusCode"], 200)
+        parsed = json.loads(resp["body"])
+        self.assertTrue(parsed.get("checkout"))
+        self.assertEqual(parsed.get("active_agent_session_id"), "codex-helper")
 
 
 if __name__ == "__main__":

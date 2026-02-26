@@ -225,16 +225,56 @@ def _deser_item(item: Dict) -> Dict[str, Any]:
     return {k: _deser_val(v) for k, v in item.items()}
 
 
+def _normalize_write_source(body: dict, claims: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Normalize write_source payload from PWA and MCP clients.
+
+    Supports both nested write_source maps and legacy top-level provider fields.
+    When JWT claims are available, defaults provider to claims.sub for user-attributed writes.
+    """
+    if not isinstance(body, dict):
+        return {
+            "channel": "mutation_api",
+            "provider": "",
+            "dispatch_id": "",
+            "coordination_request_id": "",
+        }
+
+    raw_ws = body.get("write_source")
+    ws = raw_ws if isinstance(raw_ws, dict) else {}
+    auth_mode = str(claims.get("auth_mode", "")) if isinstance(claims, dict) else ""
+
+    channel = str(ws.get("channel") or "").strip()
+    if not channel:
+        channel = "mcp_server" if auth_mode == "internal-key" else "mutation_api"
+
+    provider = str(ws.get("provider") or body.get("provider") or "").strip()
+    if not provider and isinstance(claims, dict):
+        provider = str(claims.get("sub") or "").strip()
+
+    dispatch_id = str(ws.get("dispatch_id") or body.get("dispatch_id") or "").strip()
+    coordination_request_id = str(
+        ws.get("coordination_request_id") or body.get("coordination_request_id") or ""
+    ).strip()
+
+    normalized = {
+        "channel": channel,
+        "provider": provider,
+        "dispatch_id": dispatch_id,
+        "coordination_request_id": coordination_request_id,
+    }
+    body["write_source"] = normalized
+    return normalized
+
+
 def _build_write_source(body: dict) -> Dict[str, Any]:
     """Build a structured write_source map for DynamoDB attribution."""
+    ws = _normalize_write_source(body)
     return {
         "M": {
-            "channel": _ser_s(body.get("write_source", {}).get("channel", "mutation_api")),
-            "provider": _ser_s(str(body.get("write_source", {}).get("provider", ""))),
-            "dispatch_id": _ser_s(str(body.get("write_source", {}).get("dispatch_id", ""))),
-            "coordination_request_id": _ser_s(
-                str(body.get("write_source", {}).get("coordination_request_id", ""))
-            ),
+            "channel": _ser_s(ws.get("channel", "mutation_api")),
+            "provider": _ser_s(ws.get("provider", "")),
+            "dispatch_id": _ser_s(ws.get("dispatch_id", "")),
+            "coordination_request_id": _ser_s(ws.get("coordination_request_id", "")),
             "timestamp": _ser_s(_now_z()),
         }
     }
@@ -242,9 +282,9 @@ def _build_write_source(body: dict) -> Dict[str, Any]:
 
 def _write_source_note_suffix(body: dict) -> str:
     """Build optional suffix for last_update_note with provider context."""
-    ws = body.get("write_source", {})
-    provider = str(ws.get("provider", ""))
-    dispatch_id = str(ws.get("dispatch_id", ""))
+    ws = _normalize_write_source(body)
+    provider = ws.get("provider", "")
+    dispatch_id = ws.get("dispatch_id", "")
     parts = []
     if provider:
         parts.append(f"provider={provider}")
@@ -1114,6 +1154,8 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
     if action:
         return _handle_pwa_action(project_id, record_type, record_id, body, action)
 
+    _normalize_write_source(body)
+
     field = body.get("field", "").strip()
     value = body.get("value", "")
     if not field:
@@ -1137,12 +1179,19 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
 
     # --- Session ownership enforcement ---
     if field != "active_agent_session":
-        ws = body.get("write_source", {})
+        ws = _normalize_write_source(body)
         current_session = item_data.get("active_agent_session", False)
-        current_session_id = item_data.get("active_agent_session_id", "")
-        provider = ws.get("provider", "")
-        if current_session and current_session_id and provider and current_session_id != provider:
-            return _error(409, f"Record is checked out by '{current_session_id}'. Cannot modify.")
+        current_session_id = str(item_data.get("active_agent_session_id", "")).strip()
+        provider = str(ws.get("provider", "")).strip()
+        if current_session and current_session_id:
+            if not provider:
+                return _error(
+                    400,
+                    f"Record is checked out by '{current_session_id}'. "
+                    "write_source.provider is required for modifications.",
+                )
+            if current_session_id != provider:
+                return _error(409, f"Record is checked out by '{current_session_id}'. Cannot modify.")
 
     # --- Validation for specific fields ---
     if field == "status":
@@ -1150,6 +1199,30 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
         new_lower = value.strip().lower()
         closing = new_lower in ("closed", "completed", "complete")
         transition_evidence = body.get("transition_evidence", {})
+
+        if record_type == "task" and current_status != new_lower:
+            ws = _normalize_write_source(body)
+            provider = str(ws.get("provider", "")).strip()
+            current_session = bool(item_data.get("active_agent_session"))
+            current_session_id = str(item_data.get("active_agent_session_id", "")).strip()
+            if not provider:
+                return _error(
+                    400,
+                    "Task status transitions require write_source.provider "
+                    "(agent identity).",
+                )
+            if not current_session or not current_session_id:
+                return _error(
+                    409,
+                    "Task status transitions require an active checkout. "
+                    "Check out the task before changing status.",
+                )
+            if provider != current_session_id:
+                return _error(
+                    409,
+                    f"Task is checked out by '{current_session_id}'. "
+                    f"Cannot transition status as '{provider}'.",
+                )
 
         # Enforce valid transitions — forward + revert (ENC-FTR-022)
         if current_status != new_lower:
@@ -1261,7 +1334,8 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
     # --- Session checkout/release ---
     if field == "active_agent_session":
         checking_out = value if isinstance(value, bool) else str(value).strip().lower() in ("true", "1", "yes")
-        agent_id = str(body.get("write_source", {}).get("provider", "")).strip()
+        ws = _normalize_write_source(body)
+        agent_id = str(ws.get("provider", "")).strip()
 
         if checking_out:
             if not agent_id:
@@ -1276,6 +1350,7 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
                     TableName=DYNAMODB_TABLE, Key=key,
                     UpdateExpression=(
                         "SET active_agent_session = :t, active_agent_session_id = :aid, "
+                        "checkout_state = :checked_out, checked_out_by = :aid, checked_out_at = :now, "
                         "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
                         "sync_version = if_not_exists(sync_version, :zero) + :one, "
                         "history = list_append(if_not_exists(history, :empty), :hentry)"
@@ -1283,6 +1358,7 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
                     ConditionExpression="active_agent_session <> :t OR attribute_not_exists(active_agent_session)",
                     ExpressionAttributeValues={
                         ":t": {"BOOL": True}, ":aid": _ser_s(agent_id),
+                        ":checked_out": _ser_s("checked_out"),
                         ":now": _ser_s(now), ":note": _ser_s(checkout_note),
                         ":wsrc": _build_write_source(body),
                         ":zero": {"N": "0"}, ":one": {"N": "1"},
@@ -1296,10 +1372,14 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
                 raise
             return _response(200, {
                 "success": True, "record_id": record_id,
-                "checkout": True, "active_agent_session_id": agent_id, "updated_at": now,
+                "checkout": True, "checkout_state": "checked_out",
+                "active_agent_session_id": agent_id, "updated_at": now,
             })
         else:
             release_note = f"Agent session released{note_suffix}"
+            release_agent = str(ws.get("provider", "")).strip() or str(
+                item_data.get("active_agent_session_id", "")
+            ).strip()
             history_entry = {"M": {
                 "timestamp": _ser_s(now), "status": _ser_s("worklog"),
                 "description": _ser_s(release_note),
@@ -1308,12 +1388,14 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=(
                     "SET active_agent_session = :f, active_agent_session_id = :empty_s, "
+                    "checkout_state = :checked_in, checked_in_by = :checkin_by, checked_in_at = :now, "
                     "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
                     "sync_version = if_not_exists(sync_version, :zero) + :one, "
                     "history = list_append(if_not_exists(history, :empty_l), :hentry)"
                 ),
                 ExpressionAttributeValues={
                     ":f": {"BOOL": False}, ":empty_s": _ser_s(""),
+                    ":checked_in": _ser_s("checked_in"), ":checkin_by": _ser_s(release_agent),
                     ":now": _ser_s(now), ":note": _ser_s(release_note),
                     ":wsrc": _build_write_source(body),
                     ":zero": {"N": "0"}, ":one": {"N": "1"},
@@ -1322,7 +1404,7 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
             )
             return _response(200, {
                 "success": True, "record_id": record_id,
-                "checkout": False, "updated_at": now,
+                "checkout": False, "checkout_state": "checked_in", "updated_at": now,
             })
 
     # --- Generic field update ---
@@ -1542,6 +1624,7 @@ def _handle_log(project_id: str, record_type: str, record_id: str, body: Dict) -
     description = body.get("description", "").strip()
     if not description:
         return _error(400, "Field 'description' is required.")
+    _normalize_write_source(body)
 
     ddb = _get_ddb()
     key = _build_key(project_id, record_type, record_id)
@@ -1558,12 +1641,19 @@ def _handle_log(project_id: str, record_type: str, record_id: str, body: Dict) -
 
     # Session ownership enforcement
     item_data = _deser_item(raw_item)
-    ws = body.get("write_source", {})
+    ws = _normalize_write_source(body)
     current_session = item_data.get("active_agent_session", False)
-    current_session_id = item_data.get("active_agent_session_id", "")
-    provider = ws.get("provider", "")
-    if current_session and current_session_id and provider and current_session_id != provider:
-        return _error(409, f"Record is checked out by '{current_session_id}'. Cannot modify.")
+    current_session_id = str(item_data.get("active_agent_session_id", "")).strip()
+    provider = str(ws.get("provider", "")).strip()
+    if current_session and current_session_id:
+        if not provider:
+            return _error(
+                400,
+                f"Record is checked out by '{current_session_id}'. "
+                "write_source.provider is required for modifications.",
+            )
+        if current_session_id != provider:
+            return _error(409, f"Record is checked out by '{current_session_id}'. Cannot modify.")
 
     now = _now_z()
     history_entry = {"M": {
@@ -1785,6 +1875,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             body = json.loads(event.get("body") or "{}")
         except (ValueError, TypeError):
             body = {}
+        _normalize_write_source(body, claims)
 
         if sub == "log" and method == "POST":
             return _handle_log(project_id, record_type, record_id, body)
@@ -1819,6 +1910,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
                 body = json.loads(event.get("body") or "{}")
             except (ValueError, TypeError):
                 return _error(400, "Invalid JSON body.")
+            _normalize_write_source(body, claims)
             return _handle_update_field(project_id, record_type, record_id, body)
         else:
             return _error(405, f"Method {method} not allowed. Use GET or PATCH.")
@@ -1842,6 +1934,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
                 body = json.loads(event.get("body") or "{}")
             except (ValueError, TypeError):
                 return _error(400, "Invalid JSON body.")
+            _normalize_write_source(body, claims)
             return _handle_create_record(project_id, record_type, body)
         else:
             return _error(405, f"Method {method} not allowed. Use POST to create.")
