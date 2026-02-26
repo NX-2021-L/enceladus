@@ -2256,7 +2256,7 @@ async def list_tools() -> list[Tool]:
                         "description": "The field to set (e.g., status, priority, assigned_to).",
                     },
                     "value": {
-                        "type": "string",
+                        "type": ["string", "number", "boolean", "object", "array", "null"],
                         "description": "The new value for the field.",
                     },
                     "governance_hash": {

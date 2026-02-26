@@ -571,5 +571,111 @@ class TestFeatureProductionGate(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestAcceptanceCriteriaPatchNormalization(unittest.TestCase):
+    """PATCH acceptance_criteria normalization and validation safeguards."""
+
+    def test_feature_acceptance_criteria_json_string_normalized_to_structured_items(self):
+        body = {
+            "field": "acceptance_criteria",
+            "value": json.dumps(["Criterion A", " Criterion B "]),
+        }
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {
+            "Item": _mock_ddb_item(
+                status="in-progress",
+                record_type="feature",
+                item_id="ENC-FTR-001",
+            )
+        }
+        mock_ddb.update_item.return_value = {}
+
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field("enceladus", "feature", "ENC-FTR-001", body)
+
+        parsed = json.loads(result.get("body", "{}"))
+        self.assertTrue(parsed.get("success"))
+        self.assertEqual(len(parsed.get("value", [])), 2)
+        self.assertEqual(parsed["value"][0]["description"], "Criterion A")
+        self.assertEqual(parsed["value"][1]["description"], "Criterion B")
+
+        update_kwargs = mock_ddb.update_item.call_args.kwargs
+        self.assertEqual(
+            update_kwargs["ExpressionAttributeValues"][":val"],
+            {
+                "L": [
+                    {
+                        "M": {
+                            "description": {"S": "Criterion A"},
+                            "evidence": {"S": ""},
+                            "evidence_acceptance": {"BOOL": False},
+                        }
+                    },
+                    {
+                        "M": {
+                            "description": {"S": "Criterion B"},
+                            "evidence": {"S": ""},
+                            "evidence_acceptance": {"BOOL": False},
+                        }
+                    },
+                ]
+            },
+        )
+
+    def test_task_acceptance_criteria_json_string_normalized_to_string_list(self):
+        body = {
+            "field": "acceptance_criteria",
+            "value": json.dumps([" first criterion ", "", "second criterion"]),
+        }
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {
+            "Item": _mock_ddb_item(
+                status="in-progress",
+                record_type="task",
+                item_id="ENC-TSK-001",
+            )
+        }
+        mock_ddb.update_item.return_value = {}
+
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field("enceladus", "task", "ENC-TSK-001", body)
+
+        parsed = json.loads(result.get("body", "{}"))
+        self.assertTrue(parsed.get("success"))
+        self.assertEqual(parsed.get("value"), ["first criterion", "second criterion"])
+
+        update_kwargs = mock_ddb.update_item.call_args.kwargs
+        self.assertEqual(
+            update_kwargs["ExpressionAttributeValues"][":val"],
+            {
+                "L": [
+                    {"S": "first criterion"},
+                    {"S": "second criterion"},
+                ]
+            },
+        )
+
+    def test_feature_acceptance_criteria_rejects_empty_description_object(self):
+        body = {
+            "field": "acceptance_criteria",
+            "value": json.dumps([{"description": "   "}]),
+        }
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {
+            "Item": _mock_ddb_item(
+                status="in-progress",
+                record_type="feature",
+                item_id="ENC-FTR-001",
+            )
+        }
+
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field("enceladus", "feature", "ENC-FTR-001", body)
+
+        parsed = json.loads(result.get("body", "{}"))
+        self.assertIn("error", parsed)
+        self.assertIn("description", parsed["error"])
+        mock_ddb.update_item.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
