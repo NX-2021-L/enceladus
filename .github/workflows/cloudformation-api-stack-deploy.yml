@@ -84,6 +84,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: Deploy API stack (03-api)
+        id: deploy
         run: |
           set -euo pipefail
 
@@ -96,6 +97,16 @@ jobs:
             --parameter-overrides \
               ComputeStackName="${{ steps.params.outputs.compute_stack_name }}" \
               ApiName="${{ steps.params.outputs.api_name }}"
+
+      - name: Report stack events on failure
+        if: failure() && steps.deploy.conclusion == 'failure'
+        run: |
+          echo "=== Stack events (last 20) ==="
+          aws cloudformation describe-stack-events \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --query 'StackEvents[:20].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+            --output table || echo "(describe-stack-events unavailable)"
 
       - name: Report deployed stack state
         run: |
