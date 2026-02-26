@@ -1143,6 +1143,74 @@ def _validate_feature_production_gate(project_id: str, feature_data: Dict) -> Op
     return None
 
 
+def _normalize_feature_acceptance_criterion(entry: Any, index: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Normalize one feature acceptance criterion to governed map form."""
+    if isinstance(entry, dict):
+        description = str(entry.get("description") or "").strip()
+        if not description:
+            return None, (
+                f"acceptance_criteria[{index}] requires a non-empty 'description' field."
+            )
+        evidence = str(entry.get("evidence") or "")
+        evidence_acceptance = bool(entry.get("evidence_acceptance", False))
+        return {
+            "description": description,
+            "evidence": evidence,
+            "evidence_acceptance": evidence_acceptance,
+        }, None
+
+    description = str(entry).strip()
+    if not description:
+        return None, (
+            f"acceptance_criteria[{index}] must be a non-empty string or object."
+        )
+    return {
+        "description": description,
+        "evidence": "",
+        "evidence_acceptance": False,
+    }, None
+
+
+def _normalize_acceptance_criteria_value(record_type: str, raw_value: Any) -> Tuple[Optional[List[Any]], Optional[str]]:
+    """Normalize PATCH acceptance_criteria payloads, including JSON-stringified arrays."""
+    parsed_value = raw_value
+
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            return None, "acceptance_criteria must not be empty."
+        if stripped[0] in "[{":
+            try:
+                parsed_value = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed_value = stripped
+        else:
+            parsed_value = stripped
+
+    if isinstance(parsed_value, dict):
+        parsed_list: List[Any] = [parsed_value]
+    elif isinstance(parsed_value, list):
+        parsed_list = parsed_value
+    else:
+        parsed_list = [parsed_value]
+
+    if record_type == "feature":
+        normalized_feature_criteria: List[Dict[str, Any]] = []
+        for idx, entry in enumerate(parsed_list):
+            normalized, error = _normalize_feature_acceptance_criterion(entry, idx)
+            if error:
+                return None, error
+            normalized_feature_criteria.append(normalized)
+        if not normalized_feature_criteria:
+            return None, "Feature acceptance_criteria requires at least one criterion."
+        return normalized_feature_criteria, None
+
+    normalized_list = [str(x).strip() for x in parsed_list if str(x).strip()]
+    if not normalized_list:
+        return None, "acceptance_criteria requires at least one non-empty criterion."
+    return normalized_list, None
+
+
 def _handle_update_field(project_id: str, record_type: str, record_id: str, body: Dict) -> Dict:
     """PATCH /{project}/{type}/{id} — update a single field on a record.
 
@@ -1160,6 +1228,12 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
     value = body.get("value", "")
     if not field:
         return _error(400, "Field 'field' is required (or use 'action' for PWA mutations).")
+
+    if field == "acceptance_criteria":
+        normalized_criteria, normalize_error = _normalize_acceptance_criteria_value(record_type, value)
+        if normalize_error:
+            return _error(400, normalize_error)
+        value = normalized_criteria
 
     ddb = _get_ddb()
     key = _build_key(project_id, record_type, record_id)
