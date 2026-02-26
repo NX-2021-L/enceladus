@@ -21,9 +21,18 @@ on:
         required: false
         type: string
         default: ""
+      force_static_credentials:
+        description: Force static-key credential setup instead of OIDC role assume.
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME:
         required: true
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
       COORDINATION_INTERNAL_API_KEY:
         required: false
       GH_APP_ID:
@@ -49,10 +58,27 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC backend deploy role)
+        id: aws_oidc
+        if: ${{ !inputs.force_static_credentials }}
+        continue-on-error: true
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
           aws-region: us-west-2
+
+      - name: Configure AWS credentials (static keys fallback)
+        if: ${{ inputs.force_static_credentials || (steps.aws_oidc.outcome != 'success' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '') }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Fail when AWS credentials are unavailable
+        if: ${{ !inputs.force_static_credentials && steps.aws_oidc.outcome != 'success' && (secrets.AWS_ACCESS_KEY_ID == '' || secrets.AWS_SECRET_ACCESS_KEY == '') }}
+        run: |
+          echo "OIDC role assume failed and static-key fallback secrets are not configured." >&2
+          exit 1
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
