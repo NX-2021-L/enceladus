@@ -1,0 +1,114 @@
+name: CloudFormation API Stack Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infrastructure/cloudformation/03-api.yaml"
+      - "infrastructure/cloudformation/resource-import-api.json"
+      - ".github/workflows/cloudformation-api-stack-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: "CloudFormation stack name for 03-api template"
+        type: string
+        required: false
+        default: "enceladus-api"
+      compute_stack_name:
+        description: "Referenced compute stack name"
+        type: string
+        required: false
+        default: "enceladus-compute"
+      api_name:
+        description: "API Gateway name parameter"
+        type: string
+        required: false
+        default: "devops-tracker-api"
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual API stack deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  TEMPLATE_FILE: infrastructure/cloudformation/03-api.yaml
+  DEFAULT_STACK_NAME: enceladus-api
+  DEFAULT_COMPUTE_STACK_NAME: enceladus-compute
+  DEFAULT_API_NAME: devops-tracker-api
+
+jobs:
+  deploy:
+    name: Deploy API CloudFormation stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: cloudformation-api-stack-deploy-main
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC privileged CloudFormation role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment parameters
+        id: params
+        env:
+          INPUT_STACK_NAME: ${{ github.event.inputs.stack_name }}
+          INPUT_COMPUTE_STACK_NAME: ${{ github.event.inputs.compute_stack_name }}
+          INPUT_API_NAME: ${{ github.event.inputs.api_name }}
+        run: |
+          set -euo pipefail
+
+          stack_name="${INPUT_STACK_NAME:-${DEFAULT_STACK_NAME}}"
+          compute_stack_name="${INPUT_COMPUTE_STACK_NAME:-${DEFAULT_COMPUTE_STACK_NAME}}"
+          api_name="${INPUT_API_NAME:-${DEFAULT_API_NAME}}"
+
+          {
+            echo "stack_name=${stack_name}"
+            echo "compute_stack_name=${compute_stack_name}"
+            echo "api_name=${api_name}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Validate CloudFormation template
+        run: |
+          set -euo pipefail
+          aws cloudformation validate-template \
+            --region "${AWS_REGION}" \
+            --template-body "file://${TEMPLATE_FILE}" >/dev/null
+
+      - name: Deploy API stack (03-api)
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --template-file "${TEMPLATE_FILE}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              ComputeStackName="${{ steps.params.outputs.compute_stack_name }}" \
+              ApiName="${{ steps.params.outputs.api_name }}"
+
+      - name: Report deployed stack state
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
+            --output table

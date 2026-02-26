@@ -6,6 +6,7 @@ This runbook defines the supported deployment process for Enceladus API and MCP 
 
 - `backend/lambda/coordination_api/**`
 - `tools/enceladus-mcp-server/**`
+- `infrastructure/cloudformation/03-api.yaml`
 
 These paths are deployed together because the coordination API package embeds the MCP server runtime (`server.py` and `dispatch_plan_generator.py`) during build.
 
@@ -21,12 +22,36 @@ The backend deployment-manager pipeline currently executes UI deployments throug
   - push to `main` touching scoped paths
   - manual `workflow_dispatch`
 
+## API Stack (CloudFormation) Automation
+
+Route/integration changes in `03-api.yaml` are deployed via:
+
+- Workflow: `.github/workflows/cloudformation-api-stack-deploy.yml`
+- Stack target default: `enceladus-api`
+- Template: `infrastructure/cloudformation/03-api.yaml`
+- Required secret: `AWS_CLOUDFORMATION_ROLE_TO_ASSUME` (privileged OIDC role with CloudFormation permissions)
+
+This closes the ENC-FTR-023 deployment gap where API stack changes were pushed
+without an automation path that could apply CloudFormation with privileged credentials.
+
 ## Manual Execution (local)
 
 ```bash
 cd /path/to/enceladus/repo
 chmod +x backend/lambda/coordination_api/deploy.sh
 backend/lambda/coordination_api/deploy.sh
+```
+
+For API stack changes (privileged profile required):
+
+```bash
+aws cloudformation deploy \
+  --stack-name enceladus-api \
+  --template-file /Users/jreese/enceladus/repo/infrastructure/cloudformation/03-api.yaml \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+  --no-fail-on-empty-changeset \
+  --parameter-overrides ComputeStackName=enceladus-compute ApiName=devops-tracker-api \
+  --profile <your-privileged-profile>
 ```
 
 Required environment:
