@@ -27,20 +27,21 @@ interface UseFeedOptions {
 export function useFeed(filters?: FeedFilters, _options?: UseFeedOptions) {
   // Live data from the global delta-polling provider (ENC-TSK-609).
   const { tasks: liveTasks, issues: liveIssues, features: liveFeatures, generatedAt: liveGeneratedAt } = useLiveFeed()
+  const hasLiveSnapshot = liveGeneratedAt !== null
 
   // S3 feeds as fallback for initial load before LiveFeedProvider hydrates.
   const tasksQuery = useQuery({ queryKey: feedKeys.tasks, queryFn: fetchTasks })
   const issuesQuery = useQuery({ queryKey: feedKeys.issues, queryFn: fetchIssues })
   const featuresQuery = useQuery({ queryKey: feedKeys.features, queryFn: fetchFeatures })
 
-  const tasks: Task[] = liveTasks.length > 0 ? liveTasks : (tasksQuery.data?.tasks ?? [])
-  const issues: Issue[] = liveIssues.length > 0 ? liveIssues : (issuesQuery.data?.issues ?? [])
-  const features: Feature[] = liveFeatures.length > 0 ? liveFeatures : (featuresQuery.data?.features ?? [])
+  const tasks: Task[] = hasLiveSnapshot ? liveTasks : (tasksQuery.data?.tasks ?? [])
+  const issues: Issue[] = hasLiveSnapshot ? liveIssues : (issuesQuery.data?.issues ?? [])
+  const features: Feature[] = hasLiveSnapshot ? liveFeatures : (featuresQuery.data?.features ?? [])
 
   // Pending only while live context hasn't loaded AND S3 feeds are still loading.
-  const isPending = liveTasks.length === 0 && liveIssues.length === 0 && liveFeatures.length === 0
+  const isPending = !hasLiveSnapshot
     && (tasksQuery.isPending || issuesQuery.isPending || featuresQuery.isPending)
-  const isError = liveTasks.length === 0 && liveIssues.length === 0 && liveFeatures.length === 0
+  const isError = !hasLiveSnapshot
     && (tasksQuery.isError || issuesQuery.isError || featuresQuery.isError)
 
   const generatedAt = liveGeneratedAt

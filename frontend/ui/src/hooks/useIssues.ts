@@ -19,14 +19,15 @@ function parseSort(raw?: string): { field: string; dir: 1 | -1 } {
 
 export function useIssues(filters?: IssueFilters) {
   // Live data from the global delta-polling provider (ENC-TSK-609).
-  const { issues: liveIssues } = useLiveFeed()
+  const { issues: liveIssues, generatedAt: liveGeneratedAt } = useLiveFeed()
+  const hasLiveSnapshot = liveGeneratedAt !== null
 
   // S3 feed as fallback for initial load before LiveFeedProvider hydrates.
   const s3Query = useQuery({ queryKey: feedKeys.issues, queryFn: fetchIssues })
 
-  const allIssues = liveIssues.length > 0 ? liveIssues : (s3Query.data?.issues ?? [])
-  const isPending = liveIssues.length === 0 && s3Query.isPending
-  const isError = liveIssues.length === 0 && s3Query.isError
+  const allIssues = hasLiveSnapshot ? liveIssues : (s3Query.data?.issues ?? [])
+  const isPending = !hasLiveSnapshot && s3Query.isPending
+  const isError = !hasLiveSnapshot && s3Query.isError
 
   const filtered = useMemo(() => {
     if (!allIssues.length) return []
@@ -61,7 +62,7 @@ export function useIssues(filters?: IssueFilters) {
   return {
     issues: filtered,
     allIssues,
-    generatedAt: s3Query.data?.generated_at ?? null,
+    generatedAt: liveGeneratedAt ?? s3Query.data?.generated_at ?? null,
     isPending,
     isError,
     isLoading: isPending,

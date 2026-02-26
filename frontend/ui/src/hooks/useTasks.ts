@@ -19,15 +19,16 @@ function parseSort(raw?: string): { field: string; dir: 1 | -1 } {
 
 export function useTasks(filters?: TaskFilters) {
   // Live data from the global delta-polling provider (ENC-TSK-609).
-  const { tasks: liveTasks } = useLiveFeed()
+  const { tasks: liveTasks, generatedAt: liveGeneratedAt } = useLiveFeed()
+  const hasLiveSnapshot = liveGeneratedAt !== null
 
   // S3 feed as fallback for initial load before LiveFeedProvider hydrates.
   const s3Query = useQuery({ queryKey: feedKeys.tasks, queryFn: fetchTasks })
 
   // Prefer live data; fall back to S3 when live context hasn't loaded yet.
-  const allTasks = liveTasks.length > 0 ? liveTasks : (s3Query.data?.tasks ?? [])
-  const isPending = liveTasks.length === 0 && s3Query.isPending
-  const isError = liveTasks.length === 0 && s3Query.isError
+  const allTasks = hasLiveSnapshot ? liveTasks : (s3Query.data?.tasks ?? [])
+  const isPending = !hasLiveSnapshot && s3Query.isPending
+  const isError = !hasLiveSnapshot && s3Query.isError
 
   const filtered = useMemo(() => {
     if (!allTasks.length) return []
@@ -62,7 +63,7 @@ export function useTasks(filters?: TaskFilters) {
   return {
     tasks: filtered,
     allTasks,
-    generatedAt: s3Query.data?.generated_at ?? null,
+    generatedAt: liveGeneratedAt ?? s3Query.data?.generated_at ?? null,
     isPending,
     isError,
     isLoading: isPending,
