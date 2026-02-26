@@ -67,18 +67,12 @@ jobs:
           aws-region: us-west-2
 
       - name: Configure AWS credentials (static keys fallback)
-        if: ${{ inputs.force_static_credentials || (steps.aws_oidc.outcome != 'success' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '') }}
+        if: ${{ inputs.force_static_credentials || steps.aws_oidc.outcome != 'success' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-west-2
-
-      - name: Fail when AWS credentials are unavailable
-        if: ${{ !inputs.force_static_credentials && steps.aws_oidc.outcome != 'success' && (secrets.AWS_ACCESS_KEY_ID == '' || secrets.AWS_SECRET_ACCESS_KEY == '') }}
-        run: |
-          echo "OIDC role assume failed and static-key fallback secrets are not configured." >&2
-          exit 1
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
