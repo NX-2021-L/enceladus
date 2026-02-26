@@ -7,6 +7,8 @@ import { useRecordMutation } from '../hooks/useRecordMutation'
 import { isMutationRetryExhaustedError } from '../api/mutations'
 import { StatusChip } from '../components/shared/StatusChip'
 import { PriorityBadge } from '../components/shared/PriorityBadge'
+import { ActiveSessionBadge } from '../components/shared/ActiveSessionBadge'
+import { CheckoutStateBadge } from '../components/shared/CheckoutStateBadge'
 import { GitHubLinkBadge } from '../components/shared/GitHubLinkBadge'
 import { GitHubOverlay } from '../components/shared/GitHubOverlay'
 import { MarkdownRenderer } from '../components/shared/MarkdownRenderer'
@@ -83,6 +85,31 @@ export function TaskDetailPage() {
     )
   }
 
+  function handleCheckout(checkedOut: boolean) {
+    setMutationError(null)
+    mutate(
+      {
+        projectId: task!.project_id,
+        recordType: 'task',
+        recordId: task!.task_id,
+        action: checkedOut ? 'checkout' : 'release',
+      },
+      {
+        onSuccess: () => {
+          setMutationSuccess(checkedOut ? 'Task checked out.' : 'Task checked in.')
+          setTimeout(() => setMutationSuccess(null), 3000)
+        },
+        onError: (err) => {
+          setMutationError(
+            isMutationRetryExhaustedError(err)
+              ? err.toDebugString()
+              : (err.message ?? 'Checkout update failed. Please try again.')
+          )
+        },
+      }
+    )
+  }
+
   return (
     <div className="p-4 space-y-4 pb-24">
       {/* Back link */}
@@ -103,6 +130,17 @@ export function TaskDetailPage() {
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <StatusChip status={task.status} />
           <PriorityBadge priority={task.priority} />
+          {task.active_agent_session && (
+            <ActiveSessionBadge isActive agentSessionId={task.active_agent_session_id} />
+          )}
+          <CheckoutStateBadge
+            activeSession={task.active_agent_session}
+            checkoutState={task.checkout_state}
+            checkedOutBy={task.checked_out_by}
+            checkedOutAt={task.checked_out_at}
+            checkedInBy={task.checked_in_by}
+            checkedInAt={task.checked_in_at}
+          />
           {task.category && (
             <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-violet-500/20 text-violet-400">
               {task.category}
@@ -129,6 +167,17 @@ export function TaskDetailPage() {
 
         {/* Action bar */}
         <div className="flex items-center gap-2 mt-3 flex-wrap">
+          <button
+            onClick={() => handleCheckout(!task.active_agent_session)}
+            disabled={isMutating}
+            className={`text-xs px-3 py-1.5 rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+              task.active_agent_session
+                ? 'bg-sky-900/60 text-sky-300 border-sky-700 hover:bg-sky-800/70'
+                : 'bg-amber-900/60 text-amber-300 border-amber-700 hover:bg-amber-800/70'
+            }`}
+          >
+            {task.active_agent_session ? 'Check In' : 'Check Out'}
+          </button>
           <LifecycleActions
             recordType="task"
             currentStatus={task.status}

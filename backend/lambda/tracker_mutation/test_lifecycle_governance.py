@@ -61,6 +61,20 @@ def _mock_ddb_item(status="open", record_type="task", item_id="ENC-TSK-001",
     return item
 
 
+def _mock_checked_out_task(status="open", item_id="ENC-TSK-001", agent_id="codex", extra=None):
+    """Return a task item already checked out by a specific agent."""
+    task_extra = {
+        "active_agent_session": {"BOOL": True},
+        "active_agent_session_id": {"S": agent_id},
+        "checkout_state": {"S": "checked_out"},
+        "checked_out_by": {"S": agent_id},
+        "checked_out_at": {"S": "2026-02-26T00:00:00Z"},
+    }
+    if extra:
+        task_extra.update(extra)
+    return _mock_ddb_item(status=status, record_type="task", item_id=item_id, extra=task_extra)
+
+
 def _call_update_field(project_id, record_type, record_id, body):
     """Directly invoke _handle_update_field."""
     return tracker_mutation._handle_update_field(project_id, record_type, record_id, body)
@@ -75,12 +89,12 @@ class TestTaskForwardTransitions(unittest.TestCase):
     pushed -> merged-main -> deployed -> closed."""
 
     def _patch_and_call(self, current_status, new_status, body_extra=None):
-        body = {"field": "status", "value": new_status}
+        body = {"field": "status", "value": new_status, "provider": "codex"}
         if body_extra:
             body.update(body_extra)
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_ddb_item(status=current_status)
+            "Item": _mock_checked_out_task(status=current_status, agent_id="codex")
         }
         mock_ddb.update_item.return_value = {}
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
@@ -170,6 +184,40 @@ class TestTaskSkipStagesBlocked(unittest.TestCase):
         self.assertIn("error", result)
 
 
+class TestTaskCheckoutEnforcement(unittest.TestCase):
+    """Task status transitions require active checkout and owning provider identity."""
+
+    def test_status_transition_without_checkout_rejected(self):
+        body = {"field": "status", "value": "in-progress", "provider": "codex"}
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {"Item": _mock_ddb_item(status="open")}
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field("enceladus", "task", "ENC-TSK-001", body)
+        parsed = json.loads(result.get("body", "{}"))
+        self.assertIn("error", parsed)
+        self.assertIn("active checkout", parsed["error"])
+
+    def test_status_transition_without_provider_rejected(self):
+        body = {"field": "status", "value": "in-progress"}
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {"Item": _mock_checked_out_task(status="open", agent_id="codex")}
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field("enceladus", "task", "ENC-TSK-001", body)
+        parsed = json.loads(result.get("body", "{}"))
+        self.assertIn("error", parsed)
+        self.assertIn("write_source.provider", parsed["error"])
+
+    def test_status_transition_owner_mismatch_rejected(self):
+        body = {"field": "status", "value": "in-progress", "provider": "claude"}
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {"Item": _mock_checked_out_task(status="open", agent_id="codex")}
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field("enceladus", "task", "ENC-TSK-001", body)
+        parsed = json.loads(result.get("body", "{}"))
+        self.assertIn("error", parsed)
+        self.assertIn("checked out by 'codex'", parsed["error"])
+
+
 class TestFeatureForwardTransitions(unittest.TestCase):
     """Feature lifecycle: planned -> in-progress -> completed -> production -> deprecated."""
 
@@ -256,12 +304,12 @@ class TestRevertWithEvidence(unittest.TestCase):
     """Backward transitions require transition_evidence.revert_reason."""
 
     def _patch_and_call(self, current_status, new_status, revert_reason=None):
-        body = {"field": "status", "value": new_status}
+        body = {"field": "status", "value": new_status, "provider": "codex"}
         if revert_reason is not None:
             body["transition_evidence"] = {"revert_reason": revert_reason}
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_ddb_item(status=current_status)
+            "Item": _mock_checked_out_task(status=current_status, agent_id="codex")
         }
         mock_ddb.update_item.return_value = {}
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
@@ -308,12 +356,12 @@ class TestPushedGate(unittest.TestCase):
     """task -> pushed requires valid commit_sha."""
 
     def _patch_and_call(self, transition_evidence=None):
-        body = {"field": "status", "value": "pushed"}
+        body = {"field": "status", "value": "pushed", "provider": "codex"}
         if transition_evidence:
             body["transition_evidence"] = transition_evidence
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_ddb_item(status="committed")
+            "Item": _mock_checked_out_task(status="committed", agent_id="codex")
         }
         mock_ddb.update_item.return_value = {}
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
@@ -349,11 +397,11 @@ class TestPushedGate(unittest.TestCase):
         mock_validate.assert_called_once_with("NX-2021-L", "enceladus", sha)
 
     def test_github_validation_failure_returns_400(self):
-        body = {"field": "status", "value": "pushed",
+        body = {"field": "status", "value": "pushed", "provider": "codex",
                 "transition_evidence": {"commit_sha": "b" * 40}}
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_ddb_item(status="committed")
+            "Item": _mock_checked_out_task(status="committed", agent_id="codex")
         }
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
             with patch.object(tracker_mutation, "_validate_commit_via_github",
@@ -370,12 +418,12 @@ class TestMergedMainGate(unittest.TestCase):
     """task -> merged-main requires merge_evidence."""
 
     def _patch_and_call(self, transition_evidence=None):
-        body = {"field": "status", "value": "merged-main"}
+        body = {"field": "status", "value": "merged-main", "provider": "codex"}
         if transition_evidence:
             body["transition_evidence"] = transition_evidence
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_ddb_item(status="pushed")
+            "Item": _mock_checked_out_task(status="pushed", agent_id="codex")
         }
         mock_ddb.update_item.return_value = {}
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
@@ -404,12 +452,12 @@ class TestDeployedGate(unittest.TestCase):
     """task -> deployed requires deployment_ref."""
 
     def _patch_and_call(self, transition_evidence=None):
-        body = {"field": "status", "value": "deployed"}
+        body = {"field": "status", "value": "deployed", "provider": "codex"}
         if transition_evidence:
             body["transition_evidence"] = transition_evidence
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_ddb_item(status="merged-main")
+            "Item": _mock_checked_out_task(status="merged-main", agent_id="codex")
         }
         mock_ddb.update_item.return_value = {}
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
