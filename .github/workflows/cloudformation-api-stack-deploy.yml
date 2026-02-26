@@ -55,10 +55,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify CF role secret is set
+        run: |
+          if [ -z "${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}" ]; then
+            echo "::error::AWS_CLOUDFORMATION_ROLE_TO_ASSUME secret is not set or empty. Set it to the ARN of a role with cloudformation:* and apigateway:* permissions."
+            exit 1
+          fi
+          echo "AWS_CLOUDFORMATION_ROLE_TO_ASSUME is set."
+
       - name: Configure AWS credentials (OIDC privileged CloudFormation role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME || secrets.AWS_BACKEND_ROLE_TO_ASSUME || secrets.AWS_ROLE_TO_ASSUME }}
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify AWS identity
