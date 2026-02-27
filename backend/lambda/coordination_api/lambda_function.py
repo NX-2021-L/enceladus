@@ -96,6 +96,7 @@ COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
+GOVERNANCE_POLICIES_TABLE = os.environ.get("GOVERNANCE_POLICIES_TABLE", "governance-policies")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
@@ -217,6 +218,10 @@ DEBOUNCE_WINDOW_SECONDS = int(os.environ.get("DEBOUNCE_WINDOW_SECONDS", "180")) 
 DISPATCH_LOCK_BUFFER_SECONDS = int(os.environ.get("DISPATCH_LOCK_BUFFER_SECONDS", "60"))
 DEAD_LETTER_TIMEOUT_MULTIPLIER = int(os.environ.get("DEAD_LETTER_TIMEOUT_MULTIPLIER", "2"))
 DEAD_LETTER_SNS_TOPIC_ARN = os.environ.get("DEAD_LETTER_SNS_TOPIC_ARN", "")
+GOVERNANCE_DICTIONARY_POLICY_ID = os.environ.get(
+    "GOVERNANCE_DICTIONARY_POLICY_ID",
+    "governance_data_dictionary",
+)
 
 COORDINATION_GSI_PROJECT = os.environ.get("COORDINATION_GSI_PROJECT", "project-updated-index")
 COORDINATION_GSI_IDEMPOTENCY = os.environ.get("COORDINATION_GSI_IDEMPOTENCY", "idempotency-key-index")
@@ -8082,6 +8087,212 @@ def _governance_uri_from_file_name(file_name: str) -> Optional[str]:
     return None
 
 
+def _load_governance_dictionary_fallback() -> Dict[str, Any]:
+    path = pathlib.Path(__file__).with_name("governance_data_dictionary.json")
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError("Fallback governance dictionary must be a JSON object")
+    return payload
+
+
+def _extract_governance_dictionary(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(item, dict):
+        return None
+
+    for key in ("dictionary", "policy", "payload"):
+        value = item.get(key)
+        if isinstance(value, dict) and value:
+            return value
+
+    for key in ("dictionary_json", "policy_json", "payload_json", "content"):
+        raw = item.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            return decoded
+    return None
+
+
+def _load_governance_dictionary() -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    ddb = _get_ddb()
+    try:
+        resp = ddb.scan(
+            TableName=GOVERNANCE_POLICIES_TABLE,
+            FilterExpression="policy_id = :pid",
+            ExpressionAttributeValues={":pid": _serialize(GOVERNANCE_DICTIONARY_POLICY_ID)},
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "Unknown")
+        logger.warning(
+            "Unable to read governance dictionary from %s (%s); using fallback file",
+            GOVERNANCE_POLICIES_TABLE,
+            code,
+        )
+        return _load_governance_dictionary_fallback(), {
+            "source": "fallback_file",
+            "table": GOVERNANCE_POLICIES_TABLE,
+            "policy_id": GOVERNANCE_DICTIONARY_POLICY_ID,
+            "reason": code,
+        }
+    except Exception as exc:
+        logger.warning(
+            "Unable to read governance dictionary from %s (%s); using fallback file",
+            GOVERNANCE_POLICIES_TABLE,
+            exc,
+        )
+        return _load_governance_dictionary_fallback(), {
+            "source": "fallback_file",
+            "table": GOVERNANCE_POLICIES_TABLE,
+            "policy_id": GOVERNANCE_DICTIONARY_POLICY_ID,
+            "reason": str(exc),
+        }
+
+    raw_items = resp.get("Items", [])
+    items = [_deserialize(raw) for raw in raw_items]
+    if not items:
+        return _load_governance_dictionary_fallback(), {
+            "source": "fallback_file",
+            "table": GOVERNANCE_POLICIES_TABLE,
+            "policy_id": GOVERNANCE_DICTIONARY_POLICY_ID,
+            "reason": "not_found",
+        }
+
+    def _sort_key(value: Dict[str, Any]) -> str:
+        return str(value.get("updated_at") or value.get("created_at") or "")
+
+    items.sort(key=_sort_key, reverse=True)
+    for item in items:
+        dictionary = _extract_governance_dictionary(item)
+        if not dictionary:
+            continue
+        return dictionary, {
+            "source": "dynamodb",
+            "table": GOVERNANCE_POLICIES_TABLE,
+            "policy_id": str(item.get("policy_id") or GOVERNANCE_DICTIONARY_POLICY_ID),
+            "updated_at": str(item.get("updated_at") or ""),
+            "version": str(item.get("version") or ""),
+        }
+
+    return _load_governance_dictionary_fallback(), {
+        "source": "fallback_file",
+        "table": GOVERNANCE_POLICIES_TABLE,
+        "policy_id": GOVERNANCE_DICTIONARY_POLICY_ID,
+        "reason": "invalid_policy_payload",
+    }
+
+
+def _handle_governance_dictionary(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/governance/dictionary — dictionary lookup by entity/field/value."""
+    qs = event.get("queryStringParameters") or {}
+    entity = str(qs.get("entity") or "").strip()
+    field = str(qs.get("field") or "").strip()
+    value = qs.get("value")
+    include_all = str(qs.get("include_all") or "").strip().lower() in {"1", "true", "yes"}
+
+    dictionary, source_meta = _load_governance_dictionary()
+    entities = dictionary.get("entities")
+    if not isinstance(entities, dict):
+        return _error(
+            500,
+            "Governance dictionary payload missing 'entities' object.",
+            code="INTERNAL_ERROR",
+            source=source_meta.get("source"),
+        )
+
+    if not entity:
+        entity_index = {}
+        for key, definition in entities.items():
+            fields = definition.get("fields", {}) if isinstance(definition, dict) else {}
+            entity_index[key] = {
+                "field_count": len(fields) if isinstance(fields, dict) else 0,
+                "description": str((definition or {}).get("description") or ""),
+            }
+        payload: Dict[str, Any] = {
+            "source": source_meta,
+            "dictionary_version": dictionary.get("version"),
+            "updated_at": dictionary.get("updated_at"),
+            "entities": entity_index,
+            "count": len(entity_index),
+        }
+        if include_all:
+            payload["dictionary"] = dictionary
+        return _response(200, payload)
+
+    entity_def = entities.get(entity)
+    if not isinstance(entity_def, dict):
+        return _error(
+            404,
+            f"Unknown dictionary entity '{entity}'.",
+            code="NOT_FOUND",
+            entity=entity,
+            valid_entities=sorted(entities.keys()),
+        )
+
+    fields = entity_def.get("fields")
+    if not isinstance(fields, dict):
+        return _error(
+            500,
+            f"Entity '{entity}' has invalid fields payload.",
+            code="INTERNAL_ERROR",
+            entity=entity,
+        )
+
+    if not field:
+        return _response(
+            200,
+            {
+                "source": source_meta,
+                "dictionary_version": dictionary.get("version"),
+                "entity": entity,
+                "definition": entity_def,
+            },
+        )
+
+    field_def = fields.get(field)
+    if not isinstance(field_def, dict):
+        return _error(
+            404,
+            f"Unknown field '{field}' for entity '{entity}'.",
+            code="NOT_FOUND",
+            entity=entity,
+            field=field,
+            valid_fields=sorted(fields.keys()),
+        )
+
+    result: Dict[str, Any] = {
+        "source": source_meta,
+        "dictionary_version": dictionary.get("version"),
+        "entity": entity,
+        "field": field,
+        "definition": field_def,
+    }
+
+    if value is not None:
+        allowed_values = field_def.get("enum")
+        validation_result: Dict[str, Any] = {
+            "input_value": value,
+            "valid": True,
+            "reason": "accepted",
+        }
+        if isinstance(allowed_values, list) and allowed_values:
+            normalized_allowed = [str(v) for v in allowed_values]
+            is_valid = str(value) in normalized_allowed
+            validation_result = {
+                "input_value": value,
+                "valid": is_valid,
+                "reason": "enum_mismatch" if not is_valid else "accepted",
+                "allowed_values": normalized_allowed,
+            }
+        result["validation"] = validation_result
+
+    return _response(200, result)
+
+
 def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
     """PUT /api/v1/governance/{file_name} — update governance file with archival."""
     try:
@@ -8351,6 +8562,10 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # GET /api/v1/governance/hash
     if method == "GET" and path == "/api/v1/governance/hash":
         return _handle_governance_hash()
+
+    # GET /api/v1/governance/dictionary
+    if method == "GET" and path == "/api/v1/governance/dictionary":
+        return _handle_governance_dictionary(event)
 
     # PUT /api/v1/governance/{file_name...}
     match_gov_update = re.fullmatch(r"/api/v1/governance/(.+)", path)
