@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-27.6",
-  "updated_at": "2026-02-27T10:34:00Z",
+  "version": "2026-02-27.7",
+  "updated_at": "2026-02-27T16:05:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -259,6 +259,20 @@
             }
           },
           "usage_guidance": "If scope map is omitted, internal keys remain permissive for backward compatibility."
+        }
+      }
+    },
+    "governance.resource": {
+      "description": "Governance files accessible via governance_get MCP tool and governance_update API.",
+      "fields": {
+        "file_name": {
+          "type": "string",
+          "enum": ["agents.md", "governance_data_dictionary.json"],
+          "usage_guidance": "Recognized governance file names. 'agents.md' and files under 'agents/' are Markdown governance rules. 'governance_data_dictionary.json' is the machine-readable schema/enum dictionary; load at session init via governance_get(\"governance_data_dictionary.json\")."
+        },
+        "uri": {
+          "type": "string",
+          "usage_guidance": "Resolved as governance://{file_name}. Only registered file_names are valid; others return NOT_FOUND."
         }
       }
     },
