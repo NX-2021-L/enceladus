@@ -595,6 +595,7 @@ import json
 import os
 
 import boto3
+from botocore.exceptions import ClientError
 
 table = os.environ["GOVERNANCE_POLICIES_TABLE"]
 policy_id = os.environ["GOVERNANCE_DICTIONARY_POLICY_ID"]
@@ -609,7 +610,17 @@ payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 ddb = boto3.client("dynamodb", region_name=region)
-desc = ddb.describe_table(TableName=table)
+try:
+    desc = ddb.describe_table(TableName=table)
+except ClientError as exc:
+    code = str(exc.response.get("Error", {}).get("Code", ""))
+    if code in {"AccessDeniedException", "AccessDenied", "UnauthorizedOperation"}:
+        print(
+            "[WARNING] skipping governance dictionary sync due to insufficient IAM "
+            f"permissions for table '{table}': {code}"
+        )
+        raise SystemExit(0)
+    raise
 key_schema = [entry["AttributeName"] for entry in desc["Table"]["KeySchema"]]
 
 item = {
@@ -634,7 +645,17 @@ for key in key_schema:
     else:
         item[key] = {"S": "default"}
 
-ddb.put_item(TableName=table, Item=item)
+try:
+    ddb.put_item(TableName=table, Item=item)
+except ClientError as exc:
+    code = str(exc.response.get("Error", {}).get("Code", ""))
+    if code in {"AccessDeniedException", "AccessDenied", "UnauthorizedOperation"}:
+        print(
+            "[WARNING] unable to write governance dictionary policy due to IAM "
+            f"permissions on table '{table}': {code}"
+        )
+        raise SystemExit(0)
+    raise
 print(f"[INFO] synced governance dictionary policy_id={policy_id} hash={payload_hash}")
 PY
 }

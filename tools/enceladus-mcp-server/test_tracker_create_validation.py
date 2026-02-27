@@ -283,6 +283,28 @@ def test_read_resource_governance_agents_direct_s3_path_without_catalog_lookup()
     assert fake_s3.calls[0]["Key"] == "governance/live/agents.md"
 
 
+def test_read_resource_governance_agents_returns_fetch_error_when_direct_path_fails():
+    class _FailingS3:
+        def get_object(self, **_kwargs):
+            raise RuntimeError("NoSuchKey")
+
+    with patch.object(server, "_governance_catalog", return_value={}), patch.object(
+        server, "_get_s3", return_value=_FailingS3()
+    ):
+        content = _run(server.read_resource("governance://agents.md"))
+
+    assert content.startswith("# Failed to fetch governance resource governance://agents.md")
+    assert "NoSuchKey" in content
+
+
+def test_list_resources_includes_agents_when_catalog_empty():
+    with patch.object(server, "_governance_catalog", return_value={}):
+        resources = _run(server.list_resources())
+
+    uris = [str(r.uri) for r in resources]
+    assert "governance://agents.md" in uris
+
+
 def test_read_resource_project_reference_accepts_anyurl_object():
     fake_s3 = _FakeS3("# project reference")
     ref_uri = TypeAdapter(AnyUrl).validate_python("projects://reference/enceladus")
