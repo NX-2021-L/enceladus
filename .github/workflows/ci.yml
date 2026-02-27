@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint Python files
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            backend/lambda/coordination_api/lambda_function.py \
+            tools/enceladus-mcp-server/server.py
+          echo "[SUCCESS] Python syntax check passed"
+
+      - name: Validate governance dictionary JSON
+        run: |
+          set -euo pipefail
+          python3 -c "
+          import json, sys
+          with open('backend/lambda/coordination_api/governance_data_dictionary.json') as f:
+              d = json.load(f)
+          assert 'version' in d, 'Missing version field'
+          assert 'entities' in d, 'Missing entities field'
+          print('[SUCCESS] governance_data_dictionary.json is valid JSON with required fields')
+          print(f'  version: {d[\"version\"]}')
+          print(f'  entities: {list(d[\"entities\"].keys())}')
+          "
