@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-27.1",
-  "updated_at": "2026-02-27T00:00:00Z",
+  "version": "2026-02-27.2",
+  "updated_at": "2026-02-27T02:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -11,13 +11,13 @@
       "fields": {
         "status": {
           "type": "enum",
-          "enum": ["open", "in-progress", "blocked", "closed"],
+          "enum": ["open", "in-progress", "coding-complete", "committed", "pushed", "merged-main", "deployed", "closed"],
           "definition": "Task lifecycle status.",
-          "usage_guidance": "Use 'in-progress' only when work is actively underway."
+          "usage_guidance": "Task transitions are sequential; use tracker_validation_rules before tracker_set to obtain required evidence and checkout requirements."
         },
         "priority": {
           "type": "enum",
-          "enum": ["P0", "P1", "P2"],
+          "enum": ["P0", "P1", "P2", "P3"],
           "definition": "Task urgency classification."
         },
         "category": {
@@ -35,6 +35,11 @@
         "coordination": {
           "type": "boolean",
           "definition": "Whether task is created under coordination workflow."
+        },
+        "transition_evidence": {
+          "type": "object",
+          "definition": "Evidence payload required for gated status transitions.",
+          "usage_guidance": "task->pushed requires commit_sha; task->merged-main requires merge_evidence; task->deployed requires deployment_ref; any revert requires revert_reason."
         }
       }
     },
@@ -43,11 +48,11 @@
       "fields": {
         "status": {
           "type": "enum",
-          "enum": ["open", "in-progress", "blocked", "closed"]
+          "enum": ["open", "in-progress", "closed"]
         },
         "priority": {
           "type": "enum",
-          "enum": ["P0", "P1", "P2"]
+          "enum": ["P0", "P1", "P2", "P3"]
         },
         "category": {
           "type": "enum",
@@ -66,11 +71,11 @@
       "fields": {
         "status": {
           "type": "enum",
-          "enum": ["planned", "in-progress", "blocked", "completed"]
+          "enum": ["planned", "in-progress", "completed", "production", "deprecated"]
         },
         "priority": {
           "type": "enum",
-          "enum": ["P0", "P1", "P2"]
+          "enum": ["P0", "P1", "P2", "P3"]
         },
         "category": {
           "type": "enum",
