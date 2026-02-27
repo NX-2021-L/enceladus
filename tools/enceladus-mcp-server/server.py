@@ -91,6 +91,14 @@ def _build_ssl_context() -> ssl.SSLContext:
 
 _SSL_CTX = _build_ssl_context()
 
+
+def _first_nonempty_env(*names: str) -> str:
+    for name in names:
+        value = str(os.environ.get(name, "")).strip()
+        if value:
+            return value
+    return ""
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -133,9 +141,11 @@ COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
     "https://jreese.net/api/v1/coordination",
 )
-COMMON_INTERNAL_API_KEY = os.environ.get(
+COMMON_INTERNAL_API_KEY = _first_nonempty_env(
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
-    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+    "COORDINATION_INTERNAL_API_KEY",
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
 )
 COORDINATION_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
