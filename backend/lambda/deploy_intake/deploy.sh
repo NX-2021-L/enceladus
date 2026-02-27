@@ -137,20 +137,6 @@ resolve_internal_api_key() {
     return
   fi
 
-  local existing
-  existing="$(aws lambda get-function-configuration \
-    --function-name "${FUNCTION_NAME}" \
-    --region "${REGION}" \
-    --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
-    --output text 2>/dev/null || true)"
-  if [[ "${existing}" == "None" ]]; then
-    existing=""
-  fi
-  if [[ -n "${existing}" ]]; then
-    printf '%s' "${existing}"
-    return
-  fi
-
   local coordination_key
   coordination_key="$(aws lambda get-function-configuration \
     --function-name "${COORDINATION_API_FUNCTION_NAME}" \
@@ -160,7 +146,21 @@ resolve_internal_api_key() {
   if [[ "${coordination_key}" == "None" ]]; then
     coordination_key=""
   fi
-  printf '%s' "${coordination_key}"
+  if [[ -n "${coordination_key}" ]]; then
+    printf '%s' "${coordination_key}"
+    return
+  fi
+
+  local existing
+  existing="$(aws lambda get-function-configuration \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
+    --output text 2>/dev/null || true)"
+  if [[ "${existing}" == "None" ]]; then
+    existing=""
+  fi
+  printf '%s' "${existing}"
 }
 
 deploy_lambda() {

@@ -61,14 +61,23 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_REFERENCE_PREFIX = os.environ.get("S3_REFERENCE_PREFIX", "mobile/v1/reference")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
-COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
-COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEY = (
+    os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+    or os.environ.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY", "")
+    or os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", "")
+)
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = (
+    os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+    or os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+)
 COORDINATION_INTERNAL_API_KEYS = tuple(
     key
     for key in dict.fromkeys(
         [
             k.strip()
             for src in (
+                os.environ.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS", ""),
+                os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEYS", ""),
                 os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
                 COORDINATION_INTERNAL_API_KEY,
                 COORDINATION_INTERNAL_API_KEY_PREVIOUS,

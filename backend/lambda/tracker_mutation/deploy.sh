@@ -23,6 +23,7 @@ COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
 # Internal API key (resolved from env or existing Lambda config)
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 COORDINATION_INTERNAL_API_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES:-}"
+COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -31,6 +32,16 @@ log() {
 resolve_internal_api_key() {
   if [[ -n "${COORDINATION_INTERNAL_API_KEY}" ]]; then
     printf '%s' "${COORDINATION_INTERNAL_API_KEY}"
+    return
+  fi
+  local coordination_key
+  coordination_key="$(aws lambda get-function-configuration \
+    --function-name "${COORDINATION_API_FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
+    --output text 2>/dev/null || true)"
+  if [[ "${coordination_key}" != "None" && -n "${coordination_key}" ]]; then
+    printf '%s' "${coordination_key}"
     return
   fi
   local existing
