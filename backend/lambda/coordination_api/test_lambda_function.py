@@ -141,6 +141,22 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertIn("CODEX_API_KEY", blob)
         self.assertIn("COORDINATION_CALLBACK_PROVIDER=\"openai_codex\"", blob)
 
+    def test_compute_governance_hash_local_uses_mcp_server_source(self):
+        class _FakeMcpServer:
+            def _compute_governance_hash(self, force_refresh=False):
+                if force_refresh is not True:
+                    raise AssertionError("force_refresh should be requested")
+                return "c" * 64
+
+        with patch.object(
+            coordination_lambda,
+            "_load_mcp_server_module",
+            return_value=_FakeMcpServer(),
+        ):
+            result = coordination_lambda._compute_governance_hash_local()
+
+        self.assertEqual(result, "c" * 64)
+
     def test_build_ssm_commands_uses_idempotent_mcp_profile_bootstrap(self):
         request = {
             "request_id": "CRQ-MCP001",

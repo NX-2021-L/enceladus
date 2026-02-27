@@ -270,6 +270,19 @@ def test_read_resource_governance_accepts_anyurl_object():
     assert fake_s3.calls[0]["Key"] == "governance/live/agents.md"
 
 
+def test_read_resource_governance_agents_direct_s3_path_without_catalog_lookup():
+    fake_s3 = _FakeS3("# agents direct")
+    governance_uri = TypeAdapter(AnyUrl).validate_python("governance://agents.md")
+    with patch.object(server, "_governance_catalog", return_value={}), patch.object(
+        server, "_get_s3", return_value=fake_s3
+    ):
+        content = _run(server.read_resource(governance_uri))
+
+    assert content == "# agents direct"
+    assert fake_s3.calls
+    assert fake_s3.calls[0]["Key"] == "governance/live/agents.md"
+
+
 def test_read_resource_project_reference_accepts_anyurl_object():
     fake_s3 = _FakeS3("# project reference")
     ref_uri = TypeAdapter(AnyUrl).validate_python("projects://reference/enceladus")
@@ -279,6 +292,17 @@ def test_read_resource_project_reference_accepts_anyurl_object():
     assert content == "# project reference"
     assert fake_s3.calls
     assert fake_s3.calls[0]["Key"] == f"{server.S3_REFERENCE_PREFIX}/enceladus.md"
+
+
+def test_require_governance_hash_accepts_fresh_local_when_api_hash_is_stale():
+    stale_api_hash = "a" * 64
+    fresh_hash = "b" * 64
+    with patch.object(server, "_get_governance_hash_via_api", return_value=stale_api_hash), patch.object(
+        server, "_compute_governance_hash", return_value=fresh_hash
+    ):
+        err = server._require_governance_hash({"governance_hash": fresh_hash})
+
+    assert err is None
 
 
 class _PolicyDdb:
