@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-27.5",
-  "updated_at": "2026-02-27T10:15:00Z",
+  "version": "2026-02-27.6",
+  "updated_at": "2026-02-27T10:34:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -219,6 +219,14 @@
     "internal_auth.scope_map": {
       "description": "Scoped service-token authorization map shared across Enceladus service APIs.",
       "fields": {
+        "COORDINATION_INTERNAL_API_KEY": {
+          "type": "string",
+          "usage_guidance": "Primary shared internal key. Services normalize non-empty fallback across aliases: ENCELADUS_COORDINATION_API_INTERNAL_API_KEY, ENCELADUS_COORDINATION_INTERNAL_API_KEY, COORDINATION_INTERNAL_API_KEY."
+        },
+        "COORDINATION_INTERNAL_API_KEY_PREVIOUS": {
+          "type": "string",
+          "usage_guidance": "Optional rollover key. Services normalize non-empty fallback across aliases: ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS, ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS, COORDINATION_INTERNAL_API_KEY_PREVIOUS."
+        },
         "COORDINATION_INTERNAL_API_KEY_SCOPES": {
           "type": "object",
           "constraints": {
@@ -252,6 +260,43 @@
           },
           "usage_guidance": "If scope map is omitted, internal keys remain permissive for backward compatibility."
         }
+      }
+    },
+    "internal_auth.managed_token": {
+      "description": "Unified service authentication token records stored by coordination API for external service integrations.",
+      "fields": {
+        "policy_id": {
+          "type": "string",
+          "constraints": {"prefix": "service_token#"},
+          "usage_guidance": "Deterministic key built from sha256(token) to avoid storing plaintext token secrets."
+        },
+        "token_id": {
+          "type": "string",
+          "constraints": {"pattern": "^TOK-[A-Z0-9]{12}$"},
+          "usage_guidance": "Operator-facing token identifier used for delete/permissions update routes."
+        },
+        "service_name": {
+          "type": "string",
+          "constraints": {"min_length": 1},
+          "usage_guidance": "Human-readable external service label shown in Tokens/Permissions UI tabs."
+        },
+        "permissions": {
+          "type": "array",
+          "item_type": "enum",
+          "enum": ["read", "write", "put", "delete", "admin"],
+          "usage_guidance": "Cross-service grant set used by unified auth model."
+        },
+        "status": {
+          "type": "enum",
+          "enum": ["active", "revoked"]
+        },
+        "token_masked": {
+          "type": "string",
+          "usage_guidance": "Obfuscated display value for UI listing; plaintext token is returned only at creation."
+        },
+        "created_at": {"type": "timestamp"},
+        "updated_at": {"type": "timestamp"},
+        "last_used_at": {"type": "timestamp"}
       }
     }
   }
