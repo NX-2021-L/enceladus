@@ -88,12 +88,6 @@
       "lambda_dir": "backend/lambda/governance_audit",
       "workflow_file": ".github/workflows/lambda-governance-audit-deploy.yml",
       "deploy_script": "backend/lambda/governance_audit/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-mcp-streamable",
-      "lambda_dir": "backend/lambda/mcp_streamable",
-      "workflow_file": ".github/workflows/lambda-mcp-streamable-deploy.yml",
-      "deploy_script": "backend/lambda/mcp_streamable/deploy.sh"
     }
   ]
 }

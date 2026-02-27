@@ -1,0 +1,197 @@
+{
+  "version": "2026-02-27.1",
+  "updated_at": "2026-02-27T00:00:00Z",
+  "owners": [
+    "enceladus-platform"
+  ],
+  "backward_compatibility_policy": "Additive changes are preferred. Removing enum values or required fields requires explicit migration notes and coordinated rollout.",
+  "entities": {
+    "tracker.task": {
+      "description": "Task tracker records created via MCP and tracker mutation APIs.",
+      "fields": {
+        "status": {
+          "type": "enum",
+          "enum": ["open", "in-progress", "blocked", "closed"],
+          "definition": "Task lifecycle status.",
+          "usage_guidance": "Use 'in-progress' only when work is actively underway."
+        },
+        "priority": {
+          "type": "enum",
+          "enum": ["P0", "P1", "P2"],
+          "definition": "Task urgency classification."
+        },
+        "category": {
+          "type": "enum",
+          "enum": ["implementation", "investigation", "documentation", "maintenance", "validation"],
+          "definition": "Task category used for governance and reporting."
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "item_type": "string",
+          "constraints": {"min_items": 1},
+          "definition": "Concrete conditions to mark task complete.",
+          "usage_guidance": "Required for task creation."
+        },
+        "coordination": {
+          "type": "boolean",
+          "definition": "Whether task is created under coordination workflow."
+        }
+      }
+    },
+    "tracker.issue": {
+      "description": "Issue tracker records for bug/risk/debt/security/performance.",
+      "fields": {
+        "status": {
+          "type": "enum",
+          "enum": ["open", "in-progress", "blocked", "closed"]
+        },
+        "priority": {
+          "type": "enum",
+          "enum": ["P0", "P1", "P2"]
+        },
+        "category": {
+          "type": "enum",
+          "enum": ["bug", "debt", "risk", "security", "performance"]
+        },
+        "evidence": {
+          "type": "array",
+          "item_type": "object",
+          "constraints": {"min_items": 1, "required_keys": ["description", "steps_to_duplicate"]},
+          "usage_guidance": "Issue creation requires at least one evidence object."
+        }
+      }
+    },
+    "tracker.feature": {
+      "description": "Feature tracker records with governed completion handshake.",
+      "fields": {
+        "status": {
+          "type": "enum",
+          "enum": ["planned", "in-progress", "blocked", "completed"]
+        },
+        "priority": {
+          "type": "enum",
+          "enum": ["P0", "P1", "P2"]
+        },
+        "category": {
+          "type": "enum",
+          "enum": ["epic", "capability", "enhancement", "infrastructure"]
+        },
+        "user_story": {
+          "type": "string",
+          "constraints": {"min_length": 10},
+          "usage_guidance": "Must follow: As a [USER/SYSTEM] I need/want ... so that ..."
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "item_type": "object|string",
+          "constraints": {"min_items": 1},
+          "usage_guidance": "Feature completion requires accepted evidence for all criteria."
+        }
+      }
+    },
+    "document.create": {
+      "description": "Agent document create payload fields.",
+      "fields": {
+        "project_id": {
+          "type": "string",
+          "constraints": {"pattern": "^[a-z0-9_-]+$"}
+        },
+        "title": {
+          "type": "string",
+          "constraints": {"min_length": 1, "max_length": 500}
+        },
+        "content": {
+          "type": "string",
+          "constraints": {"min_length": 1, "max_bytes": 1048576}
+        },
+        "file_name": {
+          "type": "string",
+          "constraints": {"extensions": [".md", ".markdown"]}
+        },
+        "keywords": {
+          "type": "array",
+          "item_type": "string",
+          "constraints": {"max_items": 50}
+        },
+        "related_items": {
+          "type": "array",
+          "item_type": "string",
+          "constraints": {"max_items": 100}
+        }
+      }
+    },
+    "deploy.request": {
+      "description": "Deployment intake request schema for /api/v1/deploy.",
+      "fields": {
+        "change_type": {
+          "type": "enum",
+          "enum": ["patch", "minor", "major"]
+        },
+        "deployment_type": {
+          "type": "enum",
+          "enum": [
+            "github_public_static",
+            "github_private_sst",
+            "github_public_workers",
+            "github_private_workers",
+            "lambda_update",
+            "lambda_layer",
+            "container_template",
+            "glue_crawler_update",
+            "glue_job_update",
+            "eventbridge_rule",
+            "s3_asset_sync",
+            "cloudfront_config",
+            "step_function_update"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "constraints": {"min_length": 1}
+        },
+        "changes": {
+          "type": "array",
+          "item_type": "string",
+          "constraints": {"min_items": 1}
+        },
+        "project_id": {
+          "type": "string",
+          "constraints": {"pattern": "^[a-z0-9_-]+$"}
+        }
+      }
+    },
+    "coordination.request": {
+      "description": "Coordination request envelope fields in coordination API.",
+      "fields": {
+        "state": {
+          "type": "enum",
+          "enum": [
+            "intake_received",
+            "queued",
+            "dispatching",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "dead_letter"
+          ]
+        },
+        "execution_mode": {
+          "type": "enum",
+          "enum": [
+            "preflight",
+            "codex_full_auto",
+            "codex_app_server",
+            "claude_headless",
+            "claude_agent_sdk",
+            "aws_step_function"
+          ]
+        },
+        "provider": {
+          "type": "enum",
+          "enum": ["openai_codex", "claude_agent_sdk", "aws_native", "aws_bedrock_agent"]
+        }
+      }
+    }
+  }
+}
