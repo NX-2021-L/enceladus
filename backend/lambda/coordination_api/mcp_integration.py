@@ -12,6 +12,7 @@ import logging
 import os
 import pathlib
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 try:
@@ -173,6 +174,25 @@ def _call_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _compute_governance_hash_local() -> str:
+    """Compute hash from MCP governance source (S3-backed) with fallback."""
+    try:
+        module = _load_mcp_server_module()
+        compute = getattr(module, "_compute_governance_hash", None)
+        if callable(compute):
+            try:
+                value = compute(force_refresh=True)
+            except TypeError:
+                value = compute()
+            text = str(value or "").strip()
+            if text:
+                return text
+    except Exception as exc:
+        logger.warning("MCP-backed governance hash failed; falling back to docstore: %s", exc)
+
+    return _compute_governance_hash_docstore_fallback()
+
+
+def _compute_governance_hash_docstore_fallback() -> str:
     ddb = _get_ddb()
     resp = ddb.query(
         TableName=DOCUMENTS_TABLE,
@@ -235,5 +255,4 @@ def _compute_governance_hash_local() -> str:
         h.update(b"\n")
 
     return h.hexdigest()
-
 

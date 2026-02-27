@@ -123,6 +123,9 @@ S3_DOCUMENTS_PREFIX = os.environ.get("ENCELADUS_S3_DOCUMENTS_PREFIX", "agent-doc
 GOVERNANCE_PROJECT_ID = os.environ.get("ENCELADUS_GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("ENCELADUS_GOVERNANCE_KEYWORD", "governance-file")
 GOVERNANCE_CATALOG_TTL_SECONDS = int(os.environ.get("ENCELADUS_GOVERNANCE_CATALOG_TTL_SECONDS", "300"))
+GOVERNANCE_RESOURCE_BODY_TTL_SECONDS = float(
+    os.environ.get("ENCELADUS_GOVERNANCE_RESOURCE_BODY_TTL_SECONDS", "30")
+)
 S3_GOVERNANCE_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_PREFIX", "governance/live")
 S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
 
@@ -255,6 +258,7 @@ _ddb_client = None
 _s3_client = None
 _governance_catalog_cache: Dict[str, Dict[str, Any]] = {}
 _governance_catalog_cached_at: float = 0.0
+_governance_resource_body_cache: Dict[str, Dict[str, Any]] = {}
 
 
 def _get_ddb():
@@ -831,30 +835,72 @@ _GOVERNANCE_HASH_API_TTL = 60.0  # seconds
 def _get_governance_hash_via_api() -> str:
     """Fetch governance hash from HTTP API with short TTL cache.
 
-    Falls back to local computation if the API is unreachable.
+    Resolution order:
+      1) governance API /hash (authoritative)
+      2) health API governance_hash (auth-safe fallback)
+      3) local computation from governance resources
     """
     global _governance_hash_api_cache, _governance_hash_api_cache_at
     now = time.time()
     if _governance_hash_api_cache and (now - _governance_hash_api_cache_at) < _GOVERNANCE_HASH_API_TTL:
         return _governance_hash_api_cache
+
+    def _cache_and_return(value: str) -> str:
+        nonlocal now
+        global _governance_hash_api_cache, _governance_hash_api_cache_at
+        _governance_hash_api_cache = value
+        _governance_hash_api_cache_at = now
+        return value
+
     try:
         resp = _governance_api_request("GET", "/hash")
         h = str(resp.get("governance_hash") or "").strip()
         if h:
-            _governance_hash_api_cache = h
-            _governance_hash_api_cache_at = now
-            return h
+            return _cache_and_return(h)
     except Exception:
         pass
-    # Fallback to local computation
+
+    # Fallback for auth-gated environments where /hash cannot be called directly.
+    try:
+        health = _health_api_request()
+        h = str(health.get("governance_hash") or "").strip()
+        if h:
+            return _cache_and_return(h)
+    except Exception:
+        pass
+
+    # Final fallback to local computation.
     return _compute_governance_hash()
+
+
+def _cache_governance_hash(value: str) -> None:
+    global _governance_hash_api_cache, _governance_hash_api_cache_at
+    _governance_hash_api_cache = value
+    _governance_hash_api_cache_at = time.time()
+
+
+def _current_governance_hash_for_validation(provided: str) -> str:
+    """Resolve current governance hash with stale-cache self-healing.
+
+    Primary compare uses API/health hash. If it mismatches the provided hash,
+    perform one forced local recomputation from governance resources.
+    """
+    current = _get_governance_hash_via_api()
+    if provided == current:
+        return current
+
+    fresh_local = _compute_governance_hash(force_refresh=True)
+    if provided == fresh_local:
+        _cache_governance_hash(fresh_local)
+        return fresh_local
+    return current
 
 
 def _require_governance_hash(args: dict) -> Optional[str]:
     provided = str(args.get("governance_hash") or "").strip()
     if not provided:
         return "Missing governance_hash for write-capable MCP tool call"
-    current = _get_governance_hash_via_api()
+    current = _current_governance_hash_for_validation(provided)
     if provided != current:
         return "GOVERNANCE_STALE: provided governance_hash does not match current governance bundle"
     return None
@@ -868,13 +914,18 @@ def _require_governance_hash_envelope(args: dict) -> Optional[Dict[str, Any]]:
             "Missing governance_hash for write-capable MCP tool call",
             retryable=False,
         )
-    current = _get_governance_hash_via_api()
+    current = _current_governance_hash_for_validation(provided)
     if provided != current:
+        fresh_local = _compute_governance_hash(force_refresh=True)
         return _error_payload(
             "GOVERNANCE_STALE",
             "provided governance_hash does not match current governance bundle",
             retryable=True,
-            details={"provided": provided, "current": current},
+            details={
+                "provided": provided,
+                "current": current,
+                "fresh_local": fresh_local,
+            },
         )
     return None
 
@@ -1702,8 +1753,11 @@ def _governance_catalog_from_s3() -> Dict[str, Dict[str, Any]]:
     """Build governance catalog from deterministic S3 prefix (ENC-TSK-474).
 
     Lists objects under ``S3_GOVERNANCE_PREFIX`` and derives governance URIs
-    from S3 key structure.  Content hash is SHA-256 of raw file content,
-    matching the hash algorithm used by docstore uploads.
+    from S3 key structure.
+
+    Important: this catalog path avoids fetching object bodies to keep
+    resources/list and resources/read bootstrap latency low. Content hashes are
+    computed lazily in ``_compute_governance_hash`` when needed.
     """
     try:
         s3 = _get_s3()
@@ -1732,14 +1786,6 @@ def _governance_catalog_from_s3() -> Dict[str, Dict[str, Any]]:
         if not uri:
             continue
 
-        try:
-            content_resp = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
-            content = content_resp["Body"].read()
-            content_hash = hashlib.sha256(content).hexdigest()
-        except Exception as exc:
-            logger.warning("Failed to read governance file s3://%s/%s: %s", S3_BUCKET, s3_key, exc)
-            continue
-
         last_modified = obj.get("LastModified")
         updated_at = last_modified.isoformat() if hasattr(last_modified, "isoformat") else str(last_modified or "")
 
@@ -1747,7 +1793,7 @@ def _governance_catalog_from_s3() -> Dict[str, Dict[str, Any]]:
             "file_name": rel_path,
             "s3_bucket": S3_BUCKET,
             "s3_key": s3_key,
-            "content_hash": content_hash,
+            "content_hash": "",
             "updated_at": updated_at,
         }
 
@@ -1851,9 +1897,43 @@ def _governance_catalog(force_refresh: bool = False) -> Dict[str, Dict[str, Any]
     return catalog
 
 
-def _compute_governance_hash() -> str:
+def _governance_s3_key_from_uri(uri_text: str) -> Optional[str]:
+    uri = str(uri_text or "").strip()
+    if uri == "governance://agents.md":
+        return f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/agents.md"
+    if uri.startswith("governance://agents/"):
+        rel = uri.replace("governance://", "", 1)
+        return f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{rel}"
+    return None
+
+
+def _read_governance_text_cached(
+    *,
+    uri: str,
+    bucket: str,
+    key: str,
+    force_refresh: bool = False,
+) -> str:
+    now = time.time()
+    if not force_refresh:
+        cached = _governance_resource_body_cache.get(uri)
+        if cached and (now - float(cached.get("cached_at") or 0.0)) < GOVERNANCE_RESOURCE_BODY_TTL_SECONDS:
+            return str(cached.get("text") or "")
+
+    resp = _get_s3().get_object(Bucket=bucket, Key=key)
+    text = resp["Body"].read().decode("utf-8")
+    _governance_resource_body_cache[uri] = {
+        "cached_at": now,
+        "bucket": bucket,
+        "key": key,
+        "text": text,
+    }
+    return text
+
+
+def _compute_governance_hash(force_refresh: bool = False) -> str:
     """SHA-256 of governance resources resolved from docstore catalog."""
-    catalog = _governance_catalog()
+    catalog = _governance_catalog(force_refresh=force_refresh)
     h = hashlib.sha256()
 
     if not catalog:
@@ -1868,11 +1948,13 @@ def _compute_governance_hash() -> str:
             if not s3_key:
                 continue
             try:
-                resp = _get_s3().get_object(
-                    Bucket=str(meta.get("s3_bucket") or S3_BUCKET),
-                    Key=s3_key,
+                text = _read_governance_text_cached(
+                    uri=uri,
+                    bucket=str(meta.get("s3_bucket") or S3_BUCKET),
+                    key=s3_key,
+                    force_refresh=force_refresh,
                 )
-                content_hash = hashlib.sha256(resp["Body"].read()).hexdigest()
+                content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             except Exception:
                 continue
 
@@ -2119,6 +2201,18 @@ async def read_resource(uri: str) -> str:
 
     # governance://... from deterministic S3 path (fallback: docstore)
     if uri_text.startswith("governance://"):
+        direct_key = _governance_s3_key_from_uri(uri_text)
+        if direct_key:
+            try:
+                return _read_governance_text_cached(
+                    uri=uri_text,
+                    bucket=S3_BUCKET,
+                    key=direct_key,
+                )
+            except Exception:
+                # Fall back to catalog lookup for legacy docs or alternate bucket/key.
+                pass
+
         catalog = _governance_catalog()
         meta = catalog.get(uri_text)
         if not meta:
@@ -2127,11 +2221,11 @@ async def read_resource(uri: str) -> str:
         if not s3_key:
             return f"# Governance resource missing s3_key: {uri_text}"
         try:
-            resp = _get_s3().get_object(
-                Bucket=str(meta.get("s3_bucket") or S3_BUCKET),
-                Key=s3_key,
+            return _read_governance_text_cached(
+                uri=uri_text,
+                bucket=str(meta.get("s3_bucket") or S3_BUCKET),
+                key=s3_key,
             )
-            return resp["Body"].read().decode("utf-8")
         except Exception as exc:
             return f"# Failed to fetch governance resource {uri_text}: {exc}"
 
@@ -4128,12 +4222,19 @@ async def _governance_update(args: dict) -> list[TextContent]:
     }
     encoded_name = urllib.parse.quote(file_name, safe="/")
     resp = _governance_api_request("PUT", f"/{encoded_name}", payload=payload)
+    # Invalidate local resource/hash caches after successful governance write.
+    global _governance_catalog_cache, _governance_catalog_cached_at
+    _governance_catalog_cache = {}
+    _governance_catalog_cached_at = 0.0
+    _governance_resource_body_cache.clear()
+    new_hash = str(resp.get("governance_hash") or "").strip()
+    if new_hash:
+        _cache_governance_hash(new_hash)
     return _result_text(resp)
 
 async def _governance_hash(args: dict) -> list[TextContent]:
-    # --- Phase 2d: HTTP API migration ---
-    resp = _governance_api_request("GET", "/hash")
-    return _result_text(resp)
+    governance_hash = _get_governance_hash_via_api()
+    return _result_text({"success": True, "governance_hash": governance_hash})
 
 
 # --- System ---
