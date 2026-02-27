@@ -536,7 +536,11 @@ def _cors_headers() -> Dict[str, str]:
 def _response(status_code: int, body: Any) -> Dict:
     return {
         "statusCode": status_code,
-        "headers": {**_cors_headers(), "Content-Type": "application/json"},
+        "headers": {
+            **_cors_headers(),
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
         "body": json.dumps(body),
     }
 
@@ -1139,48 +1143,41 @@ def _get_single(document_id: str, qs: Dict) -> Dict:
 
 
 def _list_by_project(qs: Dict) -> Dict:
-    """List documents for a project using GSI."""
+    """List documents for a project using strongly consistent table scan.
+
+    Avoids GSI propagation lag hiding freshly created/updated documents.
+    """
     project_id = qs.get("project", "").strip()
     if not project_id:
         return _error(400, "Query parameter 'project' is required.")
 
     ddb = _get_ddb()
-    params = {
+    params: Dict[str, Any] = {
         "TableName": DOCUMENTS_TABLE,
-        "IndexName": "project-updated-index",
-        "KeyConditionExpression": "project_id = :pid",
+        "ConsistentRead": True,
+        "FilterExpression": "project_id = :pid",
         "ExpressionAttributeValues": {":pid": {"S": project_id}},
-        "ScanIndexForward": False,  # newest first
-        "Limit": PAGE_SIZE,
     }
-
-    # Pagination
-    if qs.get("cursor"):
-        try:
-            cursor = json.loads(base64.b64decode(qs["cursor"]).decode("utf-8"))
-            params["ExclusiveStartKey"] = cursor
-        except Exception:
-            return _error(400, "Invalid pagination cursor.")
-
+    items: List[Dict[str, Any]] = []
     try:
-        resp = ddb.query(**params)
+        while True:
+            resp = ddb.scan(**params)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if not isinstance(last_key, dict) or not last_key:
+                break
+            params["ExclusiveStartKey"] = last_key
     except Exception as exc:
-        logger.error("query failed: %s", exc)
+        logger.error("scan failed: %s", exc)
         return _error(500, "Database query failed.")
 
-    docs = [_deserialize_item(item) for item in resp.get("Items", [])]
-
-    result: Dict[str, Any] = {
-        "success": True,
-        "documents": docs,
-        "count": len(docs),
-    }
-    if resp.get("LastEvaluatedKey"):
-        result["next_cursor"] = base64.b64encode(
-            json.dumps(resp["LastEvaluatedKey"]).encode()
-        ).decode()
-
-    return _response(200, result)
+    docs = [_deserialize_item(item) for item in items]
+    docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
+    sliced = docs[:PAGE_SIZE]
+    return _response(
+        200,
+        {"success": True, "documents": sliced, "count": len(sliced), "total_matches": len(docs)},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1369,29 +1366,23 @@ def _handle_search(qs: Dict) -> Dict:
                 exc,
             )
 
-    # If project specified, use GSI query + client-side filter
+    # Strongly consistent scan to avoid missing just-written docs.
+    scan_params: Dict[str, Any] = {"TableName": DOCUMENTS_TABLE, "ConsistentRead": True}
     if project_id:
-        params: Dict[str, Any] = {
-            "TableName": DOCUMENTS_TABLE,
-            "IndexName": "project-updated-index",
-            "KeyConditionExpression": "project_id = :pid",
-            "ExpressionAttributeValues": {":pid": {"S": project_id}},
-            "ScanIndexForward": False,
-        }
-        try:
-            resp = ddb.query(**params)
-        except Exception as exc:
-            logger.error("search query failed: %s", exc)
-            return _error(500, "Search failed.")
-        items = resp.get("Items", [])
-    else:
-        # Full table scan with limit (for cross-project search)
-        try:
-            resp = ddb.scan(TableName=DOCUMENTS_TABLE, Limit=500)
-        except Exception as exc:
-            logger.error("search scan failed: %s", exc)
-            return _error(500, "Search failed.")
-        items = resp.get("Items", [])
+        scan_params["FilterExpression"] = "project_id = :pid"
+        scan_params["ExpressionAttributeValues"] = {":pid": {"S": project_id}}
+    items: List[Dict[str, Any]] = []
+    try:
+        while True:
+            resp = ddb.scan(**scan_params)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if not isinstance(last_key, dict) or not last_key:
+                break
+            scan_params["ExclusiveStartKey"] = last_key
+    except Exception as exc:
+        logger.error("search scan failed: %s", exc)
+        return _error(500, "Search failed.")
 
     docs = [_deserialize_item(item) for item in items]
 

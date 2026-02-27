@@ -136,3 +136,12 @@ Run the guard scans manually at any time:
 cd /Users/jreese/agents-dev/projects/enceladus/repo
 ./tools/secrets_guard.sh
 ```
+
+## MCP API Boundary Guard
+
+MCP tool handlers must use Enceladus service APIs for business data access and
+must not bypass APIs with direct DynamoDB reads/writes.
+
+- Policy doc: `docs/mcp-api-boundary-governance.md`
+- CI guard: `.github/workflows/mcp-api-boundary-guard.yml`
+- Guard script: `tools/check_mcp_api_boundary.py`

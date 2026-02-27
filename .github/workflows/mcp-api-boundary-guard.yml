@@ -1,0 +1,32 @@
+name: MCP API Boundary Guard
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "tools/enceladus-mcp-server/server.py"
+      - "tools/check_mcp_api_boundary.py"
+      - ".github/workflows/mcp-api-boundary-guard.yml"
+  pull_request:
+    paths:
+      - "tools/enceladus-mcp-server/server.py"
+      - "tools/check_mcp_api_boundary.py"
+      - ".github/workflows/mcp-api-boundary-guard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enforce MCP API boundary
+        run: |
+          set -euo pipefail
+          python3 tools/check_mcp_api_boundary.py
