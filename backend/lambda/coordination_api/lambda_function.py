@@ -35,6 +35,7 @@ import ssl
 import time
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
@@ -8354,7 +8355,13 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
     except (json.JSONDecodeError, TypeError):
         return _error(400, "Invalid JSON body")
 
-    file_name = str(body.get("file_name") or "").strip()
+    # Accept file_name from body (preferred) or extract from URL path as fallback.
+    path = event.get("rawPath") or event.get("path") or ""
+    url_file_name = ""
+    m = re.fullmatch(r"/api/v1/governance/(.+)", path)
+    if m:
+        url_file_name = urllib.parse.unquote(m.group(1))
+    file_name = str(body.get("file_name") or url_file_name or "").strip()
     content = str(body.get("content") or "")
     change_summary = str(body.get("change_summary") or "").strip()
     governance_hash = str(body.get("governance_hash") or "").strip()

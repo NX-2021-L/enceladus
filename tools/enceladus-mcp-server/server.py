@@ -4537,7 +4537,9 @@ async def _governance_update(args: dict) -> list[TextContent]:
 
     # --- Phase 2d: HTTP API migration ---
     # Archival, hash computation, and S3 writes are handled by the coordination Lambda.
+    # file_name is included in both URL path and body — Lambda reads from body.
     payload: Dict[str, Any] = {
+        "file_name": file_name,
         "content": content_text,
         "change_summary": change_summary,
         "governance_hash": args.get("governance_hash", ""),
