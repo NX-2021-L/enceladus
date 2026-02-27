@@ -1897,14 +1897,18 @@ def _governance_catalog(force_refresh: bool = False) -> Dict[str, Dict[str, Any]
     return catalog
 
 
-def _governance_s3_key_from_uri(uri_text: str) -> Optional[str]:
+def _governance_s3_keys_from_uri(uri_text: str) -> List[str]:
     uri = str(uri_text or "").strip()
     if uri == "governance://agents.md":
-        return f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/agents.md"
+        prefix = S3_GOVERNANCE_PREFIX.rstrip("/")
+        return [
+            f"{prefix}/agents.md",
+            f"{prefix}/agents/agents.md",
+        ]
     if uri.startswith("governance://agents/"):
         rel = uri.replace("governance://", "", 1)
-        return f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{rel}"
-    return None
+        return [f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{rel}"]
+    return []
 
 
 def _read_governance_text_cached(
@@ -2166,9 +2170,11 @@ app = Server(SERVER_NAME)
 @app.list_resources()
 async def list_resources() -> list[Resource]:
     resources = []
+    seen_uris: set[str] = set()
 
     # Governance files (authoritative source: S3 governance/live/, fallback: docstore)
     for uri, meta in sorted(_governance_catalog().items()):
+        seen_uris.add(uri)
         file_name = str(meta.get("file_name") or "")
         mime_type = "application/json" if file_name.endswith(".json") else "text/markdown"
         label = "agents.md — Global governance directives" if uri == "governance://agents.md" else file_name
@@ -2178,6 +2184,17 @@ async def list_resources() -> list[Resource]:
                 name=label,
                 mimeType=mime_type,
             )
+        )
+
+    # Ensure agents.md is always discoverable, even when catalog resolution is empty.
+    if "governance://agents.md" not in seen_uris:
+        resources.insert(
+            0,
+            Resource(
+                uri="governance://agents.md",
+                name="agents.md — Global governance directives",
+                mimeType="text/markdown",
+            ),
         )
 
     return resources
@@ -2201,21 +2218,22 @@ async def read_resource(uri: str) -> str:
 
     # governance://... from deterministic S3 path (fallback: docstore)
     if uri_text.startswith("governance://"):
-        direct_key = _governance_s3_key_from_uri(uri_text)
-        if direct_key:
+        direct_err = ""
+        for direct_key in _governance_s3_keys_from_uri(uri_text):
             try:
                 return _read_governance_text_cached(
                     uri=uri_text,
                     bucket=S3_BUCKET,
                     key=direct_key,
                 )
-            except Exception:
-                # Fall back to catalog lookup for legacy docs or alternate bucket/key.
-                pass
+            except Exception as exc:
+                direct_err = str(exc)
 
         catalog = _governance_catalog()
         meta = catalog.get(uri_text)
         if not meta:
+            if direct_err:
+                return f"# Failed to fetch governance resource {uri_text} from deterministic S3 path: {direct_err}"
             return f"# Governance resource not found: {uri_text}"
         s3_key = str(meta.get("s3_key") or "").strip()
         if not s3_key:
