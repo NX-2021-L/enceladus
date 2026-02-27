@@ -54,7 +54,7 @@ deploy_lambda() {
   effective_internal_key="${COORDINATION_INTERNAL_API_KEY}"
   if [[ -z "${effective_internal_key}" ]]; then
     effective_internal_key="$(aws lambda get-function-configuration \
-      --function-name "${FUNCTION_NAME}" \
+      --function-name "${COORDINATION_API_FUNCTION_NAME}" \
       --region "${REGION}" \
       --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
       --output text 2>/dev/null || true)"
@@ -62,7 +62,7 @@ deploy_lambda() {
   fi
   if [[ -z "${effective_internal_key}" ]]; then
     effective_internal_key="$(aws lambda get-function-configuration \
-      --function-name "${COORDINATION_API_FUNCTION_NAME}" \
+      --function-name "${FUNCTION_NAME}" \
       --region "${REGION}" \
       --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
       --output text 2>/dev/null || true)"
