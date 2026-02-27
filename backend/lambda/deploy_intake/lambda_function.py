@@ -99,6 +99,10 @@ COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
     COORDINATION_INTERNAL_API_KEY,
     COORDINATION_INTERNAL_API_KEY_PREVIOUS,
 )
+_INTERNAL_SCOPE_MAP_RAW = (
+    os.environ.get("COORDINATION_INTERNAL_API_KEY_SCOPES", "")
+    or os.environ.get("ENCELADUS_INTERNAL_API_KEY_SCOPES", "")
+).strip()
 CONFIG_BUCKET = os.environ.get("CONFIG_BUCKET", "jreese-net")
 CONFIG_PREFIX = os.environ.get("CONFIG_PREFIX", "deploy-config")
 SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
@@ -180,6 +184,63 @@ _JWKS_TTL = 3600.0
 _project_cache: Dict[str, bool] = {}
 _project_cache_at: float = 0.0
 _PROJECT_CACHE_TTL = 300.0
+
+
+def _parse_internal_scope_map(raw: str) -> Dict[str, set[str]]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Invalid COORDINATION_INTERNAL_API_KEY_SCOPES JSON; ignoring scoped auth map")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: Dict[str, set[str]] = {}
+    for key, value in parsed.items():
+        token = str(key or "").strip()
+        if not token:
+            continue
+        scopes: set[str] = set()
+        if isinstance(value, list):
+            items = value
+        else:
+            items = str(value).split(",")
+        for item in items:
+            scope = str(item or "").strip().lower()
+            if scope:
+                scopes.add(scope)
+        if scopes:
+            out[token] = scopes
+    return out
+
+
+INTERNAL_API_KEY_SCOPES = _parse_internal_scope_map(_INTERNAL_SCOPE_MAP_RAW)
+
+
+def _scope_match(granted: str, required: str) -> bool:
+    if granted in {"*", "all"}:
+        return True
+    if granted == required:
+        return True
+    if granted.endswith("*"):
+        return required.startswith(granted[:-1])
+    return False
+
+
+def _internal_key_has_scopes(internal_key: str, required_scopes: Optional[List[str]]) -> bool:
+    if not required_scopes:
+        return True
+    if not INTERNAL_API_KEY_SCOPES:
+        return True
+    granted = INTERNAL_API_KEY_SCOPES.get(internal_key) or INTERNAL_API_KEY_SCOPES.get("*") or set()
+    if not granted:
+        return False
+    for required in required_scopes:
+        req = str(required or "").strip().lower()
+        if req and not any(_scope_match(g, req) for g in granted):
+            return False
+    return True
 
 
 def _get_ddb():
@@ -367,7 +428,7 @@ def _extract_token(event: Dict) -> Optional[str]:
     return None
 
 
-def _authenticate(event: Dict) -> Tuple[Optional[Dict[str, Any]], Optional[Dict]]:
+def _authenticate(event: Dict, required_scopes: Optional[List[str]] = None) -> Tuple[Optional[Dict[str, Any]], Optional[Dict]]:
     """Authenticate request. Returns (claims, None) or (None, error_response)."""
     headers = event.get("headers") or {}
     if COORDINATION_INTERNAL_API_KEYS:
@@ -377,6 +438,8 @@ def _authenticate(event: Dict) -> Tuple[Optional[Dict[str, Any]], Optional[Dict]
             or ""
         )
         if internal_key and internal_key in COORDINATION_INTERNAL_API_KEYS:
+            if not _internal_key_has_scopes(internal_key, required_scopes):
+                return None, _error(403, "Forbidden: internal key scope is insufficient for this operation.")
             return {"auth_mode": "internal-key", "sub": "internal-key"}, None
 
     token = _extract_token(event)
@@ -956,7 +1019,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
         return _response(204, "")
 
     # Auth (Cognito cookie or internal service key)
-    _claims, auth_error = _authenticate(event)
+    required_scopes = ["deploy:read"] if method == "GET" else ["deploy:write"]
+    _claims, auth_error = _authenticate(event, required_scopes)
     if auth_error:
         return auth_error
 

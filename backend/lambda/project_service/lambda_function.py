@@ -35,7 +35,7 @@ import os
 import re
 import time
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote
 
 import boto3
@@ -61,6 +61,27 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_REFERENCE_PREFIX = os.environ.get("S3_REFERENCE_PREFIX", "mobile/v1/reference")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
+COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEYS = tuple(
+    key
+    for key in dict.fromkeys(
+        [
+            k.strip()
+            for src in (
+                os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+                COORDINATION_INTERNAL_API_KEY,
+                COORDINATION_INTERNAL_API_KEY_PREVIOUS,
+            )
+            for k in str(src).split(",")
+            if k.strip()
+        ]
+    )
+)
+_INTERNAL_SCOPE_MAP_RAW = (
+    os.environ.get("COORDINATION_INTERNAL_API_KEY_SCOPES", "")
+    or os.environ.get("ENCELADUS_INTERNAL_API_KEY_SCOPES", "")
+).strip()
 CORS_ORIGIN = "https://jreese.net"
 PREFIX_GSI = "prefix-index"
 TRACKER_GSI = "project-type-index"
@@ -93,6 +114,63 @@ _jwks_fetched_at: float = 0.0
 _JWKS_TTL = 3600.0
 
 _deserializer = TypeDeserializer()
+
+
+def _parse_internal_scope_map(raw: str) -> Dict[str, Set[str]]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Invalid COORDINATION_INTERNAL_API_KEY_SCOPES JSON; ignoring scoped auth map")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: Dict[str, Set[str]] = {}
+    for key, value in parsed.items():
+        token = str(key or "").strip()
+        if not token:
+            continue
+        scopes: Set[str] = set()
+        if isinstance(value, list):
+            items = value
+        else:
+            items = str(value).split(",")
+        for item in items:
+            scope = str(item or "").strip().lower()
+            if scope:
+                scopes.add(scope)
+        if scopes:
+            out[token] = scopes
+    return out
+
+
+INTERNAL_API_KEY_SCOPES = _parse_internal_scope_map(_INTERNAL_SCOPE_MAP_RAW)
+
+
+def _scope_match(granted: str, required: str) -> bool:
+    if granted in {"*", "all"}:
+        return True
+    if granted == required:
+        return True
+    if granted.endswith("*"):
+        return required.startswith(granted[:-1])
+    return False
+
+
+def _internal_key_has_scopes(internal_key: str, required_scopes: Optional[List[str]]) -> bool:
+    if not required_scopes:
+        return True
+    if not INTERNAL_API_KEY_SCOPES:
+        return True
+    granted = INTERNAL_API_KEY_SCOPES.get(internal_key) or INTERNAL_API_KEY_SCOPES.get("*") or set()
+    if not granted:
+        return False
+    for required in required_scopes:
+        req = str(required or "").strip().lower()
+        if req and not any(_scope_match(g, req) for g in granted):
+            return False
+    return True
 
 # ---------------------------------------------------------------------------
 # JWT Auth (identical pattern to tracker_mutation)
@@ -252,7 +330,7 @@ def _cors_headers() -> Dict[str, str]:
     return {
         "Access-Control-Allow-Origin": CORS_ORIGIN,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Cookie",
+        "Access-Control-Allow-Headers": "Content-Type, Cookie, X-Coordination-Internal-Key",
         "Access-Control-Allow-Credentials": "true",
     }
 
@@ -681,26 +759,38 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         return {"statusCode": 204, "headers": _cors_headers(), "body": ""}
 
     # Auth
-    token = _extract_token(event)
-    if not token:
-        logger.warning(
-            "auth failed: no enceladus_id_token found. method=%s path=%s cookie_names=%s has_event_cookies=%s",
-            method,
-            path,
-            _cookie_names(event),
-            bool(event.get("cookies")),
-        )
-        return _error(401, "Authentication required. Please sign in.")
-    try:
-        claims = _verify_token(token)
-    except ValueError as exc:
-        logger.warning(
-            "auth failed: token validation failed. method=%s path=%s error=%s",
-            method,
-            path,
-            str(exc),
-        )
-        return _error(401, str(exc))
+    required_scopes = ["projects:write"] if method == "POST" else ["projects:read"]
+    headers = event.get("headers") or {}
+    internal_key = (
+        headers.get("x-coordination-internal-key")
+        or headers.get("X-Coordination-Internal-Key")
+        or ""
+    )
+    if internal_key and COORDINATION_INTERNAL_API_KEYS and internal_key in COORDINATION_INTERNAL_API_KEYS:
+        if not _internal_key_has_scopes(internal_key, required_scopes):
+            return _error(403, "Forbidden: internal key scope is insufficient for this operation.")
+        claims = {"auth_mode": "internal-key", "sub": "internal-key"}
+    else:
+        token = _extract_token(event)
+        if not token:
+            logger.warning(
+                "auth failed: no enceladus_id_token found. method=%s path=%s cookie_names=%s has_event_cookies=%s",
+                method,
+                path,
+                _cookie_names(event),
+                bool(event.get("cookies")),
+            )
+            return _error(401, "Authentication required. Please sign in.")
+        try:
+            claims = _verify_token(token)
+        except ValueError as exc:
+            logger.warning(
+                "auth failed: token validation failed. method=%s path=%s error=%s",
+                method,
+                path,
+                str(exc),
+            )
+            return _error(401, str(exc))
 
     # Parse path
     path_params = event.get("pathParameters") or {}

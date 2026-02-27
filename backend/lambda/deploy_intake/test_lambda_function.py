@@ -48,12 +48,14 @@ class DeployIntakeAuthTests(unittest.TestCase):
         self._original_internal_key = deploy_intake.COORDINATION_INTERNAL_API_KEY
         self._original_internal_key_previous = deploy_intake.COORDINATION_INTERNAL_API_KEY_PREVIOUS
         self._original_internal_keys = deploy_intake.COORDINATION_INTERNAL_API_KEYS
+        self._original_internal_key_scopes = deploy_intake.INTERNAL_API_KEY_SCOPES
         self._original_sqs_queue_url = deploy_intake.SQS_QUEUE_URL
 
     def tearDown(self) -> None:
         deploy_intake.COORDINATION_INTERNAL_API_KEY = self._original_internal_key
         deploy_intake.COORDINATION_INTERNAL_API_KEY_PREVIOUS = self._original_internal_key_previous
         deploy_intake.COORDINATION_INTERNAL_API_KEYS = self._original_internal_keys
+        deploy_intake.INTERNAL_API_KEY_SCOPES = self._original_internal_key_scopes
         deploy_intake.SQS_QUEUE_URL = self._original_sqs_queue_url
 
     def test_cors_allows_internal_key_header(self) -> None:
@@ -167,6 +169,37 @@ class DeployIntakeAuthTests(unittest.TestCase):
         self.assertEqual(resp["statusCode"], 401)
         body = json.loads(resp["body"])
         self.assertIn("Authentication required", body["error"])
+
+    def test_internal_key_scope_denied_returns_403(self) -> None:
+        deploy_intake.COORDINATION_INTERNAL_API_KEY = "scope-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("scope-key",)
+        deploy_intake.INTERNAL_API_KEY_SCOPES = {"scope-key": {"deploy:read"}}
+        resp = deploy_intake.lambda_handler(
+            _event(
+                method="POST",
+                path="/api/v1/deploy/trigger/enceladus",
+                headers={"X-Coordination-Internal-Key": "scope-key"},
+            ),
+            None,
+        )
+        self.assertEqual(resp["statusCode"], 403)
+
+    @patch.object(deploy_intake, "_handle_trigger")
+    def test_internal_key_scope_allows_trigger(self, mock_handle_trigger) -> None:
+        deploy_intake.COORDINATION_INTERNAL_API_KEY = "scope-key"
+        deploy_intake.COORDINATION_INTERNAL_API_KEYS = ("scope-key",)
+        deploy_intake.INTERNAL_API_KEY_SCOPES = {"scope-key": {"deploy:write"}}
+        mock_handle_trigger.return_value = deploy_intake._ok({"project_id": "enceladus", "triggered": True})
+
+        resp = deploy_intake.lambda_handler(
+            _event(
+                method="POST",
+                path="/api/v1/deploy/trigger/enceladus",
+                headers={"X-Coordination-Internal-Key": "scope-key"},
+            ),
+            None,
+        )
+        self.assertEqual(resp["statusCode"], 200)
 
     @patch.object(deploy_intake, "_verify_token", return_value={"sub": "user-1"})
     @patch.object(deploy_intake, "_handle_get_state")

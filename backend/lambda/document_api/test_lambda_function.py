@@ -108,6 +108,39 @@ class AuthTests(unittest.TestCase):
             document_api.DOCUMENT_API_INTERNAL_API_KEY_PREVIOUS = orig_prev
             document_api.DOCUMENT_API_INTERNAL_API_KEYS = orig_keys
 
+    def test_internal_key_scope_denied_for_put(self):
+        orig_key = document_api.DOCUMENT_API_INTERNAL_API_KEY
+        orig_keys = document_api.DOCUMENT_API_INTERNAL_API_KEYS
+        orig_scopes = document_api.INTERNAL_API_KEY_SCOPES
+        document_api.DOCUMENT_API_INTERNAL_API_KEY = "scope-key"
+        document_api.DOCUMENT_API_INTERNAL_API_KEYS = ("scope-key",)
+        document_api.INTERNAL_API_KEY_SCOPES = {"scope-key": {"documents:read"}}
+        try:
+            event = _make_event(
+                method="PUT",
+                path="/api/v1/documents",
+                body={"project_id": "devops", "title": "Doc", "content": "hello"},
+                cookie="",
+            )
+            event["headers"] = {"x-coordination-internal-key": "scope-key"}
+            resp = document_api.lambda_handler(event, None)
+            self.assertEqual(resp["statusCode"], 403)
+        finally:
+            document_api.DOCUMENT_API_INTERNAL_API_KEY = orig_key
+            document_api.DOCUMENT_API_INTERNAL_API_KEYS = orig_keys
+            document_api.INTERNAL_API_KEY_SCOPES = orig_scopes
+
+    @patch.object(document_api, "_authenticate", return_value=({"auth_mode": "internal-key"}, None))
+    def test_internal_key_scope_allows_put_not_403(self, _mock_auth):
+        event = _make_event(
+            method="PUT",
+            path="/api/v1/documents",
+            body={"project_id": "devops", "title": "Doc", "content": "hello"},
+            cookie="",
+        )
+        resp = document_api.lambda_handler(event, None)
+        self.assertNotEqual(resp["statusCode"], 403)
+
 
 class UploadValidationTests(unittest.TestCase):
     """Test PUT /api/v1/documents input validation."""
