@@ -55,6 +55,15 @@ This confirms code fix is implemented locally but not yet deployed to active Lam
 - Keep stdio local MCP path as compatibility fallback only.
 - Deploy coordination API + MCP server package together to avoid partial hash-source regressions.
 
+## Deployment Outcomes (GitHub Actions)
+- Commit `4c5e83e`: initial fix deployment.
+  - `Lambda Deploy - enceladus-mcp-streamable`: success (run `22468763971`)
+  - `API MCP Backend Deploy`: failed post-deploy due IAM deny on `dynamodb:DescribeTable` for `governance-policies` (run `22468763967`)
+- Commit `ed4fb37`: follow-up hardening.
+  - Added graceful handling in `backend/lambda/coordination_api/deploy.sh` for governance dictionary sync when deploy role lacks governance-policies permissions.
+  - `Lambda Deploy - enceladus-mcp-streamable`: success (run `22468891060`)
+  - `API MCP Backend Deploy`: success (run `22468891056`)
+
 ## Follow-up
 After deployment, verify:
 1. `resources/read` for `governance://agents.md` returns S3 content.
