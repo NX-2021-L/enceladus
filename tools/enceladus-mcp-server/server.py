@@ -239,8 +239,11 @@ GITHUB_API_INTERNAL_API_KEY = os.environ.get(
 GSI_PROJECT_TYPE = "project-type-index"
 
 SERVER_NAME = "enceladus"
-SERVER_VERSION = "0.4.1"
+SERVER_VERSION = "0.4.2"
 HTTP_USER_AGENT = os.environ.get("ENCELADUS_HTTP_USER_AGENT", f"enceladus-mcp-server/{SERVER_VERSION}")
+
+MCP_TRANSPORT = os.environ.get("ENCELADUS_MCP_TRANSPORT", "stdio")
+MCP_API_KEY = os.environ.get("ENCELADUS_MCP_API_KEY", "")
 
 logger = logging.getLogger(SERVER_NAME)
 
@@ -4390,3 +4393,113 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# HTTP / Lambda transport (ENCELADUS_MCP_TRANSPORT=streamable_http)
+# ---------------------------------------------------------------------------
+
+_http_session_manager: Any = None
+
+
+def _get_http_session_manager() -> Any:
+    global _http_session_manager
+    if _http_session_manager is None:
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        _http_session_manager = StreamableHTTPSessionManager(
+            app=app, json_response=True, stateless=True,
+        )
+    return _http_session_manager
+
+
+async def _handle_lambda_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    import base64
+    import anyio
+
+    # 1. Bearer auth check
+    if MCP_API_KEY:
+        auth_header = (event.get("headers") or {}).get("authorization", "")
+        if auth_header != f"Bearer {MCP_API_KEY}":
+            return {
+                "statusCode": 401,
+                "headers": {"content-type": "application/json"},
+                "body": json.dumps({"error": "Unauthorized"}),
+                "isBase64Encoded": False,
+            }
+
+    # 2. Decode body
+    body_raw = event.get("body") or ""
+    body_bytes = (
+        base64.b64decode(body_raw) if event.get("isBase64Encoded") else body_raw.encode()
+    )
+
+    # 3. Build ASGI scope from Lambda Function URL event
+    headers_raw = event.get("headers", {}) or {}
+    asgi_headers = [(k.encode(), v.encode()) for k, v in headers_raw.items()]
+    req_ctx = (event.get("requestContext") or {}).get("http", {})
+    path = req_ctx.get("path", "/mcp")
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": req_ctx.get("method", "POST").upper(),
+        "path": path,
+        "raw_path": event.get("rawPath", path).encode(),
+        "query_string": event.get("rawQueryString", "").encode(),
+        "root_path": "",
+        "scheme": "https",
+        "server": ("lambda", 443),
+        "headers": asgi_headers,
+    }
+
+    # 4. ASGI receive/send callables
+    body_consumed = False
+
+    async def receive():
+        nonlocal body_consumed
+        if not body_consumed:
+            body_consumed = True
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+        await anyio.sleep_forever()
+
+    resp_status = 200
+    resp_headers: Dict[str, str] = {}
+    resp_body = b""
+
+    async def send(message):
+        nonlocal resp_status, resp_headers, resp_body
+        if message["type"] == "http.response.start":
+            resp_status = int(message["status"])  # coerce HTTPStatus enum → int
+            for k, v in message.get("headers", []):
+                resp_headers[k.decode()] = v.decode()
+        elif message["type"] == "http.response.body":
+            resp_body += message.get("body", b"")
+
+    # 5. Run per-invocation task group (stateless)
+    manager = _get_http_session_manager()
+    async with anyio.create_task_group() as tg:
+        manager._task_group = tg
+        manager._has_started = True
+        await manager.handle_request(scope, receive, send)
+        tg.cancel_scope.cancel()
+
+    return {
+        "statusCode": resp_status,
+        "headers": resp_headers,
+        "body": resp_body.decode("utf-8", errors="replace"),
+        "isBase64Encoded": False,
+    }
+
+
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    if MCP_TRANSPORT != "streamable_http":
+        return {
+            "statusCode": 400,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps(
+                {"error": "lambda_handler requires ENCELADUS_MCP_TRANSPORT=streamable_http"}
+            ),
+            "isBase64Encoded": False,
+        }
+    return asyncio.run(_handle_lambda_event(event))
