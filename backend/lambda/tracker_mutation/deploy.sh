@@ -22,6 +22,7 @@ COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
 
 # Internal API key (resolved from env or existing Lambda config)
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
+COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}"
 COORDINATION_INTERNAL_API_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES:-}"
 COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
 
@@ -110,6 +111,7 @@ add(env.get("COORDINATION_INTERNAL_API_KEY", ""))
 add(env.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS", ""))
 add(env.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
 add(env.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
+add(os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
 add(os.environ.get("PRIMARY_KEY", ""))
 print(",".join(items))
 PY
@@ -156,27 +158,72 @@ ensure_env_vars() {
   effective_key="$(resolve_internal_api_key)"
   local effective_keys_csv
   effective_keys_csv="$(resolve_internal_api_keys_csv "${effective_key}")"
+  if [[ -z "${effective_key}" && -z "${effective_keys_csv}" ]]; then
+    log "[ERROR] refusing deploy with empty internal auth key set for ${FUNCTION_NAME}"
+    exit 1
+  fi
 
-  local env_json
-  env_json=$(python3 -c "
+  local env_json existing_env_json
+  existing_env_json="$(aws lambda get-function-configuration \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables' \
+    --output json 2>/dev/null || echo '{}')"
+  [[ "${existing_env_json}" == "None" || -z "${existing_env_json}" ]] && existing_env_json='{}'
+
+  env_json="$(EXISTING_ENV_JSON="${existing_env_json}" \
+    COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID}" \
+    COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID}" \
+    DYNAMODB_REGION="${REGION}" \
+    EFFECTIVE_KEY="${effective_key}" \
+    EFFECTIVE_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS}" \
+    EFFECTIVE_KEYS_CSV="${effective_keys_csv}" \
+    KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES}" \
+    python3 - <<'PY'
 import json
-env = {
-    'COGNITO_USER_POOL_ID': '${COGNITO_USER_POOL_ID}',
-    'COGNITO_CLIENT_ID': '${COGNITO_CLIENT_ID}',
-    'DYNAMODB_TABLE': 'devops-project-tracker',
-    'DYNAMODB_REGION': '${REGION}',
-    'PROJECTS_TABLE': 'projects',
-    'COORDINATION_INTERNAL_API_KEY': '${effective_key}',
-    'ENCELADUS_COORDINATION_INTERNAL_API_KEY': '${effective_key}',
-    'ENCELADUS_COORDINATION_API_INTERNAL_API_KEY': '${effective_key}',
-    'COORDINATION_INTERNAL_API_KEYS': '${effective_keys_csv}',
-    'ENCELADUS_COORDINATION_INTERNAL_API_KEYS': '${effective_keys_csv}',
-    'ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS': '${effective_keys_csv}',
-    'COORDINATION_INTERNAL_API_KEY_SCOPES': '${COORDINATION_INTERNAL_API_KEY_SCOPES}',
-    'CORS_ORIGIN': 'https://jreese.net',
-}
-print(json.dumps({'Variables': env}))
-")
+import os
+
+env = json.loads(os.environ.get("EXISTING_ENV_JSON", "{}"))
+if not isinstance(env, dict):
+    env = {}
+
+effective_key = (os.environ.get("EFFECTIVE_KEY", "") or "").strip() or str(
+    env.get("COORDINATION_INTERNAL_API_KEY", "")
+).strip()
+effective_prev = (os.environ.get("EFFECTIVE_KEY_PREVIOUS", "") or "").strip() or str(
+    env.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+).strip()
+effective_keys = (os.environ.get("EFFECTIVE_KEYS_CSV", "") or "").strip() or str(
+    env.get("COORDINATION_INTERNAL_API_KEYS", "")
+).strip()
+effective_scopes = (os.environ.get("KEY_SCOPES", "") or "").strip() or str(
+    env.get("COORDINATION_INTERNAL_API_KEY_SCOPES", "")
+).strip()
+
+env.update(
+    {
+        "COGNITO_USER_POOL_ID": os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E1k"),
+        "COGNITO_CLIENT_ID": os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk"),
+        "DYNAMODB_TABLE": "devops-project-tracker",
+        "DYNAMODB_REGION": os.environ.get("DYNAMODB_REGION", "us-west-2"),
+        "PROJECTS_TABLE": "projects",
+        "COORDINATION_INTERNAL_API_KEY": effective_key,
+        "COORDINATION_INTERNAL_API_KEY_PREVIOUS": effective_prev,
+        "ENCELADUS_COORDINATION_INTERNAL_API_KEY": effective_key,
+        "ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS": effective_prev,
+        "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY": effective_key,
+        "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS": effective_prev,
+        "COORDINATION_INTERNAL_API_KEYS": effective_keys,
+        "ENCELADUS_COORDINATION_INTERNAL_API_KEYS": effective_keys,
+        "ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS": effective_keys,
+        "COORDINATION_INTERNAL_API_KEY_SCOPES": effective_scopes,
+        "CORS_ORIGIN": "https://jreese.net",
+    }
+)
+
+print(json.dumps({"Variables": env}, separators=(",", ":")))
+PY
+)"
 
   aws lambda update-function-configuration \
     --function-name "${FUNCTION_NAME}" \

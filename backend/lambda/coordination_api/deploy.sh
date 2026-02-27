@@ -37,6 +37,8 @@ HOST_V2_FLEET_PASSROLE_ARN="${HOST_V2_FLEET_PASSROLE_ARN:-arn:aws:iam::${ACCOUNT
 ENCELADUS_MCP_SERVER_PATH="${ENCELADUS_MCP_SERVER_PATH:-server.py}"
 S3_BUCKET="${S3_BUCKET:-jreese-net}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
+COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}"
+COORDINATION_INTERNAL_API_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES:-}"
 SECRETS_REGION="${SECRETS_REGION:-us-west-2}"
 OPENAI_API_KEY_SECRET_ID="${OPENAI_API_KEY_SECRET_ID:-devops/coordination/openai/api-key}"
 ANTHROPIC_API_KEY_SECRET_ID="${ANTHROPIC_API_KEY_SECRET_ID:-devops/coordination/anthropic/api-key}"
@@ -336,6 +338,39 @@ resolve_internal_api_key() {
   printf '%s' "${existing}"
 }
 
+resolve_internal_api_keys_csv() {
+  local primary_key="$1"
+  local previous_key="$2"
+  local existing_csv
+  existing_csv="$(aws lambda get-function-configuration \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEYS' \
+    --output text 2>/dev/null || true)"
+  if [[ "${existing_csv}" == "None" || -z "${existing_csv}" ]]; then
+    existing_csv=""
+  fi
+  PRIMARY_KEY="${primary_key}" PREVIOUS_KEY="${previous_key}" EXISTING_CSV="${existing_csv}" python3 - <<'PY'
+import os
+
+seen = set()
+items = []
+
+def add(raw):
+    for part in str(raw or "").split(","):
+        key = part.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        items.append(key)
+
+add(os.environ.get("PRIMARY_KEY", ""))
+add(os.environ.get("PREVIOUS_KEY", ""))
+add(os.environ.get("EXISTING_CSV", ""))
+print(",".join(items))
+PY
+}
+
 package_lambda() {
   local build_dir zip_path
   build_dir="$(mktemp -d /tmp/devops-coordination-build-XXXXXX)"
@@ -397,7 +432,7 @@ package_lambda() {
 }
 
 ensure_lambda() {
-  local zip_path role_arn effective_internal_key env_file
+  local zip_path role_arn effective_internal_key effective_internal_key_previous effective_internal_keys env_file existing_env_json
   zip_path="$(package_lambda)"
   role_arn="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
 
@@ -425,9 +460,29 @@ ensure_lambda() {
   aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
 
   effective_internal_key="$(resolve_internal_api_key)"
+  effective_internal_key_previous="${COORDINATION_INTERNAL_API_KEY_PREVIOUS}"
+  if [[ -z "${effective_internal_key_previous}" ]]; then
+    effective_internal_key_previous="$(aws lambda get-function-configuration \
+      --function-name "${FUNCTION_NAME}" \
+      --region "${REGION}" \
+      --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY_PREVIOUS' \
+      --output text 2>/dev/null || true)"
+    [[ "${effective_internal_key_previous}" == "None" ]] && effective_internal_key_previous=""
+  fi
+  effective_internal_keys="$(resolve_internal_api_keys_csv "${effective_internal_key}" "${effective_internal_key_previous}")"
   if [[ -z "${effective_internal_key}" ]]; then
     log "[WARNING] COORDINATION_INTERNAL_API_KEY resolved empty; internal-key auth will be disabled."
   fi
+  if [[ -z "${effective_internal_key}" && -z "${effective_internal_keys}" ]]; then
+    log "[ERROR] refusing deploy with empty internal auth key set for ${FUNCTION_NAME}"
+    exit 1
+  fi
+  existing_env_json="$(aws lambda get-function-configuration \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables' \
+    --output json 2>/dev/null || echo '{}')"
+  [[ "${existing_env_json}" == "None" || -z "${existing_env_json}" ]] && existing_env_json='{}'
 
   env_file="$(mktemp /tmp/${FUNCTION_NAME}-env-XXXXXX)"
   TABLE_NAME="${TABLE_NAME}" \
@@ -475,13 +530,32 @@ ensure_lambda() {
   BEDROCK_AGENT_CLEANUP="${BEDROCK_AGENT_CLEANUP}" \
   BEDROCK_AGENT_REGION="${BEDROCK_AGENT_REGION}" \
   FUNCTION_NAME="${FUNCTION_NAME}" \
+  EXISTING_ENV_JSON="${existing_env_json}" \
   EFFECTIVE_INTERNAL_KEY="${effective_internal_key}" \
+  EFFECTIVE_INTERNAL_KEY_PREVIOUS="${effective_internal_key_previous}" \
+  EFFECTIVE_INTERNAL_KEYS="${effective_internal_keys}" \
+  EFFECTIVE_INTERNAL_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES}" \
   python3 - "${env_file}" <<'PY'
 import json
 import os
 import sys
 
 path = sys.argv[1]
+existing_env = json.loads(os.environ.get("EXISTING_ENV_JSON", "{}"))
+if not isinstance(existing_env, dict):
+    existing_env = {}
+effective_key = (os.environ.get("EFFECTIVE_INTERNAL_KEY", "") or "").strip() or str(
+    existing_env.get("COORDINATION_INTERNAL_API_KEY", "")
+).strip()
+effective_prev = (os.environ.get("EFFECTIVE_INTERNAL_KEY_PREVIOUS", "") or "").strip() or str(
+    existing_env.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+).strip()
+effective_keys = (os.environ.get("EFFECTIVE_INTERNAL_KEYS", "") or "").strip() or str(
+    existing_env.get("COORDINATION_INTERNAL_API_KEYS", "")
+).strip()
+effective_scopes = (os.environ.get("EFFECTIVE_INTERNAL_KEY_SCOPES", "") or "").strip() or str(
+    existing_env.get("COORDINATION_INTERNAL_API_KEY_SCOPES", "")
+).strip()
 env_vars = {
     "COORDINATION_TABLE": os.environ["TABLE_NAME"],
     "TRACKER_TABLE": os.environ["TRACKER_TABLE"],
@@ -496,7 +570,16 @@ env_vars = {
     "ENABLE_CLAUDE_HEADLESS": os.environ["ENABLE_CLAUDE_HEADLESS"],
     "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
     "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
-    "COORDINATION_INTERNAL_API_KEY": os.environ.get("EFFECTIVE_INTERNAL_KEY", ""),
+    "COORDINATION_INTERNAL_API_KEY": effective_key,
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS": effective_prev,
+    "COORDINATION_INTERNAL_API_KEYS": effective_keys,
+    "COORDINATION_INTERNAL_API_KEY_SCOPES": effective_scopes,
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY": effective_key,
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS": effective_prev,
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEYS": effective_keys,
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY": effective_key,
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS": effective_prev,
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS": effective_keys,
     "HOST_V2_INSTANCE_ID": os.environ["HOST_V2_INSTANCE_ID"],
     "HOST_V2_ENCELADUS_MCP_INSTALLER": os.environ["HOST_V2_ENCELADUS_MCP_INSTALLER"],
     "HOST_V2_MCP_PROFILE_PATH": os.environ["HOST_V2_MCP_PROFILE_PATH"],
@@ -542,8 +625,9 @@ env_vars = {
     "BEDROCK_AGENT_CLEANUP": os.environ["BEDROCK_AGENT_CLEANUP"],
     "BEDROCK_AGENT_REGION": os.environ["BEDROCK_AGENT_REGION"],
 }
+existing_env.update({k: v for k, v in env_vars.items() if v is not None})
 with open(path, "w", encoding="utf-8") as f:
-    json.dump({"Variables": env_vars}, f)
+    json.dump({"Variables": existing_env}, f)
 PY
 
   local cfg_attempt cfg_max cfg_sleep

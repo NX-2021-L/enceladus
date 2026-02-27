@@ -15,6 +15,7 @@ ZIP_FILE="/tmp/${FUNCTION_NAME}.zip"
 
 MCP_TRANSPORT="${ENCELADUS_MCP_TRANSPORT:-streamable_http}"
 MCP_API_KEY="${ENCELADUS_MCP_API_KEY:-${COORDINATION_INTERNAL_API_KEY:-}}"
+MCP_API_KEY_PREVIOUS="${ENCELADUS_MCP_API_KEY_PREVIOUS:-${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}}"
 ROLE_ARN="${LAMBDA_ROLE_ARN:-}"
 
 log() {
@@ -83,6 +84,9 @@ merged["ENCELADUS_MCP_TRANSPORT"] = os.environ["MCP_TRANSPORT"]
 mcp_api_key = os.environ.get("MCP_API_KEY", "")
 if mcp_api_key:
     merged["ENCELADUS_MCP_API_KEY"] = mcp_api_key
+mcp_api_key_previous = os.environ.get("MCP_API_KEY_PREVIOUS", "")
+if mcp_api_key_previous:
+    merged["ENCELADUS_MCP_API_KEY_PREVIOUS"] = mcp_api_key_previous
 
 print(json.dumps({"Variables": merged}, separators=(",", ":")))
 PY
@@ -152,6 +156,10 @@ deploy_lambda() {
   fi
 
   env_file="$(mktemp /tmp/${FUNCTION_NAME}-env-XXXXXX.json)"
+  if [[ -z "${MCP_API_KEY}" && -z "${MCP_API_KEY_PREVIOUS}" ]]; then
+    echo "Refusing deploy with empty MCP internal API key set for ${FUNCTION_NAME}." >&2
+    exit 1
+  fi
   SOURCE_ENV_JSON="$(aws lambda get-function-configuration \
       --function-name "${SOURCE_FUNCTION_NAME}" \
       --region "${REGION}" \
@@ -164,6 +172,7 @@ deploy_lambda() {
       --output json 2>/dev/null || echo '{}')" \
   MCP_TRANSPORT="${MCP_TRANSPORT}" \
   MCP_API_KEY="${MCP_API_KEY}" \
+  MCP_API_KEY_PREVIOUS="${MCP_API_KEY_PREVIOUS}" \
   build_environment_payload "${env_file}"
 
   if function_exists; then

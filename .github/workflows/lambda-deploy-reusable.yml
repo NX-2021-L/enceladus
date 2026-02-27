@@ -35,6 +35,8 @@ on:
         required: false
       COORDINATION_INTERNAL_API_KEY:
         required: false
+      COORDINATION_INTERNAL_API_KEY_PREVIOUS:
+        required: false
       COORDINATION_INTERNAL_API_KEY_SCOPES:
         required: false
       GH_APP_ID:
@@ -83,6 +85,7 @@ jobs:
         if: ${{ inputs.deploy_script != '' }}
         env:
           COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: ${{ secrets.COORDINATION_INTERNAL_API_KEY_PREVIOUS }}
           COORDINATION_INTERNAL_API_KEY_SCOPES: ${{ secrets.COORDINATION_INTERNAL_API_KEY_SCOPES }}
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_INSTALLATION_ID: ${{ secrets.GH_INSTALLATION_ID }}
