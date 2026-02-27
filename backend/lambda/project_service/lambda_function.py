@@ -50,6 +50,29 @@ try:
 except ImportError:
     _JWT_AVAILABLE = False
 
+
+def _first_nonempty_env(*names: str) -> str:
+    for name in names:
+        value = str(os.environ.get(name, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -61,31 +84,22 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_REFERENCE_PREFIX = os.environ.get("S3_REFERENCE_PREFIX", "mobile/v1/reference")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
-COORDINATION_INTERNAL_API_KEY = (
-    os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
-    or os.environ.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY", "")
-    or os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", "")
+COORDINATION_INTERNAL_API_KEY = _first_nonempty_env(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+    "COORDINATION_INTERNAL_API_KEY",
 )
-COORDINATION_INTERNAL_API_KEY_PREVIOUS = (
-    os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
-    or os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = _first_nonempty_env(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
 )
-COORDINATION_INTERNAL_API_KEYS = tuple(
-    key
-    for key in dict.fromkeys(
-        [
-            k.strip()
-            for src in (
-                os.environ.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS", ""),
-                os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEYS", ""),
-                os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
-                COORDINATION_INTERNAL_API_KEY,
-                COORDINATION_INTERNAL_API_KEY_PREVIOUS,
-            )
-            for k in str(src).split(",")
-            if k.strip()
-        ]
-    )
+COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
+    os.environ.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS", ""),
+    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEYS", ""),
+    os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
+    COORDINATION_INTERNAL_API_KEY,
+    COORDINATION_INTERNAL_API_KEY_PREVIOUS,
 )
 _INTERNAL_SCOPE_MAP_RAW = (
     os.environ.get("COORDINATION_INTERNAL_API_KEY_SCOPES", "")

@@ -88,6 +88,14 @@ def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
     return tuple(keys)
 
 
+def _first_nonempty_env(*names: str) -> str:
+    for name in names:
+        value = str(os.environ.get(name, "")).strip()
+        if value:
+            return value
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -97,6 +105,7 @@ TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 GOVERNANCE_POLICIES_TABLE = os.environ.get("GOVERNANCE_POLICIES_TABLE", "governance-policies")
+AUTH_TOKENS_TABLE = os.environ.get("AUTH_TOKENS_TABLE", GOVERNANCE_POLICIES_TABLE)
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
@@ -105,12 +114,24 @@ GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_GOVERNANCE_PREFIX = os.environ.get("S3_GOVERNANCE_PREFIX", "governance/live")
 S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
+AUTH_TOKEN_POLICY_PREFIX = "service_token#"
+AUTH_ALLOWED_PERMISSIONS = {"read", "write", "put", "delete", "admin"}
 
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
-COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
-COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEY = _first_nonempty_env(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+    "COORDINATION_INTERNAL_API_KEY",
+)
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = _first_nonempty_env(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+)
 COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
+    os.environ.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS", ""),
+    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEYS", ""),
     os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
     COORDINATION_INTERNAL_API_KEY,
     COORDINATION_INTERNAL_API_KEY_PREVIOUS,
@@ -763,15 +784,23 @@ def _verify_token(token: str) -> Dict[str, Any]:
 
 def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     # Optional internal auth path for trusted orchestrators / smoke tests.
-    if COORDINATION_INTERNAL_API_KEYS:
-        headers = event.get("headers") or {}
-        internal_key = (
-            headers.get("x-coordination-internal-key")
-            or headers.get("X-Coordination-Internal-Key")
-            or ""
-        )
-        if internal_key and internal_key in COORDINATION_INTERNAL_API_KEYS:
+    headers = event.get("headers") or {}
+    internal_key = (
+        headers.get("x-coordination-internal-key")
+        or headers.get("X-Coordination-Internal-Key")
+        or ""
+    )
+    if internal_key:
+        if COORDINATION_INTERNAL_API_KEYS and internal_key in COORDINATION_INTERNAL_API_KEYS:
             return {"auth_mode": "internal-key"}, None
+        managed = _load_managed_service_token(internal_key)
+        if managed:
+            _touch_managed_service_token_usage(managed.get("policy_id", ""))
+            return {
+                "auth_mode": "managed-token",
+                "service_name": managed.get("service_name"),
+                "permissions": managed.get("permissions", []),
+            }, None
 
     token = _extract_token(event)
     if not token:
@@ -8485,6 +8514,231 @@ def _handle_projects_get(project_id: str) -> Dict[str, Any]:
     return _response(200, {"project": project})
 
 
+def _normalize_permissions(raw_value: Any) -> List[str]:
+    raw_list: List[str] = []
+    if isinstance(raw_value, list):
+        raw_list = [str(v or "").strip().lower() for v in raw_value]
+    elif isinstance(raw_value, str):
+        raw_list = [part.strip().lower() for part in raw_value.split(",")]
+    normalized: List[str] = []
+    for item in raw_list:
+        if not item:
+            continue
+        if item not in AUTH_ALLOWED_PERMISSIONS:
+            raise ValueError(f"Unsupported permission '{item}'. Allowed: {sorted(AUTH_ALLOWED_PERMISSIONS)}")
+        if item not in normalized:
+            normalized.append(item)
+    return normalized or ["read"]
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _token_policy_id_from_plain(token: str) -> str:
+    return f"{AUTH_TOKEN_POLICY_PREFIX}{_hash_token(token)}"
+
+
+def _obfuscate_token(token: str) -> str:
+    if len(token) <= 10:
+        return "*" * len(token)
+    return f"{token[:6]}...{token[-4:]}"
+
+
+def _build_managed_token_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    created_at = str(item.get("created_at") or "")
+    now_ts = int(time.time())
+    try:
+        created_ts = int(datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()) if created_at else None
+    except Exception:
+        created_ts = None
+    return {
+        "token_id": str(item.get("token_id") or ""),
+        "service_name": str(item.get("service_name") or ""),
+        "status": str(item.get("status") or "active"),
+        "permissions": item.get("permissions") or ["read"],
+        "created_at": created_at,
+        "updated_at": str(item.get("updated_at") or ""),
+        "last_used_at": str(item.get("last_used_at") or ""),
+        "token_age_seconds": (now_ts - created_ts) if created_ts else None,
+        "token_masked": str(item.get("token_masked") or ""),
+    }
+
+
+def _list_managed_service_tokens() -> List[Dict[str, Any]]:
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {"TableName": AUTH_TOKENS_TABLE}
+    out: List[Dict[str, Any]] = []
+    while True:
+        resp = ddb.scan(**scan_kwargs)
+        for raw in resp.get("Items", []):
+            item = _deserialize(raw)
+            policy_id = str(item.get("policy_id") or "")
+            if not policy_id.startswith(AUTH_TOKEN_POLICY_PREFIX):
+                continue
+            out.append(_build_managed_token_payload(item))
+        if "LastEvaluatedKey" not in resp:
+            break
+        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    out.sort(key=lambda row: row.get("service_name", ""))
+    return out
+
+
+def _load_managed_service_token(internal_key: str) -> Optional[Dict[str, Any]]:
+    key = str(internal_key or "").strip()
+    if not key:
+        return None
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Key={"policy_id": _serialize(_token_policy_id_from_plain(key))},
+        )
+    except Exception:
+        logger.exception("Managed token lookup failed")
+        return None
+    item = resp.get("Item")
+    if not item:
+        return None
+    decoded = _deserialize(item)
+    if str(decoded.get("status") or "active").lower() != "active":
+        return None
+    return decoded
+
+
+def _touch_managed_service_token_usage(policy_id: str) -> None:
+    if not policy_id:
+        return
+    try:
+        _get_ddb().update_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Key={"policy_id": _serialize(policy_id)},
+            UpdateExpression="SET last_used_at = :last, updated_at = :updated",
+            ExpressionAttributeValues={
+                ":last": _serialize(_now_z()),
+                ":updated": _serialize(_now_z()),
+            },
+        )
+    except Exception:
+        logger.warning("Failed to update last_used_at for managed token %s", policy_id)
+
+
+def _handle_auth_tokens_list() -> Dict[str, Any]:
+    try:
+        tokens = _list_managed_service_tokens()
+    except Exception as exc:
+        logger.exception("Failed to list managed auth tokens")
+        return _error(500, f"Failed to list managed auth tokens: {exc}")
+    return _response(200, {"tokens": tokens, "count": len(tokens)})
+
+
+def _handle_auth_tokens_create(event: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc))
+
+    service_name = str(body.get("service_name") or "").strip()
+    if not service_name:
+        return _error(400, "service_name is required")
+    permissions_raw = body.get("permissions")
+    try:
+        permissions = _normalize_permissions(permissions_raw if permissions_raw is not None else ["read"])
+    except ValueError as exc:
+        return _error(400, str(exc))
+
+    token_id = f"TOK-{uuid.uuid4().hex[:12].upper()}"
+    plain = f"enc_svc_{uuid.uuid4().hex}{uuid.uuid4().hex}"
+    policy_id = _token_policy_id_from_plain(plain)
+    now = _now_z()
+    item = {
+        "policy_id": _serialize(policy_id),
+        "record_type": _serialize("service_token"),
+        "token_id": _serialize(token_id),
+        "service_name": _serialize(service_name),
+        "permissions": _serialize(permissions),
+        "status": _serialize("active"),
+        "token_masked": _serialize(_obfuscate_token(plain)),
+        "created_at": _serialize(now),
+        "updated_at": _serialize(now),
+        "last_used_at": _serialize(""),
+    }
+    try:
+        _get_ddb().put_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Item=item,
+            ConditionExpression="attribute_not_exists(policy_id)",
+        )
+    except Exception as exc:
+        logger.exception("Failed to create managed auth token")
+        return _error(500, f"Failed to create managed auth token: {exc}")
+
+    payload = _build_managed_token_payload(_deserialize(item))
+    payload["token"] = plain
+    return _response(201, {"success": True, "token": payload})
+
+
+def _handle_auth_token_delete(token_id: str) -> Dict[str, Any]:
+    token_id = str(token_id or "").strip()
+    if not token_id:
+        return _error(400, "token_id is required")
+    ddb = _get_ddb()
+    try:
+        scan_resp = ddb.scan(
+            TableName=AUTH_TOKENS_TABLE,
+            FilterExpression="#token_id = :tid",
+            ExpressionAttributeNames={"#token_id": "token_id"},
+            ExpressionAttributeValues={":tid": _serialize(token_id)},
+        )
+        if not scan_resp.get("Items"):
+            return _error(404, f"Token '{token_id}' not found")
+        policy_id = str(_deserialize(scan_resp["Items"][0]).get("policy_id") or "")
+        ddb.delete_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Key={"policy_id": _serialize(policy_id)},
+        )
+    except Exception as exc:
+        logger.exception("Failed to delete managed auth token")
+        return _error(500, f"Failed to delete managed auth token: {exc}")
+    return _response(200, {"success": True, "token_id": token_id, "deleted": True})
+
+
+def _handle_auth_permissions_update(token_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc))
+    try:
+        permissions = _normalize_permissions(body.get("permissions"))
+    except ValueError as exc:
+        return _error(400, str(exc))
+    ddb = _get_ddb()
+    try:
+        scan_resp = ddb.scan(
+            TableName=AUTH_TOKENS_TABLE,
+            FilterExpression="#token_id = :tid",
+            ExpressionAttributeNames={"#token_id": "token_id"},
+            ExpressionAttributeValues={":tid": _serialize(token_id)},
+        )
+        if not scan_resp.get("Items"):
+            return _error(404, f"Token '{token_id}' not found")
+        item = _deserialize(scan_resp["Items"][0])
+        policy_id = str(item.get("policy_id") or "")
+        ddb.update_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Key={"policy_id": _serialize(policy_id)},
+            UpdateExpression="SET permissions = :permissions, updated_at = :updated",
+            ExpressionAttributeValues={
+                ":permissions": _serialize(permissions),
+                ":updated": _serialize(_now_z()),
+            },
+        )
+    except Exception as exc:
+        logger.exception("Failed to update managed auth token permissions")
+        return _error(500, f"Failed to update managed auth token permissions: {exc}")
+    return _response(200, {"success": True, "token_id": token_id, "permissions": permissions})
+
+
 def _handle_health() -> Dict[str, Any]:
     """GET /api/v1/health — connection health check."""
     health: Dict[str, Any] = {}
@@ -8605,6 +8859,26 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     match_project = re.fullmatch(r"/api/v1/coordination/projects/([a-z0-9_-]+)", path)
     if method == "GET" and match_project:
         return _handle_projects_get(match_project.group(1))
+
+    # --- Unified auth token management (auth required) ---
+
+    # GET /api/v1/coordination/auth/tokens
+    if method == "GET" and path == "/api/v1/coordination/auth/tokens":
+        return _handle_auth_tokens_list()
+
+    # POST /api/v1/coordination/auth/tokens
+    if method == "POST" and path == "/api/v1/coordination/auth/tokens":
+        return _handle_auth_tokens_create(event)
+
+    # DELETE /api/v1/coordination/auth/tokens/{tokenId}
+    match_auth_token_delete = re.fullmatch(r"/api/v1/coordination/auth/tokens/([A-Za-z0-9\-]+)", path)
+    if method == "DELETE" and match_auth_token_delete:
+        return _handle_auth_token_delete(match_auth_token_delete.group(1))
+
+    # PATCH /api/v1/coordination/auth/permissions/{tokenId}
+    match_auth_permissions = re.fullmatch(r"/api/v1/coordination/auth/permissions/([A-Za-z0-9\-]+)", path)
+    if method == "PATCH" and match_auth_permissions:
+        return _handle_auth_permissions_update(match_auth_permissions.group(1), event)
 
     # --- Existing coordination routes ---
 

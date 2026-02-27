@@ -16,9 +16,11 @@ Related: DVP-TSK-252, DVP-FTR-023
 """
 
 import asyncio
+import io
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 import uuid
 from typing import Dict
@@ -873,6 +875,110 @@ def test_document_api_internal_key_header():
     assert result.get("success") is True
     assert captured_headers.get("x-coordination-internal-key") == "enc-doc-key"
     _pass("_document_api_request attaches X-Coordination-Internal-Key when configured")
+
+
+def test_tracker_api_request_retries_with_fallback_keys():
+    _header("Tracker API Key Fallback Retry")
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    import server
+
+    attempts = []
+    original_urlopen = urllib.request.urlopen
+    original_primary = server.TRACKER_API_INTERNAL_API_KEY
+    original_keys = server.TRACKER_API_INTERNAL_API_KEYS
+    original_common = server.COMMON_INTERNAL_API_KEYS
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"success": true}'
+
+    def _fake_urlopen(req, timeout=0, context=None):
+        headers = {k.lower(): v for k, v in req.header_items()}
+        attempts.append(headers.get("x-coordination-internal-key", ""))
+        if len(attempts) == 1:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error":"bad key"}'),
+            )
+        return _FakeResponse()
+
+    try:
+        server.TRACKER_API_INTERNAL_API_KEY = "tracker-bad-key"
+        server.TRACKER_API_INTERNAL_API_KEYS = ("tracker-good-key",)
+        server.COMMON_INTERNAL_API_KEYS = ()
+        urllib.request.urlopen = _fake_urlopen
+        result = server._tracker_api_request("GET", "/devops")
+    finally:
+        urllib.request.urlopen = original_urlopen
+        server.TRACKER_API_INTERNAL_API_KEY = original_primary
+        server.TRACKER_API_INTERNAL_API_KEYS = original_keys
+        server.COMMON_INTERNAL_API_KEYS = original_common
+
+    assert result.get("success") is True
+    assert attempts == ["tracker-bad-key", "tracker-good-key"]
+    _pass("_tracker_api_request retries 403 with fallback internal key")
+
+
+def test_projects_api_request_retries_with_fallback_keys():
+    _header("Projects API Key Fallback Retry")
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    import server
+
+    attempts = []
+    original_urlopen = urllib.request.urlopen
+    original_primary = server.PROJECTS_API_INTERNAL_API_KEY
+    original_keys = server.PROJECTS_API_INTERNAL_API_KEYS
+    original_common = server.COMMON_INTERNAL_API_KEYS
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"success": true}'
+
+    def _fake_urlopen(req, timeout=0, context=None):
+        headers = {k.lower(): v for k, v in req.header_items()}
+        attempts.append(headers.get("x-coordination-internal-key", ""))
+        if len(attempts) == 1:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                401,
+                "Unauthorized",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error":"expired key"}'),
+            )
+        return _FakeResponse()
+
+    try:
+        server.PROJECTS_API_INTERNAL_API_KEY = "projects-bad-key"
+        server.PROJECTS_API_INTERNAL_API_KEYS = ("projects-good-key",)
+        server.COMMON_INTERNAL_API_KEYS = ()
+        urllib.request.urlopen = _fake_urlopen
+        result = server._projects_api_request("GET")
+    finally:
+        urllib.request.urlopen = original_urlopen
+        server.PROJECTS_API_INTERNAL_API_KEY = original_primary
+        server.PROJECTS_API_INTERNAL_API_KEYS = original_keys
+        server.COMMON_INTERNAL_API_KEYS = original_common
+
+    assert result.get("success") is True
+    assert attempts == ["projects-bad-key", "projects-good-key"]
+    _pass("_projects_api_request retries 401 with fallback internal key")
 
 
 def test_documents_put_auth_fallback_direct_write():

@@ -12,6 +12,7 @@ const TITLES: Record<string, string> = {
   '/feed': 'Feed',
   '/documents': 'Documents',
   '/coordination': 'Coordination',
+  '/coordination/auth': 'Access Tokens',
 }
 
 function resolveTitle(pathname: string): string {
@@ -24,6 +25,7 @@ function resolveTitle(pathname: string): string {
     return pathname === '/projects/create' ? 'Create Project' : 'Project Detail'
   }
   if (pathname.startsWith('/coordination/')) return 'Request Detail'
+  if (pathname === '/coordination/auth') return 'Access Tokens'
   return 'Project Status'
 }
 
@@ -120,6 +122,15 @@ export function Header() {
                 className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 active:bg-slate-600 transition-colors"
               >
                 Coordination Monitor
+              </button>
+              <button
+                onClick={() => {
+                  setMenuOpen(false)
+                  navigate('/coordination/auth')
+                }}
+                className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 active:bg-slate-600 transition-colors"
+              >
+                Access Tokens
               </button>
               {ENABLE_REFRESH_LINK && (
                 <button
