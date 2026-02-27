@@ -24,6 +24,14 @@ def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
             keys.append(key)
     return tuple(keys)
 
+
+def _first_nonempty_env(*names: str) -> str:
+    for name in names:
+        value = str(os.environ.get(name, "")).strip()
+        if value:
+            return value
+    return ""
+
 __all__ = [
     "ANTHROPIC_API_BASE_URL",
     "ANTHROPIC_API_KEY_SECRET_ID",
@@ -166,9 +174,19 @@ GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
-COORDINATION_INTERNAL_API_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
-COORDINATION_INTERNAL_API_KEY_PREVIOUS = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+COORDINATION_INTERNAL_API_KEY = _first_nonempty_env(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+    "COORDINATION_INTERNAL_API_KEY",
+)
+COORDINATION_INTERNAL_API_KEY_PREVIOUS = _first_nonempty_env(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+)
 COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
+    os.environ.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS", ""),
+    os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEYS", ""),
     os.environ.get("COORDINATION_INTERNAL_API_KEYS", ""),
     COORDINATION_INTERNAL_API_KEY,
     COORDINATION_INTERNAL_API_KEY_PREVIOUS,
@@ -427,4 +445,3 @@ _DEFAULT_STATUS = {
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-

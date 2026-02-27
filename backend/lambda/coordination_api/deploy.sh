@@ -714,6 +714,14 @@ ensure_api_integration_and_routes() {
     "GET /api/v1/coordination/projects/{projectId}"
     "OPTIONS /api/v1/coordination/projects"
     "OPTIONS /api/v1/coordination/projects/{projectId}"
+    # Unified auth token management routes
+    "GET /api/v1/coordination/auth/tokens"
+    "POST /api/v1/coordination/auth/tokens"
+    "DELETE /api/v1/coordination/auth/tokens/{tokenId}"
+    "PATCH /api/v1/coordination/auth/permissions/{tokenId}"
+    "OPTIONS /api/v1/coordination/auth/tokens"
+    "OPTIONS /api/v1/coordination/auth/tokens/{tokenId}"
+    "OPTIONS /api/v1/coordination/auth/permissions/{tokenId}"
     # Phase 2b: Health route
     "GET /api/v1/health"
     "OPTIONS /api/v1/health"

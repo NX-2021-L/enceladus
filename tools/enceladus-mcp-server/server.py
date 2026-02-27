@@ -203,6 +203,10 @@ TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
     COMMON_INTERNAL_API_KEY,
 )
+TRACKER_API_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
+    "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
+    "ENCELADUS_TRACKER_API_INTERNAL_API_KEYS",
+)
 GOVERNANCE_API_BASE = os.environ.get(
     "ENCELADUS_GOVERNANCE_API_BASE",
     "https://jreese.net/api/v1/governance",
@@ -218,6 +222,10 @@ PROJECTS_API_BASE = os.environ.get(
 PROJECTS_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
     COMMON_INTERNAL_API_KEY,
+)
+PROJECTS_API_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
+    "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
+    "ENCELADUS_PROJECTS_API_INTERNAL_API_KEYS",
 )
 HEALTH_API_URL = os.environ.get(
     "ENCELADUS_HEALTH_API_URL",
@@ -1399,29 +1407,48 @@ def _tracker_api_request(
         "Accept": "application/json",
         "User-Agent": HTTP_USER_AGENT,
     }
-    if TRACKER_API_INTERNAL_API_KEY:
-        headers["X-Coordination-Internal-Key"] = TRACKER_API_INTERNAL_API_KEY
     if payload is not None:
         headers["Content-Type"] = "application/json"
         body = json.dumps(payload).encode("utf-8")
     else:
         body = None
-    req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
-    try:
-        with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
-            text = resp.read().decode("utf-8")
-            return json.loads(text) if text else {"success": True}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+
+    key_candidates: List[str] = []
+    for candidate in (
+        TRACKER_API_INTERNAL_API_KEY,
+        *TRACKER_API_INTERNAL_API_KEYS,
+        *COMMON_INTERNAL_API_KEYS,
+    ):
+        key = str(candidate or "").strip()
+        if key and key not in key_candidates:
+            key_candidates.append(key)
+    if not key_candidates:
+        key_candidates.append("")
+
+    for idx, key in enumerate(key_candidates):
+        attempt_headers = dict(headers)
+        if key:
+            attempt_headers["X-Coordination-Internal-Key"] = key
+        req = urllib.request.Request(url=url, method=method.upper(), headers=attempt_headers, data=body)
         try:
-            parsed = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            parsed = {"error": raw or str(exc)}
-        return _normalize_legacy_error_payload(parsed, exc.code)
-    except urllib.error.URLError as exc:
-        return _error_payload("UPSTREAM_ERROR", f"Tracker API unreachable: {exc}", retryable=True)
-    except Exception as exc:
-        return _error_payload("INTERNAL_ERROR", f"Tracker API request failed: {exc}", retryable=False)
+            with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
+                text = resp.read().decode("utf-8")
+                return json.loads(text) if text else {"success": True}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"error": raw or str(exc)}
+            if exc.code in (401, 403) and idx < len(key_candidates) - 1:
+                continue
+            return _normalize_legacy_error_payload(parsed, exc.code)
+        except urllib.error.URLError as exc:
+            return _error_payload("UPSTREAM_ERROR", f"Tracker API unreachable: {exc}", retryable=True)
+        except Exception as exc:
+            return _error_payload("INTERNAL_ERROR", f"Tracker API request failed: {exc}", retryable=False)
+
+    return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
 
 
 def _governance_api_request(
@@ -1479,24 +1506,42 @@ def _projects_api_request(
         "Accept": "application/json",
         "User-Agent": HTTP_USER_AGENT,
     }
-    if PROJECTS_API_INTERNAL_API_KEY:
-        headers["X-Coordination-Internal-Key"] = PROJECTS_API_INTERNAL_API_KEY
-    req = urllib.request.Request(url=url, method=method.upper(), headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp:
-            text = resp.read().decode("utf-8")
-            return json.loads(text) if text else {"success": True}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+    key_candidates: List[str] = []
+    for candidate in (
+        PROJECTS_API_INTERNAL_API_KEY,
+        *PROJECTS_API_INTERNAL_API_KEYS,
+        *COMMON_INTERNAL_API_KEYS,
+    ):
+        key = str(candidate or "").strip()
+        if key and key not in key_candidates:
+            key_candidates.append(key)
+    if not key_candidates:
+        key_candidates.append("")
+
+    for idx, key in enumerate(key_candidates):
+        attempt_headers = dict(headers)
+        if key:
+            attempt_headers["X-Coordination-Internal-Key"] = key
+        req = urllib.request.Request(url=url, method=method.upper(), headers=attempt_headers)
         try:
-            parsed = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            parsed = {"error": raw or str(exc)}
-        return _normalize_legacy_error_payload(parsed, exc.code)
-    except urllib.error.URLError as exc:
-        return _error_payload("UPSTREAM_ERROR", f"Projects API unreachable: {exc}", retryable=True)
-    except Exception as exc:
-        return _error_payload("INTERNAL_ERROR", f"Projects API request failed: {exc}", retryable=False)
+            with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp:
+                text = resp.read().decode("utf-8")
+                return json.loads(text) if text else {"success": True}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"error": raw or str(exc)}
+            if exc.code in (401, 403) and idx < len(key_candidates) - 1:
+                continue
+            return _normalize_legacy_error_payload(parsed, exc.code)
+        except urllib.error.URLError as exc:
+            return _error_payload("UPSTREAM_ERROR", f"Projects API unreachable: {exc}", retryable=True)
+        except Exception as exc:
+            return _error_payload("INTERNAL_ERROR", f"Projects API request failed: {exc}", retryable=False)
+
+    return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
 
 
 def _health_api_request() -> Dict[str, Any]:
