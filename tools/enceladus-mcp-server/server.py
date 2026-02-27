@@ -99,6 +99,22 @@ def _first_nonempty_env(*names: str) -> str:
             return value
     return ""
 
+
+def _collect_nonempty_env_keys(*names: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    keys: List[str] = []
+    for name in names:
+        raw = str(os.environ.get(name, "")).strip()
+        if not raw:
+            continue
+        for part in raw.split(","):
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return tuple(keys)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -147,6 +163,14 @@ COMMON_INTERNAL_API_KEY = _first_nonempty_env(
     "COORDINATION_INTERNAL_API_KEY",
     "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
 )
+COMMON_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEYS",
+    "COORDINATION_INTERNAL_API_KEY",
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+    "COORDINATION_INTERNAL_API_KEYS",
+)
 COORDINATION_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
     COMMON_INTERNAL_API_KEY,
@@ -166,6 +190,10 @@ DEPLOY_API_BASE = os.environ.get(
 DEPLOY_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
     COMMON_INTERNAL_API_KEY,
+)
+DEPLOY_API_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
+    "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
+    "ENCELADUS_DEPLOY_API_INTERNAL_API_KEYS",
 )
 TRACKER_API_BASE = os.environ.get(
     "ENCELADUS_TRACKER_API_BASE",
@@ -1139,8 +1167,6 @@ def _deploy_api_request(
         "Accept": "application/json",
         "User-Agent": HTTP_USER_AGENT,
     }
-    if DEPLOY_API_INTERNAL_API_KEY:
-        headers["X-Coordination-Internal-Key"] = DEPLOY_API_INTERNAL_API_KEY
     if DEPLOY_API_COOKIE:
         headers["Cookie"] = DEPLOY_API_COOKIE
     if payload is not None:
@@ -1148,22 +1174,44 @@ def _deploy_api_request(
         body = json.dumps(payload).encode("utf-8")
     else:
         body = None
-    req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=body)
-    try:
-        with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
-            text = resp.read().decode("utf-8")
-            return json.loads(text) if text else {"success": True}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+
+    # Try configured deploy key first, then fallback candidates to survive auth-key drift/rotation.
+    key_candidates: List[str] = []
+    for candidate in (
+        DEPLOY_API_INTERNAL_API_KEY,
+        *DEPLOY_API_INTERNAL_API_KEYS,
+        *COMMON_INTERNAL_API_KEYS,
+    ):
+        key = str(candidate or "").strip()
+        if key and key not in key_candidates:
+            key_candidates.append(key)
+    if not key_candidates:
+        key_candidates.append("")
+
+    for idx, key in enumerate(key_candidates):
+        attempt_headers = dict(headers)
+        if key:
+            attempt_headers["X-Coordination-Internal-Key"] = key
+        req = urllib.request.Request(url=url, method=method.upper(), headers=attempt_headers, data=body)
         try:
-            parsed = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            parsed = {"error": raw or str(exc)}
-        return _normalize_legacy_error_payload(parsed, exc.code)
-    except urllib.error.URLError as exc:
-        return _error_payload("UPSTREAM_ERROR", f"Deployment API unreachable: {exc}", retryable=True)
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        return _error_payload("INTERNAL_ERROR", f"Deployment API request failed: {exc}", retryable=False)
+            with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
+                text = resp.read().decode("utf-8")
+                return json.loads(text) if text else {"success": True}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"error": raw or str(exc)}
+            if exc.code in (401, 403) and idx < len(key_candidates) - 1:
+                continue
+            return _normalize_legacy_error_payload(parsed, exc.code)
+        except urllib.error.URLError as exc:
+            return _error_payload("UPSTREAM_ERROR", f"Deployment API unreachable: {exc}", retryable=True)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            return _error_payload("INTERNAL_ERROR", f"Deployment API request failed: {exc}", retryable=False)
+
+    return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
 
 
 def _github_api_request(
