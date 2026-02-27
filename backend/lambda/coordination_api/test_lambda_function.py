@@ -215,6 +215,94 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
             )
         )
 
+    @patch.object(
+        coordination_lambda,
+        "_load_governance_dictionary",
+        return_value=(
+            {
+                "version": "test-v1",
+                "updated_at": "2026-02-27T00:00:00Z",
+                "entities": {
+                    "tracker.task": {
+                        "fields": {
+                            "status": {
+                                "type": "enum",
+                                "enum": ["open", "in-progress", "closed"],
+                            }
+                        }
+                    }
+                },
+            },
+            {"source": "dynamodb", "table": "governance-policies", "policy_id": "governance_data_dictionary"},
+        ),
+    )
+    def test_governance_dictionary_lookup_validates_enum_value(self, _mock_dictionary):
+        event = {
+            "queryStringParameters": {
+                "entity": "tracker.task",
+                "field": "status",
+                "value": "open",
+            }
+        }
+        resp = coordination_lambda._handle_governance_dictionary(event)
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertEqual(body["entity"], "tracker.task")
+        self.assertEqual(body["field"], "status")
+        self.assertTrue(body["validation"]["valid"])
+
+    @patch.object(
+        coordination_lambda,
+        "_load_governance_dictionary",
+        return_value=(
+            {
+                "version": "test-v1",
+                "updated_at": "2026-02-27T00:00:00Z",
+                "entities": {
+                    "tracker.task": {
+                        "fields": {
+                            "status": {
+                                "type": "enum",
+                                "enum": ["open", "in-progress", "closed"],
+                            }
+                        }
+                    }
+                },
+            },
+            {"source": "dynamodb", "table": "governance-policies", "policy_id": "governance_data_dictionary"},
+        ),
+    )
+    def test_governance_dictionary_lookup_rejects_unknown_field(self, _mock_dictionary):
+        event = {"queryStringParameters": {"entity": "tracker.task", "field": "unknown"}}
+        resp = coordination_lambda._handle_governance_dictionary(event)
+        self.assertEqual(resp["statusCode"], 404)
+        body = json.loads(resp["body"])
+        self.assertFalse(body["success"])
+        self.assertEqual(body["error_envelope"]["code"], "NOT_FOUND")
+
+    @patch.object(
+        coordination_lambda,
+        "_load_governance_dictionary",
+        return_value=(
+            {
+                "version": "test-v1",
+                "updated_at": "2026-02-27T00:00:00Z",
+                "entities": {
+                    "tracker.task": {"description": "Task", "fields": {"status": {"type": "enum", "enum": ["open"]}}},
+                    "deploy.request": {"description": "Deploy", "fields": {"change_type": {"type": "enum", "enum": ["patch"]}}},
+                },
+            },
+            {"source": "fallback_file", "table": "governance-policies", "policy_id": "governance_data_dictionary"},
+        ),
+    )
+    def test_governance_dictionary_index_lists_entities(self, _mock_dictionary):
+        event = {"queryStringParameters": {}}
+        resp = coordination_lambda._handle_governance_dictionary(event)
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertEqual(body["count"], 2)
+        self.assertIn("tracker.task", body["entities"])
+
     @patch.object(coordination_lambda, "_load_mcp_server_module")
     def test_mcp_http_initialize_and_tools_list(self, mock_load_module):
         class _FakeModule:

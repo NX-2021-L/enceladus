@@ -10,6 +10,8 @@ ROLE_NAME="${ROLE_NAME:-devops-coordination-api-lambda-role}"
 TABLE_NAME="${TABLE_NAME:-coordination-requests}"
 TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker}"
 PROJECTS_TABLE="${PROJECTS_TABLE:-projects}"
+GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE:-governance-policies}"
+GOVERNANCE_DICTIONARY_POLICY_ID="${GOVERNANCE_DICTIONARY_POLICY_ID:-governance_data_dictionary}"
 HOST_V2_INSTANCE_ID="${HOST_V2_INSTANCE_ID:-i-0523f94e99ec15a1e}"
 HOST_V2_ENCELADUS_MCP_INSTALLER="${HOST_V2_ENCELADUS_MCP_INSTALLER:-tools/enceladus-mcp-server/install_profile.sh}"
 HOST_V2_MCP_PROFILE_PATH="${HOST_V2_MCP_PROFILE_PATH:-.claude/mcp.json}"
@@ -155,6 +157,15 @@ ensure_role() {
       "Effect": "Allow",
       "Action": ["dynamodb:GetItem", "dynamodb:Scan", "dynamodb:Query"],
       "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${PROJECTS_TABLE}"
+    },
+    {
+      "Sid": "GovernancePoliciesReadWrite",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:DescribeTable"],
+      "Resource": [
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${GOVERNANCE_POLICIES_TABLE}",
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${GOVERNANCE_POLICIES_TABLE}/index/*"
+      ]
     },
     {
       "Sid": "DocumentsTableRead",
@@ -359,6 +370,9 @@ package_lambda() {
   fi
 
   find "${ROOT_DIR}" -maxdepth 1 -type f -name '*.py' ! -name 'test_*' -exec cp {} "${build_dir}/" \;
+  if [[ -f "${ROOT_DIR}/governance_data_dictionary.json" ]]; then
+    cp "${ROOT_DIR}/governance_data_dictionary.json" "${build_dir}/governance_data_dictionary.json"
+  fi
   cp "${mcp_server_src}" "${build_dir}/server.py"
   cp "${mcp_dispatch_src}" "${build_dir}/dispatch_plan_generator.py"
 
@@ -419,6 +433,8 @@ ensure_lambda() {
   TABLE_NAME="${TABLE_NAME}" \
   TRACKER_TABLE="${TRACKER_TABLE}" \
   PROJECTS_TABLE="${PROJECTS_TABLE}" \
+  GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE}" \
+  GOVERNANCE_DICTIONARY_POLICY_ID="${GOVERNANCE_DICTIONARY_POLICY_ID}" \
   REGION="${REGION}" \
   SECRETS_REGION="${SECRETS_REGION}" \
   OPENAI_API_KEY_SECRET_ID="${OPENAI_API_KEY_SECRET_ID}" \
@@ -470,6 +486,8 @@ env_vars = {
     "COORDINATION_TABLE": os.environ["TABLE_NAME"],
     "TRACKER_TABLE": os.environ["TRACKER_TABLE"],
     "PROJECTS_TABLE": os.environ["PROJECTS_TABLE"],
+    "GOVERNANCE_POLICIES_TABLE": os.environ["GOVERNANCE_POLICIES_TABLE"],
+    "GOVERNANCE_DICTIONARY_POLICY_ID": os.environ["GOVERNANCE_DICTIONARY_POLICY_ID"],
     "DYNAMODB_REGION": os.environ["REGION"],
     "SSM_REGION": os.environ["REGION"],
     "SECRETS_REGION": os.environ["SECRETS_REGION"],
@@ -558,6 +576,69 @@ PY
   log "[END] Lambda ready: ${FUNCTION_NAME}"
 }
 
+sync_governance_dictionary() {
+  local dictionary_path
+  dictionary_path="${ROOT_DIR}/governance_data_dictionary.json"
+  if [[ ! -f "${dictionary_path}" ]]; then
+    log "[WARNING] governance_data_dictionary.json not found; skipping dictionary sync"
+    return 0
+  fi
+
+  GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE}" \
+  GOVERNANCE_DICTIONARY_POLICY_ID="${GOVERNANCE_DICTIONARY_POLICY_ID}" \
+  DICTIONARY_PATH="${dictionary_path}" \
+  REGION="${REGION}" \
+  python3 - <<'PY'
+import datetime
+import hashlib
+import json
+import os
+
+import boto3
+
+table = os.environ["GOVERNANCE_POLICIES_TABLE"]
+policy_id = os.environ["GOVERNANCE_DICTIONARY_POLICY_ID"]
+path = os.environ["DICTIONARY_PATH"]
+region = os.environ["REGION"]
+
+with open(path, "r", encoding="utf-8") as f:
+    payload = json.load(f)
+
+payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+ddb = boto3.client("dynamodb", region_name=region)
+desc = ddb.describe_table(TableName=table)
+key_schema = [entry["AttributeName"] for entry in desc["Table"]["KeySchema"]]
+
+item = {
+    "policy_id": {"S": policy_id},
+    "status": {"S": "active"},
+    "policy_type": {"S": "data_dictionary"},
+    "dictionary_json": {"S": payload_json},
+    "dictionary_hash": {"S": payload_hash},
+    "updated_at": {"S": now},
+    "write_source": {"S": "coordination_api_deploy"},
+}
+
+for key in key_schema:
+    if key in item:
+        continue
+    if key == "scope":
+        item[key] = {"S": "governance"}
+    elif key == "record_id":
+        item[key] = {"S": f"policy#{policy_id}"}
+    elif key.endswith("_id"):
+        item[key] = {"S": policy_id}
+    else:
+        item[key] = {"S": "default"}
+
+ddb.put_item(TableName=table, Item=item)
+print(f"[INFO] synced governance dictionary policy_id={policy_id} hash={payload_hash}")
+PY
+}
+
 ensure_api_integration_and_routes() {
   local integration_id target_arn
   target_arn="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNCTION_NAME}"
@@ -602,8 +683,10 @@ ensure_api_integration_and_routes() {
     "OPTIONS /api/v1/coordination/capabilities"
     # Phase 2b: Governance routes
     "GET /api/v1/governance/hash"
+    "GET /api/v1/governance/dictionary"
     "PUT /api/v1/governance/{fileName}"
     "OPTIONS /api/v1/governance/hash"
+    "OPTIONS /api/v1/governance/dictionary"
     "OPTIONS /api/v1/governance/{fileName}"
     # Phase 2b: Projects routes (read-only, via coordination API)
     "GET /api/v1/coordination/projects"
@@ -679,6 +762,7 @@ main() {
   ensure_table
   ensure_role
   ensure_lambda
+  sync_governance_dictionary
   ensure_observability_log_groups
   ensure_api_integration_and_routes
   smoke_hint
