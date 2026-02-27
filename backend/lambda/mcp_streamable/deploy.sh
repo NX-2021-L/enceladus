@@ -119,10 +119,14 @@ ensure_function_url() {
     log "[OK] Function URL exists for ${FUNCTION_NAME}"
   else
     log "[START] creating Function URL (NONE auth): ${FUNCTION_NAME}"
-    aws lambda create-function-url-config \
+    if ! aws lambda create-function-url-config \
       --function-name "${FUNCTION_NAME}" \
       --auth-type NONE \
-      --region "${REGION}" >/dev/null
+      --region "${REGION}" >/dev/null; then
+      log "[WARNING] unable to create Function URL (missing lambda:CreateFunctionUrlConfig?)."
+      log "[WARNING] Lambda code/config deployment succeeded; configure Function URL separately."
+      return 0
+    fi
     log "[END] created Function URL: ${FUNCTION_NAME}"
   fi
 
@@ -135,7 +139,7 @@ ensure_function_url() {
     --region "${REGION}" >/dev/null 2>&1; then
     log "[OK] Function URL invoke permission added"
   else
-    log "[OK] Function URL invoke permission already present"
+    log "[WARNING] could not add Function URL invoke permission (or it already exists)."
   fi
 }
 
