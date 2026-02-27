@@ -76,8 +76,8 @@ source_env = json.loads(os.environ.get("SOURCE_ENV_JSON", "{}"))
 existing_env = json.loads(os.environ.get("EXISTING_ENV_JSON", "{}"))
 
 merged = {}
-merged.update(source_env if isinstance(source_env, dict) else {})
 merged.update(existing_env if isinstance(existing_env, dict) else {})
+merged.update(source_env if isinstance(source_env, dict) else {})
 merged["ENCELADUS_MCP_TRANSPORT"] = os.environ["MCP_TRANSPORT"]
 
 mcp_api_key = os.environ.get("MCP_API_KEY", "")

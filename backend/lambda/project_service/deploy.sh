@@ -49,16 +49,35 @@ package_lambda() {
 deploy_lambda() {
   local zip_path="$1"
   local effective_internal_key
+  local effective_internal_keys
   local env_file
+  local coord_env_json
+
+  coord_env_json="$(aws lambda get-function-configuration \
+    --function-name "${COORDINATION_API_FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables' \
+    --output json 2>/dev/null || echo '{}')"
+  [[ "${coord_env_json}" == "None" || -z "${coord_env_json}" ]] && coord_env_json='{}'
 
   effective_internal_key="${COORDINATION_INTERNAL_API_KEY}"
   if [[ -z "${effective_internal_key}" ]]; then
-    effective_internal_key="$(aws lambda get-function-configuration \
-      --function-name "${COORDINATION_API_FUNCTION_NAME}" \
-      --region "${REGION}" \
-      --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
-      --output text 2>/dev/null || true)"
-    [[ "${effective_internal_key}" == "None" ]] && effective_internal_key=""
+    effective_internal_key="$(COORD_ENV_JSON="${coord_env_json}" python3 - <<'PY'
+import json, os
+env = json.loads(os.environ.get("COORD_ENV_JSON", "{}"))
+if not isinstance(env, dict):
+    env = {}
+for name in (
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+    "COORDINATION_INTERNAL_API_KEY",
+):
+    value = str(env.get(name, "")).strip()
+    if value:
+        print(value)
+        break
+PY
+)"
   fi
   if [[ -z "${effective_internal_key}" ]]; then
     effective_internal_key="$(aws lambda get-function-configuration \
@@ -71,6 +90,34 @@ deploy_lambda() {
   if [[ -z "${effective_internal_key}" ]]; then
     log "[WARNING] COORDINATION_INTERNAL_API_KEY unresolved; service-to-service auth may remain disabled."
   fi
+
+  effective_internal_keys="$(COORD_ENV_JSON="${coord_env_json}" PRIMARY_KEY="${effective_internal_key}" python3 - <<'PY'
+import json, os
+env = json.loads(os.environ.get("COORD_ENV_JSON", "{}"))
+if not isinstance(env, dict):
+    env = {}
+seen = set()
+items = []
+def add(raw):
+    for part in str(raw or "").split(","):
+        key = part.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        items.append(key)
+add(env.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS", ""))
+add(env.get("ENCELADUS_COORDINATION_INTERNAL_API_KEYS", ""))
+add(env.get("COORDINATION_INTERNAL_API_KEYS", ""))
+add(env.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY", ""))
+add(env.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""))
+add(env.get("COORDINATION_INTERNAL_API_KEY", ""))
+add(env.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS", ""))
+add(env.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
+add(env.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
+add(os.environ.get("PRIMARY_KEY", ""))
+print(",".join(items))
+PY
+)"
 
   log "[START] updating Lambda code: ${FUNCTION_NAME}"
   aws lambda update-function-code \
@@ -89,6 +136,7 @@ deploy_lambda() {
       --query 'Environment.Variables' \
       --output json 2>/dev/null || echo '{}')" \
   EFFECTIVE_INTERNAL_KEY="${effective_internal_key}" \
+  EFFECTIVE_INTERNAL_KEYS="${effective_internal_keys}" \
   INTERNAL_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES}" \
   python3 - <<'PY' > "${env_file}"
 import json
@@ -98,9 +146,16 @@ existing = json.loads(os.environ.get("EXISTING_ENV_JSON", "{}"))
 if not isinstance(existing, dict):
     existing = {}
 key = os.environ.get("EFFECTIVE_INTERNAL_KEY", "")
+keys_csv = os.environ.get("EFFECTIVE_INTERNAL_KEYS", "")
 scopes = os.environ.get("INTERNAL_KEY_SCOPES", "")
 if key:
     existing["COORDINATION_INTERNAL_API_KEY"] = key
+    existing["ENCELADUS_COORDINATION_INTERNAL_API_KEY"] = key
+    existing["ENCELADUS_COORDINATION_API_INTERNAL_API_KEY"] = key
+if keys_csv:
+    existing["COORDINATION_INTERNAL_API_KEYS"] = keys_csv
+    existing["ENCELADUS_COORDINATION_INTERNAL_API_KEYS"] = keys_csv
+    existing["ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS"] = keys_csv
 if scopes:
     existing["COORDINATION_INTERNAL_API_KEY_SCOPES"] = scopes
 print(json.dumps({"Variables": existing}, separators=(",", ":")))

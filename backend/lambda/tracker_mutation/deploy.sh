@@ -30,16 +30,36 @@ log() {
 }
 
 resolve_internal_api_key() {
+  local coord_env_json
+  coord_env_json="$(aws lambda get-function-configuration \
+    --function-name "${COORDINATION_API_FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables' \
+    --output json 2>/dev/null || echo '{}')"
+  if [[ "${coord_env_json}" == "None" || -z "${coord_env_json}" ]]; then
+    coord_env_json='{}'
+  fi
   if [[ -n "${COORDINATION_INTERNAL_API_KEY}" ]]; then
     printf '%s' "${COORDINATION_INTERNAL_API_KEY}"
     return
   fi
   local coordination_key
-  coordination_key="$(aws lambda get-function-configuration \
-    --function-name "${COORDINATION_API_FUNCTION_NAME}" \
-    --region "${REGION}" \
-    --query 'Environment.Variables.COORDINATION_INTERNAL_API_KEY' \
-    --output text 2>/dev/null || true)"
+  coordination_key="$(COORD_ENV_JSON="${coord_env_json}" python3 - <<'PY'
+import json, os
+env = json.loads(os.environ.get("COORD_ENV_JSON", "{}"))
+if not isinstance(env, dict):
+    env = {}
+for name in (
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
+    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+    "COORDINATION_INTERNAL_API_KEY",
+):
+    value = str(env.get(name, "")).strip()
+    if value:
+        print(value)
+        break
+PY
+)"
   if [[ "${coordination_key}" != "None" && -n "${coordination_key}" ]]; then
     printf '%s' "${coordination_key}"
     return
@@ -54,6 +74,45 @@ resolve_internal_api_key() {
     existing=""
   fi
   printf '%s' "${existing}"
+}
+
+resolve_internal_api_keys_csv() {
+  local primary_key="$1"
+  local coord_env_json
+  coord_env_json="$(aws lambda get-function-configuration \
+    --function-name "${COORDINATION_API_FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables' \
+    --output json 2>/dev/null || echo '{}')"
+  if [[ "${coord_env_json}" == "None" || -z "${coord_env_json}" ]]; then
+    coord_env_json='{}'
+  fi
+  COORD_ENV_JSON="${coord_env_json}" PRIMARY_KEY="${primary_key}" python3 - <<'PY'
+import json, os
+env = json.loads(os.environ.get("COORD_ENV_JSON", "{}"))
+if not isinstance(env, dict):
+    env = {}
+seen = set()
+items = []
+def add(raw):
+    for part in str(raw or "").split(","):
+        key = part.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        items.append(key)
+add(env.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS", ""))
+add(env.get("ENCELADUS_COORDINATION_INTERNAL_API_KEYS", ""))
+add(env.get("COORDINATION_INTERNAL_API_KEYS", ""))
+add(env.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY", ""))
+add(env.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""))
+add(env.get("COORDINATION_INTERNAL_API_KEY", ""))
+add(env.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS", ""))
+add(env.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
+add(env.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
+add(os.environ.get("PRIMARY_KEY", ""))
+print(",".join(items))
+PY
 }
 
 package_lambda() {
@@ -95,6 +154,8 @@ ensure_env_vars() {
 
   local effective_key
   effective_key="$(resolve_internal_api_key)"
+  local effective_keys_csv
+  effective_keys_csv="$(resolve_internal_api_keys_csv "${effective_key}")"
 
   local env_json
   env_json=$(python3 -c "
@@ -106,6 +167,11 @@ env = {
     'DYNAMODB_REGION': '${REGION}',
     'PROJECTS_TABLE': 'projects',
     'COORDINATION_INTERNAL_API_KEY': '${effective_key}',
+    'ENCELADUS_COORDINATION_INTERNAL_API_KEY': '${effective_key}',
+    'ENCELADUS_COORDINATION_API_INTERNAL_API_KEY': '${effective_key}',
+    'COORDINATION_INTERNAL_API_KEYS': '${effective_keys_csv}',
+    'ENCELADUS_COORDINATION_INTERNAL_API_KEYS': '${effective_keys_csv}',
+    'ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS': '${effective_keys_csv}',
     'COORDINATION_INTERNAL_API_KEY_SCOPES': '${COORDINATION_INTERNAL_API_KEY_SCOPES}',
     'CORS_ORIGIN': 'https://jreese.net',
 }
