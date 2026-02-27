@@ -1,13 +1,11 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { feedKeys, fetchDocumentsFeed } from '../api/feeds'
+import { documentKeys, fetchDocumentsByProject } from '../api/documents'
 import { isSessionExpiredError } from '../lib/authSession'
 import type { DocumentFilters } from '../types/filters'
 
-/** Polling interval for the S3-backed documents feed (15 s).
- *  Aligned with the CloudFront s-maxage (300 s) and the feed publisher's
- *  SQS FIFO debounce window (5 min). */
-const DOCUMENTS_POLL_INTERVAL = 15_000
+/** Fast polling interval for mission-critical docs freshness. */
+const DOCUMENTS_POLL_INTERVAL = 500
 
 function compareDates(a: string | null, b: string | null): number {
   if (!a) return 1
@@ -28,15 +26,15 @@ interface UseDocumentsOptions {
 }
 
 /**
- * Fetch documents from the S3-backed documents feed (`/mobile/v1/documents.json`).
- *
- * The feed contains all documents across all projects.  Filtering by project,
- * status, search, and sort is done client-side.
+ * Fetch documents directly from the document API (`/api/v1/documents?project=`).
+ * This avoids feed debounce/cache lag and surfaces new/updated docs quickly.
  */
 export function useDocuments(filters?: DocumentFilters, options?: UseDocumentsOptions) {
+  const projectId = filters?.projectId ?? ''
   const query = useQuery({
-    queryKey: feedKeys.documents,
-    queryFn: fetchDocumentsFeed,
+    queryKey: documentKeys.list(projectId),
+    queryFn: () => fetchDocumentsByProject(projectId),
+    enabled: !!projectId,
     refetchInterval: options?.polling ? DOCUMENTS_POLL_INTERVAL : undefined,
     retry: (count, error) => {
       if (isSessionExpiredError(error)) return false

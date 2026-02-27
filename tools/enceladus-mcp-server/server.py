@@ -3971,102 +3971,32 @@ async def _tracker_set_acceptance_evidence(args: dict) -> list[TextContent]:
 
 
 async def _documents_search(args: dict) -> list[TextContent]:
-    ddb = _get_ddb()
-    project_id = args.get("project_id")
-    keyword = args.get("keyword")
-    related = args.get("related")
-    title_q = args.get("title")
+    query: Dict[str, Any] = {}
+    if args.get("project_id"):
+        query["project"] = args["project_id"]
+    if args.get("keyword"):
+        query["keyword"] = args["keyword"]
+    if args.get("related"):
+        query["related"] = args["related"]
+    if args.get("title"):
+        query["title"] = args["title"]
 
-    # Scan with filters (documents table has no GSI for these queries)
-    filter_parts: List[str] = []
-    expr_vals: Dict[str, Any] = {}
-    expr_names: Dict[str, str] = {}
-
-    if project_id:
-        filter_parts.append("project_id = :pid")
-        expr_vals[":pid"] = _ser_s(project_id)
-    if keyword:
-        filter_parts.append("contains(keywords, :kw)")
-        expr_vals[":kw"] = _ser_s(keyword)
-    if related:
-        filter_parts.append("contains(related_items, :rel)")
-        expr_vals[":rel"] = _ser_s(related)
-    if title_q:
-        filter_parts.append("contains(#ttl, :ttl)")
-        expr_vals[":ttl"] = _ser_s(title_q)
-        expr_names["#ttl"] = "title"
-
-    scan_kwargs: Dict[str, Any] = {"TableName": DOCUMENTS_TABLE}
-    if filter_parts:
-        scan_kwargs["FilterExpression"] = " AND ".join(filter_parts)
-        scan_kwargs["ExpressionAttributeValues"] = expr_vals
-        if expr_names:
-            scan_kwargs["ExpressionAttributeNames"] = expr_names
-
-    resp = ddb.scan(**scan_kwargs)
-    items = [_deser_item(i) for i in resp.get("Items", [])]
-    # Return metadata only, not content
-    summary = [
-        {
-            "document_id": d.get("id") or d.get("document_id"),
-            "title": d.get("title"),
-            "project_id": d.get("project_id"),
-            "keywords": d.get("keywords"),
-            "created_at": d.get("created_at"),
-        }
-        for d in items
-    ]
-    return _result_text({"documents": summary, "count": len(summary)})
+    resp = _document_api_request("GET", "/search", query=query or None)
+    return _result_text(resp)
 
 
 async def _documents_get(args: dict) -> list[TextContent]:
     doc_id = args["document_id"]
     include_content = args.get("include_content", True)
-    ddb = _get_ddb()
-
-    resp = ddb.get_item(TableName=DOCUMENTS_TABLE, Key={"document_id": _ser_s(doc_id)})
-    item = resp.get("Item")
-    if not item:
-        return _result_text({"error": f"Document '{doc_id}' not found"})
-
-    doc = _deser_item(item)
-
-    if include_content:
-        # Fetch content from S3
-        s3_key = doc.get("s3_key")
-        if s3_key:
-            try:
-                s3_resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=s3_key)
-                doc["content"] = s3_resp["Body"].read().decode("utf-8")
-            except Exception as exc:
-                doc["content_error"] = str(exc)
-
-    return _result_text(doc)
+    query = {"include_content": "true" if include_content else "false"}
+    resp = _document_api_request("GET", f"/{urllib.parse.quote(str(doc_id), safe='')}", query=query)
+    return _result_text(resp)
 
 
 async def _documents_list(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
-    ddb = _get_ddb()
-
-    resp = ddb.scan(
-        TableName=DOCUMENTS_TABLE,
-        FilterExpression="project_id = :pid",
-        ExpressionAttributeValues={":pid": _ser_s(project_id)},
-    )
-    items = [_deser_item(i) for i in resp.get("Items", [])]
-    summary = [
-        {
-            "document_id": d.get("id") or d.get("document_id"),
-            "title": d.get("title"),
-            "status": d.get("status"),
-            "keywords": d.get("keywords"),
-            "created_at": d.get("created_at"),
-            "size_bytes": d.get("size_bytes"),
-        }
-        for d in items
-    ]
-    summary.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    return _result_text({"documents": summary, "count": len(summary)})
+    resp = _document_api_request("GET", query={"project": project_id})
+    return _result_text(resp)
 
 
 async def _documents_put(args: dict) -> list[TextContent]:
