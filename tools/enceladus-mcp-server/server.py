@@ -238,6 +238,70 @@ GITHUB_API_INTERNAL_API_KEY = os.environ.get(
     os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", ""),
 )
 
+# Tracker governance constants mirrored from tracker_mutation Lambda so MCP clients
+# can preflight status transitions and reduce avoidable rejected writes.
+TRACKER_VALID_CATEGORIES = {
+    "feature": {"epic", "capability", "enhancement", "infrastructure"},
+    "task": {"implementation", "investigation", "documentation", "maintenance", "validation"},
+    "issue": {"bug", "debt", "risk", "security", "performance"},
+}
+TRACKER_VALID_TRANSITIONS = {
+    "feature": {
+        "planned": {"in-progress"},
+        "in-progress": {"completed"},
+        "completed": {"production"},
+        "production": {"deprecated"},
+    },
+    "task": {
+        "open": {"in-progress"},
+        "in-progress": {"coding-complete"},
+        "coding-complete": {"committed"},
+        "committed": {"pushed"},
+        "pushed": {"merged-main"},
+        "merged-main": {"deployed"},
+        "deployed": {"closed"},
+    },
+    "issue": {
+        "open": {"in-progress", "closed"},
+        "in-progress": {"closed"},
+    },
+}
+TRACKER_REVERT_TRANSITIONS = {
+    "feature": {
+        "in-progress": {"planned"},
+        "completed": {"in-progress"},
+        "production": {"completed"},
+        "deprecated": {"production"},
+    },
+    "task": {
+        "in-progress": {"open"},
+        "coding-complete": {"in-progress"},
+        "committed": {"coding-complete"},
+        "pushed": {"committed"},
+        "merged-main": {"pushed"},
+    },
+    "issue": {
+        "in-progress": {"open"},
+    },
+}
+TRACKER_STATUS_EVIDENCE_REQUIREMENTS = {
+    "task": {
+        "pushed": {
+            "required": ["transition_evidence.commit_sha"],
+            "notes": "commit_sha must be a 40-char lowercase/uppercase hex SHA.",
+        },
+        "merged-main": {
+            "required": ["transition_evidence.merge_evidence"],
+            "notes": "merge_evidence should describe merge confirmation.",
+        },
+        "deployed": {
+            "required": ["transition_evidence.deployment_ref"],
+            "notes": "deployment_ref should point to deployment proof/spec/run.",
+        },
+    }
+}
+TRACKER_PRIORITY_ENUM = ("P0", "P1", "P2", "P3")
+
 # GSI names
 GSI_PROJECT_TYPE = "project-type-index"
 
@@ -2317,6 +2381,42 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="tracker_validation_rules",
+            description=(
+                "Preflight tracker edit rules for a record before calling tracker_set. "
+                "Returns allowed status transitions, required transition_evidence fields, "
+                "checkout/provider requirements, and dictionary-backed field guidance."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "record_id": {
+                        "type": "string",
+                        "description": "The record ID to preflight (e.g., ENC-TSK-628).",
+                    },
+                    "target_status": {
+                        "type": "string",
+                        "description": "Optional status to preflight against current record state.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": (
+                            "Optional provider identity to evaluate task checkout ownership "
+                            "requirements for status transitions."
+                        ),
+                    },
+                    "include_dictionary": {
+                        "type": "boolean",
+                        "description": (
+                            "If true (default), include governance dictionary lookup for "
+                            "this record type."
+                        ),
+                    },
+                },
+                "required": ["record_id"],
+            },
+        ),
+        Tool(
             name="tracker_list",
             description="List tracker records for a project. Filter by type and/or status.",
             inputSchema={
@@ -3483,6 +3583,145 @@ async def _tracker_get(args: dict) -> list[TextContent]:
     return _result_text(record)
 
 
+def _normalized_status(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _build_forward_path(record_type: str, current_status: str, terminal_status: str) -> List[str]:
+    transitions = TRACKER_VALID_TRANSITIONS.get(record_type, {})
+    path: List[str] = []
+    seen = {current_status}
+    cursor = current_status
+    while cursor != terminal_status:
+        next_options = sorted(transitions.get(cursor, set()))
+        if not next_options:
+            break
+        nxt = next_options[0]
+        path.append(nxt)
+        if nxt in seen:
+            break
+        seen.add(nxt)
+        cursor = nxt
+    if path and path[-1] == terminal_status:
+        return path
+    if current_status == terminal_status:
+        return []
+    return []
+
+
+async def _tracker_validation_rules(args: dict) -> list[TextContent]:
+    record_id = args["record_id"]
+    target_status = _normalized_status(args.get("target_status"))
+    provider = str(args.get("provider") or "").strip()
+    include_dictionary = args.get("include_dictionary", True)
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
+    if resp.get("error"):
+        return _result_text(resp)
+    record = resp.get("record", resp)
+
+    current_status = _normalized_status(record.get("status"))
+    valid_forward = sorted(TRACKER_VALID_TRANSITIONS.get(record_type, {}).get(current_status, set()))
+    valid_revert = sorted(TRACKER_REVERT_TRANSITIONS.get(record_type, {}).get(current_status, set()))
+    terminal_status = "completed" if record_type == "feature" else "closed"
+    close_path = _build_forward_path(record_type, current_status, terminal_status)
+
+    checkout_state = {
+        "active_agent_session": bool(record.get("active_agent_session")),
+        "active_agent_session_id": str(record.get("active_agent_session_id") or "").strip(),
+        "checkout_state": str(record.get("checkout_state") or "").strip(),
+        "checked_out_by": str(record.get("checked_out_by") or "").strip(),
+    }
+
+    status_requirements = {
+        "provider_required_for_task_status_change": (record_type == "task"),
+        "active_checkout_required_for_task_status_change": (record_type == "task"),
+        "owner_match_required_for_task_status_change": (record_type == "task"),
+        "transition_evidence_requirements": TRACKER_STATUS_EVIDENCE_REQUIREMENTS.get(record_type, {}),
+    }
+
+    preflight: Dict[str, Any] = {
+        "target_status": target_status or None,
+        "allowed": None,
+        "reasons": [],
+    }
+    if target_status:
+        if target_status == current_status:
+            preflight["allowed"] = True
+            preflight["reasons"].append("No status change required.")
+        elif target_status in valid_forward:
+            preflight["allowed"] = True
+            if target_status in TRACKER_STATUS_EVIDENCE_REQUIREMENTS.get(record_type, {}):
+                req = TRACKER_STATUS_EVIDENCE_REQUIREMENTS[record_type][target_status]
+                preflight["reasons"].append(
+                    f"Transition requires evidence fields: {', '.join(req['required'])}."
+                )
+        elif target_status in valid_revert:
+            preflight["allowed"] = True
+            preflight["reasons"].append(
+                "Revert transition requires transition_evidence.revert_reason."
+            )
+        else:
+            preflight["allowed"] = False
+            preflight["reasons"].append(
+                f"Invalid transition from '{current_status}' to '{target_status}'."
+            )
+
+        if record_type == "task" and target_status != current_status:
+            if not provider:
+                preflight["allowed"] = False
+                preflight["reasons"].append(
+                    "Task status transitions require provider identity."
+                )
+            owner = checkout_state["active_agent_session_id"]
+            if not checkout_state["active_agent_session"] or not owner:
+                preflight["allowed"] = False
+                preflight["reasons"].append(
+                    "Task status transitions require an active checkout."
+                )
+            elif provider and provider != owner:
+                preflight["allowed"] = False
+                preflight["reasons"].append(
+                    f"Task is checked out by '{owner}', not '{provider}'."
+                )
+
+    result: Dict[str, Any] = {
+        "record_id": record_id,
+        "record_type": record_type,
+        "current_status": current_status,
+        "allowed_categories": sorted(TRACKER_VALID_CATEGORIES.get(record_type, set())),
+        "allowed_priorities": list(TRACKER_PRIORITY_ENUM),
+        "status_rules": {
+            "valid_forward": valid_forward,
+            "valid_revert": valid_revert,
+            "terminal_status": terminal_status,
+            "path_to_terminal": close_path,
+            "requirements": status_requirements,
+        },
+        "checkout_state": checkout_state,
+        "preflight": preflight,
+        "tips": [
+            "Call this tool before tracker_set status updates to avoid avoidable 400/409 rejections.",
+            "For task status changes, include provider and satisfy checkout ownership first.",
+        ],
+    }
+
+    if include_dictionary:
+        dict_query = f"/dictionary?entity={urllib.parse.quote(f'tracker.{record_type}', safe='')}"
+        dict_resp = _governance_api_request("GET", dict_query)
+        if dict_resp.get("error"):
+            result["dictionary_lookup_error"] = dict_resp["error"]
+        else:
+            result["dictionary"] = dict_resp
+
+    return _result_text(result)
+
+
 async def _tracker_list(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
     record_type = args.get("record_type")
@@ -4462,6 +4701,7 @@ _TOOL_HANDLERS = {
     "projects_list": _projects_list,
     "projects_get": _projects_get,
     "tracker_get": _tracker_get,
+    "tracker_validation_rules": _tracker_validation_rules,
     "tracker_list": _tracker_list,
     "tracker_pending_updates": _tracker_pending_updates,
     "tracker_set": _tracker_set,
