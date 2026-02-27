@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-27.4",
-  "updated_at": "2026-02-27T09:43:00Z",
+  "version": "2026-02-27.5",
+  "updated_at": "2026-02-27T10:15:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -122,6 +122,24 @@
           "type": "array",
           "item_type": "string",
           "constraints": {"max_items": 100}
+        }
+      }
+    },
+    "document.query_response": {
+      "description": "Document list/search response envelope fields returned by document_api.",
+      "fields": {
+        "documents": {
+          "type": "array",
+          "item_type": "object",
+          "definition": "Document metadata records for list/search results."
+        },
+        "count": {
+          "type": "number",
+          "definition": "Number of documents returned in current page/response."
+        },
+        "total_matches": {
+          "type": "number",
+          "definition": "Total matching documents before response slicing."
         }
       }
     },
