@@ -378,16 +378,9 @@ Resources:
       RouteKey: POST /api/v1/auth/refresh
       Target: !Sub integrations/${AuthRefreshIntegration}
 
-  # ---------------------------------------------------------------------------
-  # Routes — GitHub Integration (ENC-FTR-021 Phase 2)
-  # ---------------------------------------------------------------------------
-
-  RouteGitHubCreateIssue:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: POST /api/v1/github/issues
-      Target: !Sub integrations/${GitHubIntegration}
+  # NOTE: GitHub routes are provisioned by backend/lambda/github_integration/deploy.sh.
+  # Keeping them out of this stack avoids route-key ownership conflicts when the
+  # integration deploy script has already created those API Gateway routes.
 
 Outputs:
   ApiEndpoint:
