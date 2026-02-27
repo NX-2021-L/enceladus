@@ -1917,6 +1917,8 @@ def _governance_uri_from_file_name(file_name: str) -> Optional[str]:
         return "governance://agents.md"
     if name.startswith("agents/"):
         return f"governance://{name}"
+    if name == "governance_data_dictionary.json":
+        return "governance://governance_data_dictionary.json"
     return None
 
 

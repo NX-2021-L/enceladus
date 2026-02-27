@@ -8136,6 +8136,8 @@ def _governance_uri_from_file_name(file_name: str) -> Optional[str]:
         return "governance://agents.md"
     if fn.startswith("agents/"):
         return f"governance://{fn}"
+    if fn == "governance_data_dictionary.json":
+        return "governance://governance_data_dictionary.json"
     return None
 
 
@@ -8393,7 +8395,8 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
 
     if existing_content is not None:
         timestamp = _now_z().replace(":", "-")
-        archive_key = f"{S3_GOVERNANCE_HISTORY_PREFIX.rstrip('/')}/{file_name}/{timestamp}.md"
+        ext = pathlib.Path(file_name).suffix or ".md"
+        archive_key = f"{S3_GOVERNANCE_HISTORY_PREFIX.rstrip('/')}/{file_name}/{timestamp}{ext}"
         try:
             s3.put_object(
                 Bucket=S3_BUCKET,
