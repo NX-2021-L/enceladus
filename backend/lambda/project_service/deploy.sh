@@ -16,6 +16,7 @@ REGION="${REGION:-us-west-2}"
 FUNCTION_NAME="${FUNCTION_NAME:-devops-project-service}"
 COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
+COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}"
 COORDINATION_INTERNAL_API_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES:-}"
 
 log() {
@@ -114,10 +115,15 @@ add(env.get("COORDINATION_INTERNAL_API_KEY", ""))
 add(env.get("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS", ""))
 add(env.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
 add(env.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
+add(os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", ""))
 add(os.environ.get("PRIMARY_KEY", ""))
 print(",".join(items))
 PY
 )"
+  if [[ -z "${effective_internal_key}" && -z "${effective_internal_keys}" ]]; then
+    log "[ERROR] refusing deploy with empty internal auth key set for ${FUNCTION_NAME}"
+    exit 1
+  fi
 
   log "[START] updating Lambda code: ${FUNCTION_NAME}"
   aws lambda update-function-code \
@@ -137,6 +143,7 @@ PY
       --output json 2>/dev/null || echo '{}')" \
   EFFECTIVE_INTERNAL_KEY="${effective_internal_key}" \
   EFFECTIVE_INTERNAL_KEYS="${effective_internal_keys}" \
+  COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS}" \
   INTERNAL_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES}" \
   python3 - <<'PY' > "${env_file}"
 import json
@@ -147,11 +154,16 @@ if not isinstance(existing, dict):
     existing = {}
 key = os.environ.get("EFFECTIVE_INTERNAL_KEY", "")
 keys_csv = os.environ.get("EFFECTIVE_INTERNAL_KEYS", "")
+previous_key = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
 scopes = os.environ.get("INTERNAL_KEY_SCOPES", "")
 if key:
     existing["COORDINATION_INTERNAL_API_KEY"] = key
     existing["ENCELADUS_COORDINATION_INTERNAL_API_KEY"] = key
     existing["ENCELADUS_COORDINATION_API_INTERNAL_API_KEY"] = key
+if previous_key:
+    existing["COORDINATION_INTERNAL_API_KEY_PREVIOUS"] = previous_key
+    existing["ENCELADUS_COORDINATION_INTERNAL_API_KEY_PREVIOUS"] = previous_key
+    existing["ENCELADUS_COORDINATION_API_INTERNAL_API_KEY_PREVIOUS"] = previous_key
 if keys_csv:
     existing["COORDINATION_INTERNAL_API_KEYS"] = keys_csv
     existing["ENCELADUS_COORDINATION_INTERNAL_API_KEYS"] = keys_csv

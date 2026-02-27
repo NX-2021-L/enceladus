@@ -52,6 +52,8 @@ jobs:
       - name: Deploy coordination API and embedded MCP server runtime
         env:
           COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: ${{ secrets.COORDINATION_INTERNAL_API_KEY_PREVIOUS }}
+          COORDINATION_INTERNAL_API_KEY_SCOPES: ${{ secrets.COORDINATION_INTERNAL_API_KEY_SCOPES }}
         run: |
           set -euo pipefail
           chmod +x backend/lambda/coordination_api/deploy.sh
