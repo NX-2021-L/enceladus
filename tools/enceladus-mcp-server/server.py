@@ -3322,6 +3322,28 @@ async def list_tools() -> list[Tool]:
             description="Compute and return the SHA-256 governance hash of loaded governance files.",
             inputSchema={"type": "object", "properties": {}},
         ),
+        Tool(
+            name="governance_get",
+            description=(
+                "Read a governance file by name and return its content. "
+                "Use to load governance://agents.md and other governance resources "
+                "during session bootstrap without requiring direct S3 access."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_name": {
+                        "type": "string",
+                        "description": (
+                            "Governance file name (e.g., 'agents.md' or "
+                            "'agents/dispatch-heuristics.md'). "
+                            "Defaults to 'agents.md' if not specified."
+                        ),
+                    },
+                },
+                "required": ["file_name"],
+            },
+        ),
         # --- System ---
         Tool(
             name="connection_health",
@@ -4067,11 +4089,12 @@ async def _documents_put(args: dict) -> list[TextContent]:
 
     result = _document_api_request("PUT", payload=body)
     if _is_authentication_required_error(result):
-        logger.info(
-            "[INFO] documents_put received auth-required response from document API; using direct fallback for project %s",
+        logger.error(
+            "[ERROR] documents_put: document API auth failed for project %s — "
+            "check ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY config. "
+            "Direct datastore fallback is disabled (agent IAM denies all DynamoDB/S3 writes).",
             body.get("project_id"),
         )
-        result = _document_put_direct(body)
     return _result_text(result)
 
 
@@ -4108,11 +4131,12 @@ async def _documents_patch(args: dict) -> list[TextContent]:
     encoded_id = urllib.parse.quote(document_id, safe="")
     result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=body)
     if _is_authentication_required_error(result):
-        logger.info(
-            "[INFO] documents_patch received auth-required response from document API; using direct fallback for document %s",
+        logger.error(
+            "[ERROR] documents_patch: document API auth failed for document %s — "
+            "check ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY config. "
+            "Direct datastore fallback is disabled (agent IAM denies all DynamoDB/S3 writes).",
             document_id,
         )
-        result = _document_patch_direct(document_id, body)
     return _result_text(result)
 
 
@@ -4269,11 +4293,12 @@ async def _deploy_state_get(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
     result = _deploy_api_request("GET", f"/state/{project_id}")
     if _is_authentication_required_error(result):
-        logger.info(
-            "[INFO] deploy_state_get received PERMISSION_DENIED from deploy API; using direct fallback for project %s",
+        logger.error(
+            "[ERROR] deploy_state_get: deploy API auth failed for project %s — "
+            "check ENCELADUS_DEPLOY_API_INTERNAL_API_KEY config. "
+            "Direct datastore fallback is disabled (MCP API boundary policy).",
             project_id,
         )
-        result = _deploy_state_get_direct(project_id)
     return _result_text(result)
 
 
@@ -4286,11 +4311,12 @@ async def _deploy_history(args: dict) -> list[TextContent]:
     limit = max(1, min(limit, 50))
     result = _deploy_api_request("GET", f"/history/{project_id}", query={"limit": limit})
     if _is_authentication_required_error(result):
-        logger.info(
-            "[INFO] deploy_history received PERMISSION_DENIED from deploy API; using direct fallback for project %s",
+        logger.error(
+            "[ERROR] deploy_history: deploy API auth failed for project %s — "
+            "check ENCELADUS_DEPLOY_API_INTERNAL_API_KEY config. "
+            "Direct datastore fallback is disabled (MCP API boundary policy).",
             project_id,
         )
-        result = _deploy_history_direct(project_id, limit)
     return _result_text(result)
 
 
@@ -4529,6 +4555,60 @@ async def _governance_update(args: dict) -> list[TextContent]:
 async def _governance_hash(args: dict) -> list[TextContent]:
     governance_hash = _get_governance_hash_via_api()
     return _result_text({"success": True, "governance_hash": governance_hash})
+
+
+async def _governance_get(args: dict) -> list[TextContent]:
+    """Read a governance file from S3 by file_name and return its content."""
+    file_name = str(args.get("file_name") or "agents.md").strip()
+    uri = _governance_uri_from_file_name(file_name)
+    if not uri:
+        return _result_text(
+            _error_payload(
+                "NOT_FOUND",
+                f"Cannot resolve governance URI for file_name: {file_name!r}",
+                retryable=False,
+            )
+        )
+    catalog = _governance_catalog()
+    meta = catalog.get(uri)
+    if not meta:
+        return _result_text(
+            _error_payload(
+                "NOT_FOUND",
+                f"Governance resource not found in catalog: {uri}",
+                retryable=False,
+            )
+        )
+    s3_key = str(meta.get("s3_key") or "").strip()
+    if not s3_key:
+        return _result_text(
+            _error_payload(
+                "INTERNAL_ERROR",
+                f"Governance catalog entry for {uri!r} is missing s3_key",
+                retryable=False,
+            )
+        )
+    try:
+        resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=s3_key)
+        content = resp["Body"].read().decode("utf-8")
+        return _result_text({"success": True, "uri": uri, "file_name": file_name, "content": content})
+    except ClientError as exc:
+        code = (exc.response or {}).get("Error", {}).get("Code", "")
+        return _result_text(
+            _error_payload(
+                "UPSTREAM_ERROR",
+                f"Failed to read governance file {uri!r} from S3 ({code}): {exc}",
+                retryable=code not in {"NoSuchKey", "404", "NotFound"},
+            )
+        )
+    except Exception as exc:
+        return _result_text(
+            _error_payload(
+                "INTERNAL_ERROR",
+                f"Unexpected error reading governance file {uri!r}: {exc}",
+                retryable=False,
+            )
+        )
 
 
 # --- System ---
@@ -4772,6 +4852,7 @@ _TOOL_HANDLERS = {
     "coordination_request_get": _coordination_request_get,
     "governance_update": _governance_update,
     "governance_hash": _governance_hash,
+    "governance_get": _governance_get,
     "connection_health": _connection_health,
     "dispatch_plan_generate": _dispatch_plan_generate,
     "dispatch_plan_dry_run": _dispatch_plan_dry_run,

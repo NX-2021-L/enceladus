@@ -8,6 +8,7 @@ API_ID="${API_ID:-8nkzqkmxqc}"
 FUNCTION_NAME="${FUNCTION_NAME:-devops-github-integration}"
 ROLE_NAME="${ROLE_NAME:-devops-github-integration-lambda-role}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
+COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}"
 GITHUB_APP_ID="${GITHUB_APP_ID:-}"
 GITHUB_INSTALLATION_ID="${GITHUB_INSTALLATION_ID:-}"
 ALLOWED_REPOS="${ALLOWED_REPOS:-NX-2021-L/enceladus}"
@@ -186,6 +187,7 @@ ensure_lambda() {
     "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
     "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
     "COORDINATION_INTERNAL_API_KEY": "${effective_key}",
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS": "${COORDINATION_INTERNAL_API_KEY_PREVIOUS}",
     "GITHUB_APP_ID": "${effective_app_id}",
     "GITHUB_INSTALLATION_ID": "${effective_install_id}",
     "GITHUB_PRIVATE_KEY_SECRET": "devops/github-app/enceladus-private-key",

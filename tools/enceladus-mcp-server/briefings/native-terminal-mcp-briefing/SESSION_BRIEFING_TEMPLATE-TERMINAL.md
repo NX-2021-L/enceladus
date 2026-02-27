@@ -18,7 +18,8 @@ Bootstrap contract:
    - connection_health
    - coordination_capabilities
    - governance_hash
-4) Read governance://agents.md and execute all required initialization steps from that file.
+4) Read governance agents.md using governance_get("agents.md") and execute all required initialization steps from that file.
+   (Fallback if governance_get is unavailable: aws s3 cp s3://jreese-net/governance/live/agents.md - --profile enceladus-agent)
 
 Operating mode:
 - MCP-only for Enceladus system interactions.

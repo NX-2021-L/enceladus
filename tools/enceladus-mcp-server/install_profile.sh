@@ -195,6 +195,13 @@ for key in (
     if value:
         env_block[key] = value
 
+import sys as _sys
+api_key_configured = any("API_KEY" in k for k in env_block)
+if not api_key_configured:
+    print("[WARNING] No ENCELADUS_*_INTERNAL_API_KEY env vars set. MCP profile will have NO auth keys.", file=_sys.stderr)
+    print("[WARNING] Tracker/document/deploy writes will return PERMISSION_DENIED until keys are configured.", file=_sys.stderr)
+    print("[WARNING] Set ENCELADUS_COORDINATION_INTERNAL_API_KEY before running install_profile.sh.", file=_sys.stderr)
+
 aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
 if aws_profile:
     env_block["AWS_PROFILE"] = aws_profile
@@ -433,6 +440,23 @@ async def main() -> None:
             await session.initialize()
             await session.call_tool("connection_health", {})
             await session.call_tool("governance_hash", {})
+
+            # Authenticated API probe — validates that API keys are present and accepted.
+            # connection_health + governance_hash both use direct DynamoDB/S3 and pass even
+            # with no keys configured. tracker_list requires the HTTP API auth key.
+            result = await session.call_tool("tracker_list", {"project_id": "enceladus", "record_type": "task", "status": "open"})
+            result_text = result.content[0].text if result.content else ""
+            import json as _json
+            try:
+                result_obj = _json.loads(result_text)
+                if isinstance(result_obj, dict) and result_obj.get("error") in ("PERMISSION_DENIED", "Authentication required"):
+                    import sys
+                    print(f"[ERROR] Authenticated API probe failed — PERMISSION_DENIED. API key may be missing or incorrect in MCP profile.", file=sys.stderr)
+                    print(f"[ERROR] Set ENCELADUS_COORDINATION_INTERNAL_API_KEY and re-run install_profile.sh.", file=sys.stderr)
+                    sys.exit(1)
+            except Exception:
+                pass  # Non-JSON or unexpected format — don't block on parse failures
+            print("[SUCCESS] Authenticated API probe passed (tracker_list)")
 
 
 anyio.run(main)
