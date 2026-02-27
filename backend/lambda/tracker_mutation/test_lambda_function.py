@@ -127,6 +127,43 @@ class AuthTests(unittest.TestCase):
         self.assertIn("Token expired", body["error"])
 
 
+class InternalKeyScopeTests(unittest.TestCase):
+    def setUp(self):
+        self._orig_key = tracker_mutation.COORDINATION_INTERNAL_API_KEY
+        self._orig_keys = tracker_mutation.COORDINATION_INTERNAL_API_KEYS
+        self._orig_scopes = tracker_mutation.INTERNAL_API_KEY_SCOPES
+
+    def tearDown(self):
+        tracker_mutation.COORDINATION_INTERNAL_API_KEY = self._orig_key
+        tracker_mutation.COORDINATION_INTERNAL_API_KEYS = self._orig_keys
+        tracker_mutation.INTERNAL_API_KEY_SCOPES = self._orig_scopes
+
+    def test_internal_key_scope_denied_for_write(self):
+        tracker_mutation.COORDINATION_INTERNAL_API_KEY = "scope-key"
+        tracker_mutation.COORDINATION_INTERNAL_API_KEYS = ("scope-key",)
+        tracker_mutation.INTERNAL_API_KEY_SCOPES = {"scope-key": {"tracker:read"}}
+
+        claims, auth_err = tracker_mutation._authenticate(
+            {"headers": {"x-coordination-internal-key": "scope-key"}},
+            required_scopes=["tracker:write"],
+        )
+        self.assertIsNone(claims)
+        self.assertIsNotNone(auth_err)
+        self.assertEqual(auth_err["statusCode"], 403)
+
+    def test_internal_key_scope_allows_write(self):
+        tracker_mutation.COORDINATION_INTERNAL_API_KEY = "scope-key"
+        tracker_mutation.COORDINATION_INTERNAL_API_KEYS = ("scope-key",)
+        tracker_mutation.INTERNAL_API_KEY_SCOPES = {"scope-key": {"tracker:*"}}
+
+        claims, auth_err = tracker_mutation._authenticate(
+            {"headers": {"x-coordination-internal-key": "scope-key"}},
+            required_scopes=["tracker:write"],
+        )
+        self.assertEqual(claims, {"auth_mode": "internal-key"})
+        self.assertIsNone(auth_err)
+
+
 class ProjectValidationTests(unittest.TestCase):
     @patch.object(tracker_mutation, "_validate_project_exists",
                   return_value="Project 'bogus' is not registered.")

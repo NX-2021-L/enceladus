@@ -22,6 +22,7 @@ COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
 
 # Internal API key (resolved from env or existing Lambda config)
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
+COORDINATION_INTERNAL_API_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES:-}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -94,6 +95,7 @@ env = {
     'DYNAMODB_REGION': '${REGION}',
     'PROJECTS_TABLE': 'projects',
     'COORDINATION_INTERNAL_API_KEY': '${effective_key}',
+    'COORDINATION_INTERNAL_API_KEY_SCOPES': '${COORDINATION_INTERNAL_API_KEY_SCOPES}',
     'CORS_ORIGIN': 'https://jreese.net',
 }
 print(json.dumps({'Variables': env}))

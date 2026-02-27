@@ -84,6 +84,10 @@ COORDINATION_INTERNAL_API_KEYS = _normalize_api_keys(
     COORDINATION_INTERNAL_API_KEY,
     COORDINATION_INTERNAL_API_KEY_PREVIOUS,
 )
+_INTERNAL_SCOPE_MAP_RAW = (
+    os.environ.get("COORDINATION_INTERNAL_API_KEY_SCOPES", "")
+    or os.environ.get("ENCELADUS_INTERNAL_API_KEY_SCOPES", "")
+).strip()
 GITHUB_INTEGRATION_API_BASE = os.environ.get("GITHUB_INTEGRATION_API_BASE", "")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 MAX_NOTE_LENGTH = 2000
@@ -335,6 +339,63 @@ _project_cache_at: float = 0.0
 _PROJECT_CACHE_TTL = 300.0
 
 
+def _parse_internal_scope_map(raw: str) -> Dict[str, set[str]]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Invalid COORDINATION_INTERNAL_API_KEY_SCOPES JSON; ignoring scoped auth map")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: Dict[str, set[str]] = {}
+    for key, value in parsed.items():
+        token = str(key or "").strip()
+        if not token:
+            continue
+        scopes: set[str] = set()
+        if isinstance(value, list):
+            items = value
+        else:
+            items = str(value).split(",")
+        for item in items:
+            scope = str(item or "").strip().lower()
+            if scope:
+                scopes.add(scope)
+        if scopes:
+            out[token] = scopes
+    return out
+
+
+INTERNAL_API_KEY_SCOPES = _parse_internal_scope_map(_INTERNAL_SCOPE_MAP_RAW)
+
+
+def _scope_match(granted: str, required: str) -> bool:
+    if granted in {"*", "all"}:
+        return True
+    if granted == required:
+        return True
+    if granted.endswith("*"):
+        return required.startswith(granted[:-1])
+    return False
+
+
+def _internal_key_has_scopes(internal_key: str, required_scopes: Optional[List[str]]) -> bool:
+    if not required_scopes:
+        return True
+    if not INTERNAL_API_KEY_SCOPES:
+        return True
+    granted = INTERNAL_API_KEY_SCOPES.get(internal_key) or INTERNAL_API_KEY_SCOPES.get("*") or set()
+    if not granted:
+        return False
+    for required in required_scopes:
+        req = str(required or "").strip().lower()
+        if req and not any(_scope_match(g, req) for g in granted):
+            return False
+    return True
+
+
 def _get_jwks() -> Dict[str, Any]:
     global _jwks_cache, _jwks_fetched_at
     now = time.time()
@@ -409,7 +470,7 @@ def _extract_token(event: Dict) -> Optional[str]:
     return None
 
 
-def _authenticate(event: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
+def _authenticate(event: Dict, required_scopes: Optional[List[str]] = None) -> Tuple[Optional[Dict], Optional[Dict]]:
     """Authenticate via internal API key or Cognito JWT.
 
     Returns (claims, None) on success or (None, error_response) on failure.
@@ -423,6 +484,8 @@ def _authenticate(event: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
         or ""
     )
     if internal_key and COORDINATION_INTERNAL_API_KEYS and internal_key in COORDINATION_INTERNAL_API_KEYS:
+        if not _internal_key_has_scopes(internal_key, required_scopes):
+            return None, _error(403, "Forbidden: internal key scope is insufficient for this operation.")
         return {"auth_mode": "internal-key"}, None
 
     # Fall back to Cognito JWT
@@ -1946,7 +2009,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
     # --- Route: GET /pending-updates ---
     if method == "GET" and _RE_PENDING_UPDATES.match(path):
-        claims, auth_err = _authenticate(event)
+        claims, auth_err = _authenticate(event, ["tracker:read"])
         if auth_err:
             return auth_err
         return _handle_pending_updates(query_params)
@@ -1959,7 +2022,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         record_id = m_sub.group("id")
         sub = m_sub.group("sub")
 
-        claims, auth_err = _authenticate(event)
+        claims, auth_err = _authenticate(
+            event,
+            ["tracker:read"] if method == "GET" else ["tracker:write"],
+        )
         if auth_err:
             return auth_err
 
@@ -1991,7 +2057,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         record_type = m_record.group("type")
         record_id = m_record.group("id")
 
-        claims, auth_err = _authenticate(event)
+        claims, auth_err = _authenticate(
+            event,
+            ["tracker:read"] if method == "GET" else ["tracker:write"],
+        )
         if auth_err:
             return auth_err
 
@@ -2017,7 +2086,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         project_id = m_type.group("project")
         record_type = m_type.group("type")
 
-        claims, auth_err = _authenticate(event)
+        claims, auth_err = _authenticate(event, ["tracker:write"])
         if auth_err:
             return auth_err
 
@@ -2041,7 +2110,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         project_id = m_project.group("project")
 
         # Don't require auth for listing? Actually yes, require it.
-        claims, auth_err = _authenticate(event)
+        claims, auth_err = _authenticate(event, ["tracker:read"])
         if auth_err:
             return auth_err
 
