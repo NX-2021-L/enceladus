@@ -363,6 +363,8 @@ env_items = {
     "ENCELADUS_PROJECTS_TABLE": "projects",
     "ENCELADUS_DOCUMENTS_TABLE": "documents",
     "ENCELADUS_S3_BUCKET": "jreese-net",
+    "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
+    "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
     # HTTP API base URLs (Phase 2d migration)
     "ENCELADUS_TRACKER_API_BASE": "https://jreese.net/api/v1/tracker",
     "ENCELADUS_GOVERNANCE_API_BASE": "https://jreese.net/api/v1/governance",
@@ -420,6 +422,51 @@ then
     :
 else
     echo "[WARNING] Failed to update ${CODEX_CONFIG_FILE}; continuing"
+fi
+
+# Write global ~/.codex/AGENTS.md (Codex bootstrap) if missing or lacks governance_get.
+CODEX_GLOBAL_AGENTS_MD="${CODEX_SETTINGS_DIR}/AGENTS.md"
+if [ ! -f "${CODEX_GLOBAL_AGENTS_MD}" ] || ! grep -q "governance_get" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null; then
+    cat > "${CODEX_GLOBAL_AGENTS_MD}" << 'GLOBAL_AGENTS_EOF'
+# Codex Bootstrap
+
+For Enceladus work: MCP servers `enceladus` and `enceladus-local` are configured.
+
+Initialize by running (in order):
+1. `mcp: connection_health`
+2. `mcp: governance_hash` — cache this for all writes
+3. `mcp: governance_get("governance_data_dictionary.json")` — load enum/constraint reference
+4. `mcp: governance_get("agents.md")` — load full governance rules and follow all instructions in it
+GLOBAL_AGENTS_EOF
+    echo "[SUCCESS] Global Codex AGENTS.md written to ${CODEX_GLOBAL_AGENTS_MD}"
+else
+    echo "[INFO] Global Codex AGENTS.md already present at ${CODEX_GLOBAL_AGENTS_MD}"
+fi
+
+# Write workspace AGENTS.md (Codex bootstrap) if missing or doesn't reference governance_get.
+# The file is intentionally minimal — agents load full rules from governance://agents.md dynamically.
+WORKSPACE_AGENTS_MD="${WORKSPACE_ROOT}/AGENTS.md"
+if [ ! -f "${WORKSPACE_AGENTS_MD}" ] || ! grep -q "governance_get" "${WORKSPACE_AGENTS_MD}" 2>/dev/null; then
+    cat > "${WORKSPACE_AGENTS_MD}" << 'AGENTS_EOF'
+# Enceladus Workspace — Codex Bootstrap
+
+MCP servers `enceladus` and `enceladus-local` are pre-configured in `~/.codex/config.toml`.
+
+## Initialization (REQUIRED — run in order every session)
+
+1. `mcp: connection_health` — verify DynamoDB/S3/API connectivity
+2. `mcp: governance_hash` — get and cache the governance hash (required for all writes)
+3. `mcp: governance_get("governance_data_dictionary.json")` — load enum/constraint reference
+4. `mcp: governance_get("agents.md")` — load full governance rules and follow all instructions in it
+5. `mcp: tracker_list(project_id="enceladus", record_type="task", status="open")` — load open tasks
+6. `mcp: tracker_pending_updates(project_id="enceladus")` — check pending updates
+
+All operating rules, tool reference, and task policies are in `governance://agents.md`.
+Do not proceed with any work until steps 1-4 are complete.
+AGENTS_EOF
+    echo "[SUCCESS] Workspace AGENTS.md written to ${WORKSPACE_AGENTS_MD}"
+else
+    echo "[INFO] Workspace AGENTS.md already present at ${WORKSPACE_AGENTS_MD}"
 fi
 
 # Optional stdio smoke test so install failures surface immediately.
