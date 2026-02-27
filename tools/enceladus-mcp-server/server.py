@@ -4515,6 +4515,13 @@ async def _connection_health(args: dict) -> list[TextContent]:
     # --- Phase 2d: HTTP API migration ---
     resp = _health_api_request()
     resp["server_version"] = SERVER_VERSION
+    resp["auth_config"] = {
+        "common_internal_api_key_configured": bool(COMMON_INTERNAL_API_KEY),
+        "coordination_api_internal_api_key_configured": bool(COORDINATION_API_INTERNAL_API_KEY),
+        "deploy_api_internal_api_key_configured": bool(DEPLOY_API_INTERNAL_API_KEY),
+        "document_api_internal_api_key_configured": bool(DOCUMENT_API_INTERNAL_API_KEY),
+        "tracker_api_internal_api_key_configured": bool(TRACKER_API_INTERNAL_API_KEY),
+    }
     return _result_text(resp)
 
 
