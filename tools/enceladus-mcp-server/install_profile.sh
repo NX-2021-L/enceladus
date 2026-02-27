@@ -266,6 +266,49 @@ else
     echo "[INFO] Add the above to your MCP client's configuration file."
 fi
 
+# ---------------------------------------------------------------------------
+# Register with Claude Code CLI (terminal) via `claude mcp add --scope user`.
+# The CLI uses ~/.claude.json (mcpServers key), NOT ~/.claude/mcp.json.
+# This step is separate from the desktop/project mcp.json written above.
+# ---------------------------------------------------------------------------
+if command -v claude >/dev/null 2>&1; then
+    echo "[INFO] Registering with Claude Code CLI (user scope -> ~/.claude.json)..."
+
+    # Build -e KEY=VALUE args by parsing the already-computed MCP_CONFIG via stdin.
+    # mapfile ensures values containing '=' or spaces are handled correctly.
+    mapfile -t _MCP_ENV_ARGS < <(
+        echo "${MCP_CONFIG}" | "${PYTHON_BIN}" -c "
+import json, sys
+config = json.load(sys.stdin)
+servers = config.get('mcpServers', {})
+if servers:
+    env = next(iter(servers.values())).get('env', {})
+    for k, v in env.items():
+        print('-e')
+        print(f'{k}={v}')
+"
+    )
+
+    # Remove any existing entry first (idempotent), then re-add.
+    claude mcp remove "${MCP_PRIMARY_ALIAS}" --scope user 2>/dev/null || true
+
+    # shellcheck disable=SC2068
+    if claude mcp add \
+        --scope user \
+        "${_MCP_ENV_ARGS[@]}" \
+        "${MCP_PRIMARY_ALIAS}" \
+        "${PYTHON_BIN}" \
+        "${SERVER_PY}" 2>&1; then
+        echo "[SUCCESS] Registered '${MCP_PRIMARY_ALIAS}' with Claude Code CLI (user scope)"
+    else
+        echo "[WARNING] claude mcp add failed — manual CLI registration may be needed."
+        echo "[WARNING] Run: claude mcp add --scope user -e KEY=VAL ... ${MCP_PRIMARY_ALIAS} ${PYTHON_BIN} ${SERVER_PY}"
+    fi
+else
+    echo "[WARNING] 'claude' CLI not found — skipping Claude Code CLI registration."
+    echo "[WARNING] After installing Claude Code CLI, run: install_profile.sh to register."
+fi
+
 # Best-effort: upsert Codex MCP profile section for desktop sessions.
 CODEX_CONFIG_FILE="${CODEX_SETTINGS_DIR}/config.toml"
 mkdir -p "${CODEX_SETTINGS_DIR}"
