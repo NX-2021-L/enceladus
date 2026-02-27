@@ -179,7 +179,6 @@ deploy_lambda() {
       --role "${role_arn}" \
       --handler "server.lambda_handler" \
       --runtime "python3.12" \
-      --architectures arm64 \
       --timeout 30 \
       --memory-size 512 \
       --environment "file://${env_file}" >/dev/null
