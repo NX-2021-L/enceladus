@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-27.3",
-  "updated_at": "2026-02-27T09:06:00Z",
+  "version": "2026-02-27.4",
+  "updated_at": "2026-02-27T09:43:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -195,6 +195,44 @@
         "provider": {
           "type": "enum",
           "enum": ["openai_codex", "claude_agent_sdk", "aws_native", "aws_bedrock_agent"]
+        }
+      }
+    },
+    "internal_auth.scope_map": {
+      "description": "Scoped service-token authorization map shared across Enceladus service APIs.",
+      "fields": {
+        "COORDINATION_INTERNAL_API_KEY_SCOPES": {
+          "type": "object",
+          "constraints": {
+            "format": "json-map",
+            "key": "internal token or * wildcard",
+            "value": "array|string of lowercase scopes"
+          },
+          "usage_guidance": "Accepted by project_service, tracker_mutation, document_api, and deploy_intake. Supports exact scopes (for example deploy:write), prefix wildcards (for example tracker:*), and global values (* or all)."
+        },
+        "required_scopes": {
+          "type": "object",
+          "constraints": {
+            "method_map": {
+              "project_service": {
+                "GET": "projects:read",
+                "POST": "projects:write"
+              },
+              "tracker_mutation": {
+                "GET": "tracker:read",
+                "POST|PATCH|DELETE": "tracker:write"
+              },
+              "document_api": {
+                "GET": "documents:read",
+                "PUT|POST|PATCH": "documents:write"
+              },
+              "deploy_intake": {
+                "GET": "deploy:read",
+                "POST|PATCH": "deploy:write"
+              }
+            }
+          },
+          "usage_guidance": "If scope map is omitted, internal keys remain permissive for backward compatibility."
         }
       }
     }
