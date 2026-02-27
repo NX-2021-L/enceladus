@@ -13,6 +13,7 @@ or cloud API access.
 
 Governance resource: governance://agents.md
 
-Resolve the active Enceladus MCP server alias, then read governance://agents.md
-and follow its session initialization instructions.
+Resolve the active Enceladus MCP server alias, then read governance agents.md
+using governance_get("agents.md") and follow its session initialization instructions.
+(Fallback if governance_get is unavailable: aws s3 cp s3://jreese-net/governance/live/agents.md - --profile enceladus-agent)
 ```
