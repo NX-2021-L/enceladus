@@ -1,0 +1,98 @@
+name: IAM CloudFormation Unblock
+
+on:
+  workflow_dispatch:
+    inputs:
+      role_name:
+        description: "Role to patch for CloudFormation API stack deploy"
+        type: string
+        required: false
+        default: "enceladus-backend-deploy-github-role"
+      reason:
+        description: "Why this hotfix is needed"
+        type: string
+        required: false
+        default: "Unblock ENC-ISS-056 / ENC-ISS-063 CloudFormation API stack deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch role policy for CloudFormation API deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy
+        env:
+          ROLE_NAME: ${{ github.event.inputs.role_name }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/enceladus-cf-unblock-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "AllowCloudFormationApiStackLifecycle",
+                "Effect": "Allow",
+                "Action": [
+                  "cloudformation:CreateChangeSet",
+                  "cloudformation:DeleteChangeSet",
+                  "cloudformation:DescribeChangeSet",
+                  "cloudformation:DescribeStackEvents",
+                  "cloudformation:DescribeStacks",
+                  "cloudformation:ExecuteChangeSet",
+                  "cloudformation:GetTemplateSummary",
+                  "cloudformation:UpdateStack",
+                  "cloudformation:ValidateTemplate"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "AllowApiGatewayMutations",
+                "Effect": "Allow",
+                "Action": [
+                  "apigateway:*"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "AllowLambdaPermissionMutationsForApiIntegrations",
+                "Effect": "Allow",
+                "Action": [
+                  "lambda:AddPermission",
+                  "lambda:RemovePermission",
+                  "lambda:GetPolicy",
+                  "lambda:GetFunctionConfiguration"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "${ROLE_NAME}" \
+            --policy-name "enceladus-cloudformation-api-unblock-v1" \
+            --policy-document "file:///tmp/enceladus-cf-unblock-policy.json"
+
+      - name: Verify inline policy attached
+        env:
+          ROLE_NAME: ${{ github.event.inputs.role_name }}
+        run: |
+          set -euo pipefail
+          aws iam get-role-policy \
+            --role-name "${ROLE_NAME}" \
+            --policy-name "enceladus-cloudformation-api-unblock-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table
