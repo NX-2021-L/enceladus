@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   createManagedAuthToken,
+  createOAuthClient,
   deleteManagedAuthToken,
   listManagedAuthTokens,
   listOAuthClients,
@@ -14,11 +15,10 @@ const GATEWAY_URL = 'https://jreese.net/api/v1/coordination/mcp'
 
 type Tab = 'tokens' | 'permissions' | 'oauth'
 
-interface CreatedCredentials {
+interface CreatedClientCreds {
   client_id: string
   client_secret: string
   service_name: string
-  permissions: string[]
 }
 
 function formatAge(seconds: number | null): string {
@@ -50,7 +50,7 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
   )
 }
 
-function ConfigBlock({ creds }: { creds: CreatedCredentials }) {
+function ClientConfigBlock({ creds }: { creds: CreatedClientCreds }) {
   const configJson = JSON.stringify(
     {
       gateway_url: GATEWAY_URL,
@@ -72,7 +72,7 @@ function ConfigBlock({ creds }: { creds: CreatedCredentials }) {
           <code className="flex-1 text-sm text-emerald-300 overflow-x-auto">{GATEWAY_URL}</code>
           <CopyButton text={GATEWAY_URL} label="Copy URL" />
         </div>
-        <p className="text-xs text-slate-500">Paste this into the "MCP Server URL" field in your client.</p>
+        <p className="text-xs text-slate-500">Paste this into the &quot;MCP Server URL&quot; field in your client.</p>
       </div>
 
       {/* Credentials */}
@@ -123,9 +123,6 @@ function ConfigBlock({ creds }: { creds: CreatedCredentials }) {
           <div><span className="text-slate-400">Transport:</span> Streamable HTTP</div>
           <div><span className="text-slate-400">Gateway URL:</span> <code>{GATEWAY_URL}</code></div>
           <div><span className="text-slate-400">Auth Header:</span> <code>X-Coordination-Internal-Key: {creds.client_secret}</code></div>
-          <div className="pt-1 text-slate-500">
-            Scopes: {creds.permissions.join(', ')}
-          </div>
         </div>
       </div>
     </div>
@@ -138,12 +135,15 @@ export function AuthTokensPage() {
   const [oauthClients, setOauthClients] = useState<OAuthClient[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [serviceName, setServiceName] = useState('')
-  const [createPerms, setCreatePerms] = useState<string[]>(['read'])
-  const [fullAccess, setFullAccess] = useState(false)
-  const [createdCreds, setCreatedCreds] = useState<CreatedCredentials | null>(null)
 
-  const effectivePerms = fullAccess ? [...PERMISSION_OPTIONS] : createPerms
+  // Create Token state
+  const [tokenServiceName, setTokenServiceName] = useState('')
+  const [tokenPerms, setTokenPerms] = useState<string[]>(['read'])
+  const [createdTokenSecret, setCreatedTokenSecret] = useState('')
+
+  // Create Client state
+  const [clientName, setClientName] = useState('')
+  const [createdClientCreds, setCreatedClientCreds] = useState<CreatedClientCreds | null>(null)
 
   async function reload() {
     setLoading(true)
@@ -168,26 +168,51 @@ export function AuthTokensPage() {
     [tokens],
   )
 
-  async function onCreate() {
-    if (!serviceName.trim()) return
+  // --- Create Token ---
+  async function onCreateToken() {
+    if (!tokenServiceName.trim()) return
     setError(null)
     try {
       const result = await createManagedAuthToken({
-        service_name: serviceName.trim(),
-        permissions: effectivePerms,
+        service_name: tokenServiceName.trim(),
+        permissions: tokenPerms,
       })
-      setCreatedCreds({
-        client_id: result.token.token_id,
-        client_secret: result.token.token,
-        service_name: serviceName.trim(),
-        permissions: effectivePerms,
-      })
-      setServiceName('')
-      setCreatePerms(['read'])
-      setFullAccess(false)
+      setCreatedTokenSecret(result.token.token)
+      setTokenServiceName('')
+      setTokenPerms(['read'])
       await reload()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Create failed')
+      setError(err instanceof Error ? err.message : 'Create token failed')
+    }
+  }
+
+  // --- Create Client ---
+  async function onCreateClient() {
+    const name = clientName.trim()
+    if (!name) return
+    setError(null)
+    try {
+      // 1. Create a service token (generates the secret)
+      const tokenResult = await createManagedAuthToken({
+        service_name: name,
+        permissions: [...PERMISSION_OPTIONS],
+      })
+      const clientId = `enceladus-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`
+      // 2. Register the OAuth client entry
+      await createOAuthClient({
+        client_id: clientId,
+        service_name: name,
+        grant_types: ['client_credentials'],
+      })
+      setCreatedClientCreds({
+        client_id: clientId,
+        client_secret: tokenResult.token.token,
+        service_name: name,
+      })
+      setClientName('')
+      await reload()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Create client failed')
     }
   }
 
@@ -215,6 +240,7 @@ export function AuthTokensPage() {
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-4 space-y-4 text-slate-100">
+      {/* Tabs */}
       <section className="rounded-xl border border-slate-700 bg-slate-900/60 p-4 space-y-3">
         <h2 className="text-lg font-semibold">Unified Service Auth</h2>
         <div className="flex gap-2">
@@ -239,35 +265,25 @@ export function AuthTokensPage() {
         </div>
       </section>
 
-      {/* Create OAuth Client / MCP Connection */}
+      {/* Create Token */}
       <section className="rounded-xl border border-slate-700 bg-slate-900/60 p-4 space-y-3">
-        <h3 className="text-sm font-medium">Create OAuth Client / MCP Connection</h3>
+        <h3 className="text-sm font-medium">Create Token</h3>
         <div className="grid gap-3 md:grid-cols-3">
           <input
-            value={serviceName}
-            onChange={(e) => setServiceName(e.target.value)}
-            placeholder="Client / service name"
+            value={tokenServiceName}
+            onChange={(e) => setTokenServiceName(e.target.value)}
+            placeholder="Service name"
             className="rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-sm"
-            onKeyDown={(e) => { if (e.key === 'Enter') void onCreate() }}
+            onKeyDown={(e) => { if (e.key === 'Enter') void onCreateToken() }}
           />
-          <div className="md:col-span-2 flex flex-wrap gap-3 items-center">
-            <label className="text-xs flex items-center gap-1 font-medium text-emerald-400">
-              <input
-                type="checkbox"
-                checked={fullAccess}
-                onChange={(e) => setFullAccess(e.target.checked)}
-              />
-              Full Access
-            </label>
-            <span className="text-slate-600">|</span>
+          <div className="md:col-span-2 flex flex-wrap gap-3">
             {PERMISSION_OPTIONS.map((perm) => (
-              <label key={perm} className={`text-xs flex items-center gap-1 ${fullAccess ? 'opacity-40' : ''}`}>
+              <label key={perm} className="text-xs flex items-center gap-1">
                 <input
                   type="checkbox"
-                  checked={fullAccess || createPerms.includes(perm)}
-                  disabled={fullAccess}
+                  checked={tokenPerms.includes(perm)}
                   onChange={(e) => {
-                    setCreatePerms((current) =>
+                    setTokenPerms((current) =>
                       e.target.checked ? [...new Set([...current, perm])] : current.filter((p) => p !== perm),
                     )
                   }}
@@ -277,46 +293,77 @@ export function AuthTokensPage() {
             ))}
           </div>
         </div>
-        <div className="flex gap-2">
-          <button onClick={() => void onCreate()} className="rounded-md bg-emerald-500 px-3 py-2 text-sm text-slate-900 font-medium">
+        <button onClick={() => void onCreateToken()} className="rounded-md bg-emerald-500 px-3 py-2 text-sm text-slate-900 font-medium">
+          Create Token
+        </button>
+        {createdTokenSecret && (
+          <div className="rounded-md border border-amber-700 bg-amber-950/40 p-2 text-xs">
+            <div className="mb-1">New token (copy now; shown once):</div>
+            <div className="flex items-center gap-2">
+              <code className="overflow-x-auto">{createdTokenSecret}</code>
+              <CopyButton text={createdTokenSecret} />
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Create Client */}
+      <section className="rounded-xl border border-slate-700 bg-slate-900/60 p-4 space-y-3">
+        <h3 className="text-sm font-medium">Create Client</h3>
+        <p className="text-xs text-slate-400">Creates an OAuth client with full-access service token for MCP-compatible agents (ChatGPT, Claude, etc.)</p>
+        <div className="flex gap-3 items-center">
+          <input
+            value={clientName}
+            onChange={(e) => setClientName(e.target.value)}
+            placeholder="Client name (e.g. Claude Connector)"
+            className="rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-sm flex-1 max-w-sm"
+            onKeyDown={(e) => { if (e.key === 'Enter') void onCreateClient() }}
+          />
+          <button onClick={() => void onCreateClient()} className="rounded-md bg-emerald-500 px-3 py-2 text-sm text-slate-900 font-medium">
             Create Client
           </button>
           <button onClick={() => void reload()} className="rounded-md bg-slate-700 px-3 py-2 text-sm">
             Refresh
           </button>
         </div>
+        {clientName.trim() && (
+          <div className="text-xs text-slate-500">
+            Client ID will be: <code>enceladus-{clientName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}</code>
+          </div>
+        )}
 
         {/* One-time credentials display */}
-        {createdCreds && (
+        {createdClientCreds && (
           <div className="rounded-md border border-amber-700 bg-amber-950/40 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-sm font-medium text-amber-300">
-                Client created: {createdCreds.service_name}
+                Client created: {createdClientCreds.service_name}
               </span>
               <button
                 className="rounded bg-slate-700 px-2 py-1 text-xs hover:bg-slate-600"
-                onClick={() => setCreatedCreds(null)}
+                onClick={() => setCreatedClientCreds(null)}
               >
                 Dismiss
               </button>
             </div>
-            <ConfigBlock creds={createdCreds} />
+            <ClientConfigBlock creds={createdClientCreds} />
           </div>
         )}
       </section>
 
       {error && <section className="rounded-md border border-rose-700 bg-rose-900/40 p-3 text-sm">{error}</section>}
 
+      {/* Data table */}
       <section className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
         {loading ? (
-          <div className="text-sm text-slate-300">Loading tokens...</div>
+          <div className="text-sm text-slate-300">Loading...</div>
         ) : tab === 'tokens' ? (
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="text-left text-slate-400">
                   <th className="py-2 pr-4">Service</th>
-                  <th className="py-2 pr-4">Client ID</th>
+                  <th className="py-2 pr-4">Token ID</th>
                   <th className="py-2 pr-4">Token</th>
                   <th className="py-2 pr-4">Age</th>
                   <th className="py-2 pr-4">Last Used</th>
@@ -328,10 +375,7 @@ export function AuthTokensPage() {
                   <tr key={token.token_id} className="border-t border-slate-800">
                     <td className="py-2 pr-4">{token.service_name}</td>
                     <td className="py-2 pr-4">
-                      <div className="flex items-center gap-2">
-                        <code className="text-xs">{token.token_id}</code>
-                        <CopyButton text={token.token_id} />
-                      </div>
+                      <code className="text-xs">{token.token_id}</code>
                     </td>
                     <td className="py-2 pr-4">
                       <code>{token.token_masked || 'hidden'}</code>
@@ -408,7 +452,10 @@ export function AuthTokensPage() {
                   <tr key={client.client_id} className="border-t border-slate-800">
                     <td className="py-2 pr-4">{client.service_name}</td>
                     <td className="py-2 pr-4">
-                      <code className="text-xs">{client.client_id}</code>
+                      <div className="flex items-center gap-2">
+                        <code className="text-xs">{client.client_id}</code>
+                        <CopyButton text={client.client_id} />
+                      </div>
                     </td>
                     <td className="py-2 pr-4">{client.grant_types.join(', ')}</td>
                     <td className="py-2 pr-4">

@@ -85,3 +85,24 @@ export async function listOAuthClients(): Promise<OAuthClient[]> {
   const body = (await res.json()) as { oauth_clients?: OAuthClient[] }
   return Array.isArray(body.oauth_clients) ? body.oauth_clients : []
 }
+
+export async function createOAuthClient(input: {
+  client_id: string
+  service_name: string
+  grant_types?: string[]
+  redirect_uris?: string[]
+}): Promise<OAuthClient> {
+  const res = await fetchWithAuth('/api/v1/coordination/auth/oauth-clients', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const body = (await res.json().catch(() => ({}))) as {
+    oauth_client?: OAuthClient
+    error?: string
+  }
+  if (!res.ok || !body.oauth_client) {
+    throw new Error(body.error || `Failed to create OAuth client: ${res.status}`)
+  }
+  return body.oauth_client
+}
