@@ -307,6 +307,27 @@ Resources:
       RouteKey: GET /api/v1/coordination/monitor/{requestId}
       Target: !Sub integrations/${CoordinationMonitorIntegration}
 
+  RouteSessionsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/sessions
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteSessionTurns:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/sessions/{sessionId}/turns
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteSessionMessage:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/sessions/{sessionId}/message
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   RouteDeploySubmit:
     Type: AWS::ApiGatewayV2::Route
     Properties:

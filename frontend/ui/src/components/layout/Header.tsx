@@ -11,6 +11,7 @@ const TITLES: Record<string, string> = {
   '/projects/create': 'Create Project',
   '/feed': 'Feed',
   '/documents': 'Documents',
+  '/terminal/manage': 'Terminal Sessions',
   '/coordination': 'Coordination',
   '/coordination/auth': 'Access Tokens',
 }
@@ -114,6 +115,15 @@ export function Header() {
 
           {menuOpen && (
             <div className="absolute right-0 top-full mt-2 w-44 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-1 z-20">
+              <button
+                onClick={() => {
+                  setMenuOpen(false)
+                  navigate('/terminal/manage')
+                }}
+                className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 active:bg-slate-600 transition-colors"
+              >
+                Terminal Sessions
+              </button>
               <button
                 onClick={() => {
                   setMenuOpen(false)

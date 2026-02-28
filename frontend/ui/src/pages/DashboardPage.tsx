@@ -6,6 +6,7 @@ import { useFeatures } from '../hooks/useFeatures'
 import { FreshnessBadge } from '../components/shared/FreshnessBadge'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
+import { TerminalChatWidget } from '../components/terminal/TerminalChatWidget'
 
 export function DashboardPage() {
   const { projects, generatedAt, isPending, isError } = useProjects()
@@ -22,6 +23,8 @@ export function DashboardPage() {
 
   return (
     <div className="p-4 space-y-4">
+      <TerminalChatWidget />
+
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-slate-400">Overview</h2>
         <FreshnessBadge generatedAt={generatedAt} />

@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-28.9",
-  "updated_at": "2026-02-28T03:45:00Z",
+  "version": "2026-02-28.10",
+  "updated_at": "2026-02-28T05:15:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -226,6 +226,38 @@
           "type": "object",
           "definition": "Archive write outcome metadata emitted by refresh polling for codex execution modes.",
           "usage_guidance": "Contains archived(bool), key, records, redaction_hits and fallback buffered_path when S3 writes fail."
+        },
+        "skip_debounce": {
+          "type": "boolean",
+          "definition": "When true, bypasses the 3-minute debounce window and auto-promotes request from intake_received to queued with immediate dispatch.",
+          "usage_guidance": "Used by chat message endpoint (POST /sessions/{id}/message) for interactive terminal sessions."
+        },
+        "provider_session": {
+          "type": "object",
+          "definition": "Session context for multi-turn terminal interactions.",
+          "usage_guidance": "Contains session_id and thread_id. Used to group coordination requests into logical terminal sessions."
+        }
+      }
+    },
+    "coordination.session": {
+      "description": "Derived session view aggregated from coordination requests grouped by provider_session.session_id.",
+      "fields": {
+        "session_id": {
+          "type": "string",
+          "definition": "UUID identifying the terminal session."
+        },
+        "provider": {
+          "type": "enum",
+          "enum": ["openai_codex", "claude_agent_sdk", "unknown"],
+          "definition": "Provider derived from execution_mode of session requests."
+        },
+        "is_active": {
+          "type": "boolean",
+          "definition": "True if the latest request in the session is in a non-terminal state."
+        },
+        "turn_count": {
+          "type": "number",
+          "definition": "Number of coordination requests associated with this session."
         }
       }
     },
