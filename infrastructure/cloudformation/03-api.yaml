@@ -120,6 +120,15 @@ Resources:
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
+  ChangelogApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-changelog-api
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
   DocPrepIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
@@ -398,6 +407,38 @@ Resources:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/auth/refresh
       Target: !Sub integrations/${AuthRefreshIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Routes — Changelog API (ENC-FTR-033)
+  # ---------------------------------------------------------------------------
+
+  RouteChangelogHistorySingle:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/history/{projectId}
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteChangelogHistoryMulti:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/history
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteChangelogVersionSingle:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/version/{projectId}
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteChangelogVersionsMulti:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/versions
+      Target: !Sub integrations/${ChangelogApiIntegration}
 
   # NOTE: GitHub routes are provisioned by backend/lambda/github_integration/deploy.sh.
   # Keeping them out of this stack avoids route-key ownership conflicts when the
