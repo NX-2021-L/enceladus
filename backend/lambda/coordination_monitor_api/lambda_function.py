@@ -4,6 +4,9 @@ Read-only Lambda API for Enceladus Coordination Monitor UI.
 
 Routes (via API Gateway proxy):
     GET     /api/v1/coordination/monitor
+    GET     /api/v1/coordination/monitor/{requestId}
+    GET     /api/v1/coordination/sessions
+    GET     /api/v1/coordination/sessions/{sessionId}/turns
     OPTIONS /api/v1/coordination/monitor*
 
 Auth:
@@ -15,14 +18,18 @@ Environment variables:
     COGNITO_CLIENT_ID         default: ""
     COORDINATION_TABLE        default: coordination-requests
     DYNAMODB_REGION           default: us-west-2
+    SESSION_ARCHIVE_BUCKET    default: jreese-net
+    SESSION_ARCHIVE_PREFIX    default: codex-sessions/
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import json
 import logging
 import os
+import re as _re
 import time
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -49,10 +56,15 @@ COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 CORS_ORIGIN = "https://jreese.net"
 
+SESSION_ARCHIVE_BUCKET = os.environ.get("SESSION_ARCHIVE_BUCKET", "jreese-net")
+SESSION_ARCHIVE_PREFIX = os.environ.get("SESSION_ARCHIVE_PREFIX", "codex-sessions/")
+
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 
 REDACTED_FIELDS = {"callback_token"}
+
+_TERMINAL_STATES = {"succeeded", "failed", "dead_letter", "cancelled"}
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -66,6 +78,7 @@ _jwks_fetched_at: float = 0.0
 _JWKS_TTL = 3600.0
 
 _ddb = None
+_s3 = None
 
 
 def _get_ddb():
@@ -77,6 +90,17 @@ def _get_ddb():
             config=Config(retries={"max_attempts": 3, "mode": "standard"}),
         )
     return _ddb
+
+
+def _get_s3():
+    global _s3
+    if _s3 is None:
+        _s3 = boto3.client(
+            "s3",
+            region_name=DYNAMODB_REGION,
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _s3
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +375,7 @@ def _transform_request(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Route handlers
+# Route handlers — Monitor
 # ---------------------------------------------------------------------------
 
 
@@ -448,10 +472,164 @@ def _handle_detail(request_id: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Route handlers — Sessions (ENC-FTR-018)
+# ---------------------------------------------------------------------------
+
+
+def _handle_sessions_list(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/sessions — list terminal sessions.
+
+    Groups coordination requests by provider_session.session_id to derive
+    a list of unique sessions with metadata.
+    """
+    ddb = _get_ddb()
+
+    try:
+        items: List[Dict[str, Any]] = []
+        scan_kwargs: Dict[str, Any] = {
+            "TableName": COORDINATION_TABLE,
+            "FilterExpression": "attribute_exists(provider_session)",
+        }
+
+        paginator = ddb.get_paginator("scan")
+        for page in paginator.paginate(**scan_kwargs):
+            for item in page.get("Items", []):
+                items.append(item)
+
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("DynamoDB scan failed for sessions")
+        return _error(500, f"Failed reading sessions: {exc}")
+
+    # Group by session_id
+    sessions_map: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        provider_session = _ddb_map(item, "provider_session")
+        if not provider_session:
+            continue
+
+        session_id = provider_session.get("session_id", "")
+        if not session_id:
+            continue
+
+        state = _ddb_str(item, "state")
+        created_at = _ddb_str(item, "created_at")
+        updated_at = _ddb_str(item, "updated_at")
+        request_id = _ddb_str(item, "request_id")
+        project_id = _ddb_str(item, "project_id")
+        execution_mode = _ddb_str(item, "execution_mode")
+
+        # Derive provider from execution_mode
+        provider = "unknown"
+        if "codex" in execution_mode:
+            provider = "openai_codex"
+        elif "claude" in execution_mode:
+            provider = "claude_agent_sdk"
+
+        if session_id not in sessions_map:
+            sessions_map[session_id] = {
+                "session_id": session_id,
+                "provider": provider,
+                "project_id": project_id,
+                "started_at": created_at,
+                "last_activity_at": updated_at,
+                "turn_count": 1,
+                "latest_request_id": request_id,
+                "latest_state": state,
+                "is_active": state not in _TERMINAL_STATES,
+            }
+        else:
+            entry = sessions_map[session_id]
+            entry["turn_count"] += 1
+            if updated_at > entry["last_activity_at"]:
+                entry["last_activity_at"] = updated_at
+                entry["latest_request_id"] = request_id
+                entry["latest_state"] = state
+                entry["is_active"] = state not in _TERMINAL_STATES
+            if created_at < entry["started_at"]:
+                entry["started_at"] = created_at
+
+    sessions = sorted(
+        sessions_map.values(),
+        key=lambda s: s.get("last_activity_at", ""),
+        reverse=True,
+    )
+
+    return _response(200, {
+        "success": True,
+        "generated_at": _now_z(),
+        "sessions": sessions,
+        "count": len(sessions),
+    })
+
+
+def _handle_session_turns(session_id: str) -> Dict[str, Any]:
+    """GET /api/v1/coordination/sessions/{sessionId}/turns — session history from S3 archive."""
+    s3 = _get_s3()
+
+    try:
+        # List all archive files for this session across date prefixes
+        all_keys: List[str] = []
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(
+            Bucket=SESSION_ARCHIVE_BUCKET,
+            Prefix=SESSION_ARCHIVE_PREFIX,
+        ):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if f"/{session_id}/" in key and key.endswith(".json.gz"):
+                    all_keys.append(key)
+
+        if not all_keys:
+            return _response(200, {
+                "success": True,
+                "session_id": session_id,
+                "turns": [],
+                "count": 0,
+            })
+
+        # Read and decompress each archive file
+        turns: List[Dict[str, Any]] = []
+        seen_indices: set = set()
+
+        for key in sorted(all_keys):
+            try:
+                resp = s3.get_object(Bucket=SESSION_ARCHIVE_BUCKET, Key=key)
+                compressed = resp["Body"].read()
+                raw = gzip.decompress(compressed).decode("utf-8")
+
+                for line in raw.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    try:
+                        turn = json.loads(line)
+                        idx = turn.get("turn_index", len(turns))
+                        if idx not in seen_indices:
+                            seen_indices.add(idx)
+                            turns.append(turn)
+                    except json.JSONDecodeError:
+                        continue
+            except (BotoCoreError, ClientError) as exc:
+                logger.warning("Failed reading S3 key %s: %s", key, exc)
+                continue
+
+        turns.sort(key=lambda t: t.get("turn_index", 0))
+
+        return _response(200, {
+            "success": True,
+            "session_id": session_id,
+            "turns": turns,
+            "count": len(turns),
+        })
+
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("S3 list/read failed for session %s", session_id)
+        return _error(500, f"Failed reading session archive: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
-import re as _re
 
 def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     method = (event.get("requestContext", {}).get("http", {}).get("method")
@@ -484,5 +662,16 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     detail_match = _re.fullmatch(r"/api/v1/coordination/monitor/([A-Za-z0-9\-]+)", path)
     if method == "GET" and detail_match:
         return _handle_detail(detail_match.group(1))
+
+    # Route: GET /api/v1/coordination/sessions
+    if method == "GET" and path.rstrip("/") == "/api/v1/coordination/sessions":
+        return _handle_sessions_list(event)
+
+    # Route: GET /api/v1/coordination/sessions/{sessionId}/turns
+    turns_match = _re.fullmatch(
+        r"/api/v1/coordination/sessions/([A-Za-z0-9\-]+)/turns", path
+    )
+    if method == "GET" and turns_match:
+        return _handle_session_turns(turns_match.group(1))
 
     return _error(404, f"Unsupported route: {method} {path}")
