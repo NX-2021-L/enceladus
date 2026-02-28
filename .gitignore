@@ -43,5 +43,9 @@ coverage/
 .DS_Store
 infrastructure/parity/out/
 
+# Agent worktree isolation (ENC-ISS-071)
+.claude/worktrees/
+.claude/agent-locks/
+
 # Ensure agent-reference content stays out of repos
 ../agent-reference/
