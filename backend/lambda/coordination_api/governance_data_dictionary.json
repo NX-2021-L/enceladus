@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-28.15",
-  "updated_at": "2026-02-28T21:00:00Z",
+  "version": "2026-02-28.16",
+  "updated_at": "2026-02-28T22:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -11,24 +11,46 @@
       "fields": {
         "status": {
           "type": "enum",
-          "enum": ["open", "in-progress", "coding-complete", "committed", "pushed", "merged-main", "deployed", "closed"],
+          "enum": [
+            "open",
+            "in-progress",
+            "coding-complete",
+            "committed",
+            "pushed",
+            "merged-main",
+            "deployed",
+            "closed"
+          ],
           "definition": "Task lifecycle status.",
           "usage_guidance": "Task transitions are sequential; use tracker_validation_rules before tracker_set to obtain required evidence and checkout requirements."
         },
         "priority": {
           "type": "enum",
-          "enum": ["P0", "P1", "P2", "P3"],
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
           "definition": "Task urgency classification."
         },
         "category": {
           "type": "enum",
-          "enum": ["implementation", "investigation", "documentation", "maintenance", "validation"],
+          "enum": [
+            "implementation",
+            "investigation",
+            "documentation",
+            "maintenance",
+            "validation"
+          ],
           "definition": "Task category used for governance and reporting."
         },
         "acceptance_criteria": {
           "type": "array",
           "item_type": "string",
-          "constraints": {"min_items": 1},
+          "constraints": {
+            "min_items": 1
+          },
           "definition": "Concrete conditions to mark task complete.",
           "usage_guidance": "Required for task creation."
         },
@@ -48,20 +70,41 @@
       "fields": {
         "status": {
           "type": "enum",
-          "enum": ["open", "in-progress", "closed"]
+          "enum": [
+            "open",
+            "in-progress",
+            "closed"
+          ]
         },
         "priority": {
           "type": "enum",
-          "enum": ["P0", "P1", "P2", "P3"]
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ]
         },
         "category": {
           "type": "enum",
-          "enum": ["bug", "debt", "risk", "security", "performance"]
+          "enum": [
+            "bug",
+            "debt",
+            "risk",
+            "security",
+            "performance"
+          ]
         },
         "evidence": {
           "type": "array",
           "item_type": "object",
-          "constraints": {"min_items": 1, "required_keys": ["description", "steps_to_duplicate"]},
+          "constraints": {
+            "min_items": 1,
+            "required_keys": [
+              "description",
+              "steps_to_duplicate"
+            ]
+          },
           "usage_guidance": "Issue creation requires at least one evidence object."
         }
       }
@@ -71,25 +114,45 @@
       "fields": {
         "status": {
           "type": "enum",
-          "enum": ["planned", "in-progress", "completed", "production", "deprecated"]
+          "enum": [
+            "planned",
+            "in-progress",
+            "completed",
+            "production",
+            "deprecated"
+          ]
         },
         "priority": {
           "type": "enum",
-          "enum": ["P0", "P1", "P2", "P3"]
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ]
         },
         "category": {
           "type": "enum",
-          "enum": ["epic", "capability", "enhancement", "infrastructure"]
+          "enum": [
+            "epic",
+            "capability",
+            "enhancement",
+            "infrastructure"
+          ]
         },
         "user_story": {
           "type": "string",
-          "constraints": {"min_length": 10},
+          "constraints": {
+            "min_length": 10
+          },
           "usage_guidance": "Must follow: As a [USER/SYSTEM] I need/want ... so that ..."
         },
         "acceptance_criteria": {
           "type": "array",
           "item_type": "object|string",
-          "constraints": {"min_items": 1},
+          "constraints": {
+            "min_items": 1
+          },
           "usage_guidance": "Feature completion requires accepted evidence for all criteria."
         }
       }
@@ -99,29 +162,46 @@
       "fields": {
         "project_id": {
           "type": "string",
-          "constraints": {"pattern": "^[a-z0-9_-]+$"}
+          "constraints": {
+            "pattern": "^[a-z0-9_-]+$"
+          }
         },
         "title": {
           "type": "string",
-          "constraints": {"min_length": 1, "max_length": 500}
+          "constraints": {
+            "min_length": 1,
+            "max_length": 500
+          }
         },
         "content": {
           "type": "string",
-          "constraints": {"min_length": 1, "max_bytes": 1048576}
+          "constraints": {
+            "min_length": 1,
+            "max_bytes": 1048576
+          }
         },
         "file_name": {
           "type": "string",
-          "constraints": {"extensions": [".md", ".markdown"]}
+          "constraints": {
+            "extensions": [
+              ".md",
+              ".markdown"
+            ]
+          }
         },
         "keywords": {
           "type": "array",
           "item_type": "string",
-          "constraints": {"max_items": 50}
+          "constraints": {
+            "max_items": 50
+          }
         },
         "related_items": {
           "type": "array",
           "item_type": "string",
-          "constraints": {"max_items": 100}
+          "constraints": {
+            "max_items": 100
+          }
         }
       }
     },
@@ -148,7 +228,11 @@
       "fields": {
         "change_type": {
           "type": "enum",
-          "enum": ["patch", "minor", "major"]
+          "enum": [
+            "patch",
+            "minor",
+            "major"
+          ]
         },
         "deployment_type": {
           "type": "enum",
@@ -170,16 +254,22 @@
         },
         "summary": {
           "type": "string",
-          "constraints": {"min_length": 1}
+          "constraints": {
+            "min_length": 1
+          }
         },
         "changes": {
           "type": "array",
           "item_type": "string",
-          "constraints": {"min_items": 1}
+          "constraints": {
+            "min_items": 1
+          }
         },
         "project_id": {
           "type": "string",
-          "constraints": {"pattern": "^[a-z0-9_-]+$"}
+          "constraints": {
+            "pattern": "^[a-z0-9_-]+$"
+          }
         }
       }
     },
@@ -212,7 +302,12 @@
         },
         "provider": {
           "type": "enum",
-          "enum": ["openai_codex", "claude_agent_sdk", "aws_native", "aws_bedrock_agent"]
+          "enum": [
+            "openai_codex",
+            "claude_agent_sdk",
+            "aws_native",
+            "aws_bedrock_agent"
+          ]
         },
         "dispatch.prompt_submitted": {
           "type": "string",
@@ -248,7 +343,11 @@
         },
         "provider": {
           "type": "enum",
-          "enum": ["openai_codex", "claude_agent_sdk", "unknown"],
+          "enum": [
+            "openai_codex",
+            "claude_agent_sdk",
+            "unknown"
+          ],
           "definition": "Provider derived from execution_mode of session requests."
         },
         "is_active": {
@@ -312,7 +411,10 @@
       "fields": {
         "file_name": {
           "type": "string",
-          "enum": ["agents.md", "governance_data_dictionary.json"],
+          "enum": [
+            "agents.md",
+            "governance_data_dictionary.json"
+          ],
           "usage_guidance": "Recognized governance file names. 'agents.md' and files under 'agents/' are Markdown governance rules. 'governance_data_dictionary.json' is the machine-readable schema/enum dictionary; load at session init via governance_get(\"governance_data_dictionary.json\")."
         },
         "uri": {
@@ -326,36 +428,57 @@
       "fields": {
         "policy_id": {
           "type": "string",
-          "constraints": {"prefix": "service_token#"},
+          "constraints": {
+            "prefix": "service_token#"
+          },
           "usage_guidance": "Deterministic key built from sha256(token) to avoid storing plaintext token secrets."
         },
         "token_id": {
           "type": "string",
-          "constraints": {"pattern": "^TOK-[A-Z0-9]{12}$"},
+          "constraints": {
+            "pattern": "^TOK-[A-Z0-9]{12}$"
+          },
           "usage_guidance": "Operator-facing token identifier used for delete/permissions update routes."
         },
         "service_name": {
           "type": "string",
-          "constraints": {"min_length": 1},
+          "constraints": {
+            "min_length": 1
+          },
           "usage_guidance": "Human-readable external service label shown in Tokens/Permissions UI tabs."
         },
         "permissions": {
           "type": "array",
           "item_type": "enum",
-          "enum": ["read", "write", "put", "delete", "admin"],
+          "enum": [
+            "read",
+            "write",
+            "put",
+            "delete",
+            "admin"
+          ],
           "usage_guidance": "Cross-service grant set used by unified auth model."
         },
         "status": {
           "type": "enum",
-          "enum": ["active", "revoked"]
+          "enum": [
+            "active",
+            "revoked"
+          ]
         },
         "token_masked": {
           "type": "string",
           "usage_guidance": "Obfuscated display value for UI listing; plaintext token is returned only at creation."
         },
-        "created_at": {"type": "timestamp"},
-        "updated_at": {"type": "timestamp"},
-        "last_used_at": {"type": "timestamp"}
+        "created_at": {
+          "type": "timestamp"
+        },
+        "updated_at": {
+          "type": "timestamp"
+        },
+        "last_used_at": {
+          "type": "timestamp"
+        }
       }
     },
     "mcp_server.oauth_token": {
@@ -363,32 +486,111 @@
       "fields": {
         "access_token": {
           "type": "string",
-          "usage_guidance": "Equals MCP_API_KEY env var. Stateless — no server-side token storage. Validated by the Lambda handler on every request via exact Bearer comparison."
+          "usage_guidance": "Equals MCP_API_KEY env var. Stateless \u2014 no server-side token storage. Validated by the Lambda handler on every request via exact Bearer comparison."
         },
         "token_type": {
           "type": "enum",
-          "enum": ["bearer"],
+          "enum": [
+            "bearer"
+          ],
           "usage_guidance": "Always 'bearer'. Sent by clients as Authorization: Bearer <access_token>."
         },
         "expires_in": {
           "type": "number",
-          "constraints": {"min": 1},
+          "constraints": {
+            "min": 1
+          },
           "usage_guidance": "Access token lifetime in seconds. Configurable via ENCELADUS_MCP_TOKEN_TTL env var. Default 28800 (8 hours). Controls when Claude.ai will attempt to use the refresh token."
         },
         "refresh_token": {
           "type": "string",
-          "usage_guidance": "Self-contained HMAC-signed opaque token with 30-day TTL. Format: base64url(payload).sha256hex. Payload is {typ:'rt', iat:<unix>, exp:<unix+2592000>} signed with OAUTH_CLIENT_SECRET. Stateless — no server storage required; valid across Lambda cold starts. Issued only on authorization_code grant (not client_credentials per RFC 6749 §4.4.3). Rotated on every use."
+          "usage_guidance": "Self-contained HMAC-signed opaque token with 30-day TTL. Format: base64url(payload).sha256hex. Payload is {typ:'rt', iat:<unix>, exp:<unix+2592000>} signed with OAUTH_CLIENT_SECRET. Stateless \u2014 no server storage required; valid across Lambda cold starts. Issued only on authorization_code grant (not client_credentials per RFC 6749 \u00a74.4.3). Rotated on every use."
         },
         "grant_types_supported": {
           "type": "array",
           "item_type": "enum",
-          "enum": ["authorization_code", "refresh_token", "client_credentials"],
+          "enum": [
+            "authorization_code",
+            "refresh_token",
+            "client_credentials"
+          ],
           "usage_guidance": "Advertised in /.well-known/oauth-authorization-server metadata. authorization_code (with PKCE/S256) is the primary flow for Claude.ai connectors. refresh_token enables silent renewal without user interaction. client_credentials is available for programmatic access."
         },
         "ENCELADUS_MCP_TOKEN_TTL": {
           "type": "number",
-          "constraints": {"min": 300},
-          "usage_guidance": "Lambda env var controlling access token lifetime in seconds. Default 28800 (8h). Set to shorter values for higher-security environments. Do not set below 300s — shorter values increase re-auth noise without meaningful security benefit."
+          "constraints": {
+            "min": 300
+          },
+          "usage_guidance": "Lambda env var controlling access token lifetime in seconds. Default 28800 (8h). Set to shorter values for higher-security environments. Do not set below 300s \u2014 shorter values increase re-auth noise without meaningful security benefit."
+        }
+      }
+    },
+    "internal_auth.oauth_client": {
+      "description": "OAuth client records stored in the governance-policies table for external agent/MCP integrations.",
+      "fields": {
+        "policy_id": {
+          "type": "string",
+          "constraints": {
+            "prefix": "oauth_client#"
+          },
+          "usage_guidance": "Partition key. Format: oauth_client#{client_id}."
+        },
+        "client_id": {
+          "type": "string",
+          "constraints": {
+            "min_length": 1
+          },
+          "usage_guidance": "Operator-facing client identifier, typically enceladus-{service-slug}."
+        },
+        "service_name": {
+          "type": "string",
+          "constraints": {
+            "min_length": 1
+          },
+          "usage_guidance": "Human-readable service label shown in OAuth Clients UI tab."
+        },
+        "grant_types": {
+          "type": "array",
+          "item_type": "enum",
+          "enum": [
+            "authorization_code",
+            "client_credentials",
+            "refresh_token"
+          ],
+          "usage_guidance": "OAuth 2.1 grant types this client is authorized to use."
+        },
+        "permissions": {
+          "type": "array",
+          "item_type": "enum",
+          "enum": [
+            "read",
+            "write",
+            "put",
+            "delete",
+            "admin"
+          ],
+          "usage_guidance": "Cross-service grant set used by unified auth model. Defaults to [\"read\"] if omitted. Editable via PATCH /oauth-clients/{clientId}/permissions."
+        },
+        "redirect_uris": {
+          "type": "array",
+          "item_type": "string",
+          "usage_guidance": "Registered redirect URIs for authorization_code flow."
+        },
+        "status": {
+          "type": "enum",
+          "enum": [
+            "active",
+            "inactive"
+          ]
+        },
+        "created_at": {
+          "type": "timestamp"
+        },
+        "updated_at": {
+          "type": "timestamp"
+        },
+        "last_used_at": {
+          "type": "timestamp"
         }
       }
     }

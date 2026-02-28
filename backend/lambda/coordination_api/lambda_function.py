@@ -9109,6 +9109,7 @@ def _build_oauth_client_payload(item: Dict[str, Any]) -> Dict[str, Any]:
         "service_name": str(item.get("service_name") or ""),
         "grant_types": item.get("grant_types") or [],
         "redirect_uris": item.get("redirect_uris") or [],
+        "permissions": item.get("permissions") or ["read"],
         "status": str(item.get("status") or "active"),
         "created_at": str(item.get("created_at") or ""),
         "updated_at": str(item.get("updated_at") or ""),
@@ -9159,6 +9160,11 @@ def _handle_oauth_clients_create(event: Dict[str, Any]) -> Dict[str, Any]:
 
     grant_types = body.get("grant_types") or ["authorization_code"]
     redirect_uris = body.get("redirect_uris") or []
+    permissions_raw = body.get("permissions")
+    try:
+        permissions = _normalize_permissions(permissions_raw if permissions_raw is not None else ["read"])
+    except ValueError as exc:
+        return _error(400, str(exc))
     now = _now_z()
     policy_id = f"{OAUTH_CLIENT_POLICY_PREFIX}{client_id}"
 
@@ -9169,6 +9175,7 @@ def _handle_oauth_clients_create(event: Dict[str, Any]) -> Dict[str, Any]:
         "service_name": _serialize(service_name),
         "grant_types": _serialize(grant_types),
         "redirect_uris": _serialize(redirect_uris),
+        "permissions": _serialize(permissions),
         "status": _serialize("active"),
         "created_at": _serialize(now),
         "updated_at": _serialize(now),
@@ -9234,6 +9241,39 @@ def _handle_oauth_client_usage(client_id: str) -> Dict[str, Any]:
         logger.exception("Failed to update OAuth client usage")
         return _error(500, f"Failed to update OAuth client usage: {exc}")
     return _response(200, {"success": True, "client_id": client_id, "last_used_at": now})
+
+
+def _handle_oauth_client_permissions_update(client_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc))
+    try:
+        permissions = _normalize_permissions(body.get("permissions"))
+    except ValueError as exc:
+        return _error(400, str(exc))
+    policy_id = f"{OAUTH_CLIENT_POLICY_PREFIX}{client_id}"
+    now = _now_z()
+    try:
+        _get_ddb().update_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Key={"policy_id": _serialize(policy_id)},
+            UpdateExpression="SET permissions = :p, updated_at = :ua",
+            ExpressionAttributeValues={
+                ":p": _serialize(permissions),
+                ":ua": _serialize(now),
+            },
+            ConditionExpression="attribute_exists(policy_id)",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return _error(404, f"OAuth client '{client_id}' not found")
+        logger.exception("Failed to update OAuth client permissions")
+        return _error(500, f"Failed to update OAuth client permissions: {exc}")
+    except Exception as exc:
+        logger.exception("Failed to update OAuth client permissions")
+        return _error(500, f"Failed to update OAuth client permissions: {exc}")
+    return _response(200, {"success": True, "client_id": client_id, "permissions": permissions})
 
 
 def _load_terminal_cognito_credentials() -> Dict[str, str]:
@@ -9655,6 +9695,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     match_oauth_usage = re.fullmatch(r"/api/v1/coordination/auth/oauth-clients/([A-Za-z0-9_\-]+)/usage", path)
     if method == "PATCH" and match_oauth_usage:
         return _handle_oauth_client_usage(match_oauth_usage.group(1))
+
+    # PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/permissions
+    match_oauth_perms = re.fullmatch(r"/api/v1/coordination/auth/oauth-clients/([A-Za-z0-9_\-]+)/permissions", path)
+    if method == "PATCH" and match_oauth_perms:
+        return _handle_oauth_client_permissions_update(match_oauth_perms.group(1), event)
 
     # POST /api/v1/coordination/auth/cognito/session
     if method == "POST" and path == "/api/v1/coordination/auth/cognito/session":

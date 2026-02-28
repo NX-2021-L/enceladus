@@ -71,6 +71,7 @@ export type OAuthClient = {
   service_name: string
   grant_types: string[]
   redirect_uris: string[]
+  permissions: string[]
   status: string
   created_at: string
   updated_at: string
@@ -105,4 +106,21 @@ export async function createOAuthClient(input: {
     throw new Error(body.error || `Failed to create OAuth client: ${res.status}`)
   }
   return body.oauth_client
+}
+
+export async function updateOAuthClientPermissions(
+  clientId: string,
+  permissions: string[],
+): Promise<void> {
+  const res = await fetchWithAuth(
+    `/api/v1/coordination/auth/oauth-clients/${encodeURIComponent(clientId)}/permissions`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ permissions }),
+    },
+  )
+  if (!res.ok) {
+    throw new Error(`Failed to update permissions for client ${clientId}: ${res.status}`)
+  }
 }
