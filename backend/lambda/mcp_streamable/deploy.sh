@@ -181,6 +181,8 @@ deploy_lambda() {
   MCP_TRANSPORT="${MCP_TRANSPORT}" \
   MCP_API_KEY="${MCP_API_KEY}" \
   MCP_API_KEY_PREVIOUS="${MCP_API_KEY_PREVIOUS}" \
+  OAUTH_CLIENT_ID="${OAUTH_CLIENT_ID}" \
+  OAUTH_CLIENT_SECRET="${OAUTH_CLIENT_SECRET}" \
   build_environment_payload "${env_file}"
 
   if function_exists; then
