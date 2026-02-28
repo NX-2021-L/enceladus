@@ -361,11 +361,16 @@ TRACKER_PRIORITY_ENUM = ("P0", "P1", "P2", "P3")
 GSI_PROJECT_TYPE = "project-type-index"
 
 SERVER_NAME = "enceladus"
-SERVER_VERSION = "0.4.2"
+SERVER_VERSION = "0.4.3"
 HTTP_USER_AGENT = os.environ.get("ENCELADUS_HTTP_USER_AGENT", f"enceladus-mcp-server/{SERVER_VERSION}")
 
 MCP_TRANSPORT = os.environ.get("ENCELADUS_MCP_TRANSPORT", "stdio")
 MCP_API_KEY = os.environ.get("ENCELADUS_MCP_API_KEY", "")
+# Access token lifetime in seconds. Default 8 hours — long enough to cover a full
+# work session without forcing re-auth, short enough to bound token exposure.
+MCP_TOKEN_TTL = int(os.environ.get("ENCELADUS_MCP_TOKEN_TTL", "28800"))
+# Refresh token lifetime — 30 days. Stateless HMAC-signed; no server storage needed.
+_REFRESH_TOKEN_TTL = 30 * 24 * 3600
 OAUTH_CLIENT_ID = os.environ.get("ENCELADUS_OAUTH_CLIENT_ID", "")
 OAUTH_CLIENT_SECRET = os.environ.get("ENCELADUS_OAUTH_CLIENT_SECRET", "")
 
@@ -5035,7 +5040,7 @@ def _handle_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, Any]:
             "token_endpoint": f"{base}/oauth/token",
             "registration_endpoint": f"{base}/oauth/register",
             "token_endpoint_auth_methods_supported": ["client_secret_post"],
-            "grant_types_supported": ["authorization_code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
             "response_types_supported": ["code"],
             "code_challenge_methods_supported": ["S256"],
             "service_documentation": f"{base}/.well-known/oauth-protected-resource",
@@ -5071,6 +5076,47 @@ def _verify_auth_code(code: str) -> Optional[dict]:
     try:
         payload = json.loads(raw)
     except Exception:
+        return None
+    if payload.get("exp", 0) < time.time():
+        return None
+    return payload
+
+
+def _mint_refresh_token() -> str:
+    """Create a self-contained, HMAC-signed refresh token (stateless — no server storage needed).
+
+    The token payload is: {"typ": "rt", "iat": <unix>, "exp": <unix+30d>}
+    Signed with OAUTH_CLIENT_SECRET so it survives Lambda cold starts and can be
+    validated on any invocation without shared state.
+    """
+    import base64 as b64
+    now = int(time.time())
+    payload = {"typ": "rt", "iat": now, "exp": now + _REFRESH_TOKEN_TTL}
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    sig = hmac.new(OAUTH_CLIENT_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    return b64.urlsafe_b64encode(raw).decode().rstrip("=") + "." + sig
+
+
+def _verify_refresh_token(token: str) -> Optional[dict]:
+    """Verify and decode a refresh token. Returns None if signature is invalid or token is expired."""
+    import base64 as b64
+    parts = token.rsplit(".", 1)
+    if len(parts) != 2:
+        return None
+    encoded, sig = parts
+    padded = encoded + "=" * (-len(encoded) % 4)
+    try:
+        raw = b64.urlsafe_b64decode(padded)
+    except Exception:
+        return None
+    expected_sig = hmac.new(OAUTH_CLIENT_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    if payload.get("typ") != "rt":
         return None
     if payload.get("exp", 0) < time.time():
         return None
@@ -5172,7 +5218,7 @@ def _handle_oauth_register(event: Dict[str, Any]) -> Dict[str, Any]:
             "client_id": OAUTH_CLIENT_ID,
             "client_secret": OAUTH_CLIENT_SECRET,
             "redirect_uris": redirect_uris,
-            "grant_types": ["authorization_code"],
+            "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "client_secret_post",
         }),
@@ -5267,7 +5313,10 @@ def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
             "body": json.dumps({
                 "access_token": MCP_API_KEY,
                 "token_type": "bearer",
-                "expires_in": 3600,
+                "expires_in": MCP_TOKEN_TTL,
+                # Refresh token lets Claude.ai silently renew without prompting
+                # the user to reconnect. Stateless HMAC-signed, 30-day TTL.
+                "refresh_token": _mint_refresh_token(),
             }),
             "isBase64Encoded": False,
         }
@@ -5281,13 +5330,45 @@ def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
                 "isBase64Encoded": False,
             }
         _touch_oauth_client_usage()
+        # RFC 6749 §4.4.3: refresh tokens SHOULD NOT be issued for client_credentials.
         return {
             "statusCode": 200,
             "headers": {"content-type": "application/json", "cache-control": "no-store"},
             "body": json.dumps({
                 "access_token": MCP_API_KEY,
                 "token_type": "bearer",
-                "expires_in": 3600,
+                "expires_in": MCP_TOKEN_TTL,
+            }),
+            "isBase64Encoded": False,
+        }
+
+    elif grant_type == "refresh_token":
+        refresh_token = (params.get("refresh_token") or [""])[0]
+        if not refresh_token:
+            return {
+                "statusCode": 400,
+                "headers": {"content-type": "application/json"},
+                "body": json.dumps({"error": "invalid_request", "error_description": "refresh_token is required"}),
+                "isBase64Encoded": False,
+            }
+        payload = _verify_refresh_token(refresh_token)
+        if payload is None:
+            return {
+                "statusCode": 400,
+                "headers": {"content-type": "application/json"},
+                "body": json.dumps({"error": "invalid_grant", "error_description": "Invalid or expired refresh token"}),
+                "isBase64Encoded": False,
+            }
+        _touch_oauth_client_usage()
+        return {
+            "statusCode": 200,
+            "headers": {"content-type": "application/json", "cache-control": "no-store"},
+            "body": json.dumps({
+                "access_token": MCP_API_KEY,
+                "token_type": "bearer",
+                "expires_in": MCP_TOKEN_TTL,
+                # Rotate the refresh token on every use (RFC 6749 §10.4 best practice)
+                "refresh_token": _mint_refresh_token(),
             }),
             "isBase64Encoded": False,
         }
