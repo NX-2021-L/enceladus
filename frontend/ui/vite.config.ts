@@ -34,6 +34,13 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // Force the new service worker to activate immediately on install instead
+        // of waiting for all existing tabs to close. Without these two flags,
+        // VitePWA with injectRegister:false never sends the SKIP_WAITING message,
+        // so the updated SW sits in "waiting" state indefinitely — users keep
+        // running the old JS bundle until they manually close every tab.
+        skipWaiting: true,
+        clientsClaim: true,
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         // Do NOT cache /mobile/v1 feeds via service worker — they require
         // the auth cookie and are intercepted by Lambda@Edge. Network-only
