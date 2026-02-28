@@ -176,6 +176,10 @@ COORDINATION_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
     COMMON_INTERNAL_API_KEY,
 )
+COORDINATION_API_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
+    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS",
+)
 DOCUMENT_API_BASE = os.environ.get(
     "ENCELADUS_DOCUMENT_API_BASE",
     "https://jreese.net/api/v1/documents",
@@ -1543,6 +1547,69 @@ def _projects_api_request(
             return _error_payload("UPSTREAM_ERROR", f"Projects API unreachable: {exc}", retryable=True)
         except Exception as exc:
             return _error_payload("INTERNAL_ERROR", f"Projects API request failed: {exc}", retryable=False)
+
+    return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
+
+
+def _coordination_api_request(
+    method: str,
+    path: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+    query: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """HTTP request to the coordination API."""
+    base = COORDINATION_API_BASE.rstrip("/")
+    route = path if path.startswith("/") else (f"/{path}" if path else "")
+    url = f"{base}{route}"
+    if query:
+        encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+        if encoded_qs:
+            url = f"{url}?{encoded_qs}"
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload).encode("utf-8")
+    else:
+        body = None
+
+    key_candidates: List[str] = []
+    for candidate in (
+        COORDINATION_API_INTERNAL_API_KEY,
+        *COORDINATION_API_INTERNAL_API_KEYS,
+        *COMMON_INTERNAL_API_KEYS,
+    ):
+        key = str(candidate or "").strip()
+        if key and key not in key_candidates:
+            key_candidates.append(key)
+    if not key_candidates:
+        key_candidates.append("")
+
+    for idx, key in enumerate(key_candidates):
+        attempt_headers = dict(headers)
+        if key:
+            attempt_headers["X-Coordination-Internal-Key"] = key
+        req = urllib.request.Request(url=url, method=method.upper(), headers=attempt_headers, data=body)
+        try:
+            with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
+                text = resp.read().decode("utf-8")
+                return json.loads(text) if text else {"success": True}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"error": raw or str(exc)}
+            if exc.code in (401, 403) and idx < len(key_candidates) - 1:
+                continue
+            return _normalize_legacy_error_payload(parsed, exc.code)
+        except urllib.error.URLError as exc:
+            return _error_payload("UPSTREAM_ERROR", f"Coordination API unreachable: {exc}", retryable=True)
+        except Exception as exc:
+            return _error_payload("INTERNAL_ERROR", f"Coordination API request failed: {exc}", retryable=False)
 
     return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
 
@@ -3288,6 +3355,32 @@ async def list_tools() -> list[Tool]:
                 "required": ["request_id"],
             },
         ),
+        Tool(
+            name="coordination_cognito_session",
+            description=(
+                "Create a Cognito-authenticated cookie bundle for terminal diagnostics "
+                "against protected Enceladus PWA routes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_origin": {
+                        "type": "string",
+                        "description": "Optional https origin for browser cookie scoping (default: https://jreese.net).",
+                    },
+                    "include_set_cookie_headers": {
+                        "type": "boolean",
+                        "description": "Include serialized Set-Cookie header strings in the response. Default true.",
+                        "default": True,
+                    },
+                    "include_tokens": {
+                        "type": "boolean",
+                        "description": "Include raw Cognito tokens in response for advanced debugging. Default false.",
+                        "default": False,
+                    },
+                },
+            },
+        ),
         # --- Governance (8) ---
         Tool(
             name="governance_update",
@@ -4496,19 +4589,22 @@ async def _coordination_capabilities(args: dict) -> list[TextContent]:
 async def _coordination_request_get(args: dict) -> list[TextContent]:
     """Get coordination request by ID via coordination API."""
     request_id = args["request_id"]
-    try:
-        import urllib.request
-        url = f"{COORDINATION_API_BASE}/requests/{urllib.parse.quote(request_id, safe='')}"
-        req = urllib.request.Request(url, method="GET")
-        req.add_header("Accept", "application/json")
-        req.add_header("User-Agent", HTTP_USER_AGENT)
-        if COORDINATION_API_INTERNAL_API_KEY:
-            req.add_header("X-Coordination-Internal-Key", COORDINATION_API_INTERNAL_API_KEY)
-        with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp_obj:
-            body = json.loads(resp_obj.read().decode("utf-8"))
-        return _result_text(body)
-    except Exception as exc:
-        return _result_text({"error": f"Failed to fetch coordination request: {exc}"})
+    result = _coordination_api_request("GET", f"/requests/{urllib.parse.quote(request_id, safe='')}")
+    return _result_text(result)
+
+
+async def _coordination_cognito_session(args: dict) -> list[TextContent]:
+    """Create Cognito cookie/session payload for terminal PWA diagnostics."""
+    payload: Dict[str, Any] = {}
+    if args.get("target_origin"):
+        payload["target_origin"] = str(args.get("target_origin") or "").strip()
+    if "include_set_cookie_headers" in args:
+        payload["include_set_cookie_headers"] = bool(args.get("include_set_cookie_headers"))
+    if "include_tokens" in args:
+        payload["include_tokens"] = bool(args.get("include_tokens"))
+
+    result = _coordination_api_request("POST", "/auth/cognito/session", payload=payload)
+    return _result_text(result)
 
 
 # --- Governance ---
@@ -4857,6 +4953,7 @@ _TOOL_HANDLERS = {
     "deploy_pending_requests": _deploy_pending_requests,
     "coordination_capabilities": _coordination_capabilities,
     "coordination_request_get": _coordination_request_get,
+    "coordination_cognito_session": _coordination_cognito_session,
     "governance_update": _governance_update,
     "governance_hash": _governance_hash,
     "governance_get": _governance_get,
