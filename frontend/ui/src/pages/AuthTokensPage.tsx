@@ -65,6 +65,16 @@ function ConfigBlock({ creds }: { creds: CreatedCredentials }) {
 
   return (
     <div className="space-y-4">
+      {/* MCP Server URL */}
+      <div className="space-y-2">
+        <h4 className="text-sm font-medium text-emerald-400">MCP Server URL</h4>
+        <div className="flex items-center gap-2 rounded-md bg-slate-950 border border-emerald-700/50 p-3">
+          <code className="flex-1 text-sm text-emerald-300 overflow-x-auto">{GATEWAY_URL}</code>
+          <CopyButton text={GATEWAY_URL} label="Copy URL" />
+        </div>
+        <p className="text-xs text-slate-500">Paste this into the "MCP Server URL" field in your client.</p>
+      </div>
+
       {/* Credentials */}
       <div className="space-y-2">
         <h4 className="text-sm font-medium text-amber-300">Client Credentials (copy now — secret shown once)</h4>
