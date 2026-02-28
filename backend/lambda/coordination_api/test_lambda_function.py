@@ -402,6 +402,92 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertEqual(resp["statusCode"], 200)
         mock_handle_mcp_http.assert_called_once()
 
+    @patch.object(
+        coordination_lambda,
+        "_load_terminal_cognito_credentials",
+        return_value={
+            "username": "svc-user",
+            "password": "svc-pass",
+            "client_id": "client-123",
+            "auth_flow": "USER_PASSWORD_AUTH",
+        },
+    )
+    @patch.object(coordination_lambda, "_get_cognito")
+    def test_handle_auth_cognito_terminal_session_success(
+        self,
+        mock_get_cognito,
+        _mock_load_credentials,
+    ):
+        class _FakeCognito:
+            class exceptions:
+                class NotAuthorizedException(Exception):
+                    pass
+
+                class UserNotConfirmedException(Exception):
+                    pass
+
+                class PasswordResetRequiredException(Exception):
+                    pass
+
+            def initiate_auth(self, **_kwargs):
+                return {
+                    "AuthenticationResult": {
+                        "IdToken": "id-token-value",
+                        "AccessToken": "access-token-value",
+                        "RefreshToken": "refresh-token-value",
+                        "ExpiresIn": 3600,
+                        "TokenType": "Bearer",
+                    }
+                }
+
+        mock_get_cognito.return_value = _FakeCognito()
+        event = {
+            "body": json.dumps(
+                {
+                    "target_origin": "https://jreese.net",
+                    "include_set_cookie_headers": True,
+                    "include_tokens": True,
+                }
+            )
+        }
+        claims = {"auth_mode": "internal-key"}
+        resp = coordination_lambda._handle_auth_cognito_terminal_session(event, claims)
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        session = body["session"]
+        self.assertEqual(session["auth_flow"], "USER_PASSWORD_AUTH")
+        self.assertEqual(session["target_origin"], "https://jreese.net")
+        self.assertGreaterEqual(len(session["cookies"]), 3)
+        self.assertIn("set_cookie_headers", session)
+        self.assertEqual(session["tokens"]["id_token"], "id-token-value")
+
+    def test_handle_auth_cognito_terminal_session_requires_write_permission(self):
+        event = {"body": "{}"}
+        claims = {"auth_mode": "managed-token", "permissions": ["read"]}
+        resp = coordination_lambda._handle_auth_cognito_terminal_session(event, claims)
+        self.assertEqual(resp["statusCode"], 403)
+        body = json.loads(resp["body"])
+        self.assertFalse(body["success"])
+        self.assertEqual(body["error_envelope"]["code"], "PERMISSION_DENIED")
+
+    @patch.object(coordination_lambda, "_authenticate", return_value=({"auth_mode": "internal-key"}, None))
+    @patch.object(coordination_lambda, "_handle_auth_cognito_terminal_session")
+    def test_lambda_handler_routes_auth_cognito_terminal_session(
+        self,
+        mock_route_handler,
+        _mock_auth,
+    ):
+        mock_route_handler.return_value = coordination_lambda._response(200, {"success": True})
+        event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/auth/cognito/session",
+            "body": "{}",
+        }
+        resp = coordination_lambda.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        mock_route_handler.assert_called_once()
+
     @patch.object(coordination_lambda, "DISPATCH_TIMEOUT_CEILING_SECONDS", 1800)
     @patch.object(coordination_lambda, "HOST_V2_TIMEOUT_SECONDS", 9999)
     @patch.object(coordination_lambda, "_build_ssm_commands", return_value=["echo ok"])
