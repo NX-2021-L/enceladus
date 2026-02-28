@@ -4934,20 +4934,157 @@ def _handle_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, Any]:
         "headers": {"content-type": "application/json", "cache-control": "public, max-age=3600"},
         "body": json.dumps({
             "issuer": base,
+            "authorization_endpoint": f"{base}/authorize",
             "token_endpoint": f"{base}/oauth/token",
+            "registration_endpoint": f"{base}/oauth/register",
             "token_endpoint_auth_methods_supported": ["client_secret_post"],
-            "grant_types_supported": ["client_credentials"],
-            "response_types_supported": [],
+            "grant_types_supported": ["authorization_code"],
+            "response_types_supported": ["code"],
+            "code_challenge_methods_supported": ["S256"],
             "service_documentation": f"{base}/.well-known/oauth-protected-resource",
         }),
         "isBase64Encoded": False,
     }
 
 
-def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
-    """OAuth 2.0 token endpoint — client_credentials grant."""
-    import urllib.parse
+def _mint_auth_code(payload: dict) -> str:
+    """Create a self-contained, HMAC-signed authorization code (no server state needed)."""
+    import base64 as b64
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    sig = hmac.new(OAUTH_CLIENT_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    return b64.urlsafe_b64encode(raw).decode().rstrip("=") + "." + sig
 
+
+def _verify_auth_code(code: str) -> Optional[dict]:
+    """Verify and decode a self-contained authorization code. Returns None if invalid."""
+    import base64 as b64
+    parts = code.rsplit(".", 1)
+    if len(parts) != 2:
+        return None
+    encoded, sig = parts
+    # Restore base64 padding
+    padded = encoded + "=" * (-len(encoded) % 4)
+    try:
+        raw = b64.urlsafe_b64decode(padded)
+    except Exception:
+        return None
+    expected_sig = hmac.new(OAUTH_CLIENT_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    if payload.get("exp", 0) < time.time():
+        return None
+    return payload
+
+
+def _handle_oauth_authorize(event: Dict[str, Any]) -> Dict[str, Any]:
+    """OAuth 2.0 Authorization endpoint — Authorization Code flow with PKCE."""
+    qs = event.get("queryStringParameters") or {}
+    response_type = qs.get("response_type", "")
+    client_id = qs.get("client_id", "")
+    redirect_uri = qs.get("redirect_uri", "")
+    state = qs.get("state", "")
+    code_challenge = qs.get("code_challenge", "")
+    code_challenge_method = qs.get("code_challenge_method", "")
+
+    if not OAUTH_CLIENT_ID or not OAUTH_CLIENT_SECRET:
+        return {
+            "statusCode": 500,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps({"error": "server_error", "error_description": "OAuth not configured"}),
+            "isBase64Encoded": False,
+        }
+
+    if response_type != "code":
+        return _oauth_error_redirect(redirect_uri, state, "unsupported_response_type")
+
+    if not hmac.compare_digest(client_id, OAUTH_CLIENT_ID):
+        return _oauth_error_redirect(redirect_uri, state, "invalid_client")
+
+    if code_challenge_method and code_challenge_method != "S256":
+        return _oauth_error_redirect(redirect_uri, state, "invalid_request",
+                                     "Only S256 code_challenge_method is supported")
+
+    # Mint a self-contained authorization code (60s TTL)
+    code = _mint_auth_code({
+        "cc": code_challenge,
+        "ccm": code_challenge_method or "S256",
+        "ru": redirect_uri,
+        "cid": client_id,
+        "exp": int(time.time()) + 60,
+    })
+
+    sep = "&" if "?" in redirect_uri else "?"
+    location = f"{redirect_uri}{sep}code={urllib.parse.quote(code, safe='')}"
+    if state:
+        location += f"&state={urllib.parse.quote(state, safe='')}"
+    return {
+        "statusCode": 302,
+        "headers": {"location": location, "cache-control": "no-store"},
+        "body": "",
+        "isBase64Encoded": False,
+    }
+
+
+def _oauth_error_redirect(redirect_uri: str, state: str, error: str,
+                           description: str = "") -> Dict[str, Any]:
+    """Build an OAuth error redirect or JSON response if no redirect_uri."""
+    if not redirect_uri:
+        body: dict = {"error": error}
+        if description:
+            body["error_description"] = description
+        return {
+            "statusCode": 400,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps(body),
+            "isBase64Encoded": False,
+        }
+    sep = "&" if "?" in redirect_uri else "?"
+    location = f"{redirect_uri}{sep}error={urllib.parse.quote(error, safe='')}"
+    if description:
+        location += f"&error_description={urllib.parse.quote(description, safe='')}"
+    if state:
+        location += f"&state={urllib.parse.quote(state, safe='')}"
+    return {
+        "statusCode": 302,
+        "headers": {"location": location, "cache-control": "no-store"},
+        "body": "",
+        "isBase64Encoded": False,
+    }
+
+
+def _handle_oauth_register(event: Dict[str, Any]) -> Dict[str, Any]:
+    """OAuth 2.0 Dynamic Client Registration (RFC 7591) — returns static client metadata."""
+    base = _get_server_base_url(event)
+    body_raw = event.get("body") or ""
+    if event.get("isBase64Encoded"):
+        import base64 as b64
+        body_raw = b64.b64decode(body_raw).decode()
+    try:
+        reg = json.loads(body_raw) if body_raw else {}
+    except Exception:
+        reg = {}
+    redirect_uris = reg.get("redirect_uris", [])
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json", "cache-control": "no-store"},
+        "body": json.dumps({
+            "client_id": OAUTH_CLIENT_ID,
+            "client_secret": OAUTH_CLIENT_SECRET,
+            "redirect_uris": redirect_uris,
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "client_secret_post",
+        }),
+        "isBase64Encoded": False,
+    }
+
+
+def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
+    """OAuth 2.0 token endpoint — authorization_code with PKCE."""
     if not OAUTH_CLIENT_ID or not OAUTH_CLIENT_SECRET:
         return {
             "statusCode": 500,
@@ -4958,23 +5095,23 @@ def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
 
     body_raw = event.get("body") or ""
     if event.get("isBase64Encoded"):
-        import base64
-        body_raw = base64.b64decode(body_raw).decode()
+        import base64 as b64
+        body_raw = b64.b64decode(body_raw).decode()
     params = urllib.parse.parse_qs(body_raw)
 
     grant_type = (params.get("grant_type") or [""])[0]
     client_id = (params.get("client_id") or [""])[0]
     client_secret = (params.get("client_secret") or [""])[0]
 
-    if grant_type != "client_credentials":
+    # Validate client credentials if provided
+    if client_id and not hmac.compare_digest(client_id, OAUTH_CLIENT_ID):
         return {
-            "statusCode": 400,
+            "statusCode": 401,
             "headers": {"content-type": "application/json"},
-            "body": json.dumps({"error": "unsupported_grant_type"}),
+            "body": json.dumps({"error": "invalid_client"}),
             "isBase64Encoded": False,
         }
-
-    if not hmac.compare_digest(client_id, OAUTH_CLIENT_ID) or not hmac.compare_digest(client_secret, OAUTH_CLIENT_SECRET):
+    if client_secret and not hmac.compare_digest(client_secret, OAUTH_CLIENT_SECRET):
         return {
             "statusCode": 401,
             "headers": {"content-type": "application/json"},
@@ -4982,14 +5119,68 @@ def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
             "isBase64Encoded": False,
         }
 
+    if grant_type == "authorization_code":
+        code = (params.get("code") or [""])[0]
+        code_verifier = (params.get("code_verifier") or [""])[0]
+
+        payload = _verify_auth_code(code)
+        if payload is None:
+            return {
+                "statusCode": 400,
+                "headers": {"content-type": "application/json"},
+                "body": json.dumps({"error": "invalid_grant", "error_description": "Invalid or expired authorization code"}),
+                "isBase64Encoded": False,
+            }
+
+        # Verify PKCE: S256 = BASE64URL(SHA256(code_verifier)) must match code_challenge
+        stored_challenge = payload.get("cc", "")
+        if stored_challenge and code_verifier:
+            import base64 as b64
+            computed = b64.urlsafe_b64encode(
+                hashlib.sha256(code_verifier.encode()).digest()
+            ).decode().rstrip("=")
+            if not hmac.compare_digest(computed, stored_challenge):
+                return {
+                    "statusCode": 400,
+                    "headers": {"content-type": "application/json"},
+                    "body": json.dumps({"error": "invalid_grant", "error_description": "PKCE verification failed"}),
+                    "isBase64Encoded": False,
+                }
+
+        return {
+            "statusCode": 200,
+            "headers": {"content-type": "application/json", "cache-control": "no-store"},
+            "body": json.dumps({
+                "access_token": MCP_API_KEY,
+                "token_type": "bearer",
+                "expires_in": 3600,
+            }),
+            "isBase64Encoded": False,
+        }
+
+    elif grant_type == "client_credentials":
+        if not client_id or not client_secret:
+            return {
+                "statusCode": 401,
+                "headers": {"content-type": "application/json"},
+                "body": json.dumps({"error": "invalid_client"}),
+                "isBase64Encoded": False,
+            }
+        return {
+            "statusCode": 200,
+            "headers": {"content-type": "application/json", "cache-control": "no-store"},
+            "body": json.dumps({
+                "access_token": MCP_API_KEY,
+                "token_type": "bearer",
+                "expires_in": 3600,
+            }),
+            "isBase64Encoded": False,
+        }
+
     return {
-        "statusCode": 200,
-        "headers": {"content-type": "application/json", "cache-control": "no-store"},
-        "body": json.dumps({
-            "access_token": MCP_API_KEY,
-            "token_type": "bearer",
-            "expires_in": 3600,
-        }),
+        "statusCode": 400,
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps({"error": "unsupported_grant_type"}),
         "isBase64Encoded": False,
     }
 
@@ -5004,8 +5195,12 @@ def _handle_oauth_route(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return _handle_oauth_protected_resource(event)
     if path == "/.well-known/oauth-authorization-server" and method == "GET":
         return _handle_oauth_server_metadata(event)
+    if path == "/authorize" and method == "GET":
+        return _handle_oauth_authorize(event)
     if path == "/oauth/token" and method == "POST":
         return _handle_oauth_token(event)
+    if path == "/oauth/register" and method == "POST":
+        return _handle_oauth_register(event)
     return None
 
 
