@@ -3,13 +3,15 @@ import {
   createManagedAuthToken,
   deleteManagedAuthToken,
   listManagedAuthTokens,
+  listOAuthClients,
   updateManagedAuthPermissions,
   type ManagedAuthToken,
+  type OAuthClient,
 } from '../api/authTokens'
 
 const PERMISSION_OPTIONS = ['read', 'write', 'put', 'delete', 'admin'] as const
 
-type Tab = 'tokens' | 'permissions'
+type Tab = 'tokens' | 'permissions' | 'oauth'
 
 function formatAge(seconds: number | null): string {
   if (seconds == null || seconds < 0) return 'n/a'
@@ -25,6 +27,7 @@ function formatAge(seconds: number | null): string {
 export function AuthTokensPage() {
   const [tab, setTab] = useState<Tab>('tokens')
   const [tokens, setTokens] = useState<ManagedAuthToken[]>([])
+  const [oauthClients, setOauthClients] = useState<OAuthClient[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [serviceName, setServiceName] = useState('')
@@ -35,8 +38,9 @@ export function AuthTokensPage() {
     setLoading(true)
     setError(null)
     try {
-      const items = await listManagedAuthTokens()
+      const [items, clients] = await Promise.all([listManagedAuthTokens(), listOAuthClients()])
       setTokens(items)
+      setOauthClients(clients)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load tokens')
     } finally {
@@ -107,6 +111,12 @@ export function AuthTokensPage() {
             onClick={() => setTab('permissions')}
           >
             Permissions
+          </button>
+          <button
+            className={`rounded-md px-3 py-1 text-sm ${tab === 'oauth' ? 'bg-slate-200 text-slate-900' : 'bg-slate-700'}`}
+            onClick={() => setTab('oauth')}
+          >
+            OAuth Clients
           </button>
         </div>
       </section>
@@ -205,7 +215,7 @@ export function AuthTokensPage() {
               </tbody>
             </table>
           </div>
-        ) : (
+        ) : tab === 'permissions' ? (
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
@@ -235,6 +245,47 @@ export function AuthTokensPage() {
                     ))}
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="text-left text-slate-400">
+                  <th className="py-2 pr-4">Service Name</th>
+                  <th className="py-2 pr-4">Client ID</th>
+                  <th className="py-2 pr-4">Grant Types</th>
+                  <th className="py-2 pr-4">Status</th>
+                  <th className="py-2 pr-4">Last Used</th>
+                </tr>
+              </thead>
+              <tbody>
+                {oauthClients.map((client) => (
+                  <tr key={client.client_id} className="border-t border-slate-800">
+                    <td className="py-2 pr-4">{client.service_name}</td>
+                    <td className="py-2 pr-4">
+                      <code className="text-xs">{client.client_id}</code>
+                    </td>
+                    <td className="py-2 pr-4">{client.grant_types.join(', ')}</td>
+                    <td className="py-2 pr-4">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span
+                          className={`inline-block h-2 w-2 rounded-full ${client.status === 'active' ? 'bg-emerald-400' : 'bg-rose-400'}`}
+                        />
+                        {client.status}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-4">{client.last_used_at || 'never'}</td>
+                  </tr>
+                ))}
+                {oauthClients.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="py-4 text-center text-slate-400">
+                      No OAuth clients registered
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

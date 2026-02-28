@@ -134,6 +134,7 @@ COORDINATION_SESSION_ARCHIVE_BUFFER_DIR = os.environ.get(
     "/tmp/coordination-session-archive-buffer",
 )
 AUTH_TOKEN_POLICY_PREFIX = "service_token#"
+OAUTH_CLIENT_POLICY_PREFIX = "oauth_client#"
 AUTH_ALLOWED_PERMISSIONS = {"read", "write", "put", "delete", "admin"}
 
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
@@ -9043,6 +9044,144 @@ def _handle_auth_permissions_update(token_id: str, event: Dict[str, Any]) -> Dic
     return _response(200, {"success": True, "token_id": token_id, "permissions": permissions})
 
 
+# ---------------------------------------------------------------------------
+# OAuth client management (ENC-FTR-031)
+# ---------------------------------------------------------------------------
+
+
+def _build_oauth_client_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "client_id": str(item.get("client_id") or ""),
+        "service_name": str(item.get("service_name") or ""),
+        "grant_types": item.get("grant_types") or [],
+        "redirect_uris": item.get("redirect_uris") or [],
+        "status": str(item.get("status") or "active"),
+        "created_at": str(item.get("created_at") or ""),
+        "updated_at": str(item.get("updated_at") or ""),
+        "last_used_at": str(item.get("last_used_at") or ""),
+    }
+
+
+def _list_oauth_clients() -> List[Dict[str, Any]]:
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {"TableName": AUTH_TOKENS_TABLE}
+    out: List[Dict[str, Any]] = []
+    while True:
+        resp = ddb.scan(**scan_kwargs)
+        for raw in resp.get("Items", []):
+            item = _deserialize(raw)
+            policy_id = str(item.get("policy_id") or "")
+            if not policy_id.startswith(OAUTH_CLIENT_POLICY_PREFIX):
+                continue
+            out.append(_build_oauth_client_payload(item))
+        if "LastEvaluatedKey" not in resp:
+            break
+        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    out.sort(key=lambda row: row.get("service_name", ""))
+    return out
+
+
+def _handle_oauth_clients_list() -> Dict[str, Any]:
+    try:
+        clients = _list_oauth_clients()
+    except Exception as exc:
+        logger.exception("Failed to list OAuth clients")
+        return _error(500, f"Failed to list OAuth clients: {exc}")
+    return _response(200, {"oauth_clients": clients, "count": len(clients)})
+
+
+def _handle_oauth_clients_create(event: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc))
+
+    client_id = str(body.get("client_id") or "").strip()
+    if not client_id:
+        return _error(400, "client_id is required")
+    service_name = str(body.get("service_name") or "").strip()
+    if not service_name:
+        return _error(400, "service_name is required")
+
+    grant_types = body.get("grant_types") or ["authorization_code"]
+    redirect_uris = body.get("redirect_uris") or []
+    now = _now_z()
+    policy_id = f"{OAUTH_CLIENT_POLICY_PREFIX}{client_id}"
+
+    item = {
+        "policy_id": _serialize(policy_id),
+        "record_type": _serialize("oauth_client"),
+        "client_id": _serialize(client_id),
+        "service_name": _serialize(service_name),
+        "grant_types": _serialize(grant_types),
+        "redirect_uris": _serialize(redirect_uris),
+        "status": _serialize("active"),
+        "created_at": _serialize(now),
+        "updated_at": _serialize(now),
+        "last_used_at": _serialize(""),
+    }
+
+    ddb = _get_ddb()
+    try:
+        existing = ddb.get_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Key={"policy_id": _serialize(policy_id)},
+        )
+        if existing.get("Item"):
+            # Idempotent: update mutable fields
+            ddb.update_item(
+                TableName=AUTH_TOKENS_TABLE,
+                Key={"policy_id": _serialize(policy_id)},
+                UpdateExpression="SET service_name = :sn, grant_types = :gt, redirect_uris = :ru, updated_at = :ua",
+                ExpressionAttributeValues={
+                    ":sn": _serialize(service_name),
+                    ":gt": _serialize(grant_types),
+                    ":ru": _serialize(redirect_uris),
+                    ":ua": _serialize(now),
+                },
+            )
+            payload = _build_oauth_client_payload(_deserialize(existing["Item"]))
+            payload.update(service_name=service_name, grant_types=grant_types,
+                           redirect_uris=redirect_uris, updated_at=now)
+            return _response(200, {"success": True, "oauth_client": payload, "created": False})
+        else:
+            ddb.put_item(TableName=AUTH_TOKENS_TABLE, Item=item)
+    except Exception as exc:
+        logger.exception("Failed to create/update OAuth client")
+        return _error(500, f"Failed to create/update OAuth client: {exc}")
+
+    payload = _build_oauth_client_payload(_deserialize(item))
+    return _response(201, {"success": True, "oauth_client": payload, "created": True})
+
+
+def _handle_oauth_client_usage(client_id: str) -> Dict[str, Any]:
+    client_id = str(client_id or "").strip()
+    if not client_id:
+        return _error(400, "client_id is required")
+    policy_id = f"{OAUTH_CLIENT_POLICY_PREFIX}{client_id}"
+    now = _now_z()
+    try:
+        _get_ddb().update_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Key={"policy_id": _serialize(policy_id)},
+            UpdateExpression="SET last_used_at = :lu, updated_at = :ua",
+            ExpressionAttributeValues={
+                ":lu": _serialize(now),
+                ":ua": _serialize(now),
+            },
+            ConditionExpression="attribute_exists(policy_id)",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return _error(404, f"OAuth client '{client_id}' not found")
+        logger.exception("Failed to update OAuth client usage")
+        return _error(500, f"Failed to update OAuth client usage: {exc}")
+    except Exception as exc:
+        logger.exception("Failed to update OAuth client usage")
+        return _error(500, f"Failed to update OAuth client usage: {exc}")
+    return _response(200, {"success": True, "client_id": client_id, "last_used_at": now})
+
+
 def _handle_health() -> Dict[str, Any]:
     """GET /api/v1/health — connection health check."""
     health: Dict[str, Any] = {}
@@ -9243,6 +9382,21 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     match_auth_permissions = re.fullmatch(r"/api/v1/coordination/auth/permissions/([A-Za-z0-9\-]+)", path)
     if method == "PATCH" and match_auth_permissions:
         return _handle_auth_permissions_update(match_auth_permissions.group(1), event)
+
+    # --- OAuth client management (ENC-FTR-031) ---
+
+    # GET /api/v1/coordination/auth/oauth-clients
+    if method == "GET" and path == "/api/v1/coordination/auth/oauth-clients":
+        return _handle_oauth_clients_list()
+
+    # POST /api/v1/coordination/auth/oauth-clients
+    if method == "POST" and path == "/api/v1/coordination/auth/oauth-clients":
+        return _handle_oauth_clients_create(event)
+
+    # PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/usage
+    match_oauth_usage = re.fullmatch(r"/api/v1/coordination/auth/oauth-clients/([A-Za-z0-9_\-]+)/usage", path)
+    if method == "PATCH" and match_oauth_usage:
+        return _handle_oauth_client_usage(match_oauth_usage.group(1))
 
     # --- Existing coordination routes ---
 
