@@ -383,6 +383,7 @@ PY
 }
 
 ensure_terminal_cognito_credentials() {
+  # NOTE: Called with || so set -e is disabled. Must check exit codes explicitly.
   log "[START] ensuring terminal Cognito credentials"
 
   # Check if Secrets Manager secret already exists
@@ -390,7 +391,7 @@ ensure_terminal_cognito_credentials() {
     --secret-id "${TERMINAL_COGNITO_SECRET_ID}" \
     --region "${SECRETS_REGION}" >/dev/null 2>&1; then
     log "[OK] Secrets Manager secret exists: ${TERMINAL_COGNITO_SECRET_ID}"
-    return
+    return 0
   fi
 
   log "[INFO] Secret ${TERMINAL_COGNITO_SECRET_ID} not found — provisioning"
@@ -402,7 +403,10 @@ ensure_terminal_cognito_credentials() {
     --client-id "${COGNITO_CLIENT_ID}" \
     --region "${COGNITO_REGION}" \
     --query 'UserPoolClient.ExplicitAuthFlows' \
-    --output text 2>/dev/null || true)"
+    --output text 2>/dev/null)" || {
+    log "[ERROR] cannot describe Cognito client — deploy role likely missing cognito-idp permissions. Run iam-cognito-terminal-unblock workflow first."
+    return 1
+  }
 
   if ! echo "${current_flows}" | grep -q "ALLOW_USER_PASSWORD_AUTH"; then
     log "[START] enabling ALLOW_USER_PASSWORD_AUTH on Cognito client"
@@ -416,13 +420,11 @@ desc = client.describe_user_pool_client(
 flows = set(desc.get('ExplicitAuthFlows', []))
 flows.add('ALLOW_USER_PASSWORD_AUTH')
 flows.add('ALLOW_REFRESH_TOKEN_AUTH')
-# Build update kwargs preserving all existing settings
 kwargs = {
     'UserPoolId': desc['UserPoolId'],
     'ClientId': desc['ClientId'],
     'ExplicitAuthFlows': sorted(flows),
 }
-# Preserve fields that reset to defaults if omitted
 for key in [
     'ClientName', 'RefreshTokenValidity', 'AccessTokenValidity',
     'IdTokenValidity', 'TokenValidityUnits', 'ReadAttributes',
@@ -436,8 +438,7 @@ for key in [
     if key in desc and desc[key] is not None:
         kwargs[key] = desc[key]
 client.update_user_pool_client(**kwargs)
-print('OK')
-" >/dev/null
+" || { log "[ERROR] failed to update Cognito client auth flows"; return 1; }
     log "[OK] Cognito client auth flows updated"
   else
     log "[OK] Cognito client already allows USER_PASSWORD_AUTH"
@@ -460,17 +461,17 @@ print('OK')
       --username "${TERMINAL_COGNITO_USERNAME}" \
       --user-attributes Name=email,Value="terminal-agent@enceladus.internal" Name=email_verified,Value=true \
       --message-action SUPPRESS \
-      --region "${COGNITO_REGION}" >/dev/null
+      --region "${COGNITO_REGION}" >/dev/null || { log "[ERROR] failed to create Cognito user"; return 1; }
     log "[OK] Cognito user created"
   fi
 
-  # Set permanent password (use env var to avoid shell interpolation issues)
-  COGNITO_PASS="${password}" aws cognito-idp admin-set-user-password \
+  # Set permanent password
+  aws cognito-idp admin-set-user-password \
     --user-pool-id "${COGNITO_USER_POOL_ID}" \
     --username "${TERMINAL_COGNITO_USERNAME}" \
     --password "${password}" \
     --permanent \
-    --region "${COGNITO_REGION}" >/dev/null
+    --region "${COGNITO_REGION}" >/dev/null || { log "[ERROR] failed to set Cognito user password"; return 1; }
   log "[OK] Cognito user password set"
 
   # Create Secrets Manager secret (use Python to build JSON safely)
@@ -488,7 +489,7 @@ print(json.dumps({
     --name "${TERMINAL_COGNITO_SECRET_ID}" \
     --secret-string "${secret_json}" \
     --region "${SECRETS_REGION}" \
-    --description "Terminal agent Cognito credentials for coordination API" >/dev/null
+    --description "Terminal agent Cognito credentials for coordination API" >/dev/null || { log "[ERROR] failed to create Secrets Manager secret"; return 1; }
   log "[OK] Secrets Manager secret created: ${TERMINAL_COGNITO_SECRET_ID}"
   log "[END] terminal Cognito credentials provisioned"
 }
