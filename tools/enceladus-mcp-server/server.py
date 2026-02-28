@@ -34,10 +34,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-import os as _os_path_helper, sys as _sys_path_helper
-_sys_path_helper.path.insert(0, _os_path_helper.path.join(_os_path_helper.path.dirname(__file__), "../../backend/lambda/shared_layer/python"))
-from enceladus_shared.serialization import _now_z
-
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -402,6 +398,10 @@ def _get_s3():
             raise RuntimeError("boto3 is not installed. Run: pip install boto3")
         _s3_client = boto3.client("s3", region_name=AWS_REGION)
     return _s3_client
+
+
+def _now_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _now_compact() -> str:
