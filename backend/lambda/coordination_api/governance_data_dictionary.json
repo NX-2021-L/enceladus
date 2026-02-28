@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-27.7",
-  "updated_at": "2026-02-27T16:05:00Z",
+  "version": "2026-02-28.8",
+  "updated_at": "2026-02-28T02:15:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -213,6 +213,19 @@
         "provider": {
           "type": "enum",
           "enum": ["openai_codex", "claude_agent_sdk", "aws_native", "aws_bedrock_agent"]
+        },
+        "dispatch.prompt_submitted": {
+          "type": "string",
+          "definition": "Prompt text submitted to provider runtime and persisted for execution traceability."
+        },
+        "session_archive_turn_index": {
+          "type": "number",
+          "definition": "Monotonic request-local turn counter used to assign deterministic archive turn IDs."
+        },
+        "result.details.session_archive": {
+          "type": "object",
+          "definition": "Archive write outcome metadata emitted by refresh polling for codex execution modes.",
+          "usage_guidance": "Contains archived(bool), key, records, redaction_hits and fallback buffered_path when S3 writes fail."
         }
       }
     },
