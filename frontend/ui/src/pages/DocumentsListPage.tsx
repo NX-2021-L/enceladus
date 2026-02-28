@@ -1,4 +1,5 @@
-import { useDocuments } from '../hooks/useDocuments'
+import { useEffect } from 'react'
+import { useDocs2 } from '../hooks/useDocuments'
 import { useProjects } from '../hooks/useProjects'
 import { useFilterState } from '../hooks/useFilterState'
 import { useInfiniteList } from '../hooks/useInfiniteList'
@@ -21,33 +22,66 @@ import type { DocumentFilters } from '../types/filters'
 export function DocumentsListPage() {
   const { filters, toggleArrayFilter, setFilter } = useFilterState<DocumentFilters>({})
   const { projects } = useProjects()
+  const {
+    documents,
+    totalMatches,
+    projectCounts,
+    defaultProject,
+    isPending,
+    isError,
+    refetch,
+  } = useDocs2(filters)
 
-  // Default to first available project; projectId is now part of filters for the S3 feed hook
-  const selectedProject = filters.projectId ?? projects[0]?.project_id ?? ''
-  const { documents, isPending, isError } = useDocuments({ ...filters, projectId: selectedProject }, { polling: true })
-  const { visible, sentinelRef, hasMore, total } = useInfiniteList(documents)
+  const selectedProject = filters.projectId ?? defaultProject
+
+  const { visible, sentinelRef, hasMore, resetPage } = useInfiniteList(documents)
+
+  useEffect(() => {
+    resetPage()
+  }, [selectedProject, filters.search, resetPage])
 
   if (!projects.length) return <LoadingState />
 
+  const allTotal = Object.values(projectCounts).reduce((s, c) => s + c.total, 0)
+
   return (
     <div className="p-4 space-y-3">
+      {/* Header with count + refresh */}
       <div className="flex items-center justify-between">
         <span className="text-xs text-slate-500">
-          {visible.length} of {total} documents
+          {visible.length} of {totalMatches} documents
         </span>
+        <button
+          onClick={() => refetch()}
+          className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+        >
+          Refresh
+        </button>
       </div>
 
-      {/* Project selector pills */}
+      {/* Project pills with counts */}
       <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+        <button
+          onClick={() => setFilter('projectId', undefined as unknown as string)}
+          className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-medium min-h-[32px] ${
+            !filters.projectId
+              ? 'bg-blue-500/20 text-blue-400'
+              : 'bg-slate-800 text-slate-400'
+          }`}
+        >
+          All ({allTotal || '...'})
+        </button>
         {projects.map((p) => (
           <button
             key={p.project_id}
             onClick={() => setFilter('projectId', p.project_id)}
             className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-medium min-h-[32px] ${
-              selectedProject === p.project_id ? 'bg-blue-500/20 text-blue-400' : 'bg-slate-800 text-slate-400'
+              filters.projectId === p.project_id
+                ? 'bg-blue-500/20 text-blue-400'
+                : 'bg-slate-800 text-slate-400'
             }`}
           >
-            {p.prefix}
+            {p.prefix} ({projectCounts[p.project_id]?.total ?? '...'})
           </button>
         ))}
       </div>
