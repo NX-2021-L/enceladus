@@ -19,6 +19,12 @@
       "deploy_script": "backend/lambda/coordination_monitor_api/deploy.sh"
     },
     {
+      "function_name": "devops-changelog-api",
+      "lambda_dir": "backend/lambda/changelog_api",
+      "workflow_file": ".github/workflows/lambda-changelog-api-deploy.yml",
+      "deploy_script": "backend/lambda/changelog_api/deploy.sh"
+    },
+    {
       "function_name": "devops-deploy-finalize",
       "lambda_dir": "backend/lambda/deploy_finalize",
       "workflow_file": ".github/workflows/lambda-deploy-finalize-deploy.yml"
