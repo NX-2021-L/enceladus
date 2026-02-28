@@ -16,6 +16,8 @@ ZIP_FILE="/tmp/${FUNCTION_NAME}.zip"
 MCP_TRANSPORT="${ENCELADUS_MCP_TRANSPORT:-streamable_http}"
 MCP_API_KEY="${ENCELADUS_MCP_API_KEY:-${COORDINATION_INTERNAL_API_KEY:-}}"
 MCP_API_KEY_PREVIOUS="${ENCELADUS_MCP_API_KEY_PREVIOUS:-${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}}"
+OAUTH_CLIENT_ID="${ENCELADUS_OAUTH_CLIENT_ID:-}"
+OAUTH_CLIENT_SECRET="${ENCELADUS_OAUTH_CLIENT_SECRET:-}"
 ROLE_ARN="${LAMBDA_ROLE_ARN:-}"
 
 log() {
@@ -87,6 +89,12 @@ if mcp_api_key:
 mcp_api_key_previous = os.environ.get("MCP_API_KEY_PREVIOUS", "")
 if mcp_api_key_previous:
     merged["ENCELADUS_MCP_API_KEY_PREVIOUS"] = mcp_api_key_previous
+oauth_client_id = os.environ.get("OAUTH_CLIENT_ID", "")
+if oauth_client_id:
+    merged["ENCELADUS_OAUTH_CLIENT_ID"] = oauth_client_id
+oauth_client_secret = os.environ.get("OAUTH_CLIENT_SECRET", "")
+if oauth_client_secret:
+    merged["ENCELADUS_OAUTH_CLIENT_SECRET"] = oauth_client_secret
 
 print(json.dumps({"Variables": merged}, separators=(",", ":")))
 PY
