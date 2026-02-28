@@ -66,6 +66,13 @@ export async function updateManagedAuthPermissions(
   }
 }
 
+export type OAuthEndpoints = {
+  authorization_url: string
+  token_url: string
+  userinfo_url: string
+  cognito_domain: string
+}
+
 export type OAuthClient = {
   client_id: string
   service_name: string
@@ -76,6 +83,10 @@ export type OAuthClient = {
   created_at: string
   updated_at: string
   last_used_at: string
+  // Only present on creation response
+  cognito_client_id?: string
+  cognito_client_secret?: string
+  oauth_endpoints?: OAuthEndpoints
 }
 
 export async function listOAuthClients(): Promise<OAuthClient[]> {
@@ -92,6 +103,7 @@ export async function createOAuthClient(input: {
   service_name: string
   grant_types?: string[]
   redirect_uris?: string[]
+  permissions?: string[]
 }): Promise<OAuthClient> {
   const res = await fetchWithAuth('/api/v1/coordination/auth/oauth-clients', {
     method: 'POST',

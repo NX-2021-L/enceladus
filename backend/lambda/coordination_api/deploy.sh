@@ -252,6 +252,17 @@ ensure_role() {
       "Resource": "arn:aws:cognito-idp:${COGNITO_REGION}:${ACCOUNT_ID}:userpool/${COGNITO_USER_POOL_ID}"
     },
     {
+      "Sid": "CognitoOAuthClientManagement",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:CreateUserPoolClient",
+        "cognito-idp:DeleteUserPoolClient",
+        "cognito-idp:DescribeUserPoolClient",
+        "cognito-idp:UpdateUserPoolClient"
+      ],
+      "Resource": "arn:aws:cognito-idp:${COGNITO_REGION}:${ACCOUNT_ID}:userpool/${COGNITO_USER_POOL_ID}"
+    },
+    {
       "Sid": "BedrockAgentLifecycle",
       "Effect": "Allow",
       "Action": [

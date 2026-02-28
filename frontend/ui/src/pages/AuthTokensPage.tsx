@@ -9,6 +9,7 @@ import {
   updateOAuthClientPermissions,
   type ManagedAuthToken,
   type OAuthClient,
+  type OAuthEndpoints,
 } from '../api/authTokens'
 
 const PERMISSION_OPTIONS = ['read', 'write', 'put', 'delete', 'admin'] as const
@@ -20,6 +21,8 @@ interface CreatedClientCreds {
   client_id: string
   client_secret: string
   service_name: string
+  api_key?: string
+  oauth_endpoints?: OAuthEndpoints
 }
 
 function formatAge(seconds: number | null): string {
@@ -52,12 +55,14 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
 }
 
 function ClientConfigBlock({ creds }: { creds: CreatedClientCreds }) {
-  const configJson = JSON.stringify(
+  const endpoints = creds.oauth_endpoints
+
+  const mcpConfigJson = JSON.stringify(
     {
       gateway_url: GATEWAY_URL,
       transport: 'streamable-http',
       auth_header: 'X-Coordination-Internal-Key',
-      auth_value: creds.client_secret,
+      auth_value: creds.api_key || creds.client_secret,
       client_id: creds.client_id,
     },
     null,
@@ -66,6 +71,54 @@ function ClientConfigBlock({ creds }: { creds: CreatedClientCreds }) {
 
   return (
     <div className="space-y-4">
+      {/* OAuth Credentials (Cognito) */}
+      {endpoints && (
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium text-cyan-400">OAuth Credentials (copy now — secret shown once)</h4>
+          <div className="grid gap-2 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="w-36 text-slate-400">Client ID:</span>
+              <code className="flex-1 overflow-x-auto">{creds.client_id}</code>
+              <CopyButton text={creds.client_id} />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-36 text-slate-400">Client Secret:</span>
+              <code className="flex-1 overflow-x-auto">{creds.client_secret}</code>
+              <CopyButton text={creds.client_secret} />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-36 text-slate-400">Authorization URL:</span>
+              <code className="flex-1 overflow-x-auto">{endpoints.authorization_url}</code>
+              <CopyButton text={endpoints.authorization_url} />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-36 text-slate-400">Token URL:</span>
+              <code className="flex-1 overflow-x-auto">{endpoints.token_url}</code>
+              <CopyButton text={endpoints.token_url} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* API Key (service token) */}
+      {creds.api_key && (
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium text-amber-300">API Key (for header-based auth)</h4>
+          <div className="grid gap-2 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="w-36 text-slate-400">API Key:</span>
+              <code className="flex-1 overflow-x-auto">{creds.api_key}</code>
+              <CopyButton text={creds.api_key} />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-36 text-slate-400">Header:</span>
+              <code className="flex-1 overflow-x-auto">X-Coordination-Internal-Key</code>
+              <CopyButton text="X-Coordination-Internal-Key" />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MCP Server URL */}
       <div className="space-y-2">
         <h4 className="text-sm font-medium text-emerald-400">MCP Server URL</h4>
@@ -73,57 +126,33 @@ function ClientConfigBlock({ creds }: { creds: CreatedClientCreds }) {
           <code className="flex-1 text-sm text-emerald-300 overflow-x-auto">{GATEWAY_URL}</code>
           <CopyButton text={GATEWAY_URL} label="Copy URL" />
         </div>
-        <p className="text-xs text-slate-500">Paste this into the &quot;MCP Server URL&quot; field in your client.</p>
       </div>
 
-      {/* Credentials */}
-      <div className="space-y-2">
-        <h4 className="text-sm font-medium text-amber-300">Client Credentials (copy now — secret shown once)</h4>
-        <div className="grid gap-2 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="w-24 text-slate-400">Client ID:</span>
-            <code className="flex-1 overflow-x-auto">{creds.client_id}</code>
-            <CopyButton text={creds.client_id} />
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-24 text-slate-400">Client Secret:</span>
-            <code className="flex-1 overflow-x-auto">{creds.client_secret}</code>
-            <CopyButton text={creds.client_secret} />
+      {/* ChatGPT OAuth Setup */}
+      {endpoints && (
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium text-slate-200">ChatGPT / OpenAI OAuth Setup</h4>
+          <div className="rounded-md bg-slate-950 border border-slate-700 p-3 text-xs space-y-1">
+            <div><span className="text-slate-400">Auth Type:</span> OAuth</div>
+            <div><span className="text-slate-400">Client ID:</span> <code>{creds.client_id}</code></div>
+            <div><span className="text-slate-400">Client Secret:</span> <code>{creds.client_secret}</code></div>
+            <div><span className="text-slate-400">Authorization URL:</span> <code>{endpoints.authorization_url}</code></div>
+            <div><span className="text-slate-400">Token URL:</span> <code>{endpoints.token_url}</code></div>
+            <div><span className="text-slate-400">Scope:</span> <code>openid email profile</code></div>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* MCP Configuration */}
+      {/* MCP Configuration (API Key) */}
       <div className="space-y-2">
-        <h4 className="text-sm font-medium text-slate-200">MCP Connection Config</h4>
+        <h4 className="text-sm font-medium text-slate-200">MCP Connection Config (API Key)</h4>
         <div className="relative">
           <pre className="rounded-md bg-slate-950 border border-slate-700 p-3 text-xs overflow-x-auto">
-            {configJson}
+            {mcpConfigJson}
           </pre>
           <div className="absolute top-2 right-2">
-            <CopyButton text={configJson} label="Copy JSON" />
+            <CopyButton text={mcpConfigJson} label="Copy JSON" />
           </div>
-        </div>
-      </div>
-
-      {/* ChatGPT Instructions */}
-      <div className="space-y-2">
-        <h4 className="text-sm font-medium text-slate-200">ChatGPT Custom GPT Setup</h4>
-        <div className="rounded-md bg-slate-950 border border-slate-700 p-3 text-xs space-y-1">
-          <div><span className="text-slate-400">Auth Type:</span> API Key</div>
-          <div><span className="text-slate-400">Header Name:</span> <code>X-Coordination-Internal-Key</code></div>
-          <div><span className="text-slate-400">Header Value:</span> <code>{creds.client_secret}</code></div>
-          <div><span className="text-slate-400">MCP Endpoint:</span> <code>{GATEWAY_URL}</code></div>
-        </div>
-      </div>
-
-      {/* Generic MCP Client */}
-      <div className="space-y-2">
-        <h4 className="text-sm font-medium text-slate-200">Generic MCP Client</h4>
-        <div className="rounded-md bg-slate-950 border border-slate-700 p-3 text-xs space-y-1">
-          <div><span className="text-slate-400">Transport:</span> Streamable HTTP</div>
-          <div><span className="text-slate-400">Gateway URL:</span> <code>{GATEWAY_URL}</code></div>
-          <div><span className="text-slate-400">Auth Header:</span> <code>X-Coordination-Internal-Key: {creds.client_secret}</code></div>
         </div>
       </div>
     </div>
@@ -144,6 +173,7 @@ export function AuthTokensPage() {
 
   // Create Client state
   const [clientName, setClientName] = useState('')
+  const [clientRedirectUri, setClientRedirectUri] = useState('')
   const [createdClientCreds, setCreatedClientCreds] = useState<CreatedClientCreds | null>(null)
 
   async function reload() {
@@ -196,22 +226,32 @@ export function AuthTokensPage() {
     if (!name) return
     setError(null)
     try {
+      // Create service token for API key auth
       const tokenResult = await createManagedAuthToken({
         service_name: name,
         permissions: [...PERMISSION_OPTIONS],
       })
-      const clientId = `enceladus-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`
-      await createOAuthClient({
-        client_id: clientId,
+      const slugId = `enceladus-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`
+      const redirectUris = clientRedirectUri.trim()
+        ? clientRedirectUri.trim().split(/[,\s]+/).filter(Boolean)
+        : []
+      // Create OAuth client — backend registers with Cognito and returns real client_id
+      const oauthClient = await createOAuthClient({
+        client_id: slugId,
         service_name: name,
-        grant_types: ['client_credentials'],
+        grant_types: ['authorization_code'],
+        redirect_uris: redirectUris,
+        permissions: [...PERMISSION_OPTIONS],
       })
       setCreatedClientCreds({
-        client_id: clientId,
-        client_secret: tokenResult.token.token,
+        client_id: oauthClient.cognito_client_id || oauthClient.client_id,
+        client_secret: oauthClient.cognito_client_secret || tokenResult.token.token,
         service_name: name,
+        api_key: tokenResult.token.token,
+        oauth_endpoints: oauthClient.oauth_endpoints,
       })
       setClientName('')
+      setClientRedirectUri('')
       await reload()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Create client failed')
@@ -326,15 +366,24 @@ export function AuthTokensPage() {
       {/* Create Client */}
       <section className="rounded-xl border border-slate-700 bg-slate-900/60 p-4 space-y-3">
         <h3 className="text-sm font-medium">Create Client</h3>
-        <p className="text-xs text-slate-400">Creates an OAuth client with full-access service token for MCP-compatible agents (ChatGPT, Claude, etc.)</p>
-        <div className="flex gap-3 items-center">
+        <p className="text-xs text-slate-400">Creates an OAuth client registered with Cognito for MCP-compatible agents (ChatGPT, Claude, etc.)</p>
+        <div className="grid gap-3 md:grid-cols-2">
           <input
             value={clientName}
             onChange={(e) => setClientName(e.target.value)}
-            placeholder="Client name (e.g. Claude Connector)"
-            className="rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-sm flex-1 max-w-sm"
+            placeholder="Client name (e.g. ChatGPT Connector)"
+            className="rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-sm"
             onKeyDown={(e) => { if (e.key === 'Enter') void onCreateClient() }}
           />
+          <input
+            value={clientRedirectUri}
+            onChange={(e) => setClientRedirectUri(e.target.value)}
+            placeholder="OAuth Redirect URI (from ChatGPT setup)"
+            className="rounded-md border border-slate-600 bg-slate-950 px-3 py-2 text-sm"
+            onKeyDown={(e) => { if (e.key === 'Enter') void onCreateClient() }}
+          />
+        </div>
+        <div className="flex gap-3 items-center">
           <button onClick={() => void onCreateClient()} className="rounded-md bg-emerald-500 px-3 py-2 text-sm text-slate-900 font-medium">
             Create Client
           </button>
@@ -342,9 +391,9 @@ export function AuthTokensPage() {
             Refresh
           </button>
         </div>
-        {clientName.trim() && (
+        {!clientRedirectUri.trim() && clientName.trim() && (
           <div className="text-xs text-slate-500">
-            Client ID will be: <code>enceladus-{clientName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}</code>
+            No redirect URI provided — a default test URI will be used. You can get the redirect URI from ChatGPT&apos;s OAuth setup page.
           </div>
         )}
         {createdClientCreds && (
