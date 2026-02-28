@@ -6,6 +6,7 @@ import {
   listManagedAuthTokens,
   listOAuthClients,
   updateManagedAuthPermissions,
+  updateOAuthClientPermissions,
   type ManagedAuthToken,
   type OAuthClient,
 } from '../api/authTokens'
@@ -13,7 +14,7 @@ import {
 const PERMISSION_OPTIONS = ['read', 'write', 'put', 'delete', 'admin'] as const
 const GATEWAY_URL = 'https://jreese.net/api/v1/coordination/mcp'
 
-type Tab = 'tokens' | 'permissions' | 'oauth'
+type Tab = 'tokens' | 'oauth' | 'permissions'
 
 interface CreatedClientCreds {
   client_id: string
@@ -168,7 +169,11 @@ export function AuthTokensPage() {
     [tokens],
   )
 
-  // --- Create Token ---
+  const sortedClients = useMemo(
+    () => [...oauthClients].sort((a, b) => a.service_name.localeCompare(b.service_name)),
+    [oauthClients],
+  )
+
   async function onCreateToken() {
     if (!tokenServiceName.trim()) return
     setError(null)
@@ -186,19 +191,16 @@ export function AuthTokensPage() {
     }
   }
 
-  // --- Create Client ---
   async function onCreateClient() {
     const name = clientName.trim()
     if (!name) return
     setError(null)
     try {
-      // 1. Create a service token (generates the secret)
       const tokenResult = await createManagedAuthToken({
         service_name: name,
         permissions: [...PERMISSION_OPTIONS],
       })
       const clientId = `enceladus-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`
-      // 2. Register the OAuth client entry
       await createOAuthClient({
         client_id: clientId,
         service_name: name,
@@ -226,12 +228,24 @@ export function AuthTokensPage() {
     }
   }
 
-  async function onTogglePermission(tokenId: string, existing: string[], perm: string, checked: boolean) {
+  async function onToggleTokenPermission(tokenId: string, existing: string[], perm: string, checked: boolean) {
     const next = checked ? [...new Set([...existing, perm])] : existing.filter((p) => p !== perm)
     const safe = next.length ? next : ['read']
     setError(null)
     try {
       await updateManagedAuthPermissions(tokenId, safe)
+      await reload()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Permission update failed')
+    }
+  }
+
+  async function onToggleClientPermission(clientId: string, existing: string[], perm: string, checked: boolean) {
+    const next = checked ? [...new Set([...existing, perm])] : existing.filter((p) => p !== perm)
+    const safe = next.length ? next : ['read']
+    setError(null)
+    try {
+      await updateOAuthClientPermissions(clientId, safe)
       await reload()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Permission update failed')
@@ -251,16 +265,18 @@ export function AuthTokensPage() {
             Tokens
           </button>
           <button
-            className={`rounded-md px-3 py-1 text-sm ${tab === 'permissions' ? 'bg-slate-200 text-slate-900' : 'bg-slate-700'}`}
-            onClick={() => setTab('permissions')}
-          >
-            Permissions
-          </button>
-          <button
             className={`rounded-md px-3 py-1 text-sm ${tab === 'oauth' ? 'bg-slate-200 text-slate-900' : 'bg-slate-700'}`}
             onClick={() => setTab('oauth')}
           >
             OAuth Clients
+          </button>
+        </div>
+        <div>
+          <button
+            className={`rounded-md px-3 py-1 text-sm ${tab === 'permissions' ? 'bg-blue-500 text-white' : 'bg-blue-900/40 text-blue-300 border border-blue-700/50'}`}
+            onClick={() => setTab('permissions')}
+          >
+            Permissions
           </button>
         </div>
       </section>
@@ -331,8 +347,6 @@ export function AuthTokensPage() {
             Client ID will be: <code>enceladus-{clientName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}</code>
           </div>
         )}
-
-        {/* One-time credentials display */}
         {createdClientCreds && (
           <div className="rounded-md border border-amber-700 bg-amber-950/40 p-4 space-y-3">
             <div className="flex items-center justify-between">
@@ -402,40 +416,7 @@ export function AuthTokensPage() {
               </tbody>
             </table>
           </div>
-        ) : tab === 'permissions' ? (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead>
-                <tr className="text-left text-slate-400">
-                  <th className="py-2 pr-4">Service</th>
-                  {PERMISSION_OPTIONS.map((perm) => (
-                    <th key={perm} className="py-2 pr-4 capitalize">
-                      {perm}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((token) => (
-                  <tr key={token.token_id} className="border-t border-slate-800">
-                    <td className="py-2 pr-4">{token.service_name}</td>
-                    {PERMISSION_OPTIONS.map((perm) => (
-                      <td key={perm} className="py-2 pr-4">
-                        <input
-                          type="checkbox"
-                          checked={token.permissions.includes(perm)}
-                          onChange={(e) =>
-                            void onTogglePermission(token.token_id, token.permissions, perm, e.target.checked)
-                          }
-                        />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
+        ) : tab === 'oauth' ? (
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
@@ -448,7 +429,7 @@ export function AuthTokensPage() {
                 </tr>
               </thead>
               <tbody>
-                {oauthClients.map((client) => (
+                {sortedClients.map((client) => (
                   <tr key={client.client_id} className="border-t border-slate-800">
                     <td className="py-2 pr-4">{client.service_name}</td>
                     <td className="py-2 pr-4">
@@ -469,7 +450,7 @@ export function AuthTokensPage() {
                     <td className="py-2 pr-4">{client.last_used_at || 'never'}</td>
                   </tr>
                 ))}
-                {oauthClients.length === 0 && (
+                {sortedClients.length === 0 && (
                   <tr>
                     <td colSpan={5} className="py-4 text-center text-slate-400">
                       No OAuth clients registered
@@ -478,6 +459,96 @@ export function AuthTokensPage() {
                 )}
               </tbody>
             </table>
+          </div>
+        ) : (
+          /* Permissions tab — tokens + OAuth clients */
+          <div className="space-y-6">
+            {/* Token permissions */}
+            <div>
+              <h4 className="text-sm font-medium text-slate-300 mb-2">Token Permissions</h4>
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-slate-400">
+                      <th className="py-2 pr-4">Service</th>
+                      {PERMISSION_OPTIONS.map((perm) => (
+                        <th key={perm} className="py-2 pr-4 capitalize">{perm}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sorted.map((token) => (
+                      <tr key={token.token_id} className="border-t border-slate-800">
+                        <td className="py-2 pr-4">{token.service_name}</td>
+                        {PERMISSION_OPTIONS.map((perm) => (
+                          <td key={perm} className="py-2 pr-4">
+                            <input
+                              type="checkbox"
+                              checked={token.permissions.includes(perm)}
+                              onChange={(e) =>
+                                void onToggleTokenPermission(token.token_id, token.permissions, perm, e.target.checked)
+                              }
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                    {sorted.length === 0 && (
+                      <tr>
+                        <td colSpan={1 + PERMISSION_OPTIONS.length} className="py-3 text-center text-slate-500 text-xs">
+                          No tokens
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* OAuth client permissions */}
+            <div>
+              <h4 className="text-sm font-medium text-slate-300 mb-2">OAuth Client Permissions</h4>
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-slate-400">
+                      <th className="py-2 pr-4">Client</th>
+                      {PERMISSION_OPTIONS.map((perm) => (
+                        <th key={perm} className="py-2 pr-4 capitalize">{perm}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedClients.map((client) => (
+                      <tr key={client.client_id} className="border-t border-slate-800">
+                        <td className="py-2 pr-4">
+                          <div>{client.service_name}</div>
+                          <div className="text-xs text-slate-500">{client.client_id}</div>
+                        </td>
+                        {PERMISSION_OPTIONS.map((perm) => (
+                          <td key={perm} className="py-2 pr-4">
+                            <input
+                              type="checkbox"
+                              checked={(client.permissions || []).includes(perm)}
+                              onChange={(e) =>
+                                void onToggleClientPermission(client.client_id, client.permissions || [], perm, e.target.checked)
+                              }
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                    {sortedClients.length === 0 && (
+                      <tr>
+                        <td colSpan={1 + PERMISSION_OPTIONS.length} className="py-3 text-center text-slate-500 text-xs">
+                          No OAuth clients
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         )}
       </section>
