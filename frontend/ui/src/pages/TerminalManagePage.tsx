@@ -10,6 +10,24 @@ import { ErrorState } from '../components/shared/ErrorState'
 
 const LS_KEY = 'enceladus:terminal_active_session'
 const TURNS_LS_PREFIX = 'enceladus:terminal_turns:'
+const ENDED_SESSIONS_KEY = 'enceladus:terminal_ended_sessions'
+
+function loadEndedSessionIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(ENDED_SESSIONS_KEY)
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set()
+  } catch {
+    return new Set()
+  }
+}
+
+function saveEndedSessionIds(ids: Set<string>) {
+  try {
+    localStorage.setItem(ENDED_SESSIONS_KEY, JSON.stringify([...ids]))
+  } catch {
+    /* quota exceeded */
+  }
+}
 
 const PROVIDERS: TerminalProvider[] = [
   {
@@ -28,7 +46,7 @@ const PROVIDERS: TerminalProvider[] = [
 
 export function TerminalManagePage() {
   const { sessions, generatedAt, isPending, isError } = useTerminalSessions()
-  const [endedSessionIds, setEndedSessionIds] = useState<Set<string>>(new Set())
+  const [endedSessionIds, setEndedSessionIds] = useState<Set<string>>(loadEndedSessionIds)
 
   const setActiveSession = useCallback(
     (state: ActiveSessionState) => {
@@ -80,8 +98,12 @@ export function TerminalManagePage() {
       // Clear local chat history for this session
       localStorage.removeItem(TURNS_LS_PREFIX + session.session_id)
 
-      // Hide the session card from the list
-      setEndedSessionIds((prev) => new Set([...prev, session.session_id]))
+      // Permanently hide the session card
+      setEndedSessionIds((prev) => {
+        const updated = new Set([...prev, session.session_id])
+        saveEndedSessionIds(updated)
+        return updated
+      })
     },
     [],
   )
