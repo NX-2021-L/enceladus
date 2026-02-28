@@ -139,6 +139,22 @@ AUTH_ALLOWED_PERMISSIONS = {"read", "write", "put", "delete", "admin"}
 
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
+COGNITO_REGION = os.environ.get("COGNITO_REGION", "")
+TERMINAL_COGNITO_SECRET_ID = os.environ.get(
+    "TERMINAL_COGNITO_SECRET_ID",
+    "devops/coordination/cognito/terminal-agent",
+)
+TERMINAL_COGNITO_AUTH_FLOW = os.environ.get(
+    "TERMINAL_COGNITO_AUTH_FLOW",
+    "USER_PASSWORD_AUTH",
+).strip() or "USER_PASSWORD_AUTH"
+TERMINAL_COGNITO_DEFAULT_ORIGIN = os.environ.get(
+    "TERMINAL_COGNITO_DEFAULT_ORIGIN",
+    CORS_ORIGIN,
+).strip() or CORS_ORIGIN
+TERMINAL_COGNITO_REFRESH_MAX_AGE_SECONDS = int(
+    os.environ.get("TERMINAL_COGNITO_REFRESH_MAX_AGE_SECONDS", "2592000")
+)
 COORDINATION_INTERNAL_API_KEY = _first_nonempty_env(
     "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
     "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
@@ -572,6 +588,7 @@ _sns = None
 _logs = None
 _mcp = CoordinationMcpClient()
 _secretsmanager = None
+_cognito = None
 _cloudwatch_sequence_tokens: Dict[Tuple[str, str], str] = {}
 _feed_subscriptions_table_available: Optional[bool] = None
 
@@ -709,6 +726,27 @@ def _get_secretsmanager():
     return _secretsmanager
 
 
+def _resolve_cognito_region() -> str:
+    configured = str(COGNITO_REGION or "").strip()
+    if configured:
+        return configured
+    pool = str(COGNITO_USER_POOL_ID or "").strip()
+    if "_" in pool:
+        return pool.split("_", 1)[0]
+    return "us-east-1"
+
+
+def _get_cognito():
+    global _cognito
+    if _cognito is None:
+        _cognito = boto3.client(
+            "cognito-idp",
+            region_name=_resolve_cognito_region(),
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _cognito
+
+
 # ---------------------------------------------------------------------------
 # Auth (same Cognito cookie validation pattern as existing Enceladus Lambdas)
 # ---------------------------------------------------------------------------
@@ -833,6 +871,22 @@ def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Opti
         return None, _error(401, str(exc))
 
 
+def _has_managed_permission(claims: Dict[str, Any], *required: str) -> bool:
+    mode = str((claims or {}).get("auth_mode") or "").strip().lower()
+    if mode == "internal-key":
+        return True
+    if mode != "managed-token":
+        return False
+    perms = {str(p or "").strip().lower() for p in (claims.get("permissions") or [])}
+    perms.discard("")
+    if "admin" in perms:
+        return True
+    required_set = {str(name or "").strip().lower() for name in required if str(name or "").strip()}
+    if not required_set:
+        return bool(perms)
+    return not required_set.isdisjoint(perms)
+
+
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
@@ -870,7 +924,7 @@ def _error(status_code: int, message: str, **extra: Any) -> Dict[str, Any]:
     if not code:
         if status_code == 400:
             code = "INVALID_INPUT"
-        elif status_code == 401:
+        elif status_code in {401, 403}:
             code = "PERMISSION_DENIED"
         elif status_code == 404:
             code = "NOT_FOUND"
@@ -9182,6 +9236,210 @@ def _handle_oauth_client_usage(client_id: str) -> Dict[str, Any]:
     return _response(200, {"success": True, "client_id": client_id, "last_used_at": now})
 
 
+def _load_terminal_cognito_credentials() -> Dict[str, str]:
+    secret_id = str(TERMINAL_COGNITO_SECRET_ID or "").strip()
+    if not secret_id:
+        raise ValueError("TERMINAL_COGNITO_SECRET_ID is not configured")
+
+    try:
+        secret_value = _get_secretsmanager().get_secret_value(SecretId=secret_id)
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"Failed to load terminal Cognito secret: {exc}") from exc
+
+    raw = str(secret_value.get("SecretString") or "").strip()
+    if not raw:
+        raise ValueError("Terminal Cognito secret is empty")
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Terminal Cognito secret must be JSON") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("Terminal Cognito secret must be a JSON object")
+
+    username = str(parsed.get("username") or parsed.get("USERNAME") or "").strip()
+    password = str(parsed.get("password") or parsed.get("PASSWORD") or "").strip()
+    client_id = str(parsed.get("client_id") or parsed.get("COGNITO_CLIENT_ID") or COGNITO_CLIENT_ID or "").strip()
+    auth_flow = str(parsed.get("auth_flow") or TERMINAL_COGNITO_AUTH_FLOW or "USER_PASSWORD_AUTH").strip()
+
+    if not username or not password:
+        raise ValueError("Terminal Cognito secret must include username and password")
+    if not client_id:
+        raise ValueError("COGNITO_CLIENT_ID is required for terminal Cognito authentication")
+
+    return {
+        "username": username,
+        "password": password,
+        "client_id": client_id,
+        "auth_flow": auth_flow,
+    }
+
+
+def _normalize_terminal_target_origin(value: str) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _cookie_header_line(name: str, value: str, path: str, max_age: int, *, http_only: bool) -> str:
+    encoded = urllib.parse.quote(str(value or ""), safe="")
+    parts = [
+        f"{name}={encoded}",
+        f"Path={path}",
+        "Secure",
+        "SameSite=None",
+        f"Max-Age={max_age}",
+    ]
+    if http_only:
+        parts.append("HttpOnly")
+    return "; ".join(parts)
+
+
+def _handle_auth_cognito_terminal_session(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    if not _has_managed_permission(claims or {}, "write"):
+        return _error(
+            403,
+            "Managed token permission denied. Requires write or admin permission.",
+            retryable=False,
+        )
+
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc), retryable=False)
+
+    target_origin = _normalize_terminal_target_origin(
+        str(body.get("target_origin") or TERMINAL_COGNITO_DEFAULT_ORIGIN)
+    )
+    if not target_origin:
+        return _error(400, "target_origin must be a valid https origin", retryable=False)
+
+    include_set_cookie_headers = bool(body.get("include_set_cookie_headers", True))
+    include_tokens = bool(body.get("include_tokens", False))
+
+    try:
+        credentials = _load_terminal_cognito_credentials()
+    except ValueError as exc:
+        return _error(500, str(exc), retryable=False)
+    except RuntimeError as exc:
+        return _error(502, str(exc), retryable=True)
+
+    cognito = _get_cognito()
+    try:
+        auth_resp = cognito.initiate_auth(
+            AuthFlow=credentials["auth_flow"],
+            AuthParameters={
+                "USERNAME": credentials["username"],
+                "PASSWORD": credentials["password"],
+            },
+            ClientId=credentials["client_id"],
+        )
+    except cognito.exceptions.NotAuthorizedException:
+        return _error(401, "Terminal Cognito credentials rejected", retryable=False)
+    except cognito.exceptions.UserNotConfirmedException:
+        return _error(401, "Terminal Cognito user is not confirmed", retryable=False)
+    except cognito.exceptions.PasswordResetRequiredException:
+        return _error(401, "Terminal Cognito user must reset password", retryable=False)
+    except (BotoCoreError, ClientError) as exc:
+        return _error(502, f"Cognito initiate_auth failed: {exc}", retryable=True)
+
+    auth_result = auth_resp.get("AuthenticationResult") or {}
+    id_token = str(auth_result.get("IdToken") or "")
+    access_token = str(auth_result.get("AccessToken") or "")
+    refresh_token = str(auth_result.get("RefreshToken") or "")
+    token_type = str(auth_result.get("TokenType") or "Bearer")
+    expires_in = int(auth_result.get("ExpiresIn") or 3600)
+
+    if not id_token:
+        return _error(502, "Cognito response missing IdToken", retryable=True)
+
+    issued_epoch_ms = int(time.time() * 1000)
+    session_at = str(issued_epoch_ms)
+    cookies: List[Dict[str, Any]] = [
+        {
+            "name": "enceladus_id_token",
+            "value": id_token,
+            "path": "/",
+            "secure": True,
+            "http_only": True,
+            "same_site": "None",
+            "max_age": expires_in,
+        },
+        {
+            "name": "enceladus_session_at",
+            "value": session_at,
+            "path": "/enceladus",
+            "secure": True,
+            "http_only": False,
+            "same_site": "None",
+            "max_age": expires_in,
+        },
+    ]
+    if refresh_token:
+        cookies.append(
+            {
+                "name": "enceladus_refresh_token",
+                "value": refresh_token,
+                "path": "/",
+                "secure": True,
+                "http_only": True,
+                "same_site": "None",
+                "max_age": TERMINAL_COGNITO_REFRESH_MAX_AGE_SECONDS,
+            }
+        )
+
+    payload: Dict[str, Any] = {
+        "success": True,
+        "session": {
+            "auth_flow": credentials["auth_flow"],
+            "issued_at": _now_z(),
+            "issued_epoch_ms": issued_epoch_ms,
+            "expires_in": expires_in,
+            "token_type": token_type,
+            "target_origin": target_origin,
+            "cookies": cookies,
+            "playwright_cookies": [
+                {
+                    "name": c["name"],
+                    "value": c["value"],
+                    "url": target_origin,
+                    "path": c["path"],
+                    "secure": c["secure"],
+                    "httpOnly": c["http_only"],
+                    "sameSite": c["same_site"],
+                }
+                for c in cookies
+            ],
+        },
+    }
+
+    if include_set_cookie_headers:
+        payload["session"]["set_cookie_headers"] = [
+            _cookie_header_line(
+                c["name"],
+                c["value"],
+                c["path"],
+                int(c["max_age"]),
+                http_only=bool(c["http_only"]),
+            )
+            for c in cookies
+        ]
+
+    if include_tokens:
+        payload["session"]["tokens"] = {
+            "id_token": id_token,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+        }
+
+    return _response(200, payload)
+
+
 def _handle_health() -> Dict[str, Any]:
     """GET /api/v1/health — connection health check."""
     health: Dict[str, Any] = {}
@@ -9397,6 +9655,10 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     match_oauth_usage = re.fullmatch(r"/api/v1/coordination/auth/oauth-clients/([A-Za-z0-9_\-]+)/usage", path)
     if method == "PATCH" and match_oauth_usage:
         return _handle_oauth_client_usage(match_oauth_usage.group(1))
+
+    # POST /api/v1/coordination/auth/cognito/session
+    if method == "POST" and path == "/api/v1/coordination/auth/cognito/session":
+        return _handle_auth_cognito_terminal_session(event, claims or {})
 
     # --- Existing coordination routes ---
 
