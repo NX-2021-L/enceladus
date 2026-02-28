@@ -71,7 +71,7 @@ ANALYTICS_ARTIFACTS = ("tasks", "issues", "features")
 SYNC_TS_FORMAT = "%Y%m%d%H%M"
 SYNC_TIMEZONE = ZoneInfo("America/Los_Angeles")
 
-_MOBILE_FEED_CACHE_CONTROL = "max-age=0, s-maxage=300, must-revalidate"
+_MOBILE_FEED_CACHE_CONTROL = "max-age=0, s-maxage=30, must-revalidate"
 
 # Payload size budget thresholds (bytes)
 FEED_SIZE_WARN_BYTES = 500 * 1024   # 500 KB — log WARNING
