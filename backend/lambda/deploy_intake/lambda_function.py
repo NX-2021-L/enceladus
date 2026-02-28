@@ -602,6 +602,19 @@ def _run_pre_deploy_hooks(project_id: str, hooks: List[str]) -> List[Dict[str, A
 # ---------------------------------------------------------------------------
 
 
+def _project_next_version(current: str, change_type: str) -> Optional[str]:
+    """Return projected next semver given current version and change_type."""
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", current.strip())
+    if not m:
+        return None
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if change_type == "major":
+        return f"{major + 1}.0.0"
+    if change_type == "minor":
+        return f"{major}.{minor + 1}.0"
+    return f"{major}.{minor}.{patch + 1}"
+
+
 def _handle_submit(event: Dict, body: Dict) -> Dict:
     project_id = body.get("project_id", "").strip()
     change_type = body.get("change_type", "").strip().lower()
@@ -724,6 +737,30 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
     ddb.put_item(TableName=DEPLOY_TABLE, Item=item)
     logger.info(f"Wrote deployment request {request_id} for project {project_id}")
 
+    # Version projection (ENC-FTR-033): read current version and compute next.
+    # Graceful — never fails the request if S3 is unavailable.
+    projected_next_version: Optional[str] = None
+    release_notes_required: Optional[bool] = None
+    release_notes_guidance: Optional[str] = None
+    try:
+        s3 = _get_s3()
+        ver_key = f"{CONFIG_PREFIX}/{project_id}/current-version.json"
+        ver_resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=ver_key)
+        ver_data = json.loads(ver_resp["Body"].read().decode("utf-8"))
+        current_ver = ver_data.get("version", "")
+        if current_ver:
+            projected_next_version = _project_next_version(current_ver, change_type)
+            if change_type in {"major", "minor"} and projected_next_version:
+                release_notes_required = True
+                release_notes_guidance = (
+                    f"This is a {change_type} version increment. Governance requires a release notes "
+                    f"document via documents_put before the deploy completes. "
+                    f"Title: 'Release Notes {projected_next_version} — {project_id}'. "
+                    f"Add the document ID to related_record_ids on any future deploy request for this version."
+                )
+    except Exception:
+        logger.info("Version projection skipped (current-version.json unavailable)", exc_info=True)
+
     # Send SQS trigger if ACTIVE
     message = "Deployment request queued."
     queued_paused = False
@@ -743,14 +780,20 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
             logger.warning("SQS trigger failed", exc_info=True)
             message = "Deployment request stored. SQS trigger failed — will be picked up on next trigger."
 
-    return _ok({
+    response_body: Dict[str, Any] = {
         "request_id": request_id,
         "deployment_type": deployment_type,
         "project_state": deploy_state,
         "queued_paused": queued_paused,
         "message": message,
         "pre_deploy_results": pre_deploy_results,
-    })
+    }
+    if projected_next_version is not None:
+        response_body["projected_next_version"] = projected_next_version
+    if release_notes_required is not None:
+        response_body["release_notes_required"] = release_notes_required
+        response_body["release_notes_guidance"] = release_notes_guidance
+    return _ok(response_body)
 
 
 # ---------------------------------------------------------------------------
