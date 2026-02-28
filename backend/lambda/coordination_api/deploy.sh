@@ -168,7 +168,7 @@ ensure_role() {
     {
       "Sid": "GovernancePoliciesReadWrite",
       "Effect": "Allow",
-      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:DescribeTable"],
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:DescribeTable"],
       "Resource": [
         "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${GOVERNANCE_POLICIES_TABLE}",
         "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${GOVERNANCE_POLICIES_TABLE}/index/*"
