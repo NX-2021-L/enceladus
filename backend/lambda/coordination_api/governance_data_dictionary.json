@@ -357,6 +357,40 @@
         "updated_at": {"type": "timestamp"},
         "last_used_at": {"type": "timestamp"}
       }
+    },
+    "mcp_server.oauth_token": {
+      "description": "OAuth 2.1 token parameters issued by the enceladus-mcp-streamable Lambda's token endpoint. Governs how the MCP server authenticates Claude.ai connectors (web, mobile, desktop) and how long sessions persist without user re-authentication.",
+      "fields": {
+        "access_token": {
+          "type": "string",
+          "usage_guidance": "Equals MCP_API_KEY env var. Stateless — no server-side token storage. Validated by the Lambda handler on every request via exact Bearer comparison."
+        },
+        "token_type": {
+          "type": "enum",
+          "enum": ["bearer"],
+          "usage_guidance": "Always 'bearer'. Sent by clients as Authorization: Bearer <access_token>."
+        },
+        "expires_in": {
+          "type": "number",
+          "constraints": {"min": 1},
+          "usage_guidance": "Access token lifetime in seconds. Configurable via ENCELADUS_MCP_TOKEN_TTL env var. Default 28800 (8 hours). Controls when Claude.ai will attempt to use the refresh token."
+        },
+        "refresh_token": {
+          "type": "string",
+          "usage_guidance": "Self-contained HMAC-signed opaque token with 30-day TTL. Format: base64url(payload).sha256hex. Payload is {typ:'rt', iat:<unix>, exp:<unix+2592000>} signed with OAUTH_CLIENT_SECRET. Stateless — no server storage required; valid across Lambda cold starts. Issued only on authorization_code grant (not client_credentials per RFC 6749 §4.4.3). Rotated on every use."
+        },
+        "grant_types_supported": {
+          "type": "array",
+          "item_type": "enum",
+          "enum": ["authorization_code", "refresh_token", "client_credentials"],
+          "usage_guidance": "Advertised in /.well-known/oauth-authorization-server metadata. authorization_code (with PKCE/S256) is the primary flow for Claude.ai connectors. refresh_token enables silent renewal without user interaction. client_credentials is available for programmatic access."
+        },
+        "ENCELADUS_MCP_TOKEN_TTL": {
+          "type": "number",
+          "constraints": {"min": 300},
+          "usage_guidance": "Lambda env var controlling access token lifetime in seconds. Default 28800 (8h). Set to shorter values for higher-security environments. Do not set below 300s — shorter values increase re-auth noise without meaningful security benefit."
+        }
+      }
     }
   }
 }
