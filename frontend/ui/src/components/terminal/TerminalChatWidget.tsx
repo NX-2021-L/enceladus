@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { ActiveSessionState, TerminalTurn } from '../../types/terminal'
 import { useSessionTurns, useActiveRequest, useSendMessage } from '../../hooks/useTerminal'
@@ -7,6 +7,7 @@ import { ChatInputBar } from './ChatInputBar'
 import { ManageConnectionButton } from './ManageConnectionButton'
 
 const LS_KEY = 'enceladus:terminal_active_session'
+const TURNS_LS_PREFIX = 'enceladus:terminal_turns:'
 
 function loadActiveSession(): ActiveSessionState | null {
   try {
@@ -20,17 +21,41 @@ function loadActiveSession(): ActiveSessionState | null {
   }
 }
 
+function loadLocalTurns(sessionId: string): TerminalTurn[] {
+  try {
+    const raw = localStorage.getItem(TURNS_LS_PREFIX + sessionId)
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
+function saveLocalTurns(sessionId: string, turns: TerminalTurn[]) {
+  try {
+    localStorage.setItem(TURNS_LS_PREFIX + sessionId, JSON.stringify(turns))
+  } catch {
+    /* localStorage quota exceeded — silent fail */
+  }
+}
+
 export function TerminalChatWidget() {
   const navigate = useNavigate()
   const [activeSession, setActiveSession] = useState<ActiveSessionState | null>(loadActiveSession)
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null)
-  const [optimisticTurns, setOptimisticTurns] = useState<TerminalTurn[]>([])
+  const [localTurns, setLocalTurns] = useState<TerminalTurn[]>(() =>
+    activeSession ? loadLocalTurns(activeSession.session_id) : [],
+  )
 
+  // Whether the session needs MCP initialization (empty project_id)
+  const needsInit = activeSession ? activeSession.project_id === '' : false
+
+  // Listen for active session changes from other tabs/components
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === LS_KEY) {
-        setActiveSession(loadActiveSession())
-        setOptimisticTurns([])
+        const session = loadActiveSession()
+        setActiveSession(session)
+        setLocalTurns(session ? loadLocalTurns(session.session_id) : [])
         setActiveRequestId(null)
       }
     }
@@ -38,40 +63,71 @@ export function TerminalChatWidget() {
     return () => window.removeEventListener('storage', onStorage)
   }, [])
 
-  const { turns: serverTurns, isPending: turnsPending, refetch: refetchTurns } = useSessionTurns(
+  const { turns: serverTurns, isPending: turnsPending } = useSessionTurns(
     activeSession?.session_id,
   )
-  const { state: requestState, isTerminal } = useActiveRequest(activeRequestId ?? undefined)
+  const { state: requestState, isTerminal, result: requestResult } = useActiveRequest(
+    activeRequestId ?? undefined,
+  )
   const sendMutation = useSendMessage()
 
+  // When request reaches terminal state, handle response and clear request tracking
   useEffect(() => {
-    if (isTerminal && activeRequestId) {
-      refetchTurns()
-      setActiveRequestId(null)
-      setOptimisticTurns([])
+    if (!isTerminal || !activeRequestId || !activeSession) return
+
+    // Extract assistant response from the coordination result
+    const summary = requestResult?.summary
+    if (summary) {
+      setLocalTurns((prev) => {
+        const assistantTurn: TerminalTurn = {
+          turn_index: prev.length,
+          role: 'assistant',
+          content: summary,
+          timestamp_utc: new Date().toISOString(),
+        }
+        const updated = [...prev, assistantTurn]
+        saveLocalTurns(activeSession.session_id, updated)
+        return updated
+      })
     }
-  }, [isTerminal, activeRequestId, refetchTurns])
 
-  const allTurns = [...serverTurns, ...optimisticTurns]
+    setActiveRequestId(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTerminal, activeRequestId])
 
-  const handleSend = useCallback(
-    (message: string) => {
-      if (!activeSession) return
+  // Merge server turns (S3 archive) with local turns, deduplicated
+  const allTurns = useMemo(() => {
+    const merged = [...serverTurns]
+    for (const lt of localTurns) {
+      const exists = merged.some(
+        (st) => st.role === lt.role && st.content === lt.content,
+      )
+      if (!exists) merged.push(lt)
+    }
+    return merged.sort((a, b) => a.turn_index - b.turn_index)
+  }, [serverTurns, localTurns])
 
-      const optimisticTurn: TerminalTurn = {
-        turn_index: serverTurns.length + optimisticTurns.length,
+  // Send a raw message to the active session
+  const sendRawMessage = useCallback(
+    (message: string, session: ActiveSessionState) => {
+      const userTurn: TerminalTurn = {
+        turn_index: localTurns.length,
         role: 'user',
         content: message,
         timestamp_utc: new Date().toISOString(),
       }
-      setOptimisticTurns((prev) => [...prev, optimisticTurn])
+      setLocalTurns((prev) => {
+        const updated = [...prev, userTurn]
+        saveLocalTurns(session.session_id, updated)
+        return updated
+      })
 
       sendMutation.mutate(
         {
-          sessionId: activeSession.session_id,
+          sessionId: session.session_id,
           message,
-          projectId: activeSession.project_id,
-          provider: activeSession.provider,
+          projectId: session.project_id,
+          provider: session.provider,
         },
         {
           onSuccess: (data) => {
@@ -81,12 +137,41 @@ export function TerminalChatWidget() {
             }
           },
           onError: () => {
-            setOptimisticTurns((prev) => prev.filter((t) => t !== optimisticTurn))
+            // Remove the failed user turn
+            setLocalTurns((prev) => {
+              const updated = prev.filter((t) => t !== userTurn)
+              if (activeSession) saveLocalTurns(activeSession.session_id, updated)
+              return updated
+            })
           },
         },
       )
     },
-    [activeSession, serverTurns.length, optimisticTurns.length, sendMutation],
+    [activeSession, localTurns.length, sendMutation],
+  )
+
+  const handleSend = useCallback(
+    (message: string) => {
+      if (!activeSession) return
+
+      if (needsInit) {
+        // User typed the project name — update session and auto-send init prompt
+        const projectId = message.trim().toLowerCase()
+        const updatedSession: ActiveSessionState = {
+          ...activeSession,
+          project_id: projectId,
+        }
+        localStorage.setItem(LS_KEY, JSON.stringify(updatedSession))
+        setActiveSession(updatedSession)
+
+        const initPrompt = `set env variable $PROJECT=${projectId}`
+        sendRawMessage(initPrompt, updatedSession)
+        return
+      }
+
+      sendRawMessage(message, activeSession)
+    },
+    [activeSession, needsInit, sendRawMessage],
   )
 
   if (!activeSession) {
@@ -109,7 +194,25 @@ export function TerminalChatWidget() {
     )
   }
 
-  const pendingState = activeRequestId && requestState && !isTerminal ? requestState : null
+  // Compute pending indicator covering all async phases
+  let pendingIndicator: string | null = null
+  if (sendMutation.isPending) {
+    pendingIndicator = 'sending'
+  } else if (activeRequestId && !requestState) {
+    pendingIndicator = 'dispatching'
+  } else if (activeRequestId && requestState && !isTerminal) {
+    pendingIndicator = requestState
+  }
+
+  // Compute placeholder text based on session state
+  let placeholder: string
+  if (needsInit) {
+    placeholder = 'What is the current project?'
+  } else if (activeRequestId) {
+    placeholder = 'Waiting for response...'
+  } else {
+    placeholder = 'Send a message...'
+  }
 
   return (
     <div className="mx-4 mb-4">
@@ -126,14 +229,14 @@ export function TerminalChatWidget() {
 
         <MessageList
           turns={allTurns}
-          pendingState={pendingState}
+          pendingState={pendingIndicator}
           isPending={turnsPending}
         />
 
         <ChatInputBar
           onSend={handleSend}
           disabled={sendMutation.isPending || !!activeRequestId}
-          placeholder={activeRequestId ? 'Waiting for response...' : 'Send a message...'}
+          placeholder={placeholder}
         />
       </div>
     </div>
