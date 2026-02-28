@@ -5083,6 +5083,22 @@ def _handle_oauth_register(event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _touch_oauth_client_usage() -> None:
+    """Fire-and-forget call to update last_used_at for this OAuth client on the coordination API."""
+    if not OAUTH_CLIENT_ID or not COORDINATION_API_BASE or not COORDINATION_API_INTERNAL_API_KEY:
+        return
+    try:
+        base = COORDINATION_API_BASE.rstrip("/")
+        url = f"{base}/auth/oauth-clients/{urllib.parse.quote(OAUTH_CLIENT_ID, safe='')}/usage"
+        req = urllib.request.Request(url, method="PATCH", data=b"{}")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-Coordination-Internal-Key", COORDINATION_API_INTERNAL_API_KEY)
+        ctx = ssl.create_default_context()
+        urllib.request.urlopen(req, timeout=5, context=ctx)
+    except Exception:
+        logger.debug("Failed to update OAuth client usage (non-critical)", exc_info=True)
+
+
 def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
     """OAuth 2.0 token endpoint — authorization_code with PKCE."""
     if not OAUTH_CLIENT_ID or not OAUTH_CLIENT_SECRET:
@@ -5147,6 +5163,7 @@ def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
                     "isBase64Encoded": False,
                 }
 
+        _touch_oauth_client_usage()
         return {
             "statusCode": 200,
             "headers": {"content-type": "application/json", "cache-control": "no-store"},
@@ -5166,6 +5183,7 @@ def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
                 "body": json.dumps({"error": "invalid_client"}),
                 "isBase64Encoded": False,
             }
+        _touch_oauth_client_usage()
         return {
             "statusCode": 200,
             "headers": {"content-type": "application/json", "cache-control": "no-store"},
