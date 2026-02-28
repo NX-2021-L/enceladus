@@ -9145,6 +9145,71 @@ def _handle_oauth_clients_list() -> Dict[str, Any]:
     return _response(200, {"oauth_clients": clients, "count": len(clients)})
 
 
+def _register_cognito_user_pool_client(
+    service_name: str,
+    redirect_uris: List[str],
+    grant_types: List[str],
+) -> Dict[str, Any]:
+    """Register an OAuth client in the Cognito User Pool.
+
+    Returns dict with cognito_client_id, cognito_client_secret, and oauth_endpoints.
+    """
+    pool_id = COGNITO_USER_POOL_ID
+    if not pool_id:
+        raise ValueError("COGNITO_USER_POOL_ID not configured")
+
+    cognito = _get_cognito()
+    cognito_region = _resolve_cognito_region()
+    cognito_domain = f"https://enceladus-status-356364570033.auth.{cognito_region}.amazoncognito.com"
+
+    # Map grant_types to Cognito AllowedOAuthFlows
+    oauth_flows: List[str] = []
+    if "authorization_code" in grant_types:
+        oauth_flows.append("code")
+    if "client_credentials" in grant_types:
+        oauth_flows.append("client_credentials")
+    if "implicit" in grant_types:
+        oauth_flows.append("implicit")
+    if not oauth_flows:
+        oauth_flows = ["code"]
+
+    callback_urls = redirect_uris if redirect_uris else ["https://oauth.pstmn.io/v1/callback"]
+
+    create_kwargs: Dict[str, Any] = {
+        "UserPoolId": pool_id,
+        "ClientName": f"enceladus-oauth-{service_name}",
+        "GenerateSecret": True,
+        "AllowedOAuthFlows": oauth_flows,
+        "AllowedOAuthScopes": ["openid", "email", "profile"],
+        "CallbackURLs": callback_urls,
+        "AllowedOAuthFlowsUserPoolClient": True,
+        "SupportedIdentityProviders": ["COGNITO"],
+        "ExplicitAuthFlows": ["ALLOW_REFRESH_TOKEN_AUTH"],
+        "TokenValidityUnits": {
+            "AccessToken": "hours",
+            "IdToken": "hours",
+            "RefreshToken": "days",
+        },
+        "AccessTokenValidity": 1,
+        "IdTokenValidity": 1,
+        "RefreshTokenValidity": 30,
+    }
+
+    resp = cognito.create_user_pool_client(**create_kwargs)
+    client_data = resp["UserPoolClient"]
+
+    return {
+        "cognito_client_id": client_data["ClientId"],
+        "cognito_client_secret": client_data.get("ClientSecret", ""),
+        "oauth_endpoints": {
+            "authorization_url": f"{cognito_domain}/oauth2/authorize",
+            "token_url": f"{cognito_domain}/oauth2/token",
+            "userinfo_url": f"{cognito_domain}/oauth2/userInfo",
+            "cognito_domain": cognito_domain,
+        },
+    }
+
+
 def _handle_oauth_clients_create(event: Dict[str, Any]) -> Dict[str, Any]:
     try:
         body = _json_body(event)
@@ -9166,6 +9231,21 @@ def _handle_oauth_clients_create(event: Dict[str, Any]) -> Dict[str, Any]:
     except ValueError as exc:
         return _error(400, str(exc))
     now = _now_z()
+
+    # Register in Cognito User Pool to get real OAuth client credentials
+    cognito_result: Optional[Dict[str, Any]] = None
+    try:
+        cognito_result = _register_cognito_user_pool_client(
+            service_name=service_name,
+            redirect_uris=redirect_uris,
+            grant_types=grant_types,
+        )
+        # Use the Cognito-generated client_id as the canonical identifier
+        client_id = cognito_result["cognito_client_id"]
+    except Exception as exc:
+        logger.exception("Failed to register Cognito User Pool client")
+        return _error(500, f"Failed to register Cognito OAuth client: {exc}")
+
     policy_id = f"{OAUTH_CLIENT_POLICY_PREFIX}{client_id}"
 
     item = {
@@ -9212,6 +9292,11 @@ def _handle_oauth_clients_create(event: Dict[str, Any]) -> Dict[str, Any]:
         return _error(500, f"Failed to create/update OAuth client: {exc}")
 
     payload = _build_oauth_client_payload(_deserialize(item))
+    # Include one-time Cognito credentials in the creation response
+    if cognito_result:
+        payload["cognito_client_id"] = cognito_result["cognito_client_id"]
+        payload["cognito_client_secret"] = cognito_result["cognito_client_secret"]
+        payload["oauth_endpoints"] = cognito_result["oauth_endpoints"]
     return _response(201, {"success": True, "oauth_client": payload, "created": True})
 
 

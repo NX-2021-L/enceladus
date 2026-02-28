@@ -1,5 +1,5 @@
 {
-  "version": "2026-02-28.16",
+  "version": "2026-02-28.17",
   "updated_at": "2026-02-28T22:00:00Z",
   "owners": [
     "enceladus-platform"
@@ -526,7 +526,7 @@
       }
     },
     "internal_auth.oauth_client": {
-      "description": "OAuth client records stored in the governance-policies table for external agent/MCP integrations.",
+      "description": "OAuth client records stored in the governance-policies table for external agent/MCP integrations. On creation, a Cognito User Pool App Client is registered via cognito-idp:CreateUserPoolClient so the client_id is valid for OAuth authorization_code flows.",
       "fields": {
         "policy_id": {
           "type": "string",
@@ -540,7 +540,7 @@
           "constraints": {
             "min_length": 1
           },
-          "usage_guidance": "Operator-facing client identifier, typically enceladus-{service-slug}."
+          "usage_guidance": "Cognito-generated User Pool App Client ID. Used as the OAuth client_id in authorization flows."
         },
         "service_name": {
           "type": "string",
