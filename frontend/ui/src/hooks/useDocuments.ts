@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { documentKeys, fetchDocumentsByProject } from '../api/documents'
 import { isSessionExpiredError } from '../lib/authSession'
+import type { Document } from '../types/feeds'
 import type { DocumentFilters } from '../types/filters'
 
 /** Fast polling interval for mission-critical docs freshness. */
@@ -44,20 +45,20 @@ export function useDocuments(filters?: DocumentFilters, options?: UseDocumentsOp
     meta: { suppressSessionExpired: true },
   })
 
-  const documents = query.data?.documents
+  const documents = query.data
 
   const filtered = useMemo(() => {
     if (!documents) return []
     let items = documents
-    if (filters?.projectId) items = items.filter((d) => d.project_id === filters.projectId)
-    if (filters?.status?.length) items = items.filter((d) => filters.status!.includes(d.status))
+    if (filters?.projectId) items = items.filter((d: Document) => d.project_id === filters.projectId)
+    if (filters?.status?.length) items = items.filter((d: Document) => filters.status!.includes(d.status))
     if (filters?.search) {
       const q = filters.search.toLowerCase()
       items = items.filter(
-        (d) =>
+        (d: Document) =>
           d.title.toLowerCase().includes(q) ||
           d.document_id.toLowerCase().includes(q) ||
-          d.keywords.some((k) => k.toLowerCase().includes(q)),
+          d.keywords.some((k: string) => k.toLowerCase().includes(q)),
       )
     }
     const { field, dir } = parseSort(filters?.sortBy)
