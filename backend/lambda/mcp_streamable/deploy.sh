@@ -78,9 +78,33 @@ import os
 source_env = json.loads(os.environ.get("SOURCE_ENV_JSON", "{}"))
 existing_env = json.loads(os.environ.get("EXISTING_ENV_JSON", "{}"))
 
+# Only keep env vars the MCP server actually reads (ENCELADUS_*, COORDINATION_*,
+# and a few infrastructure keys). The source function carries many vars (HOST_V2,
+# BEDROCK, COGNITO, etc.) that push the merged set past Lambda's 4KB limit.
+ALLOWED_PREFIXES = (
+    "ENCELADUS_",
+    "COORDINATION_",
+    "DYNAMODB_REGION",
+    "TRACKER_TABLE",
+    "PROJECTS_TABLE",
+    "DOCUMENTS_TABLE",
+    "S3_BUCKET",
+    "S3_GOVERNANCE",
+    "GOVERNANCE_",
+    "CORS_ORIGIN",
+    "SECRETS_REGION",
+    "MCP_AUDIT_",
+    "MCP_SERVER_",
+)
+
 merged = {}
-merged.update(existing_env if isinstance(existing_env, dict) else {})
-merged.update(source_env if isinstance(source_env, dict) else {})
+for env in [existing_env, source_env]:
+    if not isinstance(env, dict):
+        continue
+    for k, v in env.items():
+        if any(k.startswith(p) or k == p for p in ALLOWED_PREFIXES):
+            merged[k] = v
+
 merged["ENCELADUS_MCP_TRANSPORT"] = os.environ["MCP_TRANSPORT"]
 
 mcp_api_key = os.environ.get("MCP_API_KEY", "")
