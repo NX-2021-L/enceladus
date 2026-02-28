@@ -36,6 +36,7 @@ export function useDocuments(filters?: DocumentFilters, options?: UseDocumentsOp
     queryKey: documentKeys.list(projectId),
     queryFn: () => fetchDocumentsByProject(projectId),
     enabled: !!projectId,
+    staleTime: 0,
     refetchInterval: options?.polling ? DOCUMENTS_POLL_INTERVAL : undefined,
     retry: (count, error) => {
       if (isSessionExpiredError(error)) return false
