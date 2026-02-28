@@ -2,6 +2,7 @@ import importlib.util
 import json
 import pathlib
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -2202,6 +2203,117 @@ class SessionBridgeIntegrationTests(unittest.TestCase):
         self.assertEqual(ps.get("thread_id"), "thread-smoke")
         self.assertEqual(ps.get("turn_id"), "turn-smoke")
         self.assertEqual(ps.get("execution_id"), "exe-smoke")
+
+    def test_redact_session_archive_content_masks_common_secret_patterns(self):
+        aws_key_like = "AKIA" + "ABCDEFGHIJKLMNOP"
+        pem_block = "-----BEGIN " + "PRIVATE KEY-----\nabc\n-----END " + "PRIVATE KEY-----"
+        sample = (
+            f"{aws_key_like} and bearer sk-test-token-1234567890 "
+            "API_KEY=my-secret-value\n"
+            f"{pem_block}"
+        )
+        redacted, hits = coordination_lambda._redact_session_archive_content(sample)
+        self.assertNotIn(aws_key_like, redacted)
+        self.assertNotIn("my-secret-value", redacted)
+        self.assertNotIn("PRIVATE KEY-----", redacted)
+        self.assertIn("[REDACTED:aws_access_key_id]", redacted)
+        self.assertIn("[REDACTED:bearer_token]", redacted)
+        self.assertIn("[REDACTED:secret_assignment]", redacted)
+        self.assertIn("[REDACTED:pem_private_key_block]", redacted)
+        self.assertGreaterEqual(len(hits), 3)
+
+    def test_write_session_archive_records_retries_and_succeeds(self):
+        attempts = {"count": 0}
+
+        class _FakeS3:
+            def put_object(self, **_kwargs):
+                attempts["count"] += 1
+                if attempts["count"] < 3:
+                    raise coordination_lambda.ClientError(
+                        {"Error": {"Code": "SlowDown", "Message": "retry"}},
+                        "PutObject",
+                    )
+                return {"ETag": "ok"}
+
+        request = {"request_id": "CRQ-ARCHIVE-1"}
+        with patch.object(coordination_lambda, "_get_s3", return_value=_FakeS3()):
+            result = coordination_lambda._write_session_archive_records(
+                request=request,
+                session_id="session-abc",
+                instance_id="i-123",
+                dispatch_id="DSP-1",
+                prompt_text="hello",
+                response_text="world",
+                token_count=42,
+            )
+
+        self.assertTrue(result["archived"])
+        self.assertEqual(attempts["count"], 3)
+        self.assertIn("/session-abc/", result["key"])
+        self.assertEqual(result["records"], 2)
+
+    def test_write_session_archive_records_buffers_on_retry_exhaustion(self):
+        class _FakeS3:
+            def put_object(self, **_kwargs):
+                raise coordination_lambda.ClientError(
+                    {"Error": {"Code": "ServiceUnavailable", "Message": "down"}},
+                    "PutObject",
+                )
+
+        request = {"request_id": "CRQ-ARCHIVE-2"}
+        buffered_exists = False
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_dir = coordination_lambda.COORDINATION_SESSION_ARCHIVE_BUFFER_DIR
+            coordination_lambda.COORDINATION_SESSION_ARCHIVE_BUFFER_DIR = tmpdir
+            try:
+                with patch.object(coordination_lambda, "_get_s3", return_value=_FakeS3()):
+                    result = coordination_lambda._write_session_archive_records(
+                        request=request,
+                        session_id="session-buffer",
+                        instance_id="i-999",
+                        dispatch_id="DSP-BUF",
+                        prompt_text="prompt",
+                        response_text="response",
+                    )
+                buffered_exists = pathlib.Path(result["buffered_path"]).exists()
+            finally:
+                coordination_lambda.COORDINATION_SESSION_ARCHIVE_BUFFER_DIR = original_dir
+
+        self.assertFalse(result["archived"])
+        self.assertIn("buffered_path", result)
+        self.assertTrue(buffered_exists)
+
+    def test_refresh_from_ssm_includes_session_archive_result_for_codex_modes(self):
+        request = {
+            "request_id": "CRQ-ARCHIVE-3",
+            "project_id": "devops",
+            "state": "running",
+            "dispatch": {
+                "command_id": "cmd-archive",
+                "execution_mode": "codex_full_auto",
+                "dispatch_id": "DSP-ARCHIVE",
+                "instance_id": "i-archive",
+                "prompt_submitted": "prompt from dispatch",
+            },
+        }
+
+        class _FakeSsm:
+            def get_command_invocation(self, **_kwargs):
+                return {
+                    "Status": "Success",
+                    "StatusDetails": "Success",
+                    "StandardOutputContent": "assistant output",
+                    "StandardErrorContent": "",
+                }
+
+        with patch.object(coordination_lambda, "_get_ssm", return_value=_FakeSsm()), \
+             patch.object(coordination_lambda, "_derive_session_archive_payload", return_value={"archived": True, "key": "k"}), \
+             patch.object(coordination_lambda, "_update_request"), \
+             patch.object(coordination_lambda, "_finalize_tracker_from_request"):
+            out = coordination_lambda._refresh_request_from_ssm(request)
+
+        archive = (((out.get("result") or {}).get("details") or {}).get("session_archive") or {})
+        self.assertTrue(archive.get("archived"))
 
     def test_refresh_from_ssm_keeps_running_for_inprogress_status(self):
         request = {

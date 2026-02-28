@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import asyncio
 import dataclasses
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -115,6 +116,23 @@ GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_GOVERNANCE_PREFIX = os.environ.get("S3_GOVERNANCE_PREFIX", "governance/live")
 S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
+COORDINATION_SESSION_ARCHIVE_BUCKET = os.environ.get("COORDINATION_SESSION_ARCHIVE_BUCKET", S3_BUCKET)
+COORDINATION_SESSION_ARCHIVE_PREFIX = os.environ.get("COORDINATION_SESSION_ARCHIVE_PREFIX", "codex-sessions")
+COORDINATION_SESSION_ARCHIVE_ENABLED = (
+    os.environ.get("COORDINATION_SESSION_ARCHIVE_ENABLED", "true").strip().lower() == "true"
+)
+COORDINATION_SESSION_ARCHIVE_SCHEMA_VERSION = os.environ.get(
+    "COORDINATION_SESSION_ARCHIVE_SCHEMA_VERSION",
+    "2026-02-28.v1",
+)
+COORDINATION_SESSION_ARCHIVE_RETRY_ATTEMPTS = max(
+    1,
+    int(os.environ.get("COORDINATION_SESSION_ARCHIVE_RETRY_ATTEMPTS", "3")),
+)
+COORDINATION_SESSION_ARCHIVE_BUFFER_DIR = os.environ.get(
+    "COORDINATION_SESSION_ARCHIVE_BUFFER_DIR",
+    "/tmp/coordination-session-archive-buffer",
+)
 AUTH_TOKEN_POLICY_PREFIX = "service_token#"
 AUTH_ALLOWED_PERMISSIONS = {"read", "write", "put", "delete", "admin"}
 
@@ -4038,6 +4056,10 @@ def _dispatch_openai_codex_api(
             "governance_resource_count": len(governance_context.get("included_uris") or []),
         },
     )
+    prompt_submitted = _prepend_managed_session_bootstrap(
+        str(prompt or ""),
+        str(request.get("project_id") or ""),
+    )
     return {
         "dispatch_id": dispatch_id,
         "execution_id": execution_id,
@@ -4762,6 +4784,235 @@ def _extract_json_marker(blob: str, marker: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+_SESSION_ARCHIVE_REDACTION_RULES: List[Tuple[str, re.Pattern[str], str]] = [
+    (
+        "aws_access_key_id",
+        re.compile(r"\b(?:AKIA|ASIA|AIDA|AROA|AGPA|AIPA|ANPA|A3T[A-Z0-9])[A-Z0-9]{16}\b"),
+        "[REDACTED:aws_access_key_id]",
+    ),
+    (
+        "bearer_token",
+        re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9._~+/=-]{16,})"),
+        r"\1[REDACTED:bearer_token]",
+    ),
+    (
+        "secret_assignment",
+        re.compile(
+            r"(?im)\b([A-Z0-9_]*(?:SECRET|TOKEN|API_KEY|PASSWORD|PRIVATE_KEY)[A-Z0-9_]*)\s*=\s*([^\s\"']+)"
+        ),
+        r"\1=[REDACTED:secret_assignment]",
+    ),
+    (
+        "api_key_kv",
+        re.compile(r"(?im)\b(api[_-]?key|token|secret)\b\s*[:=]\s*([A-Za-z0-9._~+/=-]{12,})"),
+        r"\1=[REDACTED:api_key_kv]",
+    ),
+    (
+        "pem_private_key_block",
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----",
+            re.MULTILINE,
+        ),
+        "[REDACTED:pem_private_key_block]",
+    ),
+]
+
+
+def _redact_session_archive_content(raw: str) -> Tuple[str, List[str]]:
+    text = str(raw or "")
+    matches: List[str] = []
+    for label, pattern, replacement in _SESSION_ARCHIVE_REDACTION_RULES:
+        updated, count = pattern.subn(replacement, text)
+        if count > 0:
+            text = updated
+            matches.extend([label] * count)
+    return text, matches
+
+
+def _session_archive_date_parts(timestamp_utc: str) -> Tuple[str, str, str]:
+    ts = str(timestamp_utc or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T.*Z", ts):
+        return ts[0:4], ts[5:7], ts[8:10]
+    now = _now_z()
+    return now[0:4], now[5:7], now[8:10]
+
+
+def _next_session_turn_index(request: Dict[str, Any], turns: int) -> int:
+    current = int(request.get("session_archive_turn_index") or 0)
+    request["session_archive_turn_index"] = current + max(turns, 0)
+    return current
+
+
+def _buffer_session_archive_failure(*, key: str, records: List[Dict[str, Any]], error_message: str) -> str:
+    pathlib.Path(COORDINATION_SESSION_ARCHIVE_BUFFER_DIR).mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = pathlib.Path(COORDINATION_SESSION_ARCHIVE_BUFFER_DIR) / f"failed-{stamp}-{uuid.uuid4().hex[:8]}.json"
+    payload = {
+        "bucket": COORDINATION_SESSION_ARCHIVE_BUCKET,
+        "key": key,
+        "error": error_message[:500],
+        "records": records,
+        "created_at": _now_z(),
+    }
+    out_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    return str(out_path)
+
+
+def _write_session_archive_records(
+    *,
+    request: Dict[str, Any],
+    session_id: str,
+    instance_id: str,
+    dispatch_id: str,
+    prompt_text: str,
+    response_text: str,
+    token_count: Optional[int] = None,
+) -> Dict[str, Any]:
+    if not COORDINATION_SESSION_ARCHIVE_ENABLED:
+        return {"archived": False, "reason": "disabled"}
+    if not session_id:
+        return {"archived": False, "reason": "missing_session_id"}
+
+    timestamp_utc = _now_z()
+    year, month, day = _session_archive_date_parts(timestamp_utc)
+    turn_start = _next_session_turn_index(request, 2)
+
+    prompt_redacted, prompt_hits = _redact_session_archive_content(prompt_text)
+    response_redacted, response_hits = _redact_session_archive_content(response_text)
+    records: List[Dict[str, Any]] = [
+        {
+            "schema_version": COORDINATION_SESSION_ARCHIVE_SCHEMA_VERSION,
+            "session_id": session_id,
+            "ec2_instance_id": instance_id,
+            "dispatch_id": dispatch_id,
+            "timestamp_utc": timestamp_utc,
+            "turn_index": turn_start,
+            "role": "user",
+            "content": prompt_redacted,
+            "redaction_tags": sorted(set(prompt_hits)),
+        },
+        {
+            "schema_version": COORDINATION_SESSION_ARCHIVE_SCHEMA_VERSION,
+            "session_id": session_id,
+            "ec2_instance_id": instance_id,
+            "dispatch_id": dispatch_id,
+            "timestamp_utc": timestamp_utc,
+            "turn_index": turn_start + 1,
+            "role": "assistant",
+            "content": response_redacted,
+            "redaction_tags": sorted(set(response_hits)),
+        },
+    ]
+    if isinstance(token_count, int) and token_count >= 0:
+        records[1]["token_count"] = token_count
+
+    key = (
+        f"{COORDINATION_SESSION_ARCHIVE_PREFIX.rstrip('/')}/"
+        f"{year}/{month}/{day}/{session_id}/{turn_start:06d}-{dispatch_id or 'primary'}.json.gz"
+    )
+    payload_bytes = gzip.compress((json.dumps(records, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8"))
+    s3 = _get_s3()
+
+    last_error: Optional[Exception] = None
+    for attempt in range(1, COORDINATION_SESSION_ARCHIVE_RETRY_ATTEMPTS + 1):
+        try:
+            s3.put_object(
+                Bucket=COORDINATION_SESSION_ARCHIVE_BUCKET,
+                Key=key,
+                Body=payload_bytes,
+                ContentType="application/json",
+                ContentEncoding="gzip",
+                Metadata={
+                    "schema_version": COORDINATION_SESSION_ARCHIVE_SCHEMA_VERSION,
+                    "session_id": session_id[:256],
+                    "dispatch_id": (dispatch_id or "primary")[:256],
+                },
+            )
+            return {
+                "archived": True,
+                "bucket": COORDINATION_SESSION_ARCHIVE_BUCKET,
+                "key": key,
+                "records": len(records),
+                "session_id": session_id,
+                "turn_index_start": turn_start,
+                "redaction_count": len(prompt_hits) + len(response_hits),
+            }
+        except (ClientError, BotoCoreError) as exc:
+            last_error = exc
+            if attempt >= COORDINATION_SESSION_ARCHIVE_RETRY_ATTEMPTS:
+                break
+            time.sleep(min(2.0, 0.2 * (2 ** (attempt - 1))))
+
+    buffered_path = _buffer_session_archive_failure(
+        key=key,
+        records=records,
+        error_message=str(last_error or "unknown_archive_error"),
+    )
+    logger.warning(
+        "Session archive write failed; buffered locally path=%s key=%s",
+        buffered_path,
+        key,
+    )
+    return {
+        "archived": False,
+        "bucket": COORDINATION_SESSION_ARCHIVE_BUCKET,
+        "key": key,
+        "session_id": session_id,
+        "turn_index_start": turn_start,
+        "buffered_path": buffered_path,
+        "error": str(last_error or "unknown_archive_error")[:500],
+    }
+
+
+def _derive_session_archive_payload(
+    request: Dict[str, Any],
+    dispatch: Dict[str, Any],
+    *,
+    provider_result: Optional[Dict[str, Any]],
+    full_stdout: str,
+    summary: str,
+    instance_id: str,
+) -> Dict[str, Any]:
+    provider_session = request.get("provider_session") or {}
+    session_id = str(
+        provider_session.get("session_id")
+        or provider_session.get("thread_id")
+        or provider_session.get("provider_session_id")
+        or (provider_result or {}).get("session_id")
+        or (provider_result or {}).get("thread_id")
+        or dispatch.get("dispatch_id")
+        or request.get("request_id")
+        or ""
+    ).strip()
+
+    prompt_text = str(
+        dispatch.get("prompt_submitted")
+        or request.get("prompt")
+        or ""
+    )
+    response_text = str(
+        (provider_result or {}).get("summary")
+        or (provider_result or {}).get("result")
+        or full_stdout
+        or summary
+        or ""
+    )
+
+    token_count_val = (provider_result or {}).get("token_count")
+    token_count = token_count_val if isinstance(token_count_val, int) else None
+    dispatch_id = str(dispatch.get("dispatch_id") or "primary")
+
+    return _write_session_archive_records(
+        request=request,
+        session_id=session_id,
+        instance_id=instance_id,
+        dispatch_id=dispatch_id,
+        prompt_text=prompt_text,
+        response_text=response_text,
+        token_count=token_count,
+    )
+
+
 def _build_ssm_commands(
     request: Dict[str, Any],
     execution_mode: str,
@@ -5120,6 +5371,10 @@ def _send_dispatch(
             "worker_log_group": WORKER_RUNTIME_LOG_GROUP,
         },
     )
+    prompt_submitted = _prepend_managed_session_bootstrap(
+        str(prompt or ""),
+        str(request.get("project_id") or ""),
+    )
     return {
         "dispatch_id": dispatch_id,
         "command_id": command.get("CommandId"),
@@ -5148,6 +5403,7 @@ def _send_dispatch(
             if ref
         ],
         "enceladus_mcp_profile_installer": HOST_V2_ENCELADUS_MCP_INSTALLER,
+        "prompt_submitted": prompt_submitted,
     }
 
 
@@ -5173,8 +5429,10 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
 
     status = (inv.get("Status") or "").lower()
     status_details = inv.get("StatusDetails") or ""
-    stdout = (inv.get("StandardOutputContent") or "")[:4000]
-    stderr = (inv.get("StandardErrorContent") or "")[:4000]
+    full_stdout = inv.get("StandardOutputContent") or ""
+    full_stderr = inv.get("StandardErrorContent") or ""
+    stdout = full_stdout[:4000]
+    stderr = full_stderr[:4000]
     preflight_error = (
         _extract_json_marker(stdout, "COORDINATION_PREFLIGHT_ERROR=")
         or _extract_json_marker(stderr, "COORDINATION_PREFLIGHT_ERROR=")
@@ -5226,9 +5484,9 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
         extra={"ssm_status": status, "ssm_status_details": status_details},
     )
     if (dispatch.get("execution_mode") or "") == "codex_app_server":
-        provider_result = _extract_json_marker(stdout, "COORDINATION_APP_SERVER_RESULT=")
+        provider_result = _extract_json_marker(full_stdout, "COORDINATION_APP_SERVER_RESULT=")
         if provider_result is None:
-            provider_result = _extract_json_marker(stderr, "COORDINATION_APP_SERVER_RESULT=")
+            provider_result = _extract_json_marker(full_stderr, "COORDINATION_APP_SERVER_RESULT=")
         if provider_result:
             codex_session = _mcp.codex_turn_complete(
                 request_id=request.get("request_id", ""),
@@ -5241,9 +5499,9 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
                 **codex_session,
             }
     elif (dispatch.get("execution_mode") or "") == "claude_agent_sdk":
-        provider_result = _extract_json_marker(stdout, "COORDINATION_CLAUDE_SDK_RESULT=")
+        provider_result = _extract_json_marker(full_stdout, "COORDINATION_CLAUDE_SDK_RESULT=")
         if provider_result is None:
-            provider_result = _extract_json_marker(stderr, "COORDINATION_CLAUDE_SDK_RESULT=")
+            provider_result = _extract_json_marker(full_stderr, "COORDINATION_CLAUDE_SDK_RESULT=")
         if provider_result:
             request["provider_session"] = {
                 **(request.get("provider_session") or {}),
@@ -5271,6 +5529,21 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
         )
     if provider_result and provider_result.get("session_id"):
         summary = f"{reason}; session={provider_result.get('session_id')}"
+    archive_result: Dict[str, Any] = {}
+    execution_mode = str(dispatch.get("execution_mode") or "")
+    if execution_mode in {"codex_full_auto", "codex_app_server"}:
+        try:
+            archive_result = _derive_session_archive_payload(
+                request,
+                dispatch,
+                provider_result=provider_result,
+                full_stdout=full_stdout,
+                summary=summary,
+                instance_id=instance_id,
+            )
+        except Exception as exc:
+            logger.warning("Session archive pipeline failed for request %s: %s", request.get("request_id"), exc)
+            archive_result = {"archived": False, "error": str(exc)[:500]}
     timeout_failure = terminal_state == "failed" and _is_timeout_failure(status, status_details, summary)
     request = _append_dispatch_worklog(
         request,
@@ -5298,6 +5571,7 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
             "preflight_error": preflight_error,
             "preflight_ok": preflight_ok,
             "provider_preflight": provider_preflight,
+            "session_archive": archive_result,
         },
         reason="timeout" if timeout_failure else None,
     )
