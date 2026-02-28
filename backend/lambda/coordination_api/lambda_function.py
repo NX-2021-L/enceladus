@@ -7004,7 +7004,8 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
     now_epoch = _unix_now()
     callback_token = _new_callback_token()
     callback_expiry_epoch = now_epoch + CALLBACK_TOKEN_TTL_SECONDS
-    debounce_expires_epoch = now_epoch + DEBOUNCE_WINDOW_SECONDS
+    skip_debounce = bool(body.get("skip_debounce", False))
+    debounce_expires_epoch = 0 if skip_debounce else (now_epoch + DEBOUNCE_WINDOW_SECONDS)
     idempotency_expires_epoch = now_epoch + IDEMPOTENCY_WINDOW_SECONDS
     debounce_expires_iso = (
         dt.datetime.fromtimestamp(debounce_expires_epoch, tz=dt.timezone.utc)
@@ -7096,6 +7097,25 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
         governance_hash=decomposition.get("governance_hash"),
         coordination_request_id=request_id,
     )
+
+    # --- skip_debounce: auto-promote to queued and dispatch immediately ---
+    if skip_debounce:
+        try:
+            item = _append_state_transition(
+                item, _STATE_QUEUED, "skip_debounce: auto-promoted from intake_received"
+            )
+            item = _ensure_request_dispatch_plan(item, persist=False)
+            _update_request(item)
+            logger.info("[INFO] skip_debounce: auto-promoted %s to queued, dispatching", request_id)
+
+            synthetic_event = {
+                "requestContext": {"http": {"method": "POST", "path": f"/api/v1/coordination/requests/{request_id}/dispatch"}},
+                "body": "{}",
+            }
+            dispatch_result = _handle_dispatch_request(synthetic_event, request_id)
+            logger.info("[INFO] skip_debounce: dispatch result for %s: %s", request_id, dispatch_result.get("statusCode"))
+        except Exception as exc:
+            logger.warning("skip_debounce auto-dispatch failed for %s: %s", request_id, exc)
 
     return _response(
         201,
@@ -9055,6 +9075,66 @@ def _handle_health() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Chat message handler (ENC-FTR-018)
+# ---------------------------------------------------------------------------
+
+
+def _handle_chat_message(
+    event: Dict[str, Any], session_id: str, claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/sessions/{sessionId}/message
+
+    Translates a chat-style message into a coordination request with
+    skip_debounce=true for immediate dispatch.
+    """
+    try:
+        raw_body = event.get("body") or "{}"
+        body = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
+    except (json.JSONDecodeError, TypeError):
+        return _error(400, "Invalid JSON body")
+
+    message = (body.get("message") or "").strip()
+    if not message:
+        return _error(400, "Missing required field: message")
+
+    project_id = (body.get("project_id") or "").strip()
+    if not project_id:
+        return _error(400, "Missing required field: project_id")
+
+    provider = (body.get("provider") or "openai_codex").strip()
+
+    # Map provider to execution_mode
+    execution_mode_map = {
+        "openai_codex": "codex_full_auto",
+        "claude_agent_sdk": "claude_agent_sdk",
+    }
+    execution_mode = execution_mode_map.get(provider, "codex_full_auto")
+
+    # Build a synthetic create-request body
+    create_body = {
+        "project_id": project_id,
+        "initiative_title": message[:100],
+        "outcomes": ["Complete the requested task"],
+        "execution_mode": execution_mode,
+        "provider_session": {
+            "session_id": session_id,
+            "thread_id": session_id,
+        },
+        "skip_debounce": True,
+    }
+
+    # Build synthetic event for _handle_create_request
+    synthetic_event = {
+        "requestContext": event.get("requestContext", {}),
+        "headers": event.get("headers", {}),
+        "cookies": event.get("cookies", []),
+        "body": json.dumps(create_body),
+    }
+
+    return _handle_create_request(synthetic_event, claims)
+
+
+# ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
 
@@ -9186,5 +9266,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if method == "POST" and match_dispatch:
         request_id = match_dispatch.group(1)
         return _handle_dispatch_request(event, request_id)
+
+    # POST /api/v1/coordination/sessions/{sessionId}/message (ENC-FTR-018)
+    match_session_msg = re.fullmatch(r"/api/v1/coordination/sessions/([A-Za-z0-9\-]+)/message", path)
+    if method == "POST" and match_session_msg:
+        session_id = match_session_msg.group(1)
+        return _handle_chat_message(event, session_id, claims or {})
 
     return _error(404, f"Unsupported route: {method} {path}")
