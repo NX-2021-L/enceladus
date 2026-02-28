@@ -3187,7 +3187,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="deploy_submit",
-            description="Submit a deployment request through the deployment intake API.",
+            description=(
+                "Submit a deployment request through the deployment intake API. "
+                "The response includes the standard request_id and message fields, "
+                "plus version projection fields when a current-version.json exists for the project: "
+                "  projected_next_version — the semver that will be assigned if this request is the only one in the spec. "
+                "  release_notes_required — true for major or minor change_type (omitted for patch). "
+                "  release_notes_guidance — advisory text with a title template for the required release notes document. "
+                "Governance expectation for major/minor deploys: create a release notes document via documents_put "
+                "before the deploy completes, then include the document ID in related_record_ids of the deploy request. "
+                "The guidance field provides the exact title to use. Patch deploys have no release notes requirement."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
