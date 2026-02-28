@@ -56,6 +56,11 @@ BEDROCK_AGENT_DEFAULT_MODEL="${BEDROCK_AGENT_DEFAULT_MODEL:-anthropic.claude-3-5
 BEDROCK_AGENT_CREATION_TIMEOUT_SECONDS="${BEDROCK_AGENT_CREATION_TIMEOUT_SECONDS:-120}"
 BEDROCK_AGENT_CLEANUP="${BEDROCK_AGENT_CLEANUP:-true}"
 BEDROCK_AGENT_REGION="${BEDROCK_AGENT_REGION:-${REGION}}"
+COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_b2D0V3E1k}"
+COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
+COGNITO_REGION="${COGNITO_REGION:-us-east-1}"
+TERMINAL_COGNITO_SECRET_ID="${TERMINAL_COGNITO_SECRET_ID:-devops/coordination/cognito/terminal-agent}"
+TERMINAL_COGNITO_USERNAME="${TERMINAL_COGNITO_USERNAME:-terminal-agent}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -241,6 +246,12 @@ ensure_role() {
       "Resource": "arn:aws:secretsmanager:${SECRETS_REGION}:${ACCOUNT_ID}:secret:devops/coordination/*"
     },
     {
+      "Sid": "CognitoTerminalAuth",
+      "Effect": "Allow",
+      "Action": ["cognito-idp:InitiateAuth"],
+      "Resource": "arn:aws:cognito-idp:${COGNITO_REGION}:${ACCOUNT_ID}:userpool/${COGNITO_USER_POOL_ID}"
+    },
+    {
       "Sid": "BedrockAgentLifecycle",
       "Effect": "Allow",
       "Action": [
@@ -369,6 +380,117 @@ add(os.environ.get("PREVIOUS_KEY", ""))
 add(os.environ.get("EXISTING_CSV", ""))
 print(",".join(items))
 PY
+}
+
+ensure_terminal_cognito_credentials() {
+  log "[START] ensuring terminal Cognito credentials"
+
+  # Check if Secrets Manager secret already exists
+  if aws secretsmanager describe-secret \
+    --secret-id "${TERMINAL_COGNITO_SECRET_ID}" \
+    --region "${SECRETS_REGION}" >/dev/null 2>&1; then
+    log "[OK] Secrets Manager secret exists: ${TERMINAL_COGNITO_SECRET_ID}"
+    return
+  fi
+
+  log "[INFO] Secret ${TERMINAL_COGNITO_SECRET_ID} not found — provisioning"
+
+  # Ensure Cognito client allows USER_PASSWORD_AUTH
+  local current_flows
+  current_flows="$(aws cognito-idp describe-user-pool-client \
+    --user-pool-id "${COGNITO_USER_POOL_ID}" \
+    --client-id "${COGNITO_CLIENT_ID}" \
+    --region "${COGNITO_REGION}" \
+    --query 'UserPoolClient.ExplicitAuthFlows' \
+    --output text 2>/dev/null || true)"
+
+  if ! echo "${current_flows}" | grep -q "ALLOW_USER_PASSWORD_AUTH"; then
+    log "[START] enabling ALLOW_USER_PASSWORD_AUTH on Cognito client"
+    # update-user-pool-client is a replace operation — must preserve all existing settings
+    POOL="${COGNITO_USER_POOL_ID}" CLIENT="${COGNITO_CLIENT_ID}" CREGION="${COGNITO_REGION}" python3 -c "
+import boto3, os
+client = boto3.client('cognito-idp', region_name=os.environ['CREGION'])
+desc = client.describe_user_pool_client(
+    UserPoolId=os.environ['POOL'], ClientId=os.environ['CLIENT']
+)['UserPoolClient']
+flows = set(desc.get('ExplicitAuthFlows', []))
+flows.add('ALLOW_USER_PASSWORD_AUTH')
+flows.add('ALLOW_REFRESH_TOKEN_AUTH')
+# Build update kwargs preserving all existing settings
+kwargs = {
+    'UserPoolId': desc['UserPoolId'],
+    'ClientId': desc['ClientId'],
+    'ExplicitAuthFlows': sorted(flows),
+}
+# Preserve fields that reset to defaults if omitted
+for key in [
+    'ClientName', 'RefreshTokenValidity', 'AccessTokenValidity',
+    'IdTokenValidity', 'TokenValidityUnits', 'ReadAttributes',
+    'WriteAttributes', 'SupportedIdentityProviders',
+    'CallbackURLs', 'LogoutURLs', 'DefaultRedirectURI',
+    'AllowedOAuthFlows', 'AllowedOAuthScopes',
+    'AllowedOAuthFlowsUserPoolClient', 'PreventUserExistenceErrors',
+    'EnableTokenRevocation', 'EnablePropagateAdditionalUserContextData',
+    'AuthSessionValidity',
+]:
+    if key in desc and desc[key] is not None:
+        kwargs[key] = desc[key]
+client.update_user_pool_client(**kwargs)
+print('OK')
+" >/dev/null
+    log "[OK] Cognito client auth flows updated"
+  else
+    log "[OK] Cognito client already allows USER_PASSWORD_AUTH"
+  fi
+
+  # Generate secure random password
+  local password
+  password="$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")"
+
+  # Create Cognito user (idempotent — skip if exists)
+  if aws cognito-idp admin-get-user \
+    --user-pool-id "${COGNITO_USER_POOL_ID}" \
+    --username "${TERMINAL_COGNITO_USERNAME}" \
+    --region "${COGNITO_REGION}" >/dev/null 2>&1; then
+    log "[INFO] Cognito user ${TERMINAL_COGNITO_USERNAME} already exists — resetting password"
+  else
+    log "[START] creating Cognito user ${TERMINAL_COGNITO_USERNAME}"
+    aws cognito-idp admin-create-user \
+      --user-pool-id "${COGNITO_USER_POOL_ID}" \
+      --username "${TERMINAL_COGNITO_USERNAME}" \
+      --user-attributes Name=email,Value="terminal-agent@enceladus.internal" Name=email_verified,Value=true \
+      --message-action SUPPRESS \
+      --region "${COGNITO_REGION}" >/dev/null
+    log "[OK] Cognito user created"
+  fi
+
+  # Set permanent password (use env var to avoid shell interpolation issues)
+  COGNITO_PASS="${password}" aws cognito-idp admin-set-user-password \
+    --user-pool-id "${COGNITO_USER_POOL_ID}" \
+    --username "${TERMINAL_COGNITO_USERNAME}" \
+    --password "${password}" \
+    --permanent \
+    --region "${COGNITO_REGION}" >/dev/null
+  log "[OK] Cognito user password set"
+
+  # Create Secrets Manager secret (use Python to build JSON safely)
+  local secret_json
+  secret_json="$(CUSER="${TERMINAL_COGNITO_USERNAME}" CPASS="${password}" CCLIENT="${COGNITO_CLIENT_ID}" python3 -c "
+import json, os
+print(json.dumps({
+    'username': os.environ['CUSER'],
+    'password': os.environ['CPASS'],
+    'client_id': os.environ['CCLIENT'],
+    'auth_flow': 'USER_PASSWORD_AUTH'
+}, separators=(',', ':')))
+")"
+  aws secretsmanager create-secret \
+    --name "${TERMINAL_COGNITO_SECRET_ID}" \
+    --secret-string "${secret_json}" \
+    --region "${SECRETS_REGION}" \
+    --description "Terminal agent Cognito credentials for coordination API" >/dev/null
+  log "[OK] Secrets Manager secret created: ${TERMINAL_COGNITO_SECRET_ID}"
+  log "[END] terminal Cognito credentials provisioned"
 }
 
 package_lambda() {
@@ -535,6 +657,10 @@ ensure_lambda() {
   EFFECTIVE_INTERNAL_KEY_PREVIOUS="${effective_internal_key_previous}" \
   EFFECTIVE_INTERNAL_KEYS="${effective_internal_keys}" \
   EFFECTIVE_INTERNAL_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES}" \
+  COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID}" \
+  COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID}" \
+  COGNITO_REGION="${COGNITO_REGION}" \
+  TERMINAL_COGNITO_SECRET_ID="${TERMINAL_COGNITO_SECRET_ID}" \
   python3 - "${env_file}" <<'PY'
 import json
 import os
@@ -568,8 +694,10 @@ env_vars = {
     "OPENAI_API_KEY_SECRET_ID": os.environ["OPENAI_API_KEY_SECRET_ID"],
     "ANTHROPIC_API_KEY_SECRET_ID": os.environ["ANTHROPIC_API_KEY_SECRET_ID"],
     "ENABLE_CLAUDE_HEADLESS": os.environ["ENABLE_CLAUDE_HEADLESS"],
-    "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
-    "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
+    "COGNITO_USER_POOL_ID": os.environ["COGNITO_USER_POOL_ID"],
+    "COGNITO_CLIENT_ID": os.environ["COGNITO_CLIENT_ID"],
+    "COGNITO_REGION": os.environ.get("COGNITO_REGION", ""),
+    "TERMINAL_COGNITO_SECRET_ID": os.environ.get("TERMINAL_COGNITO_SECRET_ID", ""),
     "COORDINATION_INTERNAL_API_KEY": effective_key,
     "COORDINATION_INTERNAL_API_KEY_PREVIOUS": effective_prev,
     "COORDINATION_INTERNAL_API_KEYS": effective_keys,
@@ -882,6 +1010,7 @@ main() {
   ensure_table
   ensure_role
   ensure_lambda
+  ensure_terminal_cognito_credentials || log "[WARNING] terminal Cognito credential provisioning failed (non-fatal). Manual setup may be required — see ENC-ISS-076."
   sync_governance_dictionary
   ensure_observability_log_groups
   ensure_api_integration_and_routes
