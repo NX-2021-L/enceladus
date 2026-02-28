@@ -39,6 +39,10 @@ on:
         required: false
       COORDINATION_INTERNAL_API_KEY_SCOPES:
         required: false
+      ENCELADUS_OAUTH_CLIENT_ID:
+        required: false
+      ENCELADUS_OAUTH_CLIENT_SECRET:
+        required: false
       GH_APP_ID:
         required: false
       GH_INSTALLATION_ID:
@@ -87,6 +91,8 @@ jobs:
           COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
           COORDINATION_INTERNAL_API_KEY_PREVIOUS: ${{ secrets.COORDINATION_INTERNAL_API_KEY_PREVIOUS }}
           COORDINATION_INTERNAL_API_KEY_SCOPES: ${{ secrets.COORDINATION_INTERNAL_API_KEY_SCOPES }}
+          ENCELADUS_OAUTH_CLIENT_ID: ${{ secrets.ENCELADUS_OAUTH_CLIENT_ID }}
+          ENCELADUS_OAUTH_CLIENT_SECRET: ${{ secrets.ENCELADUS_OAUTH_CLIENT_SECRET }}
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_INSTALLATION_ID: ${{ secrets.GH_INSTALLATION_ID }}
         run: |
