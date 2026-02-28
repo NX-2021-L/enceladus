@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -33,6 +34,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import os as _os_path_helper, sys as _sys_path_helper
+_sys_path_helper.path.insert(0, _os_path_helper.path.join(_os_path_helper.path.dirname(__file__), "../../backend/lambda/shared_layer/python"))
+from enceladus_shared.serialization import _now_z
+
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -361,6 +366,8 @@ HTTP_USER_AGENT = os.environ.get("ENCELADUS_HTTP_USER_AGENT", f"enceladus-mcp-se
 
 MCP_TRANSPORT = os.environ.get("ENCELADUS_MCP_TRANSPORT", "stdio")
 MCP_API_KEY = os.environ.get("ENCELADUS_MCP_API_KEY", "")
+OAUTH_CLIENT_ID = os.environ.get("ENCELADUS_OAUTH_CLIENT_ID", "")
+OAUTH_CLIENT_SECRET = os.environ.get("ENCELADUS_OAUTH_CLIENT_SECRET", "")
 
 logger = logging.getLogger(SERVER_NAME)
 
@@ -395,10 +402,6 @@ def _get_s3():
             raise RuntimeError("boto3 is not installed. Run: pip install boto3")
         _s3_client = boto3.client("s3", region_name=AWS_REGION)
     return _s3_client
-
-
-def _now_z() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _now_compact() -> str:
@@ -4900,17 +4903,132 @@ def _get_http_session_manager() -> Any:
     return _http_session_manager
 
 
+def _get_server_base_url(event: Dict[str, Any]) -> str:
+    """Derive the public base URL from the Lambda Function URL event."""
+    headers = event.get("headers") or {}
+    host = headers.get("host", headers.get("x-forwarded-host", ""))
+    scheme = headers.get("x-forwarded-proto", "https")
+    return f"{scheme}://{host}" if host else ""
+
+
+def _handle_oauth_protected_resource(event: Dict[str, Any]) -> Dict[str, Any]:
+    """RFC 9728: OAuth 2.0 Protected Resource Metadata."""
+    base = _get_server_base_url(event)
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json", "cache-control": "public, max-age=3600"},
+        "body": json.dumps({
+            "resource": base,
+            "authorization_servers": [base],
+            "bearer_methods_supported": ["header"],
+        }),
+        "isBase64Encoded": False,
+    }
+
+
+def _handle_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, Any]:
+    """RFC 8414: OAuth 2.0 Authorization Server Metadata."""
+    base = _get_server_base_url(event)
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json", "cache-control": "public, max-age=3600"},
+        "body": json.dumps({
+            "issuer": base,
+            "token_endpoint": f"{base}/oauth/token",
+            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            "grant_types_supported": ["client_credentials"],
+            "response_types_supported": [],
+            "service_documentation": f"{base}/.well-known/oauth-protected-resource",
+        }),
+        "isBase64Encoded": False,
+    }
+
+
+def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
+    """OAuth 2.0 token endpoint — client_credentials grant."""
+    import urllib.parse
+
+    if not OAUTH_CLIENT_ID or not OAUTH_CLIENT_SECRET:
+        return {
+            "statusCode": 500,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps({"error": "server_error", "error_description": "OAuth not configured"}),
+            "isBase64Encoded": False,
+        }
+
+    body_raw = event.get("body") or ""
+    if event.get("isBase64Encoded"):
+        import base64
+        body_raw = base64.b64decode(body_raw).decode()
+    params = urllib.parse.parse_qs(body_raw)
+
+    grant_type = (params.get("grant_type") or [""])[0]
+    client_id = (params.get("client_id") or [""])[0]
+    client_secret = (params.get("client_secret") or [""])[0]
+
+    if grant_type != "client_credentials":
+        return {
+            "statusCode": 400,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps({"error": "unsupported_grant_type"}),
+            "isBase64Encoded": False,
+        }
+
+    if not hmac.compare_digest(client_id, OAUTH_CLIENT_ID) or not hmac.compare_digest(client_secret, OAUTH_CLIENT_SECRET):
+        return {
+            "statusCode": 401,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps({"error": "invalid_client"}),
+            "isBase64Encoded": False,
+        }
+
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json", "cache-control": "no-store"},
+        "body": json.dumps({
+            "access_token": MCP_API_KEY,
+            "token_type": "bearer",
+            "expires_in": 3600,
+        }),
+        "isBase64Encoded": False,
+    }
+
+
+def _handle_oauth_route(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Route OAuth / well-known requests. Returns None if path is not an OAuth route."""
+    req_ctx = (event.get("requestContext") or {}).get("http", {})
+    path = req_ctx.get("path", "")
+    method = req_ctx.get("method", "GET").upper()
+
+    if path == "/.well-known/oauth-protected-resource" and method == "GET":
+        return _handle_oauth_protected_resource(event)
+    if path == "/.well-known/oauth-authorization-server" and method == "GET":
+        return _handle_oauth_server_metadata(event)
+    if path == "/oauth/token" and method == "POST":
+        return _handle_oauth_token(event)
+    return None
+
+
 async def _handle_lambda_event(event: Dict[str, Any]) -> Dict[str, Any]:
     import base64
     import anyio
+
+    # 0. Handle OAuth routes (unauthenticated — they ARE the auth endpoints)
+    oauth_response = _handle_oauth_route(event)
+    if oauth_response is not None:
+        return oauth_response
 
     # 1. Bearer auth check
     if MCP_API_KEY:
         auth_header = (event.get("headers") or {}).get("authorization", "")
         if auth_header != f"Bearer {MCP_API_KEY}":
+            base = _get_server_base_url(event)
             return {
                 "statusCode": 401,
-                "headers": {"content-type": "application/json"},
+                "headers": {
+                    "content-type": "application/json",
+                    "www-authenticate": f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource"',
+                },
                 "body": json.dumps({"error": "Unauthorized"}),
                 "isBase64Encoded": False,
             }
