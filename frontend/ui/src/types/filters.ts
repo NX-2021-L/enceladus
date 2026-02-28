@@ -38,6 +38,12 @@ export interface FeedFilters {
   sortBy?: string
 }
 
+export interface ChangelogFilters {
+  projectId?: string
+  changeType?: 'major' | 'minor' | 'patch'
+  sortBy?: string
+}
+
 export interface CoordinationFilters {
   state?: string[]
   projectId?: string

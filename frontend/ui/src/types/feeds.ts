@@ -1,3 +1,28 @@
+// --- Changelog types (ENC-FTR-033) ---
+
+export interface ChangelogEntry {
+  project_id: string
+  spec_id: string
+  version: string
+  previous_version: string
+  change_type: 'major' | 'minor' | 'patch'
+  release_summary: string
+  changes: string[]
+  deployed_at: string
+  related_record_ids: string[]
+  files_changed?: string[]
+  deployment_type?: string
+}
+
+export interface ProjectVersion {
+  project_id: string
+  version: string
+  deployed_at: string
+  spec_id: string
+}
+
+// --- Core tracker types ---
+
 export interface HistoryEntry {
   timestamp: string
   status: string
