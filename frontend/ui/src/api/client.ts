@@ -23,7 +23,7 @@ export async function fetchWithAuth(input: FetchTarget, init?: FetchOptions): Pr
 }
 
 export async function fetchFeed<T>(feedName: string): Promise<T> {
-  const url = `${BASE_URL}/${feedName}.json`
+  const url = `${BASE_URL}/${feedName}.json?_t=${Date.now()}`
   // credentials:'include' ensures the enceladus_id_token cookie (SameSite=None)
   // is sent with the fetch request so Lambda@Edge can authenticate it.
   const res = await fetchWithAuth(url)
