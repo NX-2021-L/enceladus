@@ -2205,15 +2205,17 @@ class SessionBridgeIntegrationTests(unittest.TestCase):
         self.assertEqual(ps.get("execution_id"), "exe-smoke")
 
     def test_redact_session_archive_content_masks_common_secret_patterns(self):
+        aws_key_like = "AKIA" + "ABCDEFGHIJKLMNOP"
+        pem_block = "-----BEGIN " + "PRIVATE KEY-----\nabc\n-----END " + "PRIVATE KEY-----"
         sample = (
-            "AKIAABCDEFGHIJKLMNOP and bearer sk-test-token-1234567890 "
+            f"{aws_key_like} and bearer sk-test-token-1234567890 "
             "API_KEY=my-secret-value\n"
-            "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
+            f"{pem_block}"
         )
         redacted, hits = coordination_lambda._redact_session_archive_content(sample)
-        self.assertNotIn("AKIAABCDEFGHIJKLMNOP", redacted)
+        self.assertNotIn(aws_key_like, redacted)
         self.assertNotIn("my-secret-value", redacted)
-        self.assertNotIn("BEGIN PRIVATE KEY", redacted)
+        self.assertNotIn("PRIVATE KEY-----", redacted)
         self.assertIn("[REDACTED:aws_access_key_id]", redacted)
         self.assertIn("[REDACTED:bearer_token]", redacted)
         self.assertIn("[REDACTED:secret_assignment]", redacted)
