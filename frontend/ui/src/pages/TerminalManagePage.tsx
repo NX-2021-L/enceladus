@@ -1,9 +1,9 @@
 import { useState, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
 import type { TerminalProvider, TerminalSession, ActiveSessionState } from '../types/terminal'
 import { useTerminalSessions } from '../hooks/useTerminal'
 import { ProviderCard } from '../components/terminal/ProviderCard'
 import { SessionCard } from '../components/terminal/SessionCard'
+import { TerminalChatWidget } from '../components/terminal/TerminalChatWidget'
 import { FreshnessBadge } from '../components/shared/FreshnessBadge'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
@@ -27,7 +27,6 @@ const PROVIDERS: TerminalProvider[] = [
 ]
 
 export function TerminalManagePage() {
-  const navigate = useNavigate()
   const { sessions, generatedAt, isPending, isError } = useTerminalSessions()
   const [endedSessionIds, setEndedSessionIds] = useState<Set<string>>(new Set())
 
@@ -35,9 +34,8 @@ export function TerminalManagePage() {
     (state: ActiveSessionState) => {
       localStorage.setItem(LS_KEY, JSON.stringify(state))
       window.dispatchEvent(new StorageEvent('storage', { key: LS_KEY }))
-      navigate('/')
     },
-    [navigate],
+    [],
   )
 
   const handleStartSession = useCallback(
@@ -99,6 +97,8 @@ export function TerminalManagePage() {
 
   return (
     <div className="p-4 space-y-6">
+      <TerminalChatWidget />
+
       <div>
         <h2 className="text-sm font-medium text-slate-400 mb-3">Providers</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
