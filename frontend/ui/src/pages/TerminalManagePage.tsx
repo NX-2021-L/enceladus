@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { TerminalProvider, TerminalSession, ActiveSessionState } from '../types/terminal'
 import { useTerminalSessions } from '../hooks/useTerminal'
@@ -9,6 +9,7 @@ import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
 
 const LS_KEY = 'enceladus:terminal_active_session'
+const TURNS_LS_PREFIX = 'enceladus:terminal_turns:'
 
 const PROVIDERS: TerminalProvider[] = [
   {
@@ -28,6 +29,7 @@ const PROVIDERS: TerminalProvider[] = [
 export function TerminalManagePage() {
   const navigate = useNavigate()
   const { sessions, generatedAt, isPending, isError } = useTerminalSessions()
+  const [endedSessionIds, setEndedSessionIds] = useState<Set<string>>(new Set())
 
   const setActiveSession = useCallback(
     (state: ActiveSessionState) => {
@@ -44,7 +46,7 @@ export function TerminalManagePage() {
       setActiveSession({
         session_id: sessionId,
         provider: provider.id,
-        project_id: 'devops',
+        project_id: '', // empty signals needs initialization (ISS-067)
       })
     },
     [setActiveSession],
@@ -63,6 +65,7 @@ export function TerminalManagePage() {
 
   const handleEndSession = useCallback(
     (session: TerminalSession) => {
+      // Clear from active session if it's the current one
       try {
         const raw = localStorage.getItem(LS_KEY)
         if (raw) {
@@ -75,8 +78,20 @@ export function TerminalManagePage() {
       } catch {
         // ignore
       }
+
+      // Clear local chat history for this session
+      localStorage.removeItem(TURNS_LS_PREFIX + session.session_id)
+
+      // Hide the session card from the list
+      setEndedSessionIds((prev) => new Set([...prev, session.session_id]))
     },
     [],
+  )
+
+  // Filter out ended sessions from the visible list
+  const visibleSessions = useMemo(
+    () => sessions.filter((s) => !endedSessionIds.has(s.session_id)),
+    [sessions, endedSessionIds],
   )
 
   if (isPending) return <LoadingState />
@@ -96,19 +111,19 @@ export function TerminalManagePage() {
       <div>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium text-slate-400">
-            Sessions ({sessions.length})
+            Sessions ({visibleSessions.length})
           </h2>
           {generatedAt && <FreshnessBadge generatedAt={generatedAt} />}
         </div>
 
-        {sessions.length === 0 ? (
+        {visibleSessions.length === 0 ? (
           <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-6 text-center">
             <p className="text-sm text-slate-500">No terminal sessions found.</p>
             <p className="text-xs text-slate-600 mt-1">Start a new session from a provider above.</p>
           </div>
         ) : (
           <div className="space-y-3">
-            {sessions.map((s) => (
+            {visibleSessions.map((s) => (
               <SessionCard
                 key={s.session_id}
                 session={s}
