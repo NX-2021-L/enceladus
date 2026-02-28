@@ -253,6 +253,17 @@ deploy_lambda() {
   ensure_function_url
   rm -f "${env_file}"
 
+  # Register OAuth client with coordination API for dashboard visibility (idempotent)
+  if [[ -n "${OAUTH_CLIENT_ID}" && -n "${MCP_API_KEY}" ]]; then
+    log "[START] Registering OAuth client: ${OAUTH_CLIENT_ID}"
+    curl -sf -X POST "${COORDINATION_API_BASE:-https://jreese.net}/api/v1/coordination/auth/oauth-clients" \
+      -H "Content-Type: application/json" \
+      -H "x-coordination-internal-key: ${MCP_API_KEY}" \
+      -d "{\"client_id\":\"${OAUTH_CLIENT_ID}\",\"service_name\":\"Claude Connector\",\"grant_types\":[\"authorization_code\"],\"redirect_uris\":[\"https://claude.ai/api/mcp/auth_callback\"]}" \
+      && log "[OK] OAuth client registered" \
+      || log "[WARNING] OAuth client registration failed (non-critical)"
+  fi
+
   log "[END] Lambda ready: ${FUNCTION_NAME}"
 }
 

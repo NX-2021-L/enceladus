@@ -65,3 +65,23 @@ export async function updateManagedAuthPermissions(
     throw new Error(`Failed to update permissions for ${tokenId}: ${res.status}`)
   }
 }
+
+export type OAuthClient = {
+  client_id: string
+  service_name: string
+  grant_types: string[]
+  redirect_uris: string[]
+  status: string
+  created_at: string
+  updated_at: string
+  last_used_at: string
+}
+
+export async function listOAuthClients(): Promise<OAuthClient[]> {
+  const res = await fetchWithAuth('/api/v1/coordination/auth/oauth-clients')
+  if (!res.ok) {
+    throw new Error(`Failed to list OAuth clients: ${res.status}`)
+  }
+  const body = (await res.json()) as { oauth_clients?: OAuthClient[] }
+  return Array.isArray(body.oauth_clients) ? body.oauth_clients : []
+}
