@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.20",
-  "updated_at": "2026-03-01T13:00:00Z",
+  "version": "2026-03-01.21",
+  "updated_at": "2026-03-01T13:22:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -274,7 +274,7 @@
         "non_ui_config": {
           "type": "object",
           "definition": "Optional non-UI deployment execution config for deployment_type values outside github_*.",
-          "usage_guidance": "Requires service_group + target_arn. Optional source_s3_bucket, source_s3_prefix, and source_dir can be supplied for inline lambda_update packaging. When source_s3_prefix is omitted, orchestrator may derive from project metadata parent defaults."
+          "usage_guidance": "Requires service_group + target_arn. Optional source_s3_bucket, source_s3_prefix, and source_dir can be supplied for inline lambda_update packaging. Inline lambda_update archive resolution now falls back across project metadata prefixes (including parent-derived deploy-sources/<parent>) and scans available source archives until backend/lambda/<source_dir>/ content is found."
         }
       }
     },
