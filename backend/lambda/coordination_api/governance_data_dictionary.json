@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.26",
-  "updated_at": "2026-03-01T18:00:00Z",
+  "version": "2026-03-01.27",
+  "updated_at": "2026-03-01T19:10:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -64,7 +64,49 @@
         "transition_evidence": {
           "type": "object",
           "definition": "Evidence payload required for gated status transitions.",
-          "usage_guidance": "task->pushed requires commit_sha; task->merged-main requires merge_evidence; task->deploy-success requires deploy_evidence (deployment reference or spec ID); task->closed (when current status is deploy-success) requires live_validation_evidence (capture via ENC-FTR-032 Cognito session + PWA diagnostics); any revert requires revert_reason. Legacy: task->deployed previously required deployment_ref — this gate is removed as of ENC-FTR-035; use the deploy-init/deploy-success arc instead."
+          "usage_guidance": "task->pushed requires commit_sha; task->merged-main requires merge_evidence; task->deploy-success requires deploy_evidence (structured GitHub Actions Jobs API object — see deploy_evidence schema below); task->closed (when current status is deploy-success) requires live_validation_evidence (capture via ENC-FTR-032 Cognito session + PWA diagnostics); any revert requires revert_reason. Legacy: task->deployed previously required deployment_ref — this gate is removed as of ENC-FTR-035; use the deploy-init/deploy-success arc instead.",
+          "properties": {
+            "deploy_evidence": {
+              "type": "object",
+              "definition": "Structured GitHub Actions Jobs API response object. Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}. Must be provided verbatim from the API response — do not construct manually.",
+              "required_fields": {
+                "id": {
+                  "type": "integer",
+                  "definition": "GitHub Actions job ID. Unique identifier for the job run."
+                },
+                "run_id": {
+                  "type": "integer",
+                  "definition": "GitHub Actions workflow run ID. Parent run that spawned this job."
+                },
+                "head_sha": {
+                  "type": "string",
+                  "constraints": { "pattern": "^[0-9a-f]{40}$" },
+                  "definition": "40-character hex commit SHA the job ran against. Should match the task's commit_sha transition_evidence field."
+                },
+                "status": {
+                  "type": "enum",
+                  "enum": ["completed"],
+                  "definition": "GitHub Actions job status. Must be 'completed' — in-progress or queued jobs are rejected."
+                },
+                "conclusion": {
+                  "type": "enum",
+                  "enum": ["success"],
+                  "definition": "GitHub Actions job conclusion. Must be 'success' — failure, cancelled, skipped, and timed_out are all rejected."
+                },
+                "started_at": {
+                  "type": "string",
+                  "constraints": { "format": "ISO 8601 datetime", "example": "2026-03-01T18:20:00Z" },
+                  "definition": "ISO 8601 UTC datetime when the job started. Requires 'T' separator (date-only strings are rejected). Matches tracker timestamp convention."
+                },
+                "completed_at": {
+                  "type": "string",
+                  "constraints": { "format": "ISO 8601 datetime", "example": "2026-03-01T18:21:57Z" },
+                  "definition": "ISO 8601 UTC datetime when the job completed. Requires 'T' separator (date-only strings are rejected). Must be present and valid even if equal to started_at."
+                }
+              },
+              "usage_guidance": "Call GET /repos/{owner}/{repo}/actions/jobs/{job_id} and pass the response object as deploy_evidence. The Lambda validates all seven required fields, asserts status=completed and conclusion=success, and validates started_at/completed_at as ISO 8601 datetimes. The validated payload is stored as a JSON string on the task record. ENC-TSK-726."
+            }
+          }
         }
       }
     },

@@ -1198,6 +1198,89 @@ def _query_all_project_tasks(project_id: str) -> List[Dict]:
     return items
 
 
+# ENC-TSK-726: Required fields on a GitHub Actions Jobs API response object.
+# Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
+_DEPLOY_EVIDENCE_REQUIRED_FIELDS = (
+    "id", "run_id", "head_sha", "status", "conclusion", "started_at", "completed_at"
+)
+
+
+def _is_valid_iso8601(value: str) -> bool:
+    """Return True if value is a valid ISO 8601 datetime string (e.g. 2026-03-01T18:21:57Z).
+
+    Accepts both trailing-Z and offset forms (+00:00).  Matches the tracker
+    timestamp convention used for updated_at / created_at fields.
+    Requires the 'T' date/time separator — date-only strings (e.g. 2026-03-01) are rejected.
+    """
+    if not value or "T" not in value:
+        return False
+    try:
+        dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
+def _validate_deploy_evidence(deploy_evidence) -> Optional[str]:
+    """Validate deploy_evidence is a structured GitHub Actions Jobs API payload.
+
+    Source API: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
+    Required fields: id, run_id, head_sha, status, conclusion, started_at, completed_at
+    Value assertions:
+      - status  must equal "completed"
+      - conclusion must equal "success"
+    Datetime fields (started_at, completed_at) must be valid ISO 8601 strings.
+
+    Returns None if valid, or an error string describing the first violation.
+    """
+    if not deploy_evidence:
+        return (
+            "Cannot transition to 'deploy-success': transition_evidence.deploy_evidence required. "
+            "Must be a GitHub Actions Jobs API response object "
+            "(GET /repos/{owner}/{repo}/actions/jobs/{job_id})."
+        )
+    if not isinstance(deploy_evidence, dict):
+        return (
+            "Cannot transition to 'deploy-success': transition_evidence.deploy_evidence must be "
+            "a structured object (GitHub Actions Jobs API response), not a plain string. "
+            f"Required fields: {', '.join(_DEPLOY_EVIDENCE_REQUIRED_FIELDS)}."
+        )
+    missing = [
+        f for f in _DEPLOY_EVIDENCE_REQUIRED_FIELDS
+        if f not in deploy_evidence
+        or deploy_evidence[f] is None
+        or str(deploy_evidence[f]).strip() == ""
+    ]
+    if missing:
+        return (
+            f"Cannot transition to 'deploy-success': deploy_evidence missing required "
+            f"GitHub Actions Jobs API field(s): {', '.join(missing)}. "
+            "Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}."
+        )
+    status_val = str(deploy_evidence.get("status", "")).strip().lower()
+    if status_val != "completed":
+        return (
+            f"Cannot transition to 'deploy-success': deploy_evidence.status must be 'completed'. "
+            f"Got: '{deploy_evidence.get('status')}'. "
+            "Job must have reached a terminal completed state before evidence is accepted."
+        )
+    conclusion_val = str(deploy_evidence.get("conclusion", "")).strip().lower()
+    if conclusion_val != "success":
+        return (
+            f"Cannot transition to 'deploy-success': deploy_evidence.conclusion must be 'success'. "
+            f"Got: '{deploy_evidence.get('conclusion')}'. "
+            "Only GitHub Actions jobs with conclusion=success qualify as deploy evidence."
+        )
+    for dt_field in ("started_at", "completed_at"):
+        val = str(deploy_evidence.get(dt_field, "")).strip()
+        if not _is_valid_iso8601(val):
+            return (
+                f"Cannot transition to 'deploy-success': deploy_evidence.{dt_field} must be "
+                f"a valid ISO 8601 datetime (e.g. 2026-03-01T18:21:57Z). Got: '{val}'."
+            )
+    return None
+
+
 def _validate_feature_production_gate(project_id: str, feature_data: Dict) -> Optional[Dict]:
     """Enforce: feature -> production requires >=1 child task, all deploy-success/closed recursively."""
     primary = (feature_data.get("primary_task") or "").strip()
@@ -1458,11 +1541,11 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
                     "transition_evidence.merge_evidence required")
 
         if not is_revert and record_type == "task" and new_lower == "deploy-success":
-            deploy_evidence = transition_evidence.get("deploy_evidence", "").strip()
-            if not deploy_evidence:
-                return _error(400,
-                    "Cannot transition to 'deploy-success': "
-                    "transition_evidence.deploy_evidence required (deployment spec ID, URL, or log ref)")
+            # ENC-TSK-726: deploy_evidence must be a structured GitHub Actions Jobs API payload.
+            # Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
+            de_err = _validate_deploy_evidence(transition_evidence.get("deploy_evidence"))
+            if de_err:
+                return _error(400, de_err)
 
         if not is_revert and record_type == "task" and new_lower == "closed" and current_status == "deploy-success":
             live_validation_evidence = transition_evidence.get("live_validation_evidence", "").strip()
@@ -1618,7 +1701,16 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
         if transition_evidence.get("deployment_ref"):
             evidence_parts.append(f"deploy_ref: {transition_evidence['deployment_ref']}")
         if transition_evidence.get("deploy_evidence"):
-            evidence_parts.append(f"deploy_evidence: {transition_evidence['deploy_evidence'][:80]}")
+            de = transition_evidence["deploy_evidence"]
+            if isinstance(de, dict):
+                # ENC-TSK-726: structured GH Actions Jobs API payload — summarise key fields
+                de_summary = (
+                    f"job_id={de.get('id')}, run_id={de.get('run_id')}, "
+                    f"sha={str(de.get('head_sha', ''))[:12]}, conclusion={de.get('conclusion')}"
+                )
+            else:
+                de_summary = str(de)[:80]
+            evidence_parts.append(f"deploy_evidence: {de_summary}")
         if transition_evidence.get("live_validation_evidence"):
             evidence_parts.append(f"live_validation: {transition_evidence['live_validation_evidence'][:80]}")
         if transition_evidence.get("merge_evidence"):
@@ -1645,7 +1737,10 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
             extra_vals[":deploy_ref"] = {"S": transition_evidence["deployment_ref"].strip()}
         if transition_evidence.get("deploy_evidence"):
             extra_sets.append("deploy_evidence = :deploy_ev")
-            extra_vals[":deploy_ev"] = {"S": transition_evidence["deploy_evidence"].strip()}
+            de = transition_evidence["deploy_evidence"]
+            # ENC-TSK-726: store as JSON string for DynamoDB S compatibility (dict payload)
+            de_val = json.dumps(de, separators=(",", ":")) if isinstance(de, dict) else str(de).strip()
+            extra_vals[":deploy_ev"] = {"S": de_val}
         if transition_evidence.get("live_validation_evidence"):
             extra_sets.append("live_validation_evidence = :live_val_ev")
             extra_vals[":live_val_ev"] = {"S": transition_evidence["live_validation_evidence"].strip()}

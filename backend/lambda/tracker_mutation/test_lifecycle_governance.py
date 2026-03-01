@@ -7,6 +7,10 @@ Tests cover:
   + deploy_evidence gate (deploy-init → deploy-success)
   + live_validation_evidence gate (deploy-success → closed)
   + coding-updates re-entry arc (deploy-success → coding-updates → coding-complete)
+- ENC-TSK-726: deploy_evidence must be a structured GitHub Actions Jobs API payload
+  + required fields: id, run_id, head_sha, status, conclusion, started_at, completed_at
+  + status must equal "completed", conclusion must equal "success"
+  + started_at / completed_at must be valid ISO 8601 datetimes
 
 Run: python3 -m pytest test_lifecycle_governance.py -v
 """
@@ -84,6 +88,26 @@ def _call_update_field(project_id, record_type, record_id, body):
     return tracker_mutation._handle_update_field(project_id, record_type, record_id, body)
 
 
+def _valid_deploy_evidence(**overrides):
+    """Return a minimal valid GitHub Actions Jobs API payload for deploy_evidence.
+
+    Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
+    All required fields (ENC-TSK-726) are present with valid values by default.
+    Pass keyword overrides to test invalid variations.
+    """
+    payload = {
+        "id": 12345678,
+        "run_id": 22549608910,
+        "head_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-03-01T18:20:00Z",
+        "completed_at": "2026-03-01T18:21:57Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # ENC-TSK-594 / ENC-TSK-698: Transition table enforcement
 # ---------------------------------------------------------------------------
@@ -146,10 +170,10 @@ class TestTaskForwardTransitions(unittest.TestCase):
         self.assertTrue(result.get("success"))
 
     def test_deploy_init_to_deploy_success_with_evidence(self):
-        """deploy-init → deploy-success requires transition_evidence.deploy_evidence."""
+        """deploy-init → deploy-success requires transition_evidence.deploy_evidence (GH API payload)."""
         result = self._patch_and_call("deploy-init", "deploy-success", {
             "transition_evidence": {
-                "deploy_evidence": "SPEC-20260301T143000"
+                "deploy_evidence": _valid_deploy_evidence()
             }
         })
         self.assertTrue(result.get("success"))
@@ -513,7 +537,13 @@ class TestMergedMainGate(unittest.TestCase):
 
 
 class TestDeploySuccessGate(unittest.TestCase):
-    """task -> deploy-success requires transition_evidence.deploy_evidence."""
+    """task -> deploy-success requires a structured GitHub Actions Jobs API payload (ENC-TSK-726).
+
+    Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
+    Required fields: id, run_id, head_sha, status, conclusion, started_at, completed_at
+    Assertions: status == "completed", conclusion == "success"
+    Datetime validation: started_at / completed_at must be ISO 8601.
+    """
 
     def _patch_and_call(self, transition_evidence=None):
         body = {"field": "status", "value": "deploy-success", "provider": "codex"}
@@ -530,26 +560,126 @@ class TestDeploySuccessGate(unittest.TestCase):
             )
         return json.loads(result.get("body", "{}"))
 
+    # --- valid payload ---
+
+    def test_valid_gh_actions_payload_succeeds(self):
+        """Full valid GitHub Actions Jobs API payload passes all gates."""
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence()})
+        self.assertTrue(result.get("success"), result)
+
+    # --- missing / wrong type ---
+
     def test_missing_deploy_evidence_returns_400(self):
+        """No deploy_evidence key → 400."""
         result = self._patch_and_call()
         self.assertIn("error", result)
         self.assertIn("deploy_evidence", result["error"])
 
-    def test_empty_deploy_evidence_returns_400(self):
+    def test_none_deploy_evidence_returns_400(self):
+        """deploy_evidence=None → 400."""
+        result = self._patch_and_call({"deploy_evidence": None})
+        self.assertIn("error", result)
+
+    def test_plain_string_deploy_evidence_rejected(self):
+        """Plain string (old format) is rejected; must be a structured object."""
+        result = self._patch_and_call({"deploy_evidence": "SPEC-20260301T143000"})
+        self.assertIn("error", result)
+        self.assertIn("structured object", result["error"])
+
+    def test_empty_string_deploy_evidence_rejected(self):
+        """Empty string → 400."""
         result = self._patch_and_call({"deploy_evidence": "  "})
         self.assertIn("error", result)
 
-    def test_valid_deploy_evidence_spec_id_succeeds(self):
-        result = self._patch_and_call({
-            "deploy_evidence": "SPEC-20260301T143000"
-        })
-        self.assertTrue(result.get("success"))
+    # --- missing required fields ---
 
-    def test_valid_deploy_evidence_url_succeeds(self):
-        result = self._patch_and_call({
-            "deploy_evidence": "https://ci.example.com/builds/4321 - passed"
-        })
-        self.assertTrue(result.get("success"))
+    def test_missing_id_field_rejected(self):
+        de = _valid_deploy_evidence()
+        del de["id"]
+        result = self._patch_and_call({"deploy_evidence": de})
+        self.assertIn("error", result)
+        self.assertIn("id", result["error"])
+
+    def test_missing_run_id_field_rejected(self):
+        de = _valid_deploy_evidence()
+        del de["run_id"]
+        result = self._patch_and_call({"deploy_evidence": de})
+        self.assertIn("error", result)
+        self.assertIn("run_id", result["error"])
+
+    def test_missing_head_sha_field_rejected(self):
+        de = _valid_deploy_evidence()
+        del de["head_sha"]
+        result = self._patch_and_call({"deploy_evidence": de})
+        self.assertIn("error", result)
+        self.assertIn("head_sha", result["error"])
+
+    def test_missing_started_at_field_rejected(self):
+        de = _valid_deploy_evidence()
+        del de["started_at"]
+        result = self._patch_and_call({"deploy_evidence": de})
+        self.assertIn("error", result)
+        self.assertIn("started_at", result["error"])
+
+    def test_missing_completed_at_field_rejected(self):
+        de = _valid_deploy_evidence()
+        del de["completed_at"]
+        result = self._patch_and_call({"deploy_evidence": de})
+        self.assertIn("error", result)
+        self.assertIn("completed_at", result["error"])
+
+    # --- wrong status / conclusion values ---
+
+    def test_status_in_progress_rejected(self):
+        """status='in_progress' (job still running) → rejected."""
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence(status="in_progress")})
+        self.assertIn("error", result)
+        self.assertIn("completed", result["error"])
+
+    def test_status_queued_rejected(self):
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence(status="queued")})
+        self.assertIn("error", result)
+
+    def test_conclusion_failure_rejected(self):
+        """conclusion='failure' → rejected; only success qualifies."""
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence(conclusion="failure")})
+        self.assertIn("error", result)
+        self.assertIn("success", result["error"])
+
+    def test_conclusion_cancelled_rejected(self):
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence(conclusion="cancelled")})
+        self.assertIn("error", result)
+
+    def test_conclusion_skipped_rejected(self):
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence(conclusion="skipped")})
+        self.assertIn("error", result)
+
+    # --- invalid datetime formats ---
+
+    def test_invalid_started_at_epoch_int_rejected(self):
+        """Integer epoch timestamp for started_at → rejected; must be ISO 8601 string."""
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence(started_at=1740845200)})
+        self.assertIn("error", result)
+        self.assertIn("started_at", result["error"])
+
+    def test_invalid_started_at_garbage_string_rejected(self):
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence(started_at="not-a-date")})
+        self.assertIn("error", result)
+        self.assertIn("started_at", result["error"])
+
+    def test_invalid_completed_at_date_only_rejected(self):
+        """Date-only string (no time component) → rejected."""
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence(completed_at="2026-03-01")})
+        self.assertIn("error", result)
+        self.assertIn("completed_at", result["error"])
+
+    def test_valid_iso8601_with_offset_accepted(self):
+        """ISO 8601 with numeric offset (+00:00) is also valid."""
+        result = self._patch_and_call({"deploy_evidence": _valid_deploy_evidence(
+            started_at="2026-03-01T18:20:00+00:00",
+            completed_at="2026-03-01T18:21:57+00:00",
+        )})
+        self.assertTrue(result.get("success"), result)
 
 
 class TestDeploySuccessToClosedGate(unittest.TestCase):
@@ -833,11 +963,11 @@ class TestDeployedMigrationArc(unittest.TestCase):
         return json.loads(result.get("body", "{}"))
 
     def test_deployed_to_deploy_success_with_evidence_succeeds(self):
-        """Migration arc: deployed → deploy-success with deploy_evidence passes."""
+        """Migration arc: deployed → deploy-success with valid GH Actions payload passes."""
         result = self._patch_and_call({
-            "deploy_evidence": "Legacy migration: ENC-TSK-704 — task was at deployed prior to ENC-FTR-035"
+            "deploy_evidence": _valid_deploy_evidence()
         })
-        self.assertTrue(result.get("success"))
+        self.assertTrue(result.get("success"), result)
 
     def test_deployed_to_deploy_success_without_evidence_returns_400(self):
         """deploy_evidence is still required even for the migration arc."""
