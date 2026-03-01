@@ -63,6 +63,7 @@ Resources:
           SSM_REGION: !Ref AWS::Region
           SECRETS_REGION: !Ref AWS::Region
           CORS_ORIGIN: !Ref CorsOrigin
+          DOCUMENT_API_LAMBDA_NAME: devops-document-api
       Tags:
         - Key: Project
           Value: enceladus
