@@ -315,24 +315,47 @@ def _handle_failure(project_id: str, spec_id: str, error_message: str) -> None:
         },
     )
 
-    # Reset requests back to pending
+    # Reset requests back to pending for retryable failures; otherwise mark failed.
+    retryable = _is_retryable_codebuild_failure(error_message)
     if request_ids and isinstance(request_ids, list):
         for rid in request_ids:
             try:
-                ddb.update_item(
-                    TableName=DEPLOY_TABLE,
-                    Key={"project_id": {"S": project_id}, "record_id": {"S": f"request#{rid}"}},
-                    UpdateExpression="SET #st = :pending, spec_id = :null_val",
-                    ExpressionAttributeNames={"#st": "status"},
-                    ExpressionAttributeValues={
-                        ":pending": {"S": "pending"},
-                        ":null_val": {"NULL": True},
-                    },
-                )
+                if retryable:
+                    ddb.update_item(
+                        TableName=DEPLOY_TABLE,
+                        Key={"project_id": {"S": project_id}, "record_id": {"S": f"request#{rid}"}},
+                        UpdateExpression="SET #st = :pending, spec_id = :null_val",
+                        ExpressionAttributeNames={"#st": "status"},
+                        ExpressionAttributeValues={
+                            ":pending": {"S": "pending"},
+                            ":null_val": {"NULL": True},
+                        },
+                    )
+                else:
+                    ddb.update_item(
+                        TableName=DEPLOY_TABLE,
+                        Key={"project_id": {"S": project_id}, "record_id": {"S": f"request#{rid}"}},
+                        UpdateExpression="SET #st = :failed",
+                        ExpressionAttributeNames={"#st": "status"},
+                        ExpressionAttributeValues={":failed": {"S": "failed"}},
+                    )
             except ClientError:
                 logger.warning(f"Failed to reset request {rid}")
 
-        logger.info(f"[INFO] Reset {len(request_ids)} request(s) to pending")
+        if retryable:
+            logger.info(f"[INFO] Reset {len(request_ids)} request(s) to pending")
+        else:
+            logger.info(f"[INFO] Marked {len(request_ids)} request(s) failed (non-retryable CodeBuild failure)")
+
+
+def _is_retryable_codebuild_failure(error_message: str) -> bool:
+    """Classify CodeBuild failures for request retry behavior."""
+    terminal_markers = (
+        "deploy_build_helper.py fetch-config",
+        "No source archives found",
+        "No files found for source_dir",
+    )
+    return not any(marker in error_message for marker in terminal_markers)
 
 
 # ---------------------------------------------------------------------------
