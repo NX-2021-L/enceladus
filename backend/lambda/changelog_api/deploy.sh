@@ -220,25 +220,25 @@ ensure_api_routes() {
   )
 
   for route_key in "${routes[@]}"; do
-    local existing
-    existing="$(aws apigatewayv2 get-routes \
+    local create_err
+    create_err="$(mktemp /tmp/cf-route-err-XXXXXX.log)"
+    if aws apigatewayv2 create-route \
       --region "${REGION}" \
       --api-id "${API_ID}" \
-      --max-results 100 \
-      --query "Items[?RouteKey=='${route_key}'].RouteId | [0]" \
-      --output text)"
-
-    if [[ -z "${existing}" || "${existing}" == "None" ]]; then
-      log "[START] creating route: ${route_key}"
-      aws apigatewayv2 create-route \
-        --region "${REGION}" \
-        --api-id "${API_ID}" \
-        --route-key "${route_key}" \
-        --target "integrations/${integration_id}" >/dev/null
+      --route-key "${route_key}" \
+      --target "integrations/${integration_id}" >/dev/null 2>"${create_err}"; then
       log "[END] route created: ${route_key}"
     else
-      log "[OK] route exists: ${route_key}"
+      # ConflictException = route already exists — treat as OK
+      if grep -qi "ConflictException\|already exists" "${create_err}"; then
+        log "[OK] route already exists: ${route_key}"
+      else
+        cat "${create_err}" >&2
+        rm -f "${create_err}"
+        return 1
+      fi
     fi
+    rm -f "${create_err}"
   done
 
   # Lambda invoke permission
