@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.28",
-  "updated_at": "2026-03-01T19:15:00Z",
+  "version": "2026-03-01.29",
+  "updated_at": "2026-03-01T20:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -249,6 +249,40 @@
           }
         }
       }
+    },
+    "document.governance_sync": {
+      "description": "Push-on-write sync behavior for governance files to the PWA document store (ENC-TSK-729). When governance_update() is called, coordination_api invokes devops-document-api asynchronously via Lambda direct invocation (InvocationType=Event) to trigger _sync_governance_documents() immediately. This delivers the updated governance file to DynamoDB document store within seconds, meeting a <=3-minute SLA for PWA freshness without requiring a user page load.",
+      "fields": {
+        "_governance_sync_push": {
+          "type": "boolean",
+          "definition": "Internal event flag. When true, document_api lambda_handler bypasses HTTP routing and calls _handle_governance_sync_push() directly. Set by coordination_api after a successful governance S3 write. Not an HTTP field.",
+          "context": "direct Lambda invocation only (not API Gateway)"
+        },
+        "file_name": {
+          "type": "string",
+          "definition": "Governance file name that was updated (e.g. 'agents.md', 'agents/dispatch-heuristics.md'). Informational — sync always runs _sync_governance_documents() for all governance files to ensure consistency.",
+          "context": "direct Lambda invocation payload"
+        },
+        "content_hash": {
+          "type": "string",
+          "definition": "SHA-256 hex digest of the new file content. Logged for observability. Also used by _sync_governance_documents() hash comparison to skip unchanged files.",
+          "context": "direct Lambda invocation payload"
+        }
+      },
+      "covered_files": [
+        "agents.md",
+        "agents/deployment-process-references.md",
+        "agents/agent-schema.json",
+        "agents/agent-manifest.json",
+        "agents/dispatch-heuristics.md",
+        "agents/agents-reference-markdown.md",
+        "agents/agents-reference-guide-numbering.md",
+        "agents/agents-reference-project-tracking.md",
+        "governance_data_dictionary.json"
+      ],
+      "sla": "<=3 minutes from governance_update() call to PWA document store update",
+      "fallback": "On-demand sync via document_api _sync_governance_documents() triggered on search?keyword=governance-file remains active as a consistency fallback",
+      "requires_iam": "devops-coordination-api-lambda-role must have lambda:InvokeFunction on devops-document-api"
     },
     "document.query_response": {
       "description": "Document list/search response envelope fields returned by document_api.",

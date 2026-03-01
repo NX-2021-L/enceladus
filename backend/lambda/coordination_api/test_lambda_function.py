@@ -5,7 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 MODULE_PATH = pathlib.Path(__file__).with_name("lambda_function.py")
 SPEC = importlib.util.spec_from_file_location("coordination_lambda", MODULE_PATH)
@@ -2983,6 +2983,114 @@ class AnthropicEnhancementsTests(unittest.TestCase):
         self.assertTrue(claude["features"]["streaming"])
         self.assertTrue(claude["features"]["token_counting"])
         self.assertTrue(claude["features"]["cost_attribution"])
+
+
+class TriggerGovernanceSyncPushTests(unittest.TestCase):
+    """Tests for ENC-TSK-729: push-on-write governance sync trigger in coordination_api."""
+
+    def setUp(self):
+        # Reset the module-level lambda client before each test
+        coordination_lambda._lambda_client = None
+
+    @patch.object(coordination_lambda, "_get_lambda_client")
+    def test_trigger_invokes_document_api_lambda(self, mock_get_client):
+        """Successful invocation calls Lambda with correct payload."""
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = {"StatusCode": 202}
+        mock_get_client.return_value = mock_client
+
+        coordination_lambda._trigger_governance_doc_sync_push("agents.md", "abc123hash456")
+
+        mock_client.invoke.assert_called_once()
+        call_kwargs = mock_client.invoke.call_args[1]
+        self.assertEqual(call_kwargs["InvocationType"], "Event")
+        payload = json.loads(call_kwargs["Payload"].decode("utf-8"))
+        self.assertTrue(payload["_governance_sync_push"])
+        self.assertEqual(payload["file_name"], "agents.md")
+        self.assertEqual(payload["content_hash"], "abc123hash456")
+
+    @patch.object(coordination_lambda, "_get_lambda_client")
+    def test_trigger_uses_document_api_lambda_name(self, mock_get_client):
+        """Invocation targets the configured DOCUMENT_API_LAMBDA_NAME."""
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = {"StatusCode": 202}
+        mock_get_client.return_value = mock_client
+
+        original_name = coordination_lambda.DOCUMENT_API_LAMBDA_NAME
+        coordination_lambda.DOCUMENT_API_LAMBDA_NAME = "devops-document-api"
+        try:
+            coordination_lambda._trigger_governance_doc_sync_push("agents/dispatch-heuristics.md", "deadbeef0000")
+            call_kwargs = mock_client.invoke.call_args[1]
+            self.assertEqual(call_kwargs["FunctionName"], "devops-document-api")
+        finally:
+            coordination_lambda.DOCUMENT_API_LAMBDA_NAME = original_name
+
+    @patch.object(coordination_lambda, "_get_lambda_client")
+    def test_trigger_skips_when_lambda_name_empty(self, mock_get_client):
+        """If DOCUMENT_API_LAMBDA_NAME is empty, invoke is not called."""
+        original_name = coordination_lambda.DOCUMENT_API_LAMBDA_NAME
+        coordination_lambda.DOCUMENT_API_LAMBDA_NAME = ""
+        try:
+            coordination_lambda._trigger_governance_doc_sync_push("agents.md", "somehash")
+            mock_get_client.assert_not_called()
+        finally:
+            coordination_lambda.DOCUMENT_API_LAMBDA_NAME = original_name
+
+    @patch.object(coordination_lambda, "_get_lambda_client")
+    def test_trigger_swallows_invoke_exception(self, mock_get_client):
+        """If Lambda invoke raises, the exception is swallowed (non-blocking)."""
+        mock_client = MagicMock()
+        mock_client.invoke.side_effect = Exception("ResourceNotFoundException")
+        mock_get_client.return_value = mock_client
+
+        # Should not raise
+        coordination_lambda._trigger_governance_doc_sync_push("agents.md", "failhash000")
+
+    @patch.object(coordination_lambda, "_trigger_governance_doc_sync_push")
+    @patch.object(coordination_lambda, "_compute_governance_hash_local")
+    @patch.object(coordination_lambda, "_get_s3")
+    def test_trigger_called_after_governance_update(self, mock_get_s3, mock_hash, mock_trigger):
+        """_handle_governance_update calls _trigger_governance_doc_sync_push after a successful write."""
+        # Set up S3 mock: no existing file (NoSuchKey) → successful write.
+        # exceptions.NoSuchKey must be a real exception class so that the
+        # `except s3.exceptions.NoSuchKey:` clause in _handle_governance_update works.
+        class _FakeNoSuchKey(Exception):
+            pass
+        mock_s3_client = MagicMock()
+        mock_s3_client.exceptions.NoSuchKey = _FakeNoSuchKey
+        mock_get_s3.return_value = mock_s3_client
+        mock_s3_client.get_object.side_effect = _FakeNoSuchKey("Not Found")
+        mock_s3_client.put_object.return_value = {}
+        mock_hash.return_value = "newhash9999"
+
+        event = {
+            "body": json.dumps({
+                "file_name": "agents.md",
+                "content": "# Test content",
+                "change_summary": "Test change",
+                "governance_hash": "anyhash",
+            })
+        }
+        result = coordination_lambda._handle_governance_update(event)
+
+        self.assertEqual(result.get("statusCode"), 200)
+        mock_trigger.assert_called_once()
+        call_args = mock_trigger.call_args[0]
+        self.assertEqual(call_args[0], "agents.md")
+
+    def test_get_lambda_client_singleton(self):
+        """_get_lambda_client returns the same client on repeated calls."""
+        coordination_lambda._lambda_client = None
+        with patch.object(coordination_lambda.boto3, "client") as mock_boto:
+            mock_instance = MagicMock()
+            mock_boto.return_value = mock_instance
+            c1 = coordination_lambda._get_lambda_client()
+            c2 = coordination_lambda._get_lambda_client()
+            self.assertIs(c1, c2)
+            mock_boto.assert_called_once()
+
+    def tearDown(self):
+        coordination_lambda._lambda_client = None
 
 
 if __name__ == "__main__":
