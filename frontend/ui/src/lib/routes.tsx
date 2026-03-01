@@ -39,6 +39,11 @@ const DocumentsListPage = lazy(() =>
 const ChangelogListPage = lazy(() =>
   import('../pages/ChangelogListPage').then((module) => ({ default: module.ChangelogListPage })),
 )
+const ProjectChangelogPage = lazy(() =>
+  import('../pages/ProjectChangelogPage').then((module) => ({
+    default: module.ProjectChangelogPage,
+  })),
+)
 const DocumentDetailPage = lazy(() =>
   import('../pages/DocumentDetailPage').then((module) => ({
     default: module.DocumentDetailPage,
@@ -89,6 +94,10 @@ export const router = createBrowserRouter(
         { path: '/features', element: <Navigate to="/feed" replace /> },
         { path: '/documents', element: withSuspense(<DocumentsListPage />) },
         { path: '/changelog', element: withSuspense(<ChangelogListPage />) },
+        {
+          path: '/projects/:projectId/changelog',
+          element: withSuspense(<ProjectChangelogPage />),
+        },
         {
           path: '/documents/:documentId/:documentSlug',
           element: withSuspense(<DocumentDetailPage />),
