@@ -55,7 +55,7 @@ export interface Task {
   project_id: string
   title: string
   description: string
-  status: 'open' | 'closed' | 'in_progress' | 'planned'
+  status: 'open' | 'in-progress' | 'coding-complete' | 'committed' | 'pushed' | 'merged-main' | 'deployed' | 'closed'
   priority: 'P0' | 'P1' | 'P2' | 'P3'
   assigned_to: string | null
   related_feature_ids: string[]
@@ -93,7 +93,7 @@ export interface Issue {
   project_id: string
   title: string
   description: string
-  status: 'open' | 'closed'
+  status: 'open' | 'in-progress' | 'closed'
   priority: 'P0' | 'P1' | 'P2' | 'P3'
   severity: 'low' | 'medium' | 'high' | 'critical'
   hypothesis: string | null
@@ -126,7 +126,7 @@ export interface Feature {
   project_id: string
   title: string
   description: string
-  status: 'planned' | 'in_progress' | 'completed' | 'closed'
+  status: 'planned' | 'in-progress' | 'completed' | 'production' | 'deprecated'
   owners: string[]
   success_metrics_count: number
   success_metrics: string[]
