@@ -70,6 +70,7 @@ class DeployOrchestratorFallbackTests(unittest.TestCase):
         self.assertEqual(cfg["source"]["source_s3_bucket"], deploy_orchestrator.CONFIG_BUCKET)
         self.assertEqual(cfg["source"]["source_s3_prefix"], "deploy-sources/enceladus")
         self.assertTrue(cfg["build"]["version_file"])
+        s3.put_object.assert_called_once()
 
     def test_read_deploy_config_missing_uses_project_metadata_fallback(self) -> None:
         s3 = MagicMock()
@@ -86,6 +87,7 @@ class DeployOrchestratorFallbackTests(unittest.TestCase):
         ):
             cfg = deploy_orchestrator._read_deploy_config("enceladus")
         self.assertEqual(cfg, fallback)
+        s3.put_object.assert_called_once()
 
     def test_read_project_deploy_config_defaults_source_prefix_to_parent(self) -> None:
         ddb = MagicMock()
