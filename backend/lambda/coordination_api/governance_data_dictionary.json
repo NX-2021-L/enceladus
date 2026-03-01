@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.24",
-  "updated_at": "2026-03-01T13:42:00Z",
+  "version": "2026-03-01.25",
+  "updated_at": "2026-03-01T13:55:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -444,6 +444,43 @@
         "turn_count": {
           "type": "number",
           "definition": "Number of coordination requests associated with this session."
+        }
+      }
+    },
+    "coordination.auth_cognito_session": {
+      "description": "Payload contract for Cognito terminal-session bootstrap used by protected PWA diagnostics (POST /api/v1/coordination/auth/cognito/session and MCP tool coordination_cognito_session).",
+      "fields": {
+        "target_origin": {
+          "type": "string",
+          "constraints": {"format": "https-origin"},
+          "usage_guidance": "Must be an https origin matching the target Enceladus host where cookies will be applied."
+        },
+        "include_set_cookie_headers": {
+          "type": "boolean",
+          "usage_guidance": "When true, response includes serialized Set-Cookie strings for non-browser tooling."
+        },
+        "include_tokens": {
+          "type": "boolean",
+          "usage_guidance": "When true, response includes raw Cognito tokens. Use only for controlled diagnostics because token material is sensitive."
+        },
+        "session.cookies": {
+          "type": "array",
+          "item_type": "object",
+          "usage_guidance": "Canonical cookie objects returned by coordination API, including id token, refresh token (when available), and session timestamp cookie."
+        },
+        "session.playwright_cookies": {
+          "type": "array",
+          "item_type": "object",
+          "usage_guidance": "Browser-context cookie entries consumable by Playwright automation for authenticated evidence capture."
+        },
+        "session.set_cookie_headers": {
+          "type": "array",
+          "item_type": "string",
+          "usage_guidance": "Optional serialized Set-Cookie header values for external HTTP clients."
+        },
+        "session.tokens": {
+          "type": "object",
+          "usage_guidance": "Optional raw token object (id/access/refresh) returned only when include_tokens=true."
         }
       }
     },
