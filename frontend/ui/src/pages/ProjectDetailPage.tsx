@@ -158,6 +158,12 @@ export function ProjectDetailPage() {
                 >
                   REFERENCE
                 </Link>
+                <Link
+                  to={`/projects/${projectId}/changelog`}
+                  className="text-[11px] font-bold tracking-widest text-slate-500 hover:text-blue-400 transition-colors"
+                >
+                  CHANGELOG
+                </Link>
               </div>
             </div>
             <span className="text-xs font-mono text-slate-500">{project.prefix}</span>
