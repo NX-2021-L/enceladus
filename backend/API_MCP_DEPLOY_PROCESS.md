@@ -12,7 +12,13 @@ These paths are deployed together because the coordination API package embeds th
 
 ## Why This Process Exists
 
-The backend deployment-manager pipeline currently executes UI deployments through CodeBuild. Non-UI requests are validated and queued as `queued_non_ui`, but there is no downstream non-UI executor in this repository. Because of that, API/MCP deployments must use the direct coordination API deploy script.
+The backend deployment-manager pipeline executes UI deployments through CodeBuild.
+`lambda_update` non-UI requests can execute inline in `deploy_orchestrator`
+when source packaging and Lambda IAM permissions are available, but that path is
+best-effort and does not replace the dedicated API/MCP deployment workflow.
+Other non-UI deployment types still rely on downstream executor integration.
+Because API/MCP runtime updates require deterministic deployment evidence, they
+must continue to use the direct coordination API deploy script/workflow.
 
 ## Canonical Automation
 
