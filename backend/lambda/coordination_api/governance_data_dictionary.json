@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.18",
-  "updated_at": "2026-03-01T12:00:00Z",
+  "version": "2026-03-01.19",
+  "updated_at": "2026-03-01T12:55:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -270,6 +270,46 @@
           "constraints": {
             "pattern": "^[a-z0-9_-]+$"
           }
+        },
+        "non_ui_config": {
+          "type": "object",
+          "definition": "Optional non-UI deployment execution config for deployment_type values outside github_*.",
+          "usage_guidance": "Requires service_group + target_arn. Optional source_s3_bucket, source_s3_prefix, and source_dir can be supplied for inline lambda_update packaging."
+        }
+      }
+    },
+    "deploy.spec": {
+      "description": "Deployment spec records produced by deploy_orchestrator in devops-deployment-manager.",
+      "fields": {
+        "status": {
+          "type": "enum",
+          "enum": [
+            "building",
+            "queued_non_ui",
+            "deployed",
+            "failed"
+          ],
+          "definition": "Spec lifecycle status."
+        },
+        "deployment_category": {
+          "type": "enum",
+          "enum": [
+            "ui",
+            "non_ui"
+          ],
+          "definition": "Execution category selected by orchestrator."
+        },
+        "non_ui_targets": {
+          "type": "object",
+          "definition": "Serialized non-UI request targets (service_group + target_arn + validation metadata)."
+        },
+        "non_ui_execution_results": {
+          "type": "object|string",
+          "definition": "Execution output emitted by inline non-UI lambda_update orchestration (per-target status/version/reason)."
+        },
+        "error_message": {
+          "type": "string",
+          "definition": "Terminal failure message when spec status is failed."
         }
       }
     },
