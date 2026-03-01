@@ -59,8 +59,15 @@ export async function fetchAllChangelogHistory(
   return { entries, count: data.count ?? entries.length }
 }
 
-export async function fetchProjectVersion(projectId: string): Promise<ProjectVersion> {
+/**
+ * Fetch the current deployed version for a project.
+ * Returns null if no version has been recorded yet (404), rather than
+ * throwing — callers should treat null as "version unknown" and show
+ * a graceful fallback (e.g. "—").
+ */
+export async function fetchProjectVersion(projectId: string): Promise<ProjectVersion | null> {
   const res = await fetchWithAuth(`${API_BASE}/version/${encodeURIComponent(projectId)}`)
+  if (res.status === 404) return null
   if (!res.ok) throw new Error(`Failed to fetch project version: ${res.status}`)
   return res.json()
 }

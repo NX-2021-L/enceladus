@@ -69,6 +69,11 @@ export function useChangelogHistory(filters: ChangelogFilters) {
   }
 }
 
+/**
+ * Fetch the current deployed version for a project from the changelog API.
+ * data is null when no version has been recorded yet (first-time setup).
+ * Refreshes every 2 minutes so the header auto-updates after a deployment.
+ */
 export function useProjectVersion(projectId: string) {
   return useQuery({
     queryKey: changelogKeys.version(projectId),
