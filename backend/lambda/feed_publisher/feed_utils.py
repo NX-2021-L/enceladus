@@ -87,6 +87,8 @@ CLOSED_ITEM_MAX_AGE_DAYS = 90
 FRESHNESS_SLA_SECONDS = 600  # 10 minutes
 
 # Mobile feed status normalization maps
+# ENC-FTR-035: 'deployed' replaced by deploy-init / deploy-success + coding-updates re-entry arc.
+# Legacy 'deployed' kept as a passthrough until TSK-704 migration completes.
 _STATUS_TASK = {
     "open": "open",
     "in-progress": "in-progress", "in_progress": "in-progress", "in progress": "in-progress",
@@ -94,7 +96,10 @@ _STATUS_TASK = {
     "committed": "committed",
     "pushed": "pushed",
     "merged-main": "merged-main", "merged_main": "merged-main",
-    "deployed": "deployed",
+    "deploy-init": "deploy-init", "deploy_init": "deploy-init",
+    "deploy-success": "deploy-success", "deploy_success": "deploy-success",
+    "coding-updates": "coding-updates", "coding_updates": "coding-updates",
+    "deployed": "deployed",  # legacy — present until TSK-704 migration; harmless after
     "closed": "closed",
 }
 _STATUS_FEATURE = {
@@ -719,7 +724,7 @@ def _build_project_summary(
     closed_tasks = sum(1 for t in tasks if t["status"] == "closed")
     open_issues = sum(1 for i in issues if i["status"] != "closed")
     closed_issues = sum(1 for i in issues if i["status"] == "closed")
-    in_progress_features = sum(1 for f in features if f["status"] == "in_progress")
+    in_progress_features = sum(1 for f in features if f["status"] == "in-progress")
     completed_features = sum(1 for f in features if f["status"] == "completed")
 
     all_items = tasks + issues + features

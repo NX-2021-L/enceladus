@@ -1,8 +1,12 @@
-"""test_lifecycle_governance.py — Tests for ENC-FTR-022 lifecycle governance.
+"""test_lifecycle_governance.py — Tests for ENC-FTR-022 / ENC-FTR-035 lifecycle governance.
 
 Tests cover:
 - ENC-TSK-594: Transition table enforcement and revert-with-evidence
-- ENC-TSK-595: Evidence gates (pushed, merged-main, deployed, production)
+- ENC-TSK-595: Evidence gates (pushed, merged-main, deploy-success, production)
+- ENC-TSK-698: New deploy-init/deploy-success/coding-updates state machine
+  + deploy_evidence gate (deploy-init → deploy-success)
+  + live_validation_evidence gate (deploy-success → closed)
+  + coding-updates re-entry arc (deploy-success → coding-updates → coding-complete)
 
 Run: python3 -m pytest test_lifecycle_governance.py -v
 """
@@ -81,12 +85,13 @@ def _call_update_field(project_id, record_type, record_id, body):
 
 
 # ---------------------------------------------------------------------------
-# ENC-TSK-594: Transition table enforcement
+# ENC-TSK-594 / ENC-TSK-698: Transition table enforcement
 # ---------------------------------------------------------------------------
 
 class TestTaskForwardTransitions(unittest.TestCase):
-    """Task lifecycle: open -> in-progress -> coding-complete -> committed ->
-    pushed -> merged-main -> deployed -> closed."""
+    """Task lifecycle: open → in-progress → coding-complete → committed →
+    pushed → merged-main → deploy-init → deploy-success → closed.
+    Re-entry arc: deploy-success → coding-updates → coding-complete."""
 
     def _patch_and_call(self, current_status, new_status, body_extra=None):
         body = {"field": "status", "value": new_status, "provider": "codex"}
@@ -135,16 +140,37 @@ class TestTaskForwardTransitions(unittest.TestCase):
         })
         self.assertTrue(result.get("success"))
 
-    def test_merged_main_to_deployed_with_evidence(self):
-        result = self._patch_and_call("merged-main", "deployed", {
+    def test_merged_main_to_deploy_init(self):
+        """merged-main → deploy-init requires no additional evidence."""
+        result = self._patch_and_call("merged-main", "deploy-init")
+        self.assertTrue(result.get("success"))
+
+    def test_deploy_init_to_deploy_success_with_evidence(self):
+        """deploy-init → deploy-success requires transition_evidence.deploy_evidence."""
+        result = self._patch_and_call("deploy-init", "deploy-success", {
             "transition_evidence": {
-                "deployment_ref": "SPEC-20260225T143000"
+                "deploy_evidence": "SPEC-20260301T143000"
             }
         })
         self.assertTrue(result.get("success"))
 
-    def test_deployed_to_closed(self):
-        result = self._patch_and_call("deployed", "closed")
+    def test_deploy_success_to_closed_with_evidence(self):
+        """deploy-success → closed requires transition_evidence.live_validation_evidence."""
+        result = self._patch_and_call("deploy-success", "closed", {
+            "transition_evidence": {
+                "live_validation_evidence": "PWA smoke test passed, feature verified live at jreese.net"
+            }
+        })
+        self.assertTrue(result.get("success"))
+
+    def test_deploy_success_to_coding_updates(self):
+        """deploy-success → coding-updates re-entry arc (deployment failed checks)."""
+        result = self._patch_and_call("deploy-success", "coding-updates")
+        self.assertTrue(result.get("success"))
+
+    def test_coding_updates_to_coding_complete(self):
+        """coding-updates → coding-complete re-enters the standard coding path."""
+        result = self._patch_and_call("coding-updates", "coding-complete")
         self.assertTrue(result.get("success"))
 
 
@@ -175,12 +201,38 @@ class TestTaskSkipStagesBlocked(unittest.TestCase):
         result = self._patch_and_call("in-progress", "pushed")
         self.assertIn("error", result)
 
-    def test_coding_complete_to_deployed_blocked(self):
-        result = self._patch_and_call("coding-complete", "deployed")
+    def test_coding_complete_to_deploy_success_blocked(self):
+        """Can't skip straight to deploy-success from coding-complete."""
+        result = self._patch_and_call("coding-complete", "deploy-success")
         self.assertIn("error", result)
 
-    def test_open_to_deployed_blocked(self):
-        result = self._patch_and_call("open", "deployed")
+    def test_open_to_deploy_success_blocked(self):
+        result = self._patch_and_call("open", "deploy-success")
+        self.assertIn("error", result)
+
+    def test_merged_main_cannot_skip_to_closed(self):
+        """merged-main must go through deploy-init and deploy-success before closing."""
+        result = self._patch_and_call("merged-main", "closed")
+        self.assertIn("error", result)
+
+    def test_deploy_init_cannot_skip_to_closed(self):
+        """deploy-init cannot jump directly to closed; must go via deploy-success."""
+        result = self._patch_and_call("deploy-init", "closed")
+        self.assertIn("error", result)
+
+    def test_deploy_success_cannot_go_to_in_progress(self):
+        """deploy-success cannot revert to in-progress directly (must use coding-updates)."""
+        result = self._patch_and_call("deploy-success", "in-progress")
+        self.assertIn("error", result)
+
+    def test_coding_updates_cannot_go_to_pushed(self):
+        """coding-updates must re-enter at coding-complete, not skip ahead to pushed."""
+        result = self._patch_and_call("coding-updates", "pushed")
+        self.assertIn("error", result)
+
+    def test_deployed_is_no_longer_a_valid_target(self):
+        """'deployed' is a retired status; it must not be reachable from any state."""
+        result = self._patch_and_call("merged-main", "deployed")
         self.assertIn("error", result)
 
 
@@ -347,9 +399,21 @@ class TestRevertWithEvidence(unittest.TestCase):
                                        revert_reason="Push was to wrong branch")
         self.assertTrue(result.get("success"))
 
+    def test_revert_deploy_init_to_merged_main(self):
+        """deploy-init can be reverted to merged-main with a reason (deployment aborted)."""
+        result = self._patch_and_call("deploy-init", "merged-main",
+                                       revert_reason="Deployment aborted due to config error")
+        self.assertTrue(result.get("success"))
+
+    def test_revert_coding_updates_to_deploy_success(self):
+        """coding-updates can be reverted to deploy-success with a reason."""
+        result = self._patch_and_call("coding-updates", "deploy-success",
+                                       revert_reason="Additional changes not needed after review")
+        self.assertTrue(result.get("success"))
+
 
 # ---------------------------------------------------------------------------
-# ENC-TSK-595: Evidence gates
+# ENC-TSK-595 / ENC-TSK-698: Evidence gates
 # ---------------------------------------------------------------------------
 
 class TestPushedGate(unittest.TestCase):
@@ -448,16 +512,16 @@ class TestMergedMainGate(unittest.TestCase):
         self.assertTrue(result.get("success"))
 
 
-class TestDeployedGate(unittest.TestCase):
-    """task -> deployed requires deployment_ref."""
+class TestDeploySuccessGate(unittest.TestCase):
+    """task -> deploy-success requires transition_evidence.deploy_evidence."""
 
     def _patch_and_call(self, transition_evidence=None):
-        body = {"field": "status", "value": "deployed", "provider": "codex"}
+        body = {"field": "status", "value": "deploy-success", "provider": "codex"}
         if transition_evidence:
             body["transition_evidence"] = transition_evidence
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_checked_out_task(status="merged-main", agent_id="codex")
+            "Item": _mock_checked_out_task(status="deploy-init", agent_id="codex")
         }
         mock_ddb.update_item.return_value = {}
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
@@ -466,24 +530,74 @@ class TestDeployedGate(unittest.TestCase):
             )
         return json.loads(result.get("body", "{}"))
 
-    def test_missing_deployment_ref_returns_400(self):
+    def test_missing_deploy_evidence_returns_400(self):
         result = self._patch_and_call()
         self.assertIn("error", result)
-        self.assertIn("deployment_ref", result["error"])
+        self.assertIn("deploy_evidence", result["error"])
 
-    def test_empty_deployment_ref_returns_400(self):
-        result = self._patch_and_call({"deployment_ref": ""})
+    def test_empty_deploy_evidence_returns_400(self):
+        result = self._patch_and_call({"deploy_evidence": "  "})
         self.assertIn("error", result)
 
-    def test_valid_deployment_ref_succeeds(self):
+    def test_valid_deploy_evidence_spec_id_succeeds(self):
         result = self._patch_and_call({
-            "deployment_ref": "SPEC-20260225T143000"
+            "deploy_evidence": "SPEC-20260301T143000"
+        })
+        self.assertTrue(result.get("success"))
+
+    def test_valid_deploy_evidence_url_succeeds(self):
+        result = self._patch_and_call({
+            "deploy_evidence": "https://ci.example.com/builds/4321 - passed"
+        })
+        self.assertTrue(result.get("success"))
+
+
+class TestDeploySuccessToClosedGate(unittest.TestCase):
+    """task -> closed (from deploy-success) requires live_validation_evidence."""
+
+    def _patch_and_call(self, transition_evidence=None):
+        body = {"field": "status", "value": "closed", "provider": "codex"}
+        if transition_evidence:
+            body["transition_evidence"] = transition_evidence
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {
+            "Item": _mock_checked_out_task(status="deploy-success", agent_id="codex")
+        }
+        mock_ddb.update_item.return_value = {}
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field(
+                "enceladus", "task", "ENC-TSK-001", body
+            )
+        return json.loads(result.get("body", "{}"))
+
+    def test_missing_live_validation_evidence_returns_400(self):
+        result = self._patch_and_call()
+        self.assertIn("error", result)
+        self.assertIn("live_validation_evidence", result["error"])
+
+    def test_empty_live_validation_evidence_returns_400(self):
+        result = self._patch_and_call({"live_validation_evidence": "  "})
+        self.assertIn("error", result)
+
+    def test_valid_live_validation_evidence_succeeds(self):
+        result = self._patch_and_call({
+            "live_validation_evidence": "PWA smoke test passed at jreese.net; status chip shows deploy-success"
+        })
+        self.assertTrue(result.get("success"))
+
+    def test_ftr032_style_evidence_succeeds(self):
+        """Evidence captured via ENC-FTR-032 Cognito session diagnostics."""
+        result = self._patch_and_call({
+            "live_validation_evidence": (
+                "ENC-FTR-032 diagnostic: GET /enceladus/projects/enceladus 200 OK; "
+                "feature ENC-FTR-035 visible with status=production at 2026-03-01T15:00:00Z"
+            )
         })
         self.assertTrue(result.get("success"))
 
 
 class TestFeatureProductionGate(unittest.TestCase):
-    """feature -> production requires all child tasks deployed/closed."""
+    """feature -> production requires all child tasks deploy-success/closed (ENC-FTR-035)."""
 
     def _make_task_items(self, tasks):
         """tasks: list of (item_id, status, parent_or_None)"""
@@ -506,13 +620,14 @@ class TestFeatureProductionGate(unittest.TestCase):
         self.assertIn("error", parsed)
         self.assertIn("no child tasks", parsed["error"])
 
-    def test_all_children_deployed_succeeds(self):
+    def test_all_children_deploy_success_succeeds(self):
+        """All tasks at deploy-success → production gate should pass."""
         feature_data = {
             "primary_task": "ENC-TSK-001",
             "related_task_ids": ["ENC-TSK-002"],
         }
         task_items = self._make_task_items([
-            ("ENC-TSK-001", "deployed", None),
+            ("ENC-TSK-001", "deploy-success", None),
             ("ENC-TSK-002", "closed", None),
         ])
         mock_ddb = MagicMock()
@@ -521,13 +636,30 @@ class TestFeatureProductionGate(unittest.TestCase):
             result = tracker_mutation._validate_feature_production_gate("enceladus", feature_data)
         self.assertIsNone(result)
 
-    def test_some_children_not_deployed_returns_400(self):
+    def test_task_at_deployed_legacy_status_blocks_production(self):
+        """Old 'deployed' status is no longer accepted; tasks must be at deploy-success."""
+        feature_data = {
+            "primary_task": "ENC-TSK-001",
+            "related_task_ids": [],
+        }
+        task_items = self._make_task_items([
+            ("ENC-TSK-001", "deployed", None),
+        ])
+        mock_ddb = MagicMock()
+        mock_ddb.query.return_value = {"Items": task_items}
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = tracker_mutation._validate_feature_production_gate("enceladus", feature_data)
+        parsed = json.loads(result.get("body", "{}"))
+        self.assertIn("error", parsed)
+        self.assertIn("ENC-TSK-001", parsed["error"])
+
+    def test_some_children_not_ready_returns_400(self):
         feature_data = {
             "primary_task": "ENC-TSK-001",
             "related_task_ids": ["ENC-TSK-002"],
         }
         task_items = self._make_task_items([
-            ("ENC-TSK-001", "deployed", None),
+            ("ENC-TSK-001", "deploy-success", None),
             ("ENC-TSK-002", "in-progress", None),
         ])
         mock_ddb = MagicMock()
@@ -543,8 +675,8 @@ class TestFeatureProductionGate(unittest.TestCase):
         TSK-003 is in-progress -> should block."""
         feature_data = {"primary_task": "ENC-TSK-001", "related_task_ids": []}
         task_items = self._make_task_items([
-            ("ENC-TSK-001", "deployed", None),
-            ("ENC-TSK-002", "deployed", "ENC-TSK-001"),
+            ("ENC-TSK-001", "deploy-success", None),
+            ("ENC-TSK-002", "deploy-success", "ENC-TSK-001"),
             ("ENC-TSK-003", "in-progress", "ENC-TSK-002"),
         ])
         mock_ddb = MagicMock()
@@ -555,14 +687,14 @@ class TestFeatureProductionGate(unittest.TestCase):
         self.assertIn("error", parsed)
         self.assertIn("ENC-TSK-003", parsed["error"])
 
-    def test_recursive_children_all_deployed_succeeds(self):
+    def test_recursive_children_all_deploy_success_succeeds(self):
         """Feature -> TSK-001 -> child TSK-002 -> grandchild TSK-003.
-        All deployed -> should pass."""
+        All deploy-success or closed -> should pass."""
         feature_data = {"primary_task": "ENC-TSK-001", "related_task_ids": []}
         task_items = self._make_task_items([
-            ("ENC-TSK-001", "deployed", None),
+            ("ENC-TSK-001", "deploy-success", None),
             ("ENC-TSK-002", "closed", "ENC-TSK-001"),
-            ("ENC-TSK-003", "deployed", "ENC-TSK-002"),
+            ("ENC-TSK-003", "deploy-success", "ENC-TSK-002"),
         ])
         mock_ddb = MagicMock()
         mock_ddb.query.return_value = {"Items": task_items}
@@ -675,6 +807,56 @@ class TestAcceptanceCriteriaPatchNormalization(unittest.TestCase):
         self.assertIn("error", parsed)
         self.assertIn("description", parsed["error"])
         mock_ddb.update_item.assert_not_called()
+
+
+class TestDeployedMigrationArc(unittest.TestCase):
+    """ENC-TSK-704: deployed → deploy-success migration arc.
+
+    Legacy tasks at 'deployed' status must be able to transition to 'deploy-success'
+    after the ENC-FTR-035 Lambda deploy. The migration arc is temporary and should
+    be removed once all deployed tasks have been migrated.
+    """
+
+    def _patch_and_call(self, transition_evidence=None):
+        body = {"field": "status", "value": "deploy-success", "provider": "codex"}
+        if transition_evidence:
+            body["transition_evidence"] = transition_evidence
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {
+            "Item": _mock_checked_out_task(status="deployed", agent_id="codex")
+        }
+        mock_ddb.update_item.return_value = {}
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field(
+                "enceladus", "task", "ENC-TSK-001", body
+            )
+        return json.loads(result.get("body", "{}"))
+
+    def test_deployed_to_deploy_success_with_evidence_succeeds(self):
+        """Migration arc: deployed → deploy-success with deploy_evidence passes."""
+        result = self._patch_and_call({
+            "deploy_evidence": "Legacy migration: ENC-TSK-704 — task was at deployed prior to ENC-FTR-035"
+        })
+        self.assertTrue(result.get("success"))
+
+    def test_deployed_to_deploy_success_without_evidence_returns_400(self):
+        """deploy_evidence is still required even for the migration arc."""
+        result = self._patch_and_call()
+        self.assertIn("error", result)
+        self.assertIn("deploy_evidence", result["error"])
+
+    def test_deployed_cannot_skip_to_closed(self):
+        """Migration arc only goes to deploy-success; deployed → closed is no longer valid."""
+        body = {"field": "status", "value": "closed", "provider": "codex"}
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {
+            "Item": _mock_checked_out_task(status="deployed", agent_id="codex")
+        }
+        mock_ddb.update_item.return_value = {}
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field("enceladus", "task", "ENC-TSK-001", body)
+        parsed = json.loads(result.get("body", "{}"))
+        self.assertIn("error", parsed)
 
 
 if __name__ == "__main__":

@@ -55,7 +55,7 @@ export interface Task {
   project_id: string
   title: string
   description: string
-  status: 'open' | 'in-progress' | 'coding-complete' | 'committed' | 'pushed' | 'merged-main' | 'deployed' | 'closed'
+  status: 'open' | 'in-progress' | 'coding-complete' | 'committed' | 'pushed' | 'merged-main' | 'deploy-init' | 'deploy-success' | 'coding-updates' | 'closed' | 'deployed' // 'deployed' kept for legacy compat until TSK-704 migration
   priority: 'P0' | 'P1' | 'P2' | 'P3'
   assigned_to: string | null
   related_feature_ids: string[]

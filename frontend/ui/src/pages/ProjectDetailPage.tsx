@@ -91,7 +91,7 @@ export function ProjectDetailPage() {
   const taskStats = useMemo(() => {
     const open = projectTasks.filter((t) => t.status === 'open').length
     const inFlight = projectTasks.filter((t) =>
-      ['in-progress', 'coding-complete', 'committed', 'pushed', 'merged-main', 'deployed'].includes(t.status),
+      ['in-progress', 'coding-complete', 'committed', 'pushed', 'merged-main', 'deploy-init', 'deploy-success', 'coding-updates', 'deployed'].includes(t.status),
     ).length
     const closed = projectTasks.filter((t) => t.status === 'closed').length
     const total = projectTasks.length
