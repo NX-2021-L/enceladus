@@ -291,6 +291,7 @@ def _read_deploy_config(project_id: str) -> Dict[str, Any]:
     """Read deploy config with fallbacks for missing deploy.json."""
     s3 = _get_s3()
     key = f"{CONFIG_PREFIX}/{project_id}/deploy.json"
+    fallback_required = False
     try:
         resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
         return json.loads(resp["Body"].read().decode("utf-8"))
@@ -298,6 +299,7 @@ def _read_deploy_config(project_id: str) -> Dict[str, Any]:
         code = (e.response or {}).get("Error", {}).get("Code", "")
         if code not in {"NoSuchKey", "404", "NotFound"}:
             raise
+        fallback_required = True
         logger.warning(
             "[WARNING] Missing deploy config at s3://%s/%s for %s; falling back",
             CONFIG_BUCKET,
@@ -305,6 +307,7 @@ def _read_deploy_config(project_id: str) -> Dict[str, Any]:
             project_id,
         )
     except json.JSONDecodeError:
+        fallback_required = True
         logger.warning(
             "[WARNING] Invalid deploy.json at s3://%s/%s for %s; falling back",
             CONFIG_BUCKET,
@@ -315,10 +318,36 @@ def _read_deploy_config(project_id: str) -> Dict[str, Any]:
     project_cfg = _read_project_deploy_config(project_id)
     if project_cfg:
         logger.info("[INFO] Using project metadata fallback deploy config for %s", project_id)
-        return project_cfg
+        config = project_cfg
+    else:
+        logger.info("[INFO] Using synthesized default deploy config for %s", project_id)
+        config = _default_deploy_config(project_id)
 
-    logger.info("[INFO] Using synthesized default deploy config for %s", project_id)
-    return _default_deploy_config(project_id)
+    if fallback_required:
+        _persist_deploy_config(project_id, config)
+    return config
+
+
+def _persist_deploy_config(project_id: str, config: Dict[str, Any]) -> None:
+    """Persist synthesized/fallback deploy.json so downstream CodeBuild fetches succeed."""
+    s3 = _get_s3()
+    key = f"{CONFIG_PREFIX}/{project_id}/deploy.json"
+    try:
+        s3.put_object(
+            Bucket=CONFIG_BUCKET,
+            Key=key,
+            Body=json.dumps(config, indent=2).encode("utf-8"),
+            ContentType="application/json",
+        )
+        logger.info("[INFO] Persisted fallback deploy config to s3://%s/%s", CONFIG_BUCKET, key)
+    except Exception:
+        logger.warning(
+            "[WARNING] Failed to persist fallback deploy config for %s at s3://%s/%s",
+            project_id,
+            CONFIG_BUCKET,
+            key,
+            exc_info=True,
+        )
 
 
 def _get_current_version(project_id: str, config: Dict) -> str:
