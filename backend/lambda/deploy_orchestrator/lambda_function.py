@@ -254,6 +254,9 @@ def _read_project_deploy_config(project_id: str) -> Optional[Dict[str, Any]]:
         except json.JSONDecodeError:
             logger.warning("[WARNING] Invalid deploy_config JSON for %s", project_id)
 
+    parent_project = str(project.get("parent") or "").strip()
+    default_source_prefix = f"deploy-sources/{parent_project}" if parent_project else f"deploy-sources/{project_id}"
+
     source = config.get("source")
     if not isinstance(source, dict):
         source = {}
@@ -268,7 +271,7 @@ def _read_project_deploy_config(project_id: str) -> Optional[Dict[str, Any]]:
         source["source_s3_prefix"] = str(
             project.get("source_s3_prefix")
             or project.get("deploy_source_prefix")
-            or f"deploy-sources/{project_id}"
+            or default_source_prefix
         )
 
     build = config.get("build")
@@ -671,8 +674,18 @@ def _normalize_lambda_source_dir(target_arn: str, cfg: Dict[str, Any]) -> str:
 
 def _build_lambda_zip_from_source(project_id: str, target: Dict[str, Any]) -> bytes:
     """Build an in-memory Lambda package zip from latest source archive."""
-    source_bucket = str(target.get("source_s3_bucket") or "").strip() or CONFIG_BUCKET
-    source_prefix = str(target.get("source_s3_prefix") or "").strip() or f"deploy-sources/{project_id}"
+    project_cfg = _read_project_deploy_config(project_id) or {}
+    project_source = project_cfg.get("source", {}) if isinstance(project_cfg, dict) else {}
+    source_bucket = (
+        str(target.get("source_s3_bucket") or "").strip()
+        or str(project_source.get("source_s3_bucket") or "").strip()
+        or CONFIG_BUCKET
+    )
+    source_prefix = (
+        str(target.get("source_s3_prefix") or "").strip()
+        or str(project_source.get("source_s3_prefix") or "").strip()
+        or f"deploy-sources/{project_id}"
+    )
     source_key = _latest_source_archive_key(source_bucket, source_prefix)
     source_dir = _normalize_lambda_source_dir(target.get("target_arn", ""), target)
     marker = f"backend/lambda/{source_dir}/"

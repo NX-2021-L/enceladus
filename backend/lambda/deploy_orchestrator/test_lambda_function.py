@@ -85,6 +85,19 @@ class DeployOrchestratorFallbackTests(unittest.TestCase):
             cfg = deploy_orchestrator._read_deploy_config("enceladus")
         self.assertEqual(cfg, fallback)
 
+    def test_read_project_deploy_config_defaults_source_prefix_to_parent(self) -> None:
+        ddb = MagicMock()
+        ddb.get_item.return_value = {
+            "Item": {
+                "project_id": {"S": "enceladus"},
+                "parent": {"S": "devops"},
+            }
+        }
+        with patch.object(deploy_orchestrator, "_get_ddb", return_value=ddb):
+            cfg = deploy_orchestrator._read_project_deploy_config("enceladus")
+        assert cfg is not None
+        self.assertEqual(cfg["source"]["source_s3_prefix"], "deploy-sources/devops")
+
 
 class DeployOrchestratorNonUiInlineExecutionTests(unittest.TestCase):
     def _base_request(self) -> dict:
