@@ -113,6 +113,8 @@ SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
+# ENC-TSK-729: push-on-write sync — Lambda name for async document store refresh
+DOCUMENT_API_LAMBDA_NAME = os.environ.get("DOCUMENT_API_LAMBDA_NAME", "devops-document-api")
 S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_GOVERNANCE_PREFIX = os.environ.get("S3_GOVERNANCE_PREFIX", "governance/live")
 S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
@@ -586,6 +588,7 @@ _eb = None
 _sqs = None
 _sns = None
 _logs = None
+_lambda_client = None
 _mcp = CoordinationMcpClient()
 _secretsmanager = None
 _cognito = None
@@ -679,6 +682,17 @@ def _get_logs():
             config=Config(retries={"max_attempts": 3, "mode": "standard"}),
         )
     return _logs
+
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client(
+            "lambda",
+            region_name=DYNAMODB_REGION,
+            config=Config(retries={"max_attempts": 2, "mode": "standard"}),
+        )
+    return _lambda_client
 
 
 def _feed_subscriptions_enabled() -> bool:
@@ -8697,6 +8711,48 @@ def _handle_governance_dictionary(event: Dict[str, Any]) -> Dict[str, Any]:
     return _response(200, result)
 
 
+def _trigger_governance_doc_sync_push(file_name: str, content_hash: str) -> None:
+    """Fire-and-forget Lambda invocation to push-sync a governance file to the document store.
+
+    Called after a successful governance_update S3 write (ENC-TSK-729). Invokes
+    devops-document-api asynchronously (InvocationType=Event) so the PWA document
+    store reflects new governance content within seconds, without waiting for an
+    on-demand read request.
+
+    Failures are logged as warnings only — the existing on-demand sync
+    (_sync_governance_documents in document_api) remains the authoritative fallback.
+    The <=3-minute SLA is met either by this push (typical <5s) or the fallback.
+    """
+    fn_name = DOCUMENT_API_LAMBDA_NAME
+    if not fn_name:
+        logger.warning(
+            "[GOVERNANCE] DOCUMENT_API_LAMBDA_NAME not set; skipping push-on-write sync for %s",
+            file_name,
+        )
+        return
+    payload = json.dumps({
+        "_governance_sync_push": True,
+        "file_name": file_name,
+        "content_hash": content_hash,
+    }).encode("utf-8")
+    try:
+        _get_lambda_client().invoke(
+            FunctionName=fn_name,
+            InvocationType="Event",  # async fire-and-forget; returns 202 immediately
+            Payload=payload,
+        )
+        logger.info(
+            "[GOVERNANCE] push-on-write sync triggered: file=%s -> %s (hash prefix: %s)",
+            file_name, fn_name, content_hash[:12],
+        )
+    except Exception as exc:
+        logger.warning(
+            "[GOVERNANCE] push-on-write sync invoke failed for %s (non-blocking): %s. "
+            "On-demand sync via document_api search will serve as fallback.",
+            file_name, exc,
+        )
+
+
 def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
     """PUT /api/v1/governance/{file_name} — update governance file with archival."""
     try:
@@ -8804,6 +8860,9 @@ def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
     }
     if archive_key:
         result["archived_to"] = f"s3://{S3_BUCKET}/{archive_key}"
+
+    # ENC-TSK-729: push-on-write sync — immediately refresh PWA document store
+    _trigger_governance_doc_sync_push(file_name, new_hash)
 
     return _response(200, result)
 

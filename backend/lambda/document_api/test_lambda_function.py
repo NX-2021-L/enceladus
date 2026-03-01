@@ -349,5 +349,70 @@ class ResponseFormatTests(unittest.TestCase):
         self.assertTrue(body["error_envelope"]["retryable"])
 
 
+class GovernanceSyncPushTests(unittest.TestCase):
+    """Tests for ENC-TSK-729: push-on-write governance sync handler."""
+
+    @patch.object(document_api, "_sync_governance_documents")
+    def test_sync_push_event_bypasses_http_routing(self, mock_sync):
+        """Lambda invocation with _governance_sync_push=True is handled before HTTP parse."""
+        event = {"_governance_sync_push": True, "file_name": "agents.md", "content_hash": "abc123"}
+        resp = document_api.lambda_handler(event, None)
+        mock_sync.assert_called_once()
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertEqual(body["synced_file"], "agents.md")
+
+    @patch.object(document_api, "_sync_governance_documents")
+    def test_sync_push_without_file_name(self, mock_sync):
+        """_governance_sync_push with no file_name still runs full sync."""
+        event = {"_governance_sync_push": True}
+        resp = document_api.lambda_handler(event, None)
+        mock_sync.assert_called_once()
+        self.assertEqual(resp["statusCode"], 200)
+
+    @patch.object(document_api, "_sync_governance_documents")
+    def test_sync_push_logs_file_and_hash(self, mock_sync):
+        """Handler runs to completion; content_hash and file_name are accepted."""
+        event = {
+            "_governance_sync_push": True,
+            "file_name": "agents/dispatch-heuristics.md",
+            "content_hash": "deadbeef" * 8,
+        }
+        resp = document_api.lambda_handler(event, None)
+        mock_sync.assert_called_once()
+        self.assertEqual(resp["statusCode"], 200)
+
+    @patch.object(document_api, "_sync_governance_documents", side_effect=RuntimeError("S3 failure"))
+    def test_sync_push_returns_500_on_sync_error(self, _mock_sync):
+        """If _sync_governance_documents raises, handler returns 500 without crashing Lambda."""
+        event = {"_governance_sync_push": True, "file_name": "agents.md", "content_hash": "abc"}
+        resp = document_api.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 500)
+        body = json.loads(resp["body"])
+        self.assertFalse(body["success"])
+        self.assertIn("S3 failure", body["error"])
+
+    def test_normal_http_event_not_routed_to_sync_push(self):
+        """Regular HTTP events (no _governance_sync_push) are not intercepted."""
+        event = _make_event(method="OPTIONS", path="/api/v1/documents")
+        resp = document_api.lambda_handler(event, None)
+        # OPTIONS returns CORS preflight, not a sync response
+        self.assertIn(resp["statusCode"], [200, 204])
+        body_str = resp.get("body", "")
+        if body_str:
+            body = json.loads(body_str) if isinstance(body_str, str) else body_str
+            self.assertNotIn("synced_file", body)
+
+    @patch.object(document_api, "_sync_governance_documents")
+    def test_sync_push_false_is_not_intercepted(self, mock_sync):
+        """_governance_sync_push=False should not trigger sync handler."""
+        event = _make_event(method="OPTIONS", path="/api/v1/documents")
+        event["_governance_sync_push"] = False
+        resp = document_api.lambda_handler(event, None)
+        mock_sync.assert_not_called()
+        self.assertIn(resp["statusCode"], [200, 204])
+
+
 if __name__ == "__main__":
     unittest.main()

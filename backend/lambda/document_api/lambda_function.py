@@ -1409,6 +1409,54 @@ def _handle_search(qs: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Governance push-on-write sync handler (ENC-TSK-729)
+# ---------------------------------------------------------------------------
+
+
+def _handle_governance_sync_push(event: Dict) -> Dict:
+    """Handle direct Lambda invocation for governance push-on-write sync (ENC-TSK-729).
+
+    Called by coordination_api after a successful governance_update write to S3.
+    Triggers _sync_governance_documents() immediately so the PWA document store
+    reflects new governance file content without waiting for an on-demand read.
+
+    Authentication: not required — Lambda invocations are IAM-authenticated by the
+    caller (devops-coordination-api-lambda-role). No Cognito token is present.
+
+    Covered governance files (agents.md, agents/*, governance_data_dictionary.json):
+      agents/deployment-process-references.md
+      agents/agent-schema.json
+      agents/agent-manifest.json
+      agents/dispatch-heuristics.md
+      agents/agents-reference-markdown.md
+      agents/agents-reference-guide-numbering.md
+      agents/agents-reference-project-tracking.md
+    """
+    file_name = str(event.get("file_name") or "").strip()
+    content_hash = str(event.get("content_hash") or "").strip()
+    logger.info(
+        "[GOVERNANCE_SYNC_PUSH] Received push-on-write trigger: file=%s content_hash=%s",
+        file_name or "(all)",
+        content_hash[:12] if content_hash else "",
+    )
+    try:
+        _sync_governance_documents()
+        logger.info(
+            "[GOVERNANCE_SYNC_PUSH] Sync complete: file=%s", file_name or "(all)"
+        )
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"success": True, "synced_file": file_name}),
+        }
+    except Exception as exc:
+        logger.exception("[GOVERNANCE_SYNC_PUSH] Sync failed: %s", exc)
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"success": False, "error": str(exc)}),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Path parsing
 # ---------------------------------------------------------------------------
 
@@ -1449,6 +1497,11 @@ def _parse_request(event: Dict) -> Tuple[str, Optional[str], Dict]:
 
 
 def lambda_handler(event: Dict, context: Any) -> Dict:
+    # ENC-TSK-729: internal push-on-write trigger from coordination_api (direct Lambda invocation,
+    # no HTTP context). Must be checked before _parse_request which expects an HTTP event.
+    if event.get("_governance_sync_push"):
+        return _handle_governance_sync_push(event)
+
     method, document_id, qs = _parse_request(event)
 
     # CORS preflight
