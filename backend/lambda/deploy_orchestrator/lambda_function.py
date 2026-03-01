@@ -43,7 +43,7 @@ import secrets
 import time
 import zipfile
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 import boto3
 from botocore.config import Config
@@ -351,35 +351,34 @@ def _get_current_version(project_id: str, config: Dict) -> str:
         logger.warning(f"[WARNING] Unexpected error reading current-version.json: {e}")
 
     # --- Fallback: parse version.ts from latest source zip ---
-    source_prefix = config.get("source", {}).get("source_s3_prefix", f"deploy-sources/{project_id}")
-    source_bucket = config.get("source", {}).get("source_s3_bucket", CONFIG_BUCKET)
+    source_prefix = str(config.get("source", {}).get("source_s3_prefix", f"deploy-sources/{project_id}")).strip()
+    source_bucket = str(config.get("source", {}).get("source_s3_bucket", CONFIG_BUCKET)).strip()
     version_file = config.get("build", {}).get("version_file", "")
 
     if not version_file:
         return "0.0.0"
 
     try:
-        resp = s3.list_objects_v2(
-            Bucket=source_bucket, Prefix=f"{source_prefix}/",
-            MaxKeys=100,
+        source_bucket, source_prefixes = _candidate_source_locations(
+            project_id=project_id,
+            preferred_bucket=source_bucket,
+            preferred_prefix=source_prefix,
         )
-        objects = resp.get("Contents", [])
-        if not objects:
-            logger.warning(f"No source archives found at {source_bucket}/{source_prefix}/")
+        archive_keys = list(_iter_source_archive_keys(source_bucket, source_prefixes))
+        if not archive_keys:
+            logger.warning(
+                "No source archives found at s3://%s/(%s)/",
+                source_bucket,
+                " | ".join(source_prefixes),
+            )
             return "0.0.0"
 
-        zips = [o for o in objects if o["Key"].endswith(".zip")]
-        if not zips:
-            return "0.0.0"
-
-        latest = sorted(zips, key=lambda o: o["Key"], reverse=True)[0]
-        logger.info(f"Latest source archive (fallback): {latest['Key']}")
-
-        import io
-        import zipfile
-        obj = s3.get_object(Bucket=source_bucket, Key=latest["Key"])
-        with zipfile.ZipFile(io.BytesIO(obj["Body"].read())) as zf:
-            if version_file in zf.namelist():
+        for key in archive_keys:
+            logger.info("Source archive candidate (fallback): %s", key)
+            obj = s3.get_object(Bucket=source_bucket, Key=key)
+            with zipfile.ZipFile(io.BytesIO(obj["Body"].read())) as zf:
+                if version_file not in zf.namelist():
+                    continue
                 content = zf.read(version_file).decode("utf-8")
                 m = re.search(r"export\s+const\s+APP_VERSION\s*=\s*['\"](\d+\.\d+\.\d+)['\"]", content)
                 if m:
@@ -659,6 +658,75 @@ def _latest_source_archive_key(source_bucket: str, source_prefix: str) -> str:
     return sorted(zips, key=lambda o: o["Key"], reverse=True)[0]["Key"]
 
 
+def _normalize_source_prefix(prefix: str) -> str:
+    return str(prefix or "").strip().strip("/")
+
+
+def _candidate_source_locations(
+    project_id: str,
+    preferred_bucket: str,
+    preferred_prefix: str,
+) -> Tuple[str, List[str]]:
+    """Build ordered source bucket/prefix candidates for archive lookup."""
+    project_cfg = _read_project_deploy_config(project_id) or {}
+    project_source = project_cfg.get("source", {}) if isinstance(project_cfg, dict) else {}
+
+    bucket = (
+        str(preferred_bucket or "").strip()
+        or str(project_source.get("source_s3_bucket") or "").strip()
+        or CONFIG_BUCKET
+    )
+
+    prefixes: List[str] = []
+
+    def _add_prefix(value: Any) -> None:
+        candidate = _normalize_source_prefix(str(value or ""))
+        if candidate and candidate not in prefixes:
+            prefixes.append(candidate)
+
+    _add_prefix(preferred_prefix)
+    _add_prefix(project_source.get("source_s3_prefix"))
+    _add_prefix(f"deploy-sources/{project_id}")
+    return bucket, prefixes
+
+
+def _list_source_archive_keys(source_bucket: str, source_prefix: str) -> List[str]:
+    s3 = _get_s3()
+    resp = s3.list_objects_v2(Bucket=source_bucket, Prefix=f"{source_prefix}/", MaxKeys=100)
+    zips = [str(obj.get("Key", "")) for obj in resp.get("Contents", []) if str(obj.get("Key", "")).endswith(".zip")]
+    return sorted(zips, reverse=True)
+
+
+def _iter_source_archive_keys(source_bucket: str, source_prefixes: List[str]) -> Iterator[str]:
+    seen: Set[str] = set()
+    for prefix in source_prefixes:
+        for key in _list_source_archive_keys(source_bucket, prefix):
+            if key in seen:
+                continue
+            seen.add(key)
+            yield key
+
+
+def _resolve_latest_source_archive(
+    project_id: str,
+    preferred_bucket: str,
+    preferred_prefix: str,
+) -> Tuple[str, str]:
+    """Resolve latest archive key from preferred and fallback source prefixes."""
+    source_bucket, source_prefixes = _candidate_source_locations(
+        project_id=project_id,
+        preferred_bucket=preferred_bucket,
+        preferred_prefix=preferred_prefix,
+    )
+    for key in _iter_source_archive_keys(source_bucket, source_prefixes):
+        return source_bucket, key
+
+    raise RuntimeError(
+        "No source archives found at "
+        f"s3://{source_bucket}/({' | '.join(source_prefixes)})/"
+    )
+
+
 def _normalize_lambda_source_dir(target_arn: str, cfg: Dict[str, Any]) -> str:
     source_dir = str(cfg.get("source_dir", "")).strip()
     if source_dir:
@@ -676,44 +744,59 @@ def _build_lambda_zip_from_source(project_id: str, target: Dict[str, Any]) -> by
     """Build an in-memory Lambda package zip from latest source archive."""
     project_cfg = _read_project_deploy_config(project_id) or {}
     project_source = project_cfg.get("source", {}) if isinstance(project_cfg, dict) else {}
-    source_bucket = (
+    preferred_bucket = (
         str(target.get("source_s3_bucket") or "").strip()
         or str(project_source.get("source_s3_bucket") or "").strip()
         or CONFIG_BUCKET
     )
-    source_prefix = (
+    preferred_prefix = (
         str(target.get("source_s3_prefix") or "").strip()
         or str(project_source.get("source_s3_prefix") or "").strip()
         or f"deploy-sources/{project_id}"
     )
-    source_key = _latest_source_archive_key(source_bucket, source_prefix)
+    source_bucket, source_prefixes = _candidate_source_locations(
+        project_id=project_id,
+        preferred_bucket=preferred_bucket,
+        preferred_prefix=preferred_prefix,
+    )
     source_dir = _normalize_lambda_source_dir(target.get("target_arn", ""), target)
     marker = f"backend/lambda/{source_dir}/"
 
     s3 = _get_s3()
-    logger.info("[INFO] Building inline Lambda package from s3://%s/%s (%s)", source_bucket, source_key, marker)
-    src_obj = s3.get_object(Bucket=source_bucket, Key=source_key)
-
-    written = 0
-    out_bytes = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(src_obj["Body"].read())) as source_zip:
-        with zipfile.ZipFile(out_bytes, mode="w", compression=zipfile.ZIP_DEFLATED) as out_zip:
-            for name in source_zip.namelist():
-                idx = name.find(marker)
-                if idx < 0 or name.endswith("/"):
-                    continue
-                rel = name[idx + len(marker):].strip("/")
-                if not rel:
-                    continue
-                out_zip.writestr(rel, source_zip.read(name))
-                written += 1
-
-    if written == 0:
+    archive_keys = list(_iter_source_archive_keys(source_bucket, source_prefixes))
+    if not archive_keys:
         raise RuntimeError(
-            f"No files found for source_dir '{source_dir}' in source archive s3://{source_bucket}/{source_key}"
+            "No source archives found at "
+            f"s3://{source_bucket}/({' | '.join(source_prefixes)})/"
         )
 
-    return out_bytes.getvalue()
+    attempted: List[str] = []
+    for source_key in archive_keys:
+        attempted.append(source_key)
+        logger.info("[INFO] Building inline Lambda package from s3://%s/%s (%s)", source_bucket, source_key, marker)
+        src_obj = s3.get_object(Bucket=source_bucket, Key=source_key)
+
+        written = 0
+        out_bytes = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(src_obj["Body"].read())) as source_zip:
+            with zipfile.ZipFile(out_bytes, mode="w", compression=zipfile.ZIP_DEFLATED) as out_zip:
+                for name in source_zip.namelist():
+                    idx = name.find(marker)
+                    if idx < 0 or name.endswith("/"):
+                        continue
+                    rel = name[idx + len(marker):].strip("/")
+                    if not rel:
+                        continue
+                    out_zip.writestr(rel, source_zip.read(name))
+                    written += 1
+
+        if written > 0:
+            return out_bytes.getvalue()
+
+    raise RuntimeError(
+        f"No files found for source_dir '{source_dir}' in source archives "
+        f"s3://{source_bucket}/({' | '.join(source_prefixes)})/; attempted keys: {attempted[:5]}"
+    )
 
 
 def _wait_for_lambda_update(function_name: str, timeout_seconds: int = 90) -> Tuple[str, str]:
@@ -768,11 +851,15 @@ def _start_codebuild(
 ) -> str:
     """Start a CodeBuild build, returns build ID."""
     cb = _get_codebuild()
-    source_prefix = config.get("source", {}).get("source_s3_prefix", f"deploy-sources/{project_id}")
-    source_bucket = config.get("source", {}).get("source_s3_bucket", CONFIG_BUCKET)
+    source_prefix = str(config.get("source", {}).get("source_s3_prefix", f"deploy-sources/{project_id}")).strip()
+    source_bucket = str(config.get("source", {}).get("source_s3_bucket", CONFIG_BUCKET)).strip()
 
-    # Find latest source archive
-    latest_key = _latest_source_archive_key(source_bucket, source_prefix)
+    # Find latest source archive with fallback to parent/project metadata source prefixes.
+    source_bucket, latest_key = _resolve_latest_source_archive(
+        project_id=project_id,
+        preferred_bucket=source_bucket,
+        preferred_prefix=source_prefix,
+    )
     logger.info(f"Starting CodeBuild with source: s3://{source_bucket}/{latest_key}")
 
     build_resp = cb.start_build(

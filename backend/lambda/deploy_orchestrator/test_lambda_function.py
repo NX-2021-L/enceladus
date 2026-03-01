@@ -7,9 +7,11 @@ requests are not left unprocessed.
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import sys
 import unittest
+import zipfile
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
@@ -159,6 +161,70 @@ class DeployOrchestratorNonUiInlineExecutionTests(unittest.TestCase):
         ddb.update_item.assert_called_once()
         expr_values = ddb.update_item.call_args.kwargs["ExpressionAttributeValues"]
         self.assertEqual(expr_values[":failed"]["S"], "failed")
+
+
+class DeployOrchestratorSourceArchiveFallbackTests(unittest.TestCase):
+    def test_resolve_latest_source_archive_falls_back_to_parent_prefix(self) -> None:
+        s3 = MagicMock()
+        s3.list_objects_v2.side_effect = [
+            {"Contents": []},
+            {"Contents": [{"Key": "deploy-sources/devops/20260301.zip"}]},
+        ]
+        with patch.object(
+            deploy_orchestrator,
+            "_read_project_deploy_config",
+            return_value={"source": {"source_s3_bucket": "jreese-net", "source_s3_prefix": "deploy-sources/devops"}},
+        ), patch.object(deploy_orchestrator, "_get_s3", return_value=s3):
+            bucket, key = deploy_orchestrator._resolve_latest_source_archive(
+                "enceladus",
+                "jreese-net",
+                "deploy-sources/enceladus",
+            )
+        self.assertEqual(bucket, "jreese-net")
+        self.assertEqual(key, "deploy-sources/devops/20260301.zip")
+
+    def test_build_lambda_zip_from_source_tries_multiple_archives_until_marker_found(self) -> None:
+        def _zip_bytes(files: dict[str, str]) -> bytes:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for name, body in files.items():
+                    zf.writestr(name, body)
+            return buf.getvalue()
+
+        newest = _zip_bytes({"README.md": "no lambda sources here"})
+        older = _zip_bytes(
+            {
+                "backend/lambda/feed_publisher/lambda_function.py": "print('ok')",
+                "backend/lambda/feed_publisher/requirements.txt": "",
+            }
+        )
+
+        s3 = MagicMock()
+        s3.list_objects_v2.return_value = {
+            "Contents": [
+                {"Key": "deploy-sources/devops/20260301-newest.zip"},
+                {"Key": "deploy-sources/devops/20260228-older.zip"},
+            ]
+        }
+        s3.get_object.side_effect = [
+            {"Body": io.BytesIO(newest)},
+            {"Body": io.BytesIO(older)},
+        ]
+
+        with patch.object(
+            deploy_orchestrator,
+            "_read_project_deploy_config",
+            return_value={"source": {"source_s3_bucket": "jreese-net", "source_s3_prefix": "deploy-sources/devops"}},
+        ), patch.object(deploy_orchestrator, "_get_s3", return_value=s3):
+            package = deploy_orchestrator._build_lambda_zip_from_source(
+                "enceladus",
+                {"target_arn": "arn:aws:lambda:us-west-2:123456789012:function:devops-feed-publisher"},
+            )
+
+        with zipfile.ZipFile(io.BytesIO(package)) as zf:
+            self.assertIn("lambda_function.py", zf.namelist())
+            self.assertIn("requirements.txt", zf.namelist())
+        self.assertEqual(s3.get_object.call_count, 2)
 
 
 if __name__ == "__main__":
