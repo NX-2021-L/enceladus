@@ -125,6 +125,10 @@ _VALID_CATEGORIES = {
 }
 
 # Status transition rules — strictly sequential, one step forward only (ENC-FTR-022)
+# ENC-FTR-035: 'deployed' replaced by deploy-init / deploy-success + coding-updates re-entry arc.
+# Forward path: ... merged-main → deploy-init → deploy-success → closed
+# Re-entry arc:  deploy-success → coding-updates → coding-complete → ... → deploy-init
+# Migration arc: deployed → deploy-success (ENC-TSK-704: migrates legacy 'deployed' tasks; remove after migration)
 _VALID_TRANSITIONS = {
     "feature": {
         "planned": {"in-progress"},
@@ -138,8 +142,11 @@ _VALID_TRANSITIONS = {
         "coding-complete": {"committed"},
         "committed": {"pushed"},
         "pushed": {"merged-main"},
-        "merged-main": {"deployed"},
-        "deployed": {"closed"},
+        "merged-main": {"deploy-init"},
+        "deploy-init": {"deploy-success"},
+        "deploy-success": {"closed", "coding-updates"},
+        "coding-updates": {"coding-complete"},
+        "deployed": {"deploy-success"},  # ENC-TSK-704 migration arc — remove after all deployed→deploy-success migration completes
     },
     "issue": {
         "open": {"in-progress", "closed"},
@@ -161,6 +168,8 @@ _REVERT_TRANSITIONS = {
         "committed": {"coding-complete"},
         "pushed": {"committed"},
         "merged-main": {"pushed"},
+        "deploy-init": {"merged-main"},
+        "coding-updates": {"deploy-success"},
     },
     "issue": {
         "in-progress": {"open"},
@@ -1190,7 +1199,7 @@ def _query_all_project_tasks(project_id: str) -> List[Dict]:
 
 
 def _validate_feature_production_gate(project_id: str, feature_data: Dict) -> Optional[Dict]:
-    """Enforce: feature -> production requires >=1 child task, all deployed/closed recursively."""
+    """Enforce: feature -> production requires >=1 child task, all deploy-success/closed recursively."""
     primary = (feature_data.get("primary_task") or "").strip()
     related = feature_data.get("related_task_ids") or []
     root_ids: set = set()
@@ -1235,13 +1244,13 @@ def _validate_feature_production_gate(project_id: str, feature_data: Dict) -> Op
             not_ready.append(f"{tid} (not_found)")
             continue
         status = (task.get("status") or "unknown").strip().lower()
-        if status not in ("deployed", "closed"):
+        if status not in ("deploy-success", "closed"):
             not_ready.append(f"{tid} ({status})")
 
     if not_ready:
         return _error(400,
             f"Cannot transition to 'production': "
-            f"{len(not_ready)} task(s) not deployed/closed:\n"
+            f"{len(not_ready)} task(s) not deploy-success/closed:\n"
             + "\n".join(not_ready[:20]))
     return None
 
@@ -1402,6 +1411,7 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
                 )
 
         # Enforce valid transitions — forward + revert (ENC-FTR-022)
+        is_revert = False
         if current_status != new_lower:
             type_transitions = _VALID_TRANSITIONS.get(record_type, {})
             valid_next = type_transitions.get(current_status, set())
@@ -1415,6 +1425,7 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
                     return _error(400,
                         f"Reverting {record_type} from '{current_status}' to '{new_lower}' "
                         f"requires transition_evidence.revert_reason")
+                is_revert = True
             elif valid_next or revert_targets:
                 return _error(400,
                     f"Invalid status transition for {record_type}: "
@@ -1422,8 +1433,9 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
                     f"Valid forward: {sorted(valid_next)}. "
                     f"Valid revert (with revert_reason): {sorted(revert_targets)}")
 
-        # --- Evidence-gated forward transitions (ENC-FTR-022) ---
-        if record_type == "task" and new_lower == "pushed":
+        # --- Evidence-gated forward transitions (ENC-FTR-022 / ENC-FTR-035) ---
+        # Evidence gates apply to forward transitions only; reverts use revert_reason instead.
+        if not is_revert and record_type == "task" and new_lower == "pushed":
             commit_sha = transition_evidence.get("commit_sha", "").strip()
             if not commit_sha:
                 return _error(400,
@@ -1438,19 +1450,28 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
                 return _error(400,
                     f"GitHub commit validation failed for {commit_sha}: {reason}")
 
-        if record_type == "task" and new_lower == "merged-main":
+        if not is_revert and record_type == "task" and new_lower == "merged-main":
             merge_evidence = transition_evidence.get("merge_evidence", "").strip()
             if not merge_evidence:
                 return _error(400,
                     "Cannot transition to 'merged-main': "
                     "transition_evidence.merge_evidence required")
 
-        if record_type == "task" and new_lower == "deployed":
-            deployment_ref = transition_evidence.get("deployment_ref", "").strip()
-            if not deployment_ref:
+        if not is_revert and record_type == "task" and new_lower == "deploy-success":
+            deploy_evidence = transition_evidence.get("deploy_evidence", "").strip()
+            if not deploy_evidence:
                 return _error(400,
-                    "Cannot transition to 'deployed': "
-                    "transition_evidence.deployment_ref required")
+                    "Cannot transition to 'deploy-success': "
+                    "transition_evidence.deploy_evidence required (deployment spec ID, URL, or log ref)")
+
+        if not is_revert and record_type == "task" and new_lower == "closed" and current_status == "deploy-success":
+            live_validation_evidence = transition_evidence.get("live_validation_evidence", "").strip()
+            if not live_validation_evidence:
+                return _error(400,
+                    "Cannot transition to 'closed': "
+                    "transition_evidence.live_validation_evidence required. "
+                    "Use ENC-FTR-032 (Cognito PWA diagnostics) to capture evidence autonomously, "
+                    "or provide a manual confirmation string.")
 
         if record_type == "feature" and new_lower == "production":
             prod_err = _validate_feature_production_gate(project_id, item_data)
@@ -1595,7 +1616,11 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
         if transition_evidence.get("commit_sha"):
             evidence_parts.append(f"commit: {transition_evidence['commit_sha'][:12]}")
         if transition_evidence.get("deployment_ref"):
-            evidence_parts.append(f"deploy: {transition_evidence['deployment_ref']}")
+            evidence_parts.append(f"deploy_ref: {transition_evidence['deployment_ref']}")
+        if transition_evidence.get("deploy_evidence"):
+            evidence_parts.append(f"deploy_evidence: {transition_evidence['deploy_evidence'][:80]}")
+        if transition_evidence.get("live_validation_evidence"):
+            evidence_parts.append(f"live_validation: {transition_evidence['live_validation_evidence'][:80]}")
         if transition_evidence.get("merge_evidence"):
             evidence_parts.append(f"merge: {transition_evidence['merge_evidence'][:80]}")
         if transition_evidence.get("revert_reason"):
@@ -1618,6 +1643,12 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
         if transition_evidence.get("deployment_ref"):
             extra_sets.append("deployment_ref = :deploy_ref")
             extra_vals[":deploy_ref"] = {"S": transition_evidence["deployment_ref"].strip()}
+        if transition_evidence.get("deploy_evidence"):
+            extra_sets.append("deploy_evidence = :deploy_ev")
+            extra_vals[":deploy_ev"] = {"S": transition_evidence["deploy_evidence"].strip()}
+        if transition_evidence.get("live_validation_evidence"):
+            extra_sets.append("live_validation_evidence = :live_val_ev")
+            extra_vals[":live_val_ev"] = {"S": transition_evidence["live_validation_evidence"].strip()}
         if transition_evidence.get("merge_evidence"):
             extra_sets.append("merge_evidence = :merge_ev")
             extra_vals[":merge_ev"] = {"S": transition_evidence["merge_evidence"].strip()}
