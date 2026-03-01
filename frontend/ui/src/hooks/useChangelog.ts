@@ -49,6 +49,7 @@ export function useChangelogHistory(filters: ChangelogFilters) {
     })
   }, [rawEntries, filters.sortBy])
 
+  // projectCounts: how many entries per project_id (for pill filter)
   const projectCounts = useMemo(() => {
     const counts: Record<string, number> = {}
     for (const entry of rawEntries) {

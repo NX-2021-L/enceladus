@@ -200,6 +200,10 @@ DEPLOY_API_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
     "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
     "ENCELADUS_DEPLOY_API_INTERNAL_API_KEYS",
 )
+CHANGELOG_API_BASE = os.environ.get(
+    "ENCELADUS_CHANGELOG_API_BASE",
+    "https://jreese.net/api/v1/changelog",
+)
 TRACKER_API_BASE = os.environ.get(
     "ENCELADUS_TRACKER_API_BASE",
     "https://jreese.net/api/v1/tracker",
@@ -1230,6 +1234,64 @@ def _deploy_api_request(
             return _error_payload("UPSTREAM_ERROR", f"Deployment API unreachable: {exc}", retryable=True)
         except Exception as exc:  # pragma: no cover - defensive fallback
             return _error_payload("INTERNAL_ERROR", f"Deployment API request failed: {exc}", retryable=False)
+
+    return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
+
+
+def _changelog_api_request(
+    method: str,
+    path: str,
+    query: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """HTTP client for the changelog API — mirrors _deploy_api_request."""
+    base = CHANGELOG_API_BASE.rstrip("/")
+    route = path if path.startswith("/") else f"/{path}"
+    url = f"{base}{route}"
+    if query:
+        encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+        if encoded_qs:
+            url = f"{url}?{encoded_qs}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if DEPLOY_API_COOKIE:
+        headers["Cookie"] = DEPLOY_API_COOKIE
+
+    key_candidates: List[str] = []
+    for candidate in (
+        DEPLOY_API_INTERNAL_API_KEY,
+        *DEPLOY_API_INTERNAL_API_KEYS,
+        *COMMON_INTERNAL_API_KEYS,
+    ):
+        key = str(candidate or "").strip()
+        if key and key not in key_candidates:
+            key_candidates.append(key)
+    if not key_candidates:
+        key_candidates.append("")
+
+    for idx, key in enumerate(key_candidates):
+        attempt_headers = dict(headers)
+        if key:
+            attempt_headers["X-Coordination-Internal-Key"] = key
+        req = urllib.request.Request(url=url, method=method.upper(), headers=attempt_headers, data=None)
+        try:
+            with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
+                text = resp.read().decode("utf-8")
+                return json.loads(text) if text else {"success": True}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"error": raw or str(exc)}
+            if exc.code in (401, 403) and idx < len(key_candidates) - 1:
+                continue
+            return _normalize_legacy_error_payload(parsed, exc.code)
+        except urllib.error.URLError as exc:
+            return _error_payload("UPSTREAM_ERROR", f"Changelog API unreachable: {exc}", retryable=True)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            return _error_payload("INTERNAL_ERROR", f"Changelog API request failed: {exc}", retryable=False)
 
     return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
 
@@ -3187,7 +3249,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="deploy_submit",
-            description="Submit a deployment request through the deployment intake API.",
+            description=(
+                "Submit a deployment request through the deployment intake API. "
+                "The response includes the standard request_id and message fields, "
+                "plus version projection fields when a current-version.json exists for the project: "
+                "  projected_next_version — the semver that will be assigned if this request is the only one in the spec. "
+                "  release_notes_required — true for major or minor change_type (omitted for patch). "
+                "  release_notes_guidance — advisory text with a title template for the required release notes document. "
+                "Governance expectation for major/minor deploys: create a release notes document via documents_put "
+                "before the deploy completes, then include the document ID in related_record_ids of the deploy request. "
+                "The guidance field provides the exact title to use. Patch deploys have no release notes requirement."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3335,6 +3407,85 @@ async def list_tools() -> list[Tool]:
                     "limit": {
                         "type": "integer",
                         "description": "Maximum pending requests to return (default 50, max 200).",
+                    },
+                },
+                "required": ["project_id"],
+            },
+        ),
+        # --- Changelog (ENC-FTR-033) ---
+        Tool(
+            name="changelog_history",
+            description=(
+                "Fetch deployment history for a single project from the changelog API. "
+                "Returns deploy# audit records with version, change_type, release_summary, "
+                "changes[], deployed_at, and related_record_ids fields. "
+                "Sorted by deployed_at descending (most recent first). "
+                "Use change_type filter ('major', 'minor', 'patch') to narrow results."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "The project name (e.g., 'enceladus', 'devops').",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max entries to return (default 20, max 100).",
+                        "default": 20,
+                    },
+                    "change_type": {
+                        "type": "string",
+                        "description": "Filter by change type: 'major', 'minor', or 'patch'.",
+                        "enum": ["major", "minor", "patch"],
+                    },
+                },
+                "required": ["project_id"],
+            },
+        ),
+        Tool(
+            name="changelog_history_all",
+            description=(
+                "Fetch deployment history across multiple projects from the changelog API. "
+                "Returns a merged, time-sorted list of deploy# audit records for all specified projects. "
+                "Each entry includes project_id, version, change_type, release_summary, changes[], "
+                "and deployed_at. Useful for a cross-project system changelog view."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "projects": {
+                        "type": "string",
+                        "description": "Comma-separated project names (e.g., 'enceladus,devops,harrisonfamily').",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max entries per project to return (default 20, max 100).",
+                        "default": 20,
+                    },
+                    "change_type": {
+                        "type": "string",
+                        "description": "Filter by change type: 'major', 'minor', or 'patch'.",
+                        "enum": ["major", "minor", "patch"],
+                    },
+                },
+                "required": ["projects"],
+            },
+        ),
+        Tool(
+            name="changelog_version",
+            description=(
+                "Fetch the current deployed version for a project. "
+                "Reads S3 deploy-config/{project_id}/current-version.json and returns "
+                "{project_id, version, deployed_at, spec_id}. "
+                "Use this to display the active version of any Enceladus project."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "The project name (e.g., 'enceladus', 'devops').",
                     },
                 },
                 "required": ["project_id"],
@@ -4572,6 +4723,50 @@ async def _deploy_history_list(args: dict) -> list[TextContent]:
     return await _deploy_history(args)
 
 
+# --- Changelog (ENC-FTR-033) ---
+
+
+async def _changelog_history(args: dict) -> list[TextContent]:
+    """Fetch deployment history for a single project from the changelog API."""
+    project_id = args["project_id"]
+    try:
+        limit = int(args.get("limit", 20))
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, 100))
+    query: Dict[str, Any] = {"limit": limit}
+    if args.get("change_type"):
+        query["change_type"] = str(args["change_type"])
+    result = _changelog_api_request("GET", f"/history/{project_id}", query=query)
+    return _result_text(result)
+
+
+async def _changelog_history_all(args: dict) -> list[TextContent]:
+    """Fetch deployment history across multiple projects from the changelog API."""
+    projects_raw = args.get("projects", "")
+    if isinstance(projects_raw, list):
+        projects = ",".join(str(p).strip() for p in projects_raw if str(p).strip())
+    else:
+        projects = str(projects_raw or "").strip()
+    try:
+        limit = int(args.get("limit", 20))
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, 100))
+    query: Dict[str, Any] = {"projects": projects, "limit": limit}
+    if args.get("change_type"):
+        query["change_type"] = str(args["change_type"])
+    result = _changelog_api_request("GET", "/history", query=query)
+    return _result_text(result)
+
+
+async def _changelog_version(args: dict) -> list[TextContent]:
+    """Fetch the current deployed version for a project from the changelog API."""
+    project_id = args["project_id"]
+    result = _changelog_api_request("GET", f"/version/{project_id}")
+    return _result_text(result)
+
+
 # --- Coordination ---
 
 
@@ -4956,6 +5151,9 @@ _TOOL_HANDLERS = {
     "deploy_status_get": _deploy_status_get,
     "deploy_trigger": _deploy_trigger,
     "deploy_pending_requests": _deploy_pending_requests,
+    "changelog_history": _changelog_history,
+    "changelog_history_all": _changelog_history_all,
+    "changelog_version": _changelog_version,
     "coordination_capabilities": _coordination_capabilities,
     "coordination_request_get": _coordination_request_get,
     "coordination_cognito_session": _coordination_cognito_session,
