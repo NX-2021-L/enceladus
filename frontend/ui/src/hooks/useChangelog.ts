@@ -42,7 +42,6 @@ export function useChangelogHistory(filters: ChangelogFilters) {
   const entries = useMemo(() => {
     const sortBy = filters.sortBy ?? 'deployed:desc'
     const colonIdx = sortBy.indexOf(':')
-    const field = colonIdx > -1 ? sortBy.slice(0, colonIdx) : sortBy
     const dir = colonIdx > -1 ? sortBy.slice(colonIdx + 1) : 'desc'
     return [...rawEntries].sort((a, b) => {
       const cmp = a.deployed_at.localeCompare(b.deployed_at)
