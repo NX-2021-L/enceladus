@@ -34,11 +34,14 @@ Related: DVP-FTR-028
 from __future__ import annotations
 
 import datetime as dt
+import io
 import json
 import logging
 import os
 import re
 import secrets
+import time
+import zipfile
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -57,6 +60,10 @@ CONFIG_BUCKET = os.environ.get("CONFIG_BUCKET", "jreese-net")
 CONFIG_PREFIX = os.environ.get("CONFIG_PREFIX", "deploy-config")
 CODEBUILD_PROJECT = os.environ.get("CODEBUILD_PROJECT", "devops-ui-deploy-builder")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+NON_UI_INLINE_LAMBDA_UPDATE = (
+    os.environ.get("NON_UI_INLINE_LAMBDA_UPDATE", "true").strip().lower() not in {"0", "false", "no"}
+)
+DEFAULT_VERSION_FILE = os.environ.get("DEFAULT_VERSION_FILE", "frontend/ui/src/lib/version.ts")
 
 UI_DEPLOYMENT_TYPES = {
     "github_public_static",
@@ -110,6 +117,7 @@ _deser = TypeDeserializer()
 _ddb = None
 _s3 = None
 _cb = None
+_lambda = None
 
 
 def _get_ddb():
@@ -134,6 +142,17 @@ def _get_codebuild():
     if _cb is None:
         _cb = boto3.client("codebuild", region_name=DEPLOY_REGION)
     return _cb
+
+
+def _get_lambda():
+    global _lambda
+    if _lambda is None:
+        _lambda = boto3.client(
+            "lambda",
+            region_name=DEPLOY_REGION,
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _lambda
 
 
 # ---------------------------------------------------------------------------
@@ -194,12 +213,109 @@ def _check_deploy_state(project_id: str) -> str:
         return "ACTIVE"
 
 
+def _default_deploy_config(project_id: str) -> Dict[str, Any]:
+    """Synthesize a minimal deploy config when deploy.json is missing."""
+    return {
+        "source": {
+            "source_s3_bucket": CONFIG_BUCKET,
+            "source_s3_prefix": f"deploy-sources/{project_id}",
+        },
+        "build": {
+            "version_file": DEFAULT_VERSION_FILE,
+        },
+    }
+
+
+def _read_project_deploy_config(project_id: str) -> Optional[Dict[str, Any]]:
+    """Best-effort fallback for deploy config from projects table metadata."""
+    try:
+        ddb = _get_ddb()
+        resp = ddb.get_item(
+            TableName=PROJECTS_TABLE,
+            Key={"project_id": {"S": project_id}},
+        )
+        item = resp.get("Item")
+        if not item:
+            return None
+        project = _ddb_deser(item)
+    except Exception:
+        logger.warning("[WARNING] Failed reading project metadata for %s", project_id, exc_info=True)
+        return None
+
+    raw = project.get("deploy_config")
+    config: Dict[str, Any] = {}
+    if isinstance(raw, dict):
+        config = raw
+    elif isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                config = parsed
+        except json.JSONDecodeError:
+            logger.warning("[WARNING] Invalid deploy_config JSON for %s", project_id)
+
+    source = config.get("source")
+    if not isinstance(source, dict):
+        source = {}
+        config["source"] = source
+    if not source.get("source_s3_bucket"):
+        source["source_s3_bucket"] = str(
+            project.get("source_s3_bucket")
+            or project.get("deploy_source_bucket")
+            or CONFIG_BUCKET
+        )
+    if not source.get("source_s3_prefix"):
+        source["source_s3_prefix"] = str(
+            project.get("source_s3_prefix")
+            or project.get("deploy_source_prefix")
+            or f"deploy-sources/{project_id}"
+        )
+
+    build = config.get("build")
+    if not isinstance(build, dict):
+        build = {}
+        config["build"] = build
+    if not build.get("version_file"):
+        build["version_file"] = str(
+            project.get("version_file")
+            or DEFAULT_VERSION_FILE
+        )
+
+    return config
+
+
 def _read_deploy_config(project_id: str) -> Dict[str, Any]:
-    """Read the deploy.json config from S3."""
+    """Read deploy config with fallbacks for missing deploy.json."""
     s3 = _get_s3()
     key = f"{CONFIG_PREFIX}/{project_id}/deploy.json"
-    resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
-    return json.loads(resp["Body"].read().decode("utf-8"))
+    try:
+        resp = s3.get_object(Bucket=CONFIG_BUCKET, Key=key)
+        return json.loads(resp["Body"].read().decode("utf-8"))
+    except ClientError as e:
+        code = (e.response or {}).get("Error", {}).get("Code", "")
+        if code not in {"NoSuchKey", "404", "NotFound"}:
+            raise
+        logger.warning(
+            "[WARNING] Missing deploy config at s3://%s/%s for %s; falling back",
+            CONFIG_BUCKET,
+            key,
+            project_id,
+        )
+    except json.JSONDecodeError:
+        logger.warning(
+            "[WARNING] Invalid deploy.json at s3://%s/%s for %s; falling back",
+            CONFIG_BUCKET,
+            key,
+            project_id,
+        )
+
+    project_cfg = _read_project_deploy_config(project_id)
+    if project_cfg:
+        logger.info("[INFO] Using project metadata fallback deploy config for %s", project_id)
+        return project_cfg
+
+    logger.info("[INFO] Using synthesized default deploy config for %s", project_id)
+    return _default_deploy_config(project_id)
 
 
 def _get_current_version(project_id: str, config: Dict) -> str:
@@ -476,6 +592,9 @@ def _validate_non_ui_requests(
                 "target_region": target_region,
                 "rollback_on_failure": rollback_on_failure,
                 "validation_checks": validation_checks,
+                "source_s3_bucket": str(cfg.get("source_s3_bucket", "")).strip(),
+                "source_s3_prefix": str(cfg.get("source_s3_prefix", "")).strip(),
+                "source_dir": str(cfg.get("source_dir", "")).strip(),
             }
         )
 
@@ -527,6 +646,108 @@ def _write_spec(project_id: str, spec_id: str, status: str = "building", **kwarg
     ddb.put_item(TableName=DEPLOY_TABLE, Item=item)
 
 
+def _latest_source_archive_key(source_bucket: str, source_prefix: str) -> str:
+    """Return latest source zip key under the prefix."""
+    s3 = _get_s3()
+    resp = s3.list_objects_v2(Bucket=source_bucket, Prefix=f"{source_prefix}/", MaxKeys=100)
+    zips = [o for o in resp.get("Contents", []) if o["Key"].endswith(".zip")]
+    if not zips:
+        raise RuntimeError(f"No source archives found at s3://{source_bucket}/{source_prefix}/")
+    return sorted(zips, key=lambda o: o["Key"], reverse=True)[0]["Key"]
+
+
+def _normalize_lambda_source_dir(target_arn: str, cfg: Dict[str, Any]) -> str:
+    source_dir = str(cfg.get("source_dir", "")).strip()
+    if source_dir:
+        return source_dir.strip("/").replace("\\", "/")
+
+    fn = str(target_arn).split(":function:")[-1].split(":")[0].strip()
+    for prefix in ("devops-", "enceladus-"):
+        if fn.startswith(prefix):
+            fn = fn[len(prefix):]
+            break
+    return fn.replace("-", "_")
+
+
+def _build_lambda_zip_from_source(project_id: str, target: Dict[str, Any]) -> bytes:
+    """Build an in-memory Lambda package zip from latest source archive."""
+    source_bucket = str(target.get("source_s3_bucket") or "").strip() or CONFIG_BUCKET
+    source_prefix = str(target.get("source_s3_prefix") or "").strip() or f"deploy-sources/{project_id}"
+    source_key = _latest_source_archive_key(source_bucket, source_prefix)
+    source_dir = _normalize_lambda_source_dir(target.get("target_arn", ""), target)
+    marker = f"backend/lambda/{source_dir}/"
+
+    s3 = _get_s3()
+    logger.info("[INFO] Building inline Lambda package from s3://%s/%s (%s)", source_bucket, source_key, marker)
+    src_obj = s3.get_object(Bucket=source_bucket, Key=source_key)
+
+    written = 0
+    out_bytes = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(src_obj["Body"].read())) as source_zip:
+        with zipfile.ZipFile(out_bytes, mode="w", compression=zipfile.ZIP_DEFLATED) as out_zip:
+            for name in source_zip.namelist():
+                idx = name.find(marker)
+                if idx < 0 or name.endswith("/"):
+                    continue
+                rel = name[idx + len(marker):].strip("/")
+                if not rel:
+                    continue
+                out_zip.writestr(rel, source_zip.read(name))
+                written += 1
+
+    if written == 0:
+        raise RuntimeError(
+            f"No files found for source_dir '{source_dir}' in source archive s3://{source_bucket}/{source_key}"
+        )
+
+    return out_bytes.getvalue()
+
+
+def _wait_for_lambda_update(function_name: str, timeout_seconds: int = 90) -> Tuple[str, str]:
+    """Wait until Lambda update completes; returns (status, reason)."""
+    client = _get_lambda()
+    deadline = time.time() + timeout_seconds
+    status = "InProgress"
+    reason = ""
+    while time.time() < deadline:
+        cfg = client.get_function_configuration(FunctionName=function_name)
+        status = str(cfg.get("LastUpdateStatus") or "")
+        reason = str(cfg.get("LastUpdateStatusReason") or "")
+        if status in {"Successful", "Failed"}:
+            return status, reason
+        time.sleep(2)
+    return status, reason or "Timed out waiting for LastUpdateStatus terminal state"
+
+
+def _execute_lambda_update_targets(project_id: str, targets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Execute lambda_update targets inline by pushing package zip to target Lambda."""
+    client = _get_lambda()
+    results: List[Dict[str, Any]] = []
+    for target in targets:
+        request_id = str(target.get("request_id") or "")
+        target_arn = str(target.get("target_arn") or "")
+        function_name = target_arn.split(":function:")[-1].split(":")[0] if ":function:" in target_arn else target_arn
+        package_bytes = _build_lambda_zip_from_source(project_id, target)
+        update_resp = client.update_function_code(
+            FunctionName=target_arn,
+            ZipFile=package_bytes,
+            Publish=True,
+        )
+        version = str(update_resp.get("Version") or "")
+        status, reason = _wait_for_lambda_update(function_name=function_name)
+        result = {
+            "request_id": request_id,
+            "target_arn": target_arn,
+            "version": version,
+            "status": status,
+            "reason": reason,
+        }
+        if status != "Successful":
+            raise RuntimeError(f"Inline lambda_update failed for {target_arn}: {status} ({reason})")
+        results.append(result)
+    return results
+
+
 def _start_codebuild(
     project_id: str,
     spec_id: str,
@@ -538,13 +759,7 @@ def _start_codebuild(
     source_bucket = config.get("source", {}).get("source_s3_bucket", CONFIG_BUCKET)
 
     # Find latest source archive
-    s3 = _get_s3()
-    resp = s3.list_objects_v2(Bucket=source_bucket, Prefix=f"{source_prefix}/", MaxKeys=100)
-    zips = [o for o in resp.get("Contents", []) if o["Key"].endswith(".zip")]
-    if not zips:
-        raise RuntimeError(f"No source archives found at s3://{source_bucket}/{source_prefix}/")
-
-    latest_key = sorted(zips, key=lambda o: o["Key"], reverse=True)[0]["Key"]
+    latest_key = _latest_source_archive_key(source_bucket, source_prefix)
     logger.info(f"Starting CodeBuild with source: s3://{source_bucket}/{latest_key}")
 
     build_resp = cb.start_build(
@@ -694,6 +909,52 @@ def _orchestrate_typed_batch(
             all_related_record_ids=all_related,
         )
         _mark_requests(project_id, request_ids, "included", spec_id)
+        logger.info("[INFO] Non-UI deployment spec created: %s (%s)", spec_id, deployment_type)
+
+        if deployment_type == "lambda_update" and NON_UI_INLINE_LAMBDA_UPDATE:
+            ddb = _get_ddb()
+            try:
+                execution_results = _execute_lambda_update_targets(project_id, targets)
+                now = _utc_now()
+                ddb.update_item(
+                    TableName=DEPLOY_TABLE,
+                    Key={"project_id": {"S": project_id}, "record_id": {"S": f"spec#{spec_id}"}},
+                    UpdateExpression=(
+                        "SET #st = :deployed, completed_at = :now, non_ui_execution_results = :results"
+                    ),
+                    ExpressionAttributeNames={"#st": "status"},
+                    ExpressionAttributeValues={
+                        ":deployed": {"S": "deployed"},
+                        ":now": {"S": now},
+                        ":results": {"S": json.dumps(execution_results)},
+                    },
+                )
+                logger.info(
+                    "[SUCCESS] Inline lambda_update execution completed for spec %s (%d target(s))",
+                    spec_id,
+                    len(execution_results),
+                )
+                return
+            except Exception as e:
+                logger.error(
+                    "[ERROR] Inline lambda_update execution failed for %s: %s",
+                    spec_id,
+                    e,
+                    exc_info=True,
+                )
+                _mark_requests(project_id, request_ids, "pending")
+                ddb.update_item(
+                    TableName=DEPLOY_TABLE,
+                    Key={"project_id": {"S": project_id}, "record_id": {"S": f"spec#{spec_id}"}},
+                    UpdateExpression="SET #st = :failed, error_message = :err",
+                    ExpressionAttributeNames={"#st": "status"},
+                    ExpressionAttributeValues={
+                        ":failed": {"S": "failed"},
+                        ":err": {"S": str(e)[:500]},
+                    },
+                )
+                raise
+
         logger.info(
             "[SUCCESS] Non-UI deployment spec queued for downstream executor: %s (%s)",
             spec_id,
