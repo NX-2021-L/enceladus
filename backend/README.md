@@ -72,8 +72,10 @@ See `JWT_AUTHENTICATION_FORENSICS.md` for complete prevention framework.
   `infrastructure/cloudformation/03-api.yaml` (stack: `enceladus-api`).
 - Workflow coverage is enforced by `.github/workflows/lambda-workflow-coverage-guard.yml`
   running `tools/verify_lambda_workflow_coverage.py` on PRs and pushes.
-- Non-UI requests routed through deployment-manager (`queued_non_ui`) are not the canonical
-  execution path for API/MCP runtime updates in this repo.
+- Non-UI requests routed through deployment-manager are not the canonical
+  execution path for API/MCP runtime updates in this repo. (`lambda_update`
+  now supports inline execution in deploy_orchestrator, but dedicated API/MCP
+  workflows remain the required path for deterministic releases.)
 
 ## New Lambda Process
 
