@@ -37,11 +37,21 @@ fi
 
 # ---------------------------------------------------------------------------
 # Session identity
+# Fix D.1: use $1 arg for both SESSION_ID and BRANCH_NAME when provided.
+# When no arg is given, fall back to PROVIDER/TIMESTAMP and warn.
 # ---------------------------------------------------------------------------
 PROVIDER="${ENCELADUS_AGENT_PROVIDER:-unknown}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-SESSION_ID="${1:-${PROVIDER}-${TIMESTAMP}-$$}"
-BRANCH_NAME="agent/${PROVIDER}/${TIMESTAMP}"
+
+if [ -n "${1:-}" ]; then
+  SESSION_ID="$1"
+  BRANCH_NAME="agent/$1"
+else
+  SESSION_ID="${PROVIDER}-${TIMESTAMP}-$$"
+  BRANCH_NAME="agent/${PROVIDER}/${TIMESTAMP}"
+  echo "[WARN] No session name provided. Using timestamp-based branch: $BRANCH_NAME"
+  echo "[WARN] For task work, pass a session name: agent-worktree-init.sh <TRACKER-ID>-<slug>"
+fi
 
 # ---------------------------------------------------------------------------
 # Directories
@@ -64,16 +74,20 @@ for lockfile in "$LOCK_DIR"/*.lock; do
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
     echo "[WARN] Active session: $LOCK_PROV (PID $LOCK_PID) in $LOCK_WT"
   else
-    # Stale lock — clean up
+    # Fix D.4: read branch BEFORE removing the lock file to avoid read-after-delete.
+    LOCK_BRANCH="$(grep '^branch=' "$lockfile" 2>/dev/null | cut -d= -f2 || true)"
     echo "[INFO] Cleaning stale lock for PID $LOCK_PID ($LOCK_PROV)"
     rm -f "$lockfile"
     if [ -d "$LOCK_WT" ]; then
       git -C "$REPO_ROOT" worktree remove --force "$LOCK_WT" 2>/dev/null || true
     fi
-    # Also prune the branch if it was never pushed
-    LOCK_BRANCH="$(grep '^branch=' "$lockfile" 2>/dev/null | cut -d= -f2 || true)"
+    # Prune the branch only if it was never pushed to origin
     if [ -n "$LOCK_BRANCH" ]; then
-      git -C "$REPO_ROOT" branch -D "$LOCK_BRANCH" 2>/dev/null || true
+      HAS_REMOTE="$(git -C "$REPO_ROOT" branch -r --list "origin/${LOCK_BRANCH#refs/heads/}" 2>/dev/null)"
+      if [ -z "$HAS_REMOTE" ]; then
+        git -C "$REPO_ROOT" branch -D "$LOCK_BRANCH" 2>/dev/null || true
+        echo "[INFO] Removed unpushed stale branch: $LOCK_BRANCH"
+      fi
     fi
   fi
 done
@@ -83,12 +97,31 @@ if [ "$ACTIVE_COUNT" -gt 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Fix D.2: Sync with origin/main so the new worktree starts from latest main
+# ---------------------------------------------------------------------------
+echo "[INFO] Fetching origin..."
+git -C "$REPO_ROOT" fetch origin 2>&1 | sed 's/^/  /'
+if git -C "$REPO_ROOT" show-ref --verify refs/remotes/origin/main >/dev/null 2>&1; then
+  git -C "$REPO_ROOT" merge --ff-only origin/main 2>&1 | sed 's/^/  /' || {
+    echo "[WARN] Fast-forward merge of origin/main failed (main checkout may have local commits)."
+    echo "[WARN] New worktree will be created from current HEAD -- may be behind origin/main."
+  }
+fi
+
+# ---------------------------------------------------------------------------
 # Create worktree
 # ---------------------------------------------------------------------------
 WORKTREE_PATH="$WORKTREE_DIR/$SESSION_ID"
 
+# Fix D.3: Handle three cases to avoid exit-128 when branch already exists.
 if [ -d "$WORKTREE_PATH" ]; then
-  echo "[INFO] Worktree already exists at $WORKTREE_PATH. Reusing."
+  echo "[INFO] Worktree directory already exists at $WORKTREE_PATH. Reusing."
+elif git -C "$REPO_ROOT" show-ref --verify "refs/heads/$BRANCH_NAME" >/dev/null 2>&1; then
+  # Branch exists but worktree dir does not — stale branch from a killed session.
+  echo "[WARN] Branch '$BRANCH_NAME' already exists without a worktree directory."
+  echo "[INFO] Reusing existing branch for new worktree..."
+  git -C "$REPO_ROOT" worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
+  echo "[SUCCESS] Worktree created at $WORKTREE_PATH (reusing existing branch)"
 else
   git -C "$REPO_ROOT" worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" HEAD
   echo "[SUCCESS] Worktree created at $WORKTREE_PATH"
@@ -96,6 +129,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # Write lock file
+# Fix D.5: include task_id field for improved session traceability.
 # ---------------------------------------------------------------------------
 cat > "$LOCK_DIR/$SESSION_ID.lock" <<EOF
 pid=$$
@@ -103,6 +137,7 @@ provider=$PROVIDER
 started=$TIMESTAMP
 worktree=$WORKTREE_PATH
 branch=$BRANCH_NAME
+task_id=${1:-}
 EOF
 
 echo "[SUCCESS] Lock file written: $LOCK_DIR/$SESSION_ID.lock"
