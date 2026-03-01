@@ -66,9 +66,23 @@ def main() -> int:
         return 0
 
     print(
-        "[ERROR] Schema-affecting changes require governance dictionary updates.\n"
-        "Update backend/lambda/coordination_api/governance_data_dictionary.json "
-        "in the same change set."
+        "[ERROR] Schema-affecting changes detected but governance_data_dictionary.json "
+        "was NOT updated in this PR.\n"
+        "\n"
+        "  Required: backend/lambda/coordination_api/governance_data_dictionary.json\n"
+        "\n"
+        "  NOTE: Calling governance_update() (MCP tool) updates the S3 governance store\n"
+        "  only -- it does NOT update the repo file. The CI guard checks the repo diff.\n"
+        "  You must ALSO edit the repo file in your worktree and commit it in this PR.\n"
+        "\n"
+        "  Steps:\n"
+        "  1. Edit backend/lambda/coordination_api/governance_data_dictionary.json\n"
+        "  2. Increment the version field (format: YYYY-MM-DD.<n>)\n"
+        "  3. Update updated_at\n"
+        "  4. git add + commit the file in this PR\n"
+        "  5. After merge, call governance_update() MCP to sync to S3\n"
+        "\n"
+        "  See agents.md section 3.11 for full guidance."
     )
     return 1
 
