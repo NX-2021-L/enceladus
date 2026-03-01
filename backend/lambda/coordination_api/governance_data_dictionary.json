@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.22",
-  "updated_at": "2026-03-01T13:28:00Z",
+  "version": "2026-03-01.23",
+  "updated_at": "2026-03-01T13:33:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -224,7 +224,7 @@
       }
     },
     "deploy.request": {
-      "description": "Deployment intake request schema for /api/v1/deploy.",
+      "description": "Deployment intake request schema for /api/v1/deploy. Orchestrator now auto-persists fallback deploy-config/{project_id}/deploy.json when missing/invalid so CodeBuild fetch-config can run against first-time projects.",
       "fields": {
         "change_type": {
           "type": "enum",
