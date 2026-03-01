@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.27",
-  "updated_at": "2026-03-01T19:10:00Z",
+  "version": "2026-03-01.28",
+  "updated_at": "2026-03-01T19:15:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -402,6 +402,11 @@
           "type": "string",
           "definition": "GitHub Actions workflow enforcing this gate on every PR.",
           "enum": [".github/workflows/governance-dictionary-guard.yml"]
+        },
+        "s3_sync_note": {
+          "type": "string",
+          "definition": "The repo file and S3 governance store are separate artifacts requiring separate update steps.",
+          "usage_guidance": "Step 1 (required for CI): Edit the repo file in your worktree and commit it in the PR. Step 2 (required for runtime, after merge): Call governance_update MCP tool to sync to S3. Calling governance_update does NOT satisfy Step 1 -- the CI guard checks git diff, not S3."
         }
       }
     },
