@@ -59,7 +59,8 @@ export function Header() {
   const menuRef = useRef<HTMLDivElement>(null)
   const navigate = useNavigate()
   const { setLoggedOut } = useAuthState()
-  const { version } = useProjectVersion('enceladus')
+  const { data: versionData } = useProjectVersion('enceladus')
+  const version = versionData?.version
 
   const closeMenu = useCallback(() => setMenuOpen(false), [])
   useClickOutside(menuRef, closeMenu)
