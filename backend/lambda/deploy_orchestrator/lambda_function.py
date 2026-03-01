@@ -844,6 +844,15 @@ def _execute_lambda_update_targets(project_id: str, targets: List[Dict[str, Any]
     return results
 
 
+def _is_retryable_inline_lambda_error(error_message: str) -> bool:
+    """Classify inline lambda_update failures for requeue behavior."""
+    terminal_markers = (
+        "No source archives found",
+        "No files found for source_dir",
+    )
+    return not any(marker in error_message for marker in terminal_markers)
+
+
 def _start_codebuild(
     project_id: str,
     spec_id: str,
@@ -1036,13 +1045,15 @@ def _orchestrate_typed_batch(
                 )
                 return
             except Exception as e:
+                error_message = str(e)
+                retryable = _is_retryable_inline_lambda_error(error_message)
                 logger.error(
                     "[ERROR] Inline lambda_update execution failed for %s: %s",
                     spec_id,
                     e,
                     exc_info=True,
                 )
-                _mark_requests(project_id, request_ids, "pending")
+                _mark_requests(project_id, request_ids, "pending" if retryable else "failed")
                 ddb.update_item(
                     TableName=DEPLOY_TABLE,
                     Key={"project_id": {"S": project_id}, "record_id": {"S": f"spec#{spec_id}"}},
@@ -1050,7 +1061,7 @@ def _orchestrate_typed_batch(
                     ExpressionAttributeNames={"#st": "status"},
                     ExpressionAttributeValues={
                         ":failed": {"S": "failed"},
-                        ":err": {"S": str(e)[:500]},
+                        ":err": {"S": error_message[:500]},
                     },
                 )
                 raise
