@@ -29,7 +29,10 @@ export const STATUS_COLORS: Record<string, string> = {
   committed: 'bg-indigo-500/20 text-indigo-400',
   pushed: 'bg-violet-500/20 text-violet-400',
   'merged-main': 'bg-fuchsia-500/20 text-fuchsia-400',
-  deployed: 'bg-emerald-500/20 text-emerald-400',
+  'deploy-init': 'bg-amber-500/20 text-amber-400',
+  'deploy-success': 'bg-emerald-500/20 text-emerald-400',
+  'coding-updates': 'bg-orange-500/20 text-orange-400',
+  deployed: 'bg-emerald-500/20 text-emerald-400', // legacy compat — kept until TSK-704 migration
   production: 'bg-green-500/20 text-green-400',
   deprecated: 'bg-slate-500/20 text-slate-400',
 }
@@ -66,12 +69,15 @@ export const STATUS_LABELS: Record<string, string> = {
   committed: 'Committed',
   pushed: 'Pushed',
   'merged-main': 'Merged (Main)',
-  deployed: 'Deployed',
+  'deploy-init': 'Deploy: Init',
+  'deploy-success': 'Deploy: Success',
+  'coding-updates': 'Coding Updates',
+  deployed: 'Deployed', // legacy compat
   production: 'Production',
   deprecated: 'Deprecated',
 }
 
-export const TASK_STATUSES = ['open', 'in-progress', 'coding-complete', 'committed', 'pushed', 'merged-main', 'deployed', 'closed'] as const
+export const TASK_STATUSES = ['open', 'in-progress', 'coding-complete', 'committed', 'pushed', 'merged-main', 'deploy-init', 'deploy-success', 'coding-updates', 'closed'] as const
 export const ISSUE_STATUSES = ['open', 'in-progress', 'closed'] as const
 export const FEATURE_STATUSES = ['planned', 'in-progress', 'completed', 'production', 'deprecated'] as const
 export const PRIORITIES = ['P0', 'P1', 'P2', 'P3'] as const

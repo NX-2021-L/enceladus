@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.25",
-  "updated_at": "2026-03-01T13:55:00Z",
+  "version": "2026-03-01.26",
+  "updated_at": "2026-03-01T18:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -18,11 +18,14 @@
             "committed",
             "pushed",
             "merged-main",
-            "deployed",
-            "closed"
+            "deploy-init",
+            "deploy-success",
+            "coding-updates",
+            "closed",
+            "deployed"
           ],
-          "definition": "Task lifecycle status.",
-          "usage_guidance": "Task transitions are sequential; use tracker_validation_rules before tracker_set to obtain required evidence and checkout requirements."
+          "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc.",
+          "usage_guidance": "Task transitions are sequential; use tracker_validation_rules before tracker_set to obtain required evidence and checkout requirements. Forward arc (ENC-FTR-035): merged-main → deploy-init → deploy-success → closed (or → coding-updates → coding-complete for iterative post-deploy fixes)."
         },
         "priority": {
           "type": "enum",
@@ -61,7 +64,7 @@
         "transition_evidence": {
           "type": "object",
           "definition": "Evidence payload required for gated status transitions.",
-          "usage_guidance": "task->pushed requires commit_sha; task->merged-main requires merge_evidence; task->deployed requires deployment_ref; any revert requires revert_reason."
+          "usage_guidance": "task->pushed requires commit_sha; task->merged-main requires merge_evidence; task->deploy-success requires deploy_evidence (deployment reference or spec ID); task->closed (when current status is deploy-success) requires live_validation_evidence (capture via ENC-FTR-032 Cognito session + PWA diagnostics); any revert requires revert_reason. Legacy: task->deployed previously required deployment_ref — this gate is removed as of ENC-FTR-035; use the deploy-init/deploy-success arc instead."
         }
       }
     },
@@ -610,7 +613,7 @@
       "fields": {
         "access_token": {
           "type": "string",
-          "usage_guidance": "Equals MCP_API_KEY env var. Stateless \u2014 no server-side token storage. Validated by the Lambda handler on every request via exact Bearer comparison."
+          "usage_guidance": "Equals MCP_API_KEY env var. Stateless -- no server-side token storage. Validated by the Lambda handler on every request via exact Bearer comparison."
         },
         "token_type": {
           "type": "enum",
@@ -628,7 +631,7 @@
         },
         "refresh_token": {
           "type": "string",
-          "usage_guidance": "Self-contained HMAC-signed opaque token with 30-day TTL. Format: base64url(payload).sha256hex. Payload is {typ:'rt', iat:<unix>, exp:<unix+2592000>} signed with OAUTH_CLIENT_SECRET. Stateless \u2014 no server storage required; valid across Lambda cold starts. Issued only on authorization_code grant (not client_credentials per RFC 6749 \u00a74.4.3). Rotated on every use."
+          "usage_guidance": "Self-contained HMAC-signed opaque token with 30-day TTL. Format: base64url(payload).sha256hex. Payload is {typ:'rt', iat:<unix>, exp:<unix+2592000>} signed with OAUTH_CLIENT_SECRET. Stateless -- no server storage required; valid across Lambda cold starts. Issued only on authorization_code grant (not client_credentials per RFC 6749 section 4.4.3). Rotated on every use."
         },
         "grant_types_supported": {
           "type": "array",
@@ -645,7 +648,7 @@
           "constraints": {
             "min": 300
           },
-          "usage_guidance": "Lambda env var controlling access token lifetime in seconds. Default 28800 (8h). Set to shorter values for higher-security environments. Do not set below 300s \u2014 shorter values increase re-auth noise without meaningful security benefit."
+          "usage_guidance": "Lambda env var controlling access token lifetime in seconds. Default 28800 (8h). Set to shorter values for higher-security environments. Do not set below 300s -- shorter values increase re-auth noise without meaningful security benefit."
         }
       }
     },
