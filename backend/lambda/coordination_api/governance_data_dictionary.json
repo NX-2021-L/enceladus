@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.21",
-  "updated_at": "2026-03-01T13:22:00Z",
+  "version": "2026-03-01.22",
+  "updated_at": "2026-03-01T13:28:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -309,7 +309,8 @@
         },
         "error_message": {
           "type": "string",
-          "definition": "Terminal failure message when spec status is failed."
+          "definition": "Terminal failure message when spec status is failed.",
+          "usage_guidance": "Inline lambda_update packaging/source-resolution failures are treated as non-retryable and requests are marked failed (not reset to pending) to prevent infinite retry loops."
         }
       }
     },

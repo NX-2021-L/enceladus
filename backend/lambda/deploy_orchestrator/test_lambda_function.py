@@ -162,6 +162,34 @@ class DeployOrchestratorNonUiInlineExecutionTests(unittest.TestCase):
         expr_values = ddb.update_item.call_args.kwargs["ExpressionAttributeValues"]
         self.assertEqual(expr_values[":failed"]["S"], "failed")
 
+    def test_orchestrate_lambda_update_inline_packaging_failure_marks_failed(self) -> None:
+        ddb = MagicMock()
+        packaging_error = RuntimeError("No files found for source_dir 'feed_publisher' in source archives")
+        with patch.object(deploy_orchestrator, "NON_UI_INLINE_LAMBDA_UPDATE", True), patch.object(
+            deploy_orchestrator, "_validate_non_ui_requests", return_value=(True, [{"request_id": "REQ-1", "target_arn": "arn:aws:lambda:us-west-2:123456789012:function:devops-feed-publisher"}], [])
+        ), patch.object(
+            deploy_orchestrator, "_write_spec"
+        ), patch.object(
+            deploy_orchestrator, "_mark_requests"
+        ) as mark_requests, patch.object(
+            deploy_orchestrator, "_execute_lambda_update_targets", side_effect=packaging_error
+        ), patch.object(
+            deploy_orchestrator, "_get_ddb", return_value=ddb
+        ):
+            with self.assertRaises(RuntimeError):
+                deploy_orchestrator._orchestrate_typed_batch(
+                    "enceladus",
+                    "lambda_update",
+                    [self._base_request()],
+                )
+
+        self.assertEqual(mark_requests.call_count, 2)
+        mark_requests.assert_any_call("enceladus", ["REQ-1"], "included", unittest.mock.ANY)
+        mark_requests.assert_any_call("enceladus", ["REQ-1"], "failed")
+        ddb.update_item.assert_called_once()
+        expr_values = ddb.update_item.call_args.kwargs["ExpressionAttributeValues"]
+        self.assertEqual(expr_values[":failed"]["S"], "failed")
+
 
 class DeployOrchestratorSourceArchiveFallbackTests(unittest.TestCase):
     def test_resolve_latest_source_archive_falls_back_to_parent_prefix(self) -> None:
