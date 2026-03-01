@@ -9,8 +9,14 @@ Usage:
     # Dry-run (default — shows what would be written, no DynamoDB writes):
     python3 backend/lambda/changelog_api/backfill.py
 
-    # Live write:
+    # Dry-run from version.ts (no manifest needed):
+    python3 backend/lambda/changelog_api/backfill.py --from-version-ts
+
+    # Live write from manifest:
     python3 backend/lambda/changelog_api/backfill.py --write
+
+    # Live write from version.ts (enceladus/pwa entries; no manifest needed):
+    python3 backend/lambda/changelog_api/backfill.py --from-version-ts --write
 
     # Custom manifest or table:
     python3 backend/lambda/changelog_api/backfill.py \\
@@ -34,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -59,6 +66,126 @@ def _find_workspace() -> Path:
 DEFAULT_MANIFEST = _find_workspace() / "backfill_manifest.json"
 DEFAULT_TABLE = "devops-deployment-manager"
 DEFAULT_REGION = "us-west-2"
+
+
+# ---------------------------------------------------------------------------
+# version.ts parser (--from-version-ts mode)
+# ---------------------------------------------------------------------------
+
+def _find_version_ts() -> Path:
+    """Walk up from this script to find frontend/ui/src/lib/version.ts."""
+    here = Path(__file__).resolve().parent
+    for p in [here, *here.parents]:
+        candidate = p / "frontend" / "ui" / "src" / "lib" / "version.ts"
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        "Could not find frontend/ui/src/lib/version.ts. "
+        "Run from within the repo checkout or pass --manifest instead."
+    )
+
+
+def _extract_ts_objects(s: str) -> List[str]:
+    """Extract top-level {...} blocks from a TypeScript array string."""
+    objects: List[str] = []
+    depth = 0
+    start: Optional[int] = None
+    for i, ch in enumerate(s):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                objects.append(s[start : i + 1])
+                start = None
+    return objects
+
+
+def _ts_str(obj: str, field: str) -> Optional[str]:
+    """Extract a single-quoted string value for a TypeScript field."""
+    m = re.search(rf"{re.escape(field)}:\s*'([^']*)'", obj)
+    return m.group(1) if m else None
+
+
+def _ts_str_array(obj: str, field: str) -> List[str]:
+    """Extract a string array value for a TypeScript field (single-quoted strings)."""
+    m = re.search(rf"{re.escape(field)}:\s*\[(.*?)\]", obj, re.DOTALL)
+    if not m:
+        return []
+    return re.findall(r"'([^']*)'", m.group(1))
+
+
+def _parse_version_ts(path: Path) -> List[Dict]:
+    """Parse RELEASE_NOTES from version.ts and return manifest-shaped entries.
+
+    Returns entries in newest-first order (matching the version.ts declaration order).
+    Each entry has the same shape as a backfill_manifest.json entry so it can be
+    passed directly to _entry_to_ddb_item().
+    """
+    content = path.read_text()
+
+    # Locate the RELEASE_NOTES array using bracket-depth tracking so we don't
+    # accidentally match an earlier '[' in the file (e.g. in import statements).
+    marker = "export const RELEASE_NOTES"
+    try:
+        marker_idx = content.index(marker)
+    except ValueError:
+        raise ValueError(f"'export const RELEASE_NOTES' not found in {path}")
+
+    # Search for '= [' to skip past the TypeScript type annotation 'ReleaseNote[]'
+    # which also contains '[' and would cause bracket-depth tracking to terminate early.
+    eq_bracket = re.search(r"=\s*\[", content[marker_idx:])
+    if not eq_bracket:
+        raise ValueError(f"Could not find '= [' assignment in RELEASE_NOTES declaration in {path}")
+    open_bracket = marker_idx + eq_bracket.end() - 1  # position of the '[' character
+
+    depth = 0
+    close_bracket: Optional[int] = None
+    for i in range(open_bracket, len(content)):
+        if content[i] == "[":
+            depth += 1
+        elif content[i] == "]":
+            depth -= 1
+            if depth == 0:
+                close_bracket = i
+                break
+
+    if close_bracket is None:
+        raise ValueError(f"Unmatched '[' in RELEASE_NOTES array in {path}")
+
+    array_body = content[open_bracket + 1 : close_bracket]
+
+    type_map = {"major": "major", "minor": "minor", "patch": "patch"}
+
+    entries: List[Dict] = []
+    for obj_str in _extract_ts_objects(array_body):
+        version = _ts_str(obj_str, "version")
+        date = _ts_str(obj_str, "date")
+        ts_type = _ts_str(obj_str, "type")
+        summary = _ts_str(obj_str, "summary")
+        changes = _ts_str_array(obj_str, "changes")
+
+        if not version or not date:
+            continue  # Skip malformed entries
+
+        entries.append(
+            {
+                "project_id": "enceladus",
+                "component": "pwa",
+                "version": version,
+                "previous_version": None,
+                "change_type": type_map.get(ts_type or "", ts_type or "patch"),
+                "deployed_at": f"{date}T12:00:00Z",
+                "source": "static_version_ts",
+                "confidence": "high",
+                "summary": summary,
+                "changes": changes if changes else None,
+            }
+        )
+
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +296,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="ENC-FTR-033 historical changelog backfill")
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST),
                         help=f"Path to backfill_manifest.json (default: {DEFAULT_MANIFEST})")
+    parser.add_argument("--from-version-ts", action="store_true",
+                        help=(
+                            "Parse entries directly from frontend/ui/src/lib/version.ts "
+                            "(enceladus/pwa project only; no manifest file needed)"
+                        ))
     parser.add_argument("--table", default=DEFAULT_TABLE,
                         help=f"DynamoDB table name (default: {DEFAULT_TABLE})")
     parser.add_argument("--region", default=DEFAULT_REGION,
@@ -179,16 +311,37 @@ def main() -> int:
                         help="Actually write to DynamoDB (default: dry-run)")
     args = parser.parse_args()
 
-    manifest_path = Path(args.manifest)
-    if not manifest_path.exists():
-        print(f"[ERROR] Manifest not found: {manifest_path}", file=sys.stderr)
-        print("  Run the Phase 8 synthesis agent first, or pass --manifest <path>", file=sys.stderr)
-        return 1
+    # ---------------------------------------------------------------------------
+    # Load entries from the chosen source
+    # ---------------------------------------------------------------------------
 
-    with open(manifest_path) as f:
-        manifest = json.load(f)
+    source_label: str
 
-    entries: List[Dict] = manifest.get("entries", [])
+    if args.from_version_ts:
+        try:
+            version_ts_path = _find_version_ts()
+            entries = _parse_version_ts(version_ts_path)
+            source_label = str(version_ts_path)
+        except Exception as e:
+            print(f"[ERROR] --from-version-ts: {e}", file=sys.stderr)
+            return 1
+    else:
+        manifest_path = Path(args.manifest)
+        if not manifest_path.exists():
+            print(f"[ERROR] Manifest not found: {manifest_path}", file=sys.stderr)
+            print(
+                "  Options:\n"
+                "    --from-version-ts   Parse enceladus/pwa entries directly from the repo\n"
+                "    --manifest <path>   Point at an existing backfill_manifest.json\n"
+                "  Or run the Phase 8 synthesis agent first to generate the manifest.",
+                file=sys.stderr,
+            )
+            return 1
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        entries = manifest.get("entries", [])
+        source_label = str(manifest_path)
+
     if args.project:
         entries = [e for e in entries if e.get("project_id") == args.project]
 
@@ -196,7 +349,7 @@ def main() -> int:
     print(f"\n{'='*60}")
     print(f"  ENC-FTR-033 Changelog Backfill — {mode}")
     print(f"{'='*60}")
-    print(f"  Manifest : {manifest_path}")
+    print(f"  Source   : {source_label}")
     print(f"  Table    : {args.table} ({args.region})")
     print(f"  Entries  : {len(entries)}")
     if args.project:
