@@ -29,6 +29,15 @@ export interface ReleaseNote {
   changes: string[]       // Bullet-point list of individual changes
 }
 
+/**
+ * @deprecated ENC-FTR-033 — The changelog is now served from the live API:
+ *   GET /api/v1/changelog/history/{projectId}
+ * Use useChangelogHistory() / ChangelogListPage instead.
+ *
+ * This data is retained as a historical record and is the source of truth
+ * for the Phase 8 one-time backfill of pre-API deployment history.
+ * Do not delete until backfill (ENC-TSK-687-690) is complete and validated.
+ */
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
     version: '0.17.0',

@@ -180,3 +180,21 @@ export const SORT_OPTIONS_DOCUMENTS = [
   { value: 'created', label: 'Created' },
   { value: 'size', label: 'Size' },
 ] as const
+
+export const CHANGELOG_CHANGE_TYPES = ['major', 'minor', 'patch'] as const
+
+export const CHANGELOG_CHANGE_TYPE_LABELS: Record<string, string> = {
+  major: 'Major',
+  minor: 'Minor',
+  patch: 'Patch',
+}
+
+export const CHANGELOG_CHANGE_TYPE_COLORS: Record<string, string> = {
+  major: 'emerald',
+  minor: 'blue',
+  patch: 'slate',
+}
+
+export const SORT_OPTIONS_CHANGELOG = [
+  { value: 'deployed', label: 'Deploy Date' },
+] as const

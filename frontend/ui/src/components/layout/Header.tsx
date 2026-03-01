@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { ENABLE_REFRESH_LINK } from '../../lib/constants'
-import { APP_VERSION } from '../../lib/version'
+import { useProjectVersion } from '../../hooks/useChangelog'
 import { useClickOutside } from '../../hooks/useClickOutside'
 import { useAuthState } from '../../lib/authState'
 
@@ -59,6 +59,7 @@ export function Header() {
   const menuRef = useRef<HTMLDivElement>(null)
   const navigate = useNavigate()
   const { setLoggedOut } = useAuthState()
+  const { version } = useProjectVersion('enceladus')
 
   const closeMenu = useCallback(() => setMenuOpen(false), [])
   useClickOutside(menuRef, closeMenu)
@@ -93,7 +94,7 @@ export function Header() {
     <header className="sticky top-0 z-10 bg-slate-900/95 backdrop-blur border-b border-slate-700/50 px-4 py-3 flex items-center justify-between">
       <h1 className="text-lg font-semibold text-slate-100">{title}</h1>
       <div className="flex items-center gap-3">
-        <span className="text-xs text-slate-500 font-mono">v{APP_VERSION}</span>
+        <span className="text-xs text-slate-500 font-mono">{version ? `v${version}` : '—'}</span>
 
         <div className="relative" ref={menuRef}>
           <button

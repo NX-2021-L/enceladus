@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-28.17",
-  "updated_at": "2026-02-28T22:00:00Z",
+  "version": "2026-03-01.18",
+  "updated_at": "2026-03-01T12:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -591,6 +591,160 @@
         },
         "last_used_at": {
           "type": "timestamp"
+        }
+      }
+    },
+    "changelog.entry": {
+      "description": "Deployment changelog record stored in devops-deployment-manager DynamoDB table. Written by deploy_finalize and changelog_api backfill. Surfaced via GET /api/v1/changelog/history and MCP changelog_history tool.",
+      "fields": {
+        "project_id": {
+          "type": "string",
+          "definition": "Partition key. Project identifier (e.g. 'enceladus', 'devops', 'harrisonfamily')."
+        },
+        "record_id": {
+          "type": "string",
+          "constraints": {
+            "prefix": "deploy#"
+          },
+          "definition": "Sort key. Format: deploy#SPEC-{timestamp} for real deploys, deploy#{source}-v{version} for backfill entries."
+        },
+        "version": {
+          "type": "string",
+          "definition": "Semantic version string for this deployment (e.g. '0.17.0')."
+        },
+        "previous_version": {
+          "type": "string",
+          "definition": "Version string prior to this deployment. Null for initial/backfill entries without predecessor context."
+        },
+        "change_type": {
+          "type": "enum",
+          "enum": [
+            "patch",
+            "minor",
+            "major"
+          ],
+          "definition": "Semver bump type for this deployment."
+        },
+        "deployed_at": {
+          "type": "timestamp",
+          "definition": "ISO-8601 UTC timestamp of deployment completion."
+        },
+        "release_summary": {
+          "type": "string",
+          "definition": "AI-generated or human-authored single-sentence release summary."
+        },
+        "changes": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Bullet-point list of changes included in this deployment."
+        },
+        "spec_id": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^SPEC-"
+          },
+          "definition": "Reference to the deployment spec that produced this record. Absent for backfill entries."
+        },
+        "related_record_ids": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Tracker record IDs (tasks, features, issues) associated with this deployment."
+        },
+        "component": {
+          "type": "string",
+          "definition": "Sub-component label within the project (e.g. 'pwa', 'coordination-api', 'mcp-server'). Omitted for single-component projects."
+        },
+        "backfill": {
+          "type": "boolean",
+          "definition": "True if this record was written by the historical backfill script rather than the live deploy pipeline."
+        },
+        "source": {
+          "type": "enum",
+          "enum": [
+            "deploy_finalize",
+            "static_version_ts",
+            "backfill",
+            "deploy_record",
+            "spec_record",
+            "tracker_evidence",
+            "inferred"
+          ],
+          "definition": "Origin of this changelog record. 'deploy_finalize' = live pipeline; others are backfill provenance labels."
+        },
+        "confidence": {
+          "type": "enum",
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ],
+          "definition": "Confidence level for backfill records. High = authoritative source (version.ts, deploy record); medium = inferred from spec/tracker; low = gap-fill estimate. Absent on live pipeline records."
+        }
+      }
+    },
+    "changelog.version_response": {
+      "description": "Response shape returned by GET /api/v1/changelog/version/{projectId} and MCP changelog_version tool. Reads from S3 deploy-config/{project_id}/current-version.json.",
+      "fields": {
+        "project_id": {
+          "type": "string",
+          "definition": "Project identifier."
+        },
+        "version": {
+          "type": "string",
+          "definition": "Current semantic version of the project."
+        },
+        "deployed_at": {
+          "type": "timestamp",
+          "definition": "ISO-8601 UTC timestamp of the most recent deployment."
+        },
+        "spec_id": {
+          "type": "string",
+          "definition": "SPEC-ID of the deployment that set the current version."
+        }
+      }
+    },
+    "deploy.submit_response": {
+      "description": "Response envelope returned by POST /api/v1/deploy/submit (deploy_intake Lambda). Includes optional version projection fields for major/minor change types.",
+      "fields": {
+        "request_id": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^COORD-"
+          },
+          "definition": "Coordination request ID for the queued deployment."
+        },
+        "spec_id": {
+          "type": "string",
+          "definition": "SPEC-ID assigned to this deployment request."
+        },
+        "projected_next_version": {
+          "type": "string",
+          "definition": "Semver-projected version that will result from this deployment, computed from current-version.json + change_type. Present only for major/minor change_type when S3 version file is readable. Omitted for patch or on S3 read failure."
+        },
+        "release_notes_required": {
+          "type": "boolean",
+          "definition": "True when change_type is major or minor, indicating governance expects a release notes document. Omitted for patch deploys."
+        },
+        "release_notes_guidance": {
+          "type": "string",
+          "definition": "Governance instruction text directing the submitting agent to create a release notes document via documents_put before the deploy completes. Included when release_notes_required=true."
+        }
+      }
+    },
+    "mcp_server.changelog_tools": {
+      "description": "Changelog MCP tools added in ENC-FTR-033. Route through /api/v1/changelog/* endpoints of the devops-changelog-api Lambda.",
+      "fields": {
+        "changelog_history": {
+          "type": "tool",
+          "usage_guidance": "Single-project changelog. Args: project_id (required), limit (optional, default 20, max 100), change_type (optional enum: patch|minor|major). Returns array of changelog.entry records sorted by deployed_at desc."
+        },
+        "changelog_history_all": {
+          "type": "tool",
+          "usage_guidance": "Multi-project changelog. Args: projects (required, comma-separated project IDs), limit (optional per-project), change_type (optional). Merges all project histories sorted by deployed_at desc."
+        },
+        "changelog_version": {
+          "type": "tool",
+          "usage_guidance": "Current version for a project. Args: project_id (required). Returns changelog.version_response shape from S3 current-version.json."
         }
       }
     }
