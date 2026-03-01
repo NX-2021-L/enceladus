@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   guard:
+    name: Governance Dictionary Guard
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
