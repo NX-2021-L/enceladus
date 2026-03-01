@@ -88,20 +88,27 @@ FRESHNESS_SLA_SECONDS = 600  # 10 minutes
 
 # Mobile feed status normalization maps
 _STATUS_TASK = {
-    "open": "open", "closed": "closed",
-    "in-progress": "in_progress", "in_progress": "in_progress",
-    "in progress": "in_progress", "planned": "planned",
+    "open": "open",
+    "in-progress": "in-progress", "in_progress": "in-progress", "in progress": "in-progress",
+    "coding-complete": "coding-complete", "coding_complete": "coding-complete",
+    "committed": "committed",
+    "pushed": "pushed",
+    "merged-main": "merged-main", "merged_main": "merged-main",
+    "deployed": "deployed",
+    "closed": "closed",
 }
 _STATUS_FEATURE = {
-    "planned": "planned", "in-progress": "in_progress",
-    "in_progress": "in_progress", "in progress": "in_progress",
+    "planned": "planned",
+    "in-progress": "in-progress", "in_progress": "in-progress", "in progress": "in-progress",
     "complete": "completed", "completed": "completed",
+    "production": "production",
+    "deprecated": "deprecated",
     "closed": "closed",
 }
 _STATUS_ISSUE = {
-    "open": "open", "closed": "closed",
-    "in-progress": "in_progress", "in_progress": "in_progress",
-    "in progress": "in_progress",
+    "open": "open",
+    "in-progress": "in-progress", "in_progress": "in-progress", "in progress": "in-progress",
+    "closed": "closed",
 }
 _VALID_PRIORITIES = {"P0", "P1", "P2", "P3"}
 _VALID_SEVERITIES = {"low", "medium", "high", "critical"}

@@ -90,13 +90,15 @@ export function ProjectDetailPage() {
 
   const taskStats = useMemo(() => {
     const open = projectTasks.filter((t) => t.status === 'open').length
-    const planned = projectTasks.filter((t) => t.status === 'planned').length
+    const inFlight = projectTasks.filter((t) =>
+      ['in-progress', 'coding-complete', 'committed', 'pushed', 'merged-main', 'deployed'].includes(t.status),
+    ).length
     const closed = projectTasks.filter((t) => t.status === 'closed').length
     const total = projectTasks.length
     const pct = total > 0 ? Math.round((closed / total) * 100) : 0
     return [
       { value: String(open), label: 'Open Tasks', color: 'text-blue-400' },
-      { value: String(planned), label: 'Planned Tasks', color: 'text-purple-400' },
+      { value: String(inFlight), label: 'In Flight', color: 'text-cyan-400' },
       { value: String(closed), label: 'Closed Tasks', color: 'text-rose-400' },
       { value: `${pct}%`, label: 'Closed', color: 'text-slate-200' },
     ]
@@ -104,22 +106,28 @@ export function ProjectDetailPage() {
 
   const issueStats = useMemo(() => {
     const open = projectIssues.filter((i) => i.status === 'open').length
+    const inProgress = projectIssues.filter((i) => i.status === 'in-progress').length
     const closed = projectIssues.filter((i) => i.status === 'closed').length
     const total = projectIssues.length
     const pct = total > 0 ? Math.round((closed / total) * 100) : 0
     return [
       { value: String(open), label: 'Open Issues', color: 'text-amber-400' },
+      { value: String(inProgress), label: 'In Progress', color: 'text-cyan-400' },
       { value: String(closed), label: 'Closed Issues', color: 'text-rose-400' },
       { value: `${pct}%`, label: 'Closed', color: 'text-slate-200' },
     ]
   }, [projectIssues])
 
   const featureStats = useMemo(() => {
-    const completed = projectFeatures.filter((f) => f.status === 'completed').length
+    const inProgress = projectFeatures.filter((f) => f.status === 'in-progress').length
+    const live = projectFeatures.filter((f) =>
+      ['completed', 'production'].includes(f.status),
+    ).length
     const total = projectFeatures.length
-    const pct = total > 0 ? Math.round((completed / total) * 100) : 0
+    const pct = total > 0 ? Math.round((live / total) * 100) : 0
     return [
-      { value: String(completed), label: 'Live', color: 'text-emerald-400' },
+      { value: String(inProgress), label: 'In Progress', color: 'text-cyan-400' },
+      { value: String(live), label: 'Live', color: 'text-emerald-400' },
       { value: `${pct}%`, label: 'Launched', color: 'text-emerald-400' },
     ]
   }, [projectFeatures])
