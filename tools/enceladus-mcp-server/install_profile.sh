@@ -206,6 +206,11 @@ aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
 if aws_profile:
     env_block["AWS_PROFILE"] = aws_profile
 
+# Propagate agent provider identity if set in the environment
+agent_provider = os.environ.get("ENCELADUS_AGENT_PROVIDER", "").strip()
+if agent_provider:
+    env_block["ENCELADUS_AGENT_PROVIDER"] = agent_provider
+
 command = os.environ["PYTHON_BIN"]
 server_py = os.environ["SERVER_PY"]
 servers = {
@@ -370,6 +375,8 @@ env_items = {
     "ENCELADUS_GOVERNANCE_API_BASE": "https://jreese.net/api/v1/governance",
     "ENCELADUS_PROJECTS_API_BASE": "https://jreese.net/api/v1/coordination/projects",
     "ENCELADUS_HEALTH_API_URL": "https://jreese.net/api/v1/health",
+    # Agent identity — used by agent-worktree-init.sh for branch naming fallback
+    "ENCELADUS_AGENT_PROVIDER": os.environ.get("ENCELADUS_AGENT_PROVIDER", "openai_codex"),
 }
 for key in (
     "COORDINATION_INTERNAL_API_KEY",
@@ -451,18 +458,30 @@ if [ ! -f "${WORKSPACE_AGENTS_MD}" ] || ! grep -q "governance_get" "${WORKSPACE_
 # Enceladus Workspace — Codex Bootstrap
 
 MCP servers `enceladus` and `enceladus-local` are pre-configured in `~/.codex/config.toml`.
+Source: `tools/enceladus-mcp-server/server.py`
 
 ## Initialization (REQUIRED — run in order every session)
 
 1. `mcp: connection_health` — verify DynamoDB/S3/API connectivity
 2. `mcp: governance_hash` — get and cache the governance hash (required for all writes)
-3. `mcp: governance_get("governance_data_dictionary.json")` — load enum/constraint reference
-4. `mcp: governance_get("agents.md")` — load full governance rules and follow all instructions in it
+3. `mcp: governance_get("governance_data_dictionary.json")` — load enum/constraint reference (statuses, priorities, categories, deploy types, evidence fields)
+4. `mcp: governance_get("agents.md")` — **load full governance rules and execute all steps in that file**
 5. `mcp: tracker_list(project_id="enceladus", record_type="task", status="open")` — load open tasks
 6. `mcp: tracker_pending_updates(project_id="enceladus")` — check pending updates
 
 All operating rules, tool reference, and task policies are in `governance://agents.md`.
 Do not proceed with any work until steps 1-4 are complete.
+
+## Pre-Task Requirement (every task pickup)
+
+Before modifying any files for a task:
+1. Sync main: `git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/main`
+2. Create task-scoped worktree: `bash tools/agent-worktree-init.sh <TRACKER-ID>-<slug>`
+   - e.g. `agent-worktree-init.sh enc-tsk-719-governance-enhancement`
+   - Creates branch `agent/<TRACKER-ID>-<slug>` automatically
+3. Work only inside the printed worktree path — never modify files in the main checkout.
+Always assume other agent sessions are running concurrently on this machine.
+See `governance://agents.md` section 3.10 for full multi-agent safety rules.
 AGENTS_EOF
     echo "[SUCCESS] Workspace AGENTS.md written to ${WORKSPACE_AGENTS_MD}"
 else
