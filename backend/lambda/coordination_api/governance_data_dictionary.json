@@ -314,6 +314,52 @@
         }
       }
     },
+    "deploy.governance_guard": {
+      "description": "Rules governing when governance_data_dictionary.json must be updated before a PR or deploy proceeds. Enforced by tools/check_governance_dictionary_sync.py and .github/workflows/governance-dictionary-guard.yml.",
+      "fields": {
+        "trigger_patterns": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Glob patterns whose modification requires a dictionary update in the same change set.",
+          "enum": [
+            "backend/lambda/*/lambda_function.py",
+            "backend/lambda/*/tracker_ops.py",
+            "backend/lambda/*/handlers.py",
+            "tools/enceladus-mcp-server/server.py",
+            "backend/lambda/coordination_api/config.py"
+          ]
+        },
+        "dictionary_file": {
+          "type": "string",
+          "definition": "The file that must be updated when trigger_patterns are modified.",
+          "enum": ["backend/lambda/coordination_api/governance_data_dictionary.json"]
+        },
+        "required_update_triggers": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Specific conditions requiring a dictionary update.",
+          "enum": [
+            "New or removed status enum value on any tracked entity",
+            "New or removed field on any governed entity",
+            "New required evidence key for any status transition",
+            "New entity type, deploy type, or coordination execution mode",
+            "New MCP tool parameter carrying governed data",
+            "New service API scope in internal_auth.scope_map"
+          ]
+        },
+        "version_format": {
+          "type": "string",
+          "definition": "Required format for the version field when updating.",
+          "constraints": { "pattern": "^\\d{4}-\\d{2}-\\d{2}\\.\\d+$" },
+          "usage_guidance": "Increment numeric suffix. Reset to .1 on new date. Example: 2026-03-01.21."
+        },
+        "enforcement_workflow": {
+          "type": "string",
+          "definition": "GitHub Actions workflow enforcing this gate on every PR.",
+          "enum": [".github/workflows/governance-dictionary-guard.yml"]
+        }
+      }
+    },
     "coordination.request": {
       "description": "Coordination request envelope fields in coordination API.",
       "fields": {
