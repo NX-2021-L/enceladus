@@ -3370,6 +3370,22 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional submitter identity for audit.",
                     },
+                    "pr_id": {
+                        "type": "integer",
+                        "description": "GitHub PR number that was merged for this deployment (required by deploy_intake). E.g. 75.",
+                    },
+                    "merged_at": {
+                        "type": "string",
+                        "description": "ISO 8601 timestamp when the PR was merged (e.g. '2026-03-02T04:35:24Z'). Must match GitHub API value.",
+                    },
+                    "pr_owner": {
+                        "type": "string",
+                        "description": "GitHub repo owner for PR merge validation. Defaults to 'NX-2021-L' if omitted.",
+                    },
+                    "pr_repo": {
+                        "type": "string",
+                        "description": "GitHub repo name for PR merge validation. Defaults to 'enceladus' if omitted.",
+                    },
                     "github_config": {
                         "type": "object",
                         "description": "GitHub deployment config for github_* deployment types.",
@@ -3383,7 +3399,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Current governance hash for write authorization.",
                     },
                 },
-                "required": ["project_id", "change_type", "deployment_type", "summary", "changes", "governance_hash"],
+                "required": ["project_id", "change_type", "deployment_type", "summary", "changes", "pr_id", "merged_at", "governance_hash"],
             },
         ),
         Tool(
@@ -4852,6 +4868,31 @@ async def _deploy_submit(args: dict) -> list[TextContent]:
     submitted_by = str(args.get("submitted_by") or "mcp-server")
     github_config = args.get("github_config")
     non_ui_config = args.get("non_ui_config")
+    pr_id = args.get("pr_id")
+    merged_at = str(args.get("merged_at") or "")
+    pr_owner = str(args.get("pr_owner") or "NX-2021-L")
+    pr_repo = str(args.get("pr_repo") or "enceladus")
+
+    # Validate pr_id and merged_at
+    if pr_id is None or not merged_at:
+        return _result_text(
+            _error_payload(
+                "INVALID_INPUT",
+                "pr_id (integer) and merged_at (ISO 8601 string) are required for deploy_submit. "
+                "Advance the task to 'merged-main' first to obtain these values.",
+                details={"fields": ["pr_id", "merged_at"]},
+            )
+        )
+    try:
+        pr_id = int(pr_id)
+    except (TypeError, ValueError):
+        return _result_text(
+            _error_payload(
+                "INVALID_INPUT",
+                f"pr_id must be an integer, got {pr_id!r}",
+                details={"field": "pr_id"},
+            )
+        )
 
     # Validate change_type
     if change_type not in DEPLOY_CHANGE_TYPES:
@@ -4917,6 +4958,10 @@ async def _deploy_submit(args: dict) -> list[TextContent]:
         "files_changed": files_changed,
         "auto_trigger": auto_trigger,
         "submitted_by": submitted_by,
+        "pr_id": pr_id,
+        "merged_at": merged_at,
+        "pr_owner": pr_owner,
+        "pr_repo": pr_repo,
     }
     if isinstance(github_config, dict):
         body["github_config"] = github_config

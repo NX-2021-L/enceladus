@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-02.2",
-  "updated_at": "2026-03-02T04:34:34Z",
+  "version": "2026-03-02.3",
+  "updated_at": "2026-03-02T05:25:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -999,6 +999,33 @@
         "release_notes_guidance": {
           "type": "string",
           "definition": "Governance instruction text directing the submitting agent to create a release notes document via documents_put before the deploy completes. Included when release_notes_required=true."
+        }
+      }
+    },
+    "mcp_server.deploy_submit": {
+      "description": "MCP deploy_submit tool surface (ENC-TSK-735). Exposes pr_id and merged_at required fields that deploy_intake added in ENC-FTR-037 AC4. deploy_intake validates both fields against GitHub API before accepting the request.",
+      "fields": {
+        "pr_id": {
+          "type": "integer",
+          "constraints": { "min": 1 },
+          "definition": "GitHub PR number that was merged for this deployment. Required. Passed to deploy_intake which validates via GitHub API.",
+          "usage_guidance": "Obtain from advance_task_status response (merged-main transition returns pr_id). Must match a real merged PR in NX-2021-L/enceladus (or pr_owner/pr_repo if specified)."
+        },
+        "merged_at": {
+          "type": "string",
+          "constraints": { "format": "ISO 8601" },
+          "definition": "Timestamp when the PR was merged. Required. deploy_intake validates against GitHub API merged_at within 60-second tolerance.",
+          "usage_guidance": "Obtain from advance_task_status response (merged-main transition). Format: 2026-03-02T04:35:24Z."
+        },
+        "pr_owner": {
+          "type": "string",
+          "definition": "GitHub repository owner for PR validation. Optional, defaults to NX-2021-L.",
+          "usage_guidance": "Only override for non-enceladus repo deployments."
+        },
+        "pr_repo": {
+          "type": "string",
+          "definition": "GitHub repository name for PR validation. Optional, defaults to enceladus.",
+          "usage_guidance": "Only override for non-enceladus repo deployments."
         }
       }
     },
