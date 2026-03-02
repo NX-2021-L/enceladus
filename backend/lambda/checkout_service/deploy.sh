@@ -94,28 +94,43 @@ ensure_tokens_table() {
     --table-name "${TOKENS_TABLE}" \
     --region "${REGION}" >/dev/null 2>&1; then
     log "[OK] Table exists: ${TOKENS_TABLE}"
-    return
+  else
+    log "[INFO] Creating table: ${TOKENS_TABLE}"
+    aws dynamodb create-table \
+      --table-name "${TOKENS_TABLE}" \
+      --region "${REGION}" \
+      --attribute-definitions AttributeName=pk,AttributeType=S \
+      --key-schema AttributeName=pk,KeyType=HASH \
+      --billing-mode PAY_PER_REQUEST \
+      --sse-specification Enabled=true >/dev/null
+
+    aws dynamodb wait table-exists --table-name "${TOKENS_TABLE}" --region "${REGION}"
+    log "[OK] Table created: ${TOKENS_TABLE}"
   fi
 
-  log "[INFO] Creating table: ${TOKENS_TABLE}"
-  aws dynamodb create-table \
+  # Ensure TTL is enabled (idempotent — runs for both new and existing tables)
+  local ttl_status
+  ttl_status="$(aws dynamodb describe-time-to-live \
     --table-name "${TOKENS_TABLE}" \
     --region "${REGION}" \
-    --attribute-definitions AttributeName=pk,AttributeType=S \
-    --key-schema AttributeName=pk,KeyType=HASH \
-    --billing-mode PAY_PER_REQUEST \
-    --sse-specification Enabled=true >/dev/null
+    --query 'TimeToLiveDescription.TimeToLiveStatus' \
+    --output text 2>/dev/null || echo "UNKNOWN")"
 
-  # Enable TTL
-  aws dynamodb wait table-exists --table-name "${TOKENS_TABLE}" --region "${REGION}"
-  if ! aws dynamodb update-time-to-live \
-    --table-name "${TOKENS_TABLE}" \
-    --region "${REGION}" \
-    --time-to-live-specification Enabled=true,AttributeName=ttl >/dev/null; then
-    log "[WARN] Unable to enable TTL on ${TOKENS_TABLE}; continuing without TTL."
+  if [[ "${ttl_status}" != "ENABLED" && "${ttl_status}" != "ENABLING" ]]; then
+    log "[INFO] Enabling TTL on ${TOKENS_TABLE} (current status: ${ttl_status})"
+    if ! aws dynamodb update-time-to-live \
+      --table-name "${TOKENS_TABLE}" \
+      --region "${REGION}" \
+      --time-to-live-specification Enabled=true,AttributeName=ttl >/dev/null; then
+      log "[WARN] Unable to enable TTL on ${TOKENS_TABLE}; continuing without TTL."
+    else
+      log "[OK] TTL enabled on ${TOKENS_TABLE}"
+    fi
+  else
+    log "[OK] TTL already enabled on ${TOKENS_TABLE}"
   fi
 
-  log "[END] Table created: ${TOKENS_TABLE}"
+  log "[END] Table ready: ${TOKENS_TABLE}"
 }
 
 # ---------------------------------------------------------------------------
