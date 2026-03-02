@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-02.9",
-  "updated_at": "2026-03-02T20:56:00Z",
+  "version": "2026-03-02.10",
+  "updated_at": "2026-03-02T22:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1083,6 +1083,11 @@
           },
           "definition": "Base URL for outbound tracker API calls from checkout service. Must use direct API Gateway URL to bypass Cloudflare.",
           "usage_guidance": "Correct value: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker. See ENC-ISS-088."
+        },
+        "PROJECTS_TABLE": {
+          "type": "string",
+          "definition": "DynamoDB table name for project records. Used by _resolve_github_repo() to look up the project's GitHub repo URL for commit/PR validation (DVP-ISS-082).",
+          "usage_guidance": "Default: 'projects'. The checkout service Lambda IAM role must have dynamodb:GetItem and dynamodb:Scan permissions on this table."
         }
       }
     },
@@ -1158,12 +1163,17 @@
         "gate_matrix": {
           "type": "object",
           "definition": "Per-status evidence requirements enforced by checkout service.",
-          "usage_guidance": "in-progress: active_agent_session_id required (also sets checkout). coding-complete: no evidence required; issues CAI. committed: commit_sha (40-char hex) required; validated via GitHub API; issues CCI. pr: no evidence required. merged-main: pr_id (int) + merged_at (ISO 8601) required; validated via GitHub API. deploy-init: no evidence required. deploy-success: deploy_evidence (GitHub Actions Jobs API object -- 7 required fields) required; clears CAI+CCI from record. closed: live_validation_evidence (non-empty string) required; releases checkout.",
+          "usage_guidance": "in-progress: active_agent_session_id required (also sets checkout). coding-complete: no evidence required; issues CAI. committed: commit_sha (40-char hex) required; validated via GitHub API; issues CCI. pr: no evidence required. merged-main: pr_id (int) + merged_at (ISO 8601) required; validated via GitHub API. deploy-init: no evidence required. deploy-success: deploy_evidence (GitHub Actions Jobs API object -- 7 required fields) required; clears CAI+CCI from record. closed: live_validation_evidence (non-empty string) required; releases checkout. DVP-ISS-082: committed and merged-main now resolve GitHub owner/repo dynamically from the projects table instead of hardcoding NX-2021-L/enceladus. Resolution order: transition_evidence.owner/repo > project.repo field > parent project.repo > child project.repo. Optional owner/repo in transition_evidence override automatic resolution.",
           "properties": {
             "committed": {
               "required_evidence": [
                 "commit_sha"
               ],
+              "optional_evidence": [
+                "owner",
+                "repo"
+              ],
+              "repo_resolution": "Auto-resolved from projects table if owner/repo not provided in transition_evidence (DVP-ISS-082).",
               "issues_token": "CCI"
             },
             "coding-complete": {
@@ -1174,7 +1184,12 @@
               "required_evidence": [
                 "pr_id",
                 "merged_at"
-              ]
+              ],
+              "optional_evidence": [
+                "owner",
+                "repo"
+              ],
+              "repo_resolution": "Auto-resolved from projects table if owner/repo not provided in transition_evidence (DVP-ISS-082)."
             },
             "deploy-success": {
               "required_evidence": [
