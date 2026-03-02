@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-02.1",
-  "updated_at": "2026-03-02T02:40:00Z",
+  "version": "2026-03-02.2",
+  "updated_at": "2026-03-02T04:34:34Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -24,8 +24,8 @@
             "closed",
             "deployed"
           ],
-          "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc. ENC-FTR-037 renamed 'pushed' to 'pr' — backward compat read supported; new tasks must use 'pr'.",
-          "usage_guidance": "Task transitions MUST use advance_task_status MCP tool (checkout service) — direct tracker_set for task status is rejected with 403 (ENC-FTR-037). Full arc: open -> in-progress -> coding-complete -> committed -> pr -> merged-main -> deploy-init -> deploy-success -> closed. Re-entry: coding-updates -> coding-complete -> committed -> pr -> merged-main."
+          "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc. ENC-FTR-037 renamed 'pushed' to 'pr' \u2014 backward compat read supported; new tasks must use 'pr'.",
+          "usage_guidance": "Task transitions MUST use advance_task_status MCP tool (checkout service) \u2014 direct tracker_set for task status is rejected with 403 (ENC-FTR-037). Full arc: open -> in-progress -> coding-complete -> committed -> pr -> merged-main -> deploy-init -> deploy-success -> closed. Re-entry: coding-updates -> coding-complete -> committed -> pr -> merged-main."
         },
         "priority": {
           "type": "enum",
@@ -68,7 +68,7 @@
           "properties": {
             "deploy_evidence": {
               "type": "object",
-              "definition": "Structured GitHub Actions Jobs API response object. Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}. Must be provided verbatim from the API response — do not construct manually.",
+              "definition": "Structured GitHub Actions Jobs API response object. Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}. Must be provided verbatim from the API response \u2014 do not construct manually.",
               "required_fields": {
                 "id": {
                   "type": "integer",
@@ -80,27 +80,39 @@
                 },
                 "head_sha": {
                   "type": "string",
-                  "constraints": { "pattern": "^[0-9a-f]{40}$" },
+                  "constraints": {
+                    "pattern": "^[0-9a-f]{40}$"
+                  },
                   "definition": "40-character hex commit SHA the job ran against. Should match the task's commit_sha transition_evidence field."
                 },
                 "status": {
                   "type": "enum",
-                  "enum": ["completed"],
-                  "definition": "GitHub Actions job status. Must be 'completed' — in-progress or queued jobs are rejected."
+                  "enum": [
+                    "completed"
+                  ],
+                  "definition": "GitHub Actions job status. Must be 'completed' \u2014 in-progress or queued jobs are rejected."
                 },
                 "conclusion": {
                   "type": "enum",
-                  "enum": ["success"],
-                  "definition": "GitHub Actions job conclusion. Must be 'success' — failure, cancelled, skipped, and timed_out are all rejected."
+                  "enum": [
+                    "success"
+                  ],
+                  "definition": "GitHub Actions job conclusion. Must be 'success' \u2014 failure, cancelled, skipped, and timed_out are all rejected."
                 },
                 "started_at": {
                   "type": "string",
-                  "constraints": { "format": "ISO 8601 datetime", "example": "2026-03-01T18:20:00Z" },
+                  "constraints": {
+                    "format": "ISO 8601 datetime",
+                    "example": "2026-03-01T18:20:00Z"
+                  },
                   "definition": "ISO 8601 UTC datetime when the job started. Requires 'T' separator (date-only strings are rejected). Matches tracker timestamp convention."
                 },
                 "completed_at": {
                   "type": "string",
-                  "constraints": { "format": "ISO 8601 datetime", "example": "2026-03-01T18:21:57Z" },
+                  "constraints": {
+                    "format": "ISO 8601 datetime",
+                    "example": "2026-03-01T18:21:57Z"
+                  },
                   "definition": "ISO 8601 UTC datetime when the job completed. Requires 'T' separator (date-only strings are rejected). Must be present and valid even if equal to started_at."
                 }
               },
@@ -108,13 +120,17 @@
             },
             "commit_approval_id": {
               "type": "string",
-              "constraints": { "pattern": "^CAI-[0-9a-f]{32}$" },
+              "constraints": {
+                "pattern": "^CAI-[0-9a-f]{32}$"
+              },
               "definition": "Commit Approval ID (ENC-FTR-037). Issued by checkout service when task advances to coding-complete. Format: CAI-{uuid4_hex}. Stored on task record; cleared on deploy-success. Allows agent to begin commit operation.",
               "usage_guidance": "Returned by advance_task_status(target_status=coding-complete). Pass to agent as receipt that coding-complete gate was passed. Not required as input to any subsequent call -- checkout service reads it from the task record."
             },
             "commit_complete_id": {
               "type": "string",
-              "constraints": { "pattern": "^CCI-[0-9a-f]{32}$" },
+              "constraints": {
+                "pattern": "^CCI-[0-9a-f]{32}$"
+              },
               "definition": "Commit Complete ID (ENC-FTR-037). Issued by checkout service when task advances to committed (after commit_sha is validated against GitHub API). Format: CCI-{uuid4_hex}. Stored on task record; cleared on deploy-success. Required in PR body for GitHub PR Commit Gate.",
               "usage_guidance": "Returned by advance_task_status(target_status=committed, transition_evidence={commit_sha: <40-char-hex>}). Must be included verbatim in the PR body (pattern CCI-[0-9a-f]{32}) before opening the PR. GitHub Actions PR Commit Gate validates it via GET /api/v1/checkout/validate/commit-complete/{cci_id}."
             }
@@ -272,7 +288,7 @@
         },
         "file_name": {
           "type": "string",
-          "definition": "Governance file name that was updated (e.g. 'agents.md', 'agents/dispatch-heuristics.md'). Informational — sync always runs _sync_governance_documents() for all governance files to ensure consistency.",
+          "definition": "Governance file name that was updated (e.g. 'agents.md', 'agents/dispatch-heuristics.md'). Informational \u2014 sync always runs _sync_governance_documents() for all governance files to ensure consistency.",
           "context": "direct Lambda invocation payload"
         },
         "content_hash": {
@@ -369,13 +385,17 @@
         },
         "pr_id": {
           "type": "integer",
-          "constraints": { "min": 1 },
+          "constraints": {
+            "min": 1
+          },
           "definition": "GitHub PR number that was merged to main prior to this deployment (ENC-FTR-037). Required for all deployment requests.",
           "usage_guidance": "Must be an integer (e.g. 72). deploy_intake validates via GitHub API GET /repos/{owner}/{repo}/pulls/{pr_id} that the PR is merged. Omitting pr_id returns HTTP 400."
         },
         "merged_at": {
           "type": "string",
-          "constraints": { "format": "ISO 8601 datetime" },
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
           "definition": "ISO 8601 UTC timestamp of when the PR was merged to main (ENC-FTR-037). Required for all deployment requests.",
           "usage_guidance": "Must match the GitHub API merged_at field within 60-second tolerance. Source it from the advance_task_status(merged-main) response or directly from the GitHub pull request object. Omitting merged_at returns HTTP 400."
         },
@@ -446,7 +466,9 @@
         "dictionary_file": {
           "type": "string",
           "definition": "The file that must be updated when trigger_patterns are modified.",
-          "enum": ["backend/lambda/coordination_api/governance_data_dictionary.json"]
+          "enum": [
+            "backend/lambda/coordination_api/governance_data_dictionary.json"
+          ]
         },
         "required_update_triggers": {
           "type": "array",
@@ -464,13 +486,17 @@
         "version_format": {
           "type": "string",
           "definition": "Required format for the version field when updating.",
-          "constraints": { "pattern": "^\\d{4}-\\d{2}-\\d{2}\\.\\d+$" },
+          "constraints": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}\\.\\d+$"
+          },
           "usage_guidance": "Increment numeric suffix. Reset to .1 on new date. Example: 2026-03-01.21."
         },
         "enforcement_workflow": {
           "type": "string",
           "definition": "GitHub Actions workflow enforcing this gate on every PR.",
-          "enum": [".github/workflows/governance-dictionary-guard.yml"]
+          "enum": [
+            ".github/workflows/governance-dictionary-guard.yml"
+          ]
         },
         "s3_sync_note": {
           "type": "string",
@@ -571,7 +597,9 @@
       "fields": {
         "target_origin": {
           "type": "string",
-          "constraints": {"format": "https-origin"},
+          "constraints": {
+            "format": "https-origin"
+          },
           "usage_guidance": "Must be an https origin matching the target Enceladus host where cookies will be applied."
         },
         "include_set_cookie_headers": {
@@ -996,7 +1024,9 @@
       "fields": {
         "token_id": {
           "type": "string",
-          "constraints": { "pattern": "^(CAI|CCI)-[0-9a-f]{32}$" },
+          "constraints": {
+            "pattern": "^(CAI|CCI)-[0-9a-f]{32}$"
+          },
           "definition": "Token identifier. CAI (Commit Approval ID) issued at coding-complete; CCI (Commit Complete ID) issued at committed. Format: {TYPE}-{uuid4_hex}."
         },
         "task_id": {
@@ -1009,12 +1039,17 @@
         },
         "token_type": {
           "type": "enum",
-          "enum": ["CAI", "CCI"],
+          "enum": [
+            "CAI",
+            "CCI"
+          ],
           "definition": "Token type. CAI = Commit Approval; CCI = Commit Complete."
         },
         "issued_at": {
           "type": "string",
-          "constraints": { "format": "ISO 8601 datetime" },
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
           "definition": "Timestamp when the token was issued."
         },
         "ttl": {
@@ -1033,7 +1068,16 @@
       "fields": {
         "target_status": {
           "type": "enum",
-          "enum": ["in-progress", "coding-complete", "committed", "pr", "merged-main", "deploy-init", "deploy-success", "closed"],
+          "enum": [
+            "in-progress",
+            "coding-complete",
+            "committed",
+            "pr",
+            "merged-main",
+            "deploy-init",
+            "deploy-success",
+            "closed"
+          ],
           "definition": "Target status to advance the task to. Each value has specific evidence requirements (see gate_matrix below)."
         },
         "provider": {
@@ -1050,7 +1094,9 @@
           "usage_guidance": "in-progress: active_agent_session_id required (also sets checkout). coding-complete: no evidence required; issues CAI. committed: commit_sha (40-char hex) required; validated via GitHub API; issues CCI. pr: no evidence required. merged-main: pr_id (int) + merged_at (ISO 8601) required; validated via GitHub API. deploy-init: no evidence required. deploy-success: deploy_evidence (GitHub Actions Jobs API object -- 7 required fields) required; clears CAI+CCI from record. closed: live_validation_evidence (non-empty string) required; releases checkout.",
           "properties": {
             "committed": {
-              "required_evidence": ["commit_sha"],
+              "required_evidence": [
+                "commit_sha"
+              ],
               "issues_token": "CCI"
             },
             "coding-complete": {
@@ -1058,14 +1104,24 @@
               "issues_token": "CAI"
             },
             "merged-main": {
-              "required_evidence": ["pr_id", "merged_at"]
+              "required_evidence": [
+                "pr_id",
+                "merged_at"
+              ]
             },
             "deploy-success": {
-              "required_evidence": ["deploy_evidence"],
-              "clears_tokens": ["CAI", "CCI"]
+              "required_evidence": [
+                "deploy_evidence"
+              ],
+              "clears_tokens": [
+                "CAI",
+                "CCI"
+              ]
             },
             "closed": {
-              "required_evidence": ["live_validation_evidence"],
+              "required_evidence": [
+                "live_validation_evidence"
+              ],
               "releases_checkout": true
             }
           }
