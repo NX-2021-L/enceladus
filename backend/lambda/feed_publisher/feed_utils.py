@@ -1130,10 +1130,10 @@ def publish_mobile_feeds_to_s3(
 ) -> List[str]:
     """Upload mobile feed JSON/MD files from feed_dir to s3://bucket/s3_prefix/.
 
-    S3 objects are tagged with Cache-Control: max-age=0, s-maxage=300, must-revalidate.
+    S3 objects are tagged with Cache-Control: max-age=0, s-maxage=30, must-revalidate.
     Browsers always revalidate (max-age=0) while CloudFront edge caches serve the
-    object for up to 5 minutes (s-maxage=300), aligned with the SQS FIFO debounce
-    window. Returns the list of S3 keys uploaded.
+    object for up to 30 seconds (s-maxage=30), reduced from 300s to improve feed
+    freshness SLA. Returns the list of S3 keys uploaded.
     """
     require_boto3()
     s3_client = boto3.client("s3", region_name="us-east-1")

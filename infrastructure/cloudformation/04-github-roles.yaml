@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus GitHub OIDC Roles — IAM roles assumed by GitHub Actions via OIDC.
+  Part of ENC-ISS-056: Provision the missing CloudFormation deploy role so
+  the cloudformation-api-stack-deploy workflow can authenticate.
+
+  Deploy manually once with admin credentials:
+    aws cloudformation deploy --stack-name enceladus-github-roles \
+      --template-file infrastructure/cloudformation/04-github-roles.yaml \
+      --capabilities CAPABILITY_NAMED_IAM --region us-west-2
+
+  Then set the AWS_CLOUDFORMATION_ROLE_TO_ASSUME repo secret to the
+  CloudFormationDeployRoleArn output value.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: NX-2021-L
+    Description: GitHub organization name
+  GitHubRepo:
+    Type: String
+    Default: enceladus
+    Description: GitHub repository name
+  OIDCProviderArn:
+    Type: String
+    Default: arn:aws:iam::356364570033:oidc-provider/token.actions.githubusercontent.com
+    Description: >
+      ARN of the existing GitHub OIDC identity provider in this account.
+      Create one first if it does not exist (see AWS docs for
+      aws iam create-open-id-connect-provider).
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # CloudFormation API Stack Deploy Role
+  # Used by: .github/workflows/cloudformation-api-stack-deploy.yml
+  # Secret:  AWS_CLOUDFORMATION_ROLE_TO_ASSUME
+  # ---------------------------------------------------------------------------
+  CloudFormationDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: enceladus-cloudformation-deploy-github-role
+      Description: >
+        GitHub Actions OIDC role for deploying the enceladus-api
+        CloudFormation stack (03-api.yaml).
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+      Policies:
+        - PolicyName: CloudFormationDeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudFormation stack operations scoped to enceladus-* stacks
+              - Sid: CloudFormationStackOps
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStackResources
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                Resource:
+                  - !Sub "arn:aws:cloudformation:us-west-2:${AWS::AccountId}:stack/enceladus-*/*"
+
+              # API Gateway mutations (required for 03-api.yaml resources)
+              - Sid: ApiGatewayOps
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:POST
+                  - apigateway:PUT
+                  - apigateway:PATCH
+                  - apigateway:DELETE
+                Resource:
+                  - !Sub "arn:aws:apigateway:us-west-2::/*"
+
+              # IAM PassRole for CAPABILITY_NAMED_IAM
+              - Sid: IAMPassRole
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - iam:GetRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-*"
+
+              # Lambda read-only (for integration URI references)
+              - Sid: LambdaReadOnly
+                Effect: Allow
+                Action:
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                Resource:
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:devops-*"
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-*"
+
+              # CloudWatch Logs (for error reporting in workflow)
+              - Sid: LogsReadOnly
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: "*"
+
+Outputs:
+  CloudFormationDeployRoleArn:
+    Description: >
+      ARN to set as the AWS_CLOUDFORMATION_ROLE_TO_ASSUME repository secret.
+    Value: !GetAtt CloudFormationDeployRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-CloudFormationDeployRoleArn"
