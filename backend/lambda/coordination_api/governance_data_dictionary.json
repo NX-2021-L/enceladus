@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-01.29",
-  "updated_at": "2026-03-01T20:00:00Z",
+  "version": "2026-03-02.1",
+  "updated_at": "2026-03-02T02:40:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -16,7 +16,7 @@
             "in-progress",
             "coding-complete",
             "committed",
-            "pushed",
+            "pr",
             "merged-main",
             "deploy-init",
             "deploy-success",
@@ -24,8 +24,8 @@
             "closed",
             "deployed"
           ],
-          "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc.",
-          "usage_guidance": "Task transitions are sequential; use tracker_validation_rules before tracker_set to obtain required evidence and checkout requirements. Forward arc (ENC-FTR-035): merged-main → deploy-init → deploy-success → closed (or → coding-updates → coding-complete for iterative post-deploy fixes)."
+          "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc. ENC-FTR-037 renamed 'pushed' to 'pr' — backward compat read supported; new tasks must use 'pr'.",
+          "usage_guidance": "Task transitions MUST use advance_task_status MCP tool (checkout service) — direct tracker_set for task status is rejected with 403 (ENC-FTR-037). Full arc: open -> in-progress -> coding-complete -> committed -> pr -> merged-main -> deploy-init -> deploy-success -> closed. Re-entry: coding-updates -> coding-complete -> committed -> pr -> merged-main."
         },
         "priority": {
           "type": "enum",
@@ -64,7 +64,7 @@
         "transition_evidence": {
           "type": "object",
           "definition": "Evidence payload required for gated status transitions.",
-          "usage_guidance": "task->pushed requires commit_sha; task->merged-main requires merge_evidence; task->deploy-success requires deploy_evidence (structured GitHub Actions Jobs API object — see deploy_evidence schema below); task->closed (when current status is deploy-success) requires live_validation_evidence (capture via ENC-FTR-032 Cognito session + PWA diagnostics); any revert requires revert_reason. Legacy: task->deployed previously required deployment_ref — this gate is removed as of ENC-FTR-035; use the deploy-init/deploy-success arc instead.",
+          "usage_guidance": "task->committed requires commit_sha (validated against GitHub API by checkout service; also generates CCI token); task->merged-main requires merge_evidence; task->deploy-success requires deploy_evidence (structured GitHub Actions Jobs API object -- see deploy_evidence schema below); task->closed (when current status is deploy-success) requires live_validation_evidence (capture via ENC-FTR-032 Cognito session + PWA diagnostics); any revert requires revert_reason. Legacy: task->deployed previously required deployment_ref -- this gate is removed as of ENC-FTR-035; use the deploy-init/deploy-success arc instead. Legacy: task->pushed renamed to task->committed (commit_sha gate) and task->pr (formerly pushed) per ENC-FTR-037.",
           "properties": {
             "deploy_evidence": {
               "type": "object",
@@ -105,6 +105,18 @@
                 }
               },
               "usage_guidance": "Call GET /repos/{owner}/{repo}/actions/jobs/{job_id} and pass the response object as deploy_evidence. The Lambda validates all seven required fields, asserts status=completed and conclusion=success, and validates started_at/completed_at as ISO 8601 datetimes. The validated payload is stored as a JSON string on the task record. ENC-TSK-726."
+            },
+            "commit_approval_id": {
+              "type": "string",
+              "constraints": { "pattern": "^CAI-[0-9a-f]{32}$" },
+              "definition": "Commit Approval ID (ENC-FTR-037). Issued by checkout service when task advances to coding-complete. Format: CAI-{uuid4_hex}. Stored on task record; cleared on deploy-success. Allows agent to begin commit operation.",
+              "usage_guidance": "Returned by advance_task_status(target_status=coding-complete). Pass to agent as receipt that coding-complete gate was passed. Not required as input to any subsequent call -- checkout service reads it from the task record."
+            },
+            "commit_complete_id": {
+              "type": "string",
+              "constraints": { "pattern": "^CCI-[0-9a-f]{32}$" },
+              "definition": "Commit Complete ID (ENC-FTR-037). Issued by checkout service when task advances to committed (after commit_sha is validated against GitHub API). Format: CCI-{uuid4_hex}. Stored on task record; cleared on deploy-success. Required in PR body for GitHub PR Commit Gate.",
+              "usage_guidance": "Returned by advance_task_status(target_status=committed, transition_evidence={commit_sha: <40-char-hex>}). Must be included verbatim in the PR body (pattern CCI-[0-9a-f]{32}) before opening the PR. GitHub Actions PR Commit Gate validates it via GET /api/v1/checkout/validate/commit-complete/{cci_id}."
             }
           }
         }
@@ -354,6 +366,28 @@
           "type": "object",
           "definition": "Optional non-UI deployment execution config for deployment_type values outside github_*.",
           "usage_guidance": "Requires service_group + target_arn. Optional source_s3_bucket, source_s3_prefix, and source_dir can be supplied for inline lambda_update packaging. Inline lambda_update archive resolution now falls back across project metadata prefixes (including parent-derived deploy-sources/<parent>) and scans available source archives until backend/lambda/<source_dir>/ content is found."
+        },
+        "pr_id": {
+          "type": "integer",
+          "constraints": { "min": 1 },
+          "definition": "GitHub PR number that was merged to main prior to this deployment (ENC-FTR-037). Required for all deployment requests.",
+          "usage_guidance": "Must be an integer (e.g. 72). deploy_intake validates via GitHub API GET /repos/{owner}/{repo}/pulls/{pr_id} that the PR is merged. Omitting pr_id returns HTTP 400."
+        },
+        "merged_at": {
+          "type": "string",
+          "constraints": { "format": "ISO 8601 datetime" },
+          "definition": "ISO 8601 UTC timestamp of when the PR was merged to main (ENC-FTR-037). Required for all deployment requests.",
+          "usage_guidance": "Must match the GitHub API merged_at field within 60-second tolerance. Source it from the advance_task_status(merged-main) response or directly from the GitHub pull request object. Omitting merged_at returns HTTP 400."
+        },
+        "pr_owner": {
+          "type": "string",
+          "definition": "GitHub repository owner for PR validation (ENC-FTR-037). Optional; defaults to 'NX-2021-L'.",
+          "usage_guidance": "Only needed when deploying from a fork or non-default org repo."
+        },
+        "pr_repo": {
+          "type": "string",
+          "definition": "GitHub repository name for PR validation (ENC-FTR-037). Optional; defaults to 'enceladus'.",
+          "usage_guidance": "Only needed when deploying from a non-default repository (e.g. harrisonfamily)."
         }
       }
     },
@@ -405,7 +439,8 @@
             "backend/lambda/*/tracker_ops.py",
             "backend/lambda/*/handlers.py",
             "tools/enceladus-mcp-server/server.py",
-            "backend/lambda/coordination_api/config.py"
+            "backend/lambda/coordination_api/config.py",
+            "backend/lambda/checkout_service/lambda_function.py"
           ]
         },
         "dictionary_file": {
@@ -953,6 +988,87 @@
         "changelog_version": {
           "type": "tool",
           "usage_guidance": "Current version for a project. Args: project_id (required). Returns changelog.version_response shape from S3 current-version.json."
+        }
+      }
+    },
+    "checkout_service.token": {
+      "description": "Checkout service token records stored in enceladus-checkout-tokens DynamoDB table. CAI and CCI tokens gate the commit workflow (ENC-FTR-037). Each token is a DynamoDB item with a TTL.",
+      "fields": {
+        "token_id": {
+          "type": "string",
+          "constraints": { "pattern": "^(CAI|CCI)-[0-9a-f]{32}$" },
+          "definition": "Token identifier. CAI (Commit Approval ID) issued at coding-complete; CCI (Commit Complete ID) issued at committed. Format: {TYPE}-{uuid4_hex}."
+        },
+        "task_id": {
+          "type": "string",
+          "definition": "Tracker task record ID associated with this token (e.g. ENC-TSK-730)."
+        },
+        "project_id": {
+          "type": "string",
+          "definition": "Project identifier of the associated task."
+        },
+        "token_type": {
+          "type": "enum",
+          "enum": ["CAI", "CCI"],
+          "definition": "Token type. CAI = Commit Approval; CCI = Commit Complete."
+        },
+        "issued_at": {
+          "type": "string",
+          "constraints": { "format": "ISO 8601 datetime" },
+          "definition": "Timestamp when the token was issued."
+        },
+        "ttl": {
+          "type": "integer",
+          "definition": "DynamoDB TTL epoch seconds. Tokens expire 30 days after issuance. Expired tokens fail validation."
+        },
+        "validate_endpoint": {
+          "type": "string",
+          "definition": "Endpoint to validate a CCI token. Used by GitHub Actions PR Commit Gate workflow.",
+          "usage_guidance": "GET {CHECKOUT_SERVICE_API_BASE}/validate/commit-complete/{cci_id}. Returns {valid: true, task_id, project_id} on success or {valid: false, reason} on failure."
+        }
+      }
+    },
+    "checkout_service.advance_request": {
+      "description": "Request schema for POST /api/v1/checkout/{project}/task/{task_id}/advance (ENC-FTR-037). Checkout service validates evidence and advances task status through the tracker lifecycle.",
+      "fields": {
+        "target_status": {
+          "type": "enum",
+          "enum": ["in-progress", "coding-complete", "committed", "pr", "merged-main", "deploy-init", "deploy-success", "closed"],
+          "definition": "Target status to advance the task to. Each value has specific evidence requirements (see gate_matrix below)."
+        },
+        "provider": {
+          "type": "string",
+          "definition": "Provider identity making the advance request (e.g. claude_agent_sdk, coordination_dispatch)."
+        },
+        "transition_evidence": {
+          "type": "object",
+          "definition": "Evidence payload; required fields vary by target_status (see gate_matrix)."
+        },
+        "gate_matrix": {
+          "type": "object",
+          "definition": "Per-status evidence requirements enforced by checkout service.",
+          "usage_guidance": "in-progress: active_agent_session_id required (also sets checkout). coding-complete: no evidence required; issues CAI. committed: commit_sha (40-char hex) required; validated via GitHub API; issues CCI. pr: no evidence required. merged-main: pr_id (int) + merged_at (ISO 8601) required; validated via GitHub API. deploy-init: no evidence required. deploy-success: deploy_evidence (GitHub Actions Jobs API object -- 7 required fields) required; clears CAI+CCI from record. closed: live_validation_evidence (non-empty string) required; releases checkout.",
+          "properties": {
+            "committed": {
+              "required_evidence": ["commit_sha"],
+              "issues_token": "CCI"
+            },
+            "coding-complete": {
+              "required_evidence": [],
+              "issues_token": "CAI"
+            },
+            "merged-main": {
+              "required_evidence": ["pr_id", "merged_at"]
+            },
+            "deploy-success": {
+              "required_evidence": ["deploy_evidence"],
+              "clears_tokens": ["CAI", "CCI"]
+            },
+            "closed": {
+              "required_evidence": ["live_validation_evidence"],
+              "releases_checkout": true
+            }
+          }
         }
       }
     }

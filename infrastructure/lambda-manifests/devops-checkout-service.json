@@ -1,0 +1,36 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "enceladus-checkout-service",
+  "generated_at": "2026-03-02T02:40:00Z",
+  "parity_status": "PENDING_DEPLOY",
+  "region": "us-east-1",
+  "repo_entry_path": "backend/lambda/checkout_service/lambda_function.py",
+  "planned_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "environment_vars": {
+      "TRACKER_API_BASE": "https://jreese.net/api/v1",
+      "CHECKOUT_TABLE": "enceladus-checkout-tokens",
+      "CHECKOUT_SERVICE_KEY": "<from Secrets Manager: enceladus/checkout-service/key>",
+      "GITHUB_TOKEN": "<from Secrets Manager: enceladus/github/token>",
+      "GITHUB_REPO_OWNER": "NX-2021-L",
+      "GITHUB_REPO_NAME": "enceladus",
+      "COORDINATION_INTERNAL_API_KEY": "<from Secrets Manager>"
+    },
+    "handler": "lambda_function.lambda_handler",
+    "memory_size": 256,
+    "runtime": "python3.11",
+    "timeout": 30,
+    "layers": []
+  },
+  "companion_function": {
+    "function_name": "enceladus-checkout-service-auto",
+    "handler": "lambda_function.handler_auto_checkout",
+    "description": "Auto-checkout EventBridge target. Fires every 5 minutes; auto-checks-out open tasks idle for >15 minutes.",
+    "trigger": "eventbridge-rate(5 minutes)",
+    "eventbridge_rule": "enceladus-checkout-auto"
+  },
+  "deploy_script": "backend/lambda/checkout_service/deploy.sh",
+  "notes": "ENC-FTR-037. New Lambda. Deploy via deploy.sh after PR merge. Requires enceladus-checkout-tokens DynamoDB table and X-Checkout-Service-Key shared secret in Secrets Manager."
+}

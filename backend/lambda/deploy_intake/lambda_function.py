@@ -108,6 +108,9 @@ CONFIG_PREFIX = os.environ.get("CONFIG_PREFIX", "deploy-config")
 SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
 DOC_PREP_LAMBDA_NAME = os.environ.get("DOC_PREP_LAMBDA_NAME", "doc_prep")
 CORS_ORIGIN = "https://jreese.net"
+# ENC-FTR-037: GitHub PAT for PR merge validation (optional — public repos work without it)
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_API_BASE = "https://api.github.com"
 
 VALID_CHANGE_TYPES = {"patch", "minor", "major"}
 VALID_DEPLOYMENT_TYPES = {
@@ -602,6 +605,48 @@ def _run_pre_deploy_hooks(project_id: str, hooks: List[str]) -> List[Dict[str, A
 # ---------------------------------------------------------------------------
 
 
+def _validate_pr_merged(
+    owner: str, repo: str, pr_id: int, merged_at: str
+) -> Tuple[bool, str]:
+    """Verify PR is merged and merged_at matches GitHub API. ENC-FTR-037.
+
+    Returns (True, "") on success or (False, reason) on failure.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_id}"
+    headers = {"User-Agent": "enceladus-deploy-intake/1.0", "Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            pr_data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return False, f"PR #{pr_id} not found in {owner}/{repo}"
+        return False, f"GitHub API returned HTTP {exc.code} for PR #{pr_id}"
+    except Exception as exc:
+        return False, f"GitHub API unavailable: {exc}"
+
+    api_merged_at = pr_data.get("merged_at")
+    if not api_merged_at:
+        return False, f"PR #{pr_id} is not merged (merged_at is null)"
+
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        api_dt = _dt.fromisoformat(api_merged_at.replace("Z", "+00:00"))
+        given_dt = _dt.fromisoformat(merged_at.replace("Z", "+00:00"))
+        diff_seconds = abs((api_dt - given_dt).total_seconds())
+        if diff_seconds > 60:
+            return False, (
+                f"merged_at mismatch: provided={merged_at}, "
+                f"github={api_merged_at} (diff={diff_seconds:.0f}s)"
+            )
+    except ValueError as exc:
+        return False, f"Invalid merged_at timestamp format: {exc}"
+
+    return True, ""
+
+
 def _project_next_version(current: str, change_type: str) -> Optional[str]:
     """Return projected next semver given current version and change_type."""
     m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", current.strip())
@@ -626,6 +671,11 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
     submitted_by = body.get("submitted_by", "api-user")
     non_ui_config = body.get("non_ui_config", {})
     pre_deploy_hooks = body.get("pre_deploy_hooks", [])
+    # ENC-FTR-037: PR merge gate — all deployments require a merged PR
+    pr_id = body.get("pr_id")
+    merged_at = (body.get("merged_at") or "").strip()
+    pr_owner = body.get("pr_owner", "NX-2021-L")
+    pr_repo = body.get("pr_repo", "enceladus")
 
     # Validation
     if not project_id:
@@ -638,6 +688,20 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
         return _error(400, "summary is required")
     if len(summary) > MAX_SUMMARY_LENGTH:
         return _error(400, f"summary exceeds {MAX_SUMMARY_LENGTH} characters")
+    # ENC-FTR-037: All deployments require a merged PR validated via GitHub API.
+    # pr_id: GitHub PR number (int). merged_at: ISO 8601 timestamp from merged PR.
+    if pr_id is None or not merged_at:
+        return _error(400, (
+            "pr_id and merged_at are required for all deployments (ENC-FTR-037). "
+            "Advance the task to merged-main status via the checkout service to obtain these values."
+        ))
+    try:
+        pr_id_int = int(pr_id)
+    except (TypeError, ValueError):
+        return _error(400, f"pr_id must be an integer, got: {pr_id!r}")
+    pr_valid, pr_reason = _validate_pr_merged(pr_owner, pr_repo, pr_id_int, merged_at)
+    if not pr_valid:
+        return _error(400, f"PR merge validation failed: {pr_reason}")
     if not isinstance(changes, list):
         return _error(400, "changes must be an array of strings")
     if len(changes) > MAX_CHANGES_COUNT:

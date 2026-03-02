@@ -208,6 +208,11 @@ TRACKER_API_BASE = os.environ.get(
     "ENCELADUS_TRACKER_API_BASE",
     "https://jreese.net/api/v1/tracker",
 )
+# ENC-FTR-037: Checkout service base URL
+CHECKOUT_SERVICE_API_BASE = os.environ.get(
+    "CHECKOUT_SERVICE_API_BASE",
+    "https://jreese.net/api/v1/checkout",
+)
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
     COMMON_INTERNAL_API_KEY,
@@ -1525,6 +1530,58 @@ def _tracker_api_request(
     return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
 
 
+def _checkout_api_request(
+    method: str,
+    path: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """HTTP request to the checkout service API (ENC-FTR-037)."""
+    base = CHECKOUT_SERVICE_API_BASE.rstrip("/")
+    route = path if path.startswith("/") else (f"/{path}" if path else "")
+    url = f"{base}{route}"
+    headers: Dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body: Optional[bytes] = json.dumps(payload).encode("utf-8")
+    else:
+        body = None
+
+    for candidate in (
+        TRACKER_API_INTERNAL_API_KEY,
+        *TRACKER_API_INTERNAL_API_KEYS,
+        *COMMON_INTERNAL_API_KEYS,
+        "",
+    ):
+        key = str(candidate or "").strip()
+        attempt_headers = dict(headers)
+        if key:
+            attempt_headers["X-Coordination-Internal-Key"] = key
+        req = urllib.request.Request(url=url, method=method.upper(), headers=attempt_headers, data=body)
+        try:
+            with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
+                text = resp.read().decode("utf-8")
+                return json.loads(text) if text else {"success": True}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"error": raw or str(exc)}
+            if exc.code in (401, 403) and key:
+                continue
+            return _normalize_legacy_error_payload(parsed, exc.code)
+        except urllib.error.URLError as exc:
+            return _error_payload("UPSTREAM_ERROR", f"Checkout service unreachable: {exc}", retryable=True)
+        except Exception as exc:
+            return _error_payload("INTERNAL_ERROR", f"Checkout API request failed: {exc}", retryable=False)
+        break
+
+    return _error_payload("PERMISSION_DENIED", "Authentication required", retryable=False)
+
+
 def _governance_api_request(
     method: str,
     path: str = "",
@@ -2704,7 +2761,12 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_set",
-            description="Set a field value on a tracker record.",
+            description=(
+                "Set a field value on a tracker record. "
+                "NOTE (ENC-FTR-037): Task status changes are BLOCKED here — use "
+                "advance_task_status instead. Task worklogs are BLOCKED here — use "
+                "append_worklog instead. All other fields (priority, title, etc.) remain editable."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2747,9 +2809,7 @@ async def list_tools() -> list[Tool]:
                         "type": "object",
                         "description": (
                             "Evidence for gated status transitions (ENC-FTR-022). "
-                            "task->pushed: {commit_sha, owner?, repo?}. "
-                            "task->merged-main: {merge_evidence}. "
-                            "task->deployed: {deployment_ref}. "
+                            "NOTE: Task status transitions must use advance_task_status tool. "
                             "Any revert: {revert_reason}."
                         ),
                     },
@@ -2759,7 +2819,12 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_log",
-            description="Append a worklog entry to a tracker record's history.",
+            description=(
+                "Append a worklog entry to a tracker record's history. "
+                "NOTE (ENC-FTR-037): For TASKS, use append_worklog instead — "
+                "this tool is blocked for task worklogs (checkout required). "
+                "For issues and features, this tool continues to work directly."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3767,6 +3832,173 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        # --- Checkout Service Tools (ENC-FTR-037) ---
+        Tool(
+            name="checkout_task",
+            description=(
+                "Check out a tracker task and advance it to in-progress. "
+                "REQUIRED before any coding can begin on a task. "
+                "Returns full task metadata including the task record. "
+                "The checkout is owned by the calling provider (active_agent_session_id)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "record_id": {
+                        "type": "string",
+                        "description": "The task record ID (e.g., ENC-TSK-730).",
+                    },
+                    "active_agent_session_id": {
+                        "type": "string",
+                        "description": "Agent identity checking out the task (e.g., 'claude_agent_sdk').",
+                    },
+                    "governance_hash": {
+                        "type": "string",
+                        "description": "Current governance hash for write authorization.",
+                    },
+                    "coordination_request_id": {
+                        "type": "string",
+                        "description": "Optional coordination request ID for audit traceability.",
+                    },
+                },
+                "required": ["record_id", "active_agent_session_id", "governance_hash"],
+            },
+        ),
+        Tool(
+            name="release_task",
+            description=(
+                "Release the checkout on a tracker task. "
+                "Call when the session is ending or work is complete. "
+                "For completed work, prefer advance_task_status to closed instead."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "record_id": {
+                        "type": "string",
+                        "description": "The task record ID to release.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Provider releasing the task.",
+                    },
+                    "governance_hash": {
+                        "type": "string",
+                        "description": "Current governance hash for write authorization.",
+                    },
+                },
+                "required": ["record_id", "governance_hash"],
+            },
+        ),
+        Tool(
+            name="advance_task_status",
+            description=(
+                "Advance a task's status through the lifecycle arc. "
+                "This is the ONLY way to change task status (ENC-FTR-037). "
+                "Gate matrix: "
+                "coding-complete → returns commit_approval_id (CAI-xxx); "
+                "committed (requires commit_sha in transition_evidence) → validates via GitHub, "
+                "returns commit_complete_id (CCI-xxx); "
+                "pr → requires prior committed (CCI on task); "
+                "merged-main (requires pr_id + merged_at) → validates via GitHub API; "
+                "deploy-success (requires deploy_evidence object) → clears CAI+CCI tokens; "
+                "closed (requires live_validation_evidence) → releases checkout."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "record_id": {
+                        "type": "string",
+                        "description": "The task record ID to advance.",
+                    },
+                    "target_status": {
+                        "type": "string",
+                        "description": (
+                            "Target status. Lifecycle: open→in-progress→coding-complete→"
+                            "committed→pr→merged-main→deploy-init→deploy-success→closed."
+                        ),
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Provider advancing the task (must match checkout owner).",
+                    },
+                    "governance_hash": {
+                        "type": "string",
+                        "description": "Current governance hash for write authorization.",
+                    },
+                    "transition_evidence": {
+                        "type": "object",
+                        "description": (
+                            "Evidence for gated transitions. "
+                            "committed: {commit_sha: '<40-char hex>'}. "
+                            "merged-main: {pr_id: <int>, merged_at: '<ISO8601>'}. "
+                            "deploy-success: {deploy_evidence: {id, name, run_id, status, "
+                            "conclusion, started_at, completed_at}}. "
+                            "closed: {live_validation_evidence: '<description>'}. "
+                            "Any revert: {revert_reason: '<reason>'}."
+                        ),
+                    },
+                    "pr_id": {
+                        "type": "integer",
+                        "description": "GitHub PR number (shortcut for merged-main, same as transition_evidence.pr_id).",
+                    },
+                    "merged_at": {
+                        "type": "string",
+                        "description": "PR merged_at timestamp (shortcut for merged-main).",
+                    },
+                },
+                "required": ["record_id", "target_status", "provider", "governance_hash"],
+            },
+        ),
+        Tool(
+            name="append_worklog",
+            description=(
+                "Append a worklog entry to a task (checkout required). "
+                "This is the ONLY way to add task worklogs (ENC-FTR-037). "
+                "The task must be checked out by this session before calling this tool. "
+                "For issues and features, use tracker_log directly."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "record_id": {
+                        "type": "string",
+                        "description": "The task record ID to log against.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Worklog text. Use [START], [INFO], [SUCCESS], [ERROR], [END] tags.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Provider appending the worklog (must match checkout owner).",
+                    },
+                    "governance_hash": {
+                        "type": "string",
+                        "description": "Current governance hash for write authorization.",
+                    },
+                },
+                "required": ["record_id", "description", "provider", "governance_hash"],
+            },
+        ),
+        Tool(
+            name="validate_commit_complete",
+            description=(
+                "Validate a commit-complete-id (CCI-xxx) token issued by the checkout service. "
+                "Returns validity + associated task_id. "
+                "Used by GitHub Actions pr-commit-gate to verify PRs contain a valid CCI."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "cci_id": {
+                        "type": "string",
+                        "description": "The commit-complete-id token to validate (format: CCI-{32hex}).",
+                    },
+                },
+                "required": ["cci_id"],
+            },
+        ),
     ]
 
 
@@ -4172,8 +4404,23 @@ async def _tracker_set(args: dict) -> list[TextContent]:
     field = args["field"]
     value = args["value"]
 
+    # ENC-FTR-037: Task status transitions must go through checkout service.
+    try:
+        _, record_type, _ = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type == "task" and str(field).lower() == "status":
+        return _result_text({
+            "error": (
+                "Task status must be changed via advance_task_status (checkout service). "
+                "Use the advance_task_status tool with target_status and your provider identity. "
+                "This ensures the checkout gate, token issuance, and GitHub API validation are enforced."
+            )
+        })
+
     # --- Phase 2d: HTTP API migration ---
-    # All business logic (field validation, status transitions, session ownership,
+    # All business logic (field validation, session ownership,
     # write source tracking, history append) is handled by the tracker Lambda.
     try:
         project_id, record_type, rid = _parse_record_id(record_id)
@@ -4207,6 +4454,20 @@ async def _tracker_log(args: dict) -> list[TextContent]:
 
     record_id = args["record_id"]
     description = args["description"]
+
+    # ENC-FTR-037: Task worklogs must go through checkout service.
+    try:
+        _, record_type, _ = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type == "task":
+        return _result_text({
+            "error": (
+                "Task worklogs must be appended via append_worklog (checkout service). "
+                "Use the append_worklog tool. The task must be checked out first via checkout_task."
+            )
+        })
 
     # --- Phase 2d: HTTP API migration ---
     try:
@@ -5121,6 +5382,142 @@ async def _github_projects_list(args: dict) -> list[TextContent]:
 
 
 # -------------------------------------------------------------------
+# Checkout Service Handlers (ENC-FTR-037)
+# -------------------------------------------------------------------
+
+
+async def _checkout_task(args: dict) -> list[TextContent]:
+    """checkout_task — Check out a task and advance to in-progress."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = args["record_id"]
+    active_agent_session_id = (args.get("active_agent_session_id") or "").strip()
+    if not active_agent_session_id:
+        return _result_text({"error": "active_agent_session_id is required"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "task":
+        return _result_text({"error": f"checkout_task only applies to tasks, not {record_type}"})
+
+    payload: Dict[str, Any] = {
+        "active_agent_session_id": active_agent_session_id,
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("coordination_request_id"):
+        payload["coordination_request_id"] = args["coordination_request_id"]
+
+    resp = _checkout_api_request("POST", f"/{project_id}/{record_type}/{rid}/checkout", payload=payload)
+    return _result_text(resp)
+
+
+async def _release_task(args: dict) -> list[TextContent]:
+    """release_task — Release the checkout on a task."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = args["record_id"]
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    payload: Dict[str, Any] = {"governance_hash": args.get("governance_hash", "")}
+    if args.get("provider"):
+        payload["provider"] = args["provider"]
+
+    resp = _checkout_api_request("DELETE", f"/{project_id}/{record_type}/{rid}/checkout", payload=payload)
+    return _result_text(resp)
+
+
+async def _advance_task_status(args: dict) -> list[TextContent]:
+    """advance_task_status — Advance a task's lifecycle status via the checkout service."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = args["record_id"]
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "task":
+        return _result_text({"error": f"advance_task_status only applies to tasks, not {record_type}"})
+
+    payload: Dict[str, Any] = {
+        "target_status": args["target_status"],
+        "provider": args.get("provider", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("transition_evidence"):
+        payload["transition_evidence"] = args["transition_evidence"]
+    if args.get("pr_id") is not None:
+        payload["pr_id"] = args["pr_id"]
+    if args.get("merged_at"):
+        payload["merged_at"] = args["merged_at"]
+    if args.get("coordination_request_id"):
+        payload["coordination_request_id"] = args["coordination_request_id"]
+    if args.get("live_validation_evidence"):
+        payload["live_validation_evidence"] = args["live_validation_evidence"]
+
+    resp = _checkout_api_request("POST", f"/{project_id}/{record_type}/{rid}/advance", payload=payload)
+    return _result_text(resp)
+
+
+async def _append_worklog(args: dict) -> list[TextContent]:
+    """append_worklog — Append a worklog to a checked-out task via checkout service."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = args["record_id"]
+    description = (args.get("description") or "").strip()
+    if not description:
+        return _result_text({"error": "description is required"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "task":
+        return _result_text({
+            "error": (
+                f"append_worklog is for tasks only. For {record_type} records, use tracker_log directly."
+            )
+        })
+
+    payload: Dict[str, Any] = {
+        "description": description,
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("provider"):
+        payload["provider"] = args["provider"]
+    if args.get("coordination_request_id"):
+        payload["coordination_request_id"] = args["coordination_request_id"]
+
+    resp = _checkout_api_request("POST", f"/{project_id}/{record_type}/{rid}/log", payload=payload)
+    return _result_text(resp)
+
+
+async def _validate_commit_complete(args: dict) -> list[TextContent]:
+    """validate_commit_complete — Validate a CCI token issued by the checkout service."""
+    cci_id = (args.get("cci_id") or "").strip()
+    if not cci_id:
+        return _result_text({"error": "cci_id is required"})
+
+    resp = _checkout_api_request("GET", f"/validate/commit-complete/{cci_id}")
+    return _result_text(resp)
+
+
+# -------------------------------------------------------------------
 # Handler dispatch map
 # -------------------------------------------------------------------
 
@@ -5166,6 +5563,12 @@ _TOOL_HANDLERS = {
     "github_create_issue": _github_create_issue,
     "github_projects_sync": _github_projects_sync,
     "github_projects_list": _github_projects_list,
+    # ENC-FTR-037: Checkout service tools
+    "checkout_task": _checkout_task,
+    "release_task": _release_task,
+    "advance_task_status": _advance_task_status,
+    "append_worklog": _append_worklog,
+    "validate_commit_complete": _validate_commit_complete,
 }
 
 
