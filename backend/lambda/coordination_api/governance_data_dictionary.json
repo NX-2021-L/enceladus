@@ -1,5 +1,5 @@
 {
-  "version": "2026-03-02.3",
+  "version": "2026-03-02.4",
   "updated_at": "2026-03-02T05:25:00Z",
   "owners": [
     "enceladus-platform"
@@ -1043,6 +1043,20 @@
         "changelog_version": {
           "type": "tool",
           "usage_guidance": "Current version for a project. Args: project_id (required). Returns changelog.version_response shape from S3 current-version.json."
+        }
+      }
+    },
+    "checkout_service.config": {
+      "description": "Runtime configuration requirements for the checkout service Lambda (ENC-ISS-088). Documents constraints on env var values to ensure correct inter-service routing.",
+      "fields": {
+        "TRACKER_API_BASE": {
+          "type": "string",
+          "constraints": {
+            "must_not_use": "https://jreese.net/api/v1/tracker",
+            "reason": "jreese.net routes through Cloudflare, which blocks Lambda IP ranges with HTTP 1010 (Access Denied by owner rule). Lambda-to-Lambda calls must use direct API Gateway endpoint."
+          },
+          "definition": "Base URL for outbound tracker API calls from checkout service. Must use direct API Gateway URL to bypass Cloudflare.",
+          "usage_guidance": "Correct value: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker. See ENC-ISS-088."
         }
       }
     },
