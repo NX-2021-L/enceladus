@@ -271,7 +271,12 @@ def _tracker_request(
 
 
 def _get_task(project_id: str, task_id: str) -> Tuple[int, dict]:
-    return _tracker_request("GET", f"/{project_id}/task/{task_id}")
+    status, body = _tracker_request("GET", f"/{project_id}/task/{task_id}")
+    # tracker_mutation GET now returns {"success": true, "record": {...}}.
+    # Preserve backward compatibility with older flat payloads.
+    if status == 200 and isinstance(body, dict) and isinstance(body.get("record"), dict):
+        return status, body["record"]
+    return status, body
 
 
 def _set_task_field(
