@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-02.4",
-  "updated_at": "2026-03-02T05:25:00Z",
+  "version": "2026-03-02.5",
+  "updated_at": "2026-03-02T16:30:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1043,6 +1043,15 @@
         "changelog_version": {
           "type": "tool",
           "usage_guidance": "Current version for a project. Args: project_id (required). Returns changelog.version_response shape from S3 current-version.json."
+        }
+      }
+    },
+    "mcp_server.governance_dictionary": {
+      "description": "MCP tool for querying the governance data dictionary with lazy-loading support (ENC-ISS-087). Wraps GET /api/v1/governance/dictionary with optional entity/field/value filtering.",
+      "fields": {
+        "governance_dictionary": {
+          "type": "tool",
+          "usage_guidance": "No args: compact index (entity names + field counts, ~1k tokens). With entity (e.g., 'tracker.task'): full entity schema. With entity + field: single field definition. With entity + field + value: enum validation. Replaces governance_get('governance_data_dictionary.json') for session init."
         }
       }
     },
