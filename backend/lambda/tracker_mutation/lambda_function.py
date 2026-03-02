@@ -108,6 +108,8 @@ _INTERNAL_SCOPE_MAP_RAW = (
 ).strip()
 GITHUB_INTEGRATION_API_BASE = os.environ.get("GITHUB_INTEGRATION_API_BASE", "")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
+# ENC-FTR-037: checkout service gate key — only checkout_service Lambda may change task status
+CHECKOUT_SERVICE_KEY = os.environ.get("CHECKOUT_SERVICE_KEY", "")
 MAX_NOTE_LENGTH = 2000
 
 # Valid record types and their closed/default statuses
@@ -140,8 +142,9 @@ _VALID_TRANSITIONS = {
         "open": {"in-progress"},
         "in-progress": {"coding-complete"},
         "coding-complete": {"committed"},
-        "committed": {"pushed"},
-        "pushed": {"merged-main"},
+        "committed": {"pr"},
+        "pr": {"merged-main"},
+        # backward-compat: tasks with legacy status "pushed" are treated as "pr" on read
         "merged-main": {"deploy-init"},
         "deploy-init": {"deploy-success"},
         "deploy-success": {"closed", "coding-updates"},
@@ -166,8 +169,8 @@ _REVERT_TRANSITIONS = {
         "in-progress": {"open"},
         "coding-complete": {"in-progress"},
         "committed": {"coding-complete"},
-        "pushed": {"committed"},
-        "merged-main": {"pushed"},
+        "pr": {"committed"},
+        "merged-main": {"pr"},
         "deploy-init": {"merged-main"},
         "coding-updates": {"deploy-success"},
     },
@@ -476,6 +479,28 @@ def _verify_token(token: str) -> Dict[str, Any]:
     except jwt.PyJWTError as exc:
         raise ValueError(f"Token validation failed: {exc}") from exc
     return claims
+
+
+def _is_checkout_service_request(event: Optional[Dict]) -> bool:
+    """Return True if request carries the CHECKOUT_SERVICE_KEY header (ENC-FTR-037).
+
+    The checkout_service Lambda presents this key so tracker_mutation can allow
+    status transitions that would otherwise be blocked for direct callers.
+    If CHECKOUT_SERVICE_KEY is not configured, this gate is permissive (returns True)
+    to allow graceful rollout before the key is deployed.
+    """
+    if not CHECKOUT_SERVICE_KEY:
+        # Key not yet configured — permissive mode until checkout_service is deployed
+        return True
+    if not event:
+        return False
+    headers = event.get("headers") or {}
+    presented = (
+        headers.get("x-checkout-service-key")
+        or headers.get("X-Checkout-Service-Key")
+        or ""
+    )
+    return bool(presented and presented == CHECKOUT_SERVICE_KEY)
 
 
 def _extract_token(event: Dict) -> Optional[str]:
@@ -1406,11 +1431,19 @@ def _normalize_acceptance_criteria_value(record_type: str, raw_value: Any) -> Tu
     return normalized_list, None
 
 
-def _handle_update_field(project_id: str, record_type: str, record_id: str, body: Dict) -> Dict:
+def _handle_update_field(
+    project_id: str,
+    record_type: str,
+    record_id: str,
+    body: Dict,
+    event: Optional[Dict] = None,
+) -> Dict:
     """PATCH /{project}/{type}/{id} — update a single field on a record.
 
     Body: {"field": "status", "value": "in-progress", "write_source": {...}}
     Also supports legacy PWA actions: {"action": "close|note|reopen", "note": "..."}
+
+    ENC-FTR-037: Task status changes require X-Checkout-Service-Key (checkout_service only).
     """
     # Detect PWA action vs MCP field update
     action = body.get("action")
@@ -1464,6 +1497,17 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
 
     # --- Validation for specific fields ---
     if field == "status":
+        # ENC-FTR-037: Task status transitions must go through checkout_service.
+        # Direct calls (MCP tracker_set, PWA) are rejected with a clear redirect message.
+        # Gate is permissive if CHECKOUT_SERVICE_KEY is not yet configured (graceful rollout).
+        if record_type == "task" and not _is_checkout_service_request(event):
+            return _error(
+                403,
+                "Task status transitions must be made via the checkout service. "
+                "Use the advance_task_status MCP tool or POST "
+                "/api/v1/checkout/{project}/task/{task_id}/advance.",
+            )
+
         current_status = item_data.get("status", "").strip().lower()
         new_lower = value.strip().lower()
         closing = new_lower in ("closed", "completed", "complete")
@@ -1518,11 +1562,14 @@ def _handle_update_field(project_id: str, record_type: str, record_id: str, body
 
         # --- Evidence-gated forward transitions (ENC-FTR-022 / ENC-FTR-035) ---
         # Evidence gates apply to forward transitions only; reverts use revert_reason instead.
-        if not is_revert and record_type == "task" and new_lower == "pushed":
+        # ENC-FTR-037: commit_sha gate moved from "pushed" → "committed" (pushed renamed to pr).
+        # When checkout_service (Step 3) is deployed, this gate moves there; tracker_mutation
+        # will only accept "committed" transitions from checkout_service via X-Checkout-Service-Key.
+        if not is_revert and record_type == "task" and new_lower == "committed":
             commit_sha = transition_evidence.get("commit_sha", "").strip()
             if not commit_sha:
                 return _error(400,
-                    "Cannot transition to 'pushed': transition_evidence.commit_sha required")
+                    "Cannot transition to 'committed': transition_evidence.commit_sha required")
             if not re.match(r'^[0-9a-f]{40}$', commit_sha.lower()):
                 return _error(400,
                     f"Invalid commit_sha: expected 40-char hex. Got: '{commit_sha}'")
@@ -1943,12 +1990,30 @@ def _handle_log(project_id: str, record_type: str, record_id: str, body: Dict) -
         return _error(404, f"Record not found: {record_id}")
 
     # Session ownership enforcement
+    # ENC-FTR-037: worklog appends on tasks ALWAYS require an active checkout.
     item_data = _deser_item(raw_item)
     ws = _normalize_write_source(body)
     current_session = item_data.get("active_agent_session", False)
     current_session_id = str(item_data.get("active_agent_session_id", "")).strip()
     provider = str(ws.get("provider", "")).strip()
-    if current_session and current_session_id:
+    if record_type == "task":
+        if not current_session or not current_session_id:
+            return _error(
+                409,
+                "Task must be checked out to append worklog. "
+                "Use the append_worklog MCP tool (via checkout service) or "
+                "POST /api/v1/checkout/{project}/task/{task_id}/log.",
+            )
+        if not provider:
+            return _error(
+                400,
+                f"Task is checked out by '{current_session_id}'. "
+                "write_source.provider is required.",
+            )
+        if current_session_id != provider:
+            return _error(409, f"Task is checked out by '{current_session_id}'. Cannot modify as '{provider}'.")
+    elif current_session and current_session_id:
+        # Non-task records: preserve existing ownership check
         if not provider:
             return _error(
                 400,
@@ -2220,7 +2285,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             except (ValueError, TypeError):
                 return _error(400, "Invalid JSON body.")
             _normalize_write_source(body, claims)
-            return _handle_update_field(project_id, record_type, record_id, body)
+            return _handle_update_field(project_id, record_type, record_id, body, event=event)
         else:
             return _error(405, f"Method {method} not allowed. Use GET or PATCH.")
 
