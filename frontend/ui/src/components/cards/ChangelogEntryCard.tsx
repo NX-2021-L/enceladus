@@ -11,7 +11,8 @@ const CHANGE_TYPE_STYLES: Record<string, string> = {
 export function ChangelogEntryCard({ entry }: { entry: ChangelogEntry }) {
   const [expanded, setExpanded] = useState(false)
 
-  const releaseNotesId = entry.related_record_ids.find((id) => id.startsWith('DOC-'))
+  const relatedRecordIds = entry.related_record_ids ?? []
+  const releaseNotesId = relatedRecordIds.find((id) => id.startsWith('DOC-'))
   const badgeStyle = CHANGE_TYPE_STYLES[entry.change_type] ?? CHANGE_TYPE_STYLES.patch
 
   return (
@@ -57,7 +58,7 @@ export function ChangelogEntryCard({ entry }: { entry: ChangelogEntry }) {
       )}
 
       {/* Footer: release notes link + related IDs */}
-      {(releaseNotesId || entry.related_record_ids.length > 0) && (
+      {(releaseNotesId || relatedRecordIds.length > 0) && (
         <div className="mt-2 flex items-center gap-2 flex-wrap">
           {releaseNotesId && (
             <a
@@ -68,7 +69,7 @@ export function ChangelogEntryCard({ entry }: { entry: ChangelogEntry }) {
               Release Notes →
             </a>
           )}
-          {entry.related_record_ids
+          {relatedRecordIds
             .filter((id) => !id.startsWith('DOC-'))
             .slice(0, 3)
             .map((id) => (
