@@ -120,6 +120,16 @@ export async function createOAuthClient(input: {
   return body.oauth_client
 }
 
+export async function deleteOAuthClient(clientId: string): Promise<void> {
+  const res = await fetchWithAuth(
+    `/api/v1/coordination/auth/oauth-clients/${encodeURIComponent(clientId)}`,
+    { method: 'DELETE' },
+  )
+  if (!res.ok) {
+    throw new Error(`Failed to delete OAuth client ${clientId}: ${res.status}`)
+  }
+}
+
 export async function updateOAuthClientPermissions(
   clientId: string,
   permissions: string[],
