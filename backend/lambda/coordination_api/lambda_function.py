@@ -9507,10 +9507,10 @@ def _handle_oauth_client_delete(client_id: str) -> Dict[str, Any]:
             )
         except ClientError as cog_exc:
             err_code = cog_exc.response.get("Error", {}).get("Code", "")
-            if err_code != "ResourceNotFoundException":
+            if err_code not in ("ResourceNotFoundException", "InvalidParameterException"):
                 logger.exception("Failed to delete Cognito User Pool client %s", client_id)
                 return _error(500, f"Failed to delete Cognito client: {cog_exc}")
-            # Already gone in Cognito — continue with DynamoDB cleanup
+            # Not found or legacy client without valid Cognito ID — continue with DynamoDB cleanup
         # Delete the DynamoDB record
         ddb.delete_item(
             TableName=AUTH_TOKENS_TABLE,
