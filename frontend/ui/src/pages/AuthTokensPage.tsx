@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   createManagedAuthToken,
   createOAuthClient,
+  deleteOAuthClient,
   deleteManagedAuthToken,
   listManagedAuthTokens,
   listOAuthClients,
@@ -268,6 +269,17 @@ export function AuthTokensPage() {
     }
   }
 
+  async function onDeleteClient(clientId: string) {
+    if (!confirm('Delete this OAuth client? This will also revoke its Cognito credentials.')) return
+    setError(null)
+    try {
+      await deleteOAuthClient(clientId)
+      await reload()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Delete client failed')
+    }
+  }
+
   async function onToggleTokenPermission(tokenId: string, existing: string[], perm: string, checked: boolean) {
     const next = checked ? [...new Set([...existing, perm])] : existing.filter((p) => p !== perm)
     const safe = next.length ? next : ['read']
@@ -475,6 +487,7 @@ export function AuthTokensPage() {
                   <th className="py-2 pr-4">Grant Types</th>
                   <th className="py-2 pr-4">Status</th>
                   <th className="py-2 pr-4">Last Used</th>
+                  <th className="py-2 pr-4">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -497,11 +510,19 @@ export function AuthTokensPage() {
                       </span>
                     </td>
                     <td className="py-2 pr-4">{client.last_used_at || 'never'}</td>
+                    <td className="py-2 pr-4">
+                      <button
+                        onClick={() => onDeleteClient(client.client_id)}
+                        className="text-rose-400 hover:text-rose-300 text-xs"
+                      >
+                        Delete
+                      </button>
+                    </td>
                   </tr>
                 ))}
                 {sortedClients.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="py-4 text-center text-slate-400">
+                    <td colSpan={6} className="py-4 text-center text-slate-400">
                       No OAuth clients registered
                     </td>
                   </tr>
