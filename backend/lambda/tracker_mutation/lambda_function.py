@@ -600,6 +600,75 @@ def _get_project_prefix(project_id: str) -> Optional[str]:
         return None
 
 
+def _parse_github_url(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse owner and repo from a GitHub URL like https://github.com/OWNER/REPO."""
+    m = re.match(r'https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?$', url)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+
+def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the GitHub owner/repo for a project from the projects table.
+
+    Checks the project's ``repo`` field first. If absent, checks the parent
+    (one level), then children that list this project as parent.
+
+    Returns (owner, repo) or (None, None) if unresolvable.
+    """
+    try:
+        ddb = _get_ddb()
+        resp = ddb.get_item(
+            TableName=PROJECTS_TABLE,
+            Key={"project_id": {"S": project_id}},
+            ProjectionExpression="repo, parent",
+        )
+        item = resp.get("Item")
+        if not item:
+            return None, None
+
+        repo_url = item.get("repo", {}).get("S", "")
+        if repo_url:
+            return _parse_github_url(repo_url)
+
+        # Walk up to parent (one level)
+        parent_id = item.get("parent", {}).get("S", "")
+        if parent_id:
+            try:
+                resp2 = ddb.get_item(
+                    TableName=PROJECTS_TABLE,
+                    Key={"project_id": {"S": parent_id}},
+                    ProjectionExpression="repo",
+                )
+                item2 = resp2.get("Item")
+                if item2:
+                    repo_url2 = item2.get("repo", {}).get("S", "")
+                    if repo_url2:
+                        return _parse_github_url(repo_url2)
+            except Exception as exc:
+                logger.warning("Failed to look up parent project '%s': %s", parent_id, exc)
+
+        # Check children that list this project as parent
+        try:
+            scan_resp = ddb.scan(
+                TableName=PROJECTS_TABLE,
+                FilterExpression="parent = :pid",
+                ExpressionAttributeValues={":pid": {"S": project_id}},
+                ProjectionExpression="repo",
+            )
+            for child in scan_resp.get("Items", []):
+                child_repo = child.get("repo", {}).get("S", "")
+                if child_repo:
+                    return _parse_github_url(child_repo)
+        except Exception as exc:
+            logger.warning("Failed to scan child projects for '%s': %s", project_id, exc)
+
+        return None, None
+    except Exception as exc:
+        logger.warning("Failed to resolve GitHub repo for project '%s': %s", project_id, exc)
+        return None, None
+
+
 # ---------------------------------------------------------------------------
 # DynamoDB helpers
 # ---------------------------------------------------------------------------
@@ -1573,8 +1642,17 @@ def _handle_update_field(
             if not re.match(r'^[0-9a-f]{40}$', commit_sha.lower()):
                 return _error(400,
                     f"Invalid commit_sha: expected 40-char hex. Got: '{commit_sha}'")
-            owner = transition_evidence.get("owner", "NX-2021-L")
-            repo = transition_evidence.get("repo", "enceladus")
+            owner = transition_evidence.get("owner")
+            repo = transition_evidence.get("repo")
+            if not owner or not repo:
+                resolved_owner, resolved_repo = _resolve_github_repo(project_id)
+                owner = owner or resolved_owner
+                repo = repo or resolved_repo
+            if not owner or not repo:
+                return _error(400,
+                    f"Cannot resolve GitHub repo for project '{project_id}'. "
+                    "Provide owner and repo in transition_evidence, or set the "
+                    "project's repo field in the projects table.")
             valid, reason = _validate_commit_via_github(owner, repo, commit_sha)
             if not valid:
                 return _error(400,
