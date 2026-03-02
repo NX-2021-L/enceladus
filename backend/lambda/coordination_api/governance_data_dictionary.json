@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-02.5",
-  "updated_at": "2026-03-02T16:30:00Z",
+  "version": "2026-03-02.6",
+  "updated_at": "2026-03-02T19:01:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -628,6 +628,23 @@
         "session.tokens": {
           "type": "object",
           "usage_guidance": "Optional raw token object (id/access/refresh) returned only when include_tokens=true."
+        }
+      }
+    },
+    "coordination.mcp_auth": {
+      "description": "Authentication contract for the coordination MCP gateway route (/api/v1/coordination/mcp).",
+      "fields": {
+        "Authorization": {
+          "type": "string",
+          "usage_guidance": "Supports OAuth connector bearer tokens: Authorization: Bearer <jwt>. Parsed before cookie auth."
+        },
+        "enceladus_id_token": {
+          "type": "string",
+          "usage_guidance": "Cookie-based Cognito token used by PWA/browser sessions. Remains supported alongside bearer auth."
+        },
+        "jwt_claim_validation": {
+          "type": "object",
+          "usage_guidance": "ID tokens validate aud==COGNITO_CLIENT_ID; access tokens validate client_id==COGNITO_CLIENT_ID; issuer must match the Cognito user-pool issuer URL."
         }
       }
     },
