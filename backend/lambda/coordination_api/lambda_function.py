@@ -25,6 +25,7 @@ import asyncio
 import dataclasses
 import gzip
 import hashlib
+import hmac
 import importlib.util
 import json
 import logging
