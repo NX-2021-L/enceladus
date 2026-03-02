@@ -26,7 +26,7 @@ Auth:
     Auto-checkout handler: invoked by EventBridge (no HTTP auth required).
 
 Environment variables:
-    TRACKER_API_BASE              default: https://jreese.net/api/v1/tracker
+    TRACKER_API_BASE              default: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker (direct APIGW, avoids Cloudflare 1010)
     COORDINATION_INTERNAL_API_KEY  internal key for calling tracker API
     COORDINATION_INTERNAL_API_KEYS CSV of accepted internal keys (multi-key support)
     CHECKOUT_SERVICE_KEY          secret this service presents to tracker_mutation (X-Checkout-Service-Key)
@@ -75,7 +75,7 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-TRACKER_API_BASE = os.environ.get("TRACKER_API_BASE", "https://jreese.net/api/v1/tracker").rstrip("/")
+TRACKER_API_BASE = os.environ.get("TRACKER_API_BASE", "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker").rstrip("/")
 CHECKOUT_SERVICE_KEY = os.environ.get("CHECKOUT_SERVICE_KEY", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 CHECKOUT_TOKENS_TABLE = os.environ.get("CHECKOUT_TOKENS_TABLE", "enceladus-checkout-tokens")
