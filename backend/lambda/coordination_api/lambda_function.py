@@ -903,6 +903,7 @@ def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Opti
         managed = _load_managed_service_token(internal_key)
         if managed:
             _touch_managed_service_token_usage(managed.get("policy_id", ""))
+            _touch_oauth_client_by_service_name(managed.get("service_name", ""))
             return {
                 "auth_mode": "managed-token",
                 "service_name": managed.get("service_name"),
@@ -9076,6 +9077,36 @@ def _touch_managed_service_token_usage(policy_id: str) -> None:
         logger.warning("Failed to update last_used_at for managed token %s", policy_id)
 
 
+def _touch_oauth_client_by_service_name(service_name: str) -> None:
+    """Best-effort update of last_used_at on any OAuth client sharing the same service_name."""
+    if not service_name:
+        return
+    try:
+        ddb = _get_ddb()
+        resp = ddb.scan(
+            TableName=AUTH_TOKENS_TABLE,
+            FilterExpression="begins_with(policy_id, :prefix) AND service_name = :sn",
+            ExpressionAttributeValues={
+                ":prefix": _serialize(OAUTH_CLIENT_POLICY_PREFIX),
+                ":sn": _serialize(service_name),
+            },
+            ProjectionExpression="policy_id",
+        )
+        now = _now_z()
+        for raw in resp.get("Items", []):
+            ddb.update_item(
+                TableName=AUTH_TOKENS_TABLE,
+                Key={"policy_id": raw["policy_id"]},
+                UpdateExpression="SET last_used_at = :lu, updated_at = :ua",
+                ExpressionAttributeValues={
+                    ":lu": _serialize(now),
+                    ":ua": _serialize(now),
+                },
+            )
+    except Exception:
+        logger.warning("Failed to update last_used_at for OAuth client (service: %s)", service_name)
+
+
 def _handle_auth_tokens_list() -> Dict[str, Any]:
     try:
         tokens = _list_managed_service_tokens()
@@ -9453,6 +9484,42 @@ def _handle_oauth_client_permissions_update(client_id: str, event: Dict[str, Any
         logger.exception("Failed to update OAuth client permissions")
         return _error(500, f"Failed to update OAuth client permissions: {exc}")
     return _response(200, {"success": True, "client_id": client_id, "permissions": permissions})
+
+
+def _handle_oauth_client_delete(client_id: str) -> Dict[str, Any]:
+    client_id = str(client_id or "").strip()
+    if not client_id:
+        return _error(400, "client_id is required")
+    policy_id = f"{OAUTH_CLIENT_POLICY_PREFIX}{client_id}"
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Key={"policy_id": _serialize(policy_id)},
+        )
+        if not resp.get("Item"):
+            return _error(404, f"OAuth client '{client_id}' not found")
+        # Delete the Cognito User Pool client
+        try:
+            _get_cognito().delete_user_pool_client(
+                UserPoolId=COGNITO_USER_POOL_ID,
+                ClientId=client_id,
+            )
+        except ClientError as cog_exc:
+            err_code = cog_exc.response.get("Error", {}).get("Code", "")
+            if err_code != "ResourceNotFoundException":
+                logger.exception("Failed to delete Cognito User Pool client %s", client_id)
+                return _error(500, f"Failed to delete Cognito client: {cog_exc}")
+            # Already gone in Cognito — continue with DynamoDB cleanup
+        # Delete the DynamoDB record
+        ddb.delete_item(
+            TableName=AUTH_TOKENS_TABLE,
+            Key={"policy_id": _serialize(policy_id)},
+        )
+    except Exception as exc:
+        logger.exception("Failed to delete OAuth client")
+        return _error(500, f"Failed to delete OAuth client: {exc}")
+    return _response(200, {"success": True, "client_id": client_id, "deleted": True})
 
 
 def _load_terminal_cognito_credentials() -> Dict[str, str]:
@@ -9869,6 +9936,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # POST /api/v1/coordination/auth/oauth-clients
     if method == "POST" and path == "/api/v1/coordination/auth/oauth-clients":
         return _handle_oauth_clients_create(event)
+
+    # DELETE /api/v1/coordination/auth/oauth-clients/{clientId}
+    match_oauth_delete = re.fullmatch(r"/api/v1/coordination/auth/oauth-clients/([A-Za-z0-9_\-]+)", path)
+    if method == "DELETE" and match_oauth_delete:
+        return _handle_oauth_client_delete(match_oauth_delete.group(1))
 
     # PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/usage
     match_oauth_usage = re.fullmatch(r"/api/v1/coordination/auth/oauth-clients/([A-Za-z0-9_\-]+)/usage", path)
