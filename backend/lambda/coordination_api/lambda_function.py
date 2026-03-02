@@ -772,6 +772,16 @@ _JWKS_TTL = 3600.0
 
 def _extract_token(event: Dict[str, Any]) -> Optional[str]:
     headers = event.get("headers") or {}
+    auth_header = (
+        headers.get("authorization")
+        or headers.get("Authorization")
+        or ""
+    )
+    if isinstance(auth_header, str):
+        parts = auth_header.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip():
+            return parts[1].strip()
+
     cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
     cookie_parts: List[str] = []
     if cookie_header:
@@ -839,19 +849,43 @@ def _verify_token(token: str) -> Dict[str, Any]:
         raise ValueError("Token key ID not found in JWKS")
 
     try:
-        return jwt.decode(
+        claims = jwt.decode(
             token,
             key,
             algorithms=["RS256"],
-            audience=COGNITO_CLIENT_ID,
-            options={"verify_exp": True},
+            options={"verify_exp": True, "verify_aud": False},
         )
     except jwt.ExpiredSignatureError:
         raise ValueError("Token has expired. Please sign in again.")
-    except jwt.InvalidAudienceError:
-        raise ValueError("Token audience mismatch.")
     except jwt.PyJWTError as exc:
         raise ValueError(f"Token validation failed: {exc}") from exc
+
+    expected_issuer = ""
+    if COGNITO_USER_POOL_ID:
+        region = COGNITO_USER_POOL_ID.split("_", 1)[0]
+        expected_issuer = f"https://cognito-idp.{region}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+    token_issuer = str(claims.get("iss") or "").strip()
+    if expected_issuer and token_issuer and not hmac.compare_digest(token_issuer, expected_issuer):
+        raise ValueError("Token issuer mismatch.")
+
+    expected_client_id = str(COGNITO_CLIENT_ID or "").strip()
+    if expected_client_id:
+        token_use = str(claims.get("token_use") or "").strip().lower()
+        aud = str(claims.get("aud") or "").strip()
+        client_id = str(claims.get("client_id") or "").strip()
+        if token_use == "id":
+            if not hmac.compare_digest(aud, expected_client_id):
+                raise ValueError("Token audience mismatch.")
+        elif token_use == "access":
+            if not hmac.compare_digest(client_id, expected_client_id):
+                raise ValueError("Token client_id mismatch.")
+        elif not (
+            (aud and hmac.compare_digest(aud, expected_client_id))
+            or (client_id and hmac.compare_digest(client_id, expected_client_id))
+        ):
+            raise ValueError("Token client mismatch.")
+
+    return claims
 
 
 def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:

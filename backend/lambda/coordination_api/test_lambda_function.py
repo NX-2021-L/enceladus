@@ -402,6 +402,43 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertEqual(resp["statusCode"], 200)
         mock_handle_mcp_http.assert_called_once()
 
+    def test_extract_token_prefers_bearer_authorization_header(self):
+        event = {
+            "headers": {
+                "Authorization": "Bearer access-token-123",
+                "Cookie": "enceladus_id_token=cookie-token",
+            }
+        }
+        self.assertEqual(coordination_lambda._extract_token(event), "access-token-123")
+
+    @patch.object(coordination_lambda, "_verify_token", return_value={"sub": "user-1"})
+    @patch.object(coordination_lambda, "_handle_mcp_http")
+    def test_lambda_handler_routes_mcp_endpoint_with_bearer_token(
+        self,
+        mock_handle_mcp_http,
+        _mock_verify_token,
+    ):
+        mock_handle_mcp_http.return_value = coordination_lambda._response(
+            200,
+            {"jsonrpc": "2.0", "id": "req", "result": {"ok": True}},
+        )
+        event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/mcp",
+            "headers": {"authorization": "Bearer oauth-access-token"},
+            "body": json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req",
+                    "method": "initialize",
+                    "params": {},
+                }
+            ),
+        }
+        resp = coordination_lambda.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        mock_handle_mcp_http.assert_called_once()
+
     @patch.object(
         coordination_lambda,
         "_load_terminal_cognito_credentials",
