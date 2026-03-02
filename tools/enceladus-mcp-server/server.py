@@ -3679,6 +3679,46 @@ async def list_tools() -> list[Tool]:
                 "required": ["file_name"],
             },
         ),
+        Tool(
+            name="governance_dictionary",
+            description=(
+                "Query governance data dictionary with optional filtering. "
+                "No args = compact index (entity names + field counts). "
+                "With entity = full schema for that entity. "
+                "With entity + field = specific field definition. "
+                "With entity + field + value = enum validation. "
+                "Use this instead of governance_get('governance_data_dictionary.json') "
+                "to avoid loading the full ~56KB dictionary into context."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entity": {
+                        "type": "string",
+                        "description": (
+                            "Entity to look up (e.g., 'tracker.task', "
+                            "'deploy.request', 'document.create'). "
+                            "Omit for compact index of all entities."
+                        ),
+                    },
+                    "field": {
+                        "type": "string",
+                        "description": (
+                            "Field within the entity to look up "
+                            "(e.g., 'status', 'priority'). "
+                            "Requires entity."
+                        ),
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": (
+                            "Value to validate against the field's enum. "
+                            "Requires entity and field."
+                        ),
+                    },
+                },
+            },
+        ),
         # --- System ---
         Tool(
             name="connection_health",
@@ -5220,6 +5260,28 @@ async def _governance_get(args: dict) -> list[TextContent]:
         )
 
 
+async def _governance_dictionary(args: dict) -> list[TextContent]:
+    """Query governance data dictionary with optional entity/field/value filtering."""
+    entity = (args.get("entity") or "").strip()
+    field = (args.get("field") or "").strip()
+    value = (args.get("value") or "").strip()
+
+    query_parts: list[str] = []
+    if entity:
+        query_parts.append(f"entity={urllib.parse.quote(entity, safe='')}")
+    if field:
+        query_parts.append(f"field={urllib.parse.quote(field, safe='')}")
+    if value:
+        query_parts.append(f"value={urllib.parse.quote(value, safe='')}")
+
+    query_string = f"?{'&'.join(query_parts)}" if query_parts else ""
+    resp = _governance_api_request("GET", f"/dictionary{query_string}")
+
+    if resp.get("error"):
+        return _result_text(resp)
+    return _result_text(resp)
+
+
 # --- System ---
 
 
@@ -5602,6 +5664,7 @@ _TOOL_HANDLERS = {
     "governance_update": _governance_update,
     "governance_hash": _governance_hash,
     "governance_get": _governance_get,
+    "governance_dictionary": _governance_dictionary,
     "connection_health": _connection_health,
     "dispatch_plan_generate": _dispatch_plan_generate,
     "dispatch_plan_dry_run": _dispatch_plan_dry_run,
