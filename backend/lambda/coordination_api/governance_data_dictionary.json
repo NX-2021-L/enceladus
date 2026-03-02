@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-02.7",
-  "updated_at": "2026-03-02T19:22:00Z",
+  "version": "2026-03-02.8",
+  "updated_at": "2026-03-02T19:45:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -814,7 +814,7 @@
       }
     },
     "internal_auth.oauth_client": {
-      "description": "OAuth client records stored in the governance-policies table for external agent/MCP integrations. On creation, a Cognito User Pool App Client is registered via cognito-idp:CreateUserPoolClient so the client_id is valid for OAuth authorization_code flows.",
+      "description": "OAuth client records stored in the governance-policies table for external agent/MCP integrations. On creation, a Cognito User Pool App Client is registered via cognito-idp:CreateUserPoolClient so the client_id is valid for OAuth authorization_code flows. DELETE /oauth-clients/{clientId} removes both the DynamoDB record and the Cognito User Pool client. last_used_at is auto-updated when a managed token with the same service_name authenticates.",
       "fields": {
         "policy_id": {
           "type": "string",
