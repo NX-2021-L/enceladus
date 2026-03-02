@@ -104,14 +104,16 @@ ensure_tokens_table() {
     --attribute-definitions AttributeName=pk,AttributeType=S \
     --key-schema AttributeName=pk,KeyType=HASH \
     --billing-mode PAY_PER_REQUEST \
-    --sse-specification Enabled=true,SSEType=AES256 >/dev/null
+    --sse-specification Enabled=true >/dev/null
 
   # Enable TTL
   aws dynamodb wait table-exists --table-name "${TOKENS_TABLE}" --region "${REGION}"
-  aws dynamodb update-time-to-live \
+  if ! aws dynamodb update-time-to-live \
     --table-name "${TOKENS_TABLE}" \
     --region "${REGION}" \
-    --time-to-live-specification Enabled=true,AttributeName=ttl >/dev/null
+    --time-to-live-specification Enabled=true,AttributeName=ttl >/dev/null; then
+    log "[WARN] Unable to enable TTL on ${TOKENS_TABLE}; continuing without TTL."
+  fi
 
   log "[END] Table created: ${TOKENS_TABLE}"
 }
@@ -145,7 +147,7 @@ ensure_lambda_role() {
     return
   fi
 
-  log "[START] Creating IAM role: ${role_name}"
+  log "[START] Creating IAM role: ${role_name}" >&2
   aws iam create-role \
     --role-name "${role_name}" \
     --assume-role-policy-document '{
@@ -180,7 +182,7 @@ ensure_lambda_role() {
 
   # Brief wait for role propagation
   sleep 10
-  log "[END] IAM role created: ${role_name}"
+  log "[END] IAM role created: ${role_name}" >&2
   echo "${role_arn}"
 }
 
