@@ -7,6 +7,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
+import { feedKeys } from '../api/feeds';
 import {
   createProject,
   validateProjectId,
@@ -53,6 +55,7 @@ const STATUS_OPTIONS = [
 
 export function CreateProjectPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { setAuthExpired } = useAuthState();
   const redirectTimeoutRef = useRef<number | null>(null);
   const [formData, setFormData] = useState<FormData>({
@@ -153,6 +156,7 @@ export function CreateProjectPage() {
 
       const response = await createProject(payload);
       const createdProjectId = response.project.project_id;
+      queryClient.invalidateQueries({ queryKey: feedKeys.projects });
 
       setSubmission({
         isLoading: false,
