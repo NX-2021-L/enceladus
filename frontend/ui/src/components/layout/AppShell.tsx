@@ -36,7 +36,7 @@ export function AppShell() {
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
       <Header />
       <LiveFeedProvider>
-        <main className="flex-1 pb-16 overflow-y-auto">
+        <main className="relative z-0 flex-1 pb-16 overflow-y-auto">
           <Outlet />
         </main>
       </LiveFeedProvider>
