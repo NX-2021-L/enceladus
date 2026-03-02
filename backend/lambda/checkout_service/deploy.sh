@@ -412,7 +412,7 @@ print(json.dumps({"Variables": {
     "GITHUB_TOKEN": "${GITHUB_TOKEN}",
     "CHECKOUT_TOKENS_TABLE": "${TOKENS_TABLE}",
     "CHECKOUT_TOKENS_REGION": "${REGION}",
-    "TRACKER_API_BASE": "https://jreese.net/api/v1/tracker",
+    "TRACKER_API_BASE": "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker",
     "CORS_ORIGIN": "https://jreese.net",
 }}, separators=(',', ':')))
 PY
