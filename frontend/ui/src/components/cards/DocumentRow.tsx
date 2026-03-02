@@ -20,6 +20,7 @@ export function DocumentRow({ doc }: { doc: Document }) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-0.5">
             <span className="text-xs font-mono text-slate-500 flex-shrink-0">{doc.document_id}</span>
+            <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 font-medium uppercase flex-shrink-0">{doc.project_id}</span>
             <span className="text-xs text-slate-600">{formatBytes(doc.size_bytes)}</span>
           </div>
           <h4 className="text-sm font-medium text-slate-200 truncate">{doc.title}</h4>
