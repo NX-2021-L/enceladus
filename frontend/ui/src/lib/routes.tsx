@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { Navigate, createBrowserRouter } from 'react-router-dom'
 import { AppShell } from '../components/layout/AppShell'
 import { LoadingState } from '../components/shared/LoadingState'
+import { RouteErrorBoundary } from '../components/shared/RouteErrorBoundary'
 
 const DashboardPage = lazy(() =>
   import('../pages/DashboardPage').then((module) => ({ default: module.DashboardPage })),
@@ -93,7 +94,7 @@ export const router = createBrowserRouter(
         { path: '/issues', element: <Navigate to="/feed" replace /> },
         { path: '/features', element: <Navigate to="/feed" replace /> },
         { path: '/documents', element: withSuspense(<DocumentsListPage />) },
-        { path: '/changelog', element: withSuspense(<ChangelogListPage />) },
+        { path: '/changelog', element: withSuspense(<ChangelogListPage />), errorElement: <RouteErrorBoundary /> },
         {
           path: '/projects/:projectId/changelog',
           element: withSuspense(<ProjectChangelogPage />),
