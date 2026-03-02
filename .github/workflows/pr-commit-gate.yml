@@ -1,0 +1,84 @@
+name: PR Commit Gate
+
+# ENC-FTR-037: Every PR targeting main must include a commit-complete-id (CCI-xxx)
+# issued by the checkout service. This ensures that:
+#   1. A tracker task exists and was checked out for the change
+#   2. The task was advanced to "committed" status with a validated commit SHA
+#   3. The agent received the CCI token from the checkout service
+#
+# To obtain a CCI, advance the task to committed status via:
+#   - MCP: advance_task_status(target_status="committed", transition_evidence={commit_sha: "..."})
+#   - API: POST /api/v1/checkout/{project}/task/{task_id}/advance
+#
+# The CCI must appear anywhere in the PR body in the format: CCI-<32 lowercase hex chars>
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+jobs:
+  commit-gate:
+    name: PR Commit Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Extract commit-complete-id from PR body
+        id: extract_cci
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Extract CCI token: pattern CCI-{32 lowercase hex chars}
+          CCI_ID=$(echo "$PR_BODY" | grep -oE 'CCI-[0-9a-f]{32}' | head -1 || true)
+
+          if [ -z "$CCI_ID" ]; then
+            echo "::error::PR requires a commit-complete-id (CCI-xxx) from the checkout service."
+            echo "::error::To obtain one: advance the tracker task to 'committed' status with a commit SHA."
+            echo "::error::MCP: advance_task_status(target_status='committed', transition_evidence={commit_sha: '<sha>'})"
+            echo "::error::The CCI token will be returned in the response. Include it anywhere in this PR body."
+            exit 1
+          fi
+
+          echo "Found commit-complete-id: $CCI_ID"
+          echo "cci_id=$CCI_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Validate commit-complete-id with checkout service
+        env:
+          CCI_ID: ${{ steps.extract_cci.outputs.cci_id }}
+          CHECKOUT_SERVICE_BASE: https://jreese.net/api/v1/checkout
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          VALIDATE_URL="${CHECKOUT_SERVICE_BASE}/validate/commit-complete/${CCI_ID}"
+          echo "Validating: $VALIDATE_URL"
+
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Accept: application/json" \
+            "$VALIDATE_URL")
+
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n 1)
+
+          echo "Response (HTTP $HTTP_CODE): $HTTP_BODY"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            VALID=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('valid',False)).lower())" 2>/dev/null || echo "false")
+            if [ "$VALID" = "true" ]; then
+              TASK_ID=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('task_id','unknown'))" 2>/dev/null || echo "unknown")
+              echo "✅ commit-complete-id is valid. Associated task: $TASK_ID"
+              exit 0
+            else
+              REASON=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('reason','unknown'))" 2>/dev/null || echo "unknown")
+              echo "::error::commit-complete-id $CCI_ID is not valid: $REASON"
+              exit 1
+            fi
+          elif [ "$HTTP_CODE" = "404" ]; then
+            echo "::error::commit-complete-id $CCI_ID not recognized by checkout service."
+            echo "::error::Ensure you used the CCI token returned from advance_task_status(target_status='committed')."
+            exit 1
+          else
+            echo "::error::Checkout service validation failed (HTTP $HTTP_CODE). Cannot verify commit-complete-id."
+            echo "::error::Response: $HTTP_BODY"
+            exit 1
+          fi
