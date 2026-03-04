@@ -1846,7 +1846,13 @@ def _handle_update_field(
                 return _error(400,
                     f"GitHub commit validation failed for {commit_sha}: {reason}")
 
-        if not is_revert and record_type == "task" and new_lower == "merged-main":
+        if not is_revert and record_type == "task" and new_lower == "merged-main" \
+                and not _is_checkout_service_request(event):
+            # ENC-ISS-095: Skip merge_evidence requirement for checkout-service requests.
+            # The checkout service validates pr_id + merged_at via GitHub API before writing;
+            # requiring a free-text merge_evidence string here adds no governance value and
+            # blocks the standard checkout lifecycle. Non-checkout-service PATCH requests
+            # (e.g., direct PWA mutations) still require merge_evidence for backward compat.
             merge_evidence = transition_evidence.get("merge_evidence", "").strip()
             if not merge_evidence:
                 return _error(400,
