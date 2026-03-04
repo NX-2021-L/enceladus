@@ -1500,12 +1500,177 @@ def _normalize_acceptance_criteria_value(record_type: str, raw_value: Any) -> Tu
     return normalized_list, None
 
 
+def _apply_user_initiated_advance(
+    project_id: str,
+    record_type: str,
+    record_id: str,
+    body: Dict,
+    item_data: Dict,
+    claims: Optional[Dict],
+) -> Dict:
+    """Apply a user-initiated status advance (ENC-ISS-092).
+
+    Cognito-only: rejected with HTTP 403 if called with an internal API key.
+    Borrow-and-restore: temporarily takes checkout ownership as the Cognito username,
+    applies the status change, then restores the prior agent checkout (or releases if
+    the task was not previously checked out; always releases on close).
+    """
+    # Auth check: Cognito only — internal API key is explicitly rejected
+    if not claims or claims.get("auth_mode") == "internal-key":
+        return _error(
+            403,
+            "user_initiated transitions require Cognito authentication. "
+            "This path is reserved for UI use and cannot be accessed via internal API keys.",
+        )
+
+    # Extract Cognito username for audit trail
+    cognito_user = (
+        claims.get("cognito:username")
+        or claims.get("sub")
+        or "unknown_user"
+    )
+
+    # Require non-empty user_note (documents why the human overrode the lifecycle)
+    transition_evidence = body.get("transition_evidence") or {}
+    user_note = (transition_evidence.get("user_note") or "").strip()
+    if not user_note:
+        return _error(400, "transition_evidence.user_note is required for user_initiated transitions.")
+
+    # Target status
+    value = body.get("value", "")
+    new_lower = str(value).strip().lower()
+    if not new_lower:
+        return _error(400, "Field 'value' (target status) is required.")
+
+    # Validate target status is a known task status
+    all_task_statuses = {
+        "open", "in-progress", "coding-complete", "committed", "pr",
+        "merged-main", "deploy-init", "deploy-success", "coding-updates",
+        "deployed", "closed",
+    }
+    if new_lower not in all_task_statuses:
+        return _error(400, f"Unknown target status '{value}' for task.")
+
+    # Capture current checkout state before borrowing
+    was_checked_out = bool(item_data.get("active_agent_session", False))
+    previous_session_id = str(item_data.get("active_agent_session_id", "")).strip()
+
+    ddb = _get_ddb()
+    key = _build_key(project_id, record_type, record_id)
+    now = _now_z()
+
+    # Step 1: Temporarily take ownership as the Cognito user (borrow)
+    ddb.update_item(
+        TableName=DYNAMODB_TABLE, Key=key,
+        UpdateExpression=(
+            "SET active_agent_session = :t, active_agent_session_id = :aid, "
+            "checkout_state = :checked_out, updated_at = :now"
+        ),
+        ExpressionAttributeValues={
+            ":t": {"BOOL": True}, ":aid": _ser_s(cognito_user),
+            ":checked_out": _ser_s("checked_out"), ":now": _ser_s(now),
+        },
+    )
+
+    # Step 2: Apply status change with enriched evidence stamped for audit
+    enriched_evidence = {
+        **(transition_evidence if isinstance(transition_evidence, dict) else {}),
+        "user_initiated": True,
+        "user_note": user_note,
+        "initiated_by": cognito_user,
+        "initiated_at": now,
+    }
+    note_text = (
+        f"[USER-INITIATED] Status changed to '{new_lower}' by {cognito_user}. "
+        f"Note: {user_note}"
+    )
+    history_entry = {"M": {
+        "timestamp": _ser_s(now), "status": _ser_s("worklog"),
+        "description": _ser_s(note_text),
+    }}
+    evidence_json = json.dumps(enriched_evidence, separators=(",", ":"))
+
+    try:
+        ddb.update_item(
+            TableName=DYNAMODB_TABLE, Key=key,
+            UpdateExpression=(
+                "SET #fld = :val, updated_at = :now, last_update_note = :note, "
+                "transition_evidence = :te, "
+                "sync_version = if_not_exists(sync_version, :zero) + :one, "
+                "history = list_append(if_not_exists(history, :empty), :hentry)"
+            ),
+            ExpressionAttributeNames={"#fld": "status"},
+            ExpressionAttributeValues={
+                ":val": _ser_value(new_lower), ":now": _ser_s(now),
+                ":note": _ser_s(note_text), ":te": _ser_s(evidence_json),
+                ":zero": {"N": "0"}, ":one": {"N": "1"},
+                ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
+            },
+        )
+    except Exception as exc:
+        logger.error("user_initiated status update failed: %s", exc)
+        return _error(500, "Database write failed.")
+
+    # Step 3: Restore or release checkout (borrow-and-restore)
+    if new_lower == "closed":
+        # Always release on close — closed tasks must not remain checked out
+        ddb.update_item(
+            TableName=DYNAMODB_TABLE, Key=key,
+            UpdateExpression=(
+                "SET active_agent_session = :f, active_agent_session_id = :empty_s, "
+                "checkout_state = :checked_in, checked_in_by = :cib, checked_in_at = :now, "
+                "updated_at = :now"
+            ),
+            ExpressionAttributeValues={
+                ":f": {"BOOL": False}, ":empty_s": _ser_s(""),
+                ":checked_in": _ser_s("checked_in"), ":cib": _ser_s(cognito_user),
+                ":now": _ser_s(now),
+            },
+        )
+    elif was_checked_out and previous_session_id and previous_session_id != cognito_user:
+        # Restore previous agent's checkout so in-flight work is not disrupted
+        ddb.update_item(
+            TableName=DYNAMODB_TABLE, Key=key,
+            UpdateExpression="SET active_agent_session_id = :prev_id, updated_at = :now",
+            ExpressionAttributeValues={
+                ":prev_id": _ser_s(previous_session_id), ":now": _ser_s(now),
+            },
+        )
+    else:
+        # Task was not checked out before — release our temporary borrow
+        ddb.update_item(
+            TableName=DYNAMODB_TABLE, Key=key,
+            UpdateExpression=(
+                "SET active_agent_session = :f, active_agent_session_id = :empty_s, "
+                "checkout_state = :checked_in, checked_in_by = :cib, checked_in_at = :now, "
+                "updated_at = :now"
+            ),
+            ExpressionAttributeValues={
+                ":f": {"BOOL": False}, ":empty_s": _ser_s(""),
+                ":checked_in": _ser_s("checked_in"), ":cib": _ser_s(cognito_user),
+                ":now": _ser_s(now),
+            },
+        )
+
+    return _response(200, {
+        "success": True,
+        "record_id": record_id,
+        "field": "status",
+        "value": new_lower,
+        "updated_status": new_lower,
+        "user_initiated": True,
+        "initiated_by": cognito_user,
+        "updated_at": now,
+    })
+
+
 def _handle_update_field(
     project_id: str,
     record_type: str,
     record_id: str,
     body: Dict,
     event: Optional[Dict] = None,
+    claims: Optional[Dict] = None,
 ) -> Dict:
     """PATCH /{project}/{type}/{id} — update a single field on a record.
 
@@ -1547,6 +1712,16 @@ def _handle_update_field(
 
     item_data = _deser_item(raw_item)
     warnings: List[str] = []
+
+    # --- ENC-ISS-092: user-initiated transitions (Cognito-only, bypass checkout gate) ---
+    # Must be checked BEFORE session-ownership enforcement and the ENC-FTR-037 gate so
+    # human operators can transition tasks that are checked out by another agent.
+    if field == "status" and record_type == "task":
+        te_pre = body.get("transition_evidence") or {}
+        if te_pre.get("user_initiated"):
+            return _apply_user_initiated_advance(
+                project_id, record_type, record_id, body, item_data, claims
+            )
 
     # --- Session ownership enforcement ---
     if field != "active_agent_session":
@@ -2363,7 +2538,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             except (ValueError, TypeError):
                 return _error(400, "Invalid JSON body.")
             _normalize_write_source(body, claims)
-            return _handle_update_field(project_id, record_type, record_id, body, event=event)
+            return _handle_update_field(project_id, record_type, record_id, body, event=event, claims=claims)
         else:
             return _error(405, f"Method {method} not allowed. Use GET or PATCH.")
 
