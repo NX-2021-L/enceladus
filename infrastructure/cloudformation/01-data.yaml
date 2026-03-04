@@ -227,6 +227,55 @@ Resources:
         - Key: Component
           Value: governance
 
+  ComponentRegistryTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: component-registry
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        - AttributeName: component_id
+          AttributeType: S
+        - AttributeName: project_id
+          AttributeType: S
+        - AttributeName: component_name
+          AttributeType: S
+        - AttributeName: category
+          AttributeType: S
+        - AttributeName: updated_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: component_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: project-name-index
+          KeySchema:
+            - AttributeName: project_id
+              KeyType: HASH
+            - AttributeName: component_name
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: category-updated-index
+          KeySchema:
+            - AttributeName: category
+              KeyType: HASH
+            - AttributeName: updated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+        - Key: Feature
+          Value: ENC-FTR-041
+
   AgentComplianceViolationsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -407,3 +456,11 @@ Outputs:
     Value: !Ref CoordinationDeadLetterTopic
     Export:
       Name: !Sub ${AWS::StackName}-DeadLetterTopicArn
+  ComponentRegistryTableName:
+    Value: !Ref ComponentRegistryTable
+    Export:
+      Name: !Sub ${AWS::StackName}-ComponentRegistryTable
+  ComponentRegistryTableArn:
+    Value: !GetAtt ComponentRegistryTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ComponentRegistryTableArn
