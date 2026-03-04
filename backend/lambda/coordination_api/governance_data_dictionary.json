@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-04.2",
-  "updated_at": "2026-03-04T08:10:00Z",
+  "version": "2026-03-04.3",
+  "updated_at": "2026-03-04T08:35:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1277,9 +1277,11 @@
               ],
               "optional_evidence": [
                 "owner",
-                "repo"
+                "repo",
+                "merge_evidence"
               ],
-              "repo_resolution": "Auto-resolved from projects table if owner/repo not provided in transition_evidence (DVP-ISS-082)."
+              "repo_resolution": "Auto-resolved from projects table if owner/repo not provided in transition_evidence (DVP-ISS-082).",
+              "compat_note": "ENC-ISS-095: tracker_mutation has a legacy gate requiring a free-text merge_evidence string for merged-main. This gate is bypassed for checkout-service-authenticated requests (X-Checkout-Service-Key) since the checkout service validates pr_id+merged_at via GitHub API. For non-checkout-service PATCH requests, merge_evidence remains required for backward compat. When calling advance_task_status via MCP (which routes through the checkout service), only pr_id and merged_at are needed."
             },
             "deploy-success": {
               "required_evidence": [
