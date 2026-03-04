@@ -64,6 +64,7 @@ Resources:
           SECRETS_REGION: !Ref AWS::Region
           CORS_ORIGIN: !Ref CorsOrigin
           DOCUMENT_API_LAMBDA_NAME: devops-document-api
+          COMPONENTS_TABLE: component-registry
       Tags:
         - Key: Project
           Value: enceladus
