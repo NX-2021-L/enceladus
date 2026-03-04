@@ -1,5 +1,5 @@
 {
-  "version": "2026-03-04.3",
+  "version": "2026-03-04.4",
   "updated_at": "2026-03-04T08:35:00Z",
   "owners": [
     "enceladus-platform"
@@ -160,7 +160,9 @@
                 "http_status": {
                   "type": "integer",
                   "constraints": {
-                    "enum": [200]
+                    "enum": [
+                      200
+                    ]
                   },
                   "definition": "HTTP status code from the verification request. Must equal 200."
                 },
@@ -223,6 +225,11 @@
               },
               "definition": "Human note required for user_initiated transitions (ENC-ISS-092). Describes why the status was changed manually by a human operator.",
               "usage_guidance": "Required when user_initiated=true. Stored in transition_evidence and recorded as a [USER-INITIATED] worklog entry with the Cognito username as provider."
+            },
+            "merge_evidence": {
+              "type": "string_or_object",
+              "definition": "Evidence of PR merge for merged-main transitions. May be a free-text string (direct PATCH from UI/legacy) or a structured dict when provided by the checkout service (keys typically include pr_id, merged_at, owner, repo). The Lambda serializes dict values as JSON before storing. ENC-ISS-097.",
+              "usage_guidance": "For checkout-service-routed transitions (advance_task_status), pr_id and merged_at are passed as top-level body fields \u2014 merge_evidence is not required and may be omitted. For legacy direct PATCH callers, provide a non-empty string describing merge confirmation. Dict-type values are accepted and stored as a JSON string."
             }
           }
         }
@@ -1114,13 +1121,17 @@
       "fields": {
         "pr_id": {
           "type": "integer",
-          "constraints": { "min": 1 },
+          "constraints": {
+            "min": 1
+          },
           "definition": "GitHub PR number that was merged for this deployment. Required. Passed to deploy_intake which validates via GitHub API.",
           "usage_guidance": "Obtain from advance_task_status response (merged-main transition returns pr_id). Must match a real merged PR in NX-2021-L/enceladus (or pr_owner/pr_repo if specified)."
         },
         "merged_at": {
           "type": "string",
-          "constraints": { "format": "ISO 8601" },
+          "constraints": {
+            "format": "ISO 8601"
+          },
           "definition": "Timestamp when the PR was merged. Required. deploy_intake validates against GitHub API merged_at within 60-second tolerance.",
           "usage_guidance": "Obtain from advance_task_status response (merged-main transition). Format: 2026-03-02T04:35:24Z."
         },
@@ -1308,8 +1319,14 @@
         "github_pr_deploy": {
           "type": "arc_spec",
           "allowed_statuses": [
-            "in-progress", "coding-complete", "committed", "pr",
-            "merged-main", "deploy-init", "deploy-success", "closed"
+            "in-progress",
+            "coding-complete",
+            "committed",
+            "pr",
+            "merged-main",
+            "deploy-init",
+            "deploy-success",
+            "closed"
           ],
           "gate_requirements": {
             "coding-complete": "checkout required; issues CAI token",
@@ -1324,8 +1341,14 @@
         "web_deploy": {
           "type": "arc_spec",
           "allowed_statuses": [
-            "in-progress", "coding-complete", "committed", "pr",
-            "merged-main", "deploy-init", "deploy-success", "closed"
+            "in-progress",
+            "coding-complete",
+            "committed",
+            "pr",
+            "merged-main",
+            "deploy-init",
+            "deploy-success",
+            "closed"
           ],
           "gate_requirements": {
             "coding-complete": "checkout required; issues CAI token",
@@ -1340,8 +1363,12 @@
         "code_only": {
           "type": "arc_spec",
           "allowed_statuses": [
-            "in-progress", "coding-complete", "committed", "pr",
-            "merged-main", "closed"
+            "in-progress",
+            "coding-complete",
+            "committed",
+            "pr",
+            "merged-main",
+            "closed"
           ],
           "gate_requirements": {
             "coding-complete": "checkout required; issues CAI token",
@@ -1350,26 +1377,45 @@
             "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
             "closed": "code_on_main_evidence {commit_sha (40-char hex)} \u2014 GitHub compare API verifies commit is ancestor of main (status: behind or identical); releases checkout"
           },
-          "skipped_statuses": ["deploy-init", "deploy-success"],
+          "skipped_statuses": [
+            "deploy-init",
+            "deploy-success"
+          ],
           "note": "Use for tasks where code was written and merged but no deployment step exists or is needed."
         },
         "no_code": {
           "type": "arc_spec",
           "allowed_statuses": [
-            "in-progress", "coding-complete", "closed"
+            "in-progress",
+            "coding-complete",
+            "closed"
           ],
           "gate_requirements": {
             "coding-complete": "checkout required; NO CAI token issued (GitHub PR flow not applicable)",
             "closed": "no_code_evidence (non-empty string; no GitHub API call); releases checkout"
           },
-          "skipped_statuses": ["committed", "pr", "merged-main", "deploy-init", "deploy-success"],
+          "skipped_statuses": [
+            "committed",
+            "pr",
+            "merged-main",
+            "deploy-init",
+            "deploy-success"
+          ],
           "note": "Use for tasks with no GitHub repo, non-code work (infra config, CLI installs, admin tasks), or work that cannot produce GitHub commit evidence."
         },
         "user-initiated": {
           "type": "arc_spec",
           "allowed_statuses": [
-            "open", "in-progress", "coding-complete", "committed", "pr",
-            "merged-main", "deploy-init", "deploy-success", "coding-updates", "closed"
+            "open",
+            "in-progress",
+            "coding-complete",
+            "committed",
+            "pr",
+            "merged-main",
+            "deploy-init",
+            "deploy-success",
+            "coding-updates",
+            "closed"
           ],
           "auth_requirement": "Cognito session cookie (enceladus_id_token) only \u2014 internal API key rejected with HTTP 403",
           "gate_requirements": {

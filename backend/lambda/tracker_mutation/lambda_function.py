@@ -2033,7 +2033,9 @@ def _handle_update_field(
         if transition_evidence.get("live_validation_evidence"):
             evidence_parts.append(f"live_validation: {transition_evidence['live_validation_evidence'][:80]}")
         if transition_evidence.get("merge_evidence"):
-            evidence_parts.append(f"merge: {transition_evidence['merge_evidence'][:80]}")
+            me = transition_evidence["merge_evidence"]
+            me_str = json.dumps(me, separators=(",", ":")) if isinstance(me, dict) else str(me)
+            evidence_parts.append(f"merge: {me_str[:80]}")
         if transition_evidence.get("revert_reason"):
             evidence_parts.append(f"revert: {transition_evidence['revert_reason'][:80]}")
         if evidence_parts:
@@ -2065,7 +2067,9 @@ def _handle_update_field(
             extra_vals[":live_val_ev"] = {"S": transition_evidence["live_validation_evidence"].strip()}
         if transition_evidence.get("merge_evidence"):
             extra_sets.append("merge_evidence = :merge_ev")
-            extra_vals[":merge_ev"] = {"S": transition_evidence["merge_evidence"].strip()}
+            me = transition_evidence["merge_evidence"]
+            # ENC-ISS-097: merge_evidence may be a dict (checkout service) or a string (direct PATCH)
+            extra_vals[":merge_ev"] = {"S": json.dumps(me, separators=(",", ":")) if isinstance(me, dict) else str(me).strip()}
 
     update_expr = (
         "SET #fld = :val, updated_at = :now, last_update_note = :note, "
