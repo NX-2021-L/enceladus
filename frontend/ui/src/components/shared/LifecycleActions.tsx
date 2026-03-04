@@ -42,19 +42,25 @@ export function LifecycleActions({ recordType, currentStatus, projectId, recordI
   const next = getNextStatus(recordType, currentStatus)
   const prev = getPrevStatus(recordType, currentStatus)
 
-  function handleSubmit() {
+  // closeImmediately: true → Submit + Close (target closed regardless of natural next status)
+  function handleSubmit(closeImmediately: boolean = false) {
     if (!note.trim() || !modal) return
-    const { direction, targetStatus } = modal
+    const { direction } = modal
+    // For "Submit + Close", jump directly to closed. Otherwise use modal's natural target.
+    const targetStatus = closeImmediately ? 'closed' : modal.targetStatus
 
-    // Step 1: Submit the update note
+    // Step 1: Submit the update note as a worklog entry
     mutate(
       { projectId, recordType, recordId, action: 'note', note },
       {
         onSuccess: () => {
-          // Step 2: Change status
+          // Step 2: Change status.
+          // Forward transitions use user_initiated evidence (ENC-ISS-092): bypasses
+          // checkout-service gate, allowing human operators to advance from the UI.
+          // Backward transitions use revert_reason (unchanged).
           const transitionEvidence = direction === 'backward'
             ? { revert_reason: note }
-            : undefined
+            : { user_initiated: true, user_note: note }
 
           mutate(
             {
@@ -155,8 +161,18 @@ export function LifecycleActions({ recordType, currentStatus, projectId, recordI
                 >
                   Cancel
                 </button>
+                {modal.direction === 'forward' && recordType === 'task' && (
+                  <button
+                    onClick={() => handleSubmit(true)}
+                    disabled={!note.trim() || isMutating}
+                    title="Skip all remaining stages and close this task immediately"
+                    className="text-xs px-4 py-2 rounded-full text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors bg-rose-700 hover:bg-rose-600"
+                  >
+                    {isMutating ? 'Saving...' : 'Submit + Close'}
+                  </button>
+                )}
                 <button
-                  onClick={handleSubmit}
+                  onClick={() => handleSubmit(false)}
                   disabled={!note.trim() || isMutating}
                   className={`text-xs px-4 py-2 rounded-full text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
                     modal.direction === 'forward'

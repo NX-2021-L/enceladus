@@ -38,7 +38,13 @@ Environment variables:
     CORS_ORIGIN                   default: https://jreese.net
     TOKEN_TTL_DAYS                token expiry in days (default: 90)
 
-Related: ENC-FTR-037
+Related: ENC-FTR-037, ENC-ISS-092
+
+ENC-ISS-092: Added ``transition_type`` field support. Tasks may now declare one of four
+lifecycle arcs (github_pr_deploy, web_deploy, code_only, no_code) that determine which
+target_status values are allowed and what evidence each gate requires. The default
+``github_pr_deploy`` arc is fully backward compatible — tasks without the field behave
+identically to before.
 """
 
 from __future__ import annotations
@@ -576,6 +582,115 @@ def _handle_release(project_id: str, task_id: str, body: dict) -> dict:
     return _response(200, {"success": True, "task_id": task_id})
 
 
+# ---------------------------------------------------------------------------
+# ENC-ISS-092: Transition type lifecycle arcs
+# ---------------------------------------------------------------------------
+
+#: Transition types that use the full GitHub PR/commit validation flow.
+_GITHUB_PR_TYPES = {"github_pr_deploy", "web_deploy", "code_only"}
+
+#: Per-type allowed target_status values. Any status NOT in this list returns 400.
+ALLOWED_TRANSITIONS_BY_TYPE: dict = {
+    "github_pr_deploy": [
+        "in-progress", "coding-complete", "committed", "pr",
+        "merged-main", "deploy-init", "deploy-success", "closed",
+    ],
+    "web_deploy": [
+        "in-progress", "coding-complete", "committed", "pr",
+        "merged-main", "deploy-init", "deploy-success", "closed",
+    ],
+    "code_only": [
+        "in-progress", "coding-complete", "committed", "pr",
+        "merged-main", "closed",
+    ],
+    "no_code": [
+        "in-progress", "coding-complete", "closed",
+    ],
+}
+
+VALID_TRANSITION_TYPES: set = set(ALLOWED_TRANSITIONS_BY_TYPE.keys())
+
+
+def _validate_web_deploy_evidence(evidence: dict) -> Tuple[bool, str]:
+    """Validate web_deploy_evidence structure for deploy-success (ENC-ISS-092).
+
+    Does NOT re-fetch the URL — agent provides evidence, Lambda validates shape.
+    Required fields: url (HTTPS), http_status (== 200), checked_at (ISO 8601 with T).
+    Optional: cloudfront_invalidation_id, response_time_ms.
+    """
+    url = (evidence.get("url") or "").strip()
+    if not url:
+        return False, "web_deploy_evidence.url is required"
+    if not url.startswith("https://"):
+        return False, f"web_deploy_evidence.url must start with https://, got: '{url}'"
+
+    http_status = evidence.get("http_status")
+    if http_status is None:
+        return False, "web_deploy_evidence.http_status is required"
+    if http_status != 200:
+        return False, f"web_deploy_evidence.http_status must be 200, got: {http_status}"
+
+    checked_at = (evidence.get("checked_at") or "").strip()
+    if not checked_at:
+        return False, "web_deploy_evidence.checked_at is required"
+    if "T" not in checked_at:
+        return False, (
+            f"web_deploy_evidence.checked_at must be ISO 8601 with 'T' separator, "
+            f"got: '{checked_at}'"
+        )
+    try:
+        datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        return False, f"web_deploy_evidence.checked_at is not a valid ISO 8601 timestamp: {exc}"
+
+    return True, ""
+
+
+def _validate_code_on_main_evidence(
+    owner: str, repo: str, evidence: dict
+) -> Tuple[bool, str]:
+    """Validate code_on_main_evidence for closed (code_only arc, ENC-ISS-092).
+
+    Calls GitHub compare API to verify commit_sha is an ancestor of main.
+    Sets evidence["github_verified"] = True on success.
+    """
+    commit_sha = (evidence.get("commit_sha") or "").strip()
+    if not commit_sha:
+        return False, "code_on_main_evidence.commit_sha is required"
+    if not re.match(r'^[0-9a-f]{40}$', commit_sha.lower()):
+        return False, (
+            f"code_on_main_evidence.commit_sha must be a 40-char hex string, "
+            f"got: '{commit_sha}'"
+        )
+
+    # Call GitHub compare API: {sha}...main
+    # status "behind" or "identical" means commit is an ancestor of main
+    compare_path = f"/repos/{owner}/{repo}/compare/{commit_sha}...main"
+    status, body = _github_request(compare_path)
+    if status == 404:
+        return False, (
+            f"GitHub compare returned 404 — commit '{commit_sha}' or repo "
+            f"'{owner}/{repo}' not found"
+        )
+    if status != 200:
+        return False, (
+            f"GitHub compare API returned {status}: "
+            f"{body.get('message', 'unknown error')}"
+        )
+
+    compare_status = body.get("status", "")
+    if compare_status not in ("behind", "identical"):
+        return False, (
+            f"Commit '{commit_sha}' is not on main "
+            f"(GitHub compare status: '{compare_status}'). "
+            "Commit must be an ancestor of main (status 'behind' or 'identical')."
+        )
+
+    # Stamp verification flag for audit trail
+    evidence["github_verified"] = True
+    return True, ""
+
+
 def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     """POST .../advance — Advance status with gate validation + token issuance."""
     target_status = (body.get("target_status") or "").strip().lower()
@@ -586,7 +701,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     if not target_status:
         return _error(400, "target_status is required")
 
-    # --- Fetch current task to validate checkout state ---
+    # --- Fetch current task to validate checkout state and transition_type ---
     status, task = _get_task(project_id, task_id)
     if status != 200:
         return _error(status, task.get("error", f"Task not found: {task_id}"))
@@ -594,6 +709,27 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     current_status = (task.get("status") or "").lower()
     active_session = task.get("active_agent_session", False)
     session_id = task.get("active_agent_session_id", "")
+
+    # --- ENC-ISS-092: Resolve transition_type and validate allowed statuses ---
+    transition_type = (task.get("transition_type") or "github_pr_deploy").strip().lower()
+    if transition_type not in VALID_TRANSITION_TYPES:
+        # Unknown value — safe default preserves backward compatibility
+        logger.warning(
+            "Unknown transition_type '%s' on task %s; defaulting to github_pr_deploy",
+            transition_type, task_id,
+        )
+        transition_type = "github_pr_deploy"
+
+    if target_status != "in-progress":
+        # in-progress is handled by checkout below; all other statuses are arc-gated
+        allowed = ALLOWED_TRANSITIONS_BY_TYPE.get(transition_type, [])
+        if target_status not in allowed:
+            return _error(400, (
+                f"Status '{target_status}' is not allowed for transition_type "
+                f"'{transition_type}'. Allowed: {allowed}"
+            ))
+
+    uses_github_pr = transition_type in _GITHUB_PR_TYPES
 
     # --- Per-status gate logic ---
     response_extras: dict = {}
@@ -605,14 +741,17 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     elif target_status == "coding-complete":
         if not active_session:
             return _error(409, "Task must be checked out to advance to coding-complete. Use checkout endpoint first.")
-        # Generate + store Commit Approval ID
-        cai = _generate_token("CAI")
-        _store_token(cai, "CAI", task_id, project_id)
-        # Store on task record
-        _set_task_field(project_id, task_id, "commit_approval_id", cai, provider=provider)
-        response_extras["commit_approval_id"] = cai
+        if uses_github_pr:
+            # Generate + store Commit Approval ID (skipped for no_code arc)
+            cai = _generate_token("CAI")
+            _store_token(cai, "CAI", task_id, project_id)
+            # Store on task record
+            _set_task_field(project_id, task_id, "commit_approval_id", cai, provider=provider)
+            response_extras["commit_approval_id"] = cai
+        # no_code: no CAI issued — closed is the only next gate
 
     elif target_status == "committed":
+        # Unreachable for no_code (blocked by ALLOWED_TRANSITIONS_BY_TYPE above)
         commit_sha = (transition_evidence.get("commit_sha") or "").strip()
         if not commit_sha:
             return _error(400, "transition_evidence.commit_sha is required for committed")
@@ -684,33 +823,96 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         transition_evidence["merged_at"] = merged_at
 
     elif target_status == "deploy-init":
+        # Unreachable for code_only and no_code (blocked above)
         if not active_session:
             return _error(409, "Task must be checked out to advance to deploy-init.")
 
     elif target_status == "deploy-success":
-        deploy_evidence = transition_evidence.get("deploy_evidence") or body.get("deploy_evidence")
-        if not deploy_evidence or not isinstance(deploy_evidence, dict):
-            return _error(400, "transition_evidence.deploy_evidence (GitHub Actions Jobs API object) is required for deploy-success")
-        # Validate required deploy_evidence fields (ENC-TSK-726 rules)
-        required_fields = ["id", "name", "run_id", "status", "conclusion", "started_at", "completed_at"]
-        missing = [f for f in required_fields if not deploy_evidence.get(f)]
-        if missing:
-            return _error(400, f"deploy_evidence missing required fields: {missing}")
-        if deploy_evidence.get("conclusion") != "success":
-            return _error(400, f"deploy_evidence.conclusion must be 'success', got: {deploy_evidence.get('conclusion')}")
-        transition_evidence["deploy_evidence"] = deploy_evidence
-        # Clear CAI and CCI tokens from task after successful deploy
+        # Unreachable for code_only and no_code (blocked above)
+        if transition_type == "web_deploy":
+            # web_deploy arc: validate HTTP curl evidence instead of GH Actions object
+            web_evidence = (
+                transition_evidence.get("web_deploy_evidence")
+                or body.get("web_deploy_evidence")
+            )
+            if not web_evidence or not isinstance(web_evidence, dict):
+                return _error(400, (
+                    "transition_evidence.web_deploy_evidence is required for deploy-success "
+                    "on web_deploy tasks. Expected keys: url (HTTPS), http_status (200), "
+                    "checked_at (ISO 8601)"
+                ))
+            valid, reason = _validate_web_deploy_evidence(web_evidence)
+            if not valid:
+                return _error(400, f"web_deploy_evidence validation failed: {reason}")
+            transition_evidence["web_deploy_evidence"] = web_evidence
+        else:
+            # github_pr_deploy arc: validate GH Actions Jobs API object
+            deploy_evidence = transition_evidence.get("deploy_evidence") or body.get("deploy_evidence")
+            if not deploy_evidence or not isinstance(deploy_evidence, dict):
+                return _error(400, "transition_evidence.deploy_evidence (GitHub Actions Jobs API object) is required for deploy-success")
+            # Validate required deploy_evidence fields (ENC-TSK-726 rules)
+            required_fields = ["id", "name", "run_id", "status", "conclusion", "started_at", "completed_at"]
+            missing = [f for f in required_fields if not deploy_evidence.get(f)]
+            if missing:
+                return _error(400, f"deploy_evidence missing required fields: {missing}")
+            if deploy_evidence.get("conclusion") != "success":
+                return _error(400, f"deploy_evidence.conclusion must be 'success', got: {deploy_evidence.get('conclusion')}")
+            transition_evidence["deploy_evidence"] = deploy_evidence
+        # Clear CAI and CCI tokens from task after successful deploy (both arc types)
         response_extras["tokens_cleared"] = True
 
     elif target_status == "closed":
-        live_validation_evidence = (
-            transition_evidence.get("live_validation_evidence")
-            or body.get("live_validation_evidence")
-            or ""
-        ).strip()
-        if not live_validation_evidence:
-            return _error(400, "transition_evidence.live_validation_evidence is required for closed")
-        transition_evidence["live_validation_evidence"] = live_validation_evidence
+        if transition_type in ("github_pr_deploy", "web_deploy"):
+            # Full arc: require live_validation_evidence string
+            live_validation_evidence = (
+                transition_evidence.get("live_validation_evidence")
+                or body.get("live_validation_evidence")
+                or ""
+            ).strip()
+            if not live_validation_evidence:
+                return _error(400, "transition_evidence.live_validation_evidence is required for closed")
+            transition_evidence["live_validation_evidence"] = live_validation_evidence
+
+        elif transition_type == "code_only":
+            # code_only arc: verify commit is on main via GitHub compare API
+            code_evidence = (
+                transition_evidence.get("code_on_main_evidence")
+                or body.get("code_on_main_evidence")
+            )
+            if not code_evidence or not isinstance(code_evidence, dict):
+                return _error(400, (
+                    "transition_evidence.code_on_main_evidence is required for closed "
+                    "on code_only tasks. Expected keys: commit_sha (40-char hex)"
+                ))
+            owner = transition_evidence.get("owner")
+            repo = transition_evidence.get("repo")
+            if not owner or not repo:
+                resolved_owner, resolved_repo = _resolve_github_repo(project_id)
+                owner = owner or resolved_owner
+                repo = repo or resolved_repo
+            if not owner or not repo:
+                return _error(400,
+                    f"Cannot resolve GitHub repo for project '{project_id}'. "
+                    "Provide owner and repo in transition_evidence, or set the "
+                    "project's repo field in the projects table.")
+            valid, reason = _validate_code_on_main_evidence(owner, repo, code_evidence)
+            if not valid:
+                return _error(400, f"code_on_main_evidence validation failed: {reason}")
+            transition_evidence["code_on_main_evidence"] = code_evidence
+
+        elif transition_type == "no_code":
+            # no_code arc: non-empty free-text evidence, no GitHub call
+            no_code_evidence = (
+                transition_evidence.get("no_code_evidence")
+                or body.get("no_code_evidence")
+                or ""
+            ).strip()
+            if not no_code_evidence:
+                return _error(400, (
+                    "transition_evidence.no_code_evidence is required for closed "
+                    "on no_code tasks. Provide a non-empty description of what was done."
+                ))
+            transition_evidence["no_code_evidence"] = no_code_evidence
 
     else:
         # Generic advance — let tracker_mutation validate the transition
