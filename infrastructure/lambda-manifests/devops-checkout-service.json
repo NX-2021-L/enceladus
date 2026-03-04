@@ -2,8 +2,9 @@
   "entry_file": "lambda_function.py",
   "function_name": "enceladus-checkout-service",
   "generated_at": "2026-03-02T02:40:00Z",
-  "parity_status": "PENDING_DEPLOY",
-  "region": "us-east-1",
+  "parity_status": "CI_MANAGED",
+  "ci_workflow": ".github/workflows/lambda-checkout-service-deploy.yml",
+  "region": "us-west-2",
   "repo_entry_path": "backend/lambda/checkout_service/lambda_function.py",
   "planned_configuration": {
     "architectures": [
@@ -32,5 +33,5 @@
     "eventbridge_rule": "enceladus-checkout-auto"
   },
   "deploy_script": "backend/lambda/checkout_service/deploy.sh",
-  "notes": "ENC-FTR-037. New Lambda. Deploy via deploy.sh after PR merge. Requires enceladus-checkout-tokens DynamoDB table and X-Checkout-Service-Key shared secret in Secrets Manager."
+  "notes": "ENC-FTR-037. CI/CD via lambda-checkout-service-deploy.yml (added ENC-TSK-753). Deploys both enceladus-checkout-service and enceladus-checkout-service-auto via code-only update (preserves env vars). Region corrected to us-west-2. Requires enceladus-checkout-tokens DynamoDB table and X-Checkout-Service-Key shared secret in Secrets Manager."
 }
