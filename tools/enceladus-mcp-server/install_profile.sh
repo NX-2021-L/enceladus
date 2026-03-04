@@ -431,9 +431,11 @@ else
     echo "[WARNING] Failed to update ${CODEX_CONFIG_FILE}; continuing"
 fi
 
-# Write global ~/.codex/AGENTS.md (Codex bootstrap) if missing or lacks governance_get.
+# Write global ~/.codex/AGENTS.md (Codex bootstrap) if missing or uses outdated pattern.
+# Condition: rewrite if file is absent OR uses old governance_get full-dictionary load
+# (ENC-ISS-087 deprecated that pattern in favour of governance_dictionary() compact index).
 CODEX_GLOBAL_AGENTS_MD="${CODEX_SETTINGS_DIR}/AGENTS.md"
-if [ ! -f "${CODEX_GLOBAL_AGENTS_MD}" ] || ! grep -q "governance_get" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null; then
+if [ ! -f "${CODEX_GLOBAL_AGENTS_MD}" ] || ! grep -q "governance_dictionary" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null; then
     cat > "${CODEX_GLOBAL_AGENTS_MD}" << 'GLOBAL_AGENTS_EOF'
 # Codex Bootstrap
 
@@ -442,7 +444,7 @@ For Enceladus work: MCP servers `enceladus` and `enceladus-local` are configured
 Initialize by running (in order):
 1. `mcp: connection_health`
 2. `mcp: governance_hash` — cache this for all writes
-3. `mcp: governance_get("governance_data_dictionary.json")` — load enum/constraint reference
+3. `mcp: governance_dictionary` — load compact enum/constraint index (replaces full dict load per ENC-ISS-087)
 4. `mcp: governance_get("agents.md")` — load full governance rules and follow all instructions in it
 GLOBAL_AGENTS_EOF
     echo "[SUCCESS] Global Codex AGENTS.md written to ${CODEX_GLOBAL_AGENTS_MD}"
@@ -450,10 +452,12 @@ else
     echo "[INFO] Global Codex AGENTS.md already present at ${CODEX_GLOBAL_AGENTS_MD}"
 fi
 
-# Write workspace AGENTS.md (Codex bootstrap) if missing or doesn't reference governance_get.
+# Write workspace AGENTS.md (Codex bootstrap) if missing or uses outdated pattern.
+# Condition: rewrite if file is absent OR uses old governance_get full-dictionary load
+# (ENC-ISS-087 deprecated that pattern in favour of governance_dictionary() compact index).
 # The file is intentionally minimal — agents load full rules from governance://agents.md dynamically.
 WORKSPACE_AGENTS_MD="${WORKSPACE_ROOT}/AGENTS.md"
-if [ ! -f "${WORKSPACE_AGENTS_MD}" ] || ! grep -q "governance_get" "${WORKSPACE_AGENTS_MD}" 2>/dev/null; then
+if [ ! -f "${WORKSPACE_AGENTS_MD}" ] || ! grep -q "governance_dictionary" "${WORKSPACE_AGENTS_MD}" 2>/dev/null; then
     cat > "${WORKSPACE_AGENTS_MD}" << 'AGENTS_EOF'
 # Enceladus Workspace — Codex Bootstrap
 
@@ -464,7 +468,7 @@ Source: `tools/enceladus-mcp-server/server.py`
 
 1. `mcp: connection_health` — verify DynamoDB/S3/API connectivity
 2. `mcp: governance_hash` — get and cache the governance hash (required for all writes)
-3. `mcp: governance_get("governance_data_dictionary.json")` — load enum/constraint reference (statuses, priorities, categories, deploy types, evidence fields)
+3. `mcp: governance_dictionary` — load compact enum/constraint index (replaces full dict load per ENC-ISS-087)
 4. `mcp: governance_get("agents.md")` — **load full governance rules and execute all steps in that file**
 5. `mcp: tracker_list(project_id="enceladus", record_type="task", status="open")` — load open tasks
 6. `mcp: tracker_pending_updates(project_id="enceladus")` — check pending updates
@@ -477,7 +481,7 @@ Do not proceed with any work until steps 1-4 are complete.
 Before modifying any files for a task:
 1. Sync main: `git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/main`
 2. Create task-scoped worktree: `bash tools/agent-worktree-init.sh <TRACKER-ID>-<slug>`
-   - e.g. `agent-worktree-init.sh enc-tsk-719-governance-enhancement`
+   - e.g. `agent-worktree-init.sh enc-tsk-777-install-profile-fix`
    - Creates branch `agent/<TRACKER-ID>-<slug>` automatically
 3. Work only inside the printed worktree path — never modify files in the main checkout.
 Always assume other agent sessions are running concurrently on this machine.
@@ -566,6 +570,21 @@ async def main() -> None:
             except Exception:
                 pass  # Non-JSON or unexpected format — don't block on parse failures
             print("[SUCCESS] Authenticated API probe passed (tracker_list)")
+
+            # Checkout tool surface probe (ENC-ISS-098) — verifies that checkout_task and
+            # advance_task_status are exposed. These tools were added in ENC-FTR-037 and
+            # will be absent if the config points to a server.py that predates that feature.
+            tools_result = await session.list_tools()
+            tool_names = {t.name for t in tools_result.tools}
+            required_checkout_tools = {"checkout_task", "advance_task_status"}
+            missing = required_checkout_tools - tool_names
+            if missing:
+                import sys
+                print(f"[ERROR] Checkout tools missing from MCP tool surface: {missing}", file=sys.stderr)
+                print(f"[ERROR] This indicates the server.py pointed to by this config predates ENC-FTR-037.", file=sys.stderr)
+                print(f"[ERROR] Ensure the repo is up to date (git pull) and re-run install_profile.sh.", file=sys.stderr)
+                sys.exit(1)
+            print(f"[SUCCESS] Checkout tool surface verified: {required_checkout_tools}")
 
 
 anyio.run(main)
