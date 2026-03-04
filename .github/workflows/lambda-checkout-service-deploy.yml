@@ -1,0 +1,40 @@
+name: Lambda Deploy - enceladus-checkout-service
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/checkout_service/**"
+      - ".github/workflows/lambda-checkout-service-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-http:
+    name: Deploy enceladus-checkout-service (HTTP handler)
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "enceladus-checkout-service"
+      lambda_dir: "backend/lambda/checkout_service"
+    secrets:
+      AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+
+  deploy-auto:
+    name: Deploy enceladus-checkout-service-auto (EventBridge handler)
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "enceladus-checkout-service-auto"
+      lambda_dir: "backend/lambda/checkout_service"
+    secrets:
+      AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
