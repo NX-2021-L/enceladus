@@ -301,7 +301,7 @@ export function IssueDetailPage() {
       {/* Note bottom sheet overlay */}
       {showNote && (
         <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/60">
-          <div className="bg-slate-800 rounded-t-2xl p-5 space-y-3 shadow-2xl">
+          <div className="bg-slate-800 rounded-t-2xl p-5 space-y-3 shadow-2xl max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-100">Add Update Note</h3>
               <button
