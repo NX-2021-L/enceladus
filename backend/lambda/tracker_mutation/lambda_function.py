@@ -1788,6 +1788,19 @@ def _handle_update_field(
             valid_next = type_transitions.get(current_status, set())
             revert_targets = _REVERT_TRANSITIONS.get(record_type, {}).get(current_status, set())
 
+            # ENC-ISS-092: For checkout-service-authenticated requests, expand valid_next
+            # to include transition_type-specific shortcuts that bypass standard arc stages.
+            # The checkout service already validated the transition against
+            # ALLOWED_TRANSITIONS_BY_TYPE; here we just allow the write to succeed.
+            if record_type == "task" and _is_checkout_service_request(event):
+                task_tt = (item_data.get("transition_type") or "github_pr_deploy").strip().lower()
+                if task_tt == "no_code" and current_status == "coding-complete":
+                    # no_code arc: coding-complete → closed (skips committed/pr/merged-main/deploy)
+                    valid_next = valid_next | {"closed"}
+                elif task_tt == "code_only" and current_status == "merged-main":
+                    # code_only arc: merged-main → closed (skips deploy-init/deploy-success)
+                    valid_next = valid_next | {"closed"}
+
             if new_lower in valid_next:
                 pass  # valid forward transition
             elif new_lower in revert_targets:
