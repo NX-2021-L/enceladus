@@ -280,8 +280,11 @@ if command -v claude >/dev/null 2>&1; then
     echo "[INFO] Registering with Claude Code CLI (user scope -> ~/.claude.json)..."
 
     # Build -e KEY=VALUE args by parsing the already-computed MCP_CONFIG via stdin.
-    # mapfile ensures values containing '=' or spaces are handled correctly.
-    mapfile -t _MCP_ENV_ARGS < <(
+    # Use while-read instead of mapfile for bash 3.2 compatibility (macOS default).
+    _MCP_ENV_ARGS=()
+    while IFS= read -r _line; do
+        _MCP_ENV_ARGS+=("${_line}")
+    done < <(
         echo "${MCP_CONFIG}" | "${PYTHON_BIN}" -c "
 import json, sys
 config = json.load(sys.stdin)
