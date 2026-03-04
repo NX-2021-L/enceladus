@@ -3958,7 +3958,17 @@ async def list_tools() -> list[Tool]:
                 "pr → requires prior committed (CCI on task); "
                 "merged-main (requires pr_id + merged_at) → validates via GitHub API; "
                 "deploy-success (requires deploy_evidence object) → clears CAI+CCI tokens; "
-                "closed (requires live_validation_evidence) → releases checkout."
+                "closed (requires live_validation_evidence) → releases checkout. "
+                "ENC-ISS-092: the exact allowed statuses and evidence requirements depend on "
+                "task.transition_type — set via tracker_set before checkout. "
+                "github_pr_deploy (default): full arc above unchanged. "
+                "web_deploy: same arc but deploy-success uses web_deploy_evidence {url, http_status, checked_at} "
+                "instead of deploy_evidence. "
+                "code_only: skips deploy-init/deploy-success; closed uses code_on_main_evidence {commit_sha} "
+                "(GitHub compare API verifies commit is ancestor of main). "
+                "no_code: only in-progress → coding-complete → closed; no CAI issued; "
+                "closed uses no_code_evidence (non-empty string). "
+                "See governance dict checkout_service.transition_type_matrix for full per-type gate specs."
             ),
             inputSchema={
                 "type": "object",
@@ -3988,9 +3998,13 @@ async def list_tools() -> list[Tool]:
                             "Evidence for gated transitions. "
                             "committed: {commit_sha: '<40-char hex>'}. "
                             "merged-main: {pr_id: <int>, merged_at: '<ISO8601>'}. "
-                            "deploy-success: {deploy_evidence: {id, name, run_id, status, "
+                            "deploy-success (github_pr_deploy): {deploy_evidence: {id, name, run_id, status, "
                             "conclusion, started_at, completed_at}}. "
-                            "closed: {live_validation_evidence: '<description>'}. "
+                            "deploy-success (web_deploy): {web_deploy_evidence: {url: '<https://...>', "
+                            "http_status: 200, checked_at: '<ISO8601>'}}. "
+                            "closed (github_pr_deploy/web_deploy): {live_validation_evidence: '<description>'}. "
+                            "closed (code_only): {code_on_main_evidence: {commit_sha: '<40-char hex>'}}. "
+                            "closed (no_code): {no_code_evidence: '<description of what was done>'}. "
                             "Any revert: {revert_reason: '<reason>'}."
                         ),
                     },

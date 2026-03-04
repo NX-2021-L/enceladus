@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-02.10",
-  "updated_at": "2026-03-02T22:00:00Z",
+  "version": "2026-03-04.1",
+  "updated_at": "2026-03-04T07:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -25,7 +25,7 @@
             "deployed"
           ],
           "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc. ENC-FTR-037 renamed 'pushed' to 'pr' \u2014 backward compat read supported; new tasks must use 'pr'.",
-          "usage_guidance": "Task transitions MUST use advance_task_status MCP tool (checkout service) \u2014 direct tracker_set for task status is rejected with 403 (ENC-FTR-037). Full arc: open -> in-progress -> coding-complete -> committed -> pr -> merged-main -> deploy-init -> deploy-success -> closed. Re-entry: coding-updates -> coding-complete -> committed -> pr -> merged-main."
+          "usage_guidance": "Task transitions MUST use advance_task_status MCP tool (checkout service) \u2014 direct tracker_set for task status is rejected with 403 (ENC-FTR-037). Full arc: open -> in-progress -> coding-complete -> committed -> pr -> merged-main -> deploy-init -> deploy-success -> closed. Re-entry: coding-updates -> coding-complete -> committed -> pr -> merged-main. The exact allowed statuses and evidence requirements per gate depend on task.transition_type (ENC-ISS-092) \u2014 see checkout_service.transition_type_matrix. Human override: user_initiated=true in transition_evidence (Cognito JWT required; internal API key returns 403)."
         },
         "priority": {
           "type": "enum",
@@ -61,10 +61,22 @@
           "type": "boolean",
           "definition": "Whether task is created under coordination workflow."
         },
+        "transition_type": {
+          "type": "enum",
+          "enum": [
+            "github_pr_deploy",
+            "web_deploy",
+            "code_only",
+            "no_code"
+          ],
+          "default": "github_pr_deploy",
+          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Must be set via tracker_set BEFORE checkout_task is called \u2014 treated as immutable after checkout begins.",
+          "usage_guidance": "Set with tracker_set before checkout. Default github_pr_deploy is backward compatible and identical to pre-ENC-ISS-092 behavior. no_code: for tasks with no GitHub repo or non-code work (e.g. infra config, CLI installs). code_only: code was committed/merged to main but no deployment is needed. web_deploy: static/CloudFront deployments that do not produce GitHub Actions job objects. See checkout_service.transition_type_matrix for full gate requirements per type."
+        },
         "transition_evidence": {
           "type": "object",
           "definition": "Evidence payload required for gated status transitions.",
-          "usage_guidance": "task->committed requires commit_sha (validated against GitHub API by checkout service; also generates CCI token); task->merged-main requires merge_evidence; task->deploy-success requires deploy_evidence (structured GitHub Actions Jobs API object -- see deploy_evidence schema below); task->closed (when current status is deploy-success) requires live_validation_evidence (capture via ENC-FTR-032 Cognito session + PWA diagnostics); any revert requires revert_reason. Legacy: task->deployed previously required deployment_ref -- this gate is removed as of ENC-FTR-035; use the deploy-init/deploy-success arc instead. Legacy: task->pushed renamed to task->committed (commit_sha gate) and task->pr (formerly pushed) per ENC-FTR-037.",
+          "usage_guidance": "Evidence requirements depend on task.transition_type (ENC-ISS-092). github_pr_deploy (default): committed->commit_sha; merged-main->merge_evidence; deploy-success->deploy_evidence (GH Actions Jobs API); closed->live_validation_evidence string. web_deploy: same as github_pr_deploy except deploy-success->web_deploy_evidence {url, http_status, checked_at}. code_only: same through merged-main; closed->code_on_main_evidence {commit_sha} (GitHub compare API verifies ancestry). no_code: closed->no_code_evidence (non-empty string; no GitHub call). Any revert requires revert_reason. user_initiated (UI human override, Cognito JWT only): user_note required; user_initiated=true flag; all agent token gates bypassed. See checkout_service.transition_type_matrix for full per-gate specs.",
           "properties": {
             "deploy_evidence": {
               "type": "object",
@@ -133,6 +145,84 @@
               },
               "definition": "Commit Complete ID (ENC-FTR-037). Issued by checkout service when task advances to committed (after commit_sha is validated against GitHub API). Format: CCI-{uuid4_hex}. Stored on task record; cleared on deploy-success. Required in PR body for GitHub PR Commit Gate.",
               "usage_guidance": "Returned by advance_task_status(target_status=committed, transition_evidence={commit_sha: <40-char-hex>}). Must be included verbatim in the PR body (pattern CCI-[0-9a-f]{32}) before opening the PR. GitHub Actions PR Commit Gate validates it via GET /api/v1/checkout/validate/commit-complete/{cci_id}."
+            },
+            "web_deploy_evidence": {
+              "type": "object",
+              "definition": "Deploy evidence for web_deploy tasks (ENC-ISS-092). Used for static/CloudFront deployments that do not produce GitHub Actions job objects. Validated by checkout service at deploy-success gate.",
+              "required_fields": {
+                "url": {
+                  "type": "string",
+                  "constraints": {
+                    "pattern": "^https://"
+                  },
+                  "definition": "HTTPS URL verified after deployment. Must start with https://."
+                },
+                "http_status": {
+                  "type": "integer",
+                  "constraints": {
+                    "enum": [200]
+                  },
+                  "definition": "HTTP status code from the verification request. Must equal 200."
+                },
+                "checked_at": {
+                  "type": "string",
+                  "constraints": {
+                    "format": "ISO 8601 datetime with T separator",
+                    "example": "2026-03-04T07:00:00Z"
+                  },
+                  "definition": "UTC datetime when the URL was verified. Requires T separator (date-only strings rejected)."
+                }
+              },
+              "optional_fields": {
+                "cloudfront_invalidation_id": {
+                  "type": "string",
+                  "definition": "CloudFront invalidation ID if a cache invalidation was triggered (e.g. I-XXXXXXXXXXXXXXXX)."
+                },
+                "response_time_ms": {
+                  "type": "integer",
+                  "definition": "HTTP response time in milliseconds from the verification request."
+                }
+              },
+              "usage_guidance": "Provide as transition_evidence.web_deploy_evidence when calling advance_task_status(target_status=deploy-success) for a web_deploy task. Curl the deployed URL, confirm 200 OK, and record the result. Example: {url: 'https://jreese.net/', http_status: 200, checked_at: '2026-03-04T07:00:00Z', cloudfront_invalidation_id: 'I-XXXX'}."
+            },
+            "code_on_main_evidence": {
+              "type": "object",
+              "definition": "Evidence that code was merged to main for code_only tasks (ENC-ISS-092). Used at the closed gate (no deploy stages). Validated by checkout service via GitHub compare API.",
+              "required_fields": {
+                "commit_sha": {
+                  "type": "string",
+                  "constraints": {
+                    "pattern": "^[0-9a-f]{40}$"
+                  },
+                  "definition": "40-character hex commit SHA to verify. Checkout service calls GET /repos/{owner}/{repo}/compare/{commit_sha}...main and verifies the commit is behind or identical to main (i.e. an ancestor of main)."
+                },
+                "github_verified": {
+                  "type": "boolean",
+                  "definition": "Set to true by the checkout service after GitHub compare API confirms the commit is on main. Do not set manually \u2014 the service stamps this field."
+                }
+              },
+              "usage_guidance": "Provide as transition_evidence.code_on_main_evidence when calling advance_task_status(target_status=closed) for a code_only task. Only commit_sha is required as input; github_verified is stamped by the service. The commit must already be merged to the main branch before calling this gate."
+            },
+            "no_code_evidence": {
+              "type": "string",
+              "constraints": {
+                "min_length": 1
+              },
+              "definition": "Human-readable verification note for no_code tasks (ENC-ISS-092). Used at the closed gate. No GitHub API validation performed \u2014 the string is stored as-is for audit traceability.",
+              "usage_guidance": "Provide as transition_evidence.no_code_evidence when calling advance_task_status(target_status=closed) for a no_code task. Describe what was done and how it was verified. Example: 'Claude Code CLI installed on jreesewebops EC2 instance i-03aa86d6ce037e5aa. Verified via SSH: claude --version working.'"
+            },
+            "user_initiated": {
+              "type": "boolean",
+              "definition": "When true, indicates a human operator is performing this transition via the UI (ENC-ISS-092). Bypasses all agent checkout gates (ENC-FTR-037), CAI/CCI token requirements, and GitHub validation. Requires Cognito session authentication \u2014 rejected with HTTP 403 if internal API key is used.",
+              "usage_guidance": "Set by the UI only (Submit or Submit + Close button in LifecycleActions). Must be paired with user_note. The tracker_mutation Lambda stamps initiated_by (Cognito username) and initiated_at onto the stored evidence for audit traceability. Borrow-and-restore: if the task is checked out by an agent, the human override temporarily takes ownership, makes the change, then restores the agent's checkout (or releases on close). Cannot be used via MCP/agent paths."
+            },
+            "user_note": {
+              "type": "string",
+              "constraints": {
+                "min_length": 1
+              },
+              "definition": "Human note required for user_initiated transitions (ENC-ISS-092). Describes why the status was changed manually by a human operator.",
+              "usage_guidance": "Required when user_initiated=true. Stored in transition_evidence and recorded as a [USER-INITIATED] worklog entry with the Cognito username as provider."
             }
           }
         }
@@ -1162,8 +1252,8 @@
         },
         "gate_matrix": {
           "type": "object",
-          "definition": "Per-status evidence requirements enforced by checkout service.",
-          "usage_guidance": "in-progress: active_agent_session_id required (also sets checkout). coding-complete: no evidence required; issues CAI. committed: commit_sha (40-char hex) required; validated via GitHub API; issues CCI. pr: no evidence required. merged-main: pr_id (int) + merged_at (ISO 8601) required; validated via GitHub API. deploy-init: no evidence required. deploy-success: deploy_evidence (GitHub Actions Jobs API object -- 7 required fields) required; clears CAI+CCI from record. closed: live_validation_evidence (non-empty string) required; releases checkout. DVP-ISS-082: committed and merged-main now resolve GitHub owner/repo dynamically from the projects table instead of hardcoding NX-2021-L/enceladus. Resolution order: transition_evidence.owner/repo > project.repo field > parent project.repo > child project.repo. Optional owner/repo in transition_evidence override automatic resolution.",
+          "definition": "Per-status evidence requirements enforced by checkout service. Requirements vary by task.transition_type (ENC-ISS-092) \u2014 see checkout_service.transition_type_matrix for full per-type specs. Matrix below documents github_pr_deploy (default arc, unchanged from pre-ENC-ISS-092 behavior).",
+          "usage_guidance": "in-progress: active_agent_session_id required (also sets checkout). coding-complete: no evidence required; issues CAI (skipped for no_code type). committed: commit_sha (40-char hex) required; validated via GitHub API; issues CCI. pr: no evidence required. merged-main: pr_id (int) + merged_at (ISO 8601) required; validated via GitHub API. deploy-init: no evidence required. deploy-success: deploy_evidence (GitHub Actions Jobs API object -- 7 required fields) required for github_pr_deploy; web_deploy_evidence {url, http_status, checked_at} for web_deploy type; clears CAI+CCI. closed: live_validation_evidence (non-empty string) for github_pr_deploy/web_deploy; code_on_main_evidence {commit_sha} for code_only; no_code_evidence (non-empty string) for no_code; releases checkout. DVP-ISS-082: committed and merged-main now resolve GitHub owner/repo dynamically from the projects table instead of hardcoding NX-2021-L/enceladus. Resolution order: transition_evidence.owner/repo > project.repo field > parent project.repo > child project.repo. Optional owner/repo in transition_evidence override automatic resolution.",
           "properties": {
             "committed": {
               "required_evidence": [
@@ -1207,6 +1297,87 @@
               "releases_checkout": true
             }
           }
+        }
+      }
+    },
+    "checkout_service.transition_type_matrix": {
+      "description": "Per-type lifecycle arc definitions for task.transition_type (ENC-ISS-092). Specifies allowed target_status values and gate evidence requirements for each arc. Default arc is github_pr_deploy (backward compatible).",
+      "fields": {
+        "github_pr_deploy": {
+          "type": "arc_spec",
+          "allowed_statuses": [
+            "in-progress", "coding-complete", "committed", "pr",
+            "merged-main", "deploy-init", "deploy-success", "closed"
+          ],
+          "gate_requirements": {
+            "coding-complete": "checkout required; issues CAI token",
+            "committed": "commit_sha (40-char hex; GitHub API validated); CAI required on record; issues CCI token",
+            "pr": "CCI required on task record",
+            "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
+            "deploy-init": "checkout required; no evidence",
+            "deploy-success": "deploy_evidence (GitHub Actions Jobs API 7 fields: id, run_id, head_sha, status=completed, conclusion=success, started_at, completed_at); clears CAI+CCI",
+            "closed": "live_validation_evidence (non-empty string); releases checkout"
+          }
+        },
+        "web_deploy": {
+          "type": "arc_spec",
+          "allowed_statuses": [
+            "in-progress", "coding-complete", "committed", "pr",
+            "merged-main", "deploy-init", "deploy-success", "closed"
+          ],
+          "gate_requirements": {
+            "coding-complete": "checkout required; issues CAI token",
+            "committed": "commit_sha (40-char hex; GitHub API validated); CAI required on record; issues CCI token",
+            "pr": "CCI required on task record",
+            "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
+            "deploy-init": "checkout required; no evidence",
+            "deploy-success": "web_deploy_evidence {url (HTTPS), http_status (must be 200), checked_at (ISO 8601 with T separator)}; clears CAI+CCI",
+            "closed": "live_validation_evidence (non-empty string); releases checkout"
+          }
+        },
+        "code_only": {
+          "type": "arc_spec",
+          "allowed_statuses": [
+            "in-progress", "coding-complete", "committed", "pr",
+            "merged-main", "closed"
+          ],
+          "gate_requirements": {
+            "coding-complete": "checkout required; issues CAI token",
+            "committed": "commit_sha (40-char hex; GitHub API validated); CAI required on record; issues CCI token",
+            "pr": "CCI required on task record",
+            "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
+            "closed": "code_on_main_evidence {commit_sha (40-char hex)} \u2014 GitHub compare API verifies commit is ancestor of main (status: behind or identical); releases checkout"
+          },
+          "skipped_statuses": ["deploy-init", "deploy-success"],
+          "note": "Use for tasks where code was written and merged but no deployment step exists or is needed."
+        },
+        "no_code": {
+          "type": "arc_spec",
+          "allowed_statuses": [
+            "in-progress", "coding-complete", "closed"
+          ],
+          "gate_requirements": {
+            "coding-complete": "checkout required; NO CAI token issued (GitHub PR flow not applicable)",
+            "closed": "no_code_evidence (non-empty string; no GitHub API call); releases checkout"
+          },
+          "skipped_statuses": ["committed", "pr", "merged-main", "deploy-init", "deploy-success"],
+          "note": "Use for tasks with no GitHub repo, non-code work (infra config, CLI installs, admin tasks), or work that cannot produce GitHub commit evidence."
+        },
+        "user-initiated": {
+          "type": "arc_spec",
+          "allowed_statuses": [
+            "open", "in-progress", "coding-complete", "committed", "pr",
+            "merged-main", "deploy-init", "deploy-success", "coding-updates", "closed"
+          ],
+          "auth_requirement": "Cognito session cookie (enceladus_id_token) only \u2014 internal API key rejected with HTTP 403",
+          "gate_requirements": {
+            "any_status": "user_note (non-empty string) required; no checkout required; no GitHub API validation; no CAI/CCI token checks",
+            "closed (Submit + Close)": "user_note required; target_status=closed regardless of current status; checkout always released"
+          },
+          "checkout_behavior": "borrow-and-restore \u2014 tracker_mutation temporarily takes checkout ownership as Cognito username; on completion restores previous agent checkout if task was checked out (except on close, which always releases); worklog provider=cognito_username",
+          "audit": "initiated_by (Cognito username) and initiated_at stamped on transition_evidence as permanent audit record; [USER-INITIATED] worklog entry appended",
+          "handled_by": "tracker_mutation Lambda (_apply_user_initiated_advance) \u2014 NOT routed through checkout service gate matrix",
+          "note": "This is not a stored field value. user-initiated is a request-time flag (transition_evidence.user_initiated=true) handled at the API layer. The four agent-path types above (github_pr_deploy, web_deploy, code_only, no_code) are stored on the task record as task.transition_type."
         }
       }
     }
