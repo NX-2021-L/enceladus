@@ -17,6 +17,7 @@ import { ParentRecord } from '../components/shared/ParentRecord'
 import { ChildRecords } from '../components/shared/ChildRecords'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
+import { CopyButton } from '../components/shared/CopyButton'
 import { formatDate } from '../lib/formatters'
 import { filterRelatedItems, getChildrenIds } from '../lib/relationshipFilters'
 
@@ -136,7 +137,7 @@ export function FeatureDetailPage() {
         >
           {feature.project_id}
         </Link>
-        <span className="text-xs font-mono text-slate-500 block mb-1">{feature.feature_id}</span>
+        <span className="text-xs font-mono text-slate-500 mb-1 inline-flex items-center gap-1">{feature.feature_id}<CopyButton text={feature.feature_id} /></span>
         <h1 className="text-lg font-semibold text-slate-100 mb-2">{feature.title}</h1>
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <StatusChip status={feature.status} />

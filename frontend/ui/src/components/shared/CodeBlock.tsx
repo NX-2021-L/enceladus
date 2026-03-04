@@ -1,3 +1,4 @@
+import { CopyButton } from './CopyButton'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import json from 'react-syntax-highlighter/dist/esm/languages/hljs/json'
 import yaml from 'react-syntax-highlighter/dist/esm/languages/hljs/yaml'
@@ -117,12 +118,18 @@ export function CodeBlock({ code, language, showLabel = true, wrapLines = true }
   const label = language ? LANG_LABELS[language] ?? language : undefined
 
   return (
-    <div className="relative rounded-lg overflow-hidden mb-3">
+    <div className="relative group rounded-lg overflow-hidden mb-3">
       {showLabel && label && (
-        <div className="flex justify-end bg-slate-900/80 px-3 py-1 border-b border-slate-700/50">
+        <div className="flex items-center justify-between bg-slate-900/80 px-3 py-1 border-b border-slate-700/50">
           <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">
             {label}
           </span>
+          <CopyButton text={code} size="sm" className="opacity-0 group-hover:opacity-100 transition-opacity" />
+        </div>
+      )}
+      {!(showLabel && label) && (
+        <div className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
+          <CopyButton text={code} size="sm" />
         </div>
       )}
       <SyntaxHighlighter

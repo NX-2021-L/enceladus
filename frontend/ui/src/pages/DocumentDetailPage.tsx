@@ -6,6 +6,7 @@ import { MarkdownRenderer } from '../components/shared/MarkdownRenderer'
 import { CodeBlock, detectLanguageFromFilename } from '../components/shared/CodeBlock'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
+import { CopyButton } from '../components/shared/CopyButton'
 import { formatDate } from '../lib/formatters'
 import { ProjectPrimaryDocumentsPage } from './ProjectPrimaryDocumentsPage'
 import {
@@ -71,7 +72,7 @@ export function DocumentDetailPage() {
         >
           {doc.project_id}
         </Link>
-        <span className="text-xs font-mono text-slate-500 block mb-1">{doc.document_id}</span>
+        <span className="text-xs font-mono text-slate-500 mb-1 inline-flex items-center gap-1">{doc.document_id}<CopyButton text={doc.document_id} /></span>
         <h1 className="text-lg font-semibold text-slate-100 mb-2">{doc.title}</h1>
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <StatusChip status={doc.status} />
