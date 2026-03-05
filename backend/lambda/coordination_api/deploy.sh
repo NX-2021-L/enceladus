@@ -12,6 +12,7 @@ TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker}"
 PROJECTS_TABLE="${PROJECTS_TABLE:-projects}"
 GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE:-governance-policies}"
 GOVERNANCE_DICTIONARY_POLICY_ID="${GOVERNANCE_DICTIONARY_POLICY_ID:-governance_data_dictionary}"
+COMPONENTS_TABLE="${COMPONENTS_TABLE:-component-registry}"
 HOST_V2_INSTANCE_ID="${HOST_V2_INSTANCE_ID:-i-0523f94e99ec15a1e}"
 HOST_V2_ENCELADUS_MCP_INSTALLER="${HOST_V2_ENCELADUS_MCP_INSTALLER:-tools/enceladus-mcp-server/install_profile.sh}"
 HOST_V2_MCP_PROFILE_PATH="${HOST_V2_MCP_PROFILE_PATH:-.claude/mcp.json}"
@@ -181,6 +182,15 @@ ensure_role() {
       "Resource": [
         "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/documents",
         "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/documents/index/*"
+      ]
+    },
+    {
+      "Sid": "ComponentRegistryTableAccess",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"],
+      "Resource": [
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${COMPONENTS_TABLE}",
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${COMPONENTS_TABLE}/index/*"
       ]
     },
     {
@@ -624,6 +634,7 @@ ensure_lambda() {
   PROJECTS_TABLE="${PROJECTS_TABLE}" \
   GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE}" \
   GOVERNANCE_DICTIONARY_POLICY_ID="${GOVERNANCE_DICTIONARY_POLICY_ID}" \
+  COMPONENTS_TABLE="${COMPONENTS_TABLE}" \
   REGION="${REGION}" \
   SECRETS_REGION="${SECRETS_REGION}" \
   OPENAI_API_KEY_SECRET_ID="${OPENAI_API_KEY_SECRET_ID}" \
