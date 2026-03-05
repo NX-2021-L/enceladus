@@ -988,23 +988,26 @@ ensure_api_integration_and_routes() {
     "PUT /api/v1/governance/{fileName}"
     "OPTIONS /api/v1/governance/{fileName}"
   )
+  # Fetch all routes as tab-separated RouteKey<TAB>RouteId pairs.
+  # JMESPath filtering is avoided here because route keys containing curly braces
+  # (e.g. {fileName}) cause JMESPath filter expressions to misbehave silently.
+  local all_route_entries
+  all_route_entries="$(aws apigatewayv2 get-routes \
+    --region "${REGION}" \
+    --api-id "${API_ID}" \
+    --output text \
+    --query 'Items[].[RouteKey,RouteId]')"
   for del_key in "${routes_to_delete[@]}"; do
-    if printf '%s\n' "${existing_route_keys}" | grep -Fqx "${del_key}"; then
-      local del_route_id
-      del_route_id="$(aws apigatewayv2 get-routes \
+    local del_route_id
+    del_route_id="$(printf '%s\n' "${all_route_entries}" | awk -F'\t' -v key="${del_key}" '$1==key{print $2}')"
+    if [[ -n "${del_route_id}" ]]; then
+      log "[START] deleting obsolete route: ${del_key} (${del_route_id})"
+      aws apigatewayv2 delete-route \
         --region "${REGION}" \
         --api-id "${API_ID}" \
-        --query "Items[?RouteKey=='${del_key}'].RouteId | [0]" \
-        --output text)"
-      if [[ -n "${del_route_id}" && "${del_route_id}" != "None" ]]; then
-        log "[START] deleting obsolete route: ${del_key} (${del_route_id})"
-        aws apigatewayv2 delete-route \
-          --region "${REGION}" \
-          --api-id "${API_ID}" \
-          --route-id "${del_route_id}"
-        log "[END] deleted obsolete route: ${del_key}"
-        existing_route_keys="$(printf '%s\n' "${existing_route_keys}" | grep -Fxv "${del_key}")"
-      fi
+        --route-id "${del_route_id}"
+      log "[END] deleted obsolete route: ${del_key}"
+      existing_route_keys="$(printf '%s\n' "${existing_route_keys}" | grep -Fxv "${del_key}")"
     else
       log "[OK] obsolete route already absent: ${del_key}"
     fi
