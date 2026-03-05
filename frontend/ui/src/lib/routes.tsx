@@ -64,6 +64,11 @@ const AuthTokensPage = lazy(() =>
 const TerminalManagePage = lazy(() =>
   import('../pages/TerminalManagePage').then((module) => ({ default: module.TerminalManagePage })),
 )
+const ComponentRegistryPage = lazy(() =>
+  import('../pages/ComponentRegistryPage').then((module) => ({
+    default: module.ComponentRegistryPage,
+  })),
+)
 
 function withSuspense(element: ReactNode) {
   return <Suspense fallback={<LoadingState />}>{element}</Suspense>
@@ -105,6 +110,7 @@ export const router = createBrowserRouter(
         },
         { path: '/documents/:documentId', element: withSuspense(<DocumentDetailPage />) },
         { path: '/terminal/manage', element: withSuspense(<TerminalManagePage />) },
+        { path: '/components', element: withSuspense(<ComponentRegistryPage />) },
         { path: '/coordination', element: withSuspense(<CoordinationPage />) },
         { path: '/coordination/auth', element: withSuspense(<AuthTokensPage />) },
         {
