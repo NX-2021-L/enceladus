@@ -16,6 +16,7 @@
       "DEPLOY_REGION": "us-west-2",
       "DEPLOY_TABLE": "devops-deployment-manager",
       "DOC_PREP_LAMBDA_NAME": "devops-doc-prep",
+      "GITHUB_TOKEN": "<from enceladus-checkout-service Lambda env, sourced from Secrets Manager: enceladus/github/token>",
       "PROJECTS_TABLE": "projects",
       "SQS_QUEUE_URL": "https://sqs.us-west-2.amazonaws.com/356364570033/devops-deploy-queue.fifo"
     },
