@@ -38,6 +38,8 @@ Resources:
           - Content-Type
           - Authorization
           - Cookie
+          - X-Coordination-Internal-Key
+          - X-Checkout-Assistant-Key
         AllowCredentials: true
 
   # NOTE: $default stage exists but AWS::ApiGatewayV2::Stage does not support
@@ -201,6 +203,42 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/mcp
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  # Component Registry routes (ENC-FTR-041)
+  RouteComponentsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/components
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/components/{componentId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsUpdate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/coordination/components/{componentId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsDelete:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/coordination/components/{componentId}
       Target: !Sub integrations/${CoordinationApiIntegration}
 
   # ---------------------------------------------------------------------------
