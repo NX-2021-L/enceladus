@@ -1500,6 +1500,50 @@ def _normalize_acceptance_criteria_value(record_type: str, raw_value: Any) -> Tu
     return normalized_list, None
 
 
+def _normalize_evidence_value(raw_value: Any) -> Tuple[Optional[List[Any]], Optional[str]]:
+    """Normalize PATCH evidence payloads, including JSON-stringified arrays.
+
+    ENC-TSK-783 / ENC-ISS-099: Evidence written via tracker_set (MCP) may arrive as a
+    JSON string instead of a parsed list, which would be stored as DynamoDB {"S": ...}
+    and later crash the PWA with 'evidence.map is not a function'.
+    This function coerces string payloads to the proper List type and validates structure.
+    """
+    parsed_value = raw_value
+
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            return None, "evidence must not be empty."
+        if stripped[0] in "[{":
+            try:
+                parsed_value = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                return None, f"evidence string is not valid JSON: {exc}"
+        else:
+            return None, "evidence must be a JSON array of evidence objects."
+
+    if isinstance(parsed_value, dict):
+        parsed_list: List[Any] = [parsed_value]
+    elif isinstance(parsed_value, list):
+        parsed_list = parsed_value
+    else:
+        return None, "evidence must be a list of evidence objects."
+
+    if not parsed_list:
+        return None, "evidence requires at least one entry."
+
+    for i, ev in enumerate(parsed_list):
+        if not isinstance(ev, dict):
+            return None, f"evidence[{i}] must be an object."
+        if not ev.get("description", "").strip():
+            return None, f"evidence[{i}].description is required."
+        steps = ev.get("steps_to_duplicate")
+        if not isinstance(steps, list) or len(steps) == 0:
+            return None, f"evidence[{i}].steps_to_duplicate requires at least one step."
+
+    return parsed_list, None
+
+
 def _apply_user_initiated_advance(
     project_id: str,
     record_type: str,
@@ -1696,6 +1740,14 @@ def _handle_update_field(
         if normalize_error:
             return _error(400, normalize_error)
         value = normalized_criteria
+
+    # ENC-TSK-783 / ENC-ISS-099: Coerce evidence JSON strings to proper List type so the
+    # value is stored as DynamoDB {"L": [...]} instead of {"S": "[{...}]"}.
+    if field == "evidence":
+        normalized_evidence, evidence_error = _normalize_evidence_value(value)
+        if evidence_error:
+            return _error(400, evidence_error)
+        value = normalized_evidence
 
     ddb = _get_ddb()
     key = _build_key(project_id, record_type, record_id)
