@@ -9109,6 +9109,45 @@ def _trigger_governance_doc_sync_push(file_name: str, content_hash: str) -> None
         )
 
 
+def _handle_governance_get(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/governance/{file_name} — read governance file content from S3 (ENC-FTR-040)."""
+    path = event.get("rawPath") or event.get("path") or ""
+    m = re.fullmatch(r"/api/v1/governance/(.+)", path)
+    if not m:
+        return _error(400, "file_name is required in path")
+    file_name = urllib.parse.unquote(m.group(1)).strip()
+
+    # Reject reserved sub-paths that have dedicated handlers
+    if file_name in ("hash", "dictionary"):
+        return _error(400, f"'{file_name}' is a reserved governance route, not a file name")
+
+    uri = _governance_uri_from_file_name(file_name)
+    if not uri:
+        return _error(
+            400,
+            f"file_name '{file_name}' does not map to a valid governance:// URI. "
+            "Must be 'agents.md', 'governance_data_dictionary.json', or start with 'agents/'.",
+        )
+
+    live_key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{file_name}"
+    s3 = _get_s3()
+    try:
+        resp = s3.get_object(Bucket=S3_BUCKET, Key=live_key)
+        content = resp["Body"].read().decode("utf-8")
+        return _response(200, {"success": True, "uri": uri, "file_name": file_name, "content": content})
+    except s3.exceptions.NoSuchKey:
+        return _error(404, f"Governance file not found: {uri}")
+    except ClientError as exc:
+        code = (exc.response or {}).get("Error", {}).get("Code", "")
+        if code == "NoSuchKey":
+            return _error(404, f"Governance file not found: {uri}")
+        logger.exception("Failed to read governance file from S3")
+        return _error(500, f"Failed to read governance file from S3 ({code}): {exc}")
+    except Exception as exc:
+        logger.exception("Failed to read governance file from S3")
+        return _error(500, f"Failed to read governance file: {exc}")
+
+
 def _handle_governance_update(event: Dict[str, Any]) -> Dict[str, Any]:
     """PUT /api/v1/governance/{file_name} — update governance file with archival."""
     try:
@@ -10211,9 +10250,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if method == "GET" and path == "/api/v1/governance/dictionary":
         return _handle_governance_dictionary(event)
 
-    # PUT /api/v1/governance/{file_name...}
-    match_gov_update = re.fullmatch(r"/api/v1/governance/(.+)", path)
-    if method == "PUT" and match_gov_update:
+    # GET/PUT /api/v1/governance/{file_name...}  (ENC-FTR-040: GET added for MCP server)
+    match_gov_file = re.fullmatch(r"/api/v1/governance/(.+)", path)
+    if method == "GET" and match_gov_file:
+        return _handle_governance_get(event)
+    if method == "PUT" and match_gov_file:
         return _handle_governance_update(event)
 
     # --- ENC-FTR-041: Component Registry routes (auth required) ---
