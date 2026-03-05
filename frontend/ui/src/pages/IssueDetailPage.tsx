@@ -240,36 +240,53 @@ export function IssueDetailPage() {
       )}
 
       {/* Evidence (ENC-FTR-017 philosophy) */}
-      {issue.evidence && issue.evidence.length > 0 && (
-        <div className="bg-slate-800 rounded-lg p-4">
-          <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
-            Evidence
-          </h3>
-          <div className="space-y-4">
-            {issue.evidence.map((ev, i) => (
-              <div key={i} className="border-l-2 border-red-500/40 pl-3">
-                <p className="text-sm text-slate-300 mb-1">{ev.description}</p>
-                {ev.steps_to_duplicate && ev.steps_to_duplicate.length > 0 && (
-                  <div className="mt-1.5">
-                    <span className="text-xs text-slate-500 font-medium">Steps to duplicate:</span>
-                    <ol className="mt-1 space-y-0.5 list-decimal list-inside">
-                      {ev.steps_to_duplicate.map((step, si) => (
-                        <li key={si} className="text-xs text-slate-400">{step}</li>
-                      ))}
-                    </ol>
-                  </div>
-                )}
-                {(ev.observed_by || ev.timestamp) && (
-                  <div className="flex gap-3 mt-1.5 text-xs text-slate-500">
-                    {ev.observed_by && <span>Observed by: {ev.observed_by}</span>}
-                    {ev.timestamp && <span>{ev.timestamp}</span>}
-                  </div>
-                )}
-              </div>
-            ))}
+      {/* ENC-TSK-782: normalize evidence to array — evidence may be stored as a JSON string
+          (e.g. written via tracker_set before ENC-TSK-783 coercion fix). Gracefully parse
+          so the page never crashes with "evidence.map is not a function". */}
+      {(() => {
+        let evidenceArr: { description: string; steps_to_duplicate?: string[]; observed_by?: string; timestamp?: string }[] = [];
+        if (Array.isArray(issue.evidence)) {
+          evidenceArr = issue.evidence;
+        } else if (typeof issue.evidence === 'string') {
+          try {
+            const parsed = JSON.parse(issue.evidence);
+            evidenceArr = Array.isArray(parsed) ? parsed : [];
+          } catch {
+            evidenceArr = [];
+          }
+        }
+        if (evidenceArr.length === 0) return null;
+        return (
+          <div className="bg-slate-800 rounded-lg p-4">
+            <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
+              Evidence
+            </h3>
+            <div className="space-y-4">
+              {evidenceArr.map((ev, i) => (
+                <div key={i} className="border-l-2 border-red-500/40 pl-3">
+                  <p className="text-sm text-slate-300 mb-1">{ev.description}</p>
+                  {ev.steps_to_duplicate && ev.steps_to_duplicate.length > 0 && (
+                    <div className="mt-1.5">
+                      <span className="text-xs text-slate-500 font-medium">Steps to duplicate:</span>
+                      <ol className="mt-1 space-y-0.5 list-decimal list-inside">
+                        {ev.steps_to_duplicate.map((step, si) => (
+                          <li key={si} className="text-xs text-slate-400">{step}</li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+                  {(ev.observed_by || ev.timestamp) && (
+                    <div className="flex gap-3 mt-1.5 text-xs text-slate-500">
+                      {ev.observed_by && <span>Observed by: {ev.observed_by}</span>}
+                      {ev.timestamp && <span>{ev.timestamp}</span>}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Related Items — ENC-FTR-014: De-duplicated (excludes parent/children) */}
       <div className="bg-slate-800 rounded-lg p-4">
