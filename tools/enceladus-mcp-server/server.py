@@ -5211,7 +5211,7 @@ async def _governance_update(args: dict) -> list[TextContent]:
         "change_summary": change_summary,
         "governance_hash": args.get("governance_hash", ""),
     }
-    encoded_name = urllib.parse.quote(file_name, safe="/")
+    encoded_name = urllib.parse.quote(file_name, safe="")  # encode slashes → %2F so API Gateway routes correctly
     resp = _governance_api_request("PUT", f"/{encoded_name}", payload=payload)
     # Invalidate local resource/hash caches after successful governance write.
     global _governance_catalog_cache, _governance_catalog_cached_at
@@ -5229,57 +5229,29 @@ async def _governance_hash(args: dict) -> list[TextContent]:
 
 
 async def _governance_get(args: dict) -> list[TextContent]:
-    """Read a governance file from S3 by file_name and return its content."""
+    """Read a governance file by file_name via HTTP API (ENC-FTR-040).
+
+    Migrated from direct S3 boto3 access to HTTP API so that:
+    1. MCP sessions without S3 IAM permissions (e.g. enceladus-agent-cli) can read
+       governance files — the Lambda has the necessary S3 role.
+    2. agents/ sub-path files (e.g. agents/plan-capture.md) are accessible even
+       though the MCP server's S3 catalog may not enumerate them.
+    """
     file_name = str(args.get("file_name") or "agents.md").strip()
     uri = _governance_uri_from_file_name(file_name)
     if not uri:
         return _result_text(
             _error_payload(
                 "NOT_FOUND",
-                f"Cannot resolve governance URI for file_name: {file_name!r}",
+                f"Cannot resolve governance URI for file_name: {file_name!r}. "
+                "Accepted values: 'agents.md', 'governance_data_dictionary.json', "
+                "or any path starting with 'agents/'.",
                 retryable=False,
             )
         )
-    catalog = _governance_catalog()
-    meta = catalog.get(uri)
-    if not meta:
-        return _result_text(
-            _error_payload(
-                "NOT_FOUND",
-                f"Governance resource not found in catalog: {uri}",
-                retryable=False,
-            )
-        )
-    s3_key = str(meta.get("s3_key") or "").strip()
-    if not s3_key:
-        return _result_text(
-            _error_payload(
-                "INTERNAL_ERROR",
-                f"Governance catalog entry for {uri!r} is missing s3_key",
-                retryable=False,
-            )
-        )
-    try:
-        resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=s3_key)
-        content = resp["Body"].read().decode("utf-8")
-        return _result_text({"success": True, "uri": uri, "file_name": file_name, "content": content})
-    except ClientError as exc:
-        code = (exc.response or {}).get("Error", {}).get("Code", "")
-        return _result_text(
-            _error_payload(
-                "UPSTREAM_ERROR",
-                f"Failed to read governance file {uri!r} from S3 ({code}): {exc}",
-                retryable=code not in {"NoSuchKey", "404", "NotFound"},
-            )
-        )
-    except Exception as exc:
-        return _result_text(
-            _error_payload(
-                "INTERNAL_ERROR",
-                f"Unexpected error reading governance file {uri!r}: {exc}",
-                retryable=False,
-            )
-        )
+    encoded_name = urllib.parse.quote(file_name, safe="")  # encode slashes → %2F
+    resp = _governance_api_request("GET", f"/{encoded_name}")
+    return _result_text(resp)
 
 
 async def _governance_dictionary(args: dict) -> list[TextContent]:
