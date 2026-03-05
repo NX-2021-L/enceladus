@@ -106,6 +106,7 @@ def _first_nonempty_env(*names: str) -> str:
 COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests")
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+COMPONENTS_TABLE = os.environ.get("COMPONENTS_TABLE", "component-registry")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 GOVERNANCE_POLICIES_TABLE = os.environ.get("GOVERNANCE_POLICIES_TABLE", "governance-policies")
 AUTH_TOKENS_TABLE = os.environ.get("AUTH_TOKENS_TABLE", GOVERNANCE_POLICIES_TABLE)
@@ -945,10 +946,10 @@ def _has_managed_permission(claims: Dict[str, Any], *required: str) -> bool:
 def _cors_headers() -> Dict[str, str]:
     return {
         "Access-Control-Allow-Origin": CORS_ORIGIN,
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": (
             "Accept, Authorization, Content-Type, Cookie, X-Coordination-Callback-Token, "
-            "X-Coordination-Internal-Key"
+            "X-Coordination-Internal-Key, X-Checkout-Assistant-Key"
         ),
         "Access-Control-Allow-Credentials": "true",
     }
@@ -6761,6 +6762,325 @@ def _handle_mcp_http(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str,
         )
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-041: Component Registry CRUD
+# ---------------------------------------------------------------------------
+
+_COMPONENT_CATEGORIES = frozenset({
+    "lambda", "frontend", "infrastructure", "library", "workflow", "external"
+})
+_COMPONENT_TRANSITION_TYPES = frozenset({
+    "github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code"
+})
+_COMPONENT_STATUSES = frozenset({"active", "deprecated", "archived"})
+
+# Checkout-assistant key — allows updating transition_type without Cognito session
+CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
+
+
+def _is_cognito_session(claims: Dict[str, Any]) -> bool:
+    """Return True if the request was authenticated via a Cognito JWT cookie (not internal key)."""
+    mode = str((claims or {}).get("auth_mode") or "").strip().lower()
+    return mode not in ("internal-key", "managed-token")
+
+
+def _is_assistant_request(event: Dict[str, Any]) -> bool:
+    """Return True if the request carries the checkout-service-assistant key."""
+    if not CHECKOUT_ASSISTANT_KEY:
+        return False
+    headers = event.get("headers") or {}
+    key = (
+        headers.get("x-checkout-assistant-key")
+        or headers.get("X-Checkout-Assistant-Key")
+        or ""
+    )
+    return key == CHECKOUT_ASSISTANT_KEY
+
+
+def _ddb_to_py(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a DynamoDB low-level item dict to plain Python."""
+    ds = TypeDeserializer()
+    return {k: ds.deserialize(v) for k, v in item.items()}
+
+
+def _py_to_ddb(obj: Any) -> Dict[str, Any]:
+    """Convert a plain Python dict to DynamoDB low-level format."""
+    ss = TypeSerializer()
+    return {k: ss.serialize(v) for k, v in obj.items() if v is not None}
+
+
+def _component_slug(name: str) -> str:
+    """Convert a component name to a slug for component_id generation."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return f"comp-{slug}"
+
+
+def _handle_components_list(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/components — list components with optional filters."""
+    ddb = _get_ddb()
+    params = event.get("queryStringParameters") or {}
+    project_id_filter = (params.get("project_id") or "").strip()
+    category_filter = (params.get("category") or "").strip()
+    status_filter = (params.get("status") or "").strip()
+
+    try:
+        if project_id_filter:
+            # Query project-name-index GSI
+            kwargs: Dict[str, Any] = {
+                "TableName": COMPONENTS_TABLE,
+                "IndexName": "project-name-index",
+                "KeyConditionExpression": "project_id = :pid",
+                "ExpressionAttributeValues": {":pid": {"S": project_id_filter}},
+            }
+            if category_filter:
+                kwargs["FilterExpression"] = "category = :cat"
+                kwargs["ExpressionAttributeValues"][":cat"] = {"S": category_filter}
+            if status_filter:
+                fe = kwargs.get("FilterExpression", "")
+                kwargs["FilterExpression"] = (fe + " AND #st = :st") if fe else "#st = :st"
+                kwargs.setdefault("ExpressionAttributeNames", {})["#st"] = "status"
+                kwargs["ExpressionAttributeValues"][":st"] = {"S": status_filter}
+            resp = ddb.query(**kwargs)
+            items = [_ddb_to_py(i) for i in resp.get("Items", [])]
+        elif category_filter:
+            # Query category-updated-index GSI
+            kwargs = {
+                "TableName": COMPONENTS_TABLE,
+                "IndexName": "category-updated-index",
+                "KeyConditionExpression": "category = :cat",
+                "ExpressionAttributeValues": {":cat": {"S": category_filter}},
+            }
+            if status_filter:
+                kwargs["FilterExpression"] = "#st = :st"
+                kwargs["ExpressionAttributeNames"] = {"#st": "status"}
+                kwargs["ExpressionAttributeValues"][":st"] = {"S": status_filter}
+            resp = ddb.query(**kwargs)
+            items = [_ddb_to_py(i) for i in resp.get("Items", [])]
+        else:
+            # Full scan (small table, acceptable)
+            kwargs = {"TableName": COMPONENTS_TABLE}
+            filter_exprs = []
+            attr_names: Dict[str, str] = {}
+            attr_vals: Dict[str, Any] = {}
+            if status_filter:
+                filter_exprs.append("#st = :st")
+                attr_names["#st"] = "status"
+                attr_vals[":st"] = {"S": status_filter}
+            if filter_exprs:
+                kwargs["FilterExpression"] = " AND ".join(filter_exprs)
+                kwargs["ExpressionAttributeNames"] = attr_names
+                kwargs["ExpressionAttributeValues"] = attr_vals
+            items = []
+            while True:
+                resp = ddb.scan(**kwargs)
+                items.extend([_ddb_to_py(i) for i in resp.get("Items", [])])
+                last = resp.get("LastEvaluatedKey")
+                if not last:
+                    break
+                kwargs["ExclusiveStartKey"] = last
+
+        return _response(200, {"success": True, "components": items, "count": len(items)})
+    except Exception as exc:
+        logger.exception("components_list failed")
+        return _error(500, f"Failed to list components: {exc}")
+
+
+def _handle_components_get(component_id: str) -> Dict[str, Any]:
+    """GET /api/v1/coordination/components/{id} — fetch single component."""
+    ddb = _get_ddb()
+    try:
+        resp = ddb.get_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+        )
+        item = resp.get("Item")
+        if not item:
+            return _error(404, f"Component '{component_id}' not found")
+        return _response(200, {"success": True, "component": _ddb_to_py(item)})
+    except Exception as exc:
+        logger.exception("components_get failed")
+        return _error(500, f"Failed to get component: {exc}")
+
+
+def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components — create a new component.
+
+    transition_type defaults to github_pr_deploy for non-Cognito callers.
+    """
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "Invalid JSON body")
+
+    component_name = (body.get("component_name") or "").strip()
+    if not component_name:
+        return _error(400, "component_name is required")
+
+    project_id = (body.get("project_id") or "").strip()
+    if not project_id:
+        return _error(400, "project_id is required")
+
+    category = (body.get("category") or "").strip().lower()
+    if not category:
+        return _error(400, "category is required")
+    if category not in _COMPONENT_CATEGORIES:
+        return _error(400, f"Invalid category '{category}'. Allowed: {sorted(_COMPONENT_CATEGORIES)}")
+
+    # transition_type: Cognito/assistant can set any value; internal key defaults to github_pr_deploy
+    requested_type = (body.get("transition_type") or "").strip().lower()
+    if requested_type and requested_type not in _COMPONENT_TRANSITION_TYPES:
+        return _error(400, f"Invalid transition_type '{requested_type}'. Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}")
+
+    if requested_type and not (_is_cognito_session(claims) or _is_assistant_request(event)):
+        return _error(403, (
+            "Setting transition_type at create time requires Cognito authentication "
+            "(PWA session) or checkout-service-assistant key. "
+            "Internal API key callers receive the default 'github_pr_deploy'."
+        ))
+    transition_type = requested_type or "github_pr_deploy"
+
+    # Build component_id from provided slug or derive from name
+    component_id = (body.get("component_id") or "").strip()
+    if not component_id:
+        component_id = _component_slug(component_name)
+
+    status_val = (body.get("status") or "active").strip().lower()
+    if status_val not in _COMPONENT_STATUSES:
+        return _error(400, f"Invalid status '{status_val}'. Allowed: {sorted(_COMPONENT_STATUSES)}")
+
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    item: Dict[str, Any] = {
+        "component_id": component_id,
+        "component_name": component_name,
+        "project_id": project_id,
+        "category": category,
+        "transition_type": transition_type,
+        "status": status_val,
+        "created_at": now,
+        "updated_at": now,
+    }
+    if body.get("description"):
+        item["description"] = str(body["description"]).strip()
+    if body.get("github_repo"):
+        item["github_repo"] = str(body["github_repo"]).strip()
+
+    ddb = _get_ddb()
+    try:
+        ddb.put_item(
+            TableName=COMPONENTS_TABLE,
+            Item=_py_to_ddb(item),
+            ConditionExpression="attribute_not_exists(component_id)",
+        )
+        return _response(201, {"success": True, "component": item})
+    except ddb.exceptions.ConditionalCheckFailedException:
+        return _error(409, f"Component '{component_id}' already exists")
+    except Exception as exc:
+        logger.exception("components_create failed")
+        return _error(500, f"Failed to create component: {exc}")
+
+
+def _handle_components_update(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """PATCH /api/v1/coordination/components/{id} — update component fields.
+
+    Updating transition_type requires Cognito session OR checkout-service-assistant key.
+    """
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "Invalid JSON body")
+
+    if not body:
+        return _error(400, "No fields to update")
+
+    # Auth guard: transition_type changes require Cognito or assistant key
+    if "transition_type" in body:
+        if not (_is_cognito_session(claims) or _is_assistant_request(event)):
+            return _error(403, (
+                "Updating transition_type requires Cognito authentication (PWA session) "
+                "or checkout-service-assistant key (ENC-FTR-041). "
+                "Direct agent writes via internal API key are not permitted."
+            ))
+        new_type = (body["transition_type"] or "").strip().lower()
+        if new_type not in _COMPONENT_TRANSITION_TYPES:
+            return _error(400, f"Invalid transition_type '{new_type}'. Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}")
+
+    # Build update expression
+    updatable_fields = {
+        "component_name", "project_id", "category", "transition_type",
+        "description", "github_repo", "status", "assistant_reason",
+    }
+    update_parts = []
+    attr_names: Dict[str, str] = {}
+    attr_vals: Dict[str, Any] = {}
+
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    update_parts.append("#ua = :ua")
+    attr_names["#ua"] = "updated_at"
+    attr_vals[":ua"] = {"S": now}
+
+    for field in updatable_fields:
+        if field not in body:
+            continue
+        val = body[field]
+        if field == "category" and val not in _COMPONENT_CATEGORIES:
+            return _error(400, f"Invalid category '{val}'. Allowed: {sorted(_COMPONENT_CATEGORIES)}")
+        if field == "status" and val not in _COMPONENT_STATUSES:
+            return _error(400, f"Invalid status '{val}'. Allowed: {sorted(_COMPONENT_STATUSES)}")
+        safe_name = f"#f_{field}"
+        safe_val = f":v_{field}"
+        attr_names[safe_name] = field
+        attr_vals[safe_val] = {"S": str(val)} if isinstance(val, str) else {"S": str(val)}
+        update_parts.append(f"{safe_name} = {safe_val}")
+
+    if not update_parts:
+        return _error(400, "No valid fields to update")
+
+    update_expr = "SET " + ", ".join(update_parts)
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.update_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+            UpdateExpression=update_expr,
+            ExpressionAttributeNames=attr_names,
+            ExpressionAttributeValues=attr_vals,
+            ConditionExpression="attribute_exists(component_id)",
+            ReturnValues="ALL_NEW",
+        )
+        updated = _ddb_to_py(resp.get("Attributes", {}))
+        return _response(200, {"success": True, "component": updated})
+    except ddb.exceptions.ConditionalCheckFailedException:
+        return _error(404, f"Component '{component_id}' not found")
+    except Exception as exc:
+        logger.exception("components_update failed")
+        return _error(500, f"Failed to update component: {exc}")
+
+
+def _handle_components_delete(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """DELETE /api/v1/coordination/components/{id} — delete a component (Cognito only)."""
+    if not _is_cognito_session(claims):
+        return _error(403, "Deleting components requires Cognito authentication (PWA session only).")
+    ddb = _get_ddb()
+    try:
+        ddb.delete_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+            ConditionExpression="attribute_exists(component_id)",
+        )
+        return _response(200, {"success": True, "deleted": component_id})
+    except ddb.exceptions.ConditionalCheckFailedException:
+        return _error(404, f"Component '{component_id}' not found")
+    except Exception as exc:
+        logger.exception("components_delete failed")
+        return _error(500, f"Failed to delete component: {exc}")
+
+
 def _handle_capabilities() -> Dict[str, Any]:
     provider_secrets = _provider_secret_readiness()
     return _response(
@@ -9895,6 +10215,29 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     match_gov_update = re.fullmatch(r"/api/v1/governance/(.+)", path)
     if method == "PUT" and match_gov_update:
         return _handle_governance_update(event)
+
+    # --- ENC-FTR-041: Component Registry routes (auth required) ---
+
+    # GET /api/v1/coordination/components
+    if method == "GET" and path == "/api/v1/coordination/components":
+        return _handle_components_list(event)
+
+    # POST /api/v1/coordination/components
+    if method == "POST" and path == "/api/v1/coordination/components":
+        return _handle_components_create(event, claims or {})
+
+    # GET /api/v1/coordination/components/{componentId}
+    match_comp = re.fullmatch(r"/api/v1/coordination/components/([A-Za-z0-9_\-]+)", path)
+    if method == "GET" and match_comp:
+        return _handle_components_get(match_comp.group(1))
+
+    # PATCH /api/v1/coordination/components/{componentId}
+    if method == "PATCH" and match_comp:
+        return _handle_components_update(match_comp.group(1), event, claims or {})
+
+    # DELETE /api/v1/coordination/components/{componentId}
+    if method == "DELETE" and match_comp:
+        return _handle_components_delete(match_comp.group(1), event, claims or {})
 
     # --- Phase 2b: Projects routes (auth required, read-only) ---
 
