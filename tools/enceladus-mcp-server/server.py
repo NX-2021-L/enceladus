@@ -3895,7 +3895,11 @@ async def list_tools() -> list[Tool]:
                 "Check out a tracker task and advance it to in-progress. "
                 "REQUIRED before any coding can begin on a task. "
                 "Returns full task metadata including the task record. "
-                "The checkout is owned by the calling provider (active_agent_session_id)."
+                "The checkout is owned by the calling provider (active_agent_session_id). "
+                "ENC-FTR-041: Before checking out, set task.components via tracker_set to list "
+                "the component_ids this task will modify (e.g., ['comp-checkout-service']). "
+                "Without task.components, agent-initiated advance_task_status calls will be "
+                "blocked (400) — only human PWA operators can advance componentless tasks."
             ),
             inputSchema={
                 "type": "object",
@@ -3951,8 +3955,7 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Advance a task's status through the lifecycle arc. "
                 "This is the ONLY way to change task status (ENC-FTR-037). "
-                "Gate matrix: "
-                "coding-complete → returns commit_approval_id (CAI-xxx); "
+                "Gate matrix: coding-complete → returns commit_approval_id (CAI-xxx); "
                 "committed (requires commit_sha in transition_evidence) → validates via GitHub, "
                 "returns commit_complete_id (CCI-xxx); "
                 "pr → requires prior committed (CCI on task); "
@@ -3962,12 +3965,17 @@ async def list_tools() -> list[Tool]:
                 "ENC-ISS-092: the exact allowed statuses and evidence requirements depend on "
                 "task.transition_type — set via tracker_set before checkout. "
                 "github_pr_deploy (default): full arc above unchanged. "
-                "web_deploy: same arc but deploy-success uses web_deploy_evidence {url, http_status, checked_at} "
-                "instead of deploy_evidence. "
-                "code_only: skips deploy-init/deploy-success; closed uses code_on_main_evidence {commit_sha} "
-                "(GitHub compare API verifies commit is ancestor of main). "
+                "lambda_deploy (ENC-FTR-041): same arc as github_pr_deploy but deploy-success uses "
+                "lambda_deploy_evidence {function_name, version, updated_at (ISO 8601), status='Success'} "
+                "instead of deploy_evidence (GH Actions object). "
+                "web_deploy: same arc but deploy-success uses web_deploy_evidence {url, http_status, checked_at}. "
+                "code_only: skips deploy-init/deploy-success; closed uses code_on_main_evidence {commit_sha}. "
                 "no_code: only in-progress → coding-complete → closed; no CAI issued; "
                 "closed uses no_code_evidence (non-empty string). "
+                "ENC-FTR-041: task.components is required for agent advances — set via tracker_set. "
+                "The checkout service enforces that task.transition_type matches the strictest "
+                "component in task.components (STRICTNESS_RANK: github_pr_deploy=0, lambda_deploy=1, "
+                "web_deploy=1, code_only=2, no_code=3). "
                 "See governance dict checkout_service.transition_type_matrix for full per-type gate specs."
             ),
             inputSchema={

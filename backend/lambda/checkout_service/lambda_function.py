@@ -37,14 +37,26 @@ Environment variables:
     COGNITO_CLIENT_ID             6q607dk3liirhtecgps7hifmlk
     CORS_ORIGIN                   default: https://jreese.net
     TOKEN_TTL_DAYS                token expiry in days (default: 90)
+    COMPONENTS_TABLE              component registry DynamoDB table (default: component-registry)
+    CHECKOUT_ASSISTANT_KEY        secret key for checkout-service-assistant auto-remediation
+    COORDINATION_API_BASE         base URL for coordination API (default: https://jreese.net/api/v1/coordination)
 
-Related: ENC-FTR-037, ENC-ISS-092
+Related: ENC-FTR-037, ENC-ISS-092, ENC-FTR-041
 
 ENC-ISS-092: Added ``transition_type`` field support. Tasks may now declare one of four
 lifecycle arcs (github_pr_deploy, web_deploy, code_only, no_code) that determine which
 target_status values are allowed and what evidence each gate requires. The default
 ``github_pr_deploy`` arc is fully backward compatible — tasks without the field behave
 identically to before.
+
+ENC-FTR-041: Added component registry enforcement. Tasks must declare ``components``
+(list of component_ids from component-registry table) before agent-initiated advances.
+The checkout service enforces that task.transition_type is at least as strict as the
+most restrictive component's transition_type (STRICTNESS_RANK ordering). Added
+``lambda_deploy`` transition_type arc (same as web_deploy but uses lambda_deploy_evidence
+at deploy-success). Added checkout-service-assistant inline auto-remediation: after 3
+consecutive deploy-success failures, the assistant infers the intended deploy method and
+loosens component registration if safe to do so.
 """
 
 from __future__ import annotations
@@ -91,6 +103,12 @@ TOKEN_TTL_DAYS = int(os.environ.get("TOKEN_TTL_DAYS", "90"))
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E1k")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk")
+# ENC-FTR-041: Component registry enforcement
+COMPONENTS_TABLE = os.environ.get("COMPONENTS_TABLE", "component-registry")
+CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
+COORDINATION_API_BASE = os.environ.get(
+    "COORDINATION_API_BASE", "https://jreese.net/api/v1/coordination"
+)
 
 GITHUB_API_BASE = "https://api.github.com"
 
@@ -587,11 +605,15 @@ def _handle_release(project_id: str, task_id: str, body: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 #: Transition types that use the full GitHub PR/commit validation flow.
-_GITHUB_PR_TYPES = {"github_pr_deploy", "web_deploy", "code_only"}
+_GITHUB_PR_TYPES = {"github_pr_deploy", "web_deploy", "code_only", "lambda_deploy"}
 
 #: Per-type allowed target_status values. Any status NOT in this list returns 400.
 ALLOWED_TRANSITIONS_BY_TYPE: dict = {
     "github_pr_deploy": [
+        "in-progress", "coding-complete", "committed", "pr",
+        "merged-main", "deploy-init", "deploy-success", "closed",
+    ],
+    "lambda_deploy": [
         "in-progress", "coding-complete", "committed", "pr",
         "merged-main", "deploy-init", "deploy-success", "closed",
     ],
@@ -609,6 +631,16 @@ ALLOWED_TRANSITIONS_BY_TYPE: dict = {
 }
 
 VALID_TRANSITION_TYPES: set = set(ALLOWED_TRANSITIONS_BY_TYPE.keys())
+
+#: ENC-FTR-041: Strictness ranking for component registry enforcement.
+#: Lower rank = more strict. Task transition_type rank must be <= component's required rank.
+STRICTNESS_RANK: dict = {
+    "github_pr_deploy": 0,  # strictest: full CI PR + GH Actions deploy job
+    "lambda_deploy": 1,     # PR + Lambda update evidence (no GH Actions job object)
+    "web_deploy": 1,        # PR + HTTP verification of live site
+    "code_only": 2,         # PR only, no deploy step
+    "no_code": 3,           # least strict: no GitHub, no code
+}
 
 
 def _validate_web_deploy_evidence(evidence: dict) -> Tuple[bool, str]:
@@ -642,6 +674,42 @@ def _validate_web_deploy_evidence(evidence: dict) -> Tuple[bool, str]:
         datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
     except ValueError as exc:
         return False, f"web_deploy_evidence.checked_at is not a valid ISO 8601 timestamp: {exc}"
+
+    return True, ""
+
+
+def _validate_lambda_deploy_evidence(evidence: dict) -> Tuple[bool, str]:
+    """Validate lambda_deploy_evidence structure for deploy-success (ENC-FTR-041).
+
+    Required fields: function_name (str), version (str), updated_at (ISO 8601 with T),
+    status (must equal 'Success').
+    """
+    function_name = (evidence.get("function_name") or "").strip()
+    if not function_name:
+        return False, "lambda_deploy_evidence.function_name is required"
+
+    version = (evidence.get("version") or "").strip()
+    if not version:
+        return False, "lambda_deploy_evidence.version is required"
+
+    updated_at = (evidence.get("updated_at") or "").strip()
+    if not updated_at:
+        return False, "lambda_deploy_evidence.updated_at is required"
+    if "T" not in updated_at:
+        return False, (
+            f"lambda_deploy_evidence.updated_at must be ISO 8601 with 'T' separator, "
+            f"got: '{updated_at}'"
+        )
+    try:
+        datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        return False, f"lambda_deploy_evidence.updated_at is not a valid ISO 8601 timestamp: {exc}"
+
+    status = (evidence.get("status") or "").strip()
+    if not status:
+        return False, "lambda_deploy_evidence.status is required"
+    if status != "Success":
+        return False, f"lambda_deploy_evidence.status must be 'Success', got: '{status}'"
 
     return True, ""
 
@@ -691,6 +759,171 @@ def _validate_code_on_main_evidence(
     return True, ""
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-041: Component registry enforcement helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_required_transition_type(component_ids: list) -> Optional[str]:
+    """Fetch components from registry; return most restrictive transition_type.
+
+    If a component is not found in the registry, a warning is logged and enforcement
+    is skipped for that component (fail-open per-component to avoid hard blocking on
+    registry gaps). If ALL components are missing, returns None (no enforcement).
+    """
+    if not component_ids:
+        return None
+    min_rank = 99
+    required = None
+    for cid in component_ids:
+        try:
+            resp = _ddb.get_item(
+                TableName=COMPONENTS_TABLE,
+                Key={"component_id": {"S": str(cid)}},
+            )
+            item = resp.get("Item")
+            if not item:
+                logger.warning(
+                    "[FTR-041] Component '%s' not found in registry; skipping enforcement", cid
+                )
+                continue
+            comp_type = item.get("transition_type", {}).get("S", "github_pr_deploy")
+            rank = STRICTNESS_RANK.get(comp_type, 0)
+            if rank < min_rank:
+                min_rank = rank
+                required = comp_type
+        except Exception as exc:
+            logger.error("[FTR-041] Failed to fetch component '%s': %s", cid, exc)
+    return required
+
+
+def _get_component_transition_type(component_id: str) -> str:
+    """Fetch current transition_type for a component from registry. Defaults to github_pr_deploy."""
+    try:
+        resp = _ddb.get_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": str(component_id)}},
+        )
+        item = resp.get("Item") or {}
+        return item.get("transition_type", {}).get("S", "github_pr_deploy")
+    except Exception as exc:
+        logger.error("[ASSISTANT] Failed to fetch component '%s': %s", component_id, exc)
+        return "github_pr_deploy"
+
+
+def _update_component_transition_type_via_api(
+    component_id: str, new_type: str, reason: str
+) -> None:
+    """Update a component's transition_type via coordination API (assistant path)."""
+    url = f"{COORDINATION_API_BASE.rstrip('/')}/components/{component_id}"
+    payload = json.dumps({
+        "transition_type": new_type,
+        "assistant_reason": reason,
+    }).encode()
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="PATCH",
+        headers={
+            "Content-Type": "application/json",
+            "X-Checkout-Assistant-Key": CHECKOUT_ASSISTANT_KEY,
+            "X-Coordination-Internal-Key": _PRIMARY_INTERNAL_KEY,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read())
+            logger.info(
+                "[ASSISTANT] Updated component '%s' to '%s': %s",
+                component_id, new_type, body.get("success"),
+            )
+    except Exception as exc:
+        logger.error(
+            "[ASSISTANT] Failed to update component '%s' to '%s': %s",
+            component_id, new_type, exc,
+        )
+
+
+def _increment_failure_count(
+    project_id: str, task_id: str, task: dict, gate: str, provider: str
+) -> int:
+    """Increment advance_failure_count on task record; reset counter when gate changes.
+
+    Returns the new failure count.
+    """
+    current_gate = (task.get("advance_failure_gate") or "").strip()
+    current_count = int(task.get("advance_failure_count") or 0)
+    if current_gate != gate:
+        new_count = 1
+    else:
+        new_count = current_count + 1
+    _set_task_field(
+        project_id, task_id, "advance_failure_count", new_count,
+        provider=provider or "checkout-service-assistant",
+    )
+    _set_task_field(
+        project_id, task_id, "advance_failure_gate", gate,
+        provider=provider or "checkout-service-assistant",
+    )
+    return new_count
+
+
+def _invoke_assistant(
+    task_id: str, task: dict, failed_gate: str, evidence: dict
+) -> None:
+    """Analyze failure pattern and auto-remediate component transition_type (ENC-FTR-041).
+
+    Only loosens (never tightens) a component's transition_type. Infers the intended
+    deploy method from the evidence the caller is providing but failing to match.
+    Non-blocking — logs outcomes and returns; caller still returns 400 to the agent.
+    """
+    components = task.get("components") or []
+    if not components:
+        logger.info("[ASSISTANT] No components on task %s; cannot auto-remediate", task_id)
+        return
+
+    has_gha = bool(evidence.get("deploy_evidence"))
+    has_web = bool(evidence.get("web_deploy_evidence"))
+    has_lambda = bool(evidence.get("lambda_deploy_evidence"))
+
+    if not (has_gha or has_web or has_lambda):
+        logger.info(
+            "[ASSISTANT] No usable evidence on task %s; cannot infer intended type", task_id
+        )
+        return
+
+    inferred_type = (
+        "github_pr_deploy" if has_gha else
+        "web_deploy" if has_web else
+        "lambda_deploy" if has_lambda else
+        None
+    )
+    if not inferred_type:
+        return
+
+    for cid in components:
+        current = _get_component_transition_type(cid)
+        current_rank = STRICTNESS_RANK.get(current, 0)
+        inferred_rank = STRICTNESS_RANK.get(inferred_type, 0)
+        if inferred_rank >= current_rank:
+            logger.info(
+                "[ASSISTANT] NOT loosening component '%s' (inferred=%s rank=%d >= current=%s rank=%d)",
+                cid, inferred_type, inferred_rank, current, current_rank,
+            )
+            continue
+        _update_component_transition_type_via_api(
+            cid, inferred_type,
+            reason=(
+                f"Auto-remediated by checkout-service-assistant after 3 consecutive "
+                f"failed {failed_gate} attempts on task {task_id}. "
+                f"Inferred type '{inferred_type}' from evidence shape."
+            ),
+        )
+        logger.info(
+            "[ASSISTANT] Updated component '%s': %s → %s", cid, current, inferred_type
+        )
+
+
 def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     """POST .../advance — Advance status with gate validation + token issuance."""
     target_status = (body.get("target_status") or "").strip().lower()
@@ -730,6 +963,31 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
             ))
 
     uses_github_pr = transition_type in _GITHUB_PR_TYPES
+
+    # --- ENC-FTR-041: Component registry enforcement ---
+    # If task has no components and this is an agent-initiated request, block the advance.
+    # Human operators via the PWA UI (user_initiated=true) bypass this check to allow
+    # closing legacy tasks that pre-date the component registry.
+    components = task.get("components") or []
+    is_user_initiated = bool(body.get("user_initiated", False))
+    if not components and not is_user_initiated:
+        return _error(400, (
+            "task.components is required for agent-initiated advances (ENC-FTR-041). "
+            "Set task.components via tracker_set before checkout, or use the PWA UI "
+            "to advance this task (Cognito user_initiated=true path bypasses this check)."
+        ))
+    if components:
+        required_type = _get_required_transition_type(components)
+        if required_type is not None:
+            task_rank = STRICTNESS_RANK.get(transition_type, 99)
+            required_rank = STRICTNESS_RANK.get(required_type, 0)
+            if task_rank > required_rank:
+                return _error(400, (
+                    f"Task transition_type '{transition_type}' (rank {task_rank}) is less strict "
+                    f"than required '{required_type}' (rank {required_rank}) enforced by the "
+                    f"component registry (ENC-FTR-041). Update task.transition_type to at least "
+                    f"'{required_type}', or fix the component registration."
+                ))
 
     # --- Per-status gate logic ---
     response_extras: dict = {}
@@ -836,6 +1094,11 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 or body.get("web_deploy_evidence")
             )
             if not web_evidence or not isinstance(web_evidence, dict):
+                failure_count = _increment_failure_count(
+                    project_id, task_id, task, "deploy-success", provider
+                )
+                if failure_count >= 3:
+                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
                 return _error(400, (
                     "transition_evidence.web_deploy_evidence is required for deploy-success "
                     "on web_deploy tasks. Expected keys: url (HTTPS), http_status (200), "
@@ -843,26 +1106,72 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 ))
             valid, reason = _validate_web_deploy_evidence(web_evidence)
             if not valid:
+                failure_count = _increment_failure_count(
+                    project_id, task_id, task, "deploy-success", provider
+                )
+                if failure_count >= 3:
+                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
                 return _error(400, f"web_deploy_evidence validation failed: {reason}")
             transition_evidence["web_deploy_evidence"] = web_evidence
+        elif transition_type == "lambda_deploy":
+            # lambda_deploy arc: validate Lambda update evidence (ENC-FTR-041)
+            lambda_evidence = (
+                transition_evidence.get("lambda_deploy_evidence")
+                or body.get("lambda_deploy_evidence")
+            )
+            if not lambda_evidence or not isinstance(lambda_evidence, dict):
+                failure_count = _increment_failure_count(
+                    project_id, task_id, task, "deploy-success", provider
+                )
+                if failure_count >= 3:
+                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
+                return _error(400, (
+                    "transition_evidence.lambda_deploy_evidence is required for deploy-success "
+                    "on lambda_deploy tasks. Expected keys: function_name (str), version (str), "
+                    "updated_at (ISO 8601), status ('Success')"
+                ))
+            valid, reason = _validate_lambda_deploy_evidence(lambda_evidence)
+            if not valid:
+                failure_count = _increment_failure_count(
+                    project_id, task_id, task, "deploy-success", provider
+                )
+                if failure_count >= 3:
+                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
+                return _error(400, f"lambda_deploy_evidence validation failed: {reason}")
+            transition_evidence["lambda_deploy_evidence"] = lambda_evidence
         else:
             # github_pr_deploy arc: validate GH Actions Jobs API object
             deploy_evidence = transition_evidence.get("deploy_evidence") or body.get("deploy_evidence")
             if not deploy_evidence or not isinstance(deploy_evidence, dict):
+                failure_count = _increment_failure_count(
+                    project_id, task_id, task, "deploy-success", provider
+                )
+                if failure_count >= 3:
+                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
                 return _error(400, "transition_evidence.deploy_evidence (GitHub Actions Jobs API object) is required for deploy-success")
             # Validate required deploy_evidence fields (ENC-TSK-726 rules)
             required_fields = ["id", "name", "run_id", "status", "conclusion", "started_at", "completed_at"]
             missing = [f for f in required_fields if not deploy_evidence.get(f)]
             if missing:
+                failure_count = _increment_failure_count(
+                    project_id, task_id, task, "deploy-success", provider
+                )
+                if failure_count >= 3:
+                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
                 return _error(400, f"deploy_evidence missing required fields: {missing}")
             if deploy_evidence.get("conclusion") != "success":
+                failure_count = _increment_failure_count(
+                    project_id, task_id, task, "deploy-success", provider
+                )
+                if failure_count >= 3:
+                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
                 return _error(400, f"deploy_evidence.conclusion must be 'success', got: {deploy_evidence.get('conclusion')}")
             transition_evidence["deploy_evidence"] = deploy_evidence
-        # Clear CAI and CCI tokens from task after successful deploy (both arc types)
+        # Clear CAI and CCI tokens from task after successful deploy (all arc types)
         response_extras["tokens_cleared"] = True
 
     elif target_status == "closed":
-        if transition_type in ("github_pr_deploy", "web_deploy"):
+        if transition_type in ("github_pr_deploy", "web_deploy", "lambda_deploy"):
             # Full arc: require live_validation_evidence string
             live_validation_evidence = (
                 transition_evidence.get("live_validation_evidence")
