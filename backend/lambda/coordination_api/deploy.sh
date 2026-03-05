@@ -940,11 +940,11 @@ ensure_api_integration_and_routes() {
     # Phase 2b: Governance routes
     "GET /api/v1/governance/hash"
     "GET /api/v1/governance/dictionary"
-    "GET /api/v1/governance/{fileName}"
-    "PUT /api/v1/governance/{fileName}"
+    "GET /api/v1/governance/{fileName+}"
+    "PUT /api/v1/governance/{fileName+}"
     "OPTIONS /api/v1/governance/hash"
     "OPTIONS /api/v1/governance/dictionary"
-    "OPTIONS /api/v1/governance/{fileName}"
+    "OPTIONS /api/v1/governance/{fileName+}"
     # Phase 2b: Projects routes (read-only, via coordination API)
     "GET /api/v1/coordination/projects"
     "GET /api/v1/coordination/projects/{projectId}"
