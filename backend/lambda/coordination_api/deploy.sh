@@ -940,6 +940,7 @@ ensure_api_integration_and_routes() {
     # Phase 2b: Governance routes
     "GET /api/v1/governance/hash"
     "GET /api/v1/governance/dictionary"
+    "GET /api/v1/governance/{fileName}"
     "PUT /api/v1/governance/{fileName}"
     "OPTIONS /api/v1/governance/hash"
     "OPTIONS /api/v1/governance/dictionary"
