@@ -4,6 +4,7 @@ Lambda API for Enceladus feed read and subscription lifecycle.
 
 Routes (via API Gateway proxy):
     GET     /api/v1/feed
+    POST    /api/v1/feed/refresh
     POST    /api/v1/feed/subscriptions
     GET     /api/v1/feed/subscriptions/{subscriptionId}
     DELETE  /api/v1/feed/subscriptions/{subscriptionId}
@@ -58,6 +59,7 @@ DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
+FEED_PUBLISHER_FUNCTION = os.environ.get("FEED_PUBLISHER_FUNCTION", "devops-feed-publisher")
 CORS_ORIGIN = "https://jreese.net"
 FEED_CACHE_CONTROL = "max-age=0, s-maxage=300, must-revalidate"
 INCREMENTAL_LOOKBACK_SECONDS = 10
@@ -1056,6 +1058,49 @@ def _query_incremental(
 
 
 # ---------------------------------------------------------------------------
+# Feed refresh (ENC-TSK-797)
+# ---------------------------------------------------------------------------
+
+_lambda_client = None
+
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda", region_name=DYNAMODB_REGION)
+    return _lambda_client
+
+
+def _handle_feed_refresh() -> Dict[str, Any]:
+    """Invoke feed_publisher synchronously to regenerate all S3 feeds."""
+    try:
+        response = _get_lambda_client().invoke(
+            FunctionName=FEED_PUBLISHER_FUNCTION,
+            InvocationType="RequestResponse",
+            Payload=json.dumps({"Records": [], "source": "pwa_refresh"}).encode("utf-8"),
+        )
+        status_code = response.get("StatusCode", 500)
+        payload_raw = response["Payload"].read()
+        try:
+            payload = json.loads(payload_raw)
+        except (json.JSONDecodeError, TypeError):
+            payload = {"raw": payload_raw.decode("utf-8", errors="replace")}
+
+        if status_code == 200 and not response.get("FunctionError"):
+            return _response(200, {
+                "success": True,
+                "message": "Feed regeneration complete",
+                "generated_at": payload.get("generated_at"),
+            })
+        else:
+            logger.error("feed_publisher invoke error: status=%d payload=%s", status_code, payload)
+            return _error(502, "Feed regeneration failed")
+    except (BotoCoreError, ClientError) as exc:
+        logger.error("feed_publisher invoke exception: %s", exc)
+        return _error(502, f"Feed regeneration failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
@@ -1078,6 +1123,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         claims = _verify_token(token)
     except ValueError as exc:
         return _error(401, str(exc))
+
+    if method == "POST" and re.search(r"/api/v1/feed/refresh/?$", path):
+        return _handle_feed_refresh()
 
     if method == "POST" and re.search(r"/api/v1/feed/subscriptions/?$", path):
         try:

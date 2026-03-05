@@ -4,6 +4,7 @@ import { ENABLE_REFRESH_LINK } from '../../lib/constants'
 import { useProjectVersion } from '../../hooks/useChangelog'
 import { useClickOutside } from '../../hooks/useClickOutside'
 import { useAuthState } from '../../lib/authState'
+import { triggerFeedRefresh } from '../../api/feeds'
 
 const TITLES: Record<string, string> = {
   '/': 'Dashboard',
@@ -32,6 +33,13 @@ function resolveTitle(pathname: string): string {
 }
 
 async function hardRefresh() {
+  // 0. Trigger backend feed regeneration (ENC-TSK-797)
+  try {
+    await triggerFeedRefresh()
+  } catch (err) {
+    console.warn('Feed refresh failed, proceeding with reload:', err)
+  }
+
   // 1. Unregister all service workers scoped to this app
   if ('serviceWorker' in navigator) {
     const registrations = await navigator.serviceWorker.getRegistrations()
@@ -160,7 +168,7 @@ export function Header() {
                   disabled={refreshing}
                   className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 active:bg-slate-600 disabled:text-slate-500 transition-colors"
                 >
-                  {refreshing ? 'Refreshing…' : 'Refresh App'}
+                  {refreshing ? 'Syncing data…' : 'Refresh App'}
                 </button>
               )}
               <button
