@@ -25,6 +25,7 @@ COORDINATION_INTERNAL_API_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES:-}"
 COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
 DOC_PREP_LAMBDA_NAME="${DOC_PREP_LAMBDA_NAME:-devops-doc-prep}"
 CORS_ORIGIN="${CORS_ORIGIN:-https://jreese.net}"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -164,6 +165,26 @@ resolve_internal_api_key() {
   printf '%s' "${existing}"
 }
 
+resolve_github_token() {
+  # Resolve GITHUB_TOKEN for PR merge validation against private repos.
+  # Fallback: read from enceladus-checkout-service Lambda (same token, Secrets Manager sourced).
+  if [[ -n "${GITHUB_TOKEN}" ]]; then
+    printf '%s' "${GITHUB_TOKEN}"
+    return
+  fi
+
+  local existing
+  existing="$(aws lambda get-function-configuration \
+    --function-name "enceladus-checkout-service" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.GITHUB_TOKEN' \
+    --output text 2>/dev/null || true)"
+  if [[ "${existing}" == "None" ]]; then
+    existing=""
+  fi
+  printf '%s' "${existing}"
+}
+
 deploy_lambda() {
   local zip_path="$1"
   local role_arn="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
@@ -172,8 +193,13 @@ deploy_lambda() {
   if [[ -z "${effective_internal_key}" ]]; then
     log "[WARNING] COORDINATION_INTERNAL_API_KEY resolved empty; deploy_intake will remain cookie-only."
   fi
+  local effective_github_token
+  effective_github_token="$(resolve_github_token)"
+  if [[ -z "${effective_github_token}" ]]; then
+    log "[WARNING] GITHUB_TOKEN resolved empty; PR merge validation will fail for private repos."
+  fi
   local env_vars
-  env_vars="{DEPLOY_TABLE=${DEPLOY_TABLE},DEPLOY_REGION=${REGION},PROJECTS_TABLE=${PROJECTS_TABLE},CONFIG_BUCKET=${CONFIG_BUCKET},CONFIG_PREFIX=${CONFIG_PREFIX},SQS_QUEUE_URL=${SQS_QUEUE_URL},COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID},COORDINATION_INTERNAL_API_KEY=${effective_internal_key},COORDINATION_INTERNAL_API_KEY_PREVIOUS=${COORDINATION_INTERNAL_API_KEY_PREVIOUS},COORDINATION_INTERNAL_API_KEY_SCOPES=${COORDINATION_INTERNAL_API_KEY_SCOPES},DOC_PREP_LAMBDA_NAME=${DOC_PREP_LAMBDA_NAME},CORS_ORIGIN=${CORS_ORIGIN}}"
+  env_vars="{DEPLOY_TABLE=${DEPLOY_TABLE},DEPLOY_REGION=${REGION},PROJECTS_TABLE=${PROJECTS_TABLE},CONFIG_BUCKET=${CONFIG_BUCKET},CONFIG_PREFIX=${CONFIG_PREFIX},SQS_QUEUE_URL=${SQS_QUEUE_URL},COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID},COORDINATION_INTERNAL_API_KEY=${effective_internal_key},COORDINATION_INTERNAL_API_KEY_PREVIOUS=${COORDINATION_INTERNAL_API_KEY_PREVIOUS},COORDINATION_INTERNAL_API_KEY_SCOPES=${COORDINATION_INTERNAL_API_KEY_SCOPES},DOC_PREP_LAMBDA_NAME=${DOC_PREP_LAMBDA_NAME},CORS_ORIGIN=${CORS_ORIGIN},GITHUB_TOKEN=${effective_github_token}}"
 
   if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION}" >/dev/null 2>&1; then
     log "[START] updating Lambda code: ${FUNCTION_NAME}"
