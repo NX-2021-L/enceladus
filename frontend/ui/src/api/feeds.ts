@@ -39,6 +39,12 @@ export async function fetchLiveFeedDelta(since: string): Promise<LiveFeedDeltaRe
   return res.json()
 }
 
+export async function triggerFeedRefresh(): Promise<{ success: boolean; generated_at?: string }> {
+  const res = await fetchWithAuth('/api/v1/feed/refresh', { method: 'POST' })
+  if (!res.ok) throw new Error(`Feed refresh failed: ${res.status}`)
+  return res.json()
+}
+
 export const fetchProjects = () => fetchFeed<ProjectsFeed>('projects')
 export const fetchTasks = () => fetchFeed<TasksFeed>('tasks')
 export const fetchIssues = () => fetchFeed<IssuesFeed>('issues')

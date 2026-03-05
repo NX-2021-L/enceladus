@@ -334,6 +334,13 @@ Resources:
       RouteKey: GET /api/v1/feed
       Target: !Sub integrations/${FeedQueryIntegration}
 
+  RouteFeedRefresh:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/feed/refresh
+      Target: !Sub integrations/${FeedQueryIntegration}
+
   RouteMonitorList:
     Type: AWS::ApiGatewayV2::Route
     Properties:
