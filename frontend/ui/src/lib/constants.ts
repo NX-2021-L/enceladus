@@ -204,3 +204,69 @@ export const CHANGELOG_CHANGE_TYPE_COLORS: Record<string, string> = {
 export const SORT_OPTIONS_CHANGELOG = [
   { value: 'deployed', label: 'Deploy Date' },
 ] as const
+
+// ---------------------------------------------------------------------------
+// Component Registry (ENC-FTR-041)
+// ---------------------------------------------------------------------------
+
+export const COMPONENT_CATEGORIES = [
+  'lambda',
+  'frontend',
+  'infrastructure',
+  'library',
+  'workflow',
+  'external',
+] as const
+
+export const COMPONENT_CATEGORY_LABELS: Record<string, string> = {
+  lambda: 'Lambda',
+  frontend: 'Frontend',
+  infrastructure: 'Infrastructure',
+  library: 'Library',
+  workflow: 'Workflow',
+  external: 'External',
+}
+
+export const COMPONENT_CATEGORY_COLORS: Record<string, string> = {
+  lambda: 'bg-purple-500/20 text-purple-400',
+  frontend: 'bg-blue-500/20 text-blue-400',
+  infrastructure: 'bg-orange-500/20 text-orange-400',
+  library: 'bg-cyan-500/20 text-cyan-400',
+  workflow: 'bg-emerald-500/20 text-emerald-400',
+  external: 'bg-slate-500/20 text-slate-400',
+}
+
+export const COMPONENT_TRANSITION_TYPES = [
+  'github_pr_deploy',
+  'lambda_deploy',
+  'web_deploy',
+  'code_only',
+  'no_code',
+] as const
+
+export const COMPONENT_TRANSITION_TYPE_LABELS: Record<string, string> = {
+  github_pr_deploy: 'GitHub PR + Deploy',
+  lambda_deploy: 'Lambda Deploy',
+  web_deploy: 'Web Deploy',
+  code_only: 'Code Only',
+  no_code: 'No Code',
+}
+
+// Color-coded by strictness: red (strictest) → slate (least strict)
+export const COMPONENT_TRANSITION_TYPE_COLORS: Record<string, string> = {
+  github_pr_deploy: 'bg-rose-500/20 text-rose-400',
+  lambda_deploy: 'bg-orange-500/20 text-orange-400',
+  web_deploy: 'bg-blue-500/20 text-blue-400',
+  code_only: 'bg-yellow-500/20 text-yellow-400',
+  no_code: 'bg-slate-500/20 text-slate-400',
+}
+
+export const COMPONENT_TRANSITION_TYPE_RANK: Record<string, number> = {
+  github_pr_deploy: 0,
+  lambda_deploy: 1,
+  web_deploy: 1,
+  code_only: 2,
+  no_code: 3,
+}
+
+export const COMPONENT_STATUSES = ['active', 'deprecated', 'archived'] as const
