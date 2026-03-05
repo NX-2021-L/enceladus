@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-04.4",
-  "updated_at": "2026-03-04T08:35:00Z",
+  "version": "2026-03-04.5",
+  "updated_at": "2026-03-05T00:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -65,12 +65,13 @@
           "type": "enum",
           "enum": [
             "github_pr_deploy",
+            "lambda_deploy",
             "web_deploy",
             "code_only",
             "no_code"
           ],
           "default": "github_pr_deploy",
-          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Must be set via tracker_set BEFORE checkout_task is called \u2014 treated as immutable after checkout begins.",
+          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Must be set via tracker_set BEFORE checkout_task is called \u2014 treated as immutable after checkout begins. lambda_deploy: PR+commit flow with Lambda update evidence at deploy-success (ENC-FTR-041).",
           "usage_guidance": "Set with tracker_set before checkout. Default github_pr_deploy is backward compatible and identical to pre-ENC-ISS-092 behavior. no_code: for tasks with no GitHub repo or non-code work (e.g. infra config, CLI installs). code_only: code was committed/merged to main but no deployment is needed. web_deploy: static/CloudFront deployments that do not produce GitHub Actions job objects. See checkout_service.transition_type_matrix for full gate requirements per type."
         },
         "transition_evidence": {
@@ -232,6 +233,14 @@
               "usage_guidance": "For checkout-service-routed transitions (advance_task_status), pr_id and merged_at are passed as top-level body fields \u2014 merge_evidence is not required and may be omitted. For legacy direct PATCH callers, provide a non-empty string describing merge confirmation. Dict-type values are accepted and stored as a JSON string."
             }
           }
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "List of component_ids from the component registry that this task modifies (ENC-FTR-041). The checkout service enforces that task.transition_type is at least as strict as the most restrictive component's transition_type. Required for agent-initiated advances; human PWA advances bypass this check (user_initiated=true Cognito path).",
+          "usage_guidance": "Set via tracker_set before checkout. Format: [\"comp-checkout-service\", \"comp-jreese-pwa\"]. If not set, agent advances are blocked (ENC-FTR-041 enforcement)."
         }
       }
     },
@@ -1426,6 +1435,132 @@
           "audit": "initiated_by (Cognito username) and initiated_at stamped on transition_evidence as permanent audit record; [USER-INITIATED] worklog entry appended",
           "handled_by": "tracker_mutation Lambda (_apply_user_initiated_advance) \u2014 NOT routed through checkout service gate matrix",
           "note": "This is not a stored field value. user-initiated is a request-time flag (transition_evidence.user_initiated=true) handled at the API layer. The four agent-path types above (github_pr_deploy, web_deploy, code_only, no_code) are stored on the task record as task.transition_type."
+        },
+        "lambda_deploy": {
+          "type": "arc_spec",
+          "allowed_statuses": [
+            "in-progress",
+            "coding-complete",
+            "committed",
+            "pr",
+            "merged-main",
+            "deploy-init",
+            "deploy-success",
+            "closed"
+          ],
+          "gate_requirements": {
+            "coding-complete": "checkout required; issues CAI token",
+            "committed": "commit_sha (40-char hex; GitHub API validated); CAI required on record; issues CCI token",
+            "pr": "CCI required on task record",
+            "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
+            "deploy-init": "checkout required; no evidence",
+            "deploy-success": "lambda_deploy_evidence object with: function_name (str), version (str), updated_at (ISO 8601 with T), status='Success'. Does NOT accept deploy_evidence (GH Actions) or web_deploy_evidence.",
+            "closed": "live_validation_evidence (non-empty string); releases checkout"
+          },
+          "added_by": "ENC-FTR-041"
+        }
+      }
+    },
+    "component_registry.component": {
+      "description": "A registered product component in the Enceladus component registry (ENC-FTR-041). Associates a system component with its required transition_type, enforced by the checkout service when tasks declare that component in task.components.",
+      "fields": {
+        "component_id": {
+          "type": "string",
+          "format": "comp-{slug}",
+          "definition": "Unique slug identifier for the component. PK of component-registry DynamoDB table.",
+          "example": "comp-checkout-service"
+        },
+        "component_name": {
+          "type": "string",
+          "definition": "Human-readable display name of the component.",
+          "example": "Checkout Service Lambda"
+        },
+        "project_id": {
+          "type": "string",
+          "definition": "Enceladus project this component belongs to.",
+          "example": "enceladus"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "lambda",
+            "frontend",
+            "infrastructure",
+            "library",
+            "workflow",
+            "external"
+          ],
+          "definition": "Classification category of the component."
+        },
+        "transition_type": {
+          "type": "string",
+          "enum": [
+            "github_pr_deploy",
+            "lambda_deploy",
+            "web_deploy",
+            "code_only",
+            "no_code"
+          ],
+          "definition": "The minimum transition_type required for tasks that touch this component. Enforced via STRICTNESS_RANK: github_pr_deploy(0) > lambda_deploy(1) = web_deploy(1) > code_only(2) > no_code(3). Can only be updated by Cognito session (PWA) or checkout-service-assistant key."
+        },
+        "description": {
+          "type": "string",
+          "definition": "Optional free-text purpose summary of the component."
+        },
+        "github_repo": {
+          "type": "string",
+          "definition": "Optional GitHub repository reference (e.g., NX-2021-L/enceladus)."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "deprecated",
+            "archived"
+          ],
+          "definition": "Lifecycle status of the component record."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "ISO 8601",
+          "definition": "Record creation timestamp."
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "ISO 8601",
+          "definition": "Last update timestamp."
+        }
+      }
+    },
+    "checkout_service.component_enforcement": {
+      "description": "ENC-FTR-041: Component enforcement rules enforced by the checkout service in _handle_advance(). Documents the STRICTNESS_RANK ordering, no-components block, and checkout-service-assistant auto-remediation trigger.",
+      "fields": {
+        "strictness_rank": {
+          "type": "object",
+          "definition": "Rank ordering for transition types: github_pr_deploy=0 (strictest), lambda_deploy=1, web_deploy=1, code_only=2, no_code=3 (least strict). task.transition_type rank must be <= required_type rank.",
+          "values": {
+            "github_pr_deploy": 0,
+            "lambda_deploy": 1,
+            "web_deploy": 1,
+            "code_only": 2,
+            "no_code": 3
+          }
+        },
+        "no_components_block": {
+          "type": "rule",
+          "definition": "If task.components is absent or empty AND body.user_initiated is falsy, checkout service returns 400. Only human operators via PWA (user_initiated=true Cognito path) can advance tasks with no components."
+        },
+        "assistant_trigger": {
+          "type": "rule",
+          "definition": "If deploy-success evidence validation fails 3+ consecutive times on the same gate, _invoke_assistant() is called (non-blocking). The assistant infers the intended deploy method from the evidence shape and loosens affected components' transition_type if doing so would be less strict (higher rank). Never tightens."
+        },
+        "advance_failure_count": {
+          "type": "integer",
+          "definition": "Task field tracking consecutive failures at the same gate. Reset when gate changes."
+        },
+        "advance_failure_gate": {
+          "type": "string",
+          "definition": "Task field recording which gate the consecutive failures occurred at."
         }
       }
     }
