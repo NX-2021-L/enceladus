@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-05.1",
-  "updated_at": "2026-03-05T00:00:00Z",
+  "version": "2026-03-05.2",
+  "updated_at": "2026-03-05T11:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -241,6 +241,17 @@
           },
           "definition": "List of component_ids from the component registry that this task modifies (ENC-FTR-041). The checkout service enforces that task.transition_type is at least as strict as the most restrictive component's transition_type. Required for agent-initiated advances; human PWA advances bypass this check (user_initiated=true Cognito path).",
           "usage_guidance": "Set via tracker_set before checkout. Format: [\"comp-checkout-service\", \"comp-jreese-pwa\"]. If not set, agent advances are blocked (ENC-FTR-041 enforcement)."
+        },
+        "parent": {
+          "type": "string",
+          "definition": "Task ID of the parent task in a plan-derived task hierarchy (ENC-FTR-040). Set via tracker_set immediately after child task creation during plan capture. Format: PROJECT-TSK-NNN. Not enforced by the tracker API — any string is accepted; interpretation is by convention.",
+          "usage_guidance": "tracker_set(field='parent', value='ENC-TSK-NNN'). Set on phase tasks (parent = plan parent) and step tasks (parent = phase task). Provides upward navigation in the task tree. See agents/plan-capture.md for the full plan capture protocol."
+        },
+        "subtask_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children.",
+          "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. Not enforced by the tracker API. Typically set once after all phase tasks are created. Step task IDs may also be included."
         }
       }
     },
@@ -808,13 +819,14 @@
           "type": "string",
           "enum": [
             "agents.md",
+            "agents/plan-capture.md",
             "governance_data_dictionary.json"
           ],
-          "usage_guidance": "Recognized governance file names. 'agents.md' and files under 'agents/' are Markdown governance rules. 'governance_data_dictionary.json' is the machine-readable schema/enum dictionary; load at session init via governance_get(\"governance_data_dictionary.json\")."
+          "usage_guidance": "Recognized governance file names. 'agents.md' is the primary session-init governance spec. Files under 'agents/' are supplemental protocol specs (e.g., 'agents/plan-capture.md' — the ENC-FTR-040 plan capture protocol, load with governance_get after ExitPlanMode approval). 'governance_data_dictionary.json' is the machine-readable schema/enum dictionary; load at session init via governance_get(\"governance_data_dictionary.json\"). All file names under 'agents/' are accepted by the API even if not listed here."
         },
         "uri": {
           "type": "string",
-          "usage_guidance": "Resolved as governance://{file_name}. Only registered file_names are valid; others return NOT_FOUND."
+          "usage_guidance": "Resolved as governance://{file_name}. Registered file_names are pre-validated; arbitrary 'agents/' paths are accepted by the API and resolve if the S3 object exists."
         }
       }
     },
