@@ -981,6 +981,35 @@ ensure_api_integration_and_routes() {
     --query 'Items[].RouteKey' \
     --output text | tr '\t' '\n')"
 
+  # Delete obsolete routes that conflict with or were superseded by routes in the list above.
+  # Must run before creation loop to avoid ConflictException from APIGW.
+  local routes_to_delete=(
+    "GET /api/v1/governance/{fileName}"
+    "PUT /api/v1/governance/{fileName}"
+    "OPTIONS /api/v1/governance/{fileName}"
+  )
+  for del_key in "${routes_to_delete[@]}"; do
+    if printf '%s\n' "${existing_route_keys}" | grep -Fqx "${del_key}"; then
+      local del_route_id
+      del_route_id="$(aws apigatewayv2 get-routes \
+        --region "${REGION}" \
+        --api-id "${API_ID}" \
+        --query "Items[?RouteKey=='${del_key}'].RouteId | [0]" \
+        --output text)"
+      if [[ -n "${del_route_id}" && "${del_route_id}" != "None" ]]; then
+        log "[START] deleting obsolete route: ${del_key} (${del_route_id})"
+        aws apigatewayv2 delete-route \
+          --region "${REGION}" \
+          --api-id "${API_ID}" \
+          --route-id "${del_route_id}"
+        log "[END] deleted obsolete route: ${del_key}"
+        existing_route_keys="$(printf '%s\n' "${existing_route_keys}" | grep -Fxv "${del_key}")"
+      fi
+    else
+      log "[OK] obsolete route already absent: ${del_key}"
+    fi
+  done
+
   for route_key in "${routes[@]}"; do
     if ! printf '%s\n' "${existing_route_keys}" | grep -Fqx "${route_key}"; then
       log "[START] creating route: ${route_key}"
