@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-05.2",
-  "updated_at": "2026-03-05T11:00:00Z",
+  "version": "2026-03-05.3",
+  "updated_at": "2026-03-05T18:50:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1574,6 +1574,23 @@
         "advance_failure_gate": {
           "type": "string",
           "definition": "Task field recording which gate the consecutive failures occurred at."
+        }
+      }
+    },
+    "feed_query.refresh": {
+      "description": "POST /api/v1/feed/refresh endpoint added in ENC-TSK-797. Synchronously invokes devops-feed-publisher Lambda to regenerate all S3 feed files on demand, triggered by the PWA Refresh App button.",
+      "fields": {
+        "endpoint": {
+          "type": "string",
+          "definition": "POST /api/v1/feed/refresh — triggers synchronous feed regeneration via Lambda invoke of devops-feed-publisher."
+        },
+        "response_success": {
+          "type": "object",
+          "definition": "Success response: {success: true, message: 'Feed regeneration complete', generated_at: '<ISO-8601>'}."
+        },
+        "response_error": {
+          "type": "object",
+          "definition": "Error response (502): returned when feed_publisher invoke fails or returns a function error."
         }
       }
     }
