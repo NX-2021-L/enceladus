@@ -1,0 +1,100 @@
+name: CloudFormation Compute Stack Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infrastructure/cloudformation/02-compute.yaml"
+      - ".github/workflows/cloudformation-compute-stack-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: "CloudFormation stack name for 02-compute template"
+        type: string
+        required: false
+        default: "enceladus-compute"
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual compute stack deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  TEMPLATE_FILE: infrastructure/cloudformation/02-compute.yaml
+  DEFAULT_STACK_NAME: enceladus-compute
+
+jobs:
+  deploy:
+    name: Deploy Compute CloudFormation stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: cloudformation-compute-stack-deploy-main
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify CF role secret is set
+        run: |
+          if [ -z "${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}" ]; then
+            echo "::error::AWS_CLOUDFORMATION_ROLE_TO_ASSUME secret is not set or empty."
+            exit 1
+          fi
+          echo "AWS_CLOUDFORMATION_ROLE_TO_ASSUME is set."
+
+      - name: Configure AWS credentials (OIDC privileged CloudFormation role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment parameters
+        id: params
+        env:
+          INPUT_STACK_NAME: ${{ github.event.inputs.stack_name }}
+        run: |
+          set -euo pipefail
+          stack_name="${INPUT_STACK_NAME:-${DEFAULT_STACK_NAME}}"
+          echo "stack_name=${stack_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Deploy Compute stack (02-compute)
+        id: deploy
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --template-file "${TEMPLATE_FILE}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Report stack events on failure
+        if: failure() && steps.deploy.conclusion == 'failure'
+        run: |
+          echo "=== Stack events (last 20) ==="
+          aws cloudformation describe-stack-events \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --query 'StackEvents[:20].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+            --output table || echo "(describe-stack-events unavailable)"
+
+      - name: Report deployed stack state
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
+            --output table
