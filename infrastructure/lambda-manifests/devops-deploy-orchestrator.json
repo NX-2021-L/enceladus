@@ -13,7 +13,8 @@
       "CONFIG_PREFIX": "deploy-config",
       "DEPLOY_REGION": "us-west-2",
       "DEPLOY_TABLE": "devops-deployment-manager",
-      "PROJECTS_TABLE": "projects"
+      "PROJECTS_TABLE": "projects",
+      "TRACKER_TABLE": "devops-project-tracker"
     },
     "function_arn": "arn:aws:lambda:us-west-2:356364570033:function:devops-deploy-orchestrator",
     "handler": "lambda_function.handler",
@@ -26,9 +27,9 @@
     "version": "$LATEST"
   },
   "live_entry_path": "lambda_function.py",
-  "live_entry_sha256": "50ccb7ecee8a857841d85ba0aa9a20649e16065c50f13f49b84702bf67df4156",
-  "parity_status": "MATCH",
+  "live_entry_sha256": "b52511b7103c3b4351563b084e631aa01311ba6a4f4f67d4004a4b7266f64853",
+  "parity_status": "DRIFT",
   "region": "us-west-2",
   "repo_entry_path": "backend/lambda/deploy_orchestrator/lambda_function.py",
-  "repo_entry_sha256": "50ccb7ecee8a857841d85ba0aa9a20649e16065c50f13f49b84702bf67df4156"
+  "repo_entry_sha256": "b52511b7103c3b4351563b084e631aa01311ba6a4f4f67d4004a4b7266f64853"
 }

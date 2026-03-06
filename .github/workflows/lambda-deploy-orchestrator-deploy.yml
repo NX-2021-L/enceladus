@@ -26,6 +26,7 @@ jobs:
     with:
       function_name: "devops-deploy-orchestrator"
       lambda_dir: "backend/lambda/deploy_orchestrator"
+      deploy_script: "backend/lambda/deploy_orchestrator/deploy.sh"
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
       COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
