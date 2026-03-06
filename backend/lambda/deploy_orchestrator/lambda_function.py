@@ -8,6 +8,9 @@ analysis.
 
 Execution branches:
 - UI deployment types: resolve semver, write spec, start CodeBuild.
+- UI record-only mode: resolve semver, write spec + deploy audit record +
+  current-version.json inline (no CodeBuild). For externally-deployed projects.
+  See ENC-ISS-102, ENC-ISS-103.
 - Non-UI deployment types: validate service-group-specific config and write a
   queued_non_ui spec for downstream execution.
 
@@ -27,8 +30,10 @@ Environment variables:
     CONFIG_PREFIX          default: deploy-config
     CODEBUILD_PROJECT      default: devops-ui-deploy-builder
     PROJECTS_TABLE         default: projects
+    TRACKER_TABLE          default: devops-project-tracker
+    WORKLOG_PREFIX         default: [DEPLOYMENT]
 
-Related: DVP-FTR-028
+Related: DVP-FTR-028, ENC-ISS-102, ENC-ISS-103
 """
 
 from __future__ import annotations
@@ -60,6 +65,8 @@ CONFIG_BUCKET = os.environ.get("CONFIG_BUCKET", "jreese-net")
 CONFIG_PREFIX = os.environ.get("CONFIG_PREFIX", "deploy-config")
 CODEBUILD_PROJECT = os.environ.get("CODEBUILD_PROJECT", "devops-ui-deploy-builder")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
+WORKLOG_PREFIX = os.environ.get("WORKLOG_PREFIX", "[DEPLOYMENT]")
 NON_UI_INLINE_LAMBDA_UPDATE = (
     os.environ.get("NON_UI_INLINE_LAMBDA_UPDATE", "true").strip().lower() not in {"0", "false", "no"}
 )
@@ -348,6 +355,214 @@ def _persist_deploy_config(project_id: str, config: Dict[str, Any]) -> None:
             key,
             exc_info=True,
         )
+
+
+def _get_project_deploy_mode(project_id: str) -> str:
+    """Return deploy_mode from project record. Default: 'standard'.
+
+    Projects with deploy_mode='record_only' skip CodeBuild and finalize
+    deployments inline (version tracking + changelog only). Used for projects
+    that deploy via their own CI/CD (e.g., MOD GitHub Actions).
+    See ENC-ISS-102, ENC-ISS-103.
+    """
+    try:
+        ddb = _get_ddb()
+        resp = ddb.get_item(
+            TableName=PROJECTS_TABLE,
+            Key={"project_id": {"S": project_id}},
+            ProjectionExpression="deploy_mode",
+        )
+        item = resp.get("Item", {})
+        mode_val = item.get("deploy_mode", {}).get("S", "standard")
+        return mode_val
+    except Exception:
+        logger.warning("[WARNING] Failed to read deploy_mode for %s", project_id, exc_info=True)
+        return "standard"
+
+
+# --- Record-only helpers (ENC-ISS-102) ---
+# Prefix-to-project cache for tracker worklog writes
+_prefix_to_project: Dict[str, str] = {}
+
+
+def _load_prefix_map() -> None:
+    """Load prefix -> project_id mapping from projects table."""
+    if _prefix_to_project:
+        return
+    try:
+        ddb = _get_ddb()
+        resp = ddb.scan(
+            TableName=PROJECTS_TABLE,
+            ProjectionExpression="project_id, prefix",
+        )
+        for item in resp.get("Items", []):
+            pid = item.get("project_id", {}).get("S", "")
+            pfx = item.get("prefix", {}).get("S", "")
+            if pid and pfx:
+                _prefix_to_project[pfx] = pid
+    except Exception:
+        logger.warning("Failed to load prefix map", exc_info=True)
+
+
+def _infer_record_type(record_id: str) -> Optional[str]:
+    """Infer DynamoDB record_type from item ID like DVP-TSK-074."""
+    m = re.match(r"^[A-Z]{3}-(TSK|FTR|ISS)-\d{3}", record_id)
+    if not m:
+        return None
+    return {"TSK": "task", "FTR": "feature", "ISS": "issue"}.get(m.group(1))
+
+
+def _infer_project_id(record_id: str) -> Optional[str]:
+    """Infer project_id from record prefix like DVP -> devops."""
+    m = re.match(r"^([A-Z]{3})-", record_id)
+    if not m:
+        return None
+    _load_prefix_map()
+    return _prefix_to_project.get(m.group(1))
+
+
+def _finalize_record_only(
+    project_id: str,
+    spec_id: str,
+    previous_version: str,
+    new_version: str,
+    change_type: str,
+    changes: List[str],
+    release_summary: str,
+    request_ids: List[str],
+    related_ids: List[str],
+) -> None:
+    """Inline finalization for record-only deployments (no CodeBuild).
+
+    Replicates the essential parts of deploy_finalize._handle_success():
+    1. Update spec status to 'deployed'
+    2. Create deploy# audit record in DEPLOY_TABLE
+    3. Write current-version.json to S3
+    4. Write [DEPLOYMENT] worklogs to related tracker records (best-effort)
+
+    See ENC-ISS-102, ENC-ISS-103.
+    """
+    ddb = _get_ddb()
+    now = _utc_now()
+
+    # 1. Update spec → deployed
+    ddb.update_item(
+        TableName=DEPLOY_TABLE,
+        Key={"project_id": {"S": project_id}, "record_id": {"S": f"spec#{spec_id}"}},
+        UpdateExpression="SET #st = :deployed, completed_at = :now, deploy_mode = :mode",
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={
+            ":deployed": {"S": "deployed"},
+            ":now": {"S": now},
+            ":mode": {"S": "record_only"},
+        },
+    )
+    logger.info("[INFO] Spec %s status updated to 'deployed' (record-only)", spec_id)
+
+    # 2. Create deploy# audit record
+    deploy_id = f"DEP-{_utc_now_compact()}"
+    deploy_item = {
+        "project_id": {"S": project_id},
+        "record_id": {"S": f"deploy#{deploy_id}"},
+        "deploy_id": {"S": deploy_id},
+        "record_type": {"S": "deploy"},
+        "spec_id": {"S": spec_id},
+        "version": {"S": new_version},
+        "previous_version": {"S": previous_version},
+        "change_type": {"S": change_type},
+        "release_summary": {"S": release_summary},
+        "changes": {"L": [{"S": c} for c in (changes if isinstance(changes, list) else [])]},
+        "included_request_ids": {
+            "L": [{"S": r} for r in (request_ids if isinstance(request_ids, list) else [])]
+        },
+        "related_record_ids": {
+            "L": [{"S": r} for r in (related_ids if isinstance(related_ids, list) else [])]
+        },
+        "codebuild_build_id": {"S": "record-only"},
+        "duration_seconds": {"N": "0"},
+        "deployed_at": {"S": now},
+    }
+    ddb.put_item(TableName=DEPLOY_TABLE, Item=deploy_item)
+    logger.info("[INFO] Deploy audit record created: %s (record-only)", deploy_id)
+
+    # 3. Write current-version.json
+    try:
+        s3 = _get_s3()
+        version_key = f"{CONFIG_PREFIX}/{project_id}/current-version.json"
+        version_data = json.dumps(
+            {"version": new_version, "deployed_at": now, "spec_id": spec_id},
+            indent=2,
+        ).encode("utf-8")
+        s3.put_object(
+            Bucket=CONFIG_BUCKET,
+            Key=version_key,
+            Body=version_data,
+            ContentType="application/json",
+        )
+        logger.info("[SUCCESS] current-version.json updated to v%s (record-only)", new_version)
+    except Exception as e:
+        logger.error("[ERROR] Failed to write current-version.json: %s", e)
+        # Non-fatal — the deploy# audit record is the critical output
+
+    # 4. Tracker worklogs (best-effort, non-fatal)
+    if related_ids and isinstance(related_ids, list):
+        description = (
+            f"{WORKLOG_PREFIX} v{new_version} deployed — {release_summary} "
+            f"(spec: {spec_id}, record-only)"
+        )
+        if len(description) > 500:
+            description = description[:497] + "..."
+
+        updated_count = 0
+        for record_id in related_ids:
+            rec_type = _infer_record_type(record_id)
+            rec_project = _infer_project_id(record_id)
+            if not rec_type or not rec_project:
+                logger.warning("Could not infer type/project for %s, skipping worklog", record_id)
+                continue
+
+            history_entry = {
+                "M": {
+                    "timestamp": {"S": now},
+                    "status": {"S": "worklog"},
+                    "description": {"S": description},
+                }
+            }
+
+            try:
+                ddb.update_item(
+                    TableName=TRACKER_TABLE,
+                    Key={
+                        "project_id": {"S": rec_project},
+                        "record_id": {"S": f"{rec_type}#{record_id}"},
+                    },
+                    UpdateExpression=(
+                        "SET updated_at = :ts, last_update_note = :note, "
+                        "sync_version = sync_version + :one, "
+                        "#history = list_append(if_not_exists(#history, :empty_list), :entry)"
+                    ),
+                    ExpressionAttributeNames={"#history": "history"},
+                    ExpressionAttributeValues={
+                        ":ts": {"S": now},
+                        ":note": {"S": description[:200]},
+                        ":one": {"N": "1"},
+                        ":entry": {"L": [history_entry]},
+                        ":empty_list": {"L": []},
+                    },
+                )
+                updated_count += 1
+                logger.info("[INFO] Worklog written to %s", record_id)
+            except ClientError as e:
+                logger.warning("Failed to write worklog to %s: %s", record_id, e)
+
+        logger.info(
+            "[SUCCESS] Wrote %s worklogs to %d/%d records (record-only)",
+            WORKLOG_PREFIX,
+            updated_count,
+            len(related_ids),
+        )
+
+    logger.info("[END] Record-only deployment finalized: v%s (%s)", new_version, deploy_id)
 
 
 def _get_current_version(project_id: str, config: Dict) -> str:
@@ -1104,6 +1319,52 @@ def _orchestrate_typed_batch(
 
     if deployment_type not in UI_DEPLOYMENT_TYPES:
         logger.error("[ERROR] Unsupported deployment type '%s'", deployment_type)
+        return
+
+    # --- Record-only mode: skip CodeBuild for externally-deployed projects ---
+    # Projects with deploy_mode='record_only' deploy via their own CI/CD.
+    # We only need to track version + changelog. See ENC-ISS-102, ENC-ISS-103.
+    deploy_mode = _get_project_deploy_mode(project_id)
+    if deploy_mode == "record_only":
+        logger.info("[INFO] Record-only mode for %s — skipping CodeBuild", project_id)
+        config = _read_deploy_config(project_id)
+        current_version = _get_current_version(project_id, config)
+        new_version, change_type = _resolve_version(current_version, requests)
+        logger.info(
+            "[INFO] Version: %s → %s (%s) [record-only]",
+            current_version, new_version, change_type,
+        )
+
+        _write_spec(
+            project_id,
+            spec_id,
+            deployment_type=deployment_type,
+            deployment_category="ui",
+            previous_version=current_version,
+            resolved_version=new_version,
+            resolved_change_type=change_type,
+            included_request_ids=request_ids,
+            aggregated_changes=all_changes,
+            aggregated_release_summary=agg_summary,
+            integration_analysis=analysis,
+            all_related_record_ids=all_related,
+        )
+        _mark_requests(project_id, request_ids, "included", spec_id)
+
+        _finalize_record_only(
+            project_id,
+            spec_id,
+            current_version,
+            new_version,
+            change_type,
+            all_changes,
+            agg_summary,
+            request_ids,
+            all_related,
+        )
+        logger.info(
+            "[SUCCESS] Record-only deployment finalized: v%s (%s)", new_version, spec_id,
+        )
         return
 
     # UI deployment flow: read deploy config and run semver resolution + CodeBuild.

@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-05.3",
-  "updated_at": "2026-03-05T18:50:00Z",
+  "version": "2026-03-06.1",
+  "updated_at": "2026-03-06T19:50:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -530,7 +530,7 @@
       }
     },
     "deploy.spec": {
-      "description": "Deployment spec records produced by deploy_orchestrator in devops-deployment-manager.",
+      "description": "Deployment spec records produced by deploy_orchestrator in devops-deployment-manager. Supports record-only mode (ENC-ISS-102) for projects that deploy via their own CI/CD — orchestrator skips CodeBuild and finalizes inline.",
       "fields": {
         "status": {
           "type": "enum",
@@ -549,6 +549,15 @@
             "non_ui"
           ],
           "definition": "Execution category selected by orchestrator."
+        },
+        "deploy_mode": {
+          "type": "enum",
+          "enum": [
+            "standard",
+            "record_only"
+          ],
+          "definition": "Execution mode for the spec. 'standard' (default) runs full CodeBuild pipeline. 'record_only' skips CodeBuild and finalizes inline — used for externally-deployed projects (ENC-ISS-102, ENC-ISS-103).",
+          "usage_guidance": "Set on the spec by _finalize_record_only() when the project's deploy_mode is 'record_only'. The deploy_mode is read from the projects DDB table via _get_project_deploy_mode(). To enable record-only mode for a project, set deploy_mode='record_only' on its projects table record."
         },
         "non_ui_targets": {
           "type": "object",
