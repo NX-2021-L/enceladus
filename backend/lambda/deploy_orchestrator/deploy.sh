@@ -91,6 +91,12 @@ ensure_role() {
       "Effect": "Allow",
       "Action": ["codebuild:StartBuild"],
       "Resource": "arn:aws:codebuild:${REGION}:${ACCOUNT_ID}:project/${CODEBUILD_PROJECT}"
+    },
+    {
+      "Sid": "SQSConsumer",
+      "Effect": "Allow",
+      "Action": ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
+      "Resource": "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:devops-deploy-queue.fifo"
     }
   ]
 }
