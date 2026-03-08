@@ -3516,6 +3516,7 @@ async def list_tools() -> list[Tool]:
                 "Composite context retrieval for a tracker record. Bundles record core fields, "
                 "relationship graph, component source paths, domain architecture excerpts, and "
                 "recent history into a single response. Replaces 4-5 sequential tool calls. "
+                "For issues with a location_hint, auto-resolves to matching components via fuzzy matching. "
                 "Use include_* flags to control which sections are returned."
             ),
             inputSchema={
@@ -3560,7 +3561,10 @@ async def list_tools() -> list[Tool]:
                 "Return architecture documentation excerpts for specific domains. "
                 "Maps component registry domains to architecture source files and returns "
                 "only matched sections with heading metadata. Use this instead of loading "
-                "full architecture docs when only one or two domains are relevant."
+                "full architecture docs when only one or two domains are relevant. "
+                "Supports 30+ domain aliases: compute, data, dynamodb, lambda, api, governance, "
+                "security, auth, cognito, frontend, pwa, cloudfront, deploy, monitoring, mcp, "
+                "coordination, infrastructure, cloudformation, and more."
             ),
             inputSchema={
                 "type": "object",
@@ -3572,7 +3576,7 @@ async def list_tools() -> list[Tool]:
                     "domains": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Domain names to retrieve excerpts for (e.g., ['compute', 'operations']).",
+                        "description": "Domain names to retrieve excerpts for (e.g., ['compute', 'auth', 'deploy']).",
                     },
                     "max_excerpt_tokens": {
                         "type": "integer",
@@ -5228,47 +5232,174 @@ async def _get_code_map(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
-# --- Context Assembly (ENC-TSK-829 / ENC-TSK-830) ---
+# --- Context Assembly (ENC-TSK-829 / ENC-TSK-830 / ENC-TSK-825) ---
 
-# Domain-to-architecture-file mapping (ENC-TSK-830)
+# Domain-to-architecture-file mapping (ENC-TSK-830, expanded ENC-TSK-825)
+# Per design doc DOC-CA6AFFD18E98 §2.2
+_DATA_COMPUTE = {
+    "file": "docs/architecture/data-compute.md",
+    "s3_key": "agent-documents/enceladus/architecture/data-compute.md",
+}
+_SECURITY_FRONTEND = {
+    "file": "docs/architecture/security-frontend.md",
+    "s3_key": "agent-documents/enceladus/architecture/security-frontend.md",
+}
+_OPERATIONS = {
+    "file": "docs/architecture/operations.md",
+    "s3_key": "agent-documents/enceladus/architecture/operations.md",
+}
+
 _DOMAIN_ARCHITECTURE_MAP: Dict[str, Dict[str, Any]] = {
-    "compute": {
-        "file": "docs/architecture/data-compute.md",
-        "s3_key": "agent-documents/enceladus/architecture/data-compute.md",
-        "description": "Data layer, Lambda functions, DynamoDB, S3, compute infrastructure",
-    },
-    "operations": {
-        "file": "docs/architecture/operations.md",
-        "s3_key": "agent-documents/enceladus/architecture/operations.md",
-        "description": "Deployment, CI/CD, monitoring, orchestration",
-    },
-    "security_frontend": {
-        "file": "docs/architecture/security-frontend.md",
-        "s3_key": "agent-documents/enceladus/architecture/security-frontend.md",
-        "description": "Authentication, authorization, PWA frontend, Cloudflare, API Gateway",
-    },
-    # Aliases for convenience
-    "data": {
-        "file": "docs/architecture/data-compute.md",
-        "s3_key": "agent-documents/enceladus/architecture/data-compute.md",
-        "description": "Alias for compute domain",
-    },
-    "security": {
-        "file": "docs/architecture/security-frontend.md",
-        "s3_key": "agent-documents/enceladus/architecture/security-frontend.md",
-        "description": "Alias for security_frontend domain",
-    },
-    "frontend": {
-        "file": "docs/architecture/security-frontend.md",
-        "s3_key": "agent-documents/enceladus/architecture/security-frontend.md",
-        "description": "Alias for security_frontend domain",
-    },
+    # Primary domains
+    "compute": {**_DATA_COMPUTE, "description": "Data layer, Lambda functions, DynamoDB, S3, compute infrastructure"},
+    "operations": {**_OPERATIONS, "description": "Deployment, CI/CD, monitoring, orchestration"},
+    "security_frontend": {**_SECURITY_FRONTEND, "description": "Authentication, authorization, PWA frontend, Cloudflare, API Gateway"},
+    # Data / compute aliases
+    "data": {**_DATA_COMPUTE, "alias_of": "compute"},
+    "dynamodb": {**_DATA_COMPUTE, "alias_of": "compute"},
+    "tracker": {**_DATA_COMPUTE, "alias_of": "compute"},
+    "lambda": {**_DATA_COMPUTE, "alias_of": "compute"},
+    "api": {**_DATA_COMPUTE, "alias_of": "compute"},
+    "api-gateway": {**_DATA_COMPUTE, "alias_of": "compute"},
+    "governance": {**_DATA_COMPUTE, "alias_of": "compute"},
+    # Security / frontend aliases
+    "security": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "iam": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "cognito": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "auth": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "authentication": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "edge": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "frontend": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "pwa": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "ui": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "cloudfront": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    "cdn": {**_SECURITY_FRONTEND, "alias_of": "security_frontend"},
+    # Operations aliases
+    "deploy": {**_OPERATIONS, "alias_of": "operations"},
+    "ci-cd": {**_OPERATIONS, "alias_of": "operations"},
+    "github-actions": {**_OPERATIONS, "alias_of": "operations"},
+    "monitoring": {**_OPERATIONS, "alias_of": "operations"},
+    "cloudwatch": {**_OPERATIONS, "alias_of": "operations"},
+    "mcp": {**_OPERATIONS, "alias_of": "operations"},
+    "mcp-server": {**_OPERATIONS, "alias_of": "operations"},
+    "coordination": {**_OPERATIONS, "alias_of": "operations"},
+    "bedrock": {**_OPERATIONS, "alias_of": "operations"},
+    "infrastructure": {**_OPERATIONS, "alias_of": "operations"},
+    "cloudformation": {**_OPERATIONS, "alias_of": "operations"},
+}
+
+# Canonical (non-alias) domain names for display
+_CANONICAL_DOMAINS = sorted(
+    d for d, m in _DOMAIN_ARCHITECTURE_MAP.items() if "alias_of" not in m
+)
+
+# Project-specific architecture doc availability
+_PROJECT_ARCHITECTURE_SUPPORT: Dict[str, bool] = {
+    "enceladus": True,
+    # Projects without architecture docs return helpful fallback
 }
 
 
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate: ~4 chars per token for English text."""
     return max(1, len(text) // 4)
+
+
+def _resolve_location_hint_to_components(
+    location_hint: str, all_components: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Resolve a location_hint string to matching components via fuzzy matching.
+
+    Per design doc DOC-4C6035E777C0 §2-3:
+    1. Exact domain match (weight 3)
+    2. Keyword match against component names/categories/domains (weight 2-3)
+    3. Path match if hint contains file path indicators (weight 1)
+    4. Fallback: all components with match_confidence="none"
+    """
+    import re as _re
+
+    if not location_hint or not all_components:
+        return []
+
+    hint_lower = location_hint.lower().strip()
+    # Tokenize: split on whitespace and punctuation, keep meaningful tokens
+    hint_tokens = set(_re.findall(r"[a-z0-9_]+", hint_lower))
+    # Detect file path in hint
+    is_path_hint = "/" in hint_lower or _re.search(r"\.\w{2,4}$", hint_lower)
+
+    scored: List[tuple] = []  # (score, component, confidence)
+
+    for comp in all_components:
+        score = 0
+        sp = comp.get("source_paths") or {}
+        domains = sp.get("domains") or {}
+
+        # 1. Exact domain name match (weight 3 per hit)
+        for domain_name in domains:
+            if domain_name.lower() in hint_tokens:
+                score += 3
+
+        # 2. Component name / category keyword match (weight 2)
+        comp_name = comp.get("component_name", "").lower()
+        comp_category = comp.get("category", "").lower()
+        comp_desc = comp.get("description", "").lower()
+        name_tokens = set(_re.findall(r"[a-z0-9_]+", comp_name))
+        for ht in hint_tokens:
+            if ht in name_tokens:
+                score += 2
+            if ht == comp_category:
+                score += 2
+            # Partial match in description (weight 1)
+            if ht in comp_desc and len(ht) > 2:
+                score += 1
+
+        # 3. Path-based matching (weight 1 per segment hit)
+        if is_path_hint:
+            primary = sp.get("primary", "")
+            directory = sp.get("directory", "")
+            for path in [primary, directory]:
+                path_segments = set(_re.findall(r"[a-z0-9_]+", path.lower()))
+                for ht in hint_tokens:
+                    if ht in path_segments:
+                        score += 1
+        else:
+            # Even without path hint, check directory segments (weight 1)
+            directory = sp.get("directory", "")
+            dir_segments = set(_re.findall(r"[a-z0-9_]+", directory.lower()))
+            for ht in hint_tokens:
+                if ht in dir_segments:
+                    score += 1
+
+        if score > 0:
+            confidence = "exact" if score >= 6 else "fuzzy"
+            scored.append((score, comp, confidence))
+
+    # Sort by score descending, take top 3
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Minimum threshold: score >= 2
+    results = []
+    for score, comp, confidence in scored[:3]:
+        if score < 2:
+            break
+        sp = comp.get("source_paths") or {}
+        entry: Dict[str, Any] = {
+            "component_id": comp.get("component_id", ""),
+            "match_confidence": confidence,
+            "match_score": score,
+            "category": comp.get("category"),
+        }
+        if sp.get("primary"):
+            entry["primary"] = sp["primary"]
+        if sp.get("directory"):
+            entry["directory"] = sp["directory"]
+        if sp.get("domains"):
+            entry["domains"] = list(sp["domains"].keys())
+        if sp.get("architecture_sections"):
+            entry["architecture_sections"] = sp["architecture_sections"]
+        results.append(entry)
+
+    return results
 
 
 def _read_architecture_file(domain: str) -> Optional[str]:
@@ -5367,7 +5498,11 @@ def _extract_sections_for_domain(content: str, max_tokens: int) -> List[Dict[str
 
 
 async def _get_architecture_excerpts(args: dict) -> list[TextContent]:
-    """Return architecture excerpts for specific domains (ENC-TSK-830)."""
+    """Return architecture excerpts for specific domains (ENC-TSK-830, enhanced ENC-TSK-825).
+
+    Enhancements over v1: expanded domain aliases (13+ per design doc DOC-CA6AFFD18E98),
+    freshness metadata, project-aware error handling for cross-project support.
+    """
     project_id = args.get("project_id", "").strip()
     domains = args.get("domains") or []
     max_excerpt_tokens = int(args.get("max_excerpt_tokens", 1200))
@@ -5376,6 +5511,15 @@ async def _get_architecture_excerpts(args: dict) -> list[TextContent]:
         return _result_text({"error": "project_id is required"})
     if not domains:
         return _result_text({"error": "domains is required (list of domain names)"})
+
+    # Project-aware architecture support (DOC-CA6AFFD18E98 §6)
+    if not _PROJECT_ARCHITECTURE_SUPPORT.get(project_id):
+        return _result_text({
+            "error": "no_architecture",
+            "project_id": project_id,
+            "suggestion": "Use reference_search or get_code_map for project docs. "
+                          "Architecture excerpts require docs/architecture/ files with [SECTION] markers.",
+        })
 
     if not isinstance(domains, list):
         domains = [str(domains)]
@@ -5389,12 +5533,8 @@ async def _get_architecture_excerpts(args: dict) -> list[TextContent]:
         domain_lower = str(domain).strip().lower()
         mapping = _DOMAIN_ARCHITECTURE_MAP.get(domain_lower)
         if not mapping:
-            valid_domains = sorted(set(
-                d for d, m in _DOMAIN_ARCHITECTURE_MAP.items()
-                if not m.get("description", "").startswith("Alias")
-            ))
             warnings.append(
-                f"Unknown domain '{domain}'. Valid domains: {valid_domains}"
+                f"Unknown domain '{domain}'. Valid domains: {_CANONICAL_DOMAINS}"
             )
             continue
 
@@ -5410,6 +5550,7 @@ async def _get_architecture_excerpts(args: dict) -> list[TextContent]:
             break
 
         content = _read_architecture_file(domain_lower)
+        source_type = "live"  # direct file read = always fresh
         if content is None:
             warnings.append(f"Architecture file not found for domain '{domain}'")
             continue
@@ -5418,12 +5559,16 @@ async def _get_architecture_excerpts(args: dict) -> list[TextContent]:
         domain_tokens = sum(s.get("tokens", 0) for s in sections)
         tokens_used += domain_tokens
 
+        # Resolve canonical domain name for aliases
+        canonical = mapping.get("alias_of", domain_lower)
+
         result_excerpts.append({
-            "domain": domain_lower,
+            "domain": canonical,
             "source": mapping["file"],
             "section_count": len(sections),
             "sections": sections,
             "tokens": domain_tokens,
+            "freshness": source_type,
         })
 
     return _result_text({
@@ -5441,10 +5586,15 @@ async def _get_architecture_excerpts(args: dict) -> list[TextContent]:
 
 
 async def _get_issue_context(args: dict) -> list[TextContent]:
-    """Composite context retrieval for a tracker record (ENC-TSK-829).
+    """Composite context retrieval for a tracker record (ENC-TSK-829, enhanced ENC-TSK-825).
 
     Bundles: record core fields, relationships, component source paths,
     domain architecture excerpts, and recent history in one call.
+
+    ENC-TSK-825 enhancements:
+    - location_hint fuzzy matching for issues (per DOC-4C6035E777C0)
+    - match_confidence on component entries
+    - Sparse registry fallback with actionable suggestions
     """
     record_id = args.get("record_id", "").strip()
     if not record_id:
@@ -5504,25 +5654,31 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
     if relationships:
         budget_used += _estimate_tokens(json.dumps(relationships))
 
-    # 3. Components (optional)
+    # 3. Components (optional) — with location_hint fuzzy matching (ENC-TSK-825)
     components_data: List[Dict[str, Any]] = []
     component_domains: set[str] = set()
     truncated_sections: List[str] = []
+    component_resolution_method = None  # "explicit", "location_hint", or "sparse_fallback"
 
     if include_components and budget_used < max_tokens:
         comp_ids = record_resp.get("components") or []
+
+        # Query component registry for this project
+        comp_resp = _coordination_api_request(
+            "GET", "/components",
+            query={"project_id": project_id, "status": "active"},
+        )
+        all_components = comp_resp.get("components", [])
+
         if comp_ids:
-            # Query component registry
-            comp_resp = _coordination_api_request(
-                "GET", "/components",
-                query={"project_id": project_id, "status": "active"},
-            )
-            all_components = comp_resp.get("components", [])
+            # Explicit component match (tasks have components field)
+            component_resolution_method = "explicit"
             for comp in all_components:
                 cid = comp.get("component_id", "")
                 if cid in comp_ids:
                     entry: Dict[str, Any] = {
                         "component_id": cid,
+                        "match_confidence": "explicit",
                         "category": comp.get("category"),
                     }
                     sp = comp.get("source_paths") or {}
@@ -5537,6 +5693,29 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
                         entry["architecture_sections"] = sp["architecture_sections"]
                     components_data.append(entry)
 
+        elif all_components:
+            # No explicit components — try location_hint fuzzy matching (DOC-4C6035E777C0 §2-3)
+            location_hint = record_resp.get("location_hint", "")
+            if location_hint:
+                component_resolution_method = "location_hint"
+                matched = _resolve_location_hint_to_components(location_hint, all_components)
+                if matched:
+                    components_data = matched
+                    # Extract domains from matched components for architecture lookup
+                    for entry in components_data:
+                        for d in entry.get("domains", []):
+                            component_domains.add(d)
+                else:
+                    # location_hint provided but no matches above threshold
+                    component_resolution_method = "sparse_fallback"
+            else:
+                component_resolution_method = "sparse_fallback"
+
+        if not components_data and all_components:
+            # Sparse registry fallback (DOC-4C6035E777C0 §4.2, §6)
+            component_resolution_method = "sparse_fallback"
+
+        if components_data:
             budget_used += _estimate_tokens(json.dumps(components_data))
     elif include_components:
         truncated_sections.append("components")
@@ -5570,7 +5749,6 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
     recent_history: List[Dict[str, Any]] = []
     if include_recent_history and budget_used < max_tokens:
         full_history = record_resp.get("history") or []
-        history_budget = max_tokens - budget_used
         for entry in reversed(full_history):
             if len(recent_history) >= history_limit:
                 break
@@ -5598,6 +5776,17 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
         response["relationships"] = relationships
     if components_data:
         response["components"] = components_data
+    elif component_resolution_method == "sparse_fallback":
+        # Sparse fallback: actionable suggestion instead of empty list (DOC-4C6035E777C0 §6)
+        response["components"] = []
+        response["component_resolution"] = {
+            "method": "sparse_fallback",
+            "suggestion": "No component match found. Use reference_search or get_code_map "
+                          "to locate relevant code. Add a location_hint to the issue for "
+                          "better component resolution.",
+        }
+    if component_resolution_method and component_resolution_method != "sparse_fallback":
+        response["component_resolution"] = {"method": component_resolution_method}
     if arch_excerpts:
         response["architecture_excerpts"] = arch_excerpts
     if recent_history:

@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-08.5",
-  "updated_at": "2026-03-08T20:45:00Z",
+  "version": "2026-03-08.6",
+  "updated_at": "2026-03-08T21:40:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1301,25 +1301,33 @@
       }
     },
     "mcp_server.context_assembly": {
-      "description": "Composite context retrieval tools for agent token optimization (ENC-TSK-829, ENC-TSK-830). Reduces multi-call context loading to single bundled responses.",
+      "description": "Composite context retrieval tools for agent token optimization (ENC-TSK-829, ENC-TSK-830, enhanced ENC-TSK-825). Reduces multi-call context loading to single bundled responses with location_hint fuzzy matching and cross-project support.",
       "fields": {
         "get_issue_context": {
           "type": "tool",
-          "definition": "Composite MCP tool that bundles record core fields, relationship graph, component source paths, domain architecture excerpts, and recent history into a single response.",
-          "usage_guidance": "Accepts record_id and optional flags (include_components, include_architecture, include_recent_history, history_limit, max_tokens). Replaces 4-5 sequential tool calls with one."
+          "definition": "Composite MCP tool that bundles record core fields, relationship graph, component source paths, domain architecture excerpts, and recent history into a single response. For issues with location_hint, auto-resolves to matching components via weighted fuzzy matching (DOC-4C6035E777C0).",
+          "usage_guidance": "Accepts record_id and optional flags (include_components, include_architecture, include_recent_history, history_limit, max_tokens). Replaces 4-5 sequential tool calls with one. Returns component_resolution.method indicating how components were matched (explicit, location_hint, sparse_fallback)."
         },
         "get_architecture_excerpts": {
           "type": "tool",
-          "definition": "Domain-scoped architecture excerpt delivery. Maps component registry domains to architecture doc files and returns only matched sections with heading metadata.",
-          "usage_guidance": "Accepts project_id, domains[], and max_excerpt_tokens. Use instead of loading full architecture docs when only specific domains are relevant."
+          "definition": "Domain-scoped architecture excerpt delivery. Maps 30+ domain aliases to architecture doc files and returns only matched sections with heading metadata and freshness indicator (DOC-CA6AFFD18E98).",
+          "usage_guidance": "Accepts project_id, domains[], and max_excerpt_tokens. Supports expanded aliases: compute/data/dynamodb/lambda/api/governance, security/auth/cognito/iam/frontend/pwa/cloudfront, operations/deploy/monitoring/mcp/coordination/infrastructure. Returns no_architecture error for projects without docs/architecture/ files."
         },
         "domain_mapping": {
           "type": "object",
-          "definition": "Maps domain names to architecture files: compute->data-compute.md, operations->operations.md, security_frontend->security-frontend.md. Aliases: data->compute, security->security_frontend, frontend->security_frontend."
+          "definition": "Maps 30+ domain aliases to 3 architecture files: compute/data/dynamodb/lambda/api/governance->data-compute.md, security/auth/cognito/iam/frontend/pwa/cloudfront/cdn->security-frontend.md, operations/deploy/monitoring/mcp/coordination/infrastructure/cloudformation->operations.md. Canonical domains: compute, operations, security_frontend."
+        },
+        "location_hint_matching": {
+          "type": "behavior",
+          "definition": "Weighted fuzzy matching resolves issue location_hint text to components: domain name match (weight 3), component name/category (weight 2), description keyword (weight 1), directory path segment (weight 1). Threshold >= 2, max 3 results. Returns match_confidence (exact/fuzzy) and match_score per component."
         },
         "budget_truncation": {
           "type": "behavior",
           "definition": "Both tools respect token budgets with priority-ordered truncation. Truncation emits machine-readable metadata (truncated_sections, dropped_items_count) instead of silently dropping context."
+        },
+        "freshness": {
+          "type": "behavior",
+          "definition": "Architecture excerpts include freshness field: 'live' for direct file reads (always fresh, no cache needed per DOC-CA6AFFD18E98 §4.1). S3 cached reads reserved for future cross-platform agent support."
         }
       }
     },
