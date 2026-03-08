@@ -415,7 +415,7 @@ def _tool_namespace(tool_name: str) -> str:
         return "checkout"
     if name.startswith("documents_") or name == "check_document_policy":
         return "documents"
-    if name in {"reference_search", "get_code_map"}:
+    if name in {"reference_search", "get_code_map", "get_issue_context", "get_architecture_excerpts"}:
         return "reference"
     if name.startswith("deploy_"):
         return "deploy"
@@ -3509,6 +3509,80 @@ async def list_tools() -> list[Tool]:
                 "required": ["project_id"],
             },
         ),
+        # --- Context Assembly (ENC-TSK-829/830) ---
+        Tool(
+            name="get_issue_context",
+            description=(
+                "Composite context retrieval for a tracker record. Bundles record core fields, "
+                "relationship graph, component source paths, domain architecture excerpts, and "
+                "recent history into a single response. Replaces 4-5 sequential tool calls. "
+                "Use include_* flags to control which sections are returned."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "record_id": {
+                        "type": "string",
+                        "description": "Tracker record ID (e.g., ENC-ISS-105, ENC-TSK-829).",
+                    },
+                    "include_components": {
+                        "type": "boolean",
+                        "description": "Include component source paths from component registry. Default true.",
+                        "default": True,
+                    },
+                    "include_architecture": {
+                        "type": "boolean",
+                        "description": "Include domain architecture excerpts for matched components. Default true.",
+                        "default": True,
+                    },
+                    "include_recent_history": {
+                        "type": "boolean",
+                        "description": "Include recent worklog/history entries. Default true.",
+                        "default": True,
+                    },
+                    "history_limit": {
+                        "type": "integer",
+                        "description": "Max history entries to return. Default 10.",
+                        "default": 10,
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Approximate output budget in tokens. Sections are truncated in priority order when exceeded. Default 2500.",
+                        "default": 2500,
+                    },
+                },
+                "required": ["record_id"],
+            },
+        ),
+        Tool(
+            name="get_architecture_excerpts",
+            description=(
+                "Return architecture documentation excerpts for specific domains. "
+                "Maps component registry domains to architecture source files and returns "
+                "only matched sections with heading metadata. Use this instead of loading "
+                "full architecture docs when only one or two domains are relevant."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "The project name (e.g., enceladus).",
+                    },
+                    "domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Domain names to retrieve excerpts for (e.g., ['compute', 'operations']).",
+                    },
+                    "max_excerpt_tokens": {
+                        "type": "integer",
+                        "description": "Max approximate tokens for all excerpts combined. Default 1200.",
+                        "default": 1200,
+                    },
+                },
+                "required": ["project_id", "domains"],
+            },
+        ),
         # --- Deployment (6.2) ---
         Tool(
             name="deploy_state_get",
@@ -5151,6 +5225,389 @@ async def _get_code_map(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
+# --- Context Assembly (ENC-TSK-829 / ENC-TSK-830) ---
+
+# Domain-to-architecture-file mapping (ENC-TSK-830)
+_DOMAIN_ARCHITECTURE_MAP: Dict[str, Dict[str, Any]] = {
+    "compute": {
+        "file": "docs/architecture/data-compute.md",
+        "s3_key": "agent-documents/enceladus/architecture/data-compute.md",
+        "description": "Data layer, Lambda functions, DynamoDB, S3, compute infrastructure",
+    },
+    "operations": {
+        "file": "docs/architecture/operations.md",
+        "s3_key": "agent-documents/enceladus/architecture/operations.md",
+        "description": "Deployment, CI/CD, monitoring, orchestration",
+    },
+    "security_frontend": {
+        "file": "docs/architecture/security-frontend.md",
+        "s3_key": "agent-documents/enceladus/architecture/security-frontend.md",
+        "description": "Authentication, authorization, PWA frontend, Cloudflare, API Gateway",
+    },
+    # Aliases for convenience
+    "data": {
+        "file": "docs/architecture/data-compute.md",
+        "s3_key": "agent-documents/enceladus/architecture/data-compute.md",
+        "description": "Alias for compute domain",
+    },
+    "security": {
+        "file": "docs/architecture/security-frontend.md",
+        "s3_key": "agent-documents/enceladus/architecture/security-frontend.md",
+        "description": "Alias for security_frontend domain",
+    },
+    "frontend": {
+        "file": "docs/architecture/security-frontend.md",
+        "s3_key": "agent-documents/enceladus/architecture/security-frontend.md",
+        "description": "Alias for security_frontend domain",
+    },
+}
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token for English text."""
+    return max(1, len(text) // 4)
+
+
+def _read_architecture_file(domain: str) -> Optional[str]:
+    """Read an architecture doc from local filesystem or S3 fallback."""
+    mapping = _DOMAIN_ARCHITECTURE_MAP.get(domain)
+    if not mapping:
+        return None
+
+    # Try local filesystem first (relative to server.py location)
+    import pathlib as _pathlib
+    server_dir = _pathlib.Path(__file__).resolve().parent
+    repo_root = server_dir.parent.parent
+    local_path = repo_root / mapping["file"]
+    if local_path.is_file():
+        try:
+            return local_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    # S3 fallback for Lambda/remote transports
+    try:
+        resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=mapping["s3_key"])
+        return resp["Body"].read().decode("utf-8")
+    except Exception:
+        return None
+
+
+def _extract_sections_for_domain(content: str, max_tokens: int) -> List[Dict[str, Any]]:
+    """Extract top-level sections from a markdown document, respecting token budget."""
+    import re as _re
+    sections: List[Dict[str, Any]] = []
+    current_heading = ""
+    current_lines: List[str] = []
+    line_start = 1
+    total_tokens = 0
+
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        heading_match = _re.match(r"^(#{1,3})\s+(.+)", line)
+        if heading_match:
+            # Flush previous section
+            if current_heading and current_lines:
+                section_text = "\n".join(current_lines).strip()
+                section_tokens = _estimate_tokens(section_text)
+                if total_tokens + section_tokens <= max_tokens:
+                    sections.append({
+                        "heading": current_heading,
+                        "line_start": line_start,
+                        "excerpt": section_text,
+                        "tokens": section_tokens,
+                    })
+                    total_tokens += section_tokens
+                else:
+                    # Budget exceeded — truncate and stop
+                    remaining = max_tokens - total_tokens
+                    if remaining > 50:
+                        truncated = section_text[: remaining * 4]
+                        sections.append({
+                            "heading": current_heading,
+                            "line_start": line_start,
+                            "excerpt": truncated + "\n... [truncated]",
+                            "tokens": remaining,
+                            "truncated": True,
+                        })
+                    break
+
+            current_heading = heading_match.group(2).strip()
+            current_lines = []
+            line_start = i + 1
+        else:
+            current_lines.append(line)
+
+    # Flush last section
+    if current_heading and current_lines and total_tokens < max_tokens:
+        section_text = "\n".join(current_lines).strip()
+        section_tokens = _estimate_tokens(section_text)
+        remaining = max_tokens - total_tokens
+        if section_tokens <= remaining:
+            sections.append({
+                "heading": current_heading,
+                "line_start": line_start,
+                "excerpt": section_text,
+                "tokens": section_tokens,
+            })
+        elif remaining > 50:
+            truncated = section_text[: remaining * 4]
+            sections.append({
+                "heading": current_heading,
+                "line_start": line_start,
+                "excerpt": truncated + "\n... [truncated]",
+                "tokens": remaining,
+                "truncated": True,
+            })
+
+    return sections
+
+
+async def _get_architecture_excerpts(args: dict) -> list[TextContent]:
+    """Return architecture excerpts for specific domains (ENC-TSK-830)."""
+    project_id = args.get("project_id", "").strip()
+    domains = args.get("domains") or []
+    max_excerpt_tokens = int(args.get("max_excerpt_tokens", 1200))
+
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+    if not domains:
+        return _result_text({"error": "domains is required (list of domain names)"})
+
+    if not isinstance(domains, list):
+        domains = [str(domains)]
+
+    result_excerpts: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    tokens_used = 0
+    seen_files: set[str] = set()
+
+    for domain in domains:
+        domain_lower = str(domain).strip().lower()
+        mapping = _DOMAIN_ARCHITECTURE_MAP.get(domain_lower)
+        if not mapping:
+            valid_domains = sorted(set(
+                d for d, m in _DOMAIN_ARCHITECTURE_MAP.items()
+                if not m.get("description", "").startswith("Alias")
+            ))
+            warnings.append(
+                f"Unknown domain '{domain}'. Valid domains: {valid_domains}"
+            )
+            continue
+
+        # Deduplicate aliases pointing to same file
+        file_key = mapping["file"]
+        if file_key in seen_files:
+            continue
+        seen_files.add(file_key)
+
+        remaining_budget = max_excerpt_tokens - tokens_used
+        if remaining_budget <= 50:
+            warnings.append(f"Token budget exhausted; skipped domain '{domain}'")
+            break
+
+        content = _read_architecture_file(domain_lower)
+        if content is None:
+            warnings.append(f"Architecture file not found for domain '{domain}'")
+            continue
+
+        sections = _extract_sections_for_domain(content, remaining_budget)
+        domain_tokens = sum(s.get("tokens", 0) for s in sections)
+        tokens_used += domain_tokens
+
+        result_excerpts.append({
+            "domain": domain_lower,
+            "source": mapping["file"],
+            "section_count": len(sections),
+            "sections": sections,
+            "tokens": domain_tokens,
+        })
+
+    return _result_text({
+        "success": True,
+        "project_id": project_id,
+        "excerpts": result_excerpts,
+        "budget": {
+            "requested_max_tokens": max_excerpt_tokens,
+            "tokens_used": tokens_used,
+            "domains_requested": len(domains),
+            "domains_returned": len(result_excerpts),
+        },
+        "warnings": warnings if warnings else None,
+    })
+
+
+async def _get_issue_context(args: dict) -> list[TextContent]:
+    """Composite context retrieval for a tracker record (ENC-TSK-829).
+
+    Bundles: record core fields, relationships, component source paths,
+    domain architecture excerpts, and recent history in one call.
+    """
+    record_id = args.get("record_id", "").strip()
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+
+    include_components = args.get("include_components", True)
+    include_architecture = args.get("include_architecture", True)
+    include_recent_history = args.get("include_recent_history", True)
+    history_limit = int(args.get("history_limit", 10))
+    max_tokens = int(args.get("max_tokens", 2500))
+
+    # Parse record ID to get project/type
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    # 1. Fetch the record
+    record_resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
+    if not isinstance(record_resp, dict) or record_resp.get("error"):
+        return _result_text(record_resp or {"error": "Failed to fetch record"})
+
+    # Build compact record core
+    budget_used = 0
+    record_core = {
+        "id": record_id.upper(),
+        "type": record_type,
+        "title": record_resp.get("title", ""),
+        "status": record_resp.get("status", ""),
+        "priority": record_resp.get("priority", ""),
+        "category": record_resp.get("category", ""),
+        "intent": record_resp.get("intent", ""),
+    }
+    # Add type-specific fields
+    if record_type == "issue":
+        for f in ("hypothesis", "technical_notes", "location_hint", "severity"):
+            val = record_resp.get(f)
+            if val:
+                record_core[f] = val
+    if record_type == "task":
+        for f in ("transition_type", "checkout_state", "components"):
+            val = record_resp.get(f)
+            if val:
+                record_core[f] = val
+        ac = record_resp.get("acceptance_criteria")
+        if ac:
+            record_core["acceptance_criteria"] = ac
+
+    budget_used += _estimate_tokens(json.dumps(record_core))
+
+    # 2. Relationships
+    relationships: Dict[str, Any] = {}
+    for rel_field in ("related_task_ids", "related_issue_ids", "related_feature_ids", "parent"):
+        val = record_resp.get(rel_field)
+        if val:
+            relationships[rel_field] = val
+    if relationships:
+        budget_used += _estimate_tokens(json.dumps(relationships))
+
+    # 3. Components (optional)
+    components_data: List[Dict[str, Any]] = []
+    component_domains: set[str] = set()
+    truncated_sections: List[str] = []
+
+    if include_components and budget_used < max_tokens:
+        comp_ids = record_resp.get("components") or []
+        if comp_ids:
+            # Query component registry
+            comp_resp = _coordination_api_request(
+                "GET", "/components",
+                query={"project_id": project_id, "status": "active"},
+            )
+            all_components = comp_resp.get("components", [])
+            for comp in all_components:
+                cid = comp.get("component_id", "")
+                if cid in comp_ids:
+                    entry: Dict[str, Any] = {
+                        "component_id": cid,
+                        "category": comp.get("category"),
+                    }
+                    sp = comp.get("source_paths") or {}
+                    if sp.get("primary"):
+                        entry["primary"] = sp["primary"]
+                    if sp.get("directory"):
+                        entry["directory"] = sp["directory"]
+                    if sp.get("domains"):
+                        entry["domains"] = list(sp["domains"].keys())
+                        component_domains.update(sp["domains"].keys())
+                    if sp.get("architecture_sections"):
+                        entry["architecture_sections"] = sp["architecture_sections"]
+                    components_data.append(entry)
+
+            budget_used += _estimate_tokens(json.dumps(components_data))
+    elif include_components:
+        truncated_sections.append("components")
+
+    # 4. Architecture excerpts (optional)
+    arch_excerpts: List[Dict[str, Any]] = []
+    if include_architecture and component_domains and budget_used < max_tokens:
+        arch_budget = min(max_tokens - budget_used, 1200)
+        if arch_budget > 100:
+            arch_result = await _get_architecture_excerpts({
+                "project_id": project_id,
+                "domains": sorted(component_domains),
+                "max_excerpt_tokens": arch_budget,
+            })
+            # Parse the result
+            try:
+                arch_text = arch_result[0].text if arch_result else "{}"
+                arch_parsed = json.loads(arch_text)
+                arch_excerpts = arch_parsed.get("excerpts", [])
+                budget_used += sum(e.get("tokens", 0) for e in arch_excerpts)
+            except (json.JSONDecodeError, IndexError, AttributeError):
+                truncated_sections.append("architecture_excerpts")
+        else:
+            truncated_sections.append("architecture_excerpts")
+    elif include_architecture and not component_domains:
+        pass  # No domains to query
+    elif include_architecture:
+        truncated_sections.append("architecture_excerpts")
+
+    # 5. Recent history (optional)
+    recent_history: List[Dict[str, Any]] = []
+    if include_recent_history and budget_used < max_tokens:
+        full_history = record_resp.get("history") or []
+        history_budget = max_tokens - budget_used
+        for entry in reversed(full_history):
+            if len(recent_history) >= history_limit:
+                break
+            h_entry = {
+                "timestamp": entry.get("timestamp", ""),
+                "status": entry.get("status", ""),
+                "description": entry.get("description", ""),
+            }
+            entry_tokens = _estimate_tokens(json.dumps(h_entry))
+            if budget_used + entry_tokens > max_tokens:
+                truncated_sections.append("recent_history")
+                break
+            recent_history.append(h_entry)
+            budget_used += entry_tokens
+        recent_history.reverse()
+    elif include_recent_history:
+        truncated_sections.append("recent_history")
+
+    # Build final response
+    response: Dict[str, Any] = {
+        "success": True,
+        "record": record_core,
+    }
+    if relationships:
+        response["relationships"] = relationships
+    if components_data:
+        response["components"] = components_data
+    if arch_excerpts:
+        response["architecture_excerpts"] = arch_excerpts
+    if recent_history:
+        response["recent_history"] = recent_history
+    response["budget"] = {
+        "requested_max_tokens": max_tokens,
+        "estimated_output_tokens": budget_used,
+        "truncated_sections": truncated_sections if truncated_sections else [],
+    }
+
+    return _result_text(response)
+
+
 # --- Deployment ---
 
 
@@ -5923,6 +6380,8 @@ _TOOL_HANDLERS = {
     "check_document_policy": _check_document_policy,
     "reference_search": _reference_search,
     "get_code_map": _get_code_map,
+    "get_issue_context": _get_issue_context,
+    "get_architecture_excerpts": _get_architecture_excerpts,
     "deploy_state_get": _deploy_state_get,
     "deploy_history": _deploy_history,
     "deploy_history_list": _deploy_history_list,

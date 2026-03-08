@@ -1048,11 +1048,18 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
             steps = ev.get("steps_to_duplicate")
             if not isinstance(steps, list) or len(steps) == 0:
                 return _error(400, f"evidence[{i}].steps_to_duplicate requires at least one step.")
-        # ENC-TSK-805: Require location context for investigation efficiency
+        # ENC-TSK-805 / ENC-ISS-105: Soft-warn (not hard-block) on missing location context.
+        # MCP clients may not yet expose hypothesis/technical_notes/location_hint params;
+        # hard 400 blocks issue creation entirely. Ontology scoring already penalizes missing fields.
+        location_context_warnings: List[str] = []
         if not hypothesis and not technical_notes:
-            return _error(400, "Issue creation requires hypothesis OR technical_notes (ENC-TSK-805).")
+            location_context_warnings.append(
+                "Issue missing hypothesis and technical_notes — investigation efficiency may be reduced (ENC-TSK-805)."
+            )
         if not location_hint:
-            return _error(400, "Issue creation requires location_hint — suspected code paths for investigation (ENC-TSK-805).")
+            location_context_warnings.append(
+                "Issue missing location_hint — suspected code paths for investigation (ENC-TSK-805)."
+            )
 
     if primary_task:
         if record_type not in ("feature", "issue"):
@@ -1217,6 +1224,9 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         result["warning"] = category_warning
     if bidi_warnings:
         result["bidi_warnings"] = bidi_warnings
+    # ENC-ISS-105: surface location context warnings without blocking creation
+    if record_type == "issue" and location_context_warnings:
+        result["location_context_warnings"] = location_context_warnings
     return _response(201, result)
 
 
