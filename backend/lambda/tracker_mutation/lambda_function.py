@@ -999,6 +999,8 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
     status = str(body.get("status") or _DEFAULT_STATUS.get(record_type, "open"))
     severity = str(body.get("severity") or "")
     hypothesis = str(body.get("hypothesis") or "")
+    technical_notes = str(body.get("technical_notes") or "")
+    location_hint = str(body.get("location_hint") or "")
     success_metrics = body.get("success_metrics") or []
     related_str = body.get("related", "")
     user_story = str(body.get("user_story") or "").strip()
@@ -1046,6 +1048,11 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
             steps = ev.get("steps_to_duplicate")
             if not isinstance(steps, list) or len(steps) == 0:
                 return _error(400, f"evidence[{i}].steps_to_duplicate requires at least one step.")
+        # ENC-TSK-805: Require location context for investigation efficiency
+        if not hypothesis and not technical_notes:
+            return _error(400, "Issue creation requires hypothesis OR technical_notes (ENC-TSK-805).")
+        if not location_hint:
+            return _error(400, "Issue creation requires location_hint — suspected code paths for investigation (ENC-TSK-805).")
 
     if primary_task:
         if record_type not in ("feature", "issue"):
@@ -1098,6 +1105,10 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
             item["severity"] = _ser_s(severity)
         if hypothesis:
             item["hypothesis"] = _ser_s(hypothesis)
+        if technical_notes:
+            item["technical_notes"] = _ser_s(technical_notes)
+        if location_hint:
+            item["location_hint"] = _ser_s(location_hint)
     if record_type == "feature" and isinstance(success_metrics, list) and success_metrics:
         item["success_metrics"] = {"L": [_ser_s(str(x)) for x in success_metrics if str(x).strip()]}
 
