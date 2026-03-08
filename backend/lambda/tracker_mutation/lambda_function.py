@@ -125,6 +125,15 @@ _VALID_CATEGORIES = {
     "task": {"implementation", "investigation", "documentation", "maintenance", "validation"},
     "issue": {"bug", "debt", "risk", "security", "performance"},
 }
+_VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
+_VALID_TRANSITION_TYPES = ("github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code")
+_STRICTNESS_RANK = {
+    "github_pr_deploy": 0,
+    "lambda_deploy": 1,
+    "web_deploy": 1,
+    "code_only": 2,
+    "no_code": 3,
+}
 
 # Status transition rules — strictly sequential, one step forward only (ENC-FTR-022)
 # ENC-FTR-035: 'deployed' replaced by deploy-init / deploy-success + coding-updates re-entry arc.
@@ -817,9 +826,113 @@ def _response(status_code: int, body: Any) -> Dict:
 
 
 def _error(status_code: int, message: str, **extra) -> Dict:
-    body = {"success": False, "error": message}
-    body.update(extra)
+    code = str(extra.pop("code", "") or "").strip().upper()
+    if not code:
+        if status_code == 400:
+            code = "INVALID_INPUT"
+        elif status_code == 401:
+            code = "PERMISSION_DENIED"
+        elif status_code == 403:
+            code = "PERMISSION_DENIED"
+        elif status_code == 404:
+            code = "NOT_FOUND"
+        elif status_code == 409:
+            code = "CONFLICT"
+        elif status_code >= 500:
+            code = "INTERNAL_ERROR"
+        else:
+            code = "INTERNAL_ERROR"
+    retryable = bool(extra.pop("retryable", status_code >= 500))
+    details = dict(extra)
+    body = {
+        "success": False,
+        "error": message,
+        "error_envelope": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "details": details,
+        },
+    }
+    body.update(details)
     return _response(status_code, body)
+
+
+def _strictness_rank_table() -> List[Dict[str, Any]]:
+    return [
+        {"transition_type": name, "rank": _STRICTNESS_RANK[name]}
+        for name in sorted(_VALID_TRANSITION_TYPES, key=lambda item: (_STRICTNESS_RANK[item], item))
+    ]
+
+
+def _tracker_create_validation_error(
+    message: str,
+    *,
+    record_type: str,
+    missing_required_fields: Optional[List[str]] = None,
+    governed_rules: Optional[List[str]] = None,
+    example_fix: Optional[Dict[str, Any]] = None,
+) -> Dict:
+    return _error(
+        400,
+        message,
+        record_type=record_type,
+        missing_required_fields=missing_required_fields or [],
+        governed_rules=governed_rules or [],
+        allowed_values={
+            "priority": list(_VALID_PRIORITIES),
+            "category": sorted(_VALID_CATEGORIES.get(record_type, set())),
+        },
+        example_fix=example_fix or {
+            "tool": "tracker_create",
+            "arguments": {
+                "project_id": "<project_id>",
+                "record_type": record_type,
+                "title": "<title>",
+                "governance_hash": "<governance_hash>",
+            },
+        },
+    )
+
+
+def _tracker_field_validation_error(
+    message: str,
+    *,
+    field: str,
+    record_id: str = "",
+    record_type: str = "",
+    expected_type: str = "",
+    expected_format: str = "",
+    allowed_values: Optional[List[str]] = None,
+    governed_rules: Optional[List[str]] = None,
+    example_fix: Optional[Dict[str, Any]] = None,
+) -> Dict:
+    details: Dict[str, Any] = {
+        "field": field,
+        "record_id": record_id or None,
+        "record_type": record_type or None,
+        "expected_type": expected_type or None,
+        "expected_format": expected_format or None,
+        "allowed_values": allowed_values or None,
+        "governed_rules": governed_rules or [],
+        "example_fix": example_fix or {
+            "tool": "tracker_set",
+            "arguments": {
+                "record_id": record_id or "<record_id>",
+                "field": field,
+                "value": "<valid-value>",
+                "governance_hash": "<governance_hash>",
+            },
+        },
+    }
+    if field == "transition_type":
+        details["strictness_rank"] = _strictness_rank_table()
+    clean_details = {
+        key: value
+        for key, value in details.items()
+        if value not in (None, "", [], {})
+    }
+    return _error(400, message, **clean_details)
 
 
 # ---------------------------------------------------------------------------
@@ -991,7 +1104,11 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
     """POST /{project}/{type} — create a new tracker record."""
     title = body.get("title", "").strip()
     if not title:
-        return _error(400, "Field 'title' is required.")
+        return _tracker_create_validation_error(
+            "Field 'title' is required.",
+            record_type=record_type,
+            missing_required_fields=["title"],
+        )
 
     priority = body.get("priority")
     description = str(body.get("description") or "")
@@ -1015,7 +1132,12 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
     if dispatch_id:
         coordination = True
     if coordination and not coordination_request_id:
-        return _error(400, "coordination=true requires coordination_request_id.")
+        return _tracker_create_validation_error(
+            "coordination=true requires coordination_request_id.",
+            record_type=record_type,
+            missing_required_fields=["coordination_request_id"],
+            governed_rules=["coordination=true requires coordination_request_id."],
+        )
 
     # Acceptance criteria normalization
     raw_ac = body.get("acceptance_criteria")
@@ -1029,25 +1151,57 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
 
     # Validation per record type
     if record_type == "task" and not acceptance_criteria:
-        return _error(400, "Task creation requires acceptance_criteria (min 1).")
+        return _tracker_create_validation_error(
+            "Task creation requires acceptance_criteria (min 1).",
+            record_type=record_type,
+            missing_required_fields=["acceptance_criteria"],
+            governed_rules=["acceptance_criteria must contain at least one non-empty string for tasks."],
+        )
 
     if record_type == "feature":
         if not user_story:
-            return _error(400, "Feature creation requires user_story.")
+            return _tracker_create_validation_error(
+                "Feature creation requires user_story.",
+                record_type=record_type,
+                missing_required_fields=["user_story"],
+            )
         if not acceptance_criteria:
-            return _error(400, "Feature creation requires acceptance_criteria (min 1).")
+            return _tracker_create_validation_error(
+                "Feature creation requires acceptance_criteria (min 1).",
+                record_type=record_type,
+                missing_required_fields=["acceptance_criteria"],
+                governed_rules=["acceptance_criteria must contain at least one criterion for features."],
+            )
 
     if record_type == "issue":
         if not isinstance(evidence, list) or len(evidence) == 0:
-            return _error(400, "Issue creation requires evidence (min 1 entry with description + steps_to_duplicate).")
+            return _tracker_create_validation_error(
+                "Issue creation requires evidence (min 1 entry with description + steps_to_duplicate).",
+                record_type=record_type,
+                missing_required_fields=["evidence"],
+                governed_rules=["evidence must contain at least one object with description and steps_to_duplicate."],
+            )
         for i, ev in enumerate(evidence):
             if not isinstance(ev, dict):
-                return _error(400, f"evidence[{i}] must be an object.")
+                return _tracker_create_validation_error(
+                    f"evidence[{i}] must be an object.",
+                    record_type=record_type,
+                    governed_rules=["Each evidence entry must be a JSON object."],
+                )
             if not ev.get("description", "").strip():
-                return _error(400, f"evidence[{i}].description is required.")
+                return _tracker_create_validation_error(
+                    f"evidence[{i}].description is required.",
+                    record_type=record_type,
+                    missing_required_fields=[f"evidence[{i}].description"],
+                )
             steps = ev.get("steps_to_duplicate")
             if not isinstance(steps, list) or len(steps) == 0:
-                return _error(400, f"evidence[{i}].steps_to_duplicate requires at least one step.")
+                return _tracker_create_validation_error(
+                    f"evidence[{i}].steps_to_duplicate requires at least one step.",
+                    record_type=record_type,
+                    missing_required_fields=[f"evidence[{i}].steps_to_duplicate"],
+                    governed_rules=["steps_to_duplicate must be a non-empty array of reproduction steps."],
+                )
         # ENC-TSK-805 / ENC-ISS-105: Soft-warn (not hard-block) on missing location context.
         # MCP clients may not yet expose hypothesis/technical_notes/location_hint params;
         # hard 400 blocks issue creation entirely. Ontology scoring already penalizes missing fields.
@@ -1063,15 +1217,32 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
 
     if primary_task:
         if record_type not in ("feature", "issue"):
-            return _error(400, f"primary_task is only valid on feature/issue records, not {record_type}.")
+            return _tracker_create_validation_error(
+                f"primary_task is only valid on feature/issue records, not {record_type}.",
+                record_type=record_type,
+                governed_rules=["primary_task is only accepted for feature and issue records."],
+            )
         if "-TSK-" not in primary_task:
-            return _error(400, f"primary_task must reference a task ID (contains -TSK-). Got: '{primary_task}'.")
+            return _tracker_create_validation_error(
+                f"primary_task must reference a task ID (contains -TSK-). Got: '{primary_task}'.",
+                record_type=record_type,
+                governed_rules=["primary_task must reference an existing task ID containing -TSK-."],
+            )
 
-    # Category warning (soft)
-    category_warning = ""
+    if priority and priority not in _VALID_PRIORITIES:
+        return _tracker_create_validation_error(
+            f"Invalid priority '{priority}'. Allowed: {list(_VALID_PRIORITIES)}",
+            record_type=record_type,
+            governed_rules=["priority must be one of the governed enum values."],
+        )
     if category and category not in _VALID_CATEGORIES.get(record_type, set()):
-        valid = sorted(_VALID_CATEGORIES.get(record_type, set()))
-        category_warning = f"category '{category}' not in valid set for {record_type}: {valid}"
+        return _tracker_create_validation_error(
+            f"Invalid category '{category}' for {record_type}. Allowed: {sorted(_VALID_CATEGORIES.get(record_type, set()))}",
+            record_type=record_type,
+            governed_rules=["category must match the governed enum set for the record type."],
+        )
+
+    category_warning = ""
 
     # Resolve project prefix
     prefix = _get_project_prefix(project_id)
@@ -1316,7 +1487,7 @@ def _query_all_project_tasks(project_id: str) -> List[Dict]:
 # ENC-TSK-726: Required fields on a GitHub Actions Jobs API response object.
 # Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
 _DEPLOY_EVIDENCE_REQUIRED_FIELDS = (
-    "id", "run_id", "head_sha", "status", "conclusion", "started_at", "completed_at"
+    "id", "name", "run_id", "head_sha", "status", "conclusion", "started_at", "completed_at"
 )
 
 
@@ -1340,7 +1511,7 @@ def _validate_deploy_evidence(deploy_evidence) -> Optional[str]:
     """Validate deploy_evidence is a structured GitHub Actions Jobs API payload.
 
     Source API: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
-    Required fields: id, run_id, head_sha, status, conclusion, started_at, completed_at
+    Required fields: id, name, run_id, head_sha, status, conclusion, started_at, completed_at
     Value assertions:
       - status  must equal "completed"
       - conclusion must equal "success"
@@ -1371,6 +1542,12 @@ def _validate_deploy_evidence(deploy_evidence) -> Optional[str]:
             f"Cannot transition to 'deploy-success': deploy_evidence missing required "
             f"GitHub Actions Jobs API field(s): {', '.join(missing)}. "
             "Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}."
+        )
+    head_sha = str(deploy_evidence.get("head_sha", "")).strip()
+    if not re.match(r"^[0-9a-f]{40}$", head_sha.lower()):
+        return (
+            "Cannot transition to 'deploy-success': deploy_evidence.head_sha must be "
+            f"a 40-character hex SHA. Got: '{deploy_evidence.get('head_sha')}'."
         )
     status_val = str(deploy_evidence.get("status", "")).strip().lower()
     if status_val != "completed":
@@ -1784,12 +1961,26 @@ def _handle_update_field(
     field = body.get("field", "").strip()
     value = body.get("value", "")
     if not field:
-        return _error(400, "Field 'field' is required (or use 'action' for PWA mutations).")
+        return _tracker_field_validation_error(
+            "Field 'field' is required (or use 'action' for PWA mutations).",
+            field="field",
+            record_id=record_id,
+            record_type=record_type,
+            expected_type="string",
+            expected_format="single field name",
+        )
 
     if field == "acceptance_criteria":
         normalized_criteria, normalize_error = _normalize_acceptance_criteria_value(record_type, value)
         if normalize_error:
-            return _error(400, normalize_error)
+            return _tracker_field_validation_error(
+                normalize_error,
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="array",
+                expected_format="non-empty array of criteria",
+            )
         value = normalized_criteria
 
     # ENC-TSK-783 / ENC-ISS-099: Coerce evidence JSON strings to proper List type so the
@@ -1797,7 +1988,14 @@ def _handle_update_field(
     if field == "evidence":
         normalized_evidence, evidence_error = _normalize_evidence_value(value)
         if evidence_error:
-            return _error(400, evidence_error)
+            return _tracker_field_validation_error(
+                evidence_error,
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="array",
+                expected_format="array of evidence objects with description + steps_to_duplicate",
+            )
         value = normalized_evidence
 
     # ENC-ISS-059: Coerce related_*_ids JSON strings to proper List type so the
@@ -1805,7 +2003,14 @@ def _handle_update_field(
     if field in _RELATION_ID_FIELDS:
         normalized_ids, ids_error = _normalize_related_ids_value(value)
         if ids_error:
-            return _error(400, ids_error)
+            return _tracker_field_validation_error(
+                ids_error,
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="array",
+                expected_format="array of tracker record IDs",
+            )
         value = normalized_ids
 
     ddb = _get_ddb()
@@ -1851,6 +2056,46 @@ def _handle_update_field(
                 return _error(409, f"Record is checked out by '{current_session_id}'. Cannot modify.")
 
     # --- Validation for specific fields ---
+    if field == "priority":
+        normalized_priority = str(value or "").strip()
+        if normalized_priority and normalized_priority not in _VALID_PRIORITIES:
+            return _tracker_field_validation_error(
+                f"Invalid priority '{normalized_priority}'. Allowed: {list(_VALID_PRIORITIES)}",
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="enum",
+                allowed_values=list(_VALID_PRIORITIES),
+            )
+
+    if field == "category":
+        normalized_category = str(value or "").strip()
+        allowed_categories = sorted(_VALID_CATEGORIES.get(record_type, set()))
+        if normalized_category and normalized_category not in _VALID_CATEGORIES.get(record_type, set()):
+            return _tracker_field_validation_error(
+                f"Invalid category '{normalized_category}' for {record_type}. Allowed: {allowed_categories}",
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="enum",
+                allowed_values=allowed_categories,
+            )
+
+    if field == "transition_type":
+        normalized_transition_type = str(value or "").strip().lower()
+        if normalized_transition_type not in _VALID_TRANSITION_TYPES:
+            return _tracker_field_validation_error(
+                f"Invalid transition_type '{value}'. Allowed: {list(_VALID_TRANSITION_TYPES)}",
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="enum",
+                allowed_values=list(_VALID_TRANSITION_TYPES),
+                governed_rules=[
+                    "transition_type selects the lifecycle arc and should be set before checkout.",
+                ],
+            )
+
     if field == "status":
         # ENC-FTR-037: Task status transitions must go through checkout_service.
         # Direct calls (MCP tracker_set, PWA) are rejected with a clear redirect message.
@@ -1861,6 +2106,20 @@ def _handle_update_field(
                 "Task status transitions must be made via the checkout service. "
                 "Use the advance_task_status MCP tool or POST "
                 "/api/v1/checkout/{project}/task/{task_id}/advance.",
+                field="status",
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="enum",
+                expected_format="task lifecycle transition via checkout service",
+                example_fix={
+                    "tool": "advance_task_status",
+                    "arguments": {
+                        "record_id": record_id,
+                        "target_status": str(value).strip().lower(),
+                        "provider": "<provider>",
+                        "governance_hash": "<governance_hash>",
+                    },
+                },
             )
 
         current_status = item_data.get("status", "").strip().lower()
@@ -1874,10 +2133,13 @@ def _handle_update_field(
             current_session = bool(item_data.get("active_agent_session"))
             current_session_id = str(item_data.get("active_agent_session_id", "")).strip()
             if not provider:
-                return _error(
-                    400,
-                    "Task status transitions require write_source.provider "
-                    "(agent identity).",
+                return _tracker_field_validation_error(
+                    "Task status transitions require write_source.provider (agent identity).",
+                    field=field,
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="string",
+                    expected_format="checked-out agent identity",
                 )
             if not current_session or not current_session_id:
                 return _error(
@@ -1922,11 +2184,22 @@ def _handle_update_field(
                         f"requires transition_evidence.revert_reason")
                 is_revert = True
             elif valid_next or revert_targets:
-                return _error(400,
-                    f"Invalid status transition for {record_type}: "
-                    f"'{current_status}' -> '{value}'. "
-                    f"Valid forward: {sorted(valid_next)}. "
-                    f"Valid revert (with revert_reason): {sorted(revert_targets)}")
+                return _tracker_field_validation_error(
+                    (
+                        f"Invalid status transition for {record_type}: "
+                        f"'{current_status}' -> '{value}'. "
+                        f"Valid forward: {sorted(valid_next)}. "
+                        f"Valid revert (with revert_reason): {sorted(revert_targets)}"
+                    ),
+                    field=field,
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="enum",
+                    allowed_values=sorted(valid_next),
+                    governed_rules=[
+                        f"valid revert targets require transition_evidence.revert_reason: {sorted(revert_targets)}",
+                    ],
+                )
 
         # --- Evidence-gated forward transitions (ENC-FTR-022 / ENC-FTR-035) ---
         # Evidence gates apply to forward transitions only; reverts use revert_reason instead.
@@ -1936,11 +2209,23 @@ def _handle_update_field(
         if not is_revert and record_type == "task" and new_lower == "committed":
             commit_sha = transition_evidence.get("commit_sha", "").strip()
             if not commit_sha:
-                return _error(400,
-                    "Cannot transition to 'committed': transition_evidence.commit_sha required")
+                return _tracker_field_validation_error(
+                    "Cannot transition to 'committed': transition_evidence.commit_sha required",
+                    field="status",
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="object",
+                    expected_format="transition_evidence.commit_sha (40-char hex SHA)",
+                )
             if not re.match(r'^[0-9a-f]{40}$', commit_sha.lower()):
-                return _error(400,
-                    f"Invalid commit_sha: expected 40-char hex. Got: '{commit_sha}'")
+                return _tracker_field_validation_error(
+                    f"Invalid commit_sha: expected 40-char hex. Got: '{commit_sha}'",
+                    field="status",
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="object",
+                    expected_format="transition_evidence.commit_sha (40-char hex SHA)",
+                )
             owner = transition_evidence.get("owner")
             repo = transition_evidence.get("repo")
             if not owner or not repo:
@@ -1948,14 +2233,28 @@ def _handle_update_field(
                 owner = owner or resolved_owner
                 repo = repo or resolved_repo
             if not owner or not repo:
-                return _error(400,
-                    f"Cannot resolve GitHub repo for project '{project_id}'. "
-                    "Provide owner and repo in transition_evidence, or set the "
-                    "project's repo field in the projects table.")
+                return _tracker_field_validation_error(
+                    (
+                        f"Cannot resolve GitHub repo for project '{project_id}'. "
+                        "Provide owner and repo in transition_evidence, or set the "
+                        "project's repo field in the projects table."
+                    ),
+                    field="status",
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="object",
+                    expected_format="transition_evidence.owner + transition_evidence.repo",
+                )
             valid, reason = _validate_commit_via_github(owner, repo, commit_sha)
             if not valid:
-                return _error(400,
-                    f"GitHub commit validation failed for {commit_sha}: {reason}")
+                return _tracker_field_validation_error(
+                    f"GitHub commit validation failed for {commit_sha}: {reason}",
+                    field="status",
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="object",
+                    expected_format="transition_evidence.commit_sha validated against GitHub",
+                )
 
         if not is_revert and record_type == "task" and new_lower == "merged-main" \
                 and not _is_checkout_service_request(event):
@@ -1966,25 +2265,47 @@ def _handle_update_field(
             # (e.g., direct PWA mutations) still require merge_evidence for backward compat.
             merge_evidence = transition_evidence.get("merge_evidence", "").strip()
             if not merge_evidence:
-                return _error(400,
-                    "Cannot transition to 'merged-main': "
-                    "transition_evidence.merge_evidence required")
+                return _tracker_field_validation_error(
+                    "Cannot transition to 'merged-main': transition_evidence.merge_evidence required",
+                    field="status",
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="object",
+                    expected_format="transition_evidence.merge_evidence (non-empty string)",
+                )
 
         if not is_revert and record_type == "task" and new_lower == "deploy-success":
             # ENC-TSK-726: deploy_evidence must be a structured GitHub Actions Jobs API payload.
             # Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
             de_err = _validate_deploy_evidence(transition_evidence.get("deploy_evidence"))
             if de_err:
-                return _error(400, de_err)
+                return _tracker_field_validation_error(
+                    de_err,
+                    field="status",
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="object",
+                    expected_format=(
+                        "transition_evidence.deploy_evidence with id, name, run_id, "
+                        "head_sha, status, conclusion, started_at, completed_at"
+                    ),
+                )
 
         if not is_revert and record_type == "task" and new_lower == "closed" and current_status == "deploy-success":
             live_validation_evidence = transition_evidence.get("live_validation_evidence", "").strip()
             if not live_validation_evidence:
-                return _error(400,
-                    "Cannot transition to 'closed': "
-                    "transition_evidence.live_validation_evidence required. "
-                    "Use ENC-FTR-032 (Cognito PWA diagnostics) to capture evidence autonomously, "
-                    "or provide a manual confirmation string.")
+                return _tracker_field_validation_error(
+                    (
+                        "Cannot transition to 'closed': transition_evidence.live_validation_evidence required. "
+                        "Use ENC-FTR-032 (Cognito PWA diagnostics) to capture evidence autonomously, "
+                        "or provide a manual confirmation string."
+                    ),
+                    field="status",
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="object",
+                    expected_format="transition_evidence.live_validation_evidence (non-empty string)",
+                )
 
         if record_type == "feature" and new_lower == "production":
             prod_err = _validate_feature_production_gate(project_id, item_data)
@@ -2029,15 +2350,37 @@ def _handle_update_field(
         elif "-FTR-" in value:
             parent_type = "feature"
         if parent_type and parent_type != record_type:
-            return _error(400,
-                f"Parent must be the same record type. This is a {record_type} "
-                f"but parent '{value}' is a {parent_type}.")
+            return _tracker_field_validation_error(
+                (
+                    f"Parent must be the same record type. This is a {record_type} "
+                    f"but parent '{value}' is a {parent_type}."
+                ),
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="string",
+                expected_format=f"{record_type.upper()} ID",
+            )
 
     if field == "primary_task":
         if record_type not in ("feature", "issue"):
-            return _error(400, f"primary_task is only valid on feature/issue records.")
+            return _tracker_field_validation_error(
+                "primary_task is only valid on feature/issue records.",
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="string",
+                expected_format="feature or issue task ID",
+            )
         if value.strip() and "-TSK-" not in value:
-            return _error(400, f"primary_task must reference a task ID. Got: '{value}'.")
+            return _tracker_field_validation_error(
+                f"primary_task must reference a task ID. Got: '{value}'.",
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_type="string",
+                expected_format="task ID containing -TSK-",
+            )
 
     now = _now_z()
     note_suffix = _write_source_note_suffix(body)

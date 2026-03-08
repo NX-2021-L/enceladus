@@ -6984,6 +6984,49 @@ _COMPONENT_TRANSITION_TYPES = frozenset({
     "github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code"
 })
 _COMPONENT_STATUSES = frozenset({"active", "deprecated", "archived"})
+_COMPONENT_STRICTNESS_RANK = {
+    "github_pr_deploy": 0,
+    "lambda_deploy": 1,
+    "web_deploy": 1,
+    "code_only": 2,
+    "no_code": 3,
+}
+
+
+def _component_strictness_rank_table() -> list[dict[str, Any]]:
+    return [
+        {"transition_type": name, "rank": _COMPONENT_STRICTNESS_RANK[name]}
+        for name in sorted(
+            _COMPONENT_TRANSITION_TYPES,
+            key=lambda item: (_COMPONENT_STRICTNESS_RANK[item], item),
+        )
+    ]
+
+
+def _component_validation_error(
+    status_code: int,
+    message: str,
+    *,
+    field: str = "",
+    component_id: str = "",
+    expected_type: str = "",
+    allowed_values: Optional[list[str]] = None,
+    example_fix: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    details: Dict[str, Any] = {}
+    if field:
+        details["field"] = field
+    if component_id:
+        details["component_id"] = component_id
+    if expected_type:
+        details["expected_type"] = expected_type
+    if allowed_values:
+        details["allowed_values"] = allowed_values
+    if field == "transition_type":
+        details["strictness_rank"] = _component_strictness_rank_table()
+    if example_fix:
+        details["example_fix"] = example_fix
+    return _error(status_code, message, **details)
 
 # Checkout-assistant key — allows updating transition_type without Cognito session
 CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
@@ -7121,33 +7164,71 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
     try:
         body = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
-        return _error(400, "Invalid JSON body")
+        return _component_validation_error(400, "Invalid JSON body", expected_type="object")
 
     component_name = (body.get("component_name") or "").strip()
     if not component_name:
-        return _error(400, "component_name is required")
+        return _component_validation_error(
+            400,
+            "component_name is required",
+            field="component_name",
+            expected_type="string",
+        )
 
     project_id = (body.get("project_id") or "").strip()
     if not project_id:
-        return _error(400, "project_id is required")
+        return _component_validation_error(
+            400,
+            "project_id is required",
+            field="project_id",
+            expected_type="string",
+        )
 
     category = (body.get("category") or "").strip().lower()
     if not category:
-        return _error(400, "category is required")
+        return _component_validation_error(
+            400,
+            "category is required",
+            field="category",
+            expected_type="enum",
+            allowed_values=sorted(_COMPONENT_CATEGORIES),
+        )
     if category not in _COMPONENT_CATEGORIES:
-        return _error(400, f"Invalid category '{category}'. Allowed: {sorted(_COMPONENT_CATEGORIES)}")
+        return _component_validation_error(
+            400,
+            f"Invalid category '{category}'. Allowed: {sorted(_COMPONENT_CATEGORIES)}",
+            field="category",
+            expected_type="enum",
+            allowed_values=sorted(_COMPONENT_CATEGORIES),
+        )
 
     # transition_type: Cognito/assistant can set any value; internal key defaults to github_pr_deploy
     requested_type = (body.get("transition_type") or "").strip().lower()
     if requested_type and requested_type not in _COMPONENT_TRANSITION_TYPES:
-        return _error(400, f"Invalid transition_type '{requested_type}'. Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}")
+        return _component_validation_error(
+            400,
+            f"Invalid transition_type '{requested_type}'. Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}",
+            field="transition_type",
+            expected_type="enum",
+            allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+        )
 
     if requested_type and not (_is_cognito_session(claims) or _is_assistant_request(event)):
-        return _error(403, (
-            "Setting transition_type at create time requires Cognito authentication "
-            "(PWA session) or checkout-service-assistant key. "
-            "Internal API key callers receive the default 'github_pr_deploy'."
-        ))
+        return _component_validation_error(
+            403,
+            (
+                "Setting transition_type at create time requires Cognito authentication "
+                "(PWA session) or checkout-service-assistant key. "
+                "Internal API key callers receive the default 'github_pr_deploy'."
+            ),
+            field="transition_type",
+            expected_type="enum",
+            allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+            example_fix={
+                "transition_type": "github_pr_deploy",
+                "note": "Retry without transition_type, or use a Cognito session / checkout-service-assistant key to set a less strict component type.",
+            },
+        )
     transition_type = requested_type or "github_pr_deploy"
 
     # Build component_id from provided slug or derive from name
@@ -7157,7 +7238,13 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
 
     status_val = (body.get("status") or "active").strip().lower()
     if status_val not in _COMPONENT_STATUSES:
-        return _error(400, f"Invalid status '{status_val}'. Allowed: {sorted(_COMPONENT_STATUSES)}")
+        return _component_validation_error(
+            400,
+            f"Invalid status '{status_val}'. Allowed: {sorted(_COMPONENT_STATUSES)}",
+            field="status",
+            expected_type="enum",
+            allowed_values=sorted(_COMPONENT_STATUSES),
+        )
 
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -7203,22 +7290,36 @@ def _handle_components_update(
     try:
         body = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
-        return _error(400, "Invalid JSON body")
+        return _component_validation_error(400, "Invalid JSON body", component_id=component_id, expected_type="object")
 
     if not body:
-        return _error(400, "No fields to update")
+        return _component_validation_error(400, "No fields to update", component_id=component_id)
 
     # Auth guard: transition_type changes require Cognito or assistant key
     if "transition_type" in body:
         if not (_is_cognito_session(claims) or _is_assistant_request(event)):
-            return _error(403, (
-                "Updating transition_type requires Cognito authentication (PWA session) "
-                "or checkout-service-assistant key (ENC-FTR-041). "
-                "Direct agent writes via internal API key are not permitted."
-            ))
+            return _component_validation_error(
+                403,
+                (
+                    "Updating transition_type requires Cognito authentication (PWA session) "
+                    "or checkout-service-assistant key (ENC-FTR-041). "
+                    "Direct agent writes via internal API key are not permitted."
+                ),
+                field="transition_type",
+                component_id=component_id,
+                expected_type="enum",
+                allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+            )
         new_type = (body["transition_type"] or "").strip().lower()
         if new_type not in _COMPONENT_TRANSITION_TYPES:
-            return _error(400, f"Invalid transition_type '{new_type}'. Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}")
+            return _component_validation_error(
+                400,
+                f"Invalid transition_type '{new_type}'. Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}",
+                field="transition_type",
+                component_id=component_id,
+                expected_type="enum",
+                allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+            )
 
     # Build update expression
     updatable_fields = {
@@ -7242,7 +7343,13 @@ def _handle_components_update(
             continue
         val = body[field]
         if not isinstance(val, dict):
-            return _error(400, f"{field} must be a JSON object")
+            return _component_validation_error(
+                400,
+                f"{field} must be a JSON object",
+                field=field,
+                component_id=component_id,
+                expected_type="object",
+            )
         safe_name = f"#f_{field}"
         safe_val = f":v_{field}"
         attr_names[safe_name] = field
@@ -7254,9 +7361,23 @@ def _handle_components_update(
             continue
         val = body[field]
         if field == "category" and val not in _COMPONENT_CATEGORIES:
-            return _error(400, f"Invalid category '{val}'. Allowed: {sorted(_COMPONENT_CATEGORIES)}")
+            return _component_validation_error(
+                400,
+                f"Invalid category '{val}'. Allowed: {sorted(_COMPONENT_CATEGORIES)}",
+                field=field,
+                component_id=component_id,
+                expected_type="enum",
+                allowed_values=sorted(_COMPONENT_CATEGORIES),
+            )
         if field == "status" and val not in _COMPONENT_STATUSES:
-            return _error(400, f"Invalid status '{val}'. Allowed: {sorted(_COMPONENT_STATUSES)}")
+            return _component_validation_error(
+                400,
+                f"Invalid status '{val}'. Allowed: {sorted(_COMPONENT_STATUSES)}",
+                field=field,
+                component_id=component_id,
+                expected_type="enum",
+                allowed_values=sorted(_COMPONENT_STATUSES),
+            )
         safe_name = f"#f_{field}"
         safe_val = f":v_{field}"
         attr_names[safe_name] = field
@@ -7264,7 +7385,11 @@ def _handle_components_update(
         update_parts.append(f"{safe_name} = {safe_val}")
 
     if not update_parts:
-        return _error(400, "No valid fields to update")
+        return _component_validation_error(
+            400,
+            "No valid fields to update",
+            component_id=component_id,
+        )
 
     update_expr = "SET " + ", ".join(update_parts)
 
