@@ -49,25 +49,25 @@ Components seeded:
         comp-mod-keycloak          mod  external        no_code                  (needs assistant-key)
 
     DevOps project (ENC-FTR-042):
-        comp-devops-governance     devops  governance  no_code                   (needs assistant-key)
+        comp-devops-governance     devops  workflow  no_code                     (needs assistant-key)
 
     jreesewebops project (ENC-FTR-042):
         comp-jwo-web-infra         jreesewebops  infrastructure  no_code         (needs assistant-key)
 
     jreeseGPT project (ENC-FTR-042):
-        comp-jgp-platform          jreeseGPT  service  no_code                   (needs assistant-key)
+        comp-jgp-platform          jreeseGPT  external  no_code                  (needs assistant-key)
 
     jobapps project (ENC-FTR-042):
-        comp-jap-jds-platform      jobapps  service  no_code                     (needs assistant-key)
+        comp-jap-jds-platform      jobapps  external  no_code                    (needs assistant-key)
 
     intelligent-scraper-generator project (ENC-FTR-042):
         comp-isg-toolkit           intelligent-scraper-generator  library  no_code  (needs assistant-key)
 
     property160c1 project (ENC-FTR-042):
-        comp-prp-planning          property160c1  documentation  no_code         (needs assistant-key)
+        comp-prp-planning          property160c1  workflow  no_code              (needs assistant-key)
 
     agentharmony project (ENC-FTR-042):
-        comp-agh-governance        agentharmony  governance  no_code             (needs assistant-key)
+        comp-agh-governance        agentharmony  workflow  no_code               (needs assistant-key)
 """
 
 from __future__ import annotations
@@ -319,7 +319,7 @@ KNOWN_COMPONENTS = [
         "component_id": "comp-devops-governance",
         "component_name": "DevOps Governance & Deployment Config",
         "project_id": "devops",
-        "category": "governance",
+        "category": "workflow",
         "transition_type": "no_code",
         "description": "DevOps governance policies (agents.md, data dictionary), deployment configs, and agent SOPs in S3. Updated via MCP governance_update.",
         "status": "active",
@@ -346,7 +346,7 @@ KNOWN_COMPONENTS = [
         "component_id": "comp-jgp-platform",
         "component_name": "jreeseGPT AI Platform",
         "project_id": "jreeseGPT",
-        "category": "service",
+        "category": "external",
         "transition_type": "no_code",
         "description": "AI recruiter assistant — corpus ingestion, embeddings, Bedrock/Lambda APIs, scheduling workflows. Development stage.",
         "status": "active",
@@ -356,7 +356,7 @@ KNOWN_COMPONENTS = [
         "component_id": "comp-jap-jds-platform",
         "component_name": "Job Discovery System (JDS)",
         "project_id": "jobapps",
-        "category": "service",
+        "category": "external",
         "transition_type": "no_code",
         "description": "JDS scraper runners, configuration playbooks, ChromeDriver hardening, and analytics. Development stage.",
         "status": "active",
@@ -376,7 +376,7 @@ KNOWN_COMPONENTS = [
         "component_id": "comp-prp-planning",
         "component_name": "Property 160C1 Planning",
         "project_id": "property160c1",
-        "category": "documentation",
+        "category": "workflow",
         "transition_type": "no_code",
         "description": "Property 160C1 project planning and requirements artifacts. Planning stage.",
         "status": "active",
@@ -386,7 +386,7 @@ KNOWN_COMPONENTS = [
         "component_id": "comp-agh-governance",
         "component_name": "Agent Harmony Governance & Templates",
         "project_id": "agentharmony",
-        "category": "governance",
+        "category": "workflow",
         "transition_type": "no_code",
         "description": "Agent documentation standards, templates (bootstrap-session.sh, codex-auto.sh), and operational tooling inherited by all downstream projects.",
         "status": "active",
