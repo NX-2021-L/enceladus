@@ -301,10 +301,12 @@ if servers:
     claude mcp remove "${MCP_PRIMARY_ALIAS}" --scope user 2>/dev/null || true
 
     # shellcheck disable=SC2068
+    # The `--` separator is required to prevent the variadic -e <env...>
+    # option from consuming the positional <name> argument.
     if claude mcp add \
         --scope user \
         "${_MCP_ENV_ARGS[@]}" \
-        "${MCP_PRIMARY_ALIAS}" \
+        -- "${MCP_PRIMARY_ALIAS}" \
         "${PYTHON_BIN}" \
         "${SERVER_PY}" 2>&1; then
         echo "[SUCCESS] Registered '${MCP_PRIMARY_ALIAS}' with Claude Code CLI (user scope)"
