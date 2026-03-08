@@ -21,6 +21,7 @@ Related: DVP-TSK-245, DVP-TSK-252, DVP-FTR-023, DVP-TSK-248
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -875,7 +876,39 @@ def _result_text(data: Any) -> list:
     """Format a result as TextContent for MCP tool response."""
     if isinstance(data, str):
         return [TextContent(type="text", text=data)]
-    return [TextContent(type="text", text=json.dumps(data, indent=2, default=str))]
+    return [TextContent(type="text", text=json.dumps(data, default=str))]
+
+
+def _paginate(items: list, page_size: int, cursor: str | None, key_fn) -> tuple:
+    """Client-side cursor pagination helper (ENC-TSK-820).
+
+    Returns (page_items, next_cursor_or_None, total_count).
+    key_fn(item) -> str  must produce a unique, deterministic sort key per item.
+    cursor is a base64-encoded key value; items with key <= cursor are skipped.
+    """
+    total = len(items)
+    page_size = max(1, min(page_size, 100))
+
+    if cursor:
+        try:
+            decoded = base64.urlsafe_b64decode(cursor.encode()).decode()
+        except Exception:
+            decoded = ""
+        # Skip past the cursor position
+        start_idx = 0
+        for i, item in enumerate(items):
+            if key_fn(item) == decoded:
+                start_idx = i + 1
+                break
+        items = items[start_idx:]
+
+    page = items[:page_size]
+    next_cursor = None
+    if len(items) > page_size:
+        last_key = key_fn(page[-1])
+        next_cursor = base64.urlsafe_b64encode(last_key.encode()).decode()
+
+    return page, next_cursor, total
 
 
 def _error_payload(
@@ -2678,7 +2711,11 @@ async def list_tools() -> list[Tool]:
                     "record_id": {
                         "type": "string",
                         "description": "The record ID (e.g., DVP-TSK-074).",
-                    }
+                    },
+                    "include_history": {
+                        "type": "boolean",
+                        "description": "If true, include full history[] and write_source fields. Default false (summary only).",
+                    },
                 },
                 "required": ["record_id"],
             },
@@ -2721,7 +2758,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_list",
-            description="List tracker records for a project. Filter by type and/or status.",
+            description="List tracker records for a project. Filter by type and/or status. Paginated (default 25).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2737,6 +2774,14 @@ async def list_tools() -> list[Tool]:
                     "status": {
                         "type": "string",
                         "description": "Filter by status (e.g., open, in-progress, closed).",
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "description": "Max records per page (default 25, max 100).",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "Pagination cursor from previous response's next_cursor.",
                     },
                 },
                 "required": ["project_id"],
@@ -2761,12 +2806,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_set",
-            description=(
-                "Set a field value on a tracker record. "
-                "NOTE (ENC-FTR-037): Task status changes are BLOCKED here — use "
-                "advance_task_status instead. Task worklogs are BLOCKED here — use "
-                "append_worklog instead. All other fields (priority, title, etc.) remain editable."
-            ),
+            description="Set a field on a tracker record. Task status→use advance_task_status. Task worklogs→use append_worklog.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2819,12 +2859,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_log",
-            description=(
-                "Append a worklog entry to a tracker record's history. "
-                "NOTE (ENC-FTR-037): For TASKS, use append_worklog instead — "
-                "this tool is blocked for task worklogs (checkout required). "
-                "For issues and features, this tool continues to work directly."
-            ),
+            description="Append worklog to an issue or feature. For tasks, use append_worklog (checkout required).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2939,6 +2974,18 @@ async def list_tools() -> list[Tool]:
                             "Must reference a valid task ID (contains -TSK- segment). "
                             "Only valid for feature and issue record types."
                         ),
+                    },
+                    "hypothesis": {
+                        "type": "string",
+                        "description": "Root cause hypothesis (issues). Required if technical_notes not provided.",
+                    },
+                    "technical_notes": {
+                        "type": "string",
+                        "description": "Technical investigation context (issues). Required if hypothesis not provided.",
+                    },
+                    "location_hint": {
+                        "type": "string",
+                        "description": "Suspected code paths for investigation (issues). Required at issue creation.",
                     },
                     "governance_hash": {
                         "type": "string",
@@ -3060,14 +3107,22 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="documents_list",
-            description="List all documents for a project.",
+            description="List documents for a project. Paginated (default 25).",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "project_id": {
                         "type": "string",
                         "description": "The project name.",
-                    }
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "description": "Max documents per page (default 25, max 100).",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "Pagination cursor from previous response's next_cursor.",
+                    },
                 },
                 "required": ["project_id"],
             },
@@ -3259,6 +3314,29 @@ async def list_tools() -> list[Tool]:
                 "required": ["project_id", "query"],
             },
         ),
+        # --- Code Navigation (ENC-TSK-805) ---
+        Tool(
+            name="get_code_map",
+            description=(
+                "Get a code navigation map for a project by querying the component registry. "
+                "Returns component source_paths and domain-to-file mappings. "
+                "Use domain param to filter to a specific domain (e.g., 'auth', 'routing')."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "The project name (e.g., enceladus).",
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Optional domain filter (e.g., 'auth', 'tracker', 'feeds'). Returns only files for that domain.",
+                    },
+                },
+                "required": ["project_id"],
+            },
+        ),
         # --- Deployment (6.2) ---
         Tool(
             name="deploy_state_get",
@@ -3315,15 +3393,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="deploy_submit",
             description=(
-                "Submit a deployment request through the deployment intake API. "
-                "The response includes the standard request_id and message fields, "
-                "plus version projection fields when a current-version.json exists for the project: "
-                "  projected_next_version — the semver that will be assigned if this request is the only one in the spec. "
-                "  release_notes_required — true for major or minor change_type (omitted for patch). "
-                "  release_notes_guidance — advisory text with a title template for the required release notes document. "
-                "Governance expectation for major/minor deploys: create a release notes document via documents_put "
-                "before the deploy completes, then include the document ID in related_record_ids of the deploy request. "
-                "The guidance field provides the exact title to use. Patch deploys have no release notes requirement."
+                "Submit a deployment request. Returns request_id and projected_next_version. "
+                "Major/minor deploys require release notes via documents_put (guidance returned in response). "
+                "Patch deploys have no release notes requirement."
             ),
             inputSchema={
                 "type": "object",
@@ -3496,13 +3568,7 @@ async def list_tools() -> list[Tool]:
         # --- Changelog (ENC-FTR-033) ---
         Tool(
             name="changelog_history",
-            description=(
-                "Fetch deployment history for a single project from the changelog API. "
-                "Returns deploy# audit records with version, change_type, release_summary, "
-                "changes[], deployed_at, and related_record_ids fields. "
-                "Sorted by deployed_at descending (most recent first). "
-                "Use change_type filter ('major', 'minor', 'patch') to narrow results."
-            ),
+            description="Fetch deployment history for a project. Returns version, change_type, changes[], deployed_at. Filterable by change_type.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3526,12 +3592,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="changelog_history_all",
-            description=(
-                "Fetch deployment history across multiple projects from the changelog API. "
-                "Returns a merged, time-sorted list of deploy# audit records for all specified projects. "
-                "Each entry includes project_id, version, change_type, release_summary, changes[], "
-                "and deployed_at. Useful for a cross-project system changelog view."
-            ),
+            description="Fetch deployment history across multiple projects. Returns merged time-sorted deploy records.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3681,15 +3742,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="governance_dictionary",
-            description=(
-                "Query governance data dictionary with optional filtering. "
-                "No args = compact index (entity names + field counts). "
-                "With entity = full schema for that entity. "
-                "With entity + field = specific field definition. "
-                "With entity + field + value = enum validation. "
-                "Use this instead of governance_get('governance_data_dictionary.json') "
-                "to avoid loading the full ~56KB dictionary into context."
-            ),
+            description="Query governance data dictionary. No args=compact index; entity=full schema; entity+field=definition; entity+field+value=enum validation.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3728,12 +3781,7 @@ async def list_tools() -> list[Tool]:
         # --- Dispatch Plan Generation (6.1.2) ---
         Tool(
             name="dispatch_plan_generate",
-            description=(
-                "Generate a dispatch-plan for a coordination request. "
-                "Follows governance-first init sequence: loads governance, tests connections, "
-                "reads coordination request, applies heuristics, and produces a validated plan. "
-                "Optionally accepts a dispatch_plan_override to bypass auto-generation."
-            ),
+            description="Generate a dispatch-plan for a coordination request. Accepts optional dispatch_plan_override to bypass auto-generation.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3892,14 +3940,8 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="checkout_task",
             description=(
-                "Check out a tracker task and advance it to in-progress. "
-                "REQUIRED before any coding can begin on a task. "
-                "Returns full task metadata including the task record. "
-                "The checkout is owned by the calling provider (active_agent_session_id). "
-                "ENC-FTR-041: Before checking out, set task.components via tracker_set to list "
-                "the component_ids this task will modify (e.g., ['comp-checkout-service']). "
-                "Without task.components, agent-initiated advance_task_status calls will be "
-                "blocked (400) — only human PWA operators can advance componentless tasks."
+                "Check out a task and advance to in-progress. REQUIRED before coding. "
+                "Set task.components via tracker_set before checkout (required for agent advances)."
             ),
             inputSchema={
                 "type": "object",
@@ -3953,30 +3995,11 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="advance_task_status",
             description=(
-                "Advance a task's status through the lifecycle arc. "
-                "This is the ONLY way to change task status (ENC-FTR-037). "
-                "Gate matrix: coding-complete → returns commit_approval_id (CAI-xxx); "
-                "committed (requires commit_sha in transition_evidence) → validates via GitHub, "
-                "returns commit_complete_id (CCI-xxx); "
-                "pr → requires prior committed (CCI on task); "
-                "merged-main (requires pr_id + merged_at) → validates via GitHub API; "
-                "deploy-success (requires deploy_evidence object) → clears CAI+CCI tokens; "
-                "closed (requires live_validation_evidence) → releases checkout. "
-                "ENC-ISS-092: the exact allowed statuses and evidence requirements depend on "
-                "task.transition_type — set via tracker_set before checkout. "
-                "github_pr_deploy (default): full arc above unchanged. "
-                "lambda_deploy (ENC-FTR-041): same arc as github_pr_deploy but deploy-success uses "
-                "lambda_deploy_evidence {function_name, version, updated_at (ISO 8601), status='Success'} "
-                "instead of deploy_evidence (GH Actions object). "
-                "web_deploy: same arc but deploy-success uses web_deploy_evidence {url, http_status, checked_at}. "
-                "code_only: skips deploy-init/deploy-success; closed uses code_on_main_evidence {commit_sha}. "
-                "no_code: only in-progress → coding-complete → closed; no CAI issued; "
-                "closed uses no_code_evidence (non-empty string). "
-                "ENC-FTR-041: task.components is required for agent advances — set via tracker_set. "
-                "The checkout service enforces that task.transition_type matches the strictest "
-                "component in task.components (STRICTNESS_RANK: github_pr_deploy=0, lambda_deploy=1, "
-                "web_deploy=1, code_only=2, no_code=3). "
-                "See governance dict checkout_service.transition_type_matrix for full per-type gate specs."
+                "Advance a task's status through the lifecycle arc (the ONLY way to change task status). "
+                "Lifecycle: open→in-progress→coding-complete→committed→pr→merged-main→deploy-init→deploy-success→closed. "
+                "Each transition may require transition_evidence. Use tracker_validation_rules to preflight. "
+                "Requires task checkout and task.components set via tracker_set. "
+                "Query governance_dictionary(entity='checkout_service') for full gate specs per transition_type."
             ),
             inputSchema={
                 "type": "object",
@@ -4002,19 +4025,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "transition_evidence": {
                         "type": "object",
-                        "description": (
-                            "Evidence for gated transitions. "
-                            "committed: {commit_sha: '<40-char hex>'}. "
-                            "merged-main: {pr_id: <int>, merged_at: '<ISO8601>'}. "
-                            "deploy-success (github_pr_deploy): {deploy_evidence: {id, name, run_id, status, "
-                            "conclusion, started_at, completed_at}}. "
-                            "deploy-success (web_deploy): {web_deploy_evidence: {url: '<https://...>', "
-                            "http_status: 200, checked_at: '<ISO8601>'}}. "
-                            "closed (github_pr_deploy/web_deploy): {live_validation_evidence: '<description>'}. "
-                            "closed (code_only): {code_on_main_evidence: {commit_sha: '<40-char hex>'}}. "
-                            "closed (no_code): {no_code_evidence: '<description of what was done>'}. "
-                            "Any revert: {revert_reason: '<reason>'}."
-                        ),
+                        "description": "Evidence for gated transitions. Use tracker_validation_rules to see required fields for each status.",
                     },
                     "pr_id": {
                         "type": "integer",
@@ -4030,12 +4041,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="append_worklog",
-            description=(
-                "Append a worklog entry to a task (checkout required). "
-                "This is the ONLY way to add task worklogs (ENC-FTR-037). "
-                "The task must be checked out by this session before calling this tool. "
-                "For issues and features, use tracker_log directly."
-            ),
+            description="Append worklog to a checked-out task. For issues/features use tracker_log.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -4263,6 +4269,7 @@ def _compute_completeness_score(item_data: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _tracker_get(args: dict) -> list[TextContent]:
     record_id = args["record_id"]
+    include_history = args.get("include_history", False)
     try:
         project_id, record_type, rid = _parse_record_id(record_id)
     except ValueError as exc:
@@ -4273,6 +4280,11 @@ async def _tracker_get(args: dict) -> list[TextContent]:
     record = resp.get("record", resp)
     # Add completeness score (ENC-FTR-013 ontology)
     record["ontology"] = _compute_completeness_score(record)
+    # Summary mode: strip verbose fields unless include_history=true
+    if not include_history:
+        for key in ("history", "write_source", "sync_version", "last_updated_by",
+                     "ttl", "gsi1pk", "gsi1sk", "gsi2pk", "gsi2sk"):
+            record.pop(key, None)
     return _result_text(record)
 
 
@@ -4419,6 +4431,8 @@ async def _tracker_list(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
     record_type = args.get("record_type")
     status_filter = args.get("status")
+    page_size = int(args.get("page_size", 25))
+    cursor = args.get("cursor")
     query_params: Dict[str, Any] = {}
     if record_type:
         query_params["type"] = record_type
@@ -4446,7 +4460,14 @@ async def _tracker_list(args: dict) -> list[TextContent]:
                 entry["orphan"] = True
                 orphan_count += 1
         summary.append(entry)
-    result: Dict[str, Any] = {"records": summary, "count": len(items)}
+    # Cursor pagination (ENC-TSK-820)
+    page, next_cursor, total = _paginate(
+        summary, page_size, cursor,
+        key_fn=lambda e: e.get("id", ""),
+    )
+    result: Dict[str, Any] = {"records": page, "count": len(page), "total": total}
+    if next_cursor:
+        result["next_cursor"] = next_cursor
     if orphan_count > 0:
         result["orphan_tasks"] = orphan_count
         result["orphan_warning"] = (
@@ -4584,7 +4605,8 @@ async def _tracker_create(args: dict) -> list[TextContent]:
         "governance_hash": args.get("governance_hash", ""),
     }
     for key in ("priority", "description", "assigned_to", "status", "severity",
-                "hypothesis", "success_metrics", "related", "dispatch_id",
+                "hypothesis", "technical_notes", "location_hint",
+                "success_metrics", "related", "dispatch_id",
                 "coordination", "coordination_request_id", "acceptance_criteria",
                 "user_story", "category", "intent", "evidence", "primary_task",
                 "provider"):
@@ -4655,8 +4677,22 @@ async def _documents_get(args: dict) -> list[TextContent]:
 
 async def _documents_list(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
+    page_size = int(args.get("page_size", 25))
+    cursor = args.get("cursor")
     resp = _document_api_request("GET", query={"project": project_id})
-    return _result_text(resp)
+    if isinstance(resp, dict) and resp.get("error"):
+        return _result_text(resp)
+    # Response is typically {"documents": [...]} or a list
+    docs = resp.get("documents", []) if isinstance(resp, dict) else resp if isinstance(resp, list) else []
+    # Cursor pagination (ENC-TSK-820)
+    page, next_cursor, total = _paginate(
+        docs, page_size, cursor,
+        key_fn=lambda d: d.get("document_id", d.get("id", "")),
+    )
+    result: Dict[str, Any] = {"documents": page, "count": len(page), "total": total}
+    if next_cursor:
+        result["next_cursor"] = next_cursor
+    return _result_text(result)
 
 
 async def _documents_put(args: dict) -> list[TextContent]:
@@ -4877,6 +4913,69 @@ async def _reference_search(args: dict) -> list[TextContent]:
             "s3_key": s3_key,
         },
     })
+
+
+# --- Code Navigation (ENC-TSK-805) ---
+
+
+async def _get_code_map(args: dict) -> list[TextContent]:
+    """Return a code navigation map for a project from the component registry."""
+    project_id = args["project_id"]
+    domain = args.get("domain")
+
+    # Query components for this project
+    resp = _coordination_api_request(
+        "GET", "/components", query={"project_id": project_id, "status": "active"}
+    )
+    components = resp.get("components", [])
+    if not components and resp.get("error"):
+        return _result_text(resp)
+
+    result: Dict[str, Any] = {"project_id": project_id, "components": []}
+
+    for comp in components:
+        source_paths = comp.get("source_paths", {})
+        if not source_paths:
+            # Include component even without source_paths (basic info)
+            result["components"].append({
+                "component_id": comp.get("component_id"),
+                "category": comp.get("category"),
+                "transition_type": comp.get("transition_type"),
+            })
+            continue
+
+        # If domain filter is specified, only include components that have that domain
+        if domain:
+            domains = source_paths.get("domains", {})
+            if domain in domains:
+                result["components"].append({
+                    "component_id": comp.get("component_id"),
+                    "category": comp.get("category"),
+                    "domain": domain,
+                    "files": domains[domain],
+                    "primary": source_paths.get("primary"),
+                    "architecture_sections": source_paths.get("architecture_sections", []),
+                })
+            # Skip components without the requested domain
+            continue
+
+        # No domain filter — return full source_paths
+        entry: Dict[str, Any] = {
+            "component_id": comp.get("component_id"),
+            "category": comp.get("category"),
+            "transition_type": comp.get("transition_type"),
+            "primary": source_paths.get("primary"),
+            "directory": source_paths.get("directory"),
+        }
+        if source_paths.get("workflow"):
+            entry["workflow"] = source_paths["workflow"]
+        if source_paths.get("domains"):
+            entry["domains"] = list(source_paths["domains"].keys())
+        if source_paths.get("architecture_sections"):
+            entry["architecture_sections"] = source_paths["architecture_sections"]
+        result["components"].append(entry)
+
+    return _result_text(result)
 
 
 # --- Deployment ---
@@ -5640,6 +5739,7 @@ _TOOL_HANDLERS = {
     "documents_patch": _documents_patch,
     "check_document_policy": _check_document_policy,
     "reference_search": _reference_search,
+    "get_code_map": _get_code_map,
     "deploy_state_get": _deploy_state_get,
     "deploy_history": _deploy_history,
     "deploy_history_list": _deploy_history_list,

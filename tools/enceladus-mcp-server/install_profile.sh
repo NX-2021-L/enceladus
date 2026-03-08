@@ -19,7 +19,7 @@ SERVER_PY="${SCRIPT_DIR}/server.py"
 WORKSPACE_ROOT="${ENCELADUS_WORKSPACE_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 MCP_PRIMARY_ALIAS="${ENCELADUS_MCP_PRIMARY_ALIAS:-enceladus}"
 MCP_SECONDARY_ALIAS="${ENCELADUS_MCP_SECONDARY_ALIAS:-enceladus-local}"
-MCP_INCLUDE_SECONDARY_ALIAS="${ENCELADUS_MCP_INCLUDE_SECONDARY_ALIAS:-true}"
+MCP_INCLUDE_SECONDARY_ALIAS="${ENCELADUS_MCP_INCLUDE_SECONDARY_ALIAS:-false}"
 CLAUDE_SETTINGS_DIR="${ENCELADUS_MCP_CLAUDE_SETTINGS_DIR:-${HOME}/.claude}"
 CODEX_SETTINGS_DIR="${ENCELADUS_MCP_CODEX_SETTINGS_DIR:-${HOME}/.codex}"
 
@@ -434,59 +434,63 @@ else
     echo "[WARNING] Failed to update ${CODEX_CONFIG_FILE}; continuing"
 fi
 
-# Write global ~/.codex/AGENTS.md (Codex bootstrap) if missing or uses outdated pattern.
-# Condition: rewrite if file is absent OR uses old governance_get full-dictionary load
-# (ENC-ISS-087 deprecated that pattern in favour of governance_dictionary() compact index).
+# Write global ~/.codex/AGENTS.md (Codex bootstrap) if missing or outdated.
+# Rewrite if: absent, uses old governance_get full-dictionary load (ENC-ISS-087),
+# or references deprecated enceladus-local alias (ENC-TSK-821).
 CODEX_GLOBAL_AGENTS_MD="${CODEX_SETTINGS_DIR}/AGENTS.md"
-if [ ! -f "${CODEX_GLOBAL_AGENTS_MD}" ] || ! grep -q "governance_dictionary" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null; then
+if [ ! -f "${CODEX_GLOBAL_AGENTS_MD}" ] || ! grep -q "bootstrap-template" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null; then
     cat > "${CODEX_GLOBAL_AGENTS_MD}" << 'GLOBAL_AGENTS_EOF'
 # Codex Bootstrap
 
-For Enceladus work: MCP servers `enceladus` and `enceladus-local` are configured.
+MCP server `enceladus` is configured in `~/.codex/config.toml`.
 
 Initialize by running (in order):
-1. `mcp: connection_health`
-2. `mcp: governance_hash` — cache this for all writes
-3. `mcp: governance_dictionary` — load compact enum/constraint index (replaces full dict load per ENC-ISS-087)
-4. `mcp: governance_get("agents.md")` — load full governance rules and follow all instructions in it
+1. `mcp: connection_health` — verify connectivity, get governance hash
+2. `mcp: governance_get("agents.md")` — load full governance rules
+3. `mcp: governance_dictionary` — load compact enum/constraint index
+4. `mcp: governance_get("agents/bootstrap-template.md")` — load session init protocol
+
+Follow all instructions in `agents.md` before proceeding with any work.
 GLOBAL_AGENTS_EOF
     echo "[SUCCESS] Global Codex AGENTS.md written to ${CODEX_GLOBAL_AGENTS_MD}"
 else
     echo "[INFO] Global Codex AGENTS.md already present at ${CODEX_GLOBAL_AGENTS_MD}"
 fi
 
-# Write workspace AGENTS.md (Codex bootstrap) if missing or uses outdated pattern.
-# Condition: rewrite if file is absent OR uses old governance_get full-dictionary load
-# (ENC-ISS-087 deprecated that pattern in favour of governance_dictionary() compact index).
-# The file is intentionally minimal — agents load full rules from governance://agents.md dynamically.
+# Write workspace AGENTS.md (Codex bootstrap) if missing or outdated.
+# Rewrite if: absent, uses old governance_get full-dictionary load (ENC-ISS-087),
+# or references deprecated enceladus-local alias (ENC-TSK-821).
+# The file is intentionally minimal — agents load full rules from governance dynamically.
 WORKSPACE_AGENTS_MD="${WORKSPACE_ROOT}/AGENTS.md"
-if [ ! -f "${WORKSPACE_AGENTS_MD}" ] || ! grep -q "governance_dictionary" "${WORKSPACE_AGENTS_MD}" 2>/dev/null; then
+if [ ! -f "${WORKSPACE_AGENTS_MD}" ] || ! grep -q "bootstrap-template" "${WORKSPACE_AGENTS_MD}" 2>/dev/null; then
     cat > "${WORKSPACE_AGENTS_MD}" << 'AGENTS_EOF'
-# Enceladus Workspace — Codex Bootstrap
+# Enceladus Workspace — Agent Bootstrap
 
-MCP servers `enceladus` and `enceladus-local` are pre-configured in `~/.codex/config.toml`.
+MCP server `enceladus` is configured in `~/.codex/config.toml`.
 Source: `tools/enceladus-mcp-server/server.py`
 
 ## Initialization (REQUIRED — run in order every session)
 
-1. `mcp: connection_health` — verify DynamoDB/S3/API connectivity
-2. `mcp: governance_hash` — get and cache the governance hash (required for all writes)
-3. `mcp: governance_dictionary` — load compact enum/constraint index (replaces full dict load per ENC-ISS-087)
-4. `mcp: governance_get("agents.md")` — **load full governance rules and execute all steps in that file**
-5. `mcp: tracker_list(project_id="enceladus", record_type="task", status="open")` — load open tasks
-6. `mcp: tracker_pending_updates(project_id="enceladus")` — check pending updates
+1. `mcp: connection_health` — verify DynamoDB/S3/API connectivity, get governance hash
+2. `mcp: governance_get("agents.md")` — **load full governance rules and execute all steps**
+3. `mcp: governance_dictionary` — load compact enum/constraint index
+4. `mcp: governance_get("agents/bootstrap-template.md")` — load session init protocol
+5. `mcp: tracker_list(project_id="enceladus", record_type="task", status="open")` — open tasks
+6. `mcp: tracker_pending_updates(project_id="enceladus")` — pending updates
 
 All operating rules, tool reference, and task policies are in `governance://agents.md`.
 Do not proceed with any work until steps 1-4 are complete.
 
-## Pre-Task Requirement (every task pickup)
+## Pre-Code Protocol (every task pickup)
 
 Before modifying any files for a task:
 1. Sync main: `git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/main`
 2. Create task-scoped worktree: `bash tools/agent-worktree-init.sh <TRACKER-ID>-<slug>`
-   - e.g. `agent-worktree-init.sh enc-tsk-777-install-profile-fix`
    - Creates branch `agent/<TRACKER-ID>-<slug>` automatically
-3. Work only inside the printed worktree path — never modify files in the main checkout.
+3. Query component registry: `mcp: get_code_map(project_id, domain?)` for file paths
+4. Check out task: `mcp: checkout_task(record_id, active_agent_session_id, governance_hash)`
+5. Work only inside the printed worktree path — never modify files in the main checkout.
+
 Always assume other agent sessions are running concurrently on this machine.
 See `governance://agents.md` section 3.10 for full multi-agent safety rules.
 AGENTS_EOF

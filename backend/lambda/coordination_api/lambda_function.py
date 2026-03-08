@@ -6964,6 +6964,8 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
         item["description"] = str(body["description"]).strip()
     if body.get("github_repo"):
         item["github_repo"] = str(body["github_repo"]).strip()
+    if body.get("source_paths") and isinstance(body["source_paths"], dict):
+        item["source_paths"] = body["source_paths"]
 
     ddb = _get_ddb()
     try:
@@ -7012,6 +7014,8 @@ def _handle_components_update(
         "component_name", "project_id", "category", "transition_type",
         "description", "github_repo", "status", "assistant_reason",
     }
+    # source_paths is a nested map — serialized via TypeSerializer, not as plain string
+    updatable_map_fields = {"source_paths"}
     update_parts = []
     attr_names: Dict[str, str] = {}
     attr_vals: Dict[str, Any] = {}
@@ -7020,6 +7024,19 @@ def _handle_components_update(
     update_parts.append("#ua = :ua")
     attr_names["#ua"] = "updated_at"
     attr_vals[":ua"] = {"S": now}
+
+    ss = TypeSerializer()
+    for field in updatable_map_fields:
+        if field not in body:
+            continue
+        val = body[field]
+        if not isinstance(val, dict):
+            return _error(400, f"{field} must be a JSON object")
+        safe_name = f"#f_{field}"
+        safe_val = f":v_{field}"
+        attr_names[safe_name] = field
+        attr_vals[safe_val] = ss.serialize(val)
+        update_parts.append(f"{safe_name} = {safe_val}")
 
     for field in updatable_fields:
         if field not in body:

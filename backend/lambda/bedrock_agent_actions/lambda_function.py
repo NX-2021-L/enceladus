@@ -20,6 +20,8 @@ Supported actions (mapped via apiPath + httpMethod):
     GET  /documents/{documentId}      - Fetch document content
     FUNCTION check_document_policy    - Validate proposed document writes
     GET  /deployment/{projectId}      - Get deployment state
+    GET  /components                  - Get component registry info (ENC-TSK-822)
+    GET  /codemap/{projectId}         - Get code navigation map (ENC-TSK-822)
 
 Environment variables:
     TRACKER_TABLE       default: devops-project-tracker
@@ -779,6 +781,94 @@ def _handle_deployment_state(parameters: List[Dict]) -> Dict[str, Any]:
     return _deser_item(item)
 
 
+def _handle_component_info(parameters: List[Dict]) -> Dict[str, Any]:
+    """Get component registry entry with source_paths (ENC-TSK-822)."""
+    component_id = _get_param(parameters, "componentId")
+    project_id = _get_param(parameters, "projectId")
+    if not component_id and not project_id:
+        return {"error": "componentId or projectId parameter required"}
+
+    ddb = _get_ddb()
+    components_table = os.environ.get("COMPONENTS_TABLE", "component-registry")
+
+    if component_id:
+        resp = ddb.get_item(
+            TableName=components_table,
+            Key={"component_id": _ser_s(component_id)},
+        )
+        item = resp.get("Item")
+        if not item:
+            return {"error": f"Component not found: {component_id}"}
+        return _deser_item(item)
+
+    # List by project_id via GSI
+    resp = ddb.query(
+        TableName=components_table,
+        IndexName="project-name-index",
+        KeyConditionExpression="project_id = :pid",
+        ExpressionAttributeValues={":pid": _ser_s(project_id)},
+    )
+    items = [_deser_item(i) for i in resp.get("Items", [])]
+    return {"project_id": project_id, "components": items, "count": len(items)}
+
+
+def _handle_code_map(parameters: List[Dict]) -> Dict[str, Any]:
+    """Get code navigation map from component registry (ENC-TSK-822)."""
+    project_id = _get_param(parameters, "projectId")
+    domain = _get_param(parameters, "domain")
+    if not project_id:
+        return {"error": "projectId parameter required"}
+
+    ddb = _get_ddb()
+    components_table = os.environ.get("COMPONENTS_TABLE", "component-registry")
+
+    resp = ddb.query(
+        TableName=components_table,
+        IndexName="project-name-index",
+        KeyConditionExpression="project_id = :pid",
+        FilterExpression="#st = :active",
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={
+            ":pid": _ser_s(project_id),
+            ":active": _ser_s("active"),
+        },
+    )
+    components = [_deser_item(i) for i in resp.get("Items", [])]
+    result: Dict[str, Any] = {"project_id": project_id, "components": []}
+
+    for comp in components:
+        source_paths = comp.get("source_paths", {})
+        if not source_paths:
+            result["components"].append({
+                "component_id": comp.get("component_id"),
+                "category": comp.get("category"),
+            })
+            continue
+
+        if domain:
+            domains = source_paths.get("domains", {})
+            if domain in domains:
+                result["components"].append({
+                    "component_id": comp.get("component_id"),
+                    "domain": domain,
+                    "files": domains[domain],
+                    "primary": source_paths.get("primary"),
+                })
+            continue
+
+        entry: Dict[str, Any] = {
+            "component_id": comp.get("component_id"),
+            "category": comp.get("category"),
+            "primary": source_paths.get("primary"),
+            "directory": source_paths.get("directory"),
+        }
+        if source_paths.get("domains"):
+            entry["domains"] = list(source_paths["domains"].keys())
+        result["components"].append(entry)
+
+    return result
+
+
 def _dispatch_function_call(function_name: str, parameters: List[Dict]) -> Dict[str, Any]:
     """Dispatch function-details invocation to the corresponding internal handler."""
     if function_name == "tracker_get":
@@ -821,6 +911,10 @@ def _dispatch_function_call(function_name: str, parameters: List[Dict]) -> Dict[
         return _handle_check_document_policy(parameters)
     if function_name == "deployment_state_get":
         return _handle_deployment_state(parameters)
+    if function_name == "component_info":
+        return _handle_component_info(parameters)
+    if function_name == "code_map":
+        return _handle_code_map(parameters)
     return {"error": f"Unknown function: {function_name}"}
 
 
@@ -904,6 +998,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             result = _handle_document_get(parameters)
         elif api_path.startswith("/deployment/"):
             result = _handle_deployment_state(parameters)
+        elif api_path.startswith("/components"):
+            result = _handle_component_info(parameters)
+        elif api_path.startswith("/codemap/"):
+            result = _handle_code_map(parameters)
         else:
             return _error_response(action_group, api_path, http_method, 404, f"Unknown path: {api_path}")
 
