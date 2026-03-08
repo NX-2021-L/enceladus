@@ -387,6 +387,178 @@ OAUTH_CLIENT_SECRET = os.environ.get("ENCELADUS_OAUTH_CLIENT_SECRET", "")
 logger = logging.getLogger(SERVER_NAME)
 
 # ---------------------------------------------------------------------------
+# Dynamic MCP toolset context (ENC-TSK-826)
+# ---------------------------------------------------------------------------
+
+DYNAMIC_TOOLSETS_ENABLED = (
+    os.environ.get("ENCELADUS_DYNAMIC_TOOLSETS_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+_SESSION_TOOLSET_CONTEXTS: Dict[str, Dict[str, Any]] = {}
+_TOOLSET_BASE_NAMESPACES = {"projects", "tracker", "checkout", "documents", "reference", "coordination", "governance"}
+_TOOLSET_CATEGORY_NAMESPACES = {
+    "implementation": _TOOLSET_BASE_NAMESPACES | {"deploy", "changelog", "github"},
+    "maintenance": _TOOLSET_BASE_NAMESPACES | {"deploy", "changelog", "github"},
+    "validation": _TOOLSET_BASE_NAMESPACES | {"deploy", "changelog"},
+    "investigation": _TOOLSET_BASE_NAMESPACES,
+    "documentation": _TOOLSET_BASE_NAMESPACES,
+}
+
+
+def _tool_namespace(tool_name: str) -> str:
+    name = str(tool_name or "").strip()
+    if name.startswith("projects_"):
+        return "projects"
+    if name.startswith("tracker_"):
+        return "tracker"
+    if name in {"checkout_task", "release_task", "advance_task_status", "append_worklog", "validate_commit_complete"}:
+        return "checkout"
+    if name.startswith("documents_") or name == "check_document_policy":
+        return "documents"
+    if name in {"reference_search", "get_code_map"}:
+        return "reference"
+    if name.startswith("deploy_"):
+        return "deploy"
+    if name.startswith("changelog_"):
+        return "changelog"
+    if name.startswith("coordination_") or name.startswith("dispatch_plan_"):
+        return "coordination"
+    if name.startswith("governance_") or name == "connection_health":
+        return "governance"
+    if name.startswith("github_"):
+        return "github"
+    return "misc"
+
+
+def _toolset_namespaces_for_category(category: str) -> set[str]:
+    normalized = str(category or "").strip().lower()
+    if normalized in _TOOLSET_CATEGORY_NAMESPACES:
+        return set(_TOOLSET_CATEGORY_NAMESPACES[normalized])
+    # Unknown categories default to full visibility to avoid accidental lockout.
+    return {
+        "projects",
+        "tracker",
+        "checkout",
+        "documents",
+        "reference",
+        "deploy",
+        "changelog",
+        "coordination",
+        "governance",
+        "github",
+        "misc",
+    }
+
+
+def _current_request_session() -> Any:
+    try:
+        return app.request_context.session
+    except LookupError:
+        return None
+
+
+def _current_session_toolset_context(*, create: bool = False) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    session = _current_request_session()
+    if session is None:
+        return None, None
+    key = str(id(session))
+    if create:
+        return key, _SESSION_TOOLSET_CONTEXTS.setdefault(key, {})
+    return key, _SESSION_TOOLSET_CONTEXTS.get(key)
+
+
+async def _notify_tools_list_changed_if_supported() -> bool:
+    # Lambda Function URL transport is stateless today, so contextful toolset
+    # notifications cannot be relied on across requests.
+    if MCP_TRANSPORT == "streamable_http":
+        return False
+
+    session = _current_request_session()
+    if session is None or not hasattr(session, "send_tool_list_changed"):
+        return False
+    try:
+        await session.send_tool_list_changed()
+        return True
+    except Exception as exc:
+        logger.info("Dynamic toolset fallback to full tool list (no tools/list_changed support): %s", exc)
+        return False
+
+
+def _filter_tool_list_for_session_context(tools: List[Tool]) -> List[Tool]:
+    if not DYNAMIC_TOOLSETS_ENABLED:
+        return tools
+    _session_key, ctx = _current_session_toolset_context(create=False)
+    if not ctx or not ctx.get("tool_filter_active"):
+        return tools
+
+    allowed_namespaces = set(ctx.get("allowed_namespaces") or [])
+    if not allowed_namespaces:
+        return tools
+
+    filtered = [tool for tool in tools if _tool_namespace(tool.name) in allowed_namespaces]
+    # Safety valve: never return an empty list due to a context mismatch.
+    return filtered or tools
+
+
+async def _sync_dynamic_toolset_on_checkout(record_id: str, checkout_response: Dict[str, Any]) -> None:
+    if not DYNAMIC_TOOLSETS_ENABLED:
+        return
+    _session_key, ctx = _current_session_toolset_context(create=True)
+    if ctx is None:
+        return
+
+    task_payload = checkout_response.get("task") if isinstance(checkout_response, dict) else {}
+    if not isinstance(task_payload, dict):
+        task_payload = {}
+    category = str(task_payload.get("category") or "").strip().lower()
+    project_id = str(task_payload.get("project_id") or "").strip()
+    allowed_namespaces = sorted(_toolset_namespaces_for_category(category))
+
+    changed = (
+        str(ctx.get("active_task_id") or "") != str(record_id or "")
+        or str(ctx.get("active_project_id") or "") != project_id
+        or str(ctx.get("active_category") or "") != category
+        or list(ctx.get("allowed_namespaces") or []) != allowed_namespaces
+    )
+
+    ctx.update(
+        {
+            "active_task_id": str(record_id or ""),
+            "active_project_id": project_id,
+            "active_category": category,
+            "allowed_namespaces": allowed_namespaces,
+        }
+    )
+
+    if not changed and ctx.get("tool_filter_active"):
+        return
+
+    notified = await _notify_tools_list_changed_if_supported()
+    if notified:
+        ctx["supports_list_changed"] = True
+        ctx["tool_filter_active"] = True
+    else:
+        # Fallback mode for clients that do not support notifications.
+        ctx["supports_list_changed"] = False
+        ctx["tool_filter_active"] = False
+
+
+async def _sync_dynamic_toolset_on_task_release(record_id: str) -> None:
+    if not DYNAMIC_TOOLSETS_ENABLED:
+        return
+    _session_key, ctx = _current_session_toolset_context(create=False)
+    if not ctx:
+        return
+    active_task_id = str(ctx.get("active_task_id") or "")
+    if active_task_id and active_task_id != str(record_id or ""):
+        return
+
+    had_filter = bool(ctx.get("tool_filter_active"))
+    ctx.clear()
+    if had_filter:
+        await _notify_tools_list_changed_if_supported()
+
+# ---------------------------------------------------------------------------
 # DynamoDB helpers
 # ---------------------------------------------------------------------------
 
@@ -2667,7 +2839,7 @@ async def read_resource(uri: str) -> str:
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
-    return [
+    tools = [
         # --- Project Lifecycle Management (6.4) ---
         Tool(
             name="projects_list",
@@ -4084,6 +4256,7 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ]
+    return _filter_tool_list_for_session_context(tools)
 
 
 # -------------------------------------------------------------------
@@ -5613,6 +5786,8 @@ async def _checkout_task(args: dict) -> list[TextContent]:
         payload["coordination_request_id"] = args["coordination_request_id"]
 
     resp = _checkout_api_request("POST", f"/{project_id}/{record_type}/{rid}/checkout", payload=payload)
+    if isinstance(resp, dict) and resp.get("success"):
+        await _sync_dynamic_toolset_on_checkout(record_id, resp)
     return _result_text(resp)
 
 
@@ -5633,6 +5808,8 @@ async def _release_task(args: dict) -> list[TextContent]:
         payload["provider"] = args["provider"]
 
     resp = _checkout_api_request("DELETE", f"/{project_id}/{record_type}/{rid}/checkout", payload=payload)
+    if isinstance(resp, dict) and resp.get("success"):
+        await _sync_dynamic_toolset_on_task_release(record_id)
     return _result_text(resp)
 
 
@@ -5668,6 +5845,12 @@ async def _advance_task_status(args: dict) -> list[TextContent]:
         payload["live_validation_evidence"] = args["live_validation_evidence"]
 
     resp = _checkout_api_request("POST", f"/{project_id}/{record_type}/{rid}/advance", payload=payload)
+    if (
+        isinstance(resp, dict)
+        and resp.get("success")
+        and str(args.get("target_status") or "").strip().lower() == "closed"
+    ):
+        await _sync_dynamic_toolset_on_task_release(record_id)
     return _result_text(resp)
 
 
