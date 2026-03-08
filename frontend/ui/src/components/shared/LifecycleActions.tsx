@@ -50,9 +50,11 @@ export function LifecycleActions({ recordType, currentStatus, projectId, recordI
     // For "Submit + Close", jump directly to closed. Otherwise use modal's natural target.
     const targetStatus = closeImmediately ? 'closed' : modal.targetStatus
 
-    // Step 1: Submit the update note as a worklog entry
+    // Step 1: Submit the note. "Submit + Close" posts as worklog (immediate history);
+    // standard submit stores as pending update for agent processing.
+    const noteAction = closeImmediately ? 'worklog' : 'note'
     mutate(
-      { projectId, recordType, recordId, action: 'note', note },
+      { projectId, recordType, recordId, action: noteAction, note },
       {
         onSuccess: () => {
           // Step 2: Change status.
