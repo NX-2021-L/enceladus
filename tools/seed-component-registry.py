@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ENC-FTR-041: Seed the component registry with known Enceladus + MOD components.
+ENC-FTR-041 / ENC-FTR-042: Seed the component registry for all managed projects.
 
 Usage:
     python3 tools/seed-component-registry.py [--dry-run] [--base-url URL] [--api-key KEY]
@@ -30,7 +30,7 @@ transition_type as the seed entry it is skipped. If the type differs, a warning 
 and the record is left unchanged.
 
 Components seeded:
-    Enceladus project:
+    Enceladus project (ENC-FTR-041):
         comp-checkout-service      enceladus  lambda          github_pr_deploy
         comp-coordination-api      enceladus  lambda          github_pr_deploy
         comp-tracker-mutation      enceladus  lambda          github_pr_deploy
@@ -47,6 +47,27 @@ Components seeded:
         comp-mod-api               mod  lambda          github_pr_deploy
         comp-mod-infra             mod  infrastructure  github_pr_deploy
         comp-mod-keycloak          mod  external        no_code                  (needs assistant-key)
+
+    DevOps project (ENC-FTR-042):
+        comp-devops-governance     devops  workflow  no_code                     (needs assistant-key)
+
+    jreesewebops project (ENC-FTR-042):
+        comp-jwo-web-infra         jreesewebops  infrastructure  no_code         (needs assistant-key)
+
+    jreeseGPT project (ENC-FTR-042):
+        comp-jgp-platform          jreeseGPT  external  no_code                  (needs assistant-key)
+
+    jobapps project (ENC-FTR-042):
+        comp-jap-jds-platform      jobapps  external  no_code                    (needs assistant-key)
+
+    intelligent-scraper-generator project (ENC-FTR-042):
+        comp-isg-toolkit           intelligent-scraper-generator  library  no_code  (needs assistant-key)
+
+    property160c1 project (ENC-FTR-042):
+        comp-prp-planning          property160c1  workflow  no_code              (needs assistant-key)
+
+    agentharmony project (ENC-FTR-042):
+        comp-agh-governance        agentharmony  workflow  no_code               (needs assistant-key)
 """
 
 from __future__ import annotations
@@ -249,7 +270,7 @@ KNOWN_COMPONENTS = [
         "source_paths": {
             "primary": "repo/11ty/.eleventy.js",
             "directory": "repo/11ty/",
-            "related": ["workspace/11ty-dev/"],
+            "related": ["workspace/11ty-dev/", "repo/11ty/js/", "repo/11ty/_data/"],
         },
     },
     # ── MOD (vagamod.io) ─────────────────────────────────────────────────────
@@ -291,6 +312,83 @@ KNOWN_COMPONENTS = [
         "transition_type": "no_code",
         "description": "MOD Keycloak identity provider on AWS Lightsail (auth.vagamod.io) — admin-managed via Lightsail console and SSH. No GitHub Actions pipeline.",
         "github_repo": "NX-2021-L/mod",
+        "status": "active",
+    },
+    # ── DevOps (ENC-FTR-042) ─────────────────────────────────────────────────
+    {
+        "component_id": "comp-devops-governance",
+        "component_name": "DevOps Governance & Deployment Config",
+        "project_id": "devops",
+        "category": "workflow",
+        "transition_type": "no_code",
+        "description": "DevOps governance policies (agents.md, data dictionary), deployment configs, and agent SOPs in S3. Updated via MCP governance_update.",
+        "status": "active",
+        "source_paths": {
+            "primary": "governance://agents.md",
+            "related": [
+                "tools/seed-component-registry.py",
+                "backend/lambda/coordination_api/governance_data_dictionary.json",
+            ],
+        },
+    },
+    # ── jreesewebops (ENC-FTR-042) ───────────────────────────────────────────
+    {
+        "component_id": "comp-jwo-web-infra",
+        "component_name": "Web Infrastructure (CloudFront/S3/Cloudflare/Lightsail)",
+        "project_id": "jreesewebops",
+        "category": "infrastructure",
+        "transition_type": "no_code",
+        "description": "Unified web infrastructure for jreese.net, jree.se, go.thepup.io — CloudFront distributions, S3 origins, Cloudflare Workers/DNS, Lightsail instances. Admin-managed via consoles.",
+        "status": "active",
+    },
+    # ── jreeseGPT (ENC-FTR-042) ──────────────────────────────────────────────
+    {
+        "component_id": "comp-jgp-platform",
+        "component_name": "jreeseGPT AI Platform",
+        "project_id": "jreeseGPT",
+        "category": "external",
+        "transition_type": "no_code",
+        "description": "AI recruiter assistant — corpus ingestion, embeddings, Bedrock/Lambda APIs, scheduling workflows. Development stage.",
+        "status": "active",
+    },
+    # ── jobapps (ENC-FTR-042) ────────────────────────────────────────────────
+    {
+        "component_id": "comp-jap-jds-platform",
+        "component_name": "Job Discovery System (JDS)",
+        "project_id": "jobapps",
+        "category": "external",
+        "transition_type": "no_code",
+        "description": "JDS scraper runners, configuration playbooks, ChromeDriver hardening, and analytics. Development stage.",
+        "status": "active",
+    },
+    # ── intelligent-scraper-generator (ENC-FTR-042) ──────────────────────────
+    {
+        "component_id": "comp-isg-toolkit",
+        "component_name": "Intelligent Scraper Generator",
+        "project_id": "intelligent-scraper-generator",
+        "category": "library",
+        "transition_type": "no_code",
+        "description": "LLM-assisted toolkit for analyzing employer career sites and generating scraper/playbook scaffolding. Child of jobapps JDS pipeline.",
+        "status": "active",
+    },
+    # ── property160c1 (ENC-FTR-042) ──────────────────────────────────────────
+    {
+        "component_id": "comp-prp-planning",
+        "component_name": "Property 160C1 Planning",
+        "project_id": "property160c1",
+        "category": "workflow",
+        "transition_type": "no_code",
+        "description": "Property 160C1 project planning and requirements artifacts. Planning stage.",
+        "status": "active",
+    },
+    # ── agentharmony (ENC-FTR-042) ───────────────────────────────────────────
+    {
+        "component_id": "comp-agh-governance",
+        "component_name": "Agent Harmony Governance & Templates",
+        "project_id": "agentharmony",
+        "category": "workflow",
+        "transition_type": "no_code",
+        "description": "Agent documentation standards, templates (bootstrap-session.sh, codex-auto.sh), and operational tooling inherited by all downstream projects.",
         "status": "active",
     },
 ]
