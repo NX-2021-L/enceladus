@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useRecordMutation } from '../../hooks/useRecordMutation'
 import { isMutationRetryExhaustedError } from '../../api/mutations'
 import { TASK_STATUSES, ISSUE_STATUSES, FEATURE_STATUSES, STATUS_LABELS } from '../../lib/constants'
@@ -121,8 +122,8 @@ export function LifecycleActions({ recordType, currentStatus, projectId, recordI
         </button>
       )}
 
-      {/* Stage transition modal */}
-      {modal && (
+      {/* Stage transition modal — portaled to body to escape main's z-0 stacking context (ENC-ISS-096) */}
+      {modal && createPortal(
         <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/60">
           <div className="bg-slate-800 rounded-t-2xl p-5 space-y-3 shadow-2xl max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between">
@@ -185,7 +186,8 @@ export function LifecycleActions({ recordType, currentStatus, projectId, recordI
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   )
