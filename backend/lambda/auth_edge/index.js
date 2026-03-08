@@ -111,8 +111,14 @@ function isXhrRequest(headers) {
   const purpose = headers['purpose'] && headers['purpose'][0] && headers['purpose'][0].value || '';
   const secFetch = headers['sec-fetch-dest'] && headers['sec-fetch-dest'][0] && headers['sec-fetch-dest'][0].value || '';
 
-  // sec-fetch-dest=empty is set by fetch() API calls (not navigations)
-  if (secFetch === 'empty') return true;
+  // sec-fetch-dest=empty is set by fetch() API calls (not navigations).
+  // ENC-ISS-093: PWA / service-worker navigations may send sec-fetch-dest=empty
+  // without sec-fetch-mode=navigate on some platforms. If Accept includes
+  // text/html it is a browser navigation, not an API fetch() call.
+  if (secFetch === 'empty') {
+    if (accept.includes('text/html')) return false;
+    return true;
+  }
   // Explicit XHR header
   if (xrw.toLowerCase() === 'xmlhttprequest') return true;
   // prefetch/preload hint

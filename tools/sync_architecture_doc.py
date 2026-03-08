@@ -25,7 +25,7 @@ import sys
 import urllib.request
 import urllib.error
 
-API_BASE = os.environ.get("API_BASE_URL", "https://jreese.net/api/v1")
+API_BASE = os.environ.get("API_BASE_URL", "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1")
 DOC_ID = os.environ.get("ARCHITECTURE_DOC_ID", "DOC-BC7A97216DF8")
 INTERNAL_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
