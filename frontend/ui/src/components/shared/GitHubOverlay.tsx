@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useRecordMutation } from '../../hooks/useRecordMutation'
 import { createGitHubIssue } from '../../api/github'
 import { isMutationRetryExhaustedError } from '../../api/mutations'
@@ -111,7 +112,7 @@ export function GitHubOverlay({
 
   const busy = isMutating || isCreating
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/60">
       <div className="bg-slate-800 rounded-t-2xl p-5 space-y-3 shadow-2xl">
         {/* Header */}
@@ -234,7 +235,8 @@ export function GitHubOverlay({
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
