@@ -185,8 +185,44 @@ def _response(status: int, body: Any, extra_headers: Optional[dict] = None) -> d
     }
 
 
-def _error(status: int, message: str) -> dict:
-    return _response(status, {"error": message})
+def _error(
+    status: int,
+    message: str,
+    *,
+    code: Optional[str] = None,
+    retryable: Optional[bool] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> dict:
+    details = dict(details or {})
+    if not code:
+        if status == 400:
+            code = "INVALID_INPUT"
+        elif status == 401:
+            code = "PERMISSION_DENIED"
+        elif status == 403:
+            code = "PERMISSION_DENIED"
+        elif status == 404:
+            code = "NOT_FOUND"
+        elif status == 409:
+            code = "CONFLICT"
+        elif status >= 500:
+            code = "INTERNAL_ERROR"
+        else:
+            code = "INTERNAL_ERROR"
+    if retryable is None:
+        retryable = status >= 500
+    body: Dict[str, Any] = {
+        "success": False,
+        "error": message,
+        "error_envelope": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "details": details,
+        },
+    }
+    body.update(details)
+    return _response(status, body)
 
 
 # ---------------------------------------------------------------------------
@@ -566,14 +602,29 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
     """POST .../checkout — Atomic checkout + advance to in-progress."""
     provider = (body.get("active_agent_session_id") or "").strip()
     if not provider:
-        return _error(400, "active_agent_session_id is required in request body")
+        return _validation_error(
+            400,
+            "active_agent_session_id is required in request body",
+            task_id=task_id,
+            target_status="in-progress",
+            required_fields=["active_agent_session_id"],
+            example_fix=_example_checkout_fix(task_id),
+        )
 
     coordination_request_id = body.get("coordination_request_id", "")
 
     # Step 1: Check out the task (sets active_agent_session=True)
     status, result = _checkout_task(project_id, task_id, provider)
     if status not in (200, 201):
-        return _error(status, result.get("error", f"Checkout failed (HTTP {status})"))
+        return _validation_error(
+            status,
+            result.get("error", f"Checkout failed (HTTP {status})"),
+            task_id=task_id,
+            target_status="in-progress",
+            required_fields=["active_agent_session_id"],
+            extra_details={"tracker_response": result},
+            example_fix=_example_checkout_fix(task_id),
+        )
 
     # Step 2: Advance status to in-progress
     status2, result2 = _set_task_field(
@@ -648,6 +699,344 @@ STRICTNESS_RANK: dict = {
     "no_code": 3,           # least strict: no GitHub, no code
 }
 
+_TRANSITION_TYPE_SUMMARY: Dict[str, str] = {
+    "github_pr_deploy": "Full PR workflow with GitHub Actions deploy evidence.",
+    "lambda_deploy": "PR workflow with Lambda update evidence at deploy-success.",
+    "web_deploy": "PR workflow with HTTP verification evidence at deploy-success.",
+    "code_only": "PR workflow with no deploy stages; close with code_on_main_evidence.",
+    "no_code": "No GitHub lifecycle; close with a non-empty no_code_evidence note.",
+}
+
+_COMMIT_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "commit_sha": {
+            "type": "string",
+            "format": "40-char lowercase or uppercase hex SHA",
+            "description": "Git commit SHA to validate against the configured GitHub repo.",
+        },
+    },
+    "example": {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"},
+}
+
+_MERGED_MAIN_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "pr_id": {
+            "type": "integer",
+            "description": "GitHub pull request number already merged to main.",
+        },
+        "merged_at": {
+            "type": "string",
+            "format": "ISO 8601 datetime with T separator",
+            "description": "Exact merged_at timestamp returned by the GitHub API.",
+        },
+    },
+    "example": {
+        "pr_id": 123,
+        "merged_at": "2026-03-08T22:45:00Z",
+    },
+}
+
+_DEPLOY_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "source": "GET /repos/{owner}/{repo}/actions/jobs/{job_id}",
+    "required_fields": {
+        "id": {
+            "type": "integer",
+            "description": "GitHub Actions job ID.",
+        },
+        "name": {
+            "type": "string",
+            "description": "GitHub Actions job name from the Jobs API response.",
+        },
+        "run_id": {
+            "type": "integer",
+            "description": "Workflow run ID that owns the job.",
+        },
+        "head_sha": {
+            "type": "string",
+            "format": "40-char lowercase hex SHA",
+            "description": "Commit SHA the deploy job executed against.",
+        },
+        "status": {
+            "type": "enum",
+            "allowed_values": ["completed"],
+            "description": "Job status must be completed before it can be accepted as deploy evidence.",
+        },
+        "conclusion": {
+            "type": "enum",
+            "allowed_values": ["success"],
+            "description": "Only successful GitHub Actions jobs qualify as deploy evidence.",
+        },
+        "started_at": {
+            "type": "string",
+            "format": "ISO 8601 datetime with T separator",
+            "description": "UTC job start timestamp from the Jobs API response.",
+        },
+        "completed_at": {
+            "type": "string",
+            "format": "ISO 8601 datetime with T separator",
+            "description": "UTC job completion timestamp from the Jobs API response.",
+        },
+    },
+    "example": {
+        "id": 12345678,
+        "name": "Deploy checkout service",
+        "run_id": 22549608910,
+        "head_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-03-01T18:20:00Z",
+        "completed_at": "2026-03-01T18:21:57Z",
+    },
+}
+
+_WEB_DEPLOY_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "url": {
+            "type": "string",
+            "format": "HTTPS URL",
+            "description": "Public URL that was verified after the deploy completed.",
+        },
+        "http_status": {
+            "type": "integer",
+            "allowed_values": [200],
+            "description": "HTTP status from the verification request.",
+        },
+        "checked_at": {
+            "type": "string",
+            "format": "ISO 8601 datetime with T separator",
+            "description": "UTC timestamp when the verification request was performed.",
+        },
+    },
+    "optional_fields": {
+        "cloudfront_invalidation_id": {
+            "type": "string",
+            "description": "Optional CloudFront invalidation ID for the release.",
+        },
+        "response_time_ms": {
+            "type": "integer",
+            "description": "Optional latency measurement for the verification request.",
+        },
+    },
+    "example": {
+        "url": "https://jreese.net/enceladus",
+        "http_status": 200,
+        "checked_at": "2026-03-08T22:45:00Z",
+    },
+}
+
+_LAMBDA_DEPLOY_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "function_name": {
+            "type": "string",
+            "description": "Lambda function name that was updated.",
+        },
+        "version": {
+            "type": "string",
+            "description": "Published or live version identifier after the deploy.",
+        },
+        "updated_at": {
+            "type": "string",
+            "format": "ISO 8601 datetime with T separator",
+            "description": "UTC timestamp when the Lambda update completed.",
+        },
+        "status": {
+            "type": "enum",
+            "allowed_values": ["Success"],
+            "description": "Deployment status string required by the lambda_deploy gate.",
+        },
+    },
+    "example": {
+        "function_name": "devops-tracker-mutation-api",
+        "version": "42",
+        "updated_at": "2026-03-08T22:45:00Z",
+        "status": "Success",
+    },
+}
+
+_LIVE_VALIDATION_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "live_validation_evidence": {
+            "type": "string",
+            "format": "non-empty string",
+            "description": "Describe how the deployed change was confirmed live, ideally with the SPEC-ID or URL checked.",
+        },
+    },
+    "example": {
+        "live_validation_evidence": "SPEC-20260308T224500 verified via Cognito-authenticated PWA smoke test.",
+    },
+}
+
+_CODE_ON_MAIN_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "commit_sha": {
+            "type": "string",
+            "format": "40-char lowercase or uppercase hex SHA",
+            "description": "Commit that must already be reachable from main.",
+        },
+    },
+    "example": {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"},
+}
+
+_NO_CODE_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "no_code_evidence": {
+            "type": "string",
+            "format": "non-empty string",
+            "description": "Human-readable audit note describing what changed and how it was verified.",
+        },
+    },
+    "example": {
+        "no_code_evidence": "Updated governance metadata and confirmed the new rules are visible to agents.",
+    },
+}
+
+
+def _ordered_transition_types() -> list[str]:
+    return sorted(VALID_TRANSITION_TYPES, key=lambda name: (STRICTNESS_RANK.get(name, 99), name))
+
+
+def _strictness_rank_table() -> list[Dict[str, Any]]:
+    return [
+        {
+            "transition_type": name,
+            "rank": STRICTNESS_RANK[name],
+            "summary": _TRANSITION_TYPE_SUMMARY.get(name, ""),
+        }
+        for name in _ordered_transition_types()
+    ]
+
+
+def _required_evidence_schema(transition_type: str, target_status: str) -> Optional[Dict[str, Any]]:
+    if target_status == "committed":
+        return _COMMIT_EVIDENCE_SCHEMA
+    if target_status == "merged-main":
+        return _MERGED_MAIN_EVIDENCE_SCHEMA
+    if target_status == "deploy-success":
+        if transition_type == "web_deploy":
+            return _WEB_DEPLOY_EVIDENCE_SCHEMA
+        if transition_type == "lambda_deploy":
+            return _LAMBDA_DEPLOY_EVIDENCE_SCHEMA
+        return _DEPLOY_EVIDENCE_SCHEMA
+    if target_status == "closed":
+        if transition_type in ("github_pr_deploy", "web_deploy", "lambda_deploy"):
+            return _LIVE_VALIDATION_EVIDENCE_SCHEMA
+        if transition_type == "code_only":
+            return _CODE_ON_MAIN_EVIDENCE_SCHEMA
+        if transition_type == "no_code":
+            return _NO_CODE_EVIDENCE_SCHEMA
+    return None
+
+
+def _example_checkout_fix(task_id: str) -> list[Dict[str, Any]]:
+    return [
+        {
+            "tool": "tracker_set",
+            "arguments": {
+                "record_id": task_id,
+                "field": "components",
+                "value": [
+                    "comp-checkout-service",
+                    "comp-tracker-mutation",
+                    "comp-coordination-api",
+                ],
+                "governance_hash": "<governance_hash>",
+            },
+        },
+        {
+            "tool": "tracker_set",
+            "arguments": {
+                "record_id": task_id,
+                "field": "transition_type",
+                "value": "github_pr_deploy",
+                "governance_hash": "<governance_hash>",
+            },
+        },
+        {
+            "tool": "checkout_task",
+            "arguments": {
+                "record_id": task_id,
+                "active_agent_session_id": "<agent-session-id>",
+                "governance_hash": "<governance_hash>",
+            },
+        },
+    ]
+
+
+def _example_advance_fix(
+    task_id: str,
+    target_status: str,
+    provider: str,
+    transition_type: str,
+) -> Dict[str, Any]:
+    args: Dict[str, Any] = {
+        "record_id": task_id,
+        "target_status": target_status,
+        "provider": provider or "<provider>",
+        "governance_hash": "<governance_hash>",
+    }
+    schema = _required_evidence_schema(transition_type, target_status)
+    if schema and schema.get("example"):
+        args["transition_evidence"] = schema["example"]
+    return {"tool": "advance_task_status", "arguments": args}
+
+
+def _validation_error(
+    status: int,
+    message: str,
+    *,
+    task_id: str = "",
+    current_status: str = "",
+    target_status: str = "",
+    transition_type: str = "",
+    provider: str = "",
+    required_fields: Optional[list[str]] = None,
+    component_required_transition_type: str = "",
+    extra_details: Optional[Dict[str, Any]] = None,
+    example_fix: Optional[Any] = None,
+) -> dict:
+    details: Dict[str, Any] = {
+        "task_id": task_id or None,
+        "current_status": current_status or None,
+        "target_status": target_status or None,
+        "transition_type": transition_type or None,
+        "allowed_transition_types": _ordered_transition_types(),
+        "strictness_rank": _strictness_rank_table(),
+    }
+    if transition_type:
+        details["valid_next_statuses"] = ALLOWED_TRANSITIONS_BY_TYPE.get(transition_type, [])
+    schema = _required_evidence_schema(transition_type or "github_pr_deploy", target_status)
+    if schema is not None:
+        details["required_evidence_schema"] = schema
+    if required_fields:
+        details["required_fields"] = required_fields
+    if component_required_transition_type:
+        details["component_required_transition_type"] = component_required_transition_type
+    if example_fix is None and task_id and target_status:
+        example_fix = _example_advance_fix(
+            task_id,
+            target_status,
+            provider or "<provider>",
+            transition_type or "github_pr_deploy",
+        )
+    if example_fix is not None:
+        details["example_fix"] = example_fix
+    if extra_details:
+        details.update(extra_details)
+    clean_details = {
+        key: value
+        for key, value in details.items()
+        if value not in (None, "", [], {})
+    }
+    return _error(status, message, details=clean_details)
+
 #: ENC-ISS-106: Numeric rank for lifecycle stages. Used to enforce that parent tasks
 #: cannot advance past a stage until all children have reached that stage.
 #: Higher rank = further along the lifecycle.
@@ -700,6 +1089,65 @@ def _validate_web_deploy_evidence(evidence: dict) -> Tuple[bool, str]:
         datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
     except ValueError as exc:
         return False, f"web_deploy_evidence.checked_at is not a valid ISO 8601 timestamp: {exc}"
+
+    return True, ""
+
+
+def _validate_github_actions_deploy_evidence(evidence: dict) -> Tuple[bool, str]:
+    """Validate GitHub Actions Jobs API deploy evidence for github_pr_deploy tasks."""
+    if not evidence:
+        return False, "transition_evidence.deploy_evidence is required"
+    if not isinstance(evidence, dict):
+        return False, "transition_evidence.deploy_evidence must be a JSON object"
+
+    required_fields = [
+        "id",
+        "name",
+        "run_id",
+        "head_sha",
+        "status",
+        "conclusion",
+        "started_at",
+        "completed_at",
+    ]
+    missing = [field for field in required_fields if not evidence.get(field)]
+    if missing:
+        return False, f"deploy_evidence missing required fields: {missing}"
+
+    head_sha = str(evidence.get("head_sha") or "").strip()
+    if not re.match(r"^[0-9a-f]{40}$", head_sha.lower()):
+        return False, (
+            "deploy_evidence.head_sha must be a 40-char hex SHA, "
+            f"got: '{evidence.get('head_sha')}'"
+        )
+
+    status = str(evidence.get("status") or "").strip().lower()
+    if status != "completed":
+        return False, (
+            "deploy_evidence.status must be 'completed', "
+            f"got: '{evidence.get('status')}'"
+        )
+
+    conclusion = str(evidence.get("conclusion") or "").strip().lower()
+    if conclusion != "success":
+        return False, (
+            "deploy_evidence.conclusion must be 'success', "
+            f"got: '{evidence.get('conclusion')}'"
+        )
+
+    for field_name in ("started_at", "completed_at"):
+        field_value = str(evidence.get(field_name) or "").strip()
+        if "T" not in field_value:
+            return False, (
+                f"deploy_evidence.{field_name} must be ISO 8601 with 'T' separator, "
+                f"got: '{field_value}'"
+            )
+        try:
+            datetime.fromisoformat(field_value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            return False, (
+                f"deploy_evidence.{field_name} is not a valid ISO 8601 timestamp: {exc}"
+            )
 
     return True, ""
 
@@ -837,14 +1285,27 @@ def _validate_subtask_gate(
     detail_lines = [f"  - {cid} ({cstatus})" for cid, cstatus in lagging[:20]]
     if len(lagging) > 20:
         detail_lines.append(f"  ... and {len(lagging) - 20} more")
-    return _error(400, (
-        f"Cannot advance {task_id} to '{target_status}': "
-        f"{len(lagging)} child task(s) have not reached this stage "
-        f"(ENC-ISS-106):\n"
-        + "\n".join(detail_lines)
-        + f"\nAdvance all child tasks to '{target_status}' or beyond "
-        f"before advancing the parent."
-    ))
+    return _validation_error(
+        400,
+        (
+            f"Cannot advance {task_id} to '{target_status}': "
+            f"{len(lagging)} child task(s) have not reached this stage "
+            f"(ENC-ISS-106):\n"
+            + "\n".join(detail_lines)
+            + f"\nAdvance all child tasks to '{target_status}' or beyond "
+            f"before advancing the parent."
+        ),
+        task_id=task_id,
+        current_status=(task.get("status") or "").strip().lower(),
+        target_status=target_status,
+        transition_type=(task.get("transition_type") or "github_pr_deploy").strip().lower(),
+        extra_details={
+            "lagging_subtasks": [
+                {"task_id": cid, "status": cstatus}
+                for cid, cstatus in lagging
+            ],
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1020,7 +1481,21 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     governance_hash = body.get("governance_hash")
 
     if not target_status:
-        return _error(400, "target_status is required")
+        return _validation_error(
+            400,
+            "target_status is required",
+            task_id=task_id,
+            required_fields=["target_status"],
+            example_fix={
+                "tool": "advance_task_status",
+                "arguments": {
+                    "record_id": task_id,
+                    "target_status": "coding-complete",
+                    "provider": provider or "<provider>",
+                    "governance_hash": "<governance_hash>",
+                },
+            },
+        )
 
     # --- Fetch current task to validate checkout state and transition_type ---
     status, task = _get_task(project_id, task_id)
@@ -1030,6 +1505,17 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     current_status = (task.get("status") or "").lower()
     active_session = task.get("active_agent_session", False)
     session_id = task.get("active_agent_session_id", "")
+
+    if target_status != "in-progress" and not provider:
+        return _validation_error(
+            400,
+            "provider is required for advance requests after checkout.",
+            task_id=task_id,
+            current_status=current_status,
+            target_status=target_status,
+            transition_type=(task.get("transition_type") or "github_pr_deploy").strip().lower(),
+            required_fields=["provider"],
+        )
 
     # --- ENC-ISS-092: Resolve transition_type and validate allowed statuses ---
     transition_type = (task.get("transition_type") or "github_pr_deploy").strip().lower()
@@ -1045,10 +1531,18 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         # in-progress is handled by checkout below; all other statuses are arc-gated
         allowed = ALLOWED_TRANSITIONS_BY_TYPE.get(transition_type, [])
         if target_status not in allowed:
-            return _error(400, (
-                f"Status '{target_status}' is not allowed for transition_type "
-                f"'{transition_type}'. Allowed: {allowed}"
-            ))
+            return _validation_error(
+                400,
+                (
+                    f"Status '{target_status}' is not allowed for transition_type "
+                    f"'{transition_type}'. Allowed: {allowed}"
+                ),
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+            )
 
     uses_github_pr = transition_type in _GITHUB_PR_TYPES
 
@@ -1059,23 +1553,60 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     components = task.get("components") or []
     is_user_initiated = bool(body.get("user_initiated", False))
     if not components and not is_user_initiated:
-        return _error(400, (
-            "task.components is required for agent-initiated advances (ENC-FTR-041). "
-            "Set task.components via tracker_set before checkout, or use the PWA UI "
-            "to advance this task (Cognito user_initiated=true path bypasses this check)."
-        ))
+        return _validation_error(
+            400,
+            (
+                "task.components is required for agent-initiated advances (ENC-FTR-041). "
+                "Set task.components via tracker_set before checkout, or use the PWA UI "
+                "to advance this task (Cognito user_initiated=true path bypasses this check)."
+            ),
+            task_id=task_id,
+            current_status=current_status,
+            target_status=target_status,
+            transition_type=transition_type,
+            provider=provider or session_id,
+            required_fields=["components"],
+            example_fix=_example_checkout_fix(task_id),
+        )
     if components:
         required_type = _get_required_transition_type(components)
         if required_type is not None:
             task_rank = STRICTNESS_RANK.get(transition_type, 99)
             required_rank = STRICTNESS_RANK.get(required_type, 0)
             if task_rank > required_rank:
-                return _error(400, (
-                    f"Task transition_type '{transition_type}' (rank {task_rank}) is less strict "
-                    f"than required '{required_type}' (rank {required_rank}) enforced by the "
-                    f"component registry (ENC-FTR-041). Update task.transition_type to at least "
-                    f"'{required_type}', or fix the component registration."
-                ))
+                return _validation_error(
+                    400,
+                    (
+                        f"Task transition_type '{transition_type}' (rank {task_rank}) is less strict "
+                        f"than required '{required_type}' (rank {required_rank}) enforced by the "
+                        f"component registry (ENC-FTR-041). Update task.transition_type to at least "
+                        f"'{required_type}', or fix the component registration."
+                    ),
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    component_required_transition_type=required_type,
+                    extra_details={"components": components},
+                    example_fix=[
+                        {
+                            "tool": "tracker_set",
+                            "arguments": {
+                                "record_id": task_id,
+                                "field": "transition_type",
+                                "value": required_type,
+                                "governance_hash": "<governance_hash>",
+                            },
+                        },
+                        _example_advance_fix(
+                            task_id,
+                            target_status,
+                            provider or session_id or "<provider>",
+                            required_type,
+                        ),
+                    ],
+                )
 
     # --- ENC-ISS-106: Subtask lifecycle gate ---
     # Parent tasks (those with subtask_ids) cannot advance from coding-complete
@@ -1097,7 +1628,16 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
 
     elif target_status == "coding-complete":
         if not active_session:
-            return _error(409, "Task must be checked out to advance to coding-complete. Use checkout endpoint first.")
+            return _validation_error(
+                409,
+                "Task must be checked out to advance to coding-complete. Use checkout endpoint first.",
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                example_fix=_example_checkout_fix(task_id),
+            )
         if uses_github_pr:
             # Generate + store Commit Approval ID (skipped for no_code arc)
             cai = _generate_token("CAI")
@@ -1111,9 +1651,27 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         # Unreachable for no_code (blocked by ALLOWED_TRANSITIONS_BY_TYPE above)
         commit_sha = (transition_evidence.get("commit_sha") or "").strip()
         if not commit_sha:
-            return _error(400, "transition_evidence.commit_sha is required for committed")
+            return _validation_error(
+                400,
+                "transition_evidence.commit_sha is required for committed",
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                required_fields=["transition_evidence.commit_sha"],
+            )
         if not re.match(r'^[0-9a-f]{40}$', commit_sha.lower()):
-            return _error(400, f"Invalid commit_sha: expected 40-char hex. Got: '{commit_sha}'")
+            return _validation_error(
+                400,
+                f"Invalid commit_sha: expected 40-char hex. Got: '{commit_sha}'",
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                required_fields=["transition_evidence.commit_sha"],
+            )
 
         owner = transition_evidence.get("owner")
         repo = transition_evidence.get("repo")
@@ -1122,21 +1680,48 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
             owner = owner or resolved_owner
             repo = repo or resolved_repo
         if not owner or not repo:
-            return _error(400,
-                f"Cannot resolve GitHub repo for project '{project_id}'. "
-                "Provide owner and repo in transition_evidence, or set the "
-                "project's repo field in the projects table.")
+            return _validation_error(
+                400,
+                (
+                    f"Cannot resolve GitHub repo for project '{project_id}'. "
+                    "Provide owner and repo in transition_evidence, or set the "
+                    "project's repo field in the projects table."
+                ),
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                required_fields=["transition_evidence.owner", "transition_evidence.repo"],
+            )
         valid, reason = _validate_commit(owner, repo, commit_sha)
         if not valid:
-            return _error(400, f"GitHub commit validation failed: {reason}")
+            return _validation_error(
+                400,
+                f"GitHub commit validation failed: {reason}",
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                extra_details={"github_owner": owner, "github_repo": repo},
+            )
 
         # Retrieve the Commit Approval ID from the task record to verify coding-complete was reached
         cai_on_record = task.get("commit_approval_id", "")
         if not cai_on_record:
-            return _error(409, (
-                "commit_approval_id not found on task. "
-                "Advance to coding-complete first to receive a commit-approval-id."
-            ))
+            return _validation_error(
+                409,
+                (
+                    "commit_approval_id not found on task. "
+                    "Advance to coding-complete first to receive a commit-approval-id."
+                ),
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+            )
 
         # Generate + store Commit Complete ID
         cci = _generate_token("CCI")
@@ -1148,20 +1733,46 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
 
     elif target_status == "pr":
         if not active_session:
-            return _error(409, "Task must be checked out to advance to pr.")
+            return _validation_error(
+                409,
+                "Task must be checked out to advance to pr.",
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                example_fix=_example_checkout_fix(task_id),
+            )
         # Verify CCI exists on the task (ensures committed was reached)
         cci_on_record = task.get("commit_complete_id", "")
         if not cci_on_record:
-            return _error(409, (
-                "commit_complete_id not found on task. "
-                "Advance to committed (with commit_sha) first to receive a commit-complete-id."
-            ))
+            return _validation_error(
+                409,
+                (
+                    "commit_complete_id not found on task. "
+                    "Advance to committed (with commit_sha) first to receive a commit-complete-id."
+                ),
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+            )
 
     elif target_status == "merged-main":
         pr_id = body.get("pr_id") or transition_evidence.get("pr_id")
         merged_at = body.get("merged_at") or transition_evidence.get("merged_at")
         if not pr_id or not merged_at:
-            return _error(400, "pr_id and merged_at are required for merged-main")
+            return _validation_error(
+                400,
+                "pr_id and merged_at are required for merged-main",
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                required_fields=["pr_id", "merged_at"],
+            )
         owner = transition_evidence.get("owner")
         repo = transition_evidence.get("repo")
         if not owner or not repo:
@@ -1169,20 +1780,48 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
             owner = owner or resolved_owner
             repo = repo or resolved_repo
         if not owner or not repo:
-            return _error(400,
-                f"Cannot resolve GitHub repo for project '{project_id}'. "
-                "Provide owner and repo in transition_evidence, or set the "
-                "project's repo field in the projects table.")
+            return _validation_error(
+                400,
+                (
+                    f"Cannot resolve GitHub repo for project '{project_id}'. "
+                    "Provide owner and repo in transition_evidence, or set the "
+                    "project's repo field in the projects table."
+                ),
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                required_fields=["transition_evidence.owner", "transition_evidence.repo"],
+            )
         valid, reason = _validate_pr_merged(owner, repo, int(pr_id), str(merged_at))
         if not valid:
-            return _error(400, f"PR merge validation failed: {reason}")
+            return _validation_error(
+                400,
+                f"PR merge validation failed: {reason}",
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                extra_details={"github_owner": owner, "github_repo": repo, "pr_id": pr_id},
+            )
         transition_evidence["pr_id"] = pr_id
         transition_evidence["merged_at"] = merged_at
 
     elif target_status == "deploy-init":
         # Unreachable for code_only and no_code (blocked above)
         if not active_session:
-            return _error(409, "Task must be checked out to advance to deploy-init.")
+            return _validation_error(
+                409,
+                "Task must be checked out to advance to deploy-init.",
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                example_fix=_example_checkout_fix(task_id),
+            )
 
     elif target_status == "deploy-success":
         # Unreachable for code_only and no_code (blocked above)
@@ -1198,11 +1837,19 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 )
                 if failure_count >= 3:
                     _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _error(400, (
-                    "transition_evidence.web_deploy_evidence is required for deploy-success "
-                    "on web_deploy tasks. Expected keys: url (HTTPS), http_status (200), "
-                    "checked_at (ISO 8601)"
-                ))
+                return _validation_error(
+                    400,
+                    (
+                        "transition_evidence.web_deploy_evidence is required for deploy-success "
+                        "on web_deploy tasks."
+                    ),
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.web_deploy_evidence"],
+                )
             valid, reason = _validate_web_deploy_evidence(web_evidence)
             if not valid:
                 failure_count = _increment_failure_count(
@@ -1210,7 +1857,16 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 )
                 if failure_count >= 3:
                     _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _error(400, f"web_deploy_evidence validation failed: {reason}")
+                return _validation_error(
+                    400,
+                    f"web_deploy_evidence validation failed: {reason}",
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.web_deploy_evidence"],
+                )
             transition_evidence["web_deploy_evidence"] = web_evidence
         elif transition_type == "lambda_deploy":
             # lambda_deploy arc: validate Lambda update evidence (ENC-FTR-041)
@@ -1224,11 +1880,19 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 )
                 if failure_count >= 3:
                     _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _error(400, (
-                    "transition_evidence.lambda_deploy_evidence is required for deploy-success "
-                    "on lambda_deploy tasks. Expected keys: function_name (str), version (str), "
-                    "updated_at (ISO 8601), status ('Success')"
-                ))
+                return _validation_error(
+                    400,
+                    (
+                        "transition_evidence.lambda_deploy_evidence is required for deploy-success "
+                        "on lambda_deploy tasks."
+                    ),
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.lambda_deploy_evidence"],
+                )
             valid, reason = _validate_lambda_deploy_evidence(lambda_evidence)
             if not valid:
                 failure_count = _increment_failure_count(
@@ -1236,7 +1900,16 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 )
                 if failure_count >= 3:
                     _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _error(400, f"lambda_deploy_evidence validation failed: {reason}")
+                return _validation_error(
+                    400,
+                    f"lambda_deploy_evidence validation failed: {reason}",
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.lambda_deploy_evidence"],
+                )
             transition_evidence["lambda_deploy_evidence"] = lambda_evidence
         else:
             # github_pr_deploy arc: validate GH Actions Jobs API object
@@ -1247,24 +1920,33 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 )
                 if failure_count >= 3:
                     _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _error(400, "transition_evidence.deploy_evidence (GitHub Actions Jobs API object) is required for deploy-success")
-            # Validate required deploy_evidence fields (ENC-TSK-726 rules)
-            required_fields = ["id", "name", "run_id", "status", "conclusion", "started_at", "completed_at"]
-            missing = [f for f in required_fields if not deploy_evidence.get(f)]
-            if missing:
+                return _validation_error(
+                    400,
+                    "transition_evidence.deploy_evidence (GitHub Actions Jobs API object) is required for deploy-success",
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.deploy_evidence"],
+                )
+            valid, reason = _validate_github_actions_deploy_evidence(deploy_evidence)
+            if not valid:
                 failure_count = _increment_failure_count(
                     project_id, task_id, task, "deploy-success", provider
                 )
                 if failure_count >= 3:
                     _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _error(400, f"deploy_evidence missing required fields: {missing}")
-            if deploy_evidence.get("conclusion") != "success":
-                failure_count = _increment_failure_count(
-                    project_id, task_id, task, "deploy-success", provider
+                return _validation_error(
+                    400,
+                    f"deploy_evidence validation failed: {reason}",
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.deploy_evidence"],
                 )
-                if failure_count >= 3:
-                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _error(400, f"deploy_evidence.conclusion must be 'success', got: {deploy_evidence.get('conclusion')}")
             transition_evidence["deploy_evidence"] = deploy_evidence
         # Clear CAI and CCI tokens from task after successful deploy (all arc types)
         response_extras["tokens_cleared"] = True
@@ -1278,7 +1960,16 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 or ""
             ).strip()
             if not live_validation_evidence:
-                return _error(400, "transition_evidence.live_validation_evidence is required for closed")
+                return _validation_error(
+                    400,
+                    "transition_evidence.live_validation_evidence is required for closed",
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.live_validation_evidence"],
+                )
             transition_evidence["live_validation_evidence"] = live_validation_evidence
 
         elif transition_type == "code_only":
@@ -1288,10 +1979,19 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 or body.get("code_on_main_evidence")
             )
             if not code_evidence or not isinstance(code_evidence, dict):
-                return _error(400, (
-                    "transition_evidence.code_on_main_evidence is required for closed "
-                    "on code_only tasks. Expected keys: commit_sha (40-char hex)"
-                ))
+                return _validation_error(
+                    400,
+                    (
+                        "transition_evidence.code_on_main_evidence is required for closed "
+                        "on code_only tasks."
+                    ),
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.code_on_main_evidence"],
+                )
             owner = transition_evidence.get("owner")
             repo = transition_evidence.get("repo")
             if not owner or not repo:
@@ -1299,13 +1999,32 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 owner = owner or resolved_owner
                 repo = repo or resolved_repo
             if not owner or not repo:
-                return _error(400,
-                    f"Cannot resolve GitHub repo for project '{project_id}'. "
-                    "Provide owner and repo in transition_evidence, or set the "
-                    "project's repo field in the projects table.")
+                return _validation_error(
+                    400,
+                    (
+                        f"Cannot resolve GitHub repo for project '{project_id}'. "
+                        "Provide owner and repo in transition_evidence, or set the "
+                        "project's repo field in the projects table."
+                    ),
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.owner", "transition_evidence.repo"],
+                )
             valid, reason = _validate_code_on_main_evidence(owner, repo, code_evidence)
             if not valid:
-                return _error(400, f"code_on_main_evidence validation failed: {reason}")
+                return _validation_error(
+                    400,
+                    f"code_on_main_evidence validation failed: {reason}",
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.code_on_main_evidence"],
+                )
             transition_evidence["code_on_main_evidence"] = code_evidence
 
         elif transition_type == "no_code":
@@ -1316,10 +2035,19 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 or ""
             ).strip()
             if not no_code_evidence:
-                return _error(400, (
-                    "transition_evidence.no_code_evidence is required for closed "
-                    "on no_code tasks. Provide a non-empty description of what was done."
-                ))
+                return _validation_error(
+                    400,
+                    (
+                        "transition_evidence.no_code_evidence is required for closed "
+                        "on no_code tasks. Provide a non-empty description of what was done."
+                    ),
+                    task_id=task_id,
+                    current_status=current_status,
+                    target_status=target_status,
+                    transition_type=transition_type,
+                    provider=provider or session_id,
+                    required_fields=["transition_evidence.no_code_evidence"],
+                )
             transition_evidence["no_code_evidence"] = no_code_evidence
 
     else:
@@ -1334,7 +2062,16 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         governance_hash=governance_hash,
     )
     if advance_status not in (200, 201):
-        return _error(advance_status, advance_result.get("error", f"Status advance failed (HTTP {advance_status})"))
+        return _validation_error(
+            advance_status,
+            advance_result.get("error", f"Status advance failed (HTTP {advance_status})"),
+            task_id=task_id,
+            current_status=current_status,
+            target_status=target_status,
+            transition_type=transition_type,
+            provider=provider or session_id,
+            extra_details={"tracker_response": advance_result},
+        )
 
     # --- Post-advance: clear tokens on deploy-success ---
     if target_status == "deploy-success":
