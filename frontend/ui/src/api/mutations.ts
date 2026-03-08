@@ -15,7 +15,7 @@ const BASE = import.meta.env.VITE_MUTATION_BASE_URL ?? '/api/v1/tracker'
 
 export interface MutationResult {
   success: boolean
-  action?: 'close' | 'note' | 'reopen' | 'checkout' | 'release'
+  action?: 'close' | 'note' | 'reopen' | 'checkout' | 'release' | 'worklog'
   field?: string
   value?: string
   record_id: string
@@ -229,6 +229,15 @@ export async function reopenRecord(
   recordId: string,
 ): Promise<MutationResult> {
   return mutateWithRetry(projectId, recordType, recordId, { action: 'reopen' })
+}
+
+export async function submitWorklog(
+  projectId: string,
+  recordType: 'task' | 'issue' | 'feature',
+  recordId: string,
+  note: string,
+): Promise<MutationResult> {
+  return mutateWithRetry(projectId, recordType, recordId, { action: 'worklog', note })
 }
 
 export async function setField(

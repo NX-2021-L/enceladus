@@ -2221,11 +2221,11 @@ def _handle_update_field(
 
 def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: Dict, action: str) -> Dict:
     """Handle legacy PWA mutations: close, note, reopen."""
-    if action not in ("close", "note", "reopen"):
-        return _error(400, "Field 'action' must be 'close', 'note', or 'reopen'.")
+    if action not in ("close", "note", "reopen", "worklog"):
+        return _error(400, "Field 'action' must be 'close', 'note', 'reopen', or 'worklog'.")
 
     note_text = body.get("note", "")
-    if action == "note":
+    if action in ("note", "worklog"):
         if not note_text or not str(note_text).strip():
             return _error(400, "Field 'note' is required and must not be empty.")
         note_text = str(note_text).strip()
@@ -2322,6 +2322,34 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
             return _response(200, {
                 "success": True, "action": "reopen", "record_id": record_id,
                 "updated_status": default_status, "updated_at": now,
+            })
+
+        elif action == "worklog":
+            # ENC-TSK-841: Post note directly as a worklog history entry
+            # (used by PWA "Submit + Close") instead of storing as pending update.
+            now = _now_z()
+            history_entry = {"M": {
+                "timestamp": {"S": now}, "status": {"S": "worklog"},
+                "description": {"S": f"[USER] {note_text}"},
+            }}
+            ddb.update_item(
+                TableName=DYNAMODB_TABLE, Key=key,
+                UpdateExpression=(
+                    "SET updated_at = :ts, last_update_note = :note, "
+                    "sync_version = sync_version + :one, "
+                    "#history = list_append(#history, :entry)"
+                ),
+                ConditionExpression="sync_version = :expected",
+                ExpressionAttributeNames={"#history": "history"},
+                ExpressionAttributeValues={
+                    ":note": {"S": note_text}, ":ts": {"S": now},
+                    ":one": {"N": "1"}, ":entry": {"L": [history_entry]},
+                    ":expected": {"N": str(current_version)},
+                },
+            )
+            return _response(200, {
+                "success": True, "action": "worklog", "record_id": record_id,
+                "updated_at": now,
             })
 
         else:  # note
