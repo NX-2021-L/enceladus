@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-08.1",
-  "updated_at": "2026-03-08T05:00:00Z",
+  "version": "2026-03-08.2",
+  "updated_at": "2026-03-08T06:30:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -336,6 +336,21 @@
           "items": { "type": "string" },
           "definition": "IDs of related features. Cross-references for traceability.",
           "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+        },
+        "hypothesis": {
+          "type": "string",
+          "definition": "Root cause hypothesis for the issue. Required at creation if technical_notes not provided (ENC-TSK-805).",
+          "usage_guidance": "Provide a testable hypothesis about what is causing the issue."
+        },
+        "technical_notes": {
+          "type": "string",
+          "definition": "Technical context for investigation. Required at creation if hypothesis not provided (ENC-TSK-805).",
+          "usage_guidance": "Include investigation context — what was tried, what was observed, relevant stack traces or log lines."
+        },
+        "location_hint": {
+          "type": "string",
+          "definition": "Suspected code paths for investigation. Required at issue creation (ENC-TSK-805).",
+          "usage_guidance": "Point to specific files, functions, or domains where the root cause likely lives. Example: 'Check routes.tsx auth wrapper and authState.tsx session check'."
         }
       }
     },
@@ -1608,6 +1623,47 @@
           "type": "string",
           "format": "ISO 8601",
           "definition": "Last update timestamp."
+        },
+        "source_paths": {
+          "type": "object",
+          "definition": "Code navigation map for this component (ENC-TSK-805). Provides direct file paths so agents skip exploratory grep/glob. Structure varies by category.",
+          "fields": {
+            "primary": {
+              "type": "string",
+              "definition": "Main entry-point file for the component.",
+              "example": "backend/lambda/checkout_service/lambda_function.py"
+            },
+            "directory": {
+              "type": "string",
+              "definition": "Root directory containing the component's source code.",
+              "example": "backend/lambda/checkout_service/"
+            },
+            "workflow": {
+              "type": "string",
+              "definition": "GitHub Actions workflow file for deploying this component.",
+              "example": ".github/workflows/lambda-checkout-service-deploy.yml"
+            },
+            "deploy_script": {
+              "type": "string",
+              "definition": "Optional deploy script path.",
+              "example": "backend/lambda/checkout_service/deploy.sh"
+            },
+            "related": {
+              "type": "array",
+              "definition": "Other directories/files related to this component (e.g., shared layers).",
+              "example": ["backend/lambda/shared_layer/"]
+            },
+            "domains": {
+              "type": "object",
+              "definition": "For frontend components: domain-to-files mapping. Each key is a domain name, value is array of relative file paths.",
+              "example": {"auth": ["src/lib/authState.tsx", "src/api/auth.ts"]}
+            },
+            "architecture_sections": {
+              "type": "array",
+              "definition": "ARCHITECTURE.md section numbers relevant to this component.",
+              "example": ["4.1", "5.2"]
+            }
+          }
         }
       }
     },

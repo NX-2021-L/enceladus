@@ -43,6 +43,13 @@ KNOWN_COMPONENTS = [
         "description": "Enceladus checkout service Lambda — sole authorized caller for task status transitions and worklog appends.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
+        "source_paths": {
+            "primary": "backend/lambda/checkout_service/lambda_function.py",
+            "directory": "backend/lambda/checkout_service/",
+            "workflow": ".github/workflows/lambda-checkout-service-deploy.yml",
+            "related": ["backend/lambda/shared_layer/"],
+            "architecture_sections": ["4.17"],
+        },
     },
     {
         "component_id": "comp-coordination-api",
@@ -53,6 +60,17 @@ KNOWN_COMPONENTS = [
         "description": "Enceladus coordination API Lambda — coordination mode, governance routes, projects, documents, components.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
+        "source_paths": {
+            "primary": "backend/lambda/coordination_api/lambda_function.py",
+            "directory": "backend/lambda/coordination_api/",
+            "workflow": ".github/workflows/api-mcp-backend-deploy.yml",
+            "deploy_script": "backend/lambda/coordination_api/deploy.sh",
+            "related": [
+                "backend/lambda/coordination_api/governance_data_dictionary.json",
+                "backend/lambda/coordination_api/config.py",
+            ],
+            "architecture_sections": ["4.2", "5.1"],
+        },
     },
     {
         "component_id": "comp-tracker-mutation",
@@ -63,6 +81,14 @@ KNOWN_COMPONENTS = [
         "description": "Enceladus tracker mutation Lambda — handles all tracker record writes (create, set, log, etc.).",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
+        "source_paths": {
+            "primary": "backend/lambda/tracker_mutation/lambda_function.py",
+            "directory": "backend/lambda/tracker_mutation/",
+            "workflow": ".github/workflows/lambda-tracker-mutation-api-deploy.yml",
+            "deploy_script": "backend/lambda/tracker_mutation/deploy.sh",
+            "related": ["backend/lambda/shared_layer/"],
+            "architecture_sections": ["4.1", "5.1"],
+        },
     },
     {
         "component_id": "comp-enceladus-mcp-server",
@@ -73,6 +99,12 @@ KNOWN_COMPONENTS = [
         "description": "Enceladus MCP server (tools/enceladus-mcp-server/server.py) — exposed to Claude agents via MCP protocol.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
+        "source_paths": {
+            "primary": "tools/enceladus-mcp-server/server.py",
+            "directory": "tools/enceladus-mcp-server/",
+            "related": ["tools/enceladus-mcp-server/install_profile.sh"],
+            "architecture_sections": ["8.1"],
+        },
     },
     {
         "component_id": "comp-enceladus-pwa",
@@ -83,6 +115,69 @@ KNOWN_COMPONENTS = [
         "description": "Enceladus Progressive Web App — React UI deployed to jreese.net via CloudFront/S3.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
+        "source_paths": {
+            "primary": "frontend/ui/src/App.tsx",
+            "directory": "frontend/ui/src/",
+            "domains": {
+                "auth": [
+                    "frontend/ui/src/lib/authState.tsx",
+                    "frontend/ui/src/lib/authSession.ts",
+                    "frontend/ui/src/lib/logout.ts",
+                    "frontend/ui/src/api/auth.ts",
+                    "frontend/ui/src/api/authTokens.ts",
+                    "frontend/ui/src/hooks/useSessionLifecycle.ts",
+                    "frontend/ui/src/hooks/useSessionTimer.ts",
+                    "frontend/ui/src/pages/AuthTokensPage.tsx",
+                ],
+                "routing": [
+                    "frontend/ui/src/lib/routes.tsx",
+                    "frontend/ui/src/components/layout/AppShell.tsx",
+                    "frontend/ui/src/components/layout/Header.tsx",
+                    "frontend/ui/src/components/layout/BottomNav.tsx",
+                ],
+                "tracker": [
+                    "frontend/ui/src/api/mutations.ts",
+                    "frontend/ui/src/api/client.ts",
+                    "frontend/ui/src/hooks/useTasks.ts",
+                    "frontend/ui/src/hooks/useIssues.ts",
+                    "frontend/ui/src/hooks/useFeatures.ts",
+                    "frontend/ui/src/hooks/useRecordMutation.ts",
+                    "frontend/ui/src/pages/TaskDetailPage.tsx",
+                    "frontend/ui/src/pages/IssueDetailPage.tsx",
+                    "frontend/ui/src/pages/FeatureDetailPage.tsx",
+                    "frontend/ui/src/pages/ProjectDetailPage.tsx",
+                ],
+                "feeds": [
+                    "frontend/ui/src/api/feeds.ts",
+                    "frontend/ui/src/contexts/LiveFeedContext.tsx",
+                    "frontend/ui/src/hooks/useFeed.ts",
+                    "frontend/ui/src/hooks/useFilterState.ts",
+                    "frontend/ui/src/hooks/useInfiniteList.ts",
+                    "frontend/ui/src/pages/FeedPage.tsx",
+                    "frontend/ui/src/pages/DashboardPage.tsx",
+                ],
+                "deploy": [
+                    "frontend/ui/src/api/changelog.ts",
+                    "frontend/ui/src/hooks/useChangelog.ts",
+                    "frontend/ui/src/pages/ChangelogListPage.tsx",
+                    "frontend/ui/src/pages/ProjectChangelogPage.tsx",
+                ],
+                "coordination": [
+                    "frontend/ui/src/api/coordination.ts",
+                    "frontend/ui/src/hooks/useCoordination.ts",
+                    "frontend/ui/src/pages/CoordinationPage.tsx",
+                    "frontend/ui/src/pages/CoordinationDetailPage.tsx",
+                ],
+                "documents": [
+                    "frontend/ui/src/api/documents.ts",
+                    "frontend/ui/src/api/documents2.ts",
+                    "frontend/ui/src/hooks/useDocuments.ts",
+                    "frontend/ui/src/pages/DocumentsListPage.tsx",
+                    "frontend/ui/src/pages/DocumentDetailPage.tsx",
+                ],
+            },
+            "architecture_sections": ["7.1", "7.2", "7.3", "7.4"],
+        },
     },
     {
         "component_id": "comp-harrisonfamily-site",
@@ -93,6 +188,11 @@ KNOWN_COMPONENTS = [
         "description": "Harrison Family static site — Eleventy + 11ty deployed to CloudFront/S3.",
         "github_repo": "me-jreese/harrisonfamily",
         "status": "active",
+        "source_paths": {
+            "primary": "repo/11ty/.eleventy.js",
+            "directory": "repo/11ty/",
+            "related": ["workspace/11ty-dev/"],
+        },
     },
     {
         "component_id": "comp-cloudformation-data",
@@ -103,6 +203,11 @@ KNOWN_COMPONENTS = [
         "description": "Enceladus data CloudFormation stack (01-data.yaml) — DynamoDB tables, S3 buckets, etc. Updated by product lead via elevated IAM role.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
+        "source_paths": {
+            "primary": "infrastructure/cloudformation/01-data.yaml",
+            "directory": "infrastructure/cloudformation/",
+            "architecture_sections": ["3.1", "3.2", "3.3"],
+        },
     },
     {
         "component_id": "comp-cloudformation-app",
@@ -113,6 +218,12 @@ KNOWN_COMPONENTS = [
         "description": "Enceladus compute/app CloudFormation stack (02-compute.yaml) — Lambda functions, API Gateway, EventBridge rules, etc. Updated by product lead via elevated IAM role.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
+        "source_paths": {
+            "primary": "infrastructure/cloudformation/02-compute.yaml",
+            "directory": "infrastructure/cloudformation/",
+            "related": ["infrastructure/lambda_workflow_manifest.json"],
+            "architecture_sections": ["2.1", "4.0"],
+        },
     },
 ]
 
