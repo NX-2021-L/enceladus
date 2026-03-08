@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-06.1",
-  "updated_at": "2026-03-06T19:50:00Z",
+  "version": "2026-03-08.1",
+  "updated_at": "2026-03-08T05:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -252,6 +252,27 @@
           "items": { "type": "string" },
           "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children.",
           "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. Not enforced by the tracker API. Typically set once after all phase tasks are created. Step task IDs may also be included."
+        },
+        "related_task_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "IDs of related tasks. Cross-references for traceability.",
+          "usage_guidance": "tracker_set(field='related_task_ids', value=['ENC-TSK-NNN', ...]). Accepts list or JSON-stringified list.",
+          "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays (e.g. '[\"ENC-TSK-100\"]') and bare ID strings to proper DynamoDB List type. Prevents storage as DynamoDB S type instead of L type."
+        },
+        "related_issue_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "IDs of related issues. Cross-references for traceability.",
+          "usage_guidance": "tracker_set(field='related_issue_ids', value=['ENC-ISS-NNN', ...]). Accepts list or JSON-stringified list.",
+          "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+        },
+        "related_feature_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "IDs of related features. Cross-references for traceability.",
+          "usage_guidance": "tracker_set(field='related_feature_ids', value=['ENC-FTR-NNN', ...]). Accepts list or JSON-stringified list.",
+          "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         }
       }
     },
@@ -297,6 +318,24 @@
           },
           "usage_guidance": "Issue creation requires at least one evidence object. Each entry must include 'description' (string) and 'steps_to_duplicate' (array of strings). Optional fields: 'observed_by', 'timestamp'.",
           "patch_coercion": "ENC-TSK-783: When updating evidence via tracker_set (PATCH), the Lambda will coerce a JSON-stringified array to the proper DynamoDB List type. Raw string values that are not valid JSON arrays are rejected with HTTP 400. This prevents the 'evidence.map is not a function' PWA crash (ENC-ISS-099) caused by evidence stored as DynamoDB S type instead of L type."
+        },
+        "related_task_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "IDs of related tasks. Cross-references for traceability.",
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+        },
+        "related_issue_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "IDs of related issues. Cross-references for traceability.",
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+        },
+        "related_feature_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "IDs of related features. Cross-references for traceability.",
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         }
       }
     },
@@ -345,6 +384,24 @@
             "min_items": 1
           },
           "usage_guidance": "Feature completion requires accepted evidence for all criteria."
+        },
+        "related_task_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "IDs of related tasks. Cross-references for traceability.",
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+        },
+        "related_issue_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "IDs of related issues. Cross-references for traceability.",
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+        },
+        "related_feature_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "definition": "IDs of related features. Cross-references for traceability.",
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         }
       }
     },

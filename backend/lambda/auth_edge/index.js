@@ -99,6 +99,13 @@ function isXhrRequest(headers) {
   // Detect fetch/XHR calls from the PWA so we return 401 JSON instead of
   // a 302 redirect (which fetch() silently follows and returns HTML, causing
   // JSON parse failures that blank the app).
+
+  // ENC-ISS-093: Service worker navigation fetches have sec-fetch-dest=empty
+  // but sec-fetch-mode=navigate. Always treat navigations as browser requests
+  // so unauthenticated deep links get a proper login redirect, not raw JSON.
+  const secFetchMode = headers['sec-fetch-mode'] && headers['sec-fetch-mode'][0] && headers['sec-fetch-mode'][0].value || '';
+  if (secFetchMode === 'navigate') return false;
+
   const accept = headers.accept && headers.accept[0] && headers.accept[0].value || '';
   const xrw = headers['x-requested-with'] && headers['x-requested-with'][0] && headers['x-requested-with'][0].value || '';
   const purpose = headers['purpose'] && headers['purpose'][0] && headers['purpose'][0].value || '';

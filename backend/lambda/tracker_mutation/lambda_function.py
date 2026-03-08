@@ -1544,6 +1544,36 @@ def _normalize_evidence_value(raw_value: Any) -> Tuple[Optional[List[Any]], Opti
     return parsed_list, None
 
 
+def _normalize_related_ids_value(raw_value: Any) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Normalize PATCH related_*_ids payloads, including JSON-stringified arrays.
+
+    ENC-ISS-059: related_task_ids / related_issue_ids / related_feature_ids written
+    via tracker_set (MCP) may arrive as a JSON string (e.g. '["ENC-TSK-100"]') instead
+    of a parsed list, which would be stored as DynamoDB {"S": ...} instead of {"L": [...]}.
+    This function coerces string payloads to the proper List[str] type.
+    """
+    parsed_value = raw_value
+
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            return [], None
+        if stripped[0] == "[":
+            try:
+                parsed_value = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                return None, f"related_*_ids string is not valid JSON: {exc}"
+        else:
+            # Single bare ID string — wrap in a list
+            parsed_value = [stripped]
+
+    if isinstance(parsed_value, list):
+        normalized = [str(x).strip() for x in parsed_value if str(x).strip()]
+        return normalized, None
+
+    return None, "related_*_ids must be a list of record ID strings."
+
+
 def _apply_user_initiated_advance(
     project_id: str,
     record_type: str,
@@ -1748,6 +1778,14 @@ def _handle_update_field(
         if evidence_error:
             return _error(400, evidence_error)
         value = normalized_evidence
+
+    # ENC-ISS-059: Coerce related_*_ids JSON strings to proper List type so the
+    # value is stored as DynamoDB {"L": [...]} instead of {"S": "[\"ENC-TSK-...\"]"}.
+    if field in _RELATION_ID_FIELDS:
+        normalized_ids, ids_error = _normalize_related_ids_value(value)
+        if ids_error:
+            return _error(400, ids_error)
+        value = normalized_ids
 
     ddb = _get_ddb()
     key = _build_key(project_id, record_type, record_id)
