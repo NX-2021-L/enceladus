@@ -1,5 +1,5 @@
 {
-  "version": "2026-03-08.4",
+  "version": "2026-03-08.5",
   "updated_at": "2026-03-08T20:45:00Z",
   "owners": [
     "enceladus-platform"
@@ -250,8 +250,8 @@
         "subtask_ids": {
           "type": "array",
           "items": { "type": "string" },
-          "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children.",
-          "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. Not enforced by the tracker API. Typically set once after all phase tasks are created. Step task IDs may also be included."
+          "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children. ENC-ISS-106: The checkout service enforces that parent tasks cannot advance lifecycle stages (coding-complete onward) unless all direct children listed here have reached at least that stage. Children at 'closed' satisfy any stage check.",
+          "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. ENC-ISS-106: if subtask_ids is non-empty, the checkout service blocks advancement to coding-complete or beyond until every listed child is at or past that status. Not-found children also block advancement. To bypass: use the PWA user_initiated path."
         },
         "related_task_ids": {
           "type": "array",
@@ -1754,6 +1754,54 @@
         "advance_failure_gate": {
           "type": "string",
           "definition": "Task field recording which gate the consecutive failures occurred at."
+        }
+      }
+    },
+    "checkout_service.subtask_gate": {
+      "description": "ENC-ISS-106: Subtask lifecycle gate enforced by the checkout service in _handle_advance(). Prevents parent tasks from advancing past a lifecycle stage until all direct children have reached that stage. Ensures bottom-up completion ordering in plan-derived task hierarchies.",
+      "fields": {
+        "status_rank": {
+          "type": "object",
+          "definition": "Numeric rank ordering for lifecycle statuses. Higher rank = further in lifecycle. Used for comparing parent target status against children's current statuses.",
+          "values": {
+            "open": 0,
+            "in-progress": 1,
+            "coding-complete": 2,
+            "committed": 3,
+            "pr": 4,
+            "merged-main": 5,
+            "deploy-init": 6,
+            "deploy-success": 7,
+            "closed": 8
+          }
+        },
+        "gate_threshold": {
+          "type": "string",
+          "definition": "The gate activates at coding-complete (rank 2) and above. Statuses open (rank 0) and in-progress (rank 1) are not gated because a parent task must be checked out before it can orchestrate children.",
+          "value": "coding-complete"
+        },
+        "child_source": {
+          "type": "string",
+          "definition": "Children are read from the parent task's subtask_ids field (array of task IDs). Only direct children are checked — no recursive descent to grandchildren. Each level gates its own children, creating cascading enforcement naturally.",
+          "value": "task.subtask_ids"
+        },
+        "not_found_behavior": {
+          "type": "string",
+          "definition": "If a child task ID in subtask_ids cannot be fetched (HTTP != 200), the child is treated as blocking with status 'not_found'. This is the safe default — the parent cannot advance if we cannot verify child status.",
+          "value": "block"
+        },
+        "shortened_arc_handling": {
+          "type": "string",
+          "definition": "Children with shortened arcs (no_code, code_only) that reach 'closed' (rank 8) automatically satisfy any parent stage requirement. A no_code child at 'closed' satisfies a parent trying to advance to deploy-success because 8 >= 7.",
+          "value": "closed satisfies all stages"
+        },
+        "bypass_paths": {
+          "type": "array",
+          "definition": "Paths that bypass the subtask gate.",
+          "items": [
+            "PWA user_initiated transitions (tracker_mutation path, not checkout_service)",
+            "Tasks with empty or missing subtask_ids (not a parent task)"
+          ]
         }
       }
     },
