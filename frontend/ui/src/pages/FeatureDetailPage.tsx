@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useParams, Link } from 'react-router-dom'
 import { useFeatures } from '../hooks/useFeatures'
 import { useTasks } from '../hooks/useTasks'
@@ -351,8 +352,8 @@ export function FeatureDetailPage() {
         <HistoryFeed entries={feature.history ?? []} />
       </div>
 
-      {/* Note bottom sheet overlay */}
-      {showNote && (
+      {/* Note bottom sheet overlay — portaled to body to escape main's z-0 stacking context (ENC-ISS-096) */}
+      {showNote && createPortal(
         <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/60">
           <div className="bg-slate-800 rounded-t-2xl p-5 space-y-3 shadow-2xl max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between">
@@ -398,7 +399,8 @@ export function FeatureDetailPage() {
               <p className="text-xs text-red-400 whitespace-pre-wrap font-mono">{mutationError}</p>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* GitHub overlay (link existing or create new) */}
