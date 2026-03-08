@@ -840,6 +840,70 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertEqual(payload["tools"][0]["name"], "tracker_get")
         self.assertEqual(payload["text"]["format"]["type"], "json_schema")
 
+    @patch.object(
+        coordination_lambda,
+        "_build_bedrock_dispatch_prompt",
+        return_value=(
+            "agents.md project=enceladus\n\nBedrock agent policy context:\nFollow governance.",
+            {
+                "loaded": True,
+                "source": "mcp_resources",
+                "included_uris": [
+                    "governance://agents.md",
+                    "governance://agents/bedrock-agent-instructions.md",
+                ],
+                "truncated": False,
+                "bedrock_instructions_loaded": True,
+            },
+        ),
+    )
+    def test_dispatch_bedrock_api_uses_bedrock_agent_runtime(self, _mock_bedrock_prompt):
+        class _FakeBedrockClient:
+            def __init__(self):
+                self.calls = []
+
+            def invoke_agent(self, **kwargs):
+                self.calls.append(dict(kwargs))
+                return {
+                    "ResponseMetadata": {"RequestId": "bedrock-req-123"},
+                    "completion": [
+                        {"chunk": {"bytes": b"bedrock dispatch complete"}},
+                    ],
+                }
+
+        fake_client = _FakeBedrockClient()
+        request = {
+            "request_id": "CRQ-BEDROCKAPI",
+            "project_id": "enceladus",
+            "initiative_title": "Bedrock dispatch route",
+            "outcomes": ["verify invoke_agent execution"],
+            "provider_session": {
+                "bedrock_config": {
+                    "agent_id": "AGENT123",
+                    "agent_alias_id": "ALIAS123",
+                }
+            },
+        }
+
+        with patch.object(coordination_lambda, "_get_bedrock_agent_runtime", return_value=fake_client):
+            result = coordination_lambda._dispatch_bedrock_api(
+                request=request,
+                prompt="Bedrock dispatch prompt",
+                dispatch_id="DSP-BEDROCKAPI",
+            )
+
+        self.assertEqual(result["provider"], "aws_bedrock_agent")
+        self.assertEqual(result["execution_mode"], "bedrock_agent")
+        self.assertEqual(result["transport"], "bedrock_agent_runtime")
+        self.assertEqual(result["execution_id"], "bedrock-req-123")
+        self.assertEqual(result["provider_result"]["summary"], "bedrock dispatch complete")
+        self.assertTrue(result["provider_result"]["governance_context"]["bedrock_instructions_loaded"])
+        self.assertEqual(len(fake_client.calls), 1)
+        self.assertEqual(fake_client.calls[0]["agentId"], "AGENT123")
+        self.assertEqual(fake_client.calls[0]["agentAliasId"], "ALIAS123")
+        self.assertEqual(fake_client.calls[0]["sessionId"], "CRQ-BEDROCKAPI-DSP-BEDROCKAPI")
+        self.assertTrue(str(fake_client.calls[0]["inputText"]).startswith("agents.md project=enceladus"))
+
     def test_parse_mcp_result_json_payload(self):
         content = [type("Text", (), {"text": json.dumps({"success": True})})()]
         parsed = coordination_lambda._parse_mcp_result(content)
@@ -2283,6 +2347,83 @@ class SessionBridgeIntegrationTests(unittest.TestCase):
         self.assertEqual(final.get("state"), "succeeded")
         self.assertEqual((final.get("result") or {}).get("provider"), "claude_agent_sdk")
         self.assertEqual((final.get("provider_session") or {}).get("session_id"), "msg-direct-1")
+        mock_direct_dispatch.assert_called_once()
+        mock_send_dispatch.assert_not_called()
+        mock_find_host_dispatch.assert_not_called()
+
+    def test_dispatch_bedrock_agent_routes_to_direct_api(self):
+        request = {
+            "request_id": "CRQ-BEDROCK-DIRECT",
+            "project_id": "enceladus",
+            "state": "queued",
+            "dispatch_attempts": 0,
+            "provider_session": {
+                "preferred_provider": "aws_bedrock_agent",
+                "bedrock_config": {
+                    "agent_id": "AGENT123",
+                    "agent_alias_id": "ALIAS123",
+                },
+            },
+            "task_ids": [],
+            "feature_id": None,
+            "issue_ids": [],
+        }
+        updated_items = []
+        event = {
+            "body": json.dumps(
+                {
+                    "execution_mode": "bedrock_agent",
+                    "dispatch_id": "DSP-BEDROCK01",
+                    "prompt": "Say bedrock api ok",
+                }
+            )
+        }
+
+        with patch.object(coordination_lambda, "_get_request", return_value=request), \
+             patch.object(coordination_lambda, "_acquire_dispatch_lock", return_value=True), \
+             patch.object(coordination_lambda, "_lambda_provider_preflight", return_value={"passed": True, "results": []}), \
+             patch.object(
+                 coordination_lambda,
+                 "_dispatch_bedrock_api",
+                 return_value={
+                     "dispatch_id": "DSP-BEDROCK01",
+                     "execution_id": "bedrock-req-1",
+                     "execution_mode": "bedrock_agent",
+                     "provider": "aws_bedrock_agent",
+                     "transport": "bedrock_agent_runtime",
+                     "api_endpoint": "bedrock-agent-runtime:us-east-1",
+                     "sent_at": "2026-03-08T00:00:00Z",
+                     "completed_at": "2026-03-08T00:00:02Z",
+                     "status": "succeeded",
+                     "provider_result": {
+                         "provider": "aws_bedrock_agent",
+                         "session_id": "CRQ-BEDROCK-DIRECT-DSP-BEDROCK01",
+                         "thread_id": "CRQ-BEDROCK-DIRECT-DSP-BEDROCK01",
+                         "provider_session_id": "bedrock-req-1",
+                         "agent_id": "AGENT123",
+                         "agent_alias_id": "ALIAS123",
+                         "response_status": "completed",
+                         "summary": "bedrock api ok",
+                         "request_id": "bedrock-req-1",
+                         "trace_count": 0,
+                         "completed_at": "2026-03-08T00:00:02Z",
+                     },
+                 },
+             ) as mock_direct_dispatch, \
+             patch.object(coordination_lambda, "_send_dispatch") as mock_send_dispatch, \
+             patch.object(coordination_lambda, "_find_active_host_dispatch") as mock_find_host_dispatch, \
+             patch.object(coordination_lambda, "_finalize_tracker_from_request"), \
+             patch.object(coordination_lambda, "_update_request", side_effect=lambda item: updated_items.append(dict(item))):
+            resp = coordination_lambda._handle_dispatch_request(event, "CRQ-BEDROCK-DIRECT")
+
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertGreaterEqual(len(updated_items), 1)
+        final = updated_items[-1]
+        self.assertEqual(final.get("state"), "succeeded")
+        self.assertEqual((final.get("result") or {}).get("provider"), "aws_bedrock_agent")
+        self.assertEqual((final.get("provider_session") or {}).get("agent_id"), "AGENT123")
         mock_direct_dispatch.assert_called_once()
         mock_send_dispatch.assert_not_called()
         mock_find_host_dispatch.assert_not_called()

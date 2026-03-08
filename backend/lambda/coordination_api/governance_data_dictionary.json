@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-08.2",
-  "updated_at": "2026-03-08T06:30:00Z",
+  "version": "2026-03-08.3",
+  "updated_at": "2026-03-08T20:25:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -728,8 +728,11 @@
             "codex_app_server",
             "claude_headless",
             "claude_agent_sdk",
-            "aws_step_function"
-          ]
+            "aws_step_function",
+            "bedrock_agent"
+          ],
+          "definition": "Dispatch runtime selected for a coordination request.",
+          "usage_guidance": "bedrock_agent routes through direct Bedrock Agent Runtime invoke_agent dispatch (not host-v2 SSM)."
         },
         "provider": {
           "type": "enum",
@@ -1273,6 +1276,27 @@
         "governance_dictionary": {
           "type": "tool",
           "usage_guidance": "No args: compact index (entity names + field counts, ~1k tokens). With entity (e.g., 'tracker.task'): full entity schema. With entity + field: single field definition. With entity + field + value: enum validation. Replaces governance_get('governance_data_dictionary.json') for session init."
+        }
+      }
+    },
+    "mcp_server.dynamic_toolsets": {
+      "description": "Dynamic MCP toolset filtering behavior for task-scoped sessions (ENC-TSK-826). list_tools responses can be namespace-filtered based on active checked-out task category when the client supports tools/list_changed notifications.",
+      "fields": {
+        "list_tools.filtering": {
+          "type": "behavior",
+          "definition": "When session context is active and tool_filter_active=true, list_tools returns only tool namespaces relevant to the active task category."
+        },
+        "session_context": {
+          "type": "object",
+          "definition": "Per-session state tracks active_task_id, active_project_id, active_category, and allowed_namespaces."
+        },
+        "tools_list_changed_notification": {
+          "type": "notification",
+          "definition": "Server emits notifications/tools/list_changed on checkout/release context transitions when supported by the transport/session."
+        },
+        "fallback_mode": {
+          "type": "behavior",
+          "definition": "If tools/list_changed is unsupported or transport is stateless, tool_filter_active remains false and full tool list is returned (no regression)."
         }
       }
     },
