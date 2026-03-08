@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-08.6",
-  "updated_at": "2026-03-08T21:40:00Z",
+  "version": "2026-03-08.7",
+  "updated_at": "2026-03-08T23:20:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1589,7 +1589,7 @@
           "auth_requirement": "Cognito session cookie (enceladus_id_token) only \u2014 internal API key rejected with HTTP 403",
           "gate_requirements": {
             "any_status": "user_note (non-empty string) required; no checkout required; no GitHub API validation; no CAI/CCI token checks",
-            "closed (Submit + Close)": "user_note required; target_status=closed regardless of current status; checkout always released"
+            "closed (Submit + Close)": "user_note required; target_status=closed regardless of current status; checkout always released; note posted as worklog history entry (action=worklog, ENC-TSK-841) instead of pending update"
           },
           "checkout_behavior": "borrow-and-restore \u2014 tracker_mutation temporarily takes checkout ownership as Cognito username; on completion restores previous agent checkout if task was checked out (except on close, which always releases); worklog provider=cognito_username",
           "audit": "initiated_by (Cognito username) and initiated_at stamped on transition_evidence as permanent audit record; [USER-INITIATED] worklog entry appended",
