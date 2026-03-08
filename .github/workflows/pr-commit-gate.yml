@@ -46,7 +46,7 @@ jobs:
       - name: Validate commit-complete-id with checkout service
         env:
           CCI_ID: ${{ steps.extract_cci.outputs.cci_id }}
-          CHECKOUT_SERVICE_BASE: https://jreese.net/api/v1/checkout
+          CHECKOUT_SERVICE_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/checkout
           COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
         run: |
           VALIDATE_URL="${CHECKOUT_SERVICE_BASE}/validate/commit-complete/${CCI_ID}"
