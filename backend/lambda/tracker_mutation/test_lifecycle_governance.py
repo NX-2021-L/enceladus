@@ -2,7 +2,7 @@
 
 Tests cover:
 - ENC-TSK-594: Transition table enforcement and revert-with-evidence
-- ENC-TSK-595: Evidence gates (pushed, merged-main, deploy-success, production)
+- ENC-TSK-595: Evidence gates (committed, merged-main, deploy-success, production)
 - ENC-TSK-698: New deploy-init/deploy-success/coding-updates state machine
   + deploy_evidence gate (deploy-init → deploy-success)
   + live_validation_evidence gate (deploy-success → closed)
@@ -97,6 +97,7 @@ def _valid_deploy_evidence(**overrides):
     """
     payload = {
         "id": 12345678,
+        "name": "Deploy tracker mutation",
         "run_id": 22549608910,
         "head_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac",
         "status": "completed",
@@ -114,7 +115,7 @@ def _valid_deploy_evidence(**overrides):
 
 class TestTaskForwardTransitions(unittest.TestCase):
     """Task lifecycle: open → in-progress → coding-complete → committed →
-    pushed → merged-main → deploy-init → deploy-success → closed.
+    pr → merged-main → deploy-init → deploy-success → closed.
     Re-entry arc: deploy-success → coding-updates → coding-complete."""
 
     def _patch_and_call(self, current_status, new_status, body_extra=None):
@@ -143,11 +144,7 @@ class TestTaskForwardTransitions(unittest.TestCase):
         self.assertTrue(result.get("success"))
 
     def test_coding_complete_to_committed(self):
-        result = self._patch_and_call("coding-complete", "committed")
-        self.assertTrue(result.get("success"))
-
-    def test_committed_to_pushed_with_evidence(self):
-        result = self._patch_and_call("committed", "pushed", {
+        result = self._patch_and_call("coding-complete", "committed", {
             "transition_evidence": {
                 "commit_sha": "a" * 40,
                 "owner": "NX-2021-L",
@@ -156,8 +153,12 @@ class TestTaskForwardTransitions(unittest.TestCase):
         })
         self.assertTrue(result.get("success"))
 
-    def test_pushed_to_merged_main_with_evidence(self):
-        result = self._patch_and_call("pushed", "merged-main", {
+    def test_committed_to_pr(self):
+        result = self._patch_and_call("committed", "pr")
+        self.assertTrue(result.get("success"))
+
+    def test_pr_to_merged_main_with_evidence(self):
+        result = self._patch_and_call("pr", "merged-main", {
             "transition_evidence": {
                 "merge_evidence": "PR #42 merged to main, commit abc123 on main"
             }
@@ -221,8 +222,8 @@ class TestTaskSkipStagesBlocked(unittest.TestCase):
         result = self._patch_and_call("open", "closed")
         self.assertIn("error", result)
 
-    def test_in_progress_to_pushed_blocked(self):
-        result = self._patch_and_call("in-progress", "pushed")
+    def test_in_progress_to_pr_blocked(self):
+        result = self._patch_and_call("in-progress", "pr")
         self.assertIn("error", result)
 
     def test_coding_complete_to_deploy_success_blocked(self):
@@ -249,9 +250,9 @@ class TestTaskSkipStagesBlocked(unittest.TestCase):
         result = self._patch_and_call("deploy-success", "in-progress")
         self.assertIn("error", result)
 
-    def test_coding_updates_cannot_go_to_pushed(self):
-        """coding-updates must re-enter at coding-complete, not skip ahead to pushed."""
-        result = self._patch_and_call("coding-updates", "pushed")
+    def test_coding_updates_cannot_go_to_pr(self):
+        """coding-updates must re-enter at coding-complete, not skip ahead to pr."""
+        result = self._patch_and_call("coding-updates", "pr")
         self.assertIn("error", result)
 
     def test_deployed_is_no_longer_a_valid_target(self):
@@ -418,8 +419,8 @@ class TestRevertWithEvidence(unittest.TestCase):
                                        revert_reason="Commit was incorrect")
         self.assertTrue(result.get("success"))
 
-    def test_revert_pushed_to_committed(self):
-        result = self._patch_and_call("pushed", "committed",
+    def test_revert_pr_to_committed(self):
+        result = self._patch_and_call("pr", "committed",
                                        revert_reason="Push was to wrong branch")
         self.assertTrue(result.get("success"))
 
@@ -440,16 +441,19 @@ class TestRevertWithEvidence(unittest.TestCase):
 # ENC-TSK-595 / ENC-TSK-698: Evidence gates
 # ---------------------------------------------------------------------------
 
-class TestPushedGate(unittest.TestCase):
-    """task -> pushed requires valid commit_sha."""
+class TestCommittedGate(unittest.TestCase):
+    """task -> committed requires valid commit_sha."""
 
     def _patch_and_call(self, transition_evidence=None):
-        body = {"field": "status", "value": "pushed", "provider": "codex"}
+        body = {"field": "status", "value": "committed", "provider": "codex"}
         if transition_evidence:
-            body["transition_evidence"] = transition_evidence
+            evidence = dict(transition_evidence)
+            evidence.setdefault("owner", "NX-2021-L")
+            evidence.setdefault("repo", "enceladus")
+            body["transition_evidence"] = evidence
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_checked_out_task(status="committed", agent_id="codex")
+            "Item": _mock_checked_out_task(status="coding-complete", agent_id="codex")
         }
         mock_ddb.update_item.return_value = {}
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
@@ -485,11 +489,11 @@ class TestPushedGate(unittest.TestCase):
         mock_validate.assert_called_once_with("NX-2021-L", "enceladus", sha)
 
     def test_github_validation_failure_returns_400(self):
-        body = {"field": "status", "value": "pushed", "provider": "codex",
-                "transition_evidence": {"commit_sha": "b" * 40}}
+        body = {"field": "status", "value": "committed", "provider": "codex",
+                "transition_evidence": {"commit_sha": "b" * 40, "owner": "NX-2021-L", "repo": "enceladus"}}
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_checked_out_task(status="committed", agent_id="codex")
+            "Item": _mock_checked_out_task(status="coding-complete", agent_id="codex")
         }
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
             with patch.object(tracker_mutation, "_validate_commit_via_github",
@@ -503,7 +507,7 @@ class TestPushedGate(unittest.TestCase):
 
 
 class TestMergedMainGate(unittest.TestCase):
-    """task -> merged-main requires merge_evidence."""
+    """Direct task -> merged-main calls are rejected in favor of checkout_service."""
 
     def _patch_and_call(self, transition_evidence=None):
         body = {"field": "status", "value": "merged-main", "provider": "codex"}
@@ -511,36 +515,39 @@ class TestMergedMainGate(unittest.TestCase):
             body["transition_evidence"] = transition_evidence
         mock_ddb = MagicMock()
         mock_ddb.get_item.return_value = {
-            "Item": _mock_checked_out_task(status="pushed", agent_id="codex")
+            "Item": _mock_checked_out_task(status="pr", agent_id="codex")
         }
         mock_ddb.update_item.return_value = {}
         with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
-            result = _call_update_field(
-                "enceladus", "task", "ENC-TSK-001", body
-            )
+            with patch.object(tracker_mutation, "_is_checkout_service_request", return_value=False):
+                result = _call_update_field(
+                    "enceladus", "task", "ENC-TSK-001", body
+                )
         return json.loads(result.get("body", "{}"))
 
-    def test_missing_merge_evidence_returns_400(self):
+    def test_missing_merge_evidence_returns_checkout_service_redirect(self):
         result = self._patch_and_call()
         self.assertIn("error", result)
-        self.assertIn("merge_evidence", result["error"])
+        self.assertIn("advance_task_status", result["error"])
 
-    def test_empty_merge_evidence_returns_400(self):
+    def test_empty_merge_evidence_returns_checkout_service_redirect(self):
         result = self._patch_and_call({"merge_evidence": "  "})
         self.assertIn("error", result)
+        self.assertIn("advance_task_status", result["error"])
 
-    def test_valid_merge_evidence_succeeds(self):
+    def test_valid_merge_evidence_still_requires_checkout_service(self):
         result = self._patch_and_call({
             "merge_evidence": "PR #42 merged, commit abc123 verified on main"
         })
-        self.assertTrue(result.get("success"))
+        self.assertIn("error", result)
+        self.assertIn("advance_task_status", result["error"])
 
 
 class TestDeploySuccessGate(unittest.TestCase):
     """task -> deploy-success requires a structured GitHub Actions Jobs API payload (ENC-TSK-726).
 
     Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
-    Required fields: id, run_id, head_sha, status, conclusion, started_at, completed_at
+    Required fields: id, name, run_id, head_sha, status, conclusion, started_at, completed_at
     Assertions: status == "completed", conclusion == "success"
     Datetime validation: started_at / completed_at must be ISO 8601.
     """
