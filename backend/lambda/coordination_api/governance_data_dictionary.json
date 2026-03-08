@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-08.3",
-  "updated_at": "2026-03-08T20:25:00Z",
+  "version": "2026-03-08.4",
+  "updated_at": "2026-03-08T20:45:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1297,6 +1297,40 @@
         "fallback_mode": {
           "type": "behavior",
           "definition": "If tools/list_changed is unsupported or transport is stateless, tool_filter_active remains false and full tool list is returned (no regression)."
+        }
+      }
+    },
+    "mcp_server.context_assembly": {
+      "description": "Composite context retrieval tools for agent token optimization (ENC-TSK-829, ENC-TSK-830). Reduces multi-call context loading to single bundled responses.",
+      "fields": {
+        "get_issue_context": {
+          "type": "tool",
+          "definition": "Composite MCP tool that bundles record core fields, relationship graph, component source paths, domain architecture excerpts, and recent history into a single response.",
+          "usage_guidance": "Accepts record_id and optional flags (include_components, include_architecture, include_recent_history, history_limit, max_tokens). Replaces 4-5 sequential tool calls with one."
+        },
+        "get_architecture_excerpts": {
+          "type": "tool",
+          "definition": "Domain-scoped architecture excerpt delivery. Maps component registry domains to architecture doc files and returns only matched sections with heading metadata.",
+          "usage_guidance": "Accepts project_id, domains[], and max_excerpt_tokens. Use instead of loading full architecture docs when only specific domains are relevant."
+        },
+        "domain_mapping": {
+          "type": "object",
+          "definition": "Maps domain names to architecture files: compute->data-compute.md, operations->operations.md, security_frontend->security-frontend.md. Aliases: data->compute, security->security_frontend, frontend->security_frontend."
+        },
+        "budget_truncation": {
+          "type": "behavior",
+          "definition": "Both tools respect token budgets with priority-ordered truncation. Truncation emits machine-readable metadata (truncated_sections, dropped_items_count) instead of silently dropping context."
+        }
+      }
+    },
+    "tracker.issue_location_context": {
+      "description": "Issue creation location context enforcement (ENC-TSK-805, softened by ENC-ISS-105). hypothesis/technical_notes and location_hint are recommended for issues but no longer hard-block creation.",
+      "fields": {
+        "enforcement_mode": {
+          "type": "enum",
+          "values": ["soft_warning"],
+          "definition": "Missing location context fields (hypothesis, technical_notes, location_hint) produce warnings in the response but do not block issue creation.",
+          "usage_guidance": "Ontology scoring already penalizes missing fields. Hard 400 enforcement was removed in ENC-ISS-105 because MCP client bindings did not expose these parameters, causing a self-inflicted regression."
         }
       }
     },
