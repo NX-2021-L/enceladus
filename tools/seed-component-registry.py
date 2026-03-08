@@ -1,27 +1,52 @@
 #!/usr/bin/env python3
 """
-ENC-FTR-041: Seed the component registry with known Enceladus components.
+ENC-FTR-041: Seed the component registry with known Enceladus + MOD components.
 
 Usage:
     python3 tools/seed-component-registry.py [--dry-run] [--base-url URL] [--api-key KEY]
+        [--assistant-key KEY] [--direct-apigw-base URL]
 
 Environment variables (can be set instead of flags):
     ENCELADUS_COORDINATION_INTERNAL_API_KEY  — internal API key
     COORDINATION_API_BASE                    — base URL (default: https://jreese.net/api/v1/coordination)
+    CHECKOUT_ASSISTANT_KEY                   — checkout-service-assistant key (allows setting
+                                               non-default transition_type at create time)
+    COORDINATION_DIRECT_APIGW_BASE           — direct APIGW URL used for assistant-key calls
+                                               (bypasses CloudFront header stripping);
+                                               default: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/coordination
 
-The script is idempotent: it creates components with PUT semantics (409 on duplicate is
-treated as success if the existing record has the same transition_type, otherwise a
-warning is emitted and the record is skipped without overwriting).
+Auth note for non-default transition_type:
+    Creating a component with a non-default transition_type (anything other than
+    "github_pr_deploy") requires either Cognito auth (PWA session) or the checkout-service-
+    assistant key (--assistant-key / CHECKOUT_ASSISTANT_KEY). If neither is provided, the
+    script creates the component with the default "github_pr_deploy" type and emits a warning
+    that a manual PATCH via the PWA is needed to set the correct type.
+
+    The assistant-key PATCH must be sent to the direct APIGW URL (not CloudFront) because
+    CloudFront strips custom headers before reaching the Lambda backend.
+
+The script is idempotent: it GETs each component first. If the existing record has the same
+transition_type as the seed entry it is skipped. If the type differs, a warning is emitted
+and the record is left unchanged.
 
 Components seeded:
-    comp-checkout-service      enceladus  lambda      github_pr_deploy
-    comp-coordination-api      enceladus  lambda      github_pr_deploy
-    comp-tracker-mutation      enceladus  lambda      github_pr_deploy
-    comp-enceladus-mcp-server  enceladus  library     github_pr_deploy
-    comp-enceladus-pwa         enceladus  frontend    web_deploy
-    comp-harrisonfamily-site   harrisonfamily frontend web_deploy
-    comp-cloudformation-data   enceladus  infrastructure no_code
-    comp-cloudformation-app    enceladus  infrastructure no_code
+    Enceladus project:
+        comp-checkout-service      enceladus  lambda          github_pr_deploy
+        comp-coordination-api      enceladus  lambda          github_pr_deploy
+        comp-tracker-mutation      enceladus  lambda          github_pr_deploy
+        comp-enceladus-mcp-server  enceladus  library         github_pr_deploy
+        comp-enceladus-pwa         enceladus  frontend        web_deploy          (needs assistant-key)
+        comp-cloudformation-data   enceladus  infrastructure  no_code             (needs assistant-key)
+        comp-cloudformation-app    enceladus  infrastructure  no_code             (needs assistant-key)
+
+    Harrisonfamily project:
+        comp-harrisonfamily-site   harrisonfamily  frontend  web_deploy           (needs assistant-key)
+
+    MOD project (vagamod.io):
+        comp-mod-web               mod  frontend        github_pr_deploy
+        comp-mod-api               mod  lambda          github_pr_deploy
+        comp-mod-infra             mod  infrastructure  github_pr_deploy
+        comp-mod-keycloak          mod  external        no_code                  (needs assistant-key)
 """
 
 from __future__ import annotations
@@ -34,6 +59,7 @@ import urllib.error
 import urllib.request
 
 KNOWN_COMPONENTS = [
+    # ── Enceladus ────────────────────────────────────────────────────────────
     {
         "component_id": "comp-checkout-service",
         "component_name": "Checkout Service Lambda",
@@ -180,21 +206,6 @@ KNOWN_COMPONENTS = [
         },
     },
     {
-        "component_id": "comp-harrisonfamily-site",
-        "component_name": "Harrison Family Site",
-        "project_id": "harrisonfamily",
-        "category": "frontend",
-        "transition_type": "web_deploy",
-        "description": "Harrison Family static site — Eleventy + 11ty deployed to CloudFront/S3.",
-        "github_repo": "me-jreese/harrisonfamily",
-        "status": "active",
-        "source_paths": {
-            "primary": "repo/11ty/.eleventy.js",
-            "directory": "repo/11ty/",
-            "related": ["workspace/11ty-dev/"],
-        },
-    },
-    {
         "component_id": "comp-cloudformation-data",
         "component_name": "CloudFormation Data Stack",
         "project_id": "enceladus",
@@ -225,7 +236,66 @@ KNOWN_COMPONENTS = [
             "architecture_sections": ["2.1", "4.0"],
         },
     },
+    # ── Harrisonfamily ───────────────────────────────────────────────────────
+    {
+        "component_id": "comp-harrisonfamily-site",
+        "component_name": "Harrison Family Site",
+        "project_id": "harrisonfamily",
+        "category": "frontend",
+        "transition_type": "web_deploy",
+        "description": "Harrison Family static site — Eleventy + 11ty deployed to CloudFront/S3.",
+        "github_repo": "me-jreese/harrisonfamily",
+        "status": "active",
+        "source_paths": {
+            "primary": "repo/11ty/.eleventy.js",
+            "directory": "repo/11ty/",
+            "related": ["workspace/11ty-dev/"],
+        },
+    },
+    # ── MOD (vagamod.io) ─────────────────────────────────────────────────────
+    {
+        "component_id": "comp-mod-web",
+        "component_name": "MOD Next.js Frontend (vagamod.io)",
+        "project_id": "mod",
+        "category": "frontend",
+        "transition_type": "github_pr_deploy",
+        "description": "MOD Next.js/SST frontend app — deployed via GitHub Actions sst deploy to CloudFront/Lambda@Edge.",
+        "github_repo": "NX-2021-L/mod",
+        "status": "active",
+    },
+    {
+        "component_id": "comp-mod-api",
+        "component_name": "MOD Lambda API Handlers",
+        "project_id": "mod",
+        "category": "lambda",
+        "transition_type": "github_pr_deploy",
+        "description": "MOD Lambda API handlers (objects, custody, users, comments, search, QR) — deployed via GitHub Actions sst deploy.",
+        "github_repo": "NX-2021-L/mod",
+        "status": "active",
+    },
+    {
+        "component_id": "comp-mod-infra",
+        "component_name": "MOD SST Infrastructure (DynamoDB + CloudFormation)",
+        "project_id": "mod",
+        "category": "infrastructure",
+        "transition_type": "github_pr_deploy",
+        "description": "MOD SST v3 infrastructure stack — DynamoDB tables, IAM roles, CloudFront, API Gateway; deployed via GitHub Actions sst deploy.",
+        "github_repo": "NX-2021-L/mod",
+        "status": "active",
+    },
+    {
+        "component_id": "comp-mod-keycloak",
+        "component_name": "MOD Keycloak Auth (Lightsail)",
+        "project_id": "mod",
+        "category": "external",
+        "transition_type": "no_code",
+        "description": "MOD Keycloak identity provider on AWS Lightsail (auth.vagamod.io) — admin-managed via Lightsail console and SSH. No GitHub Actions pipeline.",
+        "github_repo": "NX-2021-L/mod",
+        "status": "active",
+    },
 ]
+
+_DEFAULT_TRANSITION_TYPE = "github_pr_deploy"
 
 
 def _api_request(
@@ -234,18 +304,17 @@ def _api_request(
     method: str,
     path: str,
     payload: dict | None = None,
+    extra_headers: dict | None = None,
 ) -> tuple[int, dict]:
     url = f"{base_url.rstrip('/')}{path}"
     body = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method=method,
-        headers={
-            "Content-Type": "application/json",
-            "X-Coordination-Internal-Key": api_key,
-        },
-    )
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "X-Coordination-Internal-Key": api_key,
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, json.loads(resp.read())
@@ -258,14 +327,22 @@ def _api_request(
         return exc.code, err_body
 
 
-def seed(base_url: str, api_key: str, dry_run: bool) -> None:
+def seed(
+    base_url: str,
+    api_key: str,
+    dry_run: bool,
+    assistant_key: str = "",
+    direct_apigw_base: str = "",
+) -> None:
     ok_count = 0
     skip_count = 0
     err_count = 0
+    needs_manual_patch: list[tuple[str, str]] = []  # (component_id, target_transition_type)
 
     for comp in KNOWN_COMPONENTS:
         cid = comp["component_id"]
-        print(f"\n[{cid}] ({comp['transition_type']})", end="")
+        target_type = comp["transition_type"]
+        print(f"\n[{cid}] ({target_type})", end="")
 
         if dry_run:
             print(" — DRY RUN, skipping")
@@ -275,20 +352,51 @@ def seed(base_url: str, api_key: str, dry_run: bool) -> None:
         status, existing = _api_request(base_url, api_key, "GET", f"/components/{cid}")
         if status == 200:
             existing_type = existing.get("component", {}).get("transition_type", "")
-            if existing_type == comp["transition_type"]:
+            if existing_type == target_type:
                 print(f" — already exists with same transition_type ({existing_type}), skipping")
                 skip_count += 1
                 continue
             else:
                 print(
                     f" — already exists with DIFFERENT transition_type "
-                    f"({existing_type} vs {comp['transition_type']}), SKIPPING to avoid overwrite"
+                    f"({existing_type} vs {target_type}), SKIPPING to avoid overwrite"
                 )
                 skip_count += 1
                 continue
 
-        # Create the component
-        status, result = _api_request(base_url, api_key, "POST", "/components", comp)
+        # Non-default transition_type requires assistant key or Cognito.
+        # Without those: create with default type, record for manual follow-up.
+        needs_type_auth = target_type != _DEFAULT_TRANSITION_TYPE
+
+        if needs_type_auth and not assistant_key:
+            create_payload = {k: v for k, v in comp.items() if k != "transition_type"}
+            status, result = _api_request(base_url, api_key, "POST", "/components", create_payload)
+            if status == 201:
+                print(
+                    f" — CREATED with default type (github_pr_deploy); "
+                    f"⚠️  MANUAL PATCH needed → transition_type={target_type} (via PWA or --assistant-key)"
+                )
+                needs_manual_patch.append((cid, target_type))
+                ok_count += 1
+            elif status == 409:
+                print(f" — 409 Conflict (already exists), skipping")
+                skip_count += 1
+            else:
+                print(f" — ERROR {status}: {result.get('error', result)}")
+                err_count += 1
+            continue
+
+        # Build create payload; use assistant key + direct APIGW for non-default types
+        create_payload = dict(comp)
+        if needs_type_auth and assistant_key:
+            extra = {"X-Checkout-Assistant-Key": assistant_key}
+            create_base = (direct_apigw_base or base_url).rstrip("/")
+            status, result = _api_request(
+                create_base, api_key, "POST", "/components", create_payload, extra
+            )
+        else:
+            status, result = _api_request(base_url, api_key, "POST", "/components", create_payload)
+
         if status == 201:
             print(f" — CREATED ✓")
             ok_count += 1
@@ -303,15 +411,47 @@ def seed(base_url: str, api_key: str, dry_run: bool) -> None:
     print(f"Created:  {ok_count}")
     print(f"Skipped:  {skip_count}")
     print(f"Errors:   {err_count}")
+    if needs_manual_patch:
+        print(f"\n⚠️  {len(needs_manual_patch)} component(s) created with wrong transition_type — manual PATCH needed:")
+        for cid, tt in needs_manual_patch:
+            print(f"   {cid}  →  {tt}")
+        print(
+            "\n   Fix options:\n"
+            "   1. Open jreese.net/components, find the component, click Edit, set Transition Type.\n"
+            "   2. Re-run with: CHECKOUT_ASSISTANT_KEY=<key> python3 tools/seed-component-registry.py\n"
+            "      (script will SKIP existing correct-type entries; only patch mismatches need manual fix)"
+        )
     if err_count:
         sys.exit(1)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Seed Enceladus component registry (ENC-FTR-041)")
-    parser.add_argument("--dry-run", action="store_true", help="Print what would be done without making API calls")
+    parser = argparse.ArgumentParser(
+        description="Seed Enceladus component registry (ENC-FTR-041)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print what would be done without making API calls",
+    )
     parser.add_argument("--base-url", default=None, help="Coordination API base URL")
     parser.add_argument("--api-key", default=None, help="Internal API key")
+    parser.add_argument(
+        "--assistant-key", default=None,
+        help=(
+            "Checkout-service-assistant key (X-Checkout-Assistant-Key). "
+            "Allows setting non-default transition_type at create time without Cognito. "
+            "Env var: CHECKOUT_ASSISTANT_KEY"
+        ),
+    )
+    parser.add_argument(
+        "--direct-apigw-base", default=None,
+        help=(
+            "Direct API Gateway base URL for assistant-key requests (bypasses CloudFront). "
+            "Env var: COORDINATION_DIRECT_APIGW_BASE. "
+            "Default: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/coordination"
+        ),
+    )
     args = parser.parse_args()
 
     base_url = (
@@ -324,16 +464,33 @@ def main() -> None:
         or os.environ.get("ENCELADUS_COORDINATION_INTERNAL_API_KEY", "")
         or os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
     )
+    assistant_key = args.assistant_key or os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
+    direct_apigw_base = (
+        args.direct_apigw_base
+        or os.environ.get("COORDINATION_DIRECT_APIGW_BASE", "")
+        or "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/coordination"
+    )
 
     if not api_key and not args.dry_run:
-        print("ERROR: --api-key or ENCELADUS_COORDINATION_INTERNAL_API_KEY env var is required", file=sys.stderr)
+        print(
+            "ERROR: --api-key or ENCELADUS_COORDINATION_INTERNAL_API_KEY env var is required",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    print(f"Base URL: {base_url}")
-    print(f"Dry run:  {args.dry_run}")
-    print(f"Components to seed: {len(KNOWN_COMPONENTS)}")
+    print(f"Base URL:      {base_url}")
+    print(f"Direct APIGW:  {direct_apigw_base}")
+    print(f"Dry run:       {args.dry_run}")
+    print(f"Assistant key: {'set' if assistant_key else 'not set — non-default types will default to github_pr_deploy'}")
+    print(f"Components:    {len(KNOWN_COMPONENTS)}")
 
-    seed(base_url, api_key, dry_run=args.dry_run)
+    seed(
+        base_url,
+        api_key,
+        dry_run=args.dry_run,
+        assistant_key=assistant_key,
+        direct_apigw_base=direct_apigw_base,
+    )
 
 
 if __name__ == "__main__":
