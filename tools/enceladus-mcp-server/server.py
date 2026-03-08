@@ -4245,6 +4245,9 @@ async def list_tools() -> list[Tool]:
                 "Lifecycle: open→in-progress→coding-complete→committed→pr→merged-main→deploy-init→deploy-success→closed. "
                 "Each transition may require transition_evidence. Use tracker_validation_rules to preflight. "
                 "Requires task checkout and task.components set via tracker_set. "
+                "ENC-ISS-106: Parent tasks (those with non-empty subtask_ids) cannot advance from "
+                "coding-complete onward unless all direct children have reached at least the target status. "
+                "Children at 'closed' satisfy any stage. Advance children before the parent. "
                 "Query governance_dictionary(entity='checkout_service') for full gate specs per transition_type."
             ),
             inputSchema={

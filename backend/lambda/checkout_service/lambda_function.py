@@ -41,7 +41,7 @@ Environment variables:
     CHECKOUT_ASSISTANT_KEY        secret key for checkout-service-assistant auto-remediation
     COORDINATION_API_BASE         base URL for coordination API (default: https://jreese.net/api/v1/coordination)
 
-Related: ENC-FTR-037, ENC-ISS-092, ENC-FTR-041
+Related: ENC-FTR-037, ENC-ISS-092, ENC-FTR-041, ENC-ISS-106
 
 ENC-ISS-092: Added ``transition_type`` field support. Tasks may now declare one of four
 lifecycle arcs (github_pr_deploy, web_deploy, code_only, no_code) that determine which
@@ -57,6 +57,12 @@ most restrictive component's transition_type (STRICTNESS_RANK ordering). Added
 at deploy-success). Added checkout-service-assistant inline auto-remediation: after 3
 consecutive deploy-success failures, the assistant infers the intended deploy method and
 loosens component registration if safe to do so.
+
+ENC-ISS-106: Added subtask lifecycle gate. Parent tasks (those with non-empty
+subtask_ids) cannot advance from coding-complete onward unless all direct children
+have reached at least the target status. Children at 'closed' satisfy any stage.
+The gate only applies to agent-initiated advances through the checkout service;
+PWA user_initiated transitions bypass this gate (same as component enforcement).
 """
 
 from __future__ import annotations
@@ -642,6 +648,26 @@ STRICTNESS_RANK: dict = {
     "no_code": 3,           # least strict: no GitHub, no code
 }
 
+#: ENC-ISS-106: Numeric rank for lifecycle stages. Used to enforce that parent tasks
+#: cannot advance past a stage until all children have reached that stage.
+#: Higher rank = further along the lifecycle.
+STATUS_RANK: dict = {
+    "open": 0,
+    "in-progress": 1,
+    "coding-complete": 2,
+    "committed": 3,
+    "pr": 4,
+    "merged-main": 5,
+    "deploy-init": 6,
+    "deploy-success": 7,
+    "closed": 8,
+}
+
+#: ENC-ISS-106: Minimum status rank at which the subtask gate activates.
+#: Statuses below this threshold (open, in-progress) are not gated because
+#: a parent must be checked out (in-progress) before it can orchestrate children.
+_SUBTASK_GATE_MIN_RANK: int = STATUS_RANK["coding-complete"]  # 2
+
 
 def _validate_web_deploy_evidence(evidence: dict) -> Tuple[bool, str]:
     """Validate web_deploy_evidence structure for deploy-success (ENC-ISS-092).
@@ -757,6 +783,68 @@ def _validate_code_on_main_evidence(
     # Stamp verification flag for audit trail
     evidence["github_verified"] = True
     return True, ""
+
+
+# ---------------------------------------------------------------------------
+# ENC-ISS-106: Subtask lifecycle gate
+# ---------------------------------------------------------------------------
+
+
+def _validate_subtask_gate(
+    project_id: str,
+    task_id: str,
+    task: dict,
+    target_status: str,
+) -> Optional[dict]:
+    """Enforce that parent tasks cannot advance lifecycle stages unless all
+    direct children have reached at least that stage.
+
+    Returns ``None`` if validation passes (or gate does not apply).
+    Returns an ``_error()`` response dict if validation fails.
+
+    Gate applies from coding-complete onward. Skipped for:
+      - Tasks with empty/missing subtask_ids (not a parent task)
+      - Target statuses below the gate threshold (open, in-progress)
+
+    Children with shortened arcs (e.g. no_code at 'closed') are handled
+    correctly because 'closed' has rank 8, which satisfies any target rank.
+    """
+    subtask_ids = task.get("subtask_ids") or []
+    if not subtask_ids:
+        return None
+
+    target_rank = STATUS_RANK.get(target_status)
+    if target_rank is None or target_rank < _SUBTASK_GATE_MIN_RANK:
+        return None
+
+    lagging: list = []
+    for child_id in subtask_ids:
+        child_id = str(child_id).strip()
+        if not child_id:
+            continue
+        child_status_code, child_task = _get_task(project_id, child_id)
+        if child_status_code != 200:
+            lagging.append((child_id, "not_found"))
+            continue
+        child_current = (child_task.get("status") or "unknown").strip().lower()
+        child_rank = STATUS_RANK.get(child_current, -1)
+        if child_rank < target_rank:
+            lagging.append((child_id, child_current))
+
+    if not lagging:
+        return None
+
+    detail_lines = [f"  - {cid} ({cstatus})" for cid, cstatus in lagging[:20]]
+    if len(lagging) > 20:
+        detail_lines.append(f"  ... and {len(lagging) - 20} more")
+    return _error(400, (
+        f"Cannot advance {task_id} to '{target_status}': "
+        f"{len(lagging)} child task(s) have not reached this stage "
+        f"(ENC-ISS-106):\n"
+        + "\n".join(detail_lines)
+        + f"\nAdvance all child tasks to '{target_status}' or beyond "
+        f"before advancing the parent."
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -988,6 +1076,17 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                     f"component registry (ENC-FTR-041). Update task.transition_type to at least "
                     f"'{required_type}', or fix the component registration."
                 ))
+
+    # --- ENC-ISS-106: Subtask lifecycle gate ---
+    # Parent tasks (those with subtask_ids) cannot advance from coding-complete
+    # onward unless all direct children have reached at least that same stage.
+    # Children with shortened arcs (no_code at 'closed') satisfy any stage.
+    if target_status != "in-progress":
+        subtask_error = _validate_subtask_gate(
+            project_id, task_id, task, target_status,
+        )
+        if subtask_error is not None:
+            return subtask_error
 
     # --- Per-status gate logic ---
     response_extras: dict = {}
