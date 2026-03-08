@@ -1370,18 +1370,69 @@ def _normalize_legacy_error_payload(
     default_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     if isinstance(response_body, dict):
+        envelope = response_body.get("error_envelope")
+        if isinstance(envelope, dict):
+            code = str(envelope.get("code") or default_code or _error_code_from_http_status(status_code)).strip().upper()
+            message = str(
+                envelope.get("message")
+                or response_body.get("error")
+                or f"Request failed with status {status_code}"
+            )
+            retryable = bool(
+                envelope.get(
+                    "retryable",
+                    code in {"TIMEOUT", "UPSTREAM_ERROR", "RATE_LIMITED"},
+                )
+            )
+            details = envelope.get("details")
+            if not isinstance(details, dict):
+                details = {}
+            merged_details = dict(details)
+            for key, value in response_body.items():
+                if key in {"success", "error", "error_envelope"}:
+                    continue
+                merged_details.setdefault(key, value)
+            return {
+                "success": False,
+                "error": message,
+                "error_envelope": {
+                    "code": code,
+                    "message": message,
+                    "retryable": retryable,
+                    "details": merged_details,
+                },
+                **merged_details,
+            }
         existing = response_body.get("error")
         if isinstance(existing, dict) and {"code", "message", "retryable"}.issubset(existing.keys()):
             return response_body
         if isinstance(existing, str):
             code = default_code or _error_code_from_http_status(status_code)
-            return _error_payload(code, existing, retryable=code in {"TIMEOUT", "UPSTREAM_ERROR", "RATE_LIMITED"})
+            return {
+                "success": False,
+                "error": existing,
+                "error_envelope": {
+                    "code": code,
+                    "message": existing,
+                    "retryable": code in {"TIMEOUT", "UPSTREAM_ERROR", "RATE_LIMITED"},
+                    "details": {},
+                },
+            }
     code = default_code or _error_code_from_http_status(status_code)
     message = (
         response_body if isinstance(response_body, str)
         else f"Request failed with status {status_code}"
     )
-    return _error_payload(code, message, retryable=code in {"TIMEOUT", "UPSTREAM_ERROR", "RATE_LIMITED"})
+    return {
+        "success": False,
+        "error": message,
+        "error_envelope": {
+            "code": code,
+            "message": message,
+            "retryable": code in {"TIMEOUT", "UPSTREAM_ERROR", "RATE_LIMITED"},
+            "details": {},
+        },
+    }
 
 
 def _deploy_api_request(
