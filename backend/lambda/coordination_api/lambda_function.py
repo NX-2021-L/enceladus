@@ -266,6 +266,11 @@ ANTHROPIC_API_KEY_SECRET_ID = os.environ.get(
     "ANTHROPIC_API_KEY_SECRET_ID",
     "devops/coordination/anthropic/api-key",
 )
+BEDROCK_AGENT_RUNTIME_REGION = os.environ.get("BEDROCK_AGENT_RUNTIME_REGION", "us-east-1")
+BEDROCK_AGENT_ID = os.environ.get("BEDROCK_AGENT_ID", "")
+BEDROCK_AGENT_ALIAS_ID = os.environ.get("BEDROCK_AGENT_ALIAS_ID", "")
+BEDROCK_AGENT_ENABLE_TRACE = os.environ.get("BEDROCK_AGENT_ENABLE_TRACE", "false").lower() == "true"
+BEDROCK_AGENT_INSTRUCTIONS_URI = "governance://agents/bedrock-agent-instructions.md"
 ROTATION_WARNING_DAYS = int(os.environ.get("ROTATION_WARNING_DAYS", "14"))
 
 MAX_OUTCOMES = int(os.environ.get("MAX_OUTCOMES", "25"))
@@ -591,6 +596,7 @@ _sqs = None
 _sns = None
 _logs = None
 _lambda_client = None
+_bedrock_agent_runtime = None
 _mcp = CoordinationMcpClient()
 _secretsmanager = None
 _cognito = None
@@ -695,6 +701,17 @@ def _get_lambda_client():
             config=Config(retries={"max_attempts": 2, "mode": "standard"}),
         )
     return _lambda_client
+
+
+def _get_bedrock_agent_runtime():
+    global _bedrock_agent_runtime
+    if _bedrock_agent_runtime is None:
+        _bedrock_agent_runtime = boto3.client(
+            "bedrock-agent-runtime",
+            region_name=BEDROCK_AGENT_RUNTIME_REGION,
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _bedrock_agent_runtime
 
 
 def _feed_subscriptions_enabled() -> bool:
@@ -3934,6 +3951,200 @@ def _extract_openai_text_response(response_payload: Dict[str, Any]) -> str:
     return fallback[:2000]
 
 
+def _build_bedrock_dispatch_prompt(prompt: str, project_id: str) -> Tuple[str, Dict[str, Any]]:
+    base_prompt, governance_context = _build_managed_session_prompt(prompt, project_id)
+    instructions = _read_mcp_resource_text(BEDROCK_AGENT_INSTRUCTIONS_URI).strip()
+    if not instructions:
+        context = dict(governance_context)
+        context["bedrock_instructions_loaded"] = False
+        return base_prompt, context
+
+    context = dict(governance_context)
+    included = list(context.get("included_uris") or [])
+    if BEDROCK_AGENT_INSTRUCTIONS_URI not in included:
+        included.append(BEDROCK_AGENT_INSTRUCTIONS_URI)
+    context["included_uris"] = included
+    context["loaded"] = True
+    context["source"] = str(context.get("source") or "mcp_resources")
+    context["bedrock_instructions_loaded"] = True
+    section = f"### {BEDROCK_AGENT_INSTRUCTIONS_URI}\n{instructions}"
+    if section in base_prompt:
+        return base_prompt, context
+    merged = f"{base_prompt}\n\nBedrock agent policy context:\n{section}" if base_prompt else section
+    return merged, context
+
+
+def _decode_bedrock_chunk_text(raw: Any) -> str:
+    if isinstance(raw, (bytes, bytearray)):
+        return raw.decode("utf-8", errors="replace")
+    if isinstance(raw, str):
+        return raw
+    return ""
+
+
+def _dispatch_bedrock_api(request: Dict[str, Any], prompt: Optional[str], dispatch_id: str) -> Dict[str, Any]:
+    provider_session = request.get("provider_session") or {}
+    bedrock_config = provider_session.get("bedrock_config") if isinstance(provider_session, dict) else {}
+    if not isinstance(bedrock_config, dict):
+        bedrock_config = {}
+
+    agent_id = str(
+        bedrock_config.get("agent_id")
+        or bedrock_config.get("agentId")
+        or BEDROCK_AGENT_ID
+    ).strip()
+    agent_alias_id = str(
+        bedrock_config.get("agent_alias_id")
+        or bedrock_config.get("agentAliasId")
+        or BEDROCK_AGENT_ALIAS_ID
+    ).strip()
+    if not agent_id or not agent_alias_id:
+        raise RuntimeError("Bedrock agent dispatch requires agent_id and agent_alias_id configuration")
+
+    resolved_prompt = str(prompt or "").strip()
+    if not resolved_prompt:
+        initiative = str(request.get("initiative_title") or "").strip()
+        outcomes = [str(item).strip() for item in (request.get("outcomes") or []) if str(item).strip()]
+        lines = []
+        if initiative:
+            lines.append(f"Initiative: {initiative}")
+        if outcomes:
+            lines.append("Outcomes:")
+            lines.extend(f"- {item}" for item in outcomes)
+        resolved_prompt = "\n".join(lines).strip()
+    if not resolved_prompt:
+        raise RuntimeError("Missing prompt for bedrock_agent dispatch")
+
+    resolved_prompt, governance_context = _build_bedrock_dispatch_prompt(
+        resolved_prompt,
+        str(request.get("project_id") or ""),
+    )
+
+    session_id = str(
+        provider_session.get("session_id")
+        or provider_session.get("thread_id")
+        or f"{request.get('request_id')}-{dispatch_id}"
+    ).strip()
+    if not session_id:
+        session_id = f"bedrock-{uuid.uuid4().hex[:24]}"
+
+    invoke_payload: Dict[str, Any] = {
+        "agentId": agent_id,
+        "agentAliasId": agent_alias_id,
+        "sessionId": session_id[:100],
+        "inputText": resolved_prompt,
+    }
+    if BEDROCK_AGENT_ENABLE_TRACE or bool(bedrock_config.get("enable_trace")):
+        invoke_payload["enableTrace"] = True
+
+    started_at = _now_z()
+    started = time.perf_counter()
+    try:
+        response = _get_bedrock_agent_runtime().invoke_agent(**invoke_payload)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "ClientError")
+        _emit_structured_observability(
+            component="coordination_api",
+            event="dispatch_bedrock_api",
+            request_id=str(request.get("request_id") or ""),
+            dispatch_id=dispatch_id,
+            tool_name="bedrock-agent-runtime.invoke_agent",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_code=code,
+            extra={"execution_mode": "bedrock_agent"},
+        )
+        raise RuntimeError(f"Bedrock invoke_agent failed ({code})") from exc
+    except BotoCoreError as exc:
+        _emit_structured_observability(
+            component="coordination_api",
+            event="dispatch_bedrock_api",
+            request_id=str(request.get("request_id") or ""),
+            dispatch_id=dispatch_id,
+            tool_name="bedrock-agent-runtime.invoke_agent",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_code=exc.__class__.__name__,
+            extra={"execution_mode": "bedrock_agent"},
+        )
+        raise RuntimeError(f"Bedrock invoke_agent failed ({exc.__class__.__name__})") from exc
+
+    chunks: List[str] = []
+    trace_count = 0
+    completion_stream = response.get("completion")
+    if completion_stream is not None:
+        for event in completion_stream:
+            if not isinstance(event, dict):
+                continue
+            chunk = event.get("chunk")
+            if isinstance(chunk, dict):
+                text = _decode_bedrock_chunk_text(chunk.get("bytes"))
+                if text.strip():
+                    chunks.append(text.strip())
+            if isinstance(event.get("trace"), dict):
+                trace_count += 1
+
+    summary = "\n".join(part for part in chunks if part).strip()
+    if not summary:
+        summary = "Bedrock agent dispatch completed"
+
+    completed_at = _now_z()
+    request_id_header = str((response.get("ResponseMetadata") or {}).get("RequestId") or "")
+    execution_id = request_id_header or f"bedrock-{uuid.uuid4().hex[:16]}"
+    provider_result: Dict[str, Any] = {
+        "provider": "aws_bedrock_agent",
+        "session_id": session_id,
+        "thread_id": session_id,
+        "provider_session_id": execution_id,
+        "agent_id": agent_id,
+        "agent_alias_id": agent_alias_id,
+        "response_status": "completed",
+        "summary": summary[:2000],
+        "request_id": request_id_header,
+        "trace_count": trace_count,
+        "completed_at": completed_at,
+        "governance_context": {
+            "loaded": bool(governance_context.get("loaded")),
+            "source": str(governance_context.get("source") or "prompt_bootstrap_only"),
+            "resource_count": len(governance_context.get("included_uris") or []),
+            "truncated": bool(governance_context.get("truncated")),
+            "resources": list(governance_context.get("included_uris") or []),
+            "bedrock_instructions_loaded": bool(governance_context.get("bedrock_instructions_loaded")),
+        },
+    }
+
+    _emit_structured_observability(
+        component="coordination_api",
+        event="dispatch_bedrock_api",
+        request_id=str(request.get("request_id") or ""),
+        dispatch_id=dispatch_id,
+        tool_name="bedrock-agent-runtime.invoke_agent",
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        error_code="",
+        extra={
+            "execution_mode": "bedrock_agent",
+            "request_id_header": request_id_header,
+            "trace_count": trace_count,
+            "governance_loaded": bool(governance_context.get("loaded")),
+            "governance_resource_count": len(governance_context.get("included_uris") or []),
+        },
+    )
+
+    return {
+        "dispatch_id": dispatch_id,
+        "execution_id": execution_id,
+        "execution_mode": "bedrock_agent",
+        "provider": "aws_bedrock_agent",
+        "transport": "bedrock_agent_runtime",
+        "api_endpoint": f"bedrock-agent-runtime:{BEDROCK_AGENT_RUNTIME_REGION}",
+        "project_id": request.get("project_id"),
+        "coordination_request_id": request.get("request_id"),
+        "provider_secret_refs": [],
+        "sent_at": started_at,
+        "completed_at": completed_at,
+        "status": "succeeded",
+        "provider_result": provider_result,
+    }
+
+
 def _dispatch_openai_codex_api(
     request: Dict[str, Any],
     prompt: Optional[str],
@@ -7143,6 +7354,11 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "supported": True,
                         "description": "AWS Step Functions / Lambda / CodeBuild native execution.",
                     },
+                    {
+                        "mode": "bedrock_agent",
+                        "supported": bool(BEDROCK_AGENT_ID and BEDROCK_AGENT_ALIAS_ID),
+                        "description": "AWS Bedrock Agent Runtime managed session execution.",
+                    },
                 ],
                 "providers": {
                     "openai_codex": {
@@ -7229,6 +7445,16 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "callback_mechanism": "EventBridge event or SQS message",
                         "eventbridge_bus": CALLBACK_EVENTBRIDGE_BUS,
                         "detail_type": CALLBACK_EVENT_DETAIL_TYPE,
+                    },
+                    "aws_bedrock_agent": {
+                        "status": "active" if (BEDROCK_AGENT_ID and BEDROCK_AGENT_ALIAS_ID) else "misconfigured",
+                        "managed_sessions": True,
+                        "execution_modes": ["bedrock_agent"],
+                        "runtime_region": BEDROCK_AGENT_RUNTIME_REGION,
+                        "agent_id": BEDROCK_AGENT_ID or None,
+                        "agent_alias_id": BEDROCK_AGENT_ALIAS_ID or None,
+                        "governance_context_source": BEDROCK_AGENT_INSTRUCTIONS_URI,
+                        "callback_mechanism": "Direct Bedrock Agent Runtime response (synchronous)",
                     },
                 },
                 "host_v2": {
@@ -7722,7 +7948,7 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                 **(request.get("provider_session") or {}),
                 **provider_session,
             }
-            for key in ("model", "thread_id", "fork_from_thread_id", "max_turns"):
+            for key in ("model", "thread_id", "fork_from_thread_id", "max_turns", "bedrock_config"):
                 value = provider_config.get(key)
                 if value not in (None, ""):
                     merged_provider_session[key] = value
@@ -7772,7 +7998,12 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
     current_attempt = dispatch_attempts + 1
 
     try:
-        direct_dispatch_mode = execution_mode in {"claude_agent_sdk", "codex_app_server", "codex_full_auto"}
+        direct_dispatch_mode = execution_mode in {
+            "claude_agent_sdk",
+            "codex_app_server",
+            "codex_full_auto",
+            "bedrock_agent",
+        }
         uses_host_dispatch = not direct_dispatch_mode
         uses_fleet_dispatch = uses_host_dispatch and host_allocation in {"auto", "fleet"} and _fleet_launch_ready()
         if uses_host_dispatch and not allow_host_concurrency_override:
@@ -7844,6 +8075,12 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                 dispatch_id=dispatch_id,
                 execution_mode=execution_mode,
             )
+        elif execution_mode == "bedrock_agent":
+            dispatch_meta = _dispatch_bedrock_api(
+                request=request,
+                prompt=prompt,
+                dispatch_id=dispatch_id,
+            )
         else:
             dispatch_meta = _send_dispatch(
                 request,
@@ -7873,6 +8110,11 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
             running_reason = "OpenAI Responses API dispatch accepted"
             running_extra = {"execution_id": dispatch_meta.get("execution_id")}
             running_provider = planned_provider or "openai_codex"
+            running_summary = f"Dispatch started (execution_id={dispatch_meta.get('execution_id')})"
+        elif execution_mode == "bedrock_agent":
+            running_reason = "Bedrock Agent API dispatch accepted"
+            running_extra = {"execution_id": dispatch_meta.get("execution_id")}
+            running_provider = planned_provider or "aws_bedrock_agent"
             running_summary = f"Dispatch started (execution_id={dispatch_meta.get('execution_id')})"
         else:
             running_extra.update(
@@ -7915,7 +8157,7 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
             end_ts=str(dispatch_meta.get("sent_at") or now),
         )
 
-        if execution_mode in {"claude_agent_sdk", "codex_app_server", "codex_full_auto"}:
+        if execution_mode in {"claude_agent_sdk", "codex_app_server", "codex_full_auto", "bedrock_agent"}:
             provider_result = dispatch_meta.get("provider_result") or {}
             terminal_state = str(dispatch_meta.get("status") or "succeeded").strip().lower()
             if terminal_state not in _VALID_TERMINAL_STATES:
@@ -7956,7 +8198,12 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
             dispatch_meta["status"] = terminal_state
             dispatch_meta["provider_result"] = provider_result
 
-            provider_label = "Claude API request" if execution_mode == "claude_agent_sdk" else "OpenAI Responses request"
+            if execution_mode == "claude_agent_sdk":
+                provider_label = "Claude API request"
+            elif execution_mode == "bedrock_agent":
+                provider_label = "Bedrock Agent request"
+            else:
+                provider_label = "OpenAI Responses request"
             terminal_summary = str(
                 provider_result.get("summary")
                 or (
@@ -7997,7 +8244,7 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                     "stop_reason": provider_result.get("stop_reason"),
                 }
                 release_reason = "claude_api_terminal"
-            else:
+            elif execution_mode in {"codex_app_server", "codex_full_auto"}:
                 request["provider_session"] = {
                     **(request.get("provider_session") or {}),
                     "provider": "openai_codex",
@@ -8021,6 +8268,28 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                     "response_status": provider_result.get("response_status"),
                 }
                 release_reason = "openai_api_terminal"
+            else:
+                request["provider_session"] = {
+                    **(request.get("provider_session") or {}),
+                    "provider": "aws_bedrock_agent",
+                    "session_id": provider_result.get("session_id"),
+                    "thread_id": provider_result.get("thread_id") or provider_result.get("session_id"),
+                    "provider_session_id": provider_result.get("provider_session_id"),
+                    "agent_id": provider_result.get("agent_id"),
+                    "agent_alias_id": provider_result.get("agent_alias_id"),
+                    "completed_at": provider_result.get("completed_at"),
+                    "execution_id": dispatch_meta.get("execution_id"),
+                }
+                result_provider = "aws_bedrock_agent"
+                result_details = {
+                    "provider_result": provider_result,
+                    "transport": dispatch_meta.get("transport"),
+                    "api_endpoint": dispatch_meta.get("api_endpoint"),
+                    "request_id": provider_result.get("request_id"),
+                    "response_status": provider_result.get("response_status"),
+                    "trace_count": provider_result.get("trace_count"),
+                }
+                release_reason = "bedrock_agent_terminal"
             request = _append_dispatch_worklog(
                 request,
                 dispatch_id=dispatch_id,
