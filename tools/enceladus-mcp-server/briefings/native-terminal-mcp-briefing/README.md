@@ -16,6 +16,7 @@ This folder contains terminal-optimized init files for MCP-only Enceladus sessio
 3. Paste `SESSION_BRIEFING_TEMPLATE-TERMINAL.md` as the first prompt.
 
 The terminal template enforces setup-if-missing MCP bootstrap before governance initialization.
+The startup path now also requires the lifecycle primer so terminal sessions know CAI/CCI, PR-body placement, strict-mode merge rules, and worktree CWD discipline before first PR creation.
 
 ## Path Rule
 

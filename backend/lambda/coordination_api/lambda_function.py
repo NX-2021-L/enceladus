@@ -318,11 +318,18 @@ ENABLE_MCP_GOVERNANCE_PROMPT = os.environ.get("ENABLE_MCP_GOVERNANCE_PROMPT", "t
 GOVERNANCE_PROMPT_MAX_CHARS = int(os.environ.get("GOVERNANCE_PROMPT_MAX_CHARS", "120000"))
 GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK = (
     "governance://agents.md",
+    "governance://agents/lifecycle-primer.md",
+    "governance://agents/bootstrap-template.md",
     "governance://agents/agents-reference-project-tracking.md",
     "governance://agents/agents-reference-guide-numbering.md",
     "governance://agents/agents-reference-markdown.md",
     "governance://agents/agent-manifest.json",
     "governance://agents/agent-schema.json",
+)
+_GOVERNANCE_PROMPT_PRIORITY_URIS = (
+    "governance://agents.md",
+    "governance://agents/lifecycle-primer.md",
+    "governance://agents/bootstrap-template.md",
 )
 
 _VALID_EXECUTION_MODES = {
@@ -3708,12 +3715,10 @@ def _list_mcp_governance_resource_uris() -> List[str]:
     if not uris:
         return list(GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK)
 
-    # Keep bootstrap anchor first, then deterministic sort for all remaining URIs.
     ordered = sorted(set(uris))
-    if "governance://agents.md" in ordered:
-        ordered.remove("governance://agents.md")
-        ordered.insert(0, "governance://agents.md")
-    return ordered
+    prioritized: List[str] = [uri for uri in _GOVERNANCE_PROMPT_PRIORITY_URIS if uri in ordered]
+    remainder = [uri for uri in ordered if uri not in prioritized]
+    return prioritized + remainder
 
 
 def _build_mcp_governance_context(project_id: str) -> Dict[str, Any]:
