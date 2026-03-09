@@ -18,11 +18,15 @@ Bootstrap contract:
    - connection_health
    - coordination_capabilities
    - governance_hash
-4) Read governance agents.md using governance_get("agents.md") and execute all required initialization steps from that file.
+4) Read governance agents.md using governance_get("agents.md"), then complete standard init by loading:
+   - governance_get("agents/bootstrap-template.md")
+   - governance_get("agents/lifecycle-primer.md")
+   Execute all required initialization steps from those governance resources.
    (Fallback if governance_get is unavailable: aws s3 cp s3://jreese-net/governance/live/agents.md - --profile enceladus-agent)
 
 Operating mode:
 - MCP-only for Enceladus system interactions.
+- Lifecycle primer is mandatory before code work: know checkout arc, CAI/CCI flow, PR-body CCI placement, component strictness matching, and worktree CWD rules before first PR attempt.
 - Do not use direct tracker/docstore CLI, boto3 scripts, or direct AWS API/CLI for normal task execution.
 - If bootstrap fails, stop and report the exact failure stage and remediation needed.
 ```

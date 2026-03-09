@@ -341,6 +341,7 @@ cfg = pathlib.Path(os.environ["CODEX_CONFIG_FILE"])
 text = cfg.read_text() if cfg.exists() else ""
 
 # Remove prior managed block and direct server sections to avoid duplicate TOML keys.
+text = re.sub(r"(?ms)^# BEGIN ENCELADUS CODEX STARTUP \(managed\)\n.*?# END ENCELADUS CODEX STARTUP \(managed\)\n?", "", text)
 text = re.sub(r"(?ms)^# BEGIN ENCELADUS MCP PROFILE \(managed\)\n.*?# END ENCELADUS MCP PROFILE \(managed\)\n?", "", text)
 aliases = [os.environ["MCP_PRIMARY_ALIAS"]]
 secondary = os.environ.get("MCP_SECONDARY_ALIAS", "").strip()
@@ -358,9 +359,39 @@ for section in aliases:
         text,
     )
 
+def _ensure_setting(existing: str, key: str, value_literal: str) -> str:
+    if re.search(rf"(?m)^{re.escape(key)}\s*=", existing):
+        return existing
+    existing = existing.rstrip()
+    if existing:
+        existing += "\n"
+    return existing + f"{key} = {value_literal}\n"
+
+text = _ensure_setting(text, "project_doc_max_bytes", "131072")
+text = _ensure_setting(
+    text,
+    "project_doc_fallback_filenames",
+    '["AGENTS.md", "agents.md", "AGENT.md", "README.agents.md"]',
+)
+text = _ensure_setting(
+    text,
+    "project_root_markers",
+    '[".git", "AGENTS.md", "agents.md", "projects.yaml"]',
+)
+
 text = text.rstrip()
 if text:
     text += "\n\n"
+
+text += (
+    "# BEGIN ENCELADUS CODEX STARTUP (managed)\n"
+    "# Codex startup contract for Enceladus:\n"
+    "# - Workspace AGENTS.md is loaded at session start via project_doc_fallback_filenames.\n"
+    "# - During init, load governance://agents/bootstrap-template.md and governance://agents/lifecycle-primer.md.\n"
+    "# - Use MCP checkout_task / advance_task_status for the CAI -> CCI lifecycle; put CCI-... in the PR body.\n"
+    "# - Prefer non-interactive git flows and operate from the task worktree CWD, not the shared main checkout.\n"
+    "# END ENCELADUS CODEX STARTUP (managed)\n\n"
+)
 
 py_bin = os.environ["PYTHON_BIN"]
 server_py = os.environ["SERVER_PY"]
@@ -437,10 +468,14 @@ else
 fi
 
 # Write global ~/.codex/AGENTS.md (Codex bootstrap) if missing or outdated.
-# Rewrite if: absent, uses old governance_get full-dictionary load (ENC-ISS-087),
-# or references deprecated enceladus-local alias (ENC-TSK-821).
+# Rewrite if: absent, missing lifecycle primer references, uses old governance_get
+# full-dictionary load (ENC-ISS-087), or references deprecated enceladus-local alias
+# (ENC-TSK-821).
 CODEX_GLOBAL_AGENTS_MD="${CODEX_SETTINGS_DIR}/AGENTS.md"
-if [ ! -f "${CODEX_GLOBAL_AGENTS_MD}" ] || ! grep -q "bootstrap-template" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null; then
+if [ ! -f "${CODEX_GLOBAL_AGENTS_MD}" ] \
+    || ! grep -q "bootstrap-template" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null \
+    || ! grep -q "lifecycle-primer" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null \
+    || grep -q "enceladus-local" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null; then
     cat > "${CODEX_GLOBAL_AGENTS_MD}" << 'GLOBAL_AGENTS_EOF'
 # Codex Bootstrap
 
@@ -451,8 +486,20 @@ Initialize by running (in order):
 2. `mcp: governance_get("agents.md")` — load full governance rules
 3. `mcp: governance_dictionary` — load compact enum/constraint index
 4. `mcp: governance_get("agents/bootstrap-template.md")` — load session init protocol
+5. `mcp: governance_get("agents/lifecycle-primer.md")` — load the git lifecycle primer
 
-Follow all instructions in `agents.md` before proceeding with any work.
+Follow all instructions in `agents.md` and `agents/lifecycle-primer.md` before proceeding with any work.
+
+## Git Lifecycle Quick Reference
+
+- Set `task.components` and `task.transition_type` before `checkout_task`.
+- `checkout_task` is required before any code changes; work only inside the task worktree.
+- `advance_task_status("coding-complete")` returns `CAI-...`; `advance_task_status("committed", {"commit_sha": ...})` returns `CCI-...`.
+- The PR body must include the `CCI-...` token before `PR Commit Gate` will pass.
+- Run `git` / `gh` from the task worktree CWD, not the shared main checkout.
+- Branch protection is strict: merge or rebase `origin/main` into the task branch before attempting to merge.
+- GitHub Actions re-runs can observe stale PR-body payloads; if the CCI or body changed, push or update the PR before assuming the gate saw it.
+- See `governance://agents/lifecycle-primer.md` for the full gate matrix, component strictness rules, and evidence requirements.
 GLOBAL_AGENTS_EOF
     echo "[SUCCESS] Global Codex AGENTS.md written to ${CODEX_GLOBAL_AGENTS_MD}"
 else
@@ -460,11 +507,15 @@ else
 fi
 
 # Write workspace AGENTS.md (Codex bootstrap) if missing or outdated.
-# Rewrite if: absent, uses old governance_get full-dictionary load (ENC-ISS-087),
-# or references deprecated enceladus-local alias (ENC-TSK-821).
+# Rewrite if: absent, missing lifecycle primer references, uses old governance_get
+# full-dictionary load (ENC-ISS-087), or references deprecated enceladus-local alias
+# (ENC-TSK-821).
 # The file is intentionally minimal — agents load full rules from governance dynamically.
 WORKSPACE_AGENTS_MD="${WORKSPACE_ROOT}/AGENTS.md"
-if [ ! -f "${WORKSPACE_AGENTS_MD}" ] || ! grep -q "bootstrap-template" "${WORKSPACE_AGENTS_MD}" 2>/dev/null; then
+if [ ! -f "${WORKSPACE_AGENTS_MD}" ] \
+    || ! grep -q "bootstrap-template" "${WORKSPACE_AGENTS_MD}" 2>/dev/null \
+    || ! grep -q "lifecycle-primer" "${WORKSPACE_AGENTS_MD}" 2>/dev/null \
+    || grep -q "enceladus-local" "${WORKSPACE_AGENTS_MD}" 2>/dev/null; then
     cat > "${WORKSPACE_AGENTS_MD}" << 'AGENTS_EOF'
 # Enceladus Workspace — Agent Bootstrap
 
@@ -477,11 +528,23 @@ Source: `tools/enceladus-mcp-server/server.py`
 2. `mcp: governance_get("agents.md")` — **load full governance rules and execute all steps**
 3. `mcp: governance_dictionary` — load compact enum/constraint index
 4. `mcp: governance_get("agents/bootstrap-template.md")` — load session init protocol
-5. `mcp: tracker_list(project_id="enceladus", record_type="task", status="open")` — open tasks
-6. `mcp: tracker_pending_updates(project_id="enceladus")` — pending updates
+5. `mcp: governance_get("agents/lifecycle-primer.md")` — load lifecycle gates before any PR work
+6. `mcp: tracker_list(project_id="enceladus", record_type="task", status="open")` — open tasks
+7. `mcp: tracker_pending_updates(project_id="enceladus")` — pending updates
 
 All operating rules, tool reference, and task policies are in `governance://agents.md`.
-Do not proceed with any work until steps 1-4 are complete.
+Do not proceed with any work until steps 1-5 are complete.
+
+## Git Lifecycle Quick Reference
+
+- Set `task.components` and `task.transition_type` before `checkout_task`.
+- `checkout_task` is required before code changes; never edit from the shared main checkout.
+- `coding-complete` returns `CAI-...`; `committed` requires `commit_sha` and returns `CCI-...`.
+- Put the `CCI-...` token in the PR body before opening or updating the PR.
+- Run `git` / `gh` from the task worktree CWD so branch, PR, and status commands target the right repo state.
+- If GitHub says the branch is behind, merge or rebase `origin/main` in the worktree before merging.
+- Re-running PR workflows after only editing the PR body can use stale payloads; push or update the PR body before assuming the CCI gate saw the change.
+- Read `governance://agents/lifecycle-primer.md` for the full lifecycle arc, strictness rank table, and evidence schema.
 
 ## Pre-Code Protocol (every task pickup)
 
@@ -499,6 +562,46 @@ AGENTS_EOF
     echo "[SUCCESS] Workspace AGENTS.md written to ${WORKSPACE_AGENTS_MD}"
 else
     echo "[INFO] Workspace AGENTS.md already present at ${WORKSPACE_AGENTS_MD}"
+fi
+
+# Write global ~/.claude/CLAUDE.md quick reference for Claude Code sessions.
+# This file is intentionally concise so it stays in always-loaded context.
+mkdir -p "${CLAUDE_SETTINGS_DIR}"
+CLAUDE_GLOBAL_MD="${CLAUDE_SETTINGS_DIR}/CLAUDE.md"
+if [ ! -f "${CLAUDE_GLOBAL_MD}" ] \
+    || ! grep -q "ENCELADUS_GIT_LIFECYCLE_QUICK_REFERENCE" "${CLAUDE_GLOBAL_MD}" 2>/dev/null \
+    || ! grep -q "lifecycle-primer" "${CLAUDE_GLOBAL_MD}" 2>/dev/null; then
+    cat > "${CLAUDE_GLOBAL_MD}" << 'CLAUDE_EOF'
+# Enceladus Claude Bootstrap
+
+Source: `governance://agents/bootstrap-template.md`
+
+## Session Init
+
+1. `connection_health()`
+2. `governance_get("agents.md")`
+3. `governance_dictionary()`
+4. `governance_get("agents/bootstrap-template.md")`
+5. `governance_get("agents/lifecycle-primer.md")`
+
+## Git Lifecycle Quick Reference
+
+<!-- ENCELADUS_GIT_LIFECYCLE_QUICK_REFERENCE -->
+
+| Rule | Why |
+| --- | --- |
+| Set `components` + `transition_type` before `checkout_task` | Checkout enforcement and strictness matching happen before code work starts |
+| `coding-complete` returns `CAI`; `committed` with `commit_sha` returns `CCI` | The checkout service gates commit and PR progression |
+| Put `CCI-...` in the PR body | `PR Commit Gate` rejects PRs without it |
+| Run `git` / `gh` from the task worktree CWD | Avoid wrong-repo commands and shared-checkout mutations |
+| Merge or rebase `origin/main` before merge | Strict branch protection blocks stale branches |
+| Re-run with care after PR body edits | GitHub workflow payloads can lag body-only updates |
+
+See `governance://agents/lifecycle-primer.md` for the full lifecycle arc, evidence schema, and component strictness ranking.
+CLAUDE_EOF
+    echo "[SUCCESS] Global Claude bootstrap written to ${CLAUDE_GLOBAL_MD}"
+else
+    echo "[INFO] Global Claude bootstrap already present at ${CLAUDE_GLOBAL_MD}"
 fi
 
 # Optional stdio smoke test so install failures surface immediately.
