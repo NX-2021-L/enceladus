@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-08.8",
-  "updated_at": "2026-03-08T23:35:00Z",
+  "version": "2026-03-09.1",
+  "updated_at": "2026-03-09T00:30:05Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -503,7 +503,7 @@
         },
         "file_name": {
           "type": "string",
-          "definition": "Governance file name that was updated (e.g. 'agents.md', 'agents/dispatch-heuristics.md'). Informational \u2014 sync always runs _sync_governance_documents() for all governance files to ensure consistency.",
+          "definition": "Governance file name that was updated (e.g. 'agents.md', 'agents/lifecycle-primer.md'). Informational \u2014 sync always runs _sync_governance_documents() for all governance files to ensure consistency.",
           "context": "direct Lambda invocation payload"
         },
         "content_hash": {
@@ -514,6 +514,9 @@
       },
       "covered_files": [
         "agents.md",
+        "agents/bootstrap-template.md",
+        "agents/lifecycle-primer.md",
+        "agents/bedrock-agent-instructions.md",
         "agents/deployment-process-references.md",
         "agents/agent-schema.json",
         "agents/agent-manifest.json",
@@ -928,10 +931,13 @@
           "type": "string",
           "enum": [
             "agents.md",
+            "agents/bootstrap-template.md",
+            "agents/lifecycle-primer.md",
+            "agents/bedrock-agent-instructions.md",
             "agents/plan-capture.md",
             "governance_data_dictionary.json"
           ],
-          "usage_guidance": "Recognized governance file names. 'agents.md' is the primary session-init governance spec. Files under 'agents/' are supplemental protocol specs (e.g., 'agents/plan-capture.md' — the ENC-FTR-040 plan capture protocol, load with governance_get after ExitPlanMode approval). 'governance_data_dictionary.json' is the machine-readable schema/enum dictionary; load at session init via governance_get(\"governance_data_dictionary.json\"). All file names under 'agents/' are accepted by the API even if not listed here."
+          "usage_guidance": "Recognized governance file names. 'agents.md' is the primary session-init governance spec. 'agents/bootstrap-template.md' defines the required session initialization order. 'agents/lifecycle-primer.md' is the provider-agnostic git lifecycle quick reference. 'agents/bedrock-agent-instructions.md' carries Bedrock-specific dispatch guidance. 'agents/plan-capture.md' is the ENC-FTR-040 plan capture protocol and is typically loaded only after ExitPlanMode approval. 'governance_data_dictionary.json' is the machine-readable schema/enum dictionary; load at session init via governance_get(\"governance_data_dictionary.json\"). All file names under 'agents/' are accepted by the API even if not listed here."
         },
         "uri": {
           "type": "string",

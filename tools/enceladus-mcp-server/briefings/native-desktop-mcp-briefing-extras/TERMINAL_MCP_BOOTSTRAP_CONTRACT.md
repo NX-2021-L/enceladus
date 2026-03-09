@@ -25,7 +25,9 @@ Define one idempotent startup contract for terminal sessions that may begin with
      - `governance_hash`
 4. Initialize governance.
    - Read `governance://agents.md`.
-   - Continue standard governance/session initialization from that file.
+   - Read `governance://agents/bootstrap-template.md`.
+   - Read `governance://agents/lifecycle-primer.md`.
+   - Continue standard governance/session initialization from those governance resources.
 5. Enforce MCP-only execution.
    - Use MCP tools/resources for all Enceladus reads/writes.
    - Do not use direct `tracker.py`/`docstore.py`/`boto3`/`aws` calls during normal session task execution.

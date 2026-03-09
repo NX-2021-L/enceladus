@@ -2,7 +2,7 @@
 
 ## Goal
 
-Prepare a machine so native desktop UI sessions can start with Enceladus MCP and initialize through `governance://agents.md`.
+Prepare a machine so native desktop UI sessions can start with Enceladus MCP and initialize through `governance://agents.md` plus the lifecycle primer.
 
 ## Minimum Prerequisites
 
@@ -62,6 +62,11 @@ ENCELADUS_WORKSPACE_ROOT="$(pwd)" \
 tools/enceladus-mcp-server/install_profile.sh
 ```
 
+The installer refreshes:
+- `~/.codex/config.toml`
+- `~/.codex/AGENTS.md`
+- `~/.claude/CLAUDE.md`
+
 5. Restart the desktop client (or start a fresh session) so the MCP server process reloads updated profile/runtime paths.
 
 6. Start a desktop UI session and paste `SESSION_BRIEFING_TEMPLATE-UI.md`.
@@ -71,6 +76,6 @@ tools/enceladus-mcp-server/install_profile.sh
 After the init prompt, the agent should:
 
 1. Resolve active Enceladus server alias (`enceladus` or `enceladus-local`).
-2. Read `governance://agents.md` via `governance_get("agents.md")`.
+2. Read `governance://agents.md`, `governance://agents/bootstrap-template.md`, and `governance://agents/lifecycle-primer.md`.
 3. Validate MCP readiness (`connection_health`, `coordination_capabilities`, `governance_hash`).
-4. Proceed with standard MCP-only session initialization.
+4. Proceed with standard MCP-only session initialization with lifecycle gates already loaded.

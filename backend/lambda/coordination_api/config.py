@@ -324,6 +324,8 @@ ENABLE_MCP_GOVERNANCE_PROMPT = os.environ.get("ENABLE_MCP_GOVERNANCE_PROMPT", "t
 GOVERNANCE_PROMPT_MAX_CHARS = int(os.environ.get("GOVERNANCE_PROMPT_MAX_CHARS", "120000"))
 GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK = (
     "governance://agents.md",
+    "governance://agents/lifecycle-primer.md",
+    "governance://agents/bootstrap-template.md",
     "governance://agents/agents-reference-project-tracking.md",
     "governance://agents/agents-reference-guide-numbering.md",
     "governance://agents/agents-reference-markdown.md",

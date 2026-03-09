@@ -50,9 +50,12 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         return_value={
             "loaded": True,
             "source": "mcp_resources",
-            "included_uris": ["governance://agents.md"],
+            "included_uris": [
+                "governance://agents.md",
+                "governance://agents/lifecycle-primer.md",
+            ],
             "truncated": False,
-            "text": "### governance://agents.md\n# Agent Rules",
+            "text": "### governance://agents.md\n# Agent Rules\n\n### governance://agents/lifecycle-primer.md\n# Lifecycle Primer",
         },
     )
     def test_build_managed_session_prompt_includes_governance_bundle(self, _mock_context):
@@ -62,6 +65,7 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         )
         self.assertTrue(prompt.startswith("agents.md project=devops"))
         self.assertIn("governance://agents.md", prompt)
+        self.assertIn("governance://agents/lifecycle-primer.md", prompt)
         self.assertIn("Dispatch task:\nExecute outcome checks", prompt)
         self.assertTrue(meta["loaded"])
         self.assertEqual(meta["source"], "mcp_resources")
@@ -87,6 +91,36 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
             "agents.md project=devops\n\nExecute outcome checks",
         )
         self.assertFalse(meta["loaded"])
+
+    @patch.object(coordination_lambda, "_load_mcp_server_module")
+    def test_list_mcp_governance_resource_uris_prioritizes_lifecycle_primer(self, mock_load_module):
+        class _FakeModule:
+            async def list_resources(self):
+                return [
+                    {"uri": "governance://agents/agents-reference-markdown.md"},
+                    {"uri": "governance://agents/bootstrap-template.md"},
+                    {"uri": "governance://agents/lifecycle-primer.md"},
+                    {"uri": "governance://agents.md"},
+                ]
+
+        mock_load_module.return_value = _FakeModule()
+
+        ordered = coordination_lambda._list_mcp_governance_resource_uris()
+
+        self.assertEqual(
+            ordered[:3],
+            [
+                "governance://agents.md",
+                "governance://agents/lifecycle-primer.md",
+                "governance://agents/bootstrap-template.md",
+            ],
+        )
+
+    @patch.object(coordination_lambda, "_load_mcp_server_module", side_effect=RuntimeError("boom"))
+    def test_list_mcp_governance_resource_uris_fallback_includes_lifecycle_primer(self, _mock_load):
+        ordered = coordination_lambda._list_mcp_governance_resource_uris()
+        self.assertIn("governance://agents/lifecycle-primer.md", ordered)
+        self.assertIn("governance://agents/bootstrap-template.md", ordered)
 
     def test_build_ssm_commands_preflight(self):
         request = {

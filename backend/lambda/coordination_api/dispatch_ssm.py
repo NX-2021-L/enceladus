@@ -688,12 +688,15 @@ def _list_mcp_governance_resource_uris() -> List[str]:
     if not uris:
         return list(GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK)
 
-    # Keep bootstrap anchor first, then deterministic sort for all remaining URIs.
+    priority = (
+        "governance://agents.md",
+        "governance://agents/lifecycle-primer.md",
+        "governance://agents/bootstrap-template.md",
+    )
     ordered = sorted(set(uris))
-    if "governance://agents.md" in ordered:
-        ordered.remove("governance://agents.md")
-        ordered.insert(0, "governance://agents.md")
-    return ordered
+    prioritized: List[str] = [uri for uri in priority if uri in ordered]
+    remainder = [uri for uri in ordered if uri not in prioritized]
+    return prioritized + remainder
 
 
 def _build_mcp_governance_context(project_id: str) -> Dict[str, Any]:
@@ -2428,5 +2431,4 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
     _update_request(request)
     _finalize_tracker_from_request(request)
     return request
-
 

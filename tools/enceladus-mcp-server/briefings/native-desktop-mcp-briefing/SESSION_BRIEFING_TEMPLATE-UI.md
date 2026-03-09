@@ -14,6 +14,9 @@ or cloud API access.
 Governance resource: governance://agents.md
 
 Resolve the active Enceladus MCP server alias, then read governance agents.md
-using governance_get("agents.md") and follow its session initialization instructions.
+using governance_get("agents.md"), then load:
+- governance_get("agents/bootstrap-template.md")
+- governance_get("agents/lifecycle-primer.md")
+Follow the session initialization instructions from those governance resources before any task work.
 (Fallback if governance_get is unavailable: aws s3 cp s3://jreese-net/governance/live/agents.md - --profile enceladus-agent)
 ```

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Prepare local terminal and host-v2 terminal sessions so they can bootstrap MCP if missing, then initialize via `governance://agents.md`.
+Prepare local terminal and host-v2 terminal sessions so they can bootstrap MCP if missing, then initialize via `governance://agents.md` plus the lifecycle primer.
 
 ## Minimum Prerequisites
 
@@ -62,6 +62,11 @@ ENCELADUS_WORKSPACE_ROOT="$(pwd)" \
 tools/enceladus-mcp-server/install_profile.sh
 ```
 
+The installer refreshes:
+- `~/.codex/config.toml`
+- `~/.codex/AGENTS.md`
+- `~/.claude/CLAUDE.md`
+
 5. Restart the terminal client session so MCP server runtime reloads updated profile/runtime paths.
 
 6. Start the terminal session and paste `SESSION_BRIEFING_TEMPLATE-TERMINAL.md`.
@@ -73,4 +78,5 @@ The agent should:
 1. Detect whether MCP server `enceladus` is configured.
 2. Install/repair profile if missing.
 3. Validate `connection_health`, `coordination_capabilities`, and `governance_hash`.
-4. Read `governance://agents.md` via `governance_get("agents.md")` and continue MCP-only workflow.
+4. Read `governance://agents.md`, `governance://agents/bootstrap-template.md`, and `governance://agents/lifecycle-primer.md`.
+5. Continue MCP-only workflow with lifecycle gate knowledge already loaded before the first PR attempt.
