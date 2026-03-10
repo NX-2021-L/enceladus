@@ -156,6 +156,10 @@ package_lambda() {
 }
 
 ensure_function_url() {
+  # CORS config: use ["*"] for AllowMethods (individual method names like "OPTIONS"
+  # exceed the 6-char member limit); use exact origin (no wildcard subdomains).
+  local cors_config='{"AllowOrigins":["https://claude.ai"],"AllowMethods":["*"],"AllowHeaders":["Content-Type","Authorization","Accept","Mcp-Session-Id"],"ExposeHeaders":["Mcp-Session-Id"],"AllowCredentials":true,"MaxAge":86400}'
+
   if aws lambda get-function-url-config \
     --function-name "${FUNCTION_NAME}" \
     --region "${REGION}" >/dev/null 2>&1; then
@@ -166,26 +170,14 @@ ensure_function_url() {
     aws lambda update-function-url-config \
       --function-name "${FUNCTION_NAME}" \
       --auth-type NONE \
-      --cors '{
-        "AllowOrigins": ["https://claude.ai", "https://*.claude.ai"],
-        "AllowMethods": ["GET", "POST", "DELETE", "OPTIONS"],
-        "AllowHeaders": ["Content-Type", "Authorization", "Accept", "Mcp-Session-Id"],
-        "ExposeHeaders": ["Mcp-Session-Id"],
-        "MaxAge": 86400
-      }' \
+      --cors "${cors_config}" \
       --region "${REGION}" >/dev/null || log "[WARNING] unable to update CORS"
   else
     log "[START] creating Function URL (NONE auth) with CORS: ${FUNCTION_NAME}"
     if ! aws lambda create-function-url-config \
       --function-name "${FUNCTION_NAME}" \
       --auth-type NONE \
-      --cors '{
-        "AllowOrigins": ["https://claude.ai", "https://*.claude.ai"],
-        "AllowMethods": ["GET", "POST", "DELETE", "OPTIONS"],
-        "AllowHeaders": ["Content-Type", "Authorization", "Accept", "Mcp-Session-Id"],
-        "ExposeHeaders": ["Mcp-Session-Id"],
-        "MaxAge": 86400
-      }' \
+      --cors "${cors_config}" \
       --region "${REGION}" >/dev/null; then
       log "[WARNING] unable to create Function URL (missing lambda:CreateFunctionUrlConfig?)."
       log "[WARNING] Lambda code/config deployment succeeded; configure Function URL separately."
@@ -194,6 +186,7 @@ ensure_function_url() {
     log "[END] created Function URL: ${FUNCTION_NAME}"
   fi
 
+  # Statement 1: lambda:InvokeFunctionUrl (required for NONE auth Function URLs)
   if aws lambda add-permission \
     --function-name "${FUNCTION_NAME}" \
     --statement-id FunctionURLAllowPublicAccess \
@@ -201,9 +194,23 @@ ensure_function_url() {
     --principal "*" \
     --function-url-auth-type NONE \
     --region "${REGION}" >/dev/null 2>&1; then
-    log "[OK] Function URL invoke permission added"
+    log "[OK] Function URL invoke permission added (InvokeFunctionUrl)"
   else
-    log "[WARNING] could not add Function URL invoke permission (or it already exists)."
+    log "[INFO] InvokeFunctionUrl permission already exists or could not be added."
+  fi
+
+  # Statement 2: lambda:InvokeFunction with InvokedViaFunctionUrl condition
+  # Required for Function URL to actually invoke the Lambda (AWS CLI 2.34+)
+  if aws lambda add-permission \
+    --function-name "${FUNCTION_NAME}" \
+    --statement-id FunctionURLAllowPublicInvoke \
+    --action lambda:InvokeFunction \
+    --principal "*" \
+    --invoked-via-function-url \
+    --region "${REGION}" >/dev/null 2>&1; then
+    log "[OK] Function URL invoke permission added (InvokeFunction)"
+  else
+    log "[INFO] InvokeFunction permission already exists or could not be added."
   fi
 }
 
