@@ -2870,15 +2870,14 @@ async def read_resource(uri: str) -> str:
         except Exception as exc:
             return f"# Failed to fetch governance resource {uri_text}: {exc}"
 
-    # projects://reference/{project_id}
+    # projects://reference/{project_id} (ENC-ISS-108: document store first)
     if uri_text.startswith("projects://reference/"):
         project_id = uri_text.replace("projects://reference/", "")
-        s3_key = f"{S3_REFERENCE_PREFIX}/{project_id}.md"
-        try:
-            resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=s3_key)
-            return resp["Body"].read().decode("utf-8")
-        except Exception as exc:
-            return f"# Failed to fetch reference for {project_id}: {exc}"
+        content, _source_info, error = _fetch_reference_content(project_id)
+        if content:
+            return content
+        error_msg = error.get("message", "not found") if error else "not found"
+        return f"# Failed to fetch reference for {project_id}: {error_msg}"
 
     return f"# Unknown resource URI: {uri_text}"
 
@@ -5091,7 +5090,88 @@ async def _check_document_policy(args: dict) -> list[TextContent]:
     return _result_text(evaluation)
 
 
-# --- Reference Search (DVP-TSK-293) ---
+# --- Reference Search (DVP-TSK-293, ENC-ISS-108) ---
+
+
+def _fetch_reference_content(project_id: str) -> tuple:
+    """Fetch reference document content, trying document store API first, then legacy S3.
+
+    Returns (content, source_info, error_payload) where:
+    - On success: (str, dict, None)
+    - On failure: (None, None, dict)
+
+    ENC-ISS-108: reference documents are now stored in the document store via
+    documents_put. Legacy S3 path (mobile/v1/reference/) is kept as fallback
+    for backwards compatibility (enceladus project).
+    """
+    # --- Try document store API first ---
+    try:
+        search_resp = _document_api_request(
+            "GET", "/search",
+            query={"project": project_id, "keyword": "reference"},
+        )
+        docs = []
+        if isinstance(search_resp, dict):
+            if search_resp.get("documents"):
+                docs = search_resp["documents"]
+            elif search_resp.get("results"):
+                docs = search_resp["results"]
+            elif isinstance(search_resp.get("data"), list):
+                docs = search_resp["data"]
+        elif isinstance(search_resp, list):
+            docs = search_resp
+
+        if docs:
+            doc = docs[0]
+            doc_id = doc.get("document_id") or doc.get("id", "")
+            if doc_id:
+                get_resp = _document_api_request(
+                    "GET",
+                    f"/{urllib.parse.quote(str(doc_id), safe='')}",
+                    query={"include_content": "true"},
+                )
+                doc_content = ""
+                if isinstance(get_resp, dict):
+                    doc_content = get_resp.get("content", "")
+                if doc_content:
+                    source_info = {
+                        "source": "document_store",
+                        "document_id": doc_id,
+                        "last_modified": get_resp.get("updated_at")
+                            or get_resp.get("created_at"),
+                    }
+                    return (doc_content, source_info, None)
+    except Exception:
+        pass  # Fall through to legacy S3
+
+    # --- Fallback: legacy S3 path ---
+    s3_key = f"{S3_REFERENCE_PREFIX}/{project_id}.md"
+    try:
+        resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=s3_key)
+        content = resp["Body"].read().decode("utf-8")
+        last_modified = resp.get("LastModified")
+        last_modified_str = (
+            last_modified.strftime("%Y-%m-%dT%H:%M:%SZ") if last_modified else None
+        )
+        source_info = {
+            "source": "legacy_s3",
+            "s3_key": s3_key,
+            "last_modified": last_modified_str,
+        }
+        return (content, source_info, None)
+    except Exception as exc:
+        error_msg = str(exc)
+        if "NoSuchKey" in error_msg or "404" in error_msg:
+            return (None, None, _error_payload(
+                "NOT_FOUND",
+                f"Reference document not found for project: {project_id}. "
+                f"No document with keyword 'reference' in document store, "
+                f"and no file at legacy S3 path {s3_key}.",
+                details={"s3_key": s3_key, "project_id": project_id},
+            ))
+        return (None, None, _error_payload(
+            "UPSTREAM_ERROR", f"S3 read failed: {exc}", retryable=True,
+        ))
 
 
 async def _reference_search(args: dict) -> list[TextContent]:
@@ -5114,28 +5194,10 @@ async def _reference_search(args: dict) -> list[TextContent]:
     max_results = max(1, min(int(args.get("max_results", 20)), 100))
     section_filter = args.get("section")
 
-    # Fetch reference document from S3
-    s3_key = f"{S3_REFERENCE_PREFIX}/{project_id}.md"
-    try:
-        resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=s3_key)
-        content = resp["Body"].read().decode("utf-8")
-        last_modified = resp.get("LastModified")
-        last_modified_str = (
-            last_modified.strftime("%Y-%m-%dT%H:%M:%SZ") if last_modified else None
-        )
-    except Exception as exc:
-        error_msg = str(exc)
-        if "NoSuchKey" in error_msg or "404" in error_msg:
-            return _result_text(
-                _error_payload(
-                    "NOT_FOUND",
-                    f"Reference document not found for project: {project_id}",
-                    details={"s3_key": s3_key},
-                )
-            )
-        return _result_text(
-            _error_payload("UPSTREAM_ERROR", f"S3 read failed: {exc}", retryable=True)
-        )
+    # Fetch reference document (ENC-ISS-108: document store first, S3 fallback)
+    content, source_info, error = _fetch_reference_content(project_id)
+    if error:
+        return _result_text(error)
 
     lines = content.splitlines()
     total_lines = len(lines)
@@ -5214,8 +5276,7 @@ async def _reference_search(args: dict) -> list[TextContent]:
         "snippets": snippets,
         "document_info": {
             "total_lines": total_lines,
-            "last_modified": last_modified_str,
-            "s3_key": s3_key,
+            **source_info,
         },
     })
 
