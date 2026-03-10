@@ -1,0 +1,4 @@
+mcp==1.26.0
+anyio>=4.4.0
+certifi>=2024.2.2
+PyJWT[crypto]==2.10.1

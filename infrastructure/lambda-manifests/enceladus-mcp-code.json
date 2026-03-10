@@ -1,0 +1,31 @@
+{
+  "entry_file": "server.py",
+  "function_name": "enceladus-mcp-code",
+  "generated_at": "2026-03-10T00:00:00Z",
+  "live_configuration": {
+    "architectures": [
+      "arm64"
+    ],
+    "environment": {
+      "ENCELADUS_MCP_TRANSPORT": "streamable_http",
+      "ENCELADUS_MCP_INTERFACE_MODE": "code",
+      "ENCELADUS_COGNITO_USER_POOL_ID": "",
+      "ENCELADUS_COGNITO_REGION": "us-east-1",
+      "ENCELADUS_COGNITO_CLIENT_ID": "",
+      "ENCELADUS_COGNITO_CLIENT_SECRET": "",
+      "ENCELADUS_COGNITO_DOMAIN": ""
+    },
+    "function_arn": "",
+    "handler": "server.lambda_handler",
+    "last_modified": "",
+    "layers": [],
+    "memory_size": 512,
+    "role": "",
+    "runtime": "python3.12",
+    "timeout": 30,
+    "version": "$LATEST"
+  },
+  "parity_status": "PENDING_DEPLOY",
+  "region": "us-west-2",
+  "repo_entry_path": "tools/enceladus-mcp-server/server.py"
+}
