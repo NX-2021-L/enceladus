@@ -4747,6 +4747,10 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ]
+    # Expose code-mode meta-tools in raw mode so remote raw-mode clients
+    # can discover them via tools/list (ENC-ISS-112).  Handlers already
+    # exist in _TOOL_HANDLERS; this just makes them visible.
+    tools.extend(_code_mode_tool_catalog())
     return _filter_tool_list_for_session_context(tools)
 
 
