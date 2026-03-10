@@ -252,6 +252,11 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         )
         self.assertTrue(caps["mcp_remote_gateway"]["compatibility"]["chatgpt_custom_gpt"])
         self.assertTrue(caps["mcp_remote_gateway"]["compatibility"]["managed_codex_sessions"])
+        self.assertEqual(caps["default_interface_mode"], "raw")
+        self.assertEqual(
+            caps["code_mode_tools"],
+            ["coordination", "execute", "get_compact_context", "search"],
+        )
         self.assertEqual(
             caps["providers"]["openai_codex"]["mcp_server_configuration"]["transport"],
             "streamable_http",
@@ -264,6 +269,18 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
             caps["providers"]["openai_codex"]["mcp_server_configuration"]["url"].endswith(
                 "/api/v1/coordination/mcp"
             )
+        )
+        self.assertEqual(
+            caps["providers"]["claude_agent_sdk"]["default_interface_mode"],
+            "raw",
+        )
+        self.assertIn(
+            "get_code_map",
+            caps["providers"]["claude_agent_sdk"]["allowed_raw_tools"],
+        )
+        self.assertIn(
+            "search",
+            caps["providers"]["claude_agent_sdk"]["allowed_tools"],
         )
 
     @patch.object(
@@ -1089,6 +1106,7 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertIn("COORDINATION_PROVIDER_FORK_FROM_SESSION_ID", blob)
         self.assertIn("COORDINATION_PERMISSION_MODE", blob)
         self.assertIn("COORDINATION_ALLOWED_TOOLS", blob)
+        self.assertIn('COORDINATION_INTERFACE_MODE="raw"', blob)
 
     def test_build_ssm_commands_claude_agent_sdk_defaults_model_and_permission(self):
         request = {
@@ -1105,6 +1123,30 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         blob = "\n".join(commands)
         self.assertIn('COORDINATION_PROVIDER_MODEL="claude-sonnet-4-6"', blob)
         self.assertIn('COORDINATION_PERMISSION_MODE="acceptEdits"', blob)
+        self.assertIn('COORDINATION_INTERFACE_MODE="raw"', blob)
+
+    def test_build_ssm_commands_claude_agent_sdk_code_mode_exports_raw_boundary(self):
+        request = {
+            "request_id": "CRQ-CODE001",
+            "project_id": "enceladus",
+            "feature_id": "ENC-FTR-044",
+            "provider_session": {
+                "interface_mode": "code",
+                "allowed_raw_tools": ["tracker_get", "get_code_map"],
+            },
+        }
+
+        commands = coordination_lambda._build_ssm_commands(
+            request,
+            "claude_agent_sdk",
+            "test code-mode prompt",
+        )
+        blob = "\n".join(commands)
+
+        self.assertIn('COORDINATION_INTERFACE_MODE="code"', blob)
+        self.assertIn("COORDINATION_ALLOWED_RAW_TOOLS", blob)
+        self.assertIn("get_compact_context", blob)
+        self.assertIn("get_code_map", blob)
 
     def test_validate_provider_session_accepts_claude_fields(self):
         payload = {
@@ -1123,6 +1165,30 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertEqual(result["fork_from_session_id"], "sess_000")
         self.assertEqual(result["permission_mode"], "acceptEdits")
         self.assertEqual(result["allowed_tools"], ["tracker_get", "tracker_log"])
+
+    def test_validate_provider_session_accepts_code_mode_fields(self):
+        payload = {
+            "preferred_provider": "claude_agent_sdk",
+            "fork_from_session_id": "sess_100",
+            "interface_mode": "code",
+            "allowed_tools": ["search", "get_compact_context", "search"],
+            "allowed_raw_tools": ["tracker_get", "get_code_map", "tracker_get"],
+        }
+
+        result = coordination_lambda._validate_provider_session(payload)
+
+        self.assertEqual(result["interface_mode"], "code")
+        self.assertEqual(result["allowed_tools"], ["search", "get_compact_context"])
+        self.assertEqual(result["allowed_raw_tools"], ["tracker_get", "get_code_map"])
+
+    def test_validate_provider_session_rejects_raw_tool_names_in_code_mode_allowed_tools(self):
+        payload = {
+            "interface_mode": "code",
+            "allowed_tools": ["tracker_get"],
+        }
+
+        with self.assertRaises(ValueError):
+            coordination_lambda._validate_provider_session(payload)
 
     def test_validate_provider_session_rejects_non_enceladus_tool(self):
         payload = {

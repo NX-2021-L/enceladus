@@ -135,10 +135,14 @@ __all__ = [
     "_CLAUDE_CONTEXT_LIMITS",
     "_CLAUDE_DEFAULT_CONTEXT_LIMIT",
     "_CLAUDE_DEFAULT_PRICING",
+    "_ENCELADUS_ALLOWED_RAW_TOOLS",
     "_CLAUDE_MODEL_ROUTING",
     "_CLAUDE_PERMISSION_MODES",
     "_CLAUDE_PRICING",
     "_CLAUDE_VALID_TASK_COMPLEXITIES",
+    "_ENCELADUS_CODE_MODE_TOOLS",
+    "_ENCELADUS_DEFAULT_INTERFACE_MODE",
+    "_ENCELADUS_INTERFACE_MODES",
     "_DEFAULT_STATUS",
     "_ENCELADUS_ALLOWED_TOOLS",
     "_NON_RETRIABLE_FAILURE_CLASSES",
@@ -377,11 +381,21 @@ _CLAUDE_DEFAULT_CONTEXT_LIMIT = 200_000
 _VALID_TERMINAL_STATES = {"succeeded", "failed", "cancelled", "dead_letter"}
 _VALID_PROVIDERS = {"claude_agent_sdk", "openai_codex", "aws_native", "aws_bedrock_agent"}
 _CLAUDE_PERMISSION_MODES = {"plan", "acceptEdits", "default"}
-_ENCELADUS_ALLOWED_TOOLS = {
+_ENCELADUS_INTERFACE_MODES = {"raw", "code"}
+_ENCELADUS_DEFAULT_INTERFACE_MODE = "raw"
+_ENCELADUS_CODE_MODE_TOOLS = {
+    "search",
+    "coordination",
+    "get_compact_context",
+    "execute",
+}
+_ENCELADUS_ALLOWED_RAW_TOOLS = {
     "projects_list",
     "projects_get",
     "tracker_get",
     "tracker_list",
+    "tracker_pending_updates",
+    "tracker_validation_rules",
     "tracker_set",
     "tracker_log",
     "tracker_create",
@@ -391,20 +405,34 @@ _ENCELADUS_ALLOWED_TOOLS = {
     "check_document_policy",
     "documents_put",
     "documents_patch",
+    "reference_search",
+    "get_code_map",
+    "get_issue_context",
+    "get_architecture_excerpts",
     "deploy_state_get",
     "deploy_history",
+    "deploy_history_list",
     "deploy_submit",
     "deploy_state_set",
     "deploy_status",
+    "deploy_status_get",
     "deploy_trigger",
     "deploy_pending_requests",
+    "changelog_history",
+    "changelog_history_all",
+    "changelog_version",
     "coordination_capabilities",
     "coordination_request_get",
+    "coordination_cognito_session",
     "governance_hash",
+    "governance_get",
+    "governance_dictionary",
     "connection_health",
     "dispatch_plan_generate",
     "dispatch_plan_dry_run",
+    "github_projects_list",
 }
+_ENCELADUS_ALLOWED_TOOLS = _ENCELADUS_ALLOWED_RAW_TOOLS | _ENCELADUS_CODE_MODE_TOOLS
 _RETRY_BACKOFF_SECONDS = (10, 60, 300)
 _RETRIABLE_FAILURE_CLASSES = {"network_timeout", "provider_transient", "host_unavailable"}
 _NON_RETRIABLE_FAILURE_CLASSES = {"auth_invalid", "governance_stale", "input_validation"}

@@ -376,11 +376,21 @@ _CLAUDE_DEFAULT_CONTEXT_LIMIT = 200_000
 _VALID_TERMINAL_STATES = {"succeeded", "failed", "cancelled", "dead_letter"}
 _VALID_PROVIDERS = {"claude_agent_sdk", "openai_codex", "aws_native", "aws_bedrock_agent"}
 _CLAUDE_PERMISSION_MODES = {"plan", "acceptEdits", "default"}
-_ENCELADUS_ALLOWED_TOOLS = {
+_ENCELADUS_INTERFACE_MODES = {"raw", "code"}
+_ENCELADUS_DEFAULT_INTERFACE_MODE = "raw"
+_ENCELADUS_CODE_MODE_TOOLS = {
+    "search",
+    "coordination",
+    "get_compact_context",
+    "execute",
+}
+_ENCELADUS_ALLOWED_RAW_TOOLS = {
     "projects_list",
     "projects_get",
     "tracker_get",
     "tracker_list",
+    "tracker_pending_updates",
+    "tracker_validation_rules",
     "tracker_set",
     "tracker_log",
     "tracker_create",
@@ -390,20 +400,34 @@ _ENCELADUS_ALLOWED_TOOLS = {
     "check_document_policy",
     "documents_put",
     "documents_patch",
+    "reference_search",
+    "get_code_map",
+    "get_issue_context",
+    "get_architecture_excerpts",
     "deploy_state_get",
     "deploy_history",
+    "deploy_history_list",
     "deploy_submit",
     "deploy_state_set",
     "deploy_status",
+    "deploy_status_get",
     "deploy_trigger",
     "deploy_pending_requests",
+    "changelog_history",
+    "changelog_history_all",
+    "changelog_version",
     "coordination_capabilities",
     "coordination_request_get",
+    "coordination_cognito_session",
     "governance_hash",
+    "governance_get",
+    "governance_dictionary",
     "connection_health",
     "dispatch_plan_generate",
     "dispatch_plan_dry_run",
+    "github_projects_list",
 }
+_ENCELADUS_ALLOWED_TOOLS = _ENCELADUS_ALLOWED_RAW_TOOLS | _ENCELADUS_CODE_MODE_TOOLS
 _RETRY_BACKOFF_SECONDS = (10, 60, 300)
 _RETRIABLE_FAILURE_CLASSES = {"network_timeout", "provider_transient", "host_unavailable"}
 _NON_RETRIABLE_FAILURE_CLASSES = {"auth_invalid", "governance_stale", "input_validation"}
@@ -1953,8 +1977,10 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         "provider_session_id",
         "model",
         "preferred_provider",
+        "interface_mode",
         "permission_mode",
         "allowed_tools",
+        "allowed_raw_tools",
         "system_prompt",
         "task_complexity",
         "thinking",
@@ -1980,6 +2006,18 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
             )
         if preferred:
             out["preferred_provider"] = preferred
+
+    interface_mode = raw.get("interface_mode")
+    if interface_mode not in (None, ""):
+        if not isinstance(interface_mode, str):
+            raise ValueError("'provider_preferences.interface_mode' must be a string")
+        normalized_interface_mode = interface_mode.strip().lower()
+        if normalized_interface_mode not in _ENCELADUS_INTERFACE_MODES:
+            raise ValueError(
+                f"Unsupported interface_mode '{normalized_interface_mode}'. "
+                f"Allowed: {sorted(_ENCELADUS_INTERFACE_MODES)}"
+            )
+        out["interface_mode"] = normalized_interface_mode
 
     for field in (
         "thread_id",
@@ -2047,8 +2085,43 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
                 )
             if tool not in normalized_tools:
                 normalized_tools.append(tool)
+        interface_mode_value = str(out.get("interface_mode") or _ENCELADUS_DEFAULT_INTERFACE_MODE)
+        if interface_mode_value == "code":
+            invalid_code_tools = [
+                tool for tool in normalized_tools if tool not in _ENCELADUS_CODE_MODE_TOOLS
+            ]
+            if invalid_code_tools:
+                raise ValueError(
+                    "'provider_preferences.allowed_tools' must contain only code-mode meta tools "
+                    f"when interface_mode=code. Invalid: {invalid_code_tools}"
+                )
         if normalized_tools:
             out["allowed_tools"] = normalized_tools
+
+    allowed_raw_tools = raw.get("allowed_raw_tools")
+    if allowed_raw_tools not in (None, ""):
+        if not isinstance(allowed_raw_tools, list):
+            raise ValueError("'provider_preferences.allowed_raw_tools' must be a list of strings")
+        normalized_raw_tools: List[str] = []
+        for idx, tool_name in enumerate(allowed_raw_tools, start=1):
+            if not isinstance(tool_name, str):
+                raise ValueError(f"'provider_preferences.allowed_raw_tools[{idx}]' must be a string")
+            tool = tool_name.strip()
+            if not tool:
+                continue
+            if len(tool) > 128:
+                raise ValueError(
+                    f"'provider_preferences.allowed_raw_tools[{idx}]' exceeds max length (128)"
+                )
+            if tool not in _ENCELADUS_ALLOWED_RAW_TOOLS:
+                raise ValueError(
+                    f"'provider_preferences.allowed_raw_tools[{idx}]' is not an allowlisted "
+                    f"Enceladus MCP raw tool: {tool}"
+                )
+            if tool not in normalized_raw_tools:
+                normalized_raw_tools.append(tool)
+        if normalized_raw_tools:
+            out["allowed_raw_tools"] = normalized_raw_tools
 
     # system_prompt — optional string for Claude system message
     system_prompt = raw.get("system_prompt")
@@ -4619,10 +4692,24 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
     )
 
     permission_mode = str(provider_session.get("permission_mode") or "acceptEdits").strip() or "acceptEdits"
+    interface_mode = str(
+        provider_session.get("interface_mode") or _ENCELADUS_DEFAULT_INTERFACE_MODE
+    ).strip().lower()
+    if interface_mode not in _ENCELADUS_INTERFACE_MODES:
+        interface_mode = _ENCELADUS_DEFAULT_INTERFACE_MODE
     allowed_tools = provider_session.get("allowed_tools")
     if not isinstance(allowed_tools, list) or not allowed_tools:
-        allowed_tools = sorted(_ENCELADUS_ALLOWED_TOOLS)
+        if interface_mode == "code":
+            allowed_tools = sorted(_ENCELADUS_CODE_MODE_TOOLS)
+        else:
+            allowed_tools = sorted(_ENCELADUS_ALLOWED_RAW_TOOLS)
     normalized_allowed_tools = [str(tool).strip() for tool in allowed_tools if str(tool).strip()]
+    allowed_raw_tools = provider_session.get("allowed_raw_tools")
+    if not isinstance(allowed_raw_tools, list) or not allowed_raw_tools:
+        allowed_raw_tools = sorted(_ENCELADUS_ALLOWED_RAW_TOOLS)
+    normalized_allowed_raw_tools = [
+        str(tool).strip() for tool in allowed_raw_tools if str(tool).strip()
+    ]
 
     resolved_prompt = str(prompt or "").strip()
     if not resolved_prompt:
@@ -4791,7 +4878,9 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         "fork_from_session_id": provider_session.get("fork_from_session_id"),
         "model": str(payload.get("model") or model),
         "permission_mode": permission_mode,
+        "interface_mode": interface_mode,
         "allowed_tools": normalized_allowed_tools,
+        "allowed_raw_tools": normalized_allowed_raw_tools,
         "usage": usage,
         "cost_attribution": cost_attribution,
         "stop_reason": str(payload.get("stop_reason") or ""),
@@ -5367,12 +5456,29 @@ def _build_ssm_commands(
     if execution_mode == "claude_agent_sdk" and not permission_mode:
         permission_mode = "acceptEdits"
     escaped_permission_mode = json.dumps(permission_mode)
+    interface_mode = str(
+        provider_session.get("interface_mode") or _ENCELADUS_DEFAULT_INTERFACE_MODE
+    ).strip().lower()
+    if interface_mode not in _ENCELADUS_INTERFACE_MODES:
+        interface_mode = _ENCELADUS_DEFAULT_INTERFACE_MODE
+    escaped_interface_mode = json.dumps(interface_mode)
     allowed_tools = provider_session.get("allowed_tools")
     if not isinstance(allowed_tools, list) or not allowed_tools:
-        allowed_tools = sorted(_ENCELADUS_ALLOWED_TOOLS)
+        if interface_mode == "code":
+            allowed_tools = sorted(_ENCELADUS_CODE_MODE_TOOLS)
+        else:
+            allowed_tools = sorted(_ENCELADUS_ALLOWED_RAW_TOOLS)
     normalized_allowed_tools = [str(tool).strip() for tool in allowed_tools if str(tool).strip()]
     escaped_allowed_tools_csv = json.dumps(",".join(normalized_allowed_tools))
     escaped_allowed_tools_json = json.dumps(json.dumps(normalized_allowed_tools))
+    allowed_raw_tools = provider_session.get("allowed_raw_tools")
+    if not isinstance(allowed_raw_tools, list) or not allowed_raw_tools:
+        allowed_raw_tools = sorted(_ENCELADUS_ALLOWED_RAW_TOOLS)
+    normalized_allowed_raw_tools = [
+        str(tool).strip() for tool in allowed_raw_tools if str(tool).strip()
+    ]
+    escaped_allowed_raw_tools_csv = json.dumps(",".join(normalized_allowed_raw_tools))
+    escaped_allowed_raw_tools_json = json.dumps(json.dumps(normalized_allowed_raw_tools))
 
     # Derive HOME from HOST_V2_WORK_ROOT (e.g. /home/ec2-user/claude-code-dev -> /home/ec2-user)
     host_v2_home = "/".join(HOST_V2_WORK_ROOT.rstrip("/").split("/")[:4]) or "/home/ec2-user"
@@ -5579,8 +5685,11 @@ def _build_ssm_commands(
                 f"COORDINATION_PROVIDER_FORK_FROM_SESSION_ID={escaped_fork_session_id}",
                 f"COORDINATION_PROVIDER_MODEL={escaped_model}",
                 f"COORDINATION_PERMISSION_MODE={escaped_permission_mode}",
+                f"COORDINATION_INTERFACE_MODE={escaped_interface_mode}",
                 f"COORDINATION_ALLOWED_TOOLS={escaped_allowed_tools_csv}",
                 f"COORDINATION_ALLOWED_TOOLS_JSON={escaped_allowed_tools_json}",
+                f"COORDINATION_ALLOWED_RAW_TOOLS={escaped_allowed_raw_tools_csv}",
+                f"COORDINATION_ALLOWED_RAW_TOOLS_JSON={escaped_allowed_raw_tools_json}",
                 "if [ -x ./projects/devops/tools/agentcli-host-v2/launch_devops_claude_agent_sdk.sh ]; then",
                 (
                     "  timeout "
@@ -5597,7 +5706,9 @@ def _build_ssm_commands(
                     "\"fork_from_session_id\":os.getenv(\"COORDINATION_PROVIDER_FORK_FROM_SESSION_ID\") or None,"
                     "\"model\":os.getenv(\"COORDINATION_PROVIDER_MODEL\") or None,"
                     "\"permission_mode\":os.getenv(\"COORDINATION_PERMISSION_MODE\") or None,"
+                    "\"interface_mode\":os.getenv(\"COORDINATION_INTERFACE_MODE\") or None,"
                     "\"allowed_tools\":(os.getenv(\"COORDINATION_ALLOWED_TOOLS\") or \"\").split(\",\") if os.getenv(\"COORDINATION_ALLOWED_TOOLS\") else [],"
+                    "\"allowed_raw_tools\":(os.getenv(\"COORDINATION_ALLOWED_RAW_TOOLS\") or \"\").split(\",\") if os.getenv(\"COORDINATION_ALLOWED_RAW_TOOLS\") else [],"
                     "\"completed_at\":time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime())"
                     "}; "
                     "print(\"COORDINATION_CLAUDE_SDK_RESULT=\"+json.dumps(payload, separators=(\",\",\":\")))'"
@@ -6315,7 +6426,9 @@ def _normalize_claude_sdk_callback(body: Dict[str, Any]) -> Dict[str, Any]:
         "session_id",
         "fork_from_session_id",
         "permission_mode",
+        "interface_mode",
         "allowed_tools",
+        "allowed_raw_tools",
     ):
         if body.get(sdk_field) is not None:
             details[sdk_field] = body[sdk_field]
@@ -6549,7 +6662,9 @@ def _update_provider_session_from_callback(
             "session_id",
             "fork_from_session_id",
             "permission_mode",
+            "interface_mode",
             "allowed_tools",
+            "allowed_raw_tools",
             "completed_at",
             "model",
         ):
@@ -7447,6 +7562,9 @@ def _handle_capabilities() -> Dict[str, Any]:
             "success": True,
             "capabilities": {
                 "contract_version": "0.3.0",
+                "interface_modes": sorted(_ENCELADUS_INTERFACE_MODES),
+                "default_interface_mode": _ENCELADUS_DEFAULT_INTERFACE_MODE,
+                "code_mode_tools": sorted(_ENCELADUS_CODE_MODE_TOOLS),
                 "execution_modes": [
                     {
                         "mode": "preflight",
@@ -7518,6 +7636,9 @@ def _handle_capabilities() -> Dict[str, Any]:
                             "transport": "streamable_http",
                             "auth_mode": "cognito_or_internal_key",
                             "auth_header": "X-Coordination-Internal-Key",
+                            "interface_modes": sorted(_ENCELADUS_INTERFACE_MODES),
+                            "default_interface_mode": _ENCELADUS_DEFAULT_INTERFACE_MODE,
+                            "code_mode_tools": sorted(_ENCELADUS_CODE_MODE_TOOLS),
                             "access_token_secret_ref": provider_secrets["openai_codex"].get("secret_ref"),
                             "compatibility": {
                                 "chatgpt_custom_gpt": True,
@@ -7536,6 +7657,10 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "default_permission_mode": "acceptEdits",
                         "permission_modes": sorted(_CLAUDE_PERMISSION_MODES),
                         "allowed_tools": sorted(_ENCELADUS_ALLOWED_TOOLS),
+                        "allowed_raw_tools": sorted(_ENCELADUS_ALLOWED_RAW_TOOLS),
+                        "interface_modes": sorted(_ENCELADUS_INTERFACE_MODES),
+                        "default_interface_mode": _ENCELADUS_DEFAULT_INTERFACE_MODE,
+                        "code_mode_tools": sorted(_ENCELADUS_CODE_MODE_TOOLS),
                         "model_routing": {
                             "task_complexities": sorted(_CLAUDE_VALID_TASK_COMPLEXITIES),
                             "routing_table": _CLAUDE_MODEL_ROUTING,

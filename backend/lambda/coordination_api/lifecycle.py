@@ -455,7 +455,9 @@ def _normalize_claude_sdk_callback(body: Dict[str, Any]) -> Dict[str, Any]:
         "session_id",
         "fork_from_session_id",
         "permission_mode",
+        "interface_mode",
         "allowed_tools",
+        "allowed_raw_tools",
     ):
         if body.get(sdk_field) is not None:
             details[sdk_field] = body[sdk_field]
@@ -551,7 +553,9 @@ def _update_provider_session_from_callback(
             "session_id",
             "fork_from_session_id",
             "permission_mode",
+            "interface_mode",
             "allowed_tools",
+            "allowed_raw_tools",
             "completed_at",
             "model",
         ):
@@ -757,5 +761,4 @@ def _emit_callback_event(request: Dict[str, Any], callback_body: Dict[str, Any])
         )
     except Exception as exc:
         logger.warning("Failed emitting callback EventBridge event: %s", exc)
-
 
