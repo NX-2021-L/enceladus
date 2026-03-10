@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-10.4",
-  "updated_at": "2026-03-10T16:15:00Z",
+  "version": "2026-03-10.5",
+  "updated_at": "2026-03-10T19:50:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1383,6 +1383,35 @@
           "type": "array",
           "item_type": "string",
           "definition": "Raw MCP tools that code-mode meta-tools may resolve onto within the current session boundary."
+        }
+      }
+    },
+    "mcp_server.cognito_oauth": {
+      "description": "Cognito-direct OAuth authentication mode for MCP endpoints (ENC-FTR-045). When active, OAuth metadata points authorization_endpoint and token_endpoint directly to Cognito Hosted UI, DCR returns pre-configured Cognito app client credentials, and bearer tokens are validated as Cognito JWTs.",
+      "fields": {
+        "auth_mode": {
+          "type": "enum",
+          "enum": [
+            "self_contained",
+            "cognito_direct"
+          ],
+          "definition": "Authentication mode. self_contained uses HMAC-signed auth codes and static MCP_API_KEY bearer validation. cognito_direct points OAuth to Cognito Hosted UI and validates JWT bearer tokens. Mode is auto-detected: cognito_direct activates when ENCELADUS_COGNITO_USER_POOL_ID, ENCELADUS_COGNITO_CLIENT_ID, and ENCELADUS_COGNITO_DOMAIN are all set."
+        },
+        "cognito_env_vars": {
+          "type": "object",
+          "definition": "Environment variables for Cognito-direct mode: ENCELADUS_COGNITO_USER_POOL_ID (Cognito User Pool ID), ENCELADUS_COGNITO_REGION (Cognito region, defaults to pool ID prefix), ENCELADUS_COGNITO_CLIENT_ID (app client ID for DCR and JWT validation), ENCELADUS_COGNITO_CLIENT_SECRET (app client secret for DCR), ENCELADUS_COGNITO_DOMAIN (Cognito Hosted UI base URL)."
+        },
+        "bearer_validation": {
+          "type": "behavior",
+          "definition": "In cognito_direct mode, Bearer tokens are validated as RS256 JWTs against the Cognito JWKS endpoint. Validates issuer, expiration, and client_id/audience. JWKS keys are cached for 3600 seconds. Rejected tokens return 401 with WWW-Authenticate header containing resource_metadata URL."
+        },
+        "cors": {
+          "type": "behavior",
+          "definition": "Lambda Function URL configured with CORS: AllowOrigins=['https://claude.ai', 'https://*.claude.ai'], AllowMethods=['GET','POST','DELETE','OPTIONS'], AllowHeaders=['Content-Type','Authorization','Accept','Mcp-Session-Id'], ExposeHeaders=['Mcp-Session-Id']."
+        },
+        "lambda_deployment": {
+          "type": "string",
+          "definition": "Deployed as enceladus-mcp-code Lambda with Function URL. Separate from enceladus-mcp-streamable (self-contained OAuth, all tools). Uses ENCELADUS_MCP_INTERFACE_MODE=code to expose only the 4 code-mode meta-tools."
         }
       }
     },

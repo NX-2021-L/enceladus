@@ -1,0 +1,39 @@
+name: Lambda Deploy - enceladus-mcp-code
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda/mcp_code/**"
+      - "tools/enceladus-mcp-server/server.py"
+      - ".github/workflows/lambda-mcp-code-deploy.yml"
+      - ".github/workflows/lambda-deploy-reusable.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/lambda-deploy-reusable.yml
+    with:
+      function_name: "enceladus-mcp-code"
+      lambda_dir: "backend/lambda/mcp_code"
+      deploy_script: "backend/lambda/mcp_code/deploy.sh"
+    secrets:
+      AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+      COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+      COORDINATION_INTERNAL_API_KEY_PREVIOUS: ${{ secrets.COORDINATION_INTERNAL_API_KEY_PREVIOUS }}
+      ENCELADUS_COGNITO_CLIENT_ID: ${{ secrets.ENCELADUS_COGNITO_CLIENT_ID }}
+      ENCELADUS_COGNITO_CLIENT_SECRET: ${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}
+      ENCELADUS_COGNITO_DOMAIN: ${{ secrets.ENCELADUS_COGNITO_DOMAIN }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_INSTALLATION_ID: ${{ secrets.GH_INSTALLATION_ID }}
