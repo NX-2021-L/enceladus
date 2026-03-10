@@ -73,7 +73,11 @@ from config import (
     _CLAUDE_DEFAULT_PRICING,
     _CLAUDE_MODEL_ROUTING,
     _CLAUDE_PRICING,
+    _ENCELADUS_ALLOWED_RAW_TOOLS,
     _ENCELADUS_ALLOWED_TOOLS,
+    _ENCELADUS_CODE_MODE_TOOLS,
+    _ENCELADUS_DEFAULT_INTERFACE_MODE,
+    _ENCELADUS_INTERFACE_MODES,
     _STATE_RUNNING,
     logger,
 )
@@ -1399,10 +1403,24 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
     )
 
     permission_mode = str(provider_session.get("permission_mode") or "acceptEdits").strip() or "acceptEdits"
+    interface_mode = str(
+        provider_session.get("interface_mode") or _ENCELADUS_DEFAULT_INTERFACE_MODE
+    ).strip().lower()
+    if interface_mode not in _ENCELADUS_INTERFACE_MODES:
+        interface_mode = _ENCELADUS_DEFAULT_INTERFACE_MODE
     allowed_tools = provider_session.get("allowed_tools")
     if not isinstance(allowed_tools, list) or not allowed_tools:
-        allowed_tools = sorted(_ENCELADUS_ALLOWED_TOOLS)
+        if interface_mode == "code":
+            allowed_tools = sorted(_ENCELADUS_CODE_MODE_TOOLS)
+        else:
+            allowed_tools = sorted(_ENCELADUS_ALLOWED_RAW_TOOLS)
     normalized_allowed_tools = [str(tool).strip() for tool in allowed_tools if str(tool).strip()]
+    allowed_raw_tools = provider_session.get("allowed_raw_tools")
+    if not isinstance(allowed_raw_tools, list) or not allowed_raw_tools:
+        allowed_raw_tools = sorted(_ENCELADUS_ALLOWED_RAW_TOOLS)
+    normalized_allowed_raw_tools = [
+        str(tool).strip() for tool in allowed_raw_tools if str(tool).strip()
+    ]
 
     resolved_prompt = str(prompt or "").strip()
     if not resolved_prompt:
@@ -1571,7 +1589,9 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         "fork_from_session_id": provider_session.get("fork_from_session_id"),
         "model": str(payload.get("model") or model),
         "permission_mode": permission_mode,
+        "interface_mode": interface_mode,
         "allowed_tools": normalized_allowed_tools,
+        "allowed_raw_tools": normalized_allowed_raw_tools,
         "usage": usage,
         "cost_attribution": cost_attribution,
         "stop_reason": str(payload.get("stop_reason") or ""),
@@ -1918,12 +1938,29 @@ def _build_ssm_commands(
     if execution_mode == "claude_agent_sdk" and not permission_mode:
         permission_mode = "acceptEdits"
     escaped_permission_mode = json.dumps(permission_mode)
+    interface_mode = str(
+        provider_session.get("interface_mode") or _ENCELADUS_DEFAULT_INTERFACE_MODE
+    ).strip().lower()
+    if interface_mode not in _ENCELADUS_INTERFACE_MODES:
+        interface_mode = _ENCELADUS_DEFAULT_INTERFACE_MODE
+    escaped_interface_mode = json.dumps(interface_mode)
     allowed_tools = provider_session.get("allowed_tools")
     if not isinstance(allowed_tools, list) or not allowed_tools:
-        allowed_tools = sorted(_ENCELADUS_ALLOWED_TOOLS)
+        if interface_mode == "code":
+            allowed_tools = sorted(_ENCELADUS_CODE_MODE_TOOLS)
+        else:
+            allowed_tools = sorted(_ENCELADUS_ALLOWED_RAW_TOOLS)
     normalized_allowed_tools = [str(tool).strip() for tool in allowed_tools if str(tool).strip()]
     escaped_allowed_tools_csv = json.dumps(",".join(normalized_allowed_tools))
     escaped_allowed_tools_json = json.dumps(json.dumps(normalized_allowed_tools))
+    allowed_raw_tools = provider_session.get("allowed_raw_tools")
+    if not isinstance(allowed_raw_tools, list) or not allowed_raw_tools:
+        allowed_raw_tools = sorted(_ENCELADUS_ALLOWED_RAW_TOOLS)
+    normalized_allowed_raw_tools = [
+        str(tool).strip() for tool in allowed_raw_tools if str(tool).strip()
+    ]
+    escaped_allowed_raw_tools_csv = json.dumps(",".join(normalized_allowed_raw_tools))
+    escaped_allowed_raw_tools_json = json.dumps(json.dumps(normalized_allowed_raw_tools))
 
     # Derive HOME from HOST_V2_WORK_ROOT (e.g. /home/ec2-user/claude-code-dev -> /home/ec2-user)
     host_v2_home = "/".join(HOST_V2_WORK_ROOT.rstrip("/").split("/")[:4]) or "/home/ec2-user"
@@ -2130,8 +2167,11 @@ def _build_ssm_commands(
                 f"COORDINATION_PROVIDER_FORK_FROM_SESSION_ID={escaped_fork_session_id}",
                 f"COORDINATION_PROVIDER_MODEL={escaped_model}",
                 f"COORDINATION_PERMISSION_MODE={escaped_permission_mode}",
+                f"COORDINATION_INTERFACE_MODE={escaped_interface_mode}",
                 f"COORDINATION_ALLOWED_TOOLS={escaped_allowed_tools_csv}",
                 f"COORDINATION_ALLOWED_TOOLS_JSON={escaped_allowed_tools_json}",
+                f"COORDINATION_ALLOWED_RAW_TOOLS={escaped_allowed_raw_tools_csv}",
+                f"COORDINATION_ALLOWED_RAW_TOOLS_JSON={escaped_allowed_raw_tools_json}",
                 "if [ -x ./projects/devops/tools/agentcli-host-v2/launch_devops_claude_agent_sdk.sh ]; then",
                 (
                     "  timeout "
@@ -2148,7 +2188,9 @@ def _build_ssm_commands(
                     "\"fork_from_session_id\":os.getenv(\"COORDINATION_PROVIDER_FORK_FROM_SESSION_ID\") or None,"
                     "\"model\":os.getenv(\"COORDINATION_PROVIDER_MODEL\") or None,"
                     "\"permission_mode\":os.getenv(\"COORDINATION_PERMISSION_MODE\") or None,"
+                    "\"interface_mode\":os.getenv(\"COORDINATION_INTERFACE_MODE\") or None,"
                     "\"allowed_tools\":(os.getenv(\"COORDINATION_ALLOWED_TOOLS\") or \"\").split(\",\") if os.getenv(\"COORDINATION_ALLOWED_TOOLS\") else [],"
+                    "\"allowed_raw_tools\":(os.getenv(\"COORDINATION_ALLOWED_RAW_TOOLS\") or \"\").split(\",\") if os.getenv(\"COORDINATION_ALLOWED_RAW_TOOLS\") else [],"
                     "\"completed_at\":time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime())"
                     "}; "
                     "print(\"COORDINATION_CLAUDE_SDK_RESULT=\"+json.dumps(payload, separators=(\",\",\":\")))'"
@@ -2431,4 +2473,3 @@ def _refresh_request_from_ssm(request: Dict[str, Any]) -> Dict[str, Any]:
     _update_request(request)
     _finalize_tracker_from_request(request)
     return request
-

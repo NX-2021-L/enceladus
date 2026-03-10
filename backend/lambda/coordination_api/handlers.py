@@ -65,7 +65,11 @@ from config import (
     _CLAUDE_MODEL_ROUTING,
     _CLAUDE_PERMISSION_MODES,
     _CLAUDE_VALID_TASK_COMPLEXITIES,
+    _ENCELADUS_ALLOWED_RAW_TOOLS,
     _ENCELADUS_ALLOWED_TOOLS,
+    _ENCELADUS_CODE_MODE_TOOLS,
+    _ENCELADUS_DEFAULT_INTERFACE_MODE,
+    _ENCELADUS_INTERFACE_MODES,
     _NON_RETRIABLE_FAILURE_CLASSES,
     _RETRIABLE_FAILURE_CLASSES,
     _RETRY_BACKOFF_SECONDS,
@@ -382,6 +386,9 @@ def _handle_capabilities() -> Dict[str, Any]:
             "success": True,
             "capabilities": {
                 "contract_version": "0.3.0",
+                "interface_modes": sorted(_ENCELADUS_INTERFACE_MODES),
+                "default_interface_mode": _ENCELADUS_DEFAULT_INTERFACE_MODE,
+                "code_mode_tools": sorted(_ENCELADUS_CODE_MODE_TOOLS),
                 "execution_modes": [
                     {
                         "mode": "preflight",
@@ -448,6 +455,9 @@ def _handle_capabilities() -> Dict[str, Any]:
                             "transport": "streamable_http",
                             "auth_mode": "cognito_or_internal_key",
                             "auth_header": "X-Coordination-Internal-Key",
+                            "interface_modes": sorted(_ENCELADUS_INTERFACE_MODES),
+                            "default_interface_mode": _ENCELADUS_DEFAULT_INTERFACE_MODE,
+                            "code_mode_tools": sorted(_ENCELADUS_CODE_MODE_TOOLS),
                             "access_token_secret_ref": provider_secrets["openai_codex"].get("secret_ref"),
                             "compatibility": {
                                 "chatgpt_custom_gpt": True,
@@ -466,6 +476,10 @@ def _handle_capabilities() -> Dict[str, Any]:
                         "default_permission_mode": "acceptEdits",
                         "permission_modes": sorted(_CLAUDE_PERMISSION_MODES),
                         "allowed_tools": sorted(_ENCELADUS_ALLOWED_TOOLS),
+                        "allowed_raw_tools": sorted(_ENCELADUS_ALLOWED_RAW_TOOLS),
+                        "interface_modes": sorted(_ENCELADUS_INTERFACE_MODES),
+                        "default_interface_mode": _ENCELADUS_DEFAULT_INTERFACE_MODE,
+                        "code_mode_tools": sorted(_ENCELADUS_CODE_MODE_TOOLS),
                         "model_routing": {
                             "task_complexities": sorted(_CLAUDE_VALID_TASK_COMPLEXITIES),
                             "routing_table": _CLAUDE_MODEL_ROUTING,
@@ -1913,5 +1927,3 @@ def _handle_sqs_callback(event: Dict[str, Any]) -> Dict[str, Any]:
             "failures": failures,
         },
     )
-
-

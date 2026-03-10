@@ -27,7 +27,11 @@ from config import (
     MAX_OUTCOME_LENGTH,
     _CLAUDE_PERMISSION_MODES,
     _CLAUDE_VALID_TASK_COMPLEXITIES,
+    _ENCELADUS_ALLOWED_RAW_TOOLS,
     _ENCELADUS_ALLOWED_TOOLS,
+    _ENCELADUS_CODE_MODE_TOOLS,
+    _ENCELADUS_DEFAULT_INTERFACE_MODE,
+    _ENCELADUS_INTERFACE_MODES,
     _RETRY_BACKOFF_SECONDS,
     _STATE_DEAD_LETTER,
     _VALID_EXECUTION_MODES,
@@ -115,8 +119,10 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         "provider_session_id",
         "model",
         "preferred_provider",
+        "interface_mode",
         "permission_mode",
         "allowed_tools",
+        "allowed_raw_tools",
         "system_prompt",
         "task_complexity",
         "thinking",
@@ -143,6 +149,18 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
             )
         if preferred:
             out["preferred_provider"] = preferred
+
+    interface_mode = raw.get("interface_mode")
+    if interface_mode not in (None, ""):
+        if not isinstance(interface_mode, str):
+            raise ValueError("'provider_preferences.interface_mode' must be a string")
+        normalized_interface_mode = interface_mode.strip().lower()
+        if normalized_interface_mode not in _ENCELADUS_INTERFACE_MODES:
+            raise ValueError(
+                f"Unsupported interface_mode '{normalized_interface_mode}'. "
+                f"Allowed: {sorted(_ENCELADUS_INTERFACE_MODES)}"
+            )
+        out["interface_mode"] = normalized_interface_mode
 
     for field in (
         "thread_id",
@@ -210,8 +228,43 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
                 )
             if tool not in normalized_tools:
                 normalized_tools.append(tool)
+        interface_mode_value = str(out.get("interface_mode") or _ENCELADUS_DEFAULT_INTERFACE_MODE)
+        if interface_mode_value == "code":
+            invalid_code_tools = [
+                tool for tool in normalized_tools if tool not in _ENCELADUS_CODE_MODE_TOOLS
+            ]
+            if invalid_code_tools:
+                raise ValueError(
+                    "'provider_preferences.allowed_tools' must contain only code-mode meta tools "
+                    f"when interface_mode=code. Invalid: {invalid_code_tools}"
+                )
         if normalized_tools:
             out["allowed_tools"] = normalized_tools
+
+    allowed_raw_tools = raw.get("allowed_raw_tools")
+    if allowed_raw_tools not in (None, ""):
+        if not isinstance(allowed_raw_tools, list):
+            raise ValueError("'provider_preferences.allowed_raw_tools' must be a list of strings")
+        normalized_raw_tools: List[str] = []
+        for idx, tool_name in enumerate(allowed_raw_tools, start=1):
+            if not isinstance(tool_name, str):
+                raise ValueError(f"'provider_preferences.allowed_raw_tools[{idx}]' must be a string")
+            tool = tool_name.strip()
+            if not tool:
+                continue
+            if len(tool) > 128:
+                raise ValueError(
+                    f"'provider_preferences.allowed_raw_tools[{idx}]' exceeds max length (128)"
+                )
+            if tool not in _ENCELADUS_ALLOWED_RAW_TOOLS:
+                raise ValueError(
+                    f"'provider_preferences.allowed_raw_tools[{idx}]' is not an allowlisted "
+                    f"Enceladus MCP raw tool: {tool}"
+                )
+            if tool not in normalized_raw_tools:
+                normalized_raw_tools.append(tool)
+        if normalized_raw_tools:
+            out["allowed_raw_tools"] = normalized_raw_tools
 
     # system_prompt — optional string for Claude system message
     system_prompt = raw.get("system_prompt")
@@ -462,6 +515,5 @@ def _move_to_dead_letter(request: Dict[str, Any], reason: str, failure_class: Op
         "failure_class": failure_class,
     }
     _publish_dead_letter_alert(request, reason)
-
 
 
