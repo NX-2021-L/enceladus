@@ -384,6 +384,25 @@ _REFRESH_TOKEN_TTL = 30 * 24 * 3600
 OAUTH_CLIENT_ID = os.environ.get("ENCELADUS_OAUTH_CLIENT_ID", "")
 OAUTH_CLIENT_SECRET = os.environ.get("ENCELADUS_OAUTH_CLIENT_SECRET", "")
 
+INTERFACE_MODE_RAW = "raw"
+INTERFACE_MODE_CODE = "code"
+CODE_MODE_TOOL_NAMES = ("search", "coordination", "get_compact_context", "execute")
+_CODE_MODE_TOOL_SET = set(CODE_MODE_TOOL_NAMES)
+
+
+def _normalize_interface_mode(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {INTERFACE_MODE_RAW, INTERFACE_MODE_CODE}:
+        return normalized
+    return INTERFACE_MODE_RAW
+
+
+INTERFACE_MODE = _normalize_interface_mode(
+    os.environ.get("ENCELADUS_MCP_INTERFACE_MODE")
+    or os.environ.get("COORDINATION_INTERFACE_MODE")
+    or INTERFACE_MODE_RAW
+)
+
 logger = logging.getLogger(SERVER_NAME)
 
 # ---------------------------------------------------------------------------
@@ -1042,6 +1061,182 @@ def _normalize_coordination_request_id(value: Any) -> str:
             "with only uppercase letters, numbers, or hyphens."
         )
     return text
+
+
+def _normalize_env_string_list(raw: Any) -> List[str]:
+    if raw in (None, "", []):
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        parsed: Any = None
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+        if isinstance(parsed, list):
+            source = parsed
+        else:
+            source = text.split(",")
+    elif isinstance(raw, list):
+        source = raw
+    else:
+        return []
+
+    out: List[str] = []
+    for entry in source:
+        if entry is None:
+            continue
+        value = str(entry).strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _configured_raw_tool_allowlist() -> Optional[set[str]]:
+    raw_tools = _normalize_env_string_list(
+        os.environ.get("COORDINATION_ALLOWED_RAW_TOOLS_JSON")
+        or os.environ.get("COORDINATION_ALLOWED_RAW_TOOLS")
+    )
+    if raw_tools:
+        return set(raw_tools)
+
+    legacy_tools = [
+        tool
+        for tool in _normalize_env_string_list(
+            os.environ.get("COORDINATION_ALLOWED_TOOLS_JSON")
+            or os.environ.get("COORDINATION_ALLOWED_TOOLS")
+        )
+        if tool not in _CODE_MODE_TOOL_SET
+    ]
+    if legacy_tools:
+        return set(legacy_tools)
+    return None
+
+
+def _raw_tool_allowed(tool_name: str) -> bool:
+    allowlist = _configured_raw_tool_allowlist()
+    if allowlist is None:
+        return True
+    return str(tool_name or "").strip() in allowlist
+
+
+def _tool_content_to_plain(content: list[TextContent]) -> Any:
+    texts = [item.text for item in content if hasattr(item, "text")]
+    if not texts:
+        return None
+    if len(texts) == 1:
+        text = texts[0]
+        if isinstance(text, str):
+            stripped = text.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    return json.loads(stripped)
+                except json.JSONDecodeError:
+                    pass
+        return text
+
+    parsed_items: List[Any] = []
+    for text in texts:
+        if isinstance(text, str):
+            stripped = text.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    parsed_items.append(json.loads(stripped))
+                    continue
+                except json.JSONDecodeError:
+                    pass
+        parsed_items.append(text)
+    return parsed_items
+
+
+async def _invoke_raw_tool(
+    name: str,
+    arguments: Dict[str, Any],
+    *,
+    require_allowlist: bool = True,
+) -> Dict[str, Any]:
+    tool_name = str(name or "").strip()
+    if not tool_name:
+        raise ValueError("tool name is required")
+    if tool_name in _CODE_MODE_TOOL_SET:
+        raise ValueError(f"Meta tool '{tool_name}' cannot be invoked as a raw tool")
+    if require_allowlist and not _raw_tool_allowed(tool_name):
+        raise PermissionError(f"Raw tool '{tool_name}' is outside the current session boundary")
+
+    handler = _TOOL_HANDLERS.get(tool_name)
+    if handler is None:
+        raise ValueError(f"Unknown raw tool '{tool_name}'")
+
+    content = await handler(arguments or {})
+    status = _tool_result_status(content)
+    return {
+        "tool": tool_name,
+        "arguments": arguments or {},
+        "content": content,
+        "payload": _tool_content_to_plain(content),
+        "status": status,
+        "error_code": "" if status == "success" else _tool_error_code(content),
+    }
+
+
+def _meta_tool_success(
+    tool_name: str,
+    *,
+    action: str = "",
+    result: Any = None,
+    mode: str = "",
+    steps: Optional[List[Dict[str, Any]]] = None,
+    underlying_calls: Optional[List[Dict[str, Any]]] = None,
+    warnings: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    dry_run: bool = False,
+    partial: bool = False,
+) -> list[TextContent]:
+    payload: Dict[str, Any] = {
+        "success": True,
+        "interface_mode": INTERFACE_MODE,
+        "tool": tool_name,
+    }
+    if action:
+        payload["action"] = action
+    if mode:
+        payload["mode"] = mode
+    if result is not None:
+        payload["result"] = result
+    if steps is not None:
+        payload["step_results"] = steps
+    payload["dry_run"] = bool(dry_run)
+    payload["partial"] = bool(partial)
+    payload["underlying_calls"] = underlying_calls or []
+    if metadata:
+        payload["metadata"] = metadata
+    if warnings:
+        payload["warnings"] = warnings
+    return _result_text(payload)
+
+
+def _meta_tool_error(
+    tool_name: str,
+    *,
+    code: str,
+    message: str,
+    action: str = "",
+    mode: str = "",
+    underlying_calls: Optional[List[Dict[str, Any]]] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> list[TextContent]:
+    payload = _error_payload(code=code, message=message, details=details)
+    payload["interface_mode"] = INTERFACE_MODE
+    payload["tool"] = tool_name
+    if action:
+        payload["action"] = action
+    if mode:
+        payload["mode"] = mode
+    payload["underlying_calls"] = underlying_calls or []
+    return _result_text(payload)
 
 
 def _result_text(data: Any) -> list:
@@ -2887,8 +3082,173 @@ async def read_resource(uri: str) -> str:
 # -------------------------------------------------------------------
 
 
+def _code_mode_tool_catalog() -> list[Tool]:
+    return [
+        Tool(
+            name="search",
+            description=(
+                "Compact read-only discovery surface over governed Enceladus resources. "
+                "Use action + arguments to access project, tracker, document, deploy, changelog, "
+                "governance, reference, and health lookups."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": (
+                            "Read action identifier such as projects.list, tracker.get, "
+                            "documents.search, deploy.history, changelog.version, "
+                            "governance.dictionary, reference.search, or system.connection_health."
+                        ),
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Arguments forwarded to the governed underlying read tool.",
+                    },
+                },
+                "required": ["action"],
+            },
+        ),
+        Tool(
+            name="coordination",
+            description=(
+                "Compact coordination/orchestration surface for capabilities, request inspection, "
+                "dispatch-plan generation, and managed-session auth helpers."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": (
+                            "Coordination action identifier such as capabilities.get, request.get, "
+                            "dispatch_plan.generate, dispatch_plan.dry_run, or auth.cognito_session."
+                        ),
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Arguments forwarded to the governed coordination helper.",
+                    },
+                },
+                "required": ["action"],
+            },
+        ),
+        Tool(
+            name="get_compact_context",
+            description=(
+                "Budgeted composite context assembly that reuses existing issue-context, codemap, "
+                "architecture, document, governance, and project helpers while preserving raw codemap payloads."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": "Context mode: record, issue, task, feature, project, document, or topic.",
+                    },
+                    "record_id": {
+                        "type": "string",
+                        "description": "Tracker record ID for record-oriented modes.",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project ID for project/topic modes and codemap lookups.",
+                    },
+                    "document_id": {
+                        "type": "string",
+                        "description": "Document ID for document mode.",
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Optional codemap domain filter using the existing get_code_map payload semantics.",
+                    },
+                    "domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional architecture or topic domains.",
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Token budget forwarded to existing composite helpers where supported.",
+                    },
+                    "history_limit": {
+                        "type": "integer",
+                        "description": "History limit forwarded to record context helpers.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Topic or reference search query.",
+                    },
+                    "include_code_map": {
+                        "type": "boolean",
+                        "description": "If true (default), include the existing get_code_map payload under code_map.",
+                    },
+                    "include_governance": {
+                        "type": "boolean",
+                        "description": "If true, include governance dictionary slices when available.",
+                    },
+                    "include_related_documents": {
+                        "type": "boolean",
+                        "description": "If true, include related document summaries when available.",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="execute",
+            description=(
+                "Governed workflow runner for ordered mutation or lifecycle steps. "
+                "Each step resolves through existing MCP/HTTP handlers, supports dry_run, "
+                "and returns per-step status with resolved underlying calls."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, resolve and validate steps without executing them.",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "description": (
+                                        "Action identifier such as tracker.create, documents.patch, "
+                                        "deploy.submit, checkout.advance, or github.create_issue."
+                                    ),
+                                },
+                                "arguments": {
+                                    "type": "object",
+                                    "description": "Arguments forwarded to the governed underlying tool.",
+                                },
+                                "on_error": {
+                                    "type": "string",
+                                    "description": "abort (default) or continue.",
+                                },
+                                "dry_run": {
+                                    "type": "boolean",
+                                    "description": "Optional step-level dry-run override.",
+                                },
+                            },
+                            "required": ["action"],
+                        },
+                        "description": "Ordered governed execution steps.",
+                    },
+                },
+                "required": ["steps"],
+            },
+        ),
+    ]
+
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
+    if INTERFACE_MODE == INTERFACE_MODE_CODE:
+        return _code_mode_tool_catalog()
     tools = [
         # --- Project Lifecycle Management (6.4) ---
         Tool(
@@ -4400,6 +4760,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     args = arguments or {}
     started = time.perf_counter()
     try:
+        if INTERFACE_MODE == INTERFACE_MODE_CODE and name not in _CODE_MODE_TOOL_SET:
+            result = _error_result(
+                f"Tool '{name}' is not exposed in code mode. Use one of: {', '.join(CODE_MODE_TOOL_NAMES)}"
+            ).content
+            _audit_tool_invocation(
+                name,
+                args,
+                "error",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                error_code="tool_not_exposed",
+            )
+            return result
         handler = _TOOL_HANDLERS.get(name)
         if handler is None:
             result = _error_result(f"Unknown tool: {name}").content
@@ -5901,6 +6273,801 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
     return _result_text(response)
 
 
+# --- Code Mode Meta-Tools (ENC-FTR-044) ---
+
+_SEARCH_ACTIONS: Dict[str, Dict[str, Any]] = {
+    "projects.list": {"tool": "projects_list"},
+    "projects.get": {"tool": "projects_get"},
+    "tracker.get": {"tool": "tracker_get"},
+    "tracker.list": {"tool": "tracker_list"},
+    "tracker.pending_updates": {"tool": "tracker_pending_updates"},
+    "tracker.validation_rules": {"tool": "tracker_validation_rules"},
+    "documents.search": {"tool": "documents_search"},
+    "documents.get": {"tool": "documents_get"},
+    "documents.list": {"tool": "documents_list"},
+    "reference.search": {"tool": "reference_search"},
+    "deploy.state_get": {"tool": "deploy_state_get"},
+    "deploy.history": {"tool": "deploy_history"},
+    "deploy.history_list": {"tool": "deploy_history_list"},
+    "deploy.status": {"tool": "deploy_status"},
+    "deploy.status_get": {"tool": "deploy_status_get"},
+    "deploy.pending_requests": {"tool": "deploy_pending_requests"},
+    "changelog.history": {"tool": "changelog_history"},
+    "changelog.history_all": {"tool": "changelog_history_all"},
+    "changelog.version": {"tool": "changelog_version"},
+    "governance.hash": {"tool": "governance_hash"},
+    "governance.get": {"tool": "governance_get"},
+    "governance.dictionary": {"tool": "governance_dictionary"},
+    "system.connection_health": {"tool": "connection_health"},
+    "github.projects_list": {"tool": "github_projects_list"},
+}
+
+_COORDINATION_ACTIONS: Dict[str, Dict[str, Any]] = {
+    "capabilities.get": {"tool": "coordination_capabilities"},
+    "request.get": {"tool": "coordination_request_get"},
+    "auth.cognito_session": {"tool": "coordination_cognito_session"},
+    "dispatch_plan.generate": {"tool": "dispatch_plan_generate"},
+    "dispatch_plan.dry_run": {"tool": "dispatch_plan_dry_run"},
+}
+
+_EXECUTE_ACTIONS: Dict[str, Dict[str, Any]] = {
+    "tracker.create": {"tool": "tracker_create", "requires_governance_hash": True},
+    "tracker.set": {"tool": "tracker_set", "requires_governance_hash": True},
+    "tracker.log": {"tool": "tracker_log", "requires_governance_hash": True},
+    "tracker.set_acceptance_evidence": {
+        "tool": "tracker_set_acceptance_evidence",
+        "requires_governance_hash": True,
+    },
+    "documents.check_policy": {"tool": "check_document_policy"},
+    "documents.put": {"tool": "documents_put", "requires_governance_hash": True},
+    "documents.patch": {"tool": "documents_patch", "requires_governance_hash": True},
+    "deploy.submit": {"tool": "deploy_submit", "requires_governance_hash": True},
+    "deploy.state_set": {"tool": "deploy_state_set", "requires_governance_hash": True},
+    "deploy.trigger": {"tool": "deploy_trigger"},
+    "checkout.task": {"tool": "checkout_task", "requires_governance_hash": True},
+    "checkout.release": {"tool": "release_task", "requires_governance_hash": True},
+    "checkout.advance": {"tool": "advance_task_status", "requires_governance_hash": True},
+    "checkout.append_worklog": {"tool": "append_worklog", "requires_governance_hash": True},
+    "github.create_issue": {"tool": "github_create_issue"},
+    "github.projects_sync": {"tool": "github_projects_sync"},
+}
+
+_RECORD_CONTEXT_MODES = {"record", "issue", "task", "feature"}
+
+
+def _merge_meta_tool_arguments(args: Dict[str, Any], reserved: set[str]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    raw_args = args.get("arguments")
+    if isinstance(raw_args, dict):
+        merged.update(raw_args)
+    for key, value in args.items():
+        if key in reserved or key in merged:
+            continue
+        merged[key] = value
+    return merged
+
+
+def _raw_call_summary(raw_call: Dict[str, Any], *, status_override: str = "") -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "tool": raw_call.get("tool"),
+        "status": status_override or raw_call.get("status") or "unknown",
+    }
+    arguments = raw_call.get("arguments")
+    if isinstance(arguments, dict) and arguments:
+        summary["arguments"] = arguments
+    error_code = str(raw_call.get("error_code") or "").strip()
+    if error_code:
+        summary["error_code"] = error_code
+    return summary
+
+
+def _result_metadata(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    metadata: Dict[str, Any] = {}
+    if payload.get("next_cursor") is not None:
+        metadata["next_cursor"] = payload.get("next_cursor")
+    pagination = payload.get("pagination")
+    if metadata.get("next_cursor") is None and isinstance(pagination, dict):
+        if pagination.get("next_cursor") is not None:
+            metadata["next_cursor"] = pagination.get("next_cursor")
+    for key in ("count", "match_count", "total_count"):
+        if payload.get(key) is not None:
+            metadata[key] = payload.get(key)
+    if isinstance(payload.get("budget"), dict):
+        metadata["budget"] = payload.get("budget")
+    if isinstance(payload.get("warnings"), list) and payload.get("warnings"):
+        metadata["warnings"] = payload.get("warnings")
+    return metadata
+
+
+async def _best_effort_raw_tool(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    *,
+    underlying_calls: List[Dict[str, Any]],
+    warnings: List[str],
+    warning_label: str,
+) -> Any:
+    try:
+        raw_call = await _invoke_raw_tool(tool_name, tool_args)
+    except PermissionError as exc:
+        warnings.append(str(exc))
+        return None
+    except Exception as exc:
+        warnings.append(f"{warning_label}: {exc}")
+        return None
+
+    underlying_calls.append(_raw_call_summary(raw_call))
+    if raw_call["status"] != "success":
+        warnings.append(
+            f"{warning_label}: {raw_call.get('error_code') or 'tool_error'}"
+        )
+        return None
+    return raw_call["payload"]
+
+
+async def _search(args: dict) -> list[TextContent]:
+    action = str(args.get("action") or "").strip()
+    if not action:
+        return _meta_tool_error(
+            "search",
+            code="invalid_input",
+            message="action is required",
+        )
+
+    entry = _SEARCH_ACTIONS.get(action)
+    if not entry:
+        return _meta_tool_error(
+            "search",
+            code="unknown_action",
+            message=f"Unknown search action '{action}'",
+            action=action,
+        )
+
+    raw_args = _merge_meta_tool_arguments(args, {"action", "arguments"})
+    try:
+        raw_call = await _invoke_raw_tool(entry["tool"], raw_args)
+    except PermissionError as exc:
+        return _meta_tool_error(
+            "search",
+            code="boundary_denied",
+            message=str(exc),
+            action=action,
+        )
+    except Exception as exc:
+        return _meta_tool_error(
+            "search",
+            code="tool_resolution_failed",
+            message=str(exc),
+            action=action,
+        )
+
+    if raw_call["status"] != "success":
+        return _meta_tool_error(
+            "search",
+            code=raw_call.get("error_code") or "tool_error",
+            message=f"Underlying tool '{entry['tool']}' returned an error",
+            action=action,
+            underlying_calls=[_raw_call_summary(raw_call)],
+            details={"result": raw_call["payload"]},
+        )
+
+    return _meta_tool_success(
+        "search",
+        action=action,
+        result=raw_call["payload"],
+        metadata=_result_metadata(raw_call["payload"]),
+        underlying_calls=[_raw_call_summary(raw_call)],
+    )
+
+
+async def _coordination_meta(args: dict) -> list[TextContent]:
+    action = str(args.get("action") or "").strip()
+    if not action:
+        return _meta_tool_error(
+            "coordination",
+            code="invalid_input",
+            message="action is required",
+        )
+
+    entry = _COORDINATION_ACTIONS.get(action)
+    if not entry:
+        return _meta_tool_error(
+            "coordination",
+            code="unknown_action",
+            message=f"Unknown coordination action '{action}'",
+            action=action,
+        )
+
+    raw_args = _merge_meta_tool_arguments(args, {"action", "arguments"})
+    try:
+        raw_call = await _invoke_raw_tool(entry["tool"], raw_args)
+    except PermissionError as exc:
+        return _meta_tool_error(
+            "coordination",
+            code="boundary_denied",
+            message=str(exc),
+            action=action,
+        )
+    except Exception as exc:
+        return _meta_tool_error(
+            "coordination",
+            code="tool_resolution_failed",
+            message=str(exc),
+            action=action,
+        )
+
+    if raw_call["status"] != "success":
+        return _meta_tool_error(
+            "coordination",
+            code=raw_call.get("error_code") or "tool_error",
+            message=f"Underlying tool '{entry['tool']}' returned an error",
+            action=action,
+            underlying_calls=[_raw_call_summary(raw_call)],
+            details={"result": raw_call["payload"]},
+        )
+
+    return _meta_tool_success(
+        "coordination",
+        action=action,
+        result=raw_call["payload"],
+        metadata=_result_metadata(raw_call["payload"]),
+        underlying_calls=[_raw_call_summary(raw_call)],
+    )
+
+
+async def _get_compact_context_meta(args: dict) -> list[TextContent]:
+    mode = str(args.get("mode") or "").strip().lower()
+    if not mode:
+        if args.get("record_id"):
+            mode = "record"
+        elif args.get("document_id"):
+            mode = "document"
+        elif args.get("query"):
+            mode = "topic"
+        elif args.get("project_id"):
+            mode = "project"
+    if not mode:
+        return _meta_tool_error(
+            "get_compact_context",
+            code="invalid_input",
+            message="mode is required (or provide record_id, document_id, query, or project_id)",
+        )
+
+    warnings: List[str] = []
+    underlying_calls: List[Dict[str, Any]] = []
+    context: Dict[str, Any] = {}
+    include_code_map = args.get("include_code_map", True) is not False
+    include_related_documents = args.get("include_related_documents", True) is not False
+    include_governance = args.get("include_governance", True) is not False
+
+    if mode in _RECORD_CONTEXT_MODES:
+        record_id = str(args.get("record_id") or "").strip()
+        if not record_id:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="invalid_input",
+                message="record_id is required for record-oriented context modes",
+                mode=mode,
+            )
+
+        raw_args = {
+            "record_id": record_id,
+            "include_components": args.get("include_components", True),
+            "include_architecture": args.get("include_architecture", True),
+            "include_recent_history": args.get("include_recent_history", True),
+            "history_limit": args.get("history_limit", 10),
+            "max_tokens": args.get("max_tokens", 2500),
+        }
+        try:
+            record_call = await _invoke_raw_tool("get_issue_context", raw_args)
+        except PermissionError as exc:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="boundary_denied",
+                message=str(exc),
+                mode=mode,
+            )
+        except Exception as exc:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="tool_resolution_failed",
+                message=str(exc),
+                mode=mode,
+            )
+
+        underlying_calls.append(_raw_call_summary(record_call))
+        if record_call["status"] != "success":
+            return _meta_tool_error(
+                "get_compact_context",
+                code=record_call.get("error_code") or "tool_error",
+                message="Underlying issue-context assembly failed",
+                mode=mode,
+                underlying_calls=underlying_calls,
+                details={"result": record_call["payload"]},
+            )
+
+        context["record_context"] = record_call["payload"]
+        project_id = str(
+            args.get("project_id")
+            or ((record_call["payload"] or {}).get("project_id") if isinstance(record_call["payload"], dict) else "")
+        ).strip()
+        if not project_id:
+            try:
+                project_id, _record_type, _rid = _parse_record_id(record_id)
+            except ValueError:
+                project_id = ""
+
+        if project_id:
+            project_payload = await _best_effort_raw_tool(
+                "projects_get",
+                {"project_name": project_id},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="project lookup failed",
+            )
+            if project_payload is not None:
+                context["project"] = project_payload
+
+        if include_code_map and project_id:
+            code_map_payload = await _best_effort_raw_tool(
+                "get_code_map",
+                {"project_id": project_id, **({"domain": args.get("domain")} if args.get("domain") else {})},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="code map unavailable",
+            )
+            if code_map_payload is not None:
+                context["code_map"] = code_map_payload
+
+        if include_related_documents:
+            related_docs = await _best_effort_raw_tool(
+                "documents_search",
+                {"project_id": project_id, "related": record_id} if project_id else {"related": record_id},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="related document lookup failed",
+            )
+            if related_docs is not None:
+                context["related_documents"] = related_docs
+
+        if include_governance:
+            governance_entity = str(args.get("governance_entity") or "").strip()
+            if not governance_entity:
+                try:
+                    _project_id, record_type, _rid = _parse_record_id(record_id)
+                    governance_entity = f"tracker.{record_type}"
+                except ValueError:
+                    governance_entity = ""
+            if governance_entity:
+                governance_payload = await _best_effort_raw_tool(
+                    "governance_dictionary",
+                    {"entity": governance_entity},
+                    underlying_calls=underlying_calls,
+                    warnings=warnings,
+                    warning_label="governance lookup failed",
+                )
+                if governance_payload is not None:
+                    context["governance"] = governance_payload
+
+    elif mode == "project":
+        project_id = str(args.get("project_id") or "").strip()
+        if not project_id:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="invalid_input",
+                message="project_id is required for project mode",
+                mode=mode,
+            )
+        try:
+            project_call = await _invoke_raw_tool("projects_get", {"project_name": project_id})
+        except PermissionError as exc:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="boundary_denied",
+                message=str(exc),
+                mode=mode,
+            )
+        except Exception as exc:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="tool_resolution_failed",
+                message=str(exc),
+                mode=mode,
+            )
+        underlying_calls.append(_raw_call_summary(project_call))
+        if project_call["status"] != "success":
+            return _meta_tool_error(
+                "get_compact_context",
+                code=project_call.get("error_code") or "tool_error",
+                message="Project lookup failed",
+                mode=mode,
+                underlying_calls=underlying_calls,
+                details={"result": project_call["payload"]},
+            )
+        context["project"] = project_call["payload"]
+
+        if include_code_map:
+            code_map_payload = await _best_effort_raw_tool(
+                "get_code_map",
+                {"project_id": project_id, **({"domain": args.get("domain")} if args.get("domain") else {})},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="code map unavailable",
+            )
+            if code_map_payload is not None:
+                context["code_map"] = code_map_payload
+
+        if include_related_documents:
+            docs_payload = await _best_effort_raw_tool(
+                "documents_list",
+                {"project_id": project_id, "page_size": args.get("page_size", 10)},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="project document lookup failed",
+            )
+            if docs_payload is not None:
+                context["documents"] = docs_payload
+
+        if args.get("domains"):
+            arch_payload = await _best_effort_raw_tool(
+                "get_architecture_excerpts",
+                {
+                    "project_id": project_id,
+                    "domains": args.get("domains"),
+                    "max_excerpt_tokens": args.get("max_excerpt_tokens", 1200),
+                },
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="architecture excerpts unavailable",
+            )
+            if arch_payload is not None:
+                context["architecture"] = arch_payload
+
+        governance_entity = str(args.get("governance_entity") or "").strip()
+        if include_governance and governance_entity:
+            governance_payload = await _best_effort_raw_tool(
+                "governance_dictionary",
+                {"entity": governance_entity},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="governance lookup failed",
+            )
+            if governance_payload is not None:
+                context["governance"] = governance_payload
+
+    elif mode == "document":
+        document_id = str(args.get("document_id") or "").strip()
+        if not document_id:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="invalid_input",
+                message="document_id is required for document mode",
+                mode=mode,
+            )
+        try:
+            document_call = await _invoke_raw_tool("documents_get", {"document_id": document_id, "include_content": True})
+        except PermissionError as exc:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="boundary_denied",
+                message=str(exc),
+                mode=mode,
+            )
+        except Exception as exc:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="tool_resolution_failed",
+                message=str(exc),
+                mode=mode,
+            )
+        underlying_calls.append(_raw_call_summary(document_call))
+        if document_call["status"] != "success":
+            return _meta_tool_error(
+                "get_compact_context",
+                code=document_call.get("error_code") or "tool_error",
+                message="Document lookup failed",
+                mode=mode,
+                underlying_calls=underlying_calls,
+                details={"result": document_call["payload"]},
+            )
+        context["document"] = document_call["payload"]
+
+        document_payload = document_call["payload"] if isinstance(document_call["payload"], dict) else {}
+        document_record = document_payload.get("document") if isinstance(document_payload.get("document"), dict) else {}
+        project_id = str(args.get("project_id") or document_record.get("project_id") or "").strip()
+        if include_code_map and project_id:
+            code_map_payload = await _best_effort_raw_tool(
+                "get_code_map",
+                {"project_id": project_id, **({"domain": args.get("domain")} if args.get("domain") else {})},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="code map unavailable",
+            )
+            if code_map_payload is not None:
+                context["code_map"] = code_map_payload
+
+        related_items = document_record.get("related_items") if isinstance(document_record, dict) else None
+        if include_related_documents and related_items:
+            context["related_items"] = related_items
+
+    elif mode == "topic":
+        query = str(args.get("query") or "").strip()
+        project_id = str(args.get("project_id") or "").strip()
+        if not query and not project_id:
+            return _meta_tool_error(
+                "get_compact_context",
+                code="invalid_input",
+                message="topic mode requires query or project_id",
+                mode=mode,
+            )
+
+        if project_id:
+            project_payload = await _best_effort_raw_tool(
+                "projects_get",
+                {"project_name": project_id},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="project lookup failed",
+            )
+            if project_payload is not None:
+                context["project"] = project_payload
+
+        document_search_args: Dict[str, Any] = {}
+        if project_id:
+            document_search_args["project_id"] = project_id
+        if args.get("keyword"):
+            document_search_args["keyword"] = args.get("keyword")
+        if args.get("title"):
+            document_search_args["title"] = args.get("title")
+        elif query:
+            document_search_args["title"] = query
+        if args.get("related"):
+            document_search_args["related"] = args.get("related")
+        docs_payload = await _best_effort_raw_tool(
+            "documents_search",
+            document_search_args,
+            underlying_calls=underlying_calls,
+            warnings=warnings,
+            warning_label="document topic search failed",
+        )
+        if docs_payload is not None:
+            context["documents"] = docs_payload
+
+        if project_id and query:
+            reference_payload = await _best_effort_raw_tool(
+                "reference_search",
+                {
+                    "project_id": project_id,
+                    "query": query,
+                    "context_lines": args.get("context_lines", 2),
+                    "max_results": args.get("max_results", 10),
+                    **({"section": args.get("section")} if args.get("section") else {}),
+                },
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="reference search failed",
+            )
+            if reference_payload is not None:
+                context["reference"] = reference_payload
+
+        if include_code_map and project_id:
+            code_map_payload = await _best_effort_raw_tool(
+                "get_code_map",
+                {"project_id": project_id, **({"domain": args.get("domain")} if args.get("domain") else {})},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="code map unavailable",
+            )
+            if code_map_payload is not None:
+                context["code_map"] = code_map_payload
+
+        if project_id and args.get("domains"):
+            arch_payload = await _best_effort_raw_tool(
+                "get_architecture_excerpts",
+                {
+                    "project_id": project_id,
+                    "domains": args.get("domains"),
+                    "max_excerpt_tokens": args.get("max_excerpt_tokens", 1200),
+                },
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="architecture excerpts unavailable",
+            )
+            if arch_payload is not None:
+                context["architecture"] = arch_payload
+
+        governance_entity = str(args.get("governance_entity") or "").strip()
+        if include_governance and governance_entity:
+            governance_payload = await _best_effort_raw_tool(
+                "governance_dictionary",
+                {"entity": governance_entity},
+                underlying_calls=underlying_calls,
+                warnings=warnings,
+                warning_label="governance lookup failed",
+            )
+            if governance_payload is not None:
+                context["governance"] = governance_payload
+    else:
+        return _meta_tool_error(
+            "get_compact_context",
+            code="unknown_mode",
+            message=f"Unknown context mode '{mode}'",
+            mode=mode,
+        )
+
+    return _meta_tool_success(
+        "get_compact_context",
+        mode=mode,
+        result=context,
+        underlying_calls=underlying_calls,
+        warnings=warnings,
+        metadata={"section_count": len(context)},
+        partial=bool(warnings),
+    )
+
+
+async def _execute(args: dict) -> list[TextContent]:
+    steps = args.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return _meta_tool_error(
+            "execute",
+            code="invalid_input",
+            message="steps must be a non-empty array",
+        )
+
+    overall_dry_run = bool(args.get("dry_run", False))
+    step_results: List[Dict[str, Any]] = []
+    underlying_calls: List[Dict[str, Any]] = []
+    failed_steps: List[Dict[str, Any]] = []
+
+    for index, raw_step in enumerate(steps, start=1):
+        if not isinstance(raw_step, dict):
+            failed_steps.append({"step": index, "error": "step must be an object"})
+            step_results.append({"step": index, "status": "invalid", "error": "step must be an object"})
+            break
+
+        action = str(raw_step.get("action") or "").strip()
+        on_error = str(raw_step.get("on_error") or "abort").strip().lower()
+        entry = _EXECUTE_ACTIONS.get(action)
+        if not action or entry is None:
+            error_message = f"Unknown execute action '{action}'" if action else "step action is required"
+            failed_steps.append({"step": index, "action": action, "error": error_message})
+            step_results.append({"step": index, "action": action, "status": "invalid", "error": error_message})
+            if on_error != "continue":
+                break
+            continue
+
+        step_args = {}
+        if isinstance(raw_step.get("arguments"), dict):
+            step_args.update(raw_step["arguments"])
+        step_dry_run = overall_dry_run or bool(raw_step.get("dry_run", False))
+        summary = {
+            "tool": entry["tool"],
+            "arguments": step_args,
+            "status": "dry_run" if step_dry_run else "pending",
+        }
+
+        if entry.get("requires_governance_hash") and not step_args.get("governance_hash"):
+            error_message = f"Action '{action}' requires governance_hash"
+            failed_steps.append({"step": index, "action": action, "error": error_message})
+            summary["status"] = "blocked"
+            summary["error_code"] = "governance_hash_missing"
+            underlying_calls.append(summary)
+            step_results.append({
+                "step": index,
+                "action": action,
+                "status": "blocked",
+                "error": error_message,
+                "resolved_calls": [summary],
+            })
+            if on_error != "continue":
+                break
+            continue
+
+        if not _raw_tool_allowed(entry["tool"]):
+            error_message = f"Raw tool '{entry['tool']}' is outside the current session boundary"
+            failed_steps.append({"step": index, "action": action, "error": error_message})
+            summary["status"] = "blocked"
+            summary["error_code"] = "boundary_denied"
+            underlying_calls.append(summary)
+            step_results.append({
+                "step": index,
+                "action": action,
+                "status": "blocked",
+                "error": error_message,
+                "resolved_calls": [summary],
+            })
+            if on_error != "continue":
+                break
+            continue
+
+        if step_dry_run:
+            underlying_calls.append(summary)
+            step_results.append({
+                "step": index,
+                "action": action,
+                "status": "dry_run",
+                "resolved_calls": [summary],
+            })
+            continue
+
+        try:
+            raw_call = await _invoke_raw_tool(entry["tool"], step_args)
+        except Exception as exc:
+            error_message = str(exc)
+            failed_steps.append({"step": index, "action": action, "error": error_message})
+            summary["status"] = "error"
+            summary["error_code"] = "tool_resolution_failed"
+            underlying_calls.append(summary)
+            step_results.append({
+                "step": index,
+                "action": action,
+                "status": "error",
+                "error": error_message,
+                "resolved_calls": [summary],
+            })
+            if on_error != "continue":
+                break
+            continue
+
+        call_summary = _raw_call_summary(raw_call)
+        underlying_calls.append(call_summary)
+        if raw_call["status"] != "success":
+            error_message = f"Underlying tool '{entry['tool']}' returned an error"
+            failed_steps.append({
+                "step": index,
+                "action": action,
+                "error": error_message,
+                "error_code": raw_call.get("error_code") or "tool_error",
+            })
+            step_results.append({
+                "step": index,
+                "action": action,
+                "status": "error",
+                "error": error_message,
+                "result": raw_call["payload"],
+                "resolved_calls": [call_summary],
+            })
+            if on_error != "continue":
+                break
+            continue
+
+        step_results.append({
+            "step": index,
+            "action": action,
+            "status": "success",
+            "result": raw_call["payload"],
+            "resolved_calls": [call_summary],
+        })
+
+    if failed_steps:
+        return _result_text({
+            "success": False,
+            "interface_mode": INTERFACE_MODE,
+            "tool": "execute",
+            "dry_run": overall_dry_run,
+            "partial": any(step.get("status") == "success" for step in step_results),
+            "step_results": step_results,
+            "underlying_calls": underlying_calls,
+            "error": {
+                "code": "step_failed",
+                "message": "One or more execute steps failed",
+                "details": {"failed_steps": failed_steps},
+            },
+        })
+
+    return _meta_tool_success(
+        "execute",
+        steps=step_results,
+        underlying_calls=underlying_calls,
+        dry_run=overall_dry_run,
+        metadata={"step_count": len(step_results)},
+    )
+
+
 # --- Deployment ---
 
 
@@ -6655,6 +7822,10 @@ async def _validate_commit_complete(args: dict) -> list[TextContent]:
 # -------------------------------------------------------------------
 
 _TOOL_HANDLERS = {
+    "search": _search,
+    "coordination": _coordination_meta,
+    "get_compact_context": _get_compact_context_meta,
+    "execute": _execute,
     "projects_list": _projects_list,
     "projects_get": _projects_get,
     "tracker_get": _tracker_get,

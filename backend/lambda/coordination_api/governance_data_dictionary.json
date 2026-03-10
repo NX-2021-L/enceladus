@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-10.1",
-  "updated_at": "2026-03-10T03:50:00Z",
+  "version": "2026-03-10.2",
+  "updated_at": "2026-03-10T20:30:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -793,6 +793,27 @@
           "type": "object",
           "definition": "Session context for multi-turn terminal interactions.",
           "usage_guidance": "Contains session_id and thread_id. Used to group coordination requests into logical terminal sessions."
+        },
+        "provider_session.interface_mode": {
+          "type": "enum",
+          "enum": [
+            "raw",
+            "code"
+          ],
+          "definition": "Managed-session MCP interface contract requested for the provider runtime.",
+          "usage_guidance": "raw preserves the broad raw-tool MCP surface. code exposes only search, coordination, get_compact_context, and execute while allowing those meta-tools to resolve onto governed raw handlers."
+        },
+        "provider_session.allowed_tools": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Provider-visible tool names allowed for the managed session.",
+          "usage_guidance": "When interface_mode=code, allowed_tools should contain only the four code-mode meta tools. When interface_mode=raw, allowed_tools may contain allowlisted raw MCP tool names."
+        },
+        "provider_session.allowed_raw_tools": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Optional raw MCP tool allowlist used internally by code-mode action resolution.",
+          "usage_guidance": "Code-mode sessions pass this boundary to the MCP server via COORDINATION_ALLOWED_RAW_TOOLS[_JSON]. Meta-tools may resolve only to raw tools listed here."
         }
       }
     },
@@ -1331,9 +1352,48 @@
         }
       }
     },
+    "mcp_server.code_mode": {
+      "description": "Four-tool code-mode MCP surface for low-token managed sessions (ENC-FTR-044).",
+      "fields": {
+        "interface_mode": {
+          "type": "enum",
+          "enum": [
+            "raw",
+            "code"
+          ],
+          "definition": "Server interface flag. code publishes only search, coordination, get_compact_context, and execute."
+        },
+        "search": {
+          "type": "tool",
+          "usage_guidance": "Compact read-only discovery surface over projects, tracker, documents, deploy, changelog, governance, reference, health, and GitHub project listings. Accepts action + arguments."
+        },
+        "coordination": {
+          "type": "tool",
+          "usage_guidance": "Compact orchestration surface over coordination_capabilities, coordination_request_get, coordination_cognito_session, dispatch_plan_generate, and dispatch_plan_dry_run."
+        },
+        "get_compact_context": {
+          "type": "tool",
+          "usage_guidance": "Budgeted composite context assembly for record, project, document, and topic modes. Must preserve the existing get_code_map payload verbatim under result.code_map when codemap is included."
+        },
+        "execute": {
+          "type": "tool",
+          "usage_guidance": "Ordered workflow runner for governed mutations. steps[].action resolves through an audited registry to existing MCP/HTTP handlers only. Supports dry_run and per-step on_error handling."
+        },
+        "allowed_raw_tools": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Raw MCP tools that code-mode meta-tools may resolve onto within the current session boundary."
+        }
+      }
+    },
     "mcp_server.context_assembly": {
       "description": "Composite context retrieval tools for agent token optimization (ENC-TSK-829, ENC-TSK-830, enhanced ENC-TSK-825). Reduces multi-call context loading to single bundled responses with location_hint fuzzy matching and cross-project support.",
       "fields": {
+        "get_compact_context": {
+          "type": "tool",
+          "definition": "Code-mode composite context tool that reuses get_issue_context, get_code_map, get_architecture_excerpts, documents_search/list, governance_dictionary, and projects_get under one compact envelope.",
+          "usage_guidance": "Supports record|issue|task|feature|project|document|topic modes. In record/project/topic modes, code_map should use the existing get_code_map logic and payloads unchanged."
+        },
         "get_issue_context": {
           "type": "tool",
           "definition": "Composite MCP tool that bundles record core fields, relationship graph, component source paths, domain architecture excerpts, and recent history into a single response. For issues with location_hint, auto-resolves to matching components via weighted fuzzy matching (DOC-4C6035E777C0).",
