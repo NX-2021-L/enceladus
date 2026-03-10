@@ -62,7 +62,10 @@ RESOLVED_AUTH_KEY="${ENCELADUS_COORDINATION_INTERNAL_API_KEY:-${ENCELADUS_COORDI
 # ---------------------------------------------------------------------------
 # Build remote HTTP MCP config JSON (ENC-TSK-862, ENC-TSK-864)
 # ---------------------------------------------------------------------------
-MCP_CONFIG=$("${PYTHON_BIN}" -c "
+MCP_CONFIG=$(MCP_PRIMARY_ALIAS="${MCP_PRIMARY_ALIAS}" \
+  MCP_GATEWAY_URL="${MCP_GATEWAY_URL}" \
+  RESOLVED_AUTH_KEY="${RESOLVED_AUTH_KEY}" \
+  "${PYTHON_BIN}" -c "
 import json, os
 alias = os.environ['MCP_PRIMARY_ALIAS']
 url = os.environ['MCP_GATEWAY_URL']
@@ -71,9 +74,7 @@ server = {'type': 'http', 'url': url}
 if auth_key:
     server['headers'] = {'X-Coordination-Internal-Key': auth_key}
 print(json.dumps({'mcpServers': {alias: server}}, indent=2))
-" MCP_PRIMARY_ALIAS="${MCP_PRIMARY_ALIAS}" \
-  MCP_GATEWAY_URL="${MCP_GATEWAY_URL}" \
-  RESOLVED_AUTH_KEY="${RESOLVED_AUTH_KEY}")
+")
 
 # ---------------------------------------------------------------------------
 # Install into Claude Code desktop settings (~/.claude/mcp.json)
