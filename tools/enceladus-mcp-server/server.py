@@ -5881,14 +5881,23 @@ def _read_architecture_file(domain: str) -> Optional[str]:
     if not mapping:
         return None
 
-    # Try local filesystem first (relative to server.py location)
     import pathlib as _pathlib
     server_dir = _pathlib.Path(__file__).resolve().parent
+
+    # Try repo-relative path (local dev: server.py is at tools/enceladus-mcp-server/)
     repo_root = server_dir.parent.parent
     local_path = repo_root / mapping["file"]
     if local_path.is_file():
         try:
             return local_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    # Try package-relative path (Lambda: architecture docs bundled alongside server.py) (ENC-ISS-111)
+    package_path = server_dir / mapping["file"]
+    if package_path.is_file():
+        try:
+            return package_path.read_text(encoding="utf-8")
         except Exception:
             pass
 
@@ -6089,6 +6098,8 @@ async def _get_issue_context(args: dict) -> list[TextContent]:
     record_resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
     if not isinstance(record_resp, dict) or record_resp.get("error"):
         return _result_text(record_resp or {"error": "Failed to fetch record"})
+    # Unwrap record envelope — API returns {"record": {...}} (ENC-ISS-110)
+    record_resp = record_resp.get("record", record_resp)
 
     # Build compact record core
     budget_used = 0

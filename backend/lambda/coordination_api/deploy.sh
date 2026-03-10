@@ -555,6 +555,14 @@ package_lambda() {
   cp "${mcp_server_src}" "${build_dir}/server.py"
   cp "${mcp_dispatch_src}" "${build_dir}/dispatch_plan_generator.py"
 
+  # Include architecture docs for get_architecture_excerpts Lambda fallback (ENC-ISS-111)
+  local arch_dir
+  arch_dir="$(dirname "${mcp_server_src}")/../../docs/architecture"
+  if [[ -d "${arch_dir}" ]]; then
+    mkdir -p "${build_dir}/docs/architecture"
+    cp "${arch_dir}"/*.md "${build_dir}/docs/architecture/" 2>/dev/null || true
+  fi
+
   python3 -m pip install \
     --quiet \
     --upgrade \
