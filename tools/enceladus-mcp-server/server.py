@@ -2870,7 +2870,7 @@ async def read_resource(uri: str) -> str:
         except Exception as exc:
             return f"# Failed to fetch governance resource {uri_text}: {exc}"
 
-    # projects://reference/{project_id} (ENC-ISS-108: document store first)
+    # projects://reference/{project_id} (ENC-ISS-108: reads from document store)
     if uri_text.startswith("projects://reference/"):
         project_id = uri_text.replace("projects://reference/", "")
         content, _source_info, error = _fetch_reference_content(project_id)
@@ -5094,17 +5094,15 @@ async def _check_document_policy(args: dict) -> list[TextContent]:
 
 
 def _fetch_reference_content(project_id: str) -> tuple:
-    """Fetch reference document content, trying document store API first, then legacy S3.
+    """Fetch reference document content from the document store API.
 
     Returns (content, source_info, error_payload) where:
     - On success: (str, dict, None)
     - On failure: (None, None, dict)
 
-    ENC-ISS-108: reference documents are now stored in the document store via
-    documents_put. Legacy S3 path (mobile/v1/reference/) is kept as fallback
-    for backwards compatibility (enceladus project).
+    ENC-ISS-108: All reference documents live in the document store (keyword
+    'reference'). The legacy S3 path (mobile/v1/reference/) is retired.
     """
-    # --- Try document store API first ---
     try:
         search_resp = _document_api_request(
             "GET", "/search",
@@ -5121,56 +5119,47 @@ def _fetch_reference_content(project_id: str) -> tuple:
         elif isinstance(search_resp, list):
             docs = search_resp
 
-        if docs:
-            doc = docs[0]
-            doc_id = doc.get("document_id") or doc.get("id", "")
-            if doc_id:
-                get_resp = _document_api_request(
-                    "GET",
-                    f"/{urllib.parse.quote(str(doc_id), safe='')}",
-                    query={"include_content": "true"},
-                )
-                doc_content = ""
-                if isinstance(get_resp, dict):
-                    doc_content = get_resp.get("content", "")
-                if doc_content:
-                    source_info = {
-                        "source": "document_store",
-                        "document_id": doc_id,
-                        "last_modified": get_resp.get("updated_at")
-                            or get_resp.get("created_at"),
-                    }
-                    return (doc_content, source_info, None)
-    except Exception:
-        pass  # Fall through to legacy S3
-
-    # --- Fallback: legacy S3 path ---
-    s3_key = f"{S3_REFERENCE_PREFIX}/{project_id}.md"
-    try:
-        resp = _get_s3().get_object(Bucket=S3_BUCKET, Key=s3_key)
-        content = resp["Body"].read().decode("utf-8")
-        last_modified = resp.get("LastModified")
-        last_modified_str = (
-            last_modified.strftime("%Y-%m-%dT%H:%M:%SZ") if last_modified else None
-        )
-        source_info = {
-            "source": "legacy_s3",
-            "s3_key": s3_key,
-            "last_modified": last_modified_str,
-        }
-        return (content, source_info, None)
-    except Exception as exc:
-        error_msg = str(exc)
-        if "NoSuchKey" in error_msg or "404" in error_msg:
+        if not docs:
             return (None, None, _error_payload(
                 "NOT_FOUND",
                 f"Reference document not found for project: {project_id}. "
-                f"No document with keyword 'reference' in document store, "
-                f"and no file at legacy S3 path {s3_key}.",
-                details={"s3_key": s3_key, "project_id": project_id},
+                f"Create one via documents_put with keyword 'reference'.",
+                details={"project_id": project_id},
             ))
+
+        doc = docs[0]
+        doc_id = doc.get("document_id") or doc.get("id", "")
+        if not doc_id:
+            return (None, None, _error_payload(
+                "INTERNAL_ERROR",
+                f"Document search returned result without document_id for {project_id}.",
+            ))
+
+        get_resp = _document_api_request(
+            "GET",
+            f"/{urllib.parse.quote(str(doc_id), safe='')}",
+            query={"include_content": "true"},
+        )
+        doc_content = get_resp.get("content", "") if isinstance(get_resp, dict) else ""
+        if not doc_content:
+            return (None, None, _error_payload(
+                "NOT_FOUND",
+                f"Reference document {doc_id} for {project_id} has no content.",
+                details={"document_id": doc_id, "project_id": project_id},
+            ))
+
+        source_info = {
+            "source": "document_store",
+            "document_id": doc_id,
+            "last_modified": get_resp.get("updated_at") or get_resp.get("created_at"),
+        }
+        return (doc_content, source_info, None)
+
+    except Exception as exc:
         return (None, None, _error_payload(
-            "UPSTREAM_ERROR", f"S3 read failed: {exc}", retryable=True,
+            "UPSTREAM_ERROR",
+            f"Document store API failed for {project_id}: {exc}",
+            retryable=True,
         ))
 
 
