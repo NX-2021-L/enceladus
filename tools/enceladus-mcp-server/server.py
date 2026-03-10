@@ -384,6 +384,20 @@ _REFRESH_TOKEN_TTL = 30 * 24 * 3600
 OAUTH_CLIENT_ID = os.environ.get("ENCELADUS_OAUTH_CLIENT_ID", "")
 OAUTH_CLIENT_SECRET = os.environ.get("ENCELADUS_OAUTH_CLIENT_SECRET", "")
 
+# Cognito-direct OAuth (ENC-FTR-045): when set, OAuth metadata points directly
+# to Cognito Hosted UI and bearer tokens are validated as Cognito JWTs.
+COGNITO_USER_POOL_ID = os.environ.get("ENCELADUS_COGNITO_USER_POOL_ID", "")
+COGNITO_CLIENT_ID_CODE = os.environ.get("ENCELADUS_COGNITO_CLIENT_ID", "")
+COGNITO_CLIENT_SECRET_CODE = os.environ.get("ENCELADUS_COGNITO_CLIENT_SECRET", "")
+COGNITO_DOMAIN = os.environ.get("ENCELADUS_COGNITO_DOMAIN", "")
+COGNITO_REGION = os.environ.get("ENCELADUS_COGNITO_REGION", "")
+
+
+def _cognito_mode_active() -> bool:
+    """Return True when Cognito-direct OAuth is configured (ENC-FTR-045)."""
+    return bool(COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID_CODE and COGNITO_DOMAIN)
+
+
 INTERFACE_MODE_RAW = "raw"
 INTERFACE_MODE_CODE = "code"
 CODE_MODE_TOOL_NAMES = ("search", "coordination", "get_compact_context", "execute")
@@ -7937,6 +7951,239 @@ def _get_server_base_url(event: Dict[str, Any]) -> str:
     return f"{scheme}://{host}" if host else ""
 
 
+# ---------------------------------------------------------------------------
+# Cognito JWKS + JWT validation (ENC-FTR-045)
+# ---------------------------------------------------------------------------
+
+_cognito_jwks_cache: Dict[str, Any] = {}
+_cognito_jwks_fetched_at: float = 0.0
+_COGNITO_JWKS_TTL: float = 3600.0
+
+
+def _get_cognito_jwks() -> Dict[str, Any]:
+    """Fetch and cache Cognito JWKS keys. Requires PyJWT[crypto]."""
+    global _cognito_jwks_cache, _cognito_jwks_fetched_at
+    now = time.time()
+    if _cognito_jwks_cache and (now - _cognito_jwks_fetched_at) < _COGNITO_JWKS_TTL:
+        return _cognito_jwks_cache
+
+    if not COGNITO_USER_POOL_ID:
+        raise ValueError("COGNITO_USER_POOL_ID not set")
+
+    region = COGNITO_REGION or COGNITO_USER_POOL_ID.split("_")[0]
+    url = (
+        f"https://cognito-idp.{region}.amazonaws.com/"
+        f"{COGNITO_USER_POOL_ID}/.well-known/jwks.json"
+    )
+
+    try:
+        import jwt as _jwt_mod
+        from jwt.algorithms import RSAAlgorithm as _RSA
+    except ImportError:
+        raise ValueError("PyJWT[crypto] is required for Cognito JWT validation")
+
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        pass
+    with urllib.request.urlopen(url, timeout=5, context=ctx) as resp:
+        data = json.loads(resp.read())
+
+    new_cache: Dict[str, Any] = {}
+    for key_data in data.get("keys", []):
+        kid = key_data.get("kid")
+        if kid:
+            new_cache[kid] = _RSA.from_jwk(json.dumps(key_data))
+
+    _cognito_jwks_cache = new_cache
+    _cognito_jwks_fetched_at = now
+    return _cognito_jwks_cache
+
+
+def _verify_cognito_jwt(token: str) -> Dict[str, Any]:
+    """Validate a Cognito-issued JWT (access or id token). Returns claims dict."""
+    try:
+        import jwt as _jwt_mod
+    except ImportError:
+        raise ValueError("PyJWT[crypto] is required for Cognito JWT validation")
+
+    try:
+        header = _jwt_mod.get_unverified_header(token)
+    except Exception as exc:
+        raise ValueError(f"Invalid token header: {exc}") from exc
+
+    kid = header.get("kid")
+    alg = header.get("alg", "RS256")
+    if alg != "RS256":
+        raise ValueError(f"Unexpected token algorithm: {alg}")
+
+    key = _get_cognito_jwks().get(kid)
+    if key is None:
+        raise ValueError("Token key ID not found in JWKS")
+
+    region = COGNITO_REGION or COGNITO_USER_POOL_ID.split("_", 1)[0]
+    expected_issuer = f"https://cognito-idp.{region}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+
+    try:
+        claims = _jwt_mod.decode(
+            token,
+            key,
+            algorithms=["RS256"],
+            issuer=expected_issuer,
+            options={"verify_exp": True, "verify_aud": False},
+        )
+    except _jwt_mod.ExpiredSignatureError:
+        raise ValueError("Token has expired")
+    except _jwt_mod.InvalidIssuerError:
+        raise ValueError("Token issuer mismatch")
+    except _jwt_mod.PyJWTError as exc:
+        raise ValueError(f"Token validation failed: {exc}") from exc
+
+    # Validate client_id for access tokens or aud for id tokens
+    if COGNITO_CLIENT_ID_CODE:
+        token_use = str(claims.get("token_use") or "").strip().lower()
+        if token_use == "access":
+            cid = str(claims.get("client_id") or "")
+            if not hmac.compare_digest(cid, COGNITO_CLIENT_ID_CODE):
+                raise ValueError("Token client_id mismatch")
+        elif token_use == "id":
+            aud = str(claims.get("aud") or "")
+            if not hmac.compare_digest(aud, COGNITO_CLIENT_ID_CODE):
+                raise ValueError("Token audience mismatch")
+
+    return claims
+
+
+# ---------------------------------------------------------------------------
+# Cognito-direct OAuth endpoints (ENC-FTR-045)
+# ---------------------------------------------------------------------------
+
+
+def _handle_cognito_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, Any]:
+    """RFC 8414: Authorization Server Metadata pointing directly to Cognito Hosted UI."""
+    base = _get_server_base_url(event)
+    cognito_domain = COGNITO_DOMAIN.rstrip("/")
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json", "cache-control": "public, max-age=3600"},
+        "body": json.dumps({
+            "issuer": base,
+            "authorization_endpoint": f"{cognito_domain}/oauth2/authorize",
+            "token_endpoint": f"{cognito_domain}/oauth2/token",
+            "registration_endpoint": f"{base}/oauth/register",
+            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "response_types_supported": ["code"],
+            "code_challenge_methods_supported": ["S256"],
+            "service_documentation": f"{base}/.well-known/oauth-protected-resource",
+        }),
+        "isBase64Encoded": False,
+    }
+
+
+def _handle_cognito_authorize(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Fallback /authorize — redirect to Cognito Hosted UI with PKCE passthrough."""
+    qs = event.get("queryStringParameters") or {}
+    cognito_domain = COGNITO_DOMAIN.rstrip("/")
+
+    # Build Cognito authorize URL, passing through all OAuth params
+    params = {}
+    for key in ("response_type", "client_id", "redirect_uri", "state",
+                "code_challenge", "code_challenge_method", "scope"):
+        val = qs.get(key, "")
+        if val:
+            params[key] = val
+
+    # Default scope to openid if not specified
+    if "scope" not in params:
+        params["scope"] = "openid email profile"
+
+    location = f"{cognito_domain}/oauth2/authorize?{urllib.parse.urlencode(params)}"
+    return {
+        "statusCode": 302,
+        "headers": {"location": location, "cache-control": "no-store"},
+        "body": "",
+        "isBase64Encoded": False,
+    }
+
+
+def _handle_cognito_token(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Fallback /oauth/token — proxy to Cognito token endpoint."""
+    cognito_domain = COGNITO_DOMAIN.rstrip("/")
+    token_url = f"{cognito_domain}/oauth2/token"
+
+    body_raw = event.get("body") or ""
+    if event.get("isBase64Encoded"):
+        import base64 as b64
+        body_raw = b64.b64decode(body_raw).decode()
+
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        pass
+
+    req = urllib.request.Request(
+        token_url,
+        data=body_raw.encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            resp_body = resp.read().decode("utf-8")
+            return {
+                "statusCode": resp.status,
+                "headers": {"content-type": "application/json", "cache-control": "no-store"},
+                "body": resp_body,
+                "isBase64Encoded": False,
+            }
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode("utf-8", errors="replace") if exc.fp else "{}"
+        return {
+            "statusCode": exc.code,
+            "headers": {"content-type": "application/json"},
+            "body": err_body,
+            "isBase64Encoded": False,
+        }
+    except Exception as exc:
+        return {
+            "statusCode": 502,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps({"error": "server_error", "error_description": str(exc)}),
+            "isBase64Encoded": False,
+        }
+
+
+def _handle_cognito_register(event: Dict[str, Any]) -> Dict[str, Any]:
+    """RFC 7591: Dynamic Client Registration — returns pre-configured Cognito app client."""
+    body_raw = event.get("body") or ""
+    if event.get("isBase64Encoded"):
+        import base64 as b64
+        body_raw = b64.b64decode(body_raw).decode()
+    try:
+        reg = json.loads(body_raw) if body_raw else {}
+    except Exception:
+        reg = {}
+    redirect_uris = reg.get("redirect_uris", [])
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json", "cache-control": "no-store"},
+        "body": json.dumps({
+            "client_id": COGNITO_CLIENT_ID_CODE,
+            "client_secret": COGNITO_CLIENT_SECRET_CODE,
+            "redirect_uris": redirect_uris,
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "client_secret_post",
+        }),
+        "isBase64Encoded": False,
+    }
+
+
 def _handle_oauth_protected_resource(event: Dict[str, Any]) -> Dict[str, Any]:
     """RFC 9728: OAuth 2.0 Protected Resource Metadata."""
     base = _get_server_base_url(event)
@@ -8306,21 +8553,28 @@ def _handle_oauth_token(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _handle_oauth_route(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Route OAuth / well-known requests. Returns None if path is not an OAuth route."""
+    """Route OAuth / well-known requests. Returns None if path is not an OAuth route.
+
+    When Cognito mode is active (ENC-FTR-045), dispatches to Cognito-direct
+    handlers; otherwise uses the self-contained HMAC-based flow.
+    """
     req_ctx = (event.get("requestContext") or {}).get("http", {})
     path = req_ctx.get("path", "")
     method = req_ctx.get("method", "GET").upper()
 
     if path == "/.well-known/oauth-protected-resource" and method == "GET":
         return _handle_oauth_protected_resource(event)
+
+    cognito = _cognito_mode_active()
+
     if path == "/.well-known/oauth-authorization-server" and method == "GET":
-        return _handle_oauth_server_metadata(event)
+        return _handle_cognito_oauth_server_metadata(event) if cognito else _handle_oauth_server_metadata(event)
     if path == "/authorize" and method == "GET":
-        return _handle_oauth_authorize(event)
+        return _handle_cognito_authorize(event) if cognito else _handle_oauth_authorize(event)
     if path == "/oauth/token" and method == "POST":
-        return _handle_oauth_token(event)
+        return _handle_cognito_token(event) if cognito else _handle_oauth_token(event)
     if path == "/oauth/register" and method == "POST":
-        return _handle_oauth_register(event)
+        return _handle_cognito_register(event) if cognito else _handle_oauth_register(event)
     return None
 
 
@@ -8334,10 +8588,39 @@ async def _handle_lambda_event(event: Dict[str, Any]) -> Dict[str, Any]:
         return oauth_response
 
     # 1. Bearer auth check
-    if MCP_API_KEY:
-        auth_header = (event.get("headers") or {}).get("authorization", "")
+    base = _get_server_base_url(event)
+    auth_header = (event.get("headers") or {}).get("authorization", "")
+
+    if _cognito_mode_active():
+        # Cognito JWT validation (ENC-FTR-045)
+        token = ""
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+        if not token:
+            return {
+                "statusCode": 401,
+                "headers": {
+                    "content-type": "application/json",
+                    "www-authenticate": f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource"',
+                },
+                "body": json.dumps({"error": "Unauthorized", "error_description": "Bearer token required"}),
+                "isBase64Encoded": False,
+            }
+        try:
+            _verify_cognito_jwt(token)
+        except ValueError as exc:
+            return {
+                "statusCode": 401,
+                "headers": {
+                    "content-type": "application/json",
+                    "www-authenticate": f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource"',
+                },
+                "body": json.dumps({"error": "invalid_token", "error_description": str(exc)}),
+                "isBase64Encoded": False,
+            }
+    elif MCP_API_KEY:
+        # Self-contained static key validation (original flow)
         if auth_header != f"Bearer {MCP_API_KEY}":
-            base = _get_server_base_url(event)
             return {
                 "statusCode": 401,
                 "headers": {

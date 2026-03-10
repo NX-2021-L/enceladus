@@ -47,6 +47,12 @@ on:
         required: false
       GH_INSTALLATION_ID:
         required: false
+      ENCELADUS_COGNITO_CLIENT_ID:
+        required: false
+      ENCELADUS_COGNITO_CLIENT_SECRET:
+        required: false
+      ENCELADUS_COGNITO_DOMAIN:
+        required: false
 
 permissions:
   contents: read
@@ -95,6 +101,9 @@ jobs:
           ENCELADUS_OAUTH_CLIENT_SECRET: ${{ secrets.ENCELADUS_OAUTH_CLIENT_SECRET }}
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_INSTALLATION_ID: ${{ secrets.GH_INSTALLATION_ID }}
+          ENCELADUS_COGNITO_CLIENT_ID: ${{ secrets.ENCELADUS_COGNITO_CLIENT_ID }}
+          ENCELADUS_COGNITO_CLIENT_SECRET: ${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}
+          ENCELADUS_COGNITO_DOMAIN: ${{ secrets.ENCELADUS_COGNITO_DOMAIN }}
         run: |
           set -euo pipefail
           chmod +x "${{ inputs.deploy_script }}"
