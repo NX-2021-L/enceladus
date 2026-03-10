@@ -8086,6 +8086,7 @@ def _handle_cognito_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, An
             "token_endpoint_auth_methods_supported": ["client_secret_post"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "response_types_supported": ["code"],
+            "scopes_supported": ["openid", "email", "profile"],
             "code_challenge_methods_supported": ["S256"],
             "service_documentation": f"{base}/.well-known/oauth-protected-resource",
         }),
@@ -8188,6 +8189,7 @@ def _handle_cognito_register(event: Dict[str, Any]) -> Dict[str, Any]:
             "redirect_uris": redirect_uris,
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
+            "scope": "openid email profile",
             "token_endpoint_auth_method": "client_secret_post",
         }),
         "isBase64Encoded": False,
@@ -8203,6 +8205,7 @@ def _handle_oauth_protected_resource(event: Dict[str, Any]) -> Dict[str, Any]:
         "body": json.dumps({
             "resource": base,
             "authorization_servers": [base],
+            "scopes_supported": ["openid", "email", "profile"],
             "bearer_methods_supported": ["header"],
         }),
         "isBase64Encoded": False,
