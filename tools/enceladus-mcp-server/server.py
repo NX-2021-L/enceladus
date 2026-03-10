@@ -7944,7 +7944,17 @@ def _get_http_session_manager() -> Any:
 
 
 def _get_server_base_url(event: Dict[str, Any]) -> str:
-    """Derive the public base URL from the Lambda Function URL event."""
+    """Derive the public base URL, preferring CUSTOM_DOMAIN when set (ENC-TSK-873).
+
+    When behind CloudFront, the Host header is replaced with the origin domain.
+    CUSTOM_DOMAIN env var lets the Lambda return the vanity URL in OAuth metadata.
+    """
+    custom = os.environ.get("CUSTOM_DOMAIN", "").strip().rstrip("/")
+    if custom:
+        # Ensure scheme prefix
+        if not custom.startswith("https://"):
+            custom = f"https://{custom}"
+        return custom
     headers = event.get("headers") or {}
     host = headers.get("host", headers.get("x-forwarded-host", ""))
     scheme = headers.get("x-forwarded-proto", "https")

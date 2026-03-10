@@ -19,6 +19,7 @@ COGNITO_REGION="${ENCELADUS_COGNITO_REGION:-us-east-1}"
 COGNITO_CLIENT_ID="${ENCELADUS_COGNITO_CLIENT_ID:-}"
 COGNITO_CLIENT_SECRET="${ENCELADUS_COGNITO_CLIENT_SECRET:-}"
 COGNITO_DOMAIN="${ENCELADUS_COGNITO_DOMAIN:-}"
+CUSTOM_DOMAIN="${ENCELADUS_CUSTOM_DOMAIN:-mcp.jreese.net}"
 ROLE_ARN="${LAMBDA_ROLE_ARN:-}"
 
 log() {
@@ -126,6 +127,9 @@ if cognito_client_secret:
 cognito_domain = os.environ.get("COGNITO_DOMAIN", "")
 if cognito_domain:
     merged["ENCELADUS_COGNITO_DOMAIN"] = cognito_domain
+custom_domain = os.environ.get("CUSTOM_DOMAIN", "")
+if custom_domain:
+    merged["CUSTOM_DOMAIN"] = custom_domain
 
 print(json.dumps({"Variables": merged}, separators=(",", ":")))
 PY
@@ -243,6 +247,7 @@ deploy_lambda() {
   COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID}" \
   COGNITO_CLIENT_SECRET="${COGNITO_CLIENT_SECRET}" \
   COGNITO_DOMAIN="${COGNITO_DOMAIN}" \
+  CUSTOM_DOMAIN="${CUSTOM_DOMAIN}" \
   build_environment_payload "${env_file}"
 
   if function_exists; then
