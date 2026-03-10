@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-10.3",
-  "updated_at": "2026-03-10T12:52:00Z",
+  "version": "2026-03-10.4",
+  "updated_at": "2026-03-10T16:15:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1361,7 +1361,7 @@
             "raw",
             "code"
           ],
-          "definition": "Server interface flag. code publishes only search, coordination, get_compact_context, and execute."
+          "definition": "Server interface flag. code publishes only search, coordination, get_compact_context, and execute. raw publishes all raw tools plus the four code-mode meta-tools (ENC-ISS-112)."
         },
         "search": {
           "type": "tool",

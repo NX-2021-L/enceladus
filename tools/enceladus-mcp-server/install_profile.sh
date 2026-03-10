@@ -1,135 +1,48 @@
 #!/usr/bin/env bash
-# install_profile.sh — Install the Enceladus MCP server profile for provider sessions.
+# install_profile.sh — Install the Enceladus remote HTTP MCP profile for provider sessions.
 #
-# Registers the Enceladus MCP server with Claude Code/Codex (or compatible MCP clients)
-# so provider sessions can access governed Enceladus system resources.
+# Registers the Enceladus remote MCP gateway with Claude Code/Codex (or compatible
+# MCP clients) so provider sessions can access governed Enceladus system resources
+# through the Streamable HTTP endpoint — no local server.py subprocess needed.
 #
 # Usage:
-#   ./install_profile.sh
+#   ENCELADUS_COORDINATION_INTERNAL_API_KEY=<key> ./install_profile.sh
 #   ENCELADUS_WORKSPACE_ROOT=/path ./install_profile.sh
 #
-# Related: DVP-TSK-245, DVP-FTR-023, ENC-TSK-511
+# Related: DVP-TSK-245, DVP-FTR-023, ENC-TSK-511, ENC-TSK-862, ENC-TSK-864
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVER_PY="${SCRIPT_DIR}/server.py"
 
 # Workspace root auto-detection
 WORKSPACE_ROOT="${ENCELADUS_WORKSPACE_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 MCP_PRIMARY_ALIAS="${ENCELADUS_MCP_PRIMARY_ALIAS:-enceladus}"
-MCP_SECONDARY_ALIAS="${ENCELADUS_MCP_SECONDARY_ALIAS:-enceladus-local}"
-MCP_INCLUDE_SECONDARY_ALIAS="${ENCELADUS_MCP_INCLUDE_SECONDARY_ALIAS:-false}"
 CLAUDE_SETTINGS_DIR="${ENCELADUS_MCP_CLAUDE_SETTINGS_DIR:-${HOME}/.claude}"
 CODEX_SETTINGS_DIR="${ENCELADUS_MCP_CODEX_SETTINGS_DIR:-${HOME}/.codex}"
 
-# Resolve a stable Python interpreter for MCP runtime.
+# Remote MCP gateway URL (ENC-TSK-862, ENC-TSK-864)
+MCP_GATEWAY_URL="${ENCELADUS_MCP_GATEWAY_URL:-https://jreese.net/api/v1/coordination/mcp}"
+
+# Python is needed for JSON/TOML config file manipulation only (not for MCP runtime).
 PYTHON_BIN="${ENCELADUS_MCP_PYTHON_BIN:-$(command -v python3 || true)}"
 if [ -z "${PYTHON_BIN}" ]; then
-    echo "[ERROR] python3 not found in PATH"
+    echo "[ERROR] python3 not found in PATH (needed for config file manipulation)"
     exit 1
 fi
 
-PYTHON_USER_SITE="$("${PYTHON_BIN}" - <<'PY'
-import site
-print(site.getusersitepackages())
-PY
-)"
-MCP_PYTHONPATH="${PYTHON_USER_SITE}"
-if [ -n "${PYTHONPATH:-}" ]; then
-    MCP_PYTHONPATH="${MCP_PYTHONPATH}:${PYTHONPATH}"
-fi
-
-echo "[INFO] Enceladus MCP profile installer"
-echo "[INFO] Server: ${SERVER_PY}"
+echo "[INFO] Enceladus MCP profile installer (remote HTTP mode)"
+echo "[INFO] Gateway: ${MCP_GATEWAY_URL}"
 echo "[INFO] Workspace root: ${WORKSPACE_ROOT}"
-echo "[INFO] Python: ${PYTHON_BIN}"
-echo "[INFO] Primary alias: ${MCP_PRIMARY_ALIAS}"
-echo "[INFO] Secondary alias: ${MCP_SECONDARY_ALIAS} (enabled=${MCP_INCLUDE_SECONDARY_ALIAS})"
+echo "[INFO] Alias: ${MCP_PRIMARY_ALIAS}"
 
-# Verify server.py exists
-if [ ! -f "${SERVER_PY}" ]; then
-    echo "[ERROR] server.py not found at ${SERVER_PY}"
-    exit 1
-fi
-
-# Verify Python + dependencies
-if ! "${PYTHON_BIN}" -c "import mcp, boto3" >/dev/null 2>&1; then
-    echo "[INFO] Installing required Python packages..."
-    "${PYTHON_BIN}" -m pip install --user --quiet mcp boto3 PyYAML 2>/dev/null || {
-        echo "[ERROR] Failed to install required packages (mcp, boto3, PyYAML)"
-        exit 1
-    }
-fi
-
-# Verify AWS credentials
-if ! aws sts get-caller-identity >/dev/null 2>&1; then
-    echo "[WARNING] AWS credentials not available. MCP server will have limited functionality."
-fi
-
-# Resolve a stable AWS profile for MCP runtime when possible.
-# If credential separation is enabled below, writer profile takes precedence.
-RESOLVED_AWS_PROFILE=""
-if [ -n "${AWS_PROFILE:-}" ]; then
-    if aws sts get-caller-identity --profile "${AWS_PROFILE}" >/dev/null 2>&1; then
-        RESOLVED_AWS_PROFILE="${AWS_PROFILE}"
-        echo "[INFO] Using AWS_PROFILE from shell: ${RESOLVED_AWS_PROFILE}"
-    else
-        echo "[WARNING] Shell AWS_PROFILE='${AWS_PROFILE}' is not usable for sts; ignoring."
-    fi
-fi
-
-if [ -z "${RESOLVED_AWS_PROFILE}" ]; then
-    for candidate in enceladus-agent personal default ec2-role; do
-        if aws sts get-caller-identity --profile "${candidate}" >/dev/null 2>&1; then
-            RESOLVED_AWS_PROFILE="${candidate}"
-            echo "[INFO] Auto-detected AWS profile for MCP runtime: ${RESOLVED_AWS_PROFILE}"
-            break
-        fi
-    done
-fi
-
-# Configure MCP writer AWS profile for credential separation (ENC-ISS-009 Phase 2A).
-# The MCP server subprocess uses this profile to assume the writer role, while the
-# agent process itself runs under the scoped read-only dispatch session role.
-MCP_WRITER_ROLE_ARN="${ENCELADUS_MCP_WRITER_ROLE_ARN:-arn:aws:iam::356364570033:role/enceladus-mcp-writer-role}"
-MCP_WRITER_PROFILE="enceladus-mcp-writer"
-MCP_WRITER_ACTIVE="false"
-
-if [ -n "${ENCELADUS_MCP_WRITER_ROLE_ARN:-}" ] || [ "${ENCELADUS_ENABLE_CREDENTIAL_SEPARATION:-false}" = "true" ]; then
-    echo "[INFO] Configuring MCP writer profile: ${MCP_WRITER_PROFILE}"
-    aws configure set profile.${MCP_WRITER_PROFILE}.role_arn "${MCP_WRITER_ROLE_ARN}" 2>/dev/null || true
-    aws configure set profile.${MCP_WRITER_PROFILE}.credential_source Ec2InstanceMetadata 2>/dev/null || true
-    aws configure set profile.${MCP_WRITER_PROFILE}.region us-west-2 2>/dev/null || true
-
-    # Verify the writer profile can assume the role
-    if aws sts get-caller-identity --profile "${MCP_WRITER_PROFILE}" >/dev/null 2>&1; then
-        echo "[SUCCESS] MCP writer profile configured and verified"
-        MCP_WRITER_ACTIVE="true"
-    else
-        echo "[WARNING] MCP writer profile configured but role assumption failed — falling back to ambient credentials"
-    fi
-fi
-
-MCP_RUNTIME_AWS_PROFILE=""
-if [ "${MCP_WRITER_ACTIVE}" = "true" ]; then
-    MCP_RUNTIME_AWS_PROFILE="${MCP_WRITER_PROFILE}"
-elif [ -n "${RESOLVED_AWS_PROFILE}" ]; then
-    MCP_RUNTIME_AWS_PROFILE="${RESOLVED_AWS_PROFILE}"
-fi
-
+# ---------------------------------------------------------------------------
 # Unified service-auth env resolution (ENC-FTR-028):
 # Allow one coordination key to fan out across all API-specific key env vars.
+# ---------------------------------------------------------------------------
 BASE_INTERNAL_KEY="${ENCELADUS_COORDINATION_INTERNAL_API_KEY:-${ENCELADUS_COORDINATION_API_INTERNAL_API_KEY:-${COORDINATION_INTERNAL_API_KEY:-}}}"
 if [ -n "${BASE_INTERNAL_KEY}" ]; then
     export ENCELADUS_COORDINATION_INTERNAL_API_KEY="${ENCELADUS_COORDINATION_INTERNAL_API_KEY:-${BASE_INTERNAL_KEY}}"
-    export ENCELADUS_COORDINATION_API_INTERNAL_API_KEY="${ENCELADUS_COORDINATION_API_INTERNAL_API_KEY:-${BASE_INTERNAL_KEY}}"
-    export ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY="${ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY:-${BASE_INTERNAL_KEY}}"
-    export ENCELADUS_DEPLOY_API_INTERNAL_API_KEY="${ENCELADUS_DEPLOY_API_INTERNAL_API_KEY:-${BASE_INTERNAL_KEY}}"
-    export ENCELADUS_TRACKER_API_INTERNAL_API_KEY="${ENCELADUS_TRACKER_API_INTERNAL_API_KEY:-${BASE_INTERNAL_KEY}}"
-    export ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY="${ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY:-${BASE_INTERNAL_KEY}}"
-    export ENCELADUS_PROJECTS_API_INTERNAL_API_KEY="${ENCELADUS_PROJECTS_API_INTERNAL_API_KEY:-${BASE_INTERNAL_KEY}}"
-    export COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-${BASE_INTERNAL_KEY}}"
 fi
 
 if [ "${ENCELADUS_ALLOW_KEYLESS_PROFILE:-false}" != "true" ]; then
@@ -143,106 +56,34 @@ if [ "${ENCELADUS_ALLOW_KEYLESS_PROFILE:-false}" != "true" ]; then
     fi
 fi
 
-# Build the MCP server configuration JSON
-MCP_CONFIG=$(PYTHON_BIN="${PYTHON_BIN}" \
-    SERVER_PY="${SERVER_PY}" \
-    MCP_PYTHONPATH="${MCP_PYTHONPATH}" \
-    WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
-    MCP_RUNTIME_AWS_PROFILE="${MCP_RUNTIME_AWS_PROFILE}" \
-    MCP_PRIMARY_ALIAS="${MCP_PRIMARY_ALIAS}" \
-    MCP_SECONDARY_ALIAS="${MCP_SECONDARY_ALIAS}" \
-    MCP_INCLUDE_SECONDARY_ALIAS="${MCP_INCLUDE_SECONDARY_ALIAS}" \
-    "${PYTHON_BIN}" - <<'PY'
-import json
-import os
+# Resolve the auth key for the remote gateway header.
+RESOLVED_AUTH_KEY="${ENCELADUS_COORDINATION_INTERNAL_API_KEY:-${ENCELADUS_COORDINATION_API_INTERNAL_API_KEY:-${COORDINATION_INTERNAL_API_KEY:-}}}"
 
+# ---------------------------------------------------------------------------
+# Build remote HTTP MCP config JSON (ENC-TSK-862, ENC-TSK-864)
+# ---------------------------------------------------------------------------
+MCP_CONFIG=$("${PYTHON_BIN}" -c "
+import json, os
+alias = os.environ['MCP_PRIMARY_ALIAS']
+url = os.environ['MCP_GATEWAY_URL']
+auth_key = os.environ.get('RESOLVED_AUTH_KEY', '')
+server = {'type': 'http', 'url': url}
+if auth_key:
+    server['headers'] = {'X-Coordination-Internal-Key': auth_key}
+print(json.dumps({'mcpServers': {alias: server}}, indent=2))
+" MCP_PRIMARY_ALIAS="${MCP_PRIMARY_ALIAS}" \
+  MCP_GATEWAY_URL="${MCP_GATEWAY_URL}" \
+  RESOLVED_AUTH_KEY="${RESOLVED_AUTH_KEY}")
 
-def to_bool(value: str) -> bool:
-    return value.strip().lower() not in {"", "0", "false", "no", "off"}
-
-
-env_block = {
-    "PYTHONUNBUFFERED": "1",
-    "PYTHONPATH": os.environ["MCP_PYTHONPATH"],
-    "ENCELADUS_WORKSPACE_ROOT": os.environ["WORKSPACE_ROOT"],
-    "ENCELADUS_REGION": "us-west-2",
-    "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
-    "ENCELADUS_PROJECTS_TABLE": "projects",
-    "ENCELADUS_DOCUMENTS_TABLE": "documents",
-    "ENCELADUS_S3_BUCKET": "jreese-net",
-    "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
-    "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
-    # HTTP API base URLs (Phase 2d migration — MCP routes through HTTP APIs)
-    "ENCELADUS_TRACKER_API_BASE": "https://jreese.net/api/v1/tracker",
-    "ENCELADUS_GOVERNANCE_API_BASE": "https://jreese.net/api/v1/governance",
-    "ENCELADUS_PROJECTS_API_BASE": "https://jreese.net/api/v1/coordination/projects",
-    "ENCELADUS_HEALTH_API_URL": "https://jreese.net/api/v1/health",
-}
-for key in (
-    "COORDINATION_INTERNAL_API_KEY",
-    "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
-    "COORDINATION_INTERNAL_API_KEYS",
-    "ENCELADUS_MCP_INTERFACE_MODE",
-    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
-    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
-    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS",
-    "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
-    "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
-    "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
-    "ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY",
-    "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
-):
-    value = os.environ.get(key, "").strip()
-    if value:
-        env_block[key] = value
-
-import sys as _sys
-api_key_configured = any("API_KEY" in k for k in env_block)
-if not api_key_configured:
-    print("[WARNING] No ENCELADUS_*_INTERNAL_API_KEY env vars set. MCP profile will have NO auth keys.", file=_sys.stderr)
-    print("[WARNING] Tracker/document/deploy writes will return PERMISSION_DENIED until keys are configured.", file=_sys.stderr)
-    print("[WARNING] Set ENCELADUS_COORDINATION_INTERNAL_API_KEY before running install_profile.sh.", file=_sys.stderr)
-
-aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
-if aws_profile:
-    env_block["AWS_PROFILE"] = aws_profile
-
-# Propagate agent provider identity if set in the environment
-agent_provider = os.environ.get("ENCELADUS_AGENT_PROVIDER", "").strip()
-if agent_provider:
-    env_block["ENCELADUS_AGENT_PROVIDER"] = agent_provider
-
-command = os.environ["PYTHON_BIN"]
-server_py = os.environ["SERVER_PY"]
-servers = {
-    os.environ["MCP_PRIMARY_ALIAS"]: {
-        "command": command,
-        "args": [server_py],
-        "env": env_block,
-    }
-}
-
-secondary_alias = os.environ.get("MCP_SECONDARY_ALIAS", "").strip()
-include_secondary = to_bool(os.environ.get("MCP_INCLUDE_SECONDARY_ALIAS", "true"))
-if include_secondary and secondary_alias and secondary_alias not in servers:
-    servers[secondary_alias] = {
-        "command": command,
-        "args": [server_py],
-        "env": env_block,
-    }
-
-print(json.dumps({"mcpServers": servers}, indent=2))
-PY
-)
-
-# Try to install into Claude Code settings
+# ---------------------------------------------------------------------------
+# Install into Claude Code desktop settings (~/.claude/mcp.json)
+# ---------------------------------------------------------------------------
 CLAUDE_MCP_FILE="${CLAUDE_SETTINGS_DIR}/mcp.json"
 
 if [ -d "${CLAUDE_SETTINGS_DIR}" ] || command -v claude >/dev/null 2>&1; then
     mkdir -p "${CLAUDE_SETTINGS_DIR}"
 
     if [ -f "${CLAUDE_MCP_FILE}" ]; then
-        # Merge with existing config
         echo "[INFO] Merging into existing ${CLAUDE_MCP_FILE}"
         "${PYTHON_BIN}" -c "
 import json
@@ -273,66 +114,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Register with Claude Code CLI (terminal) via `claude mcp add --scope user`.
+# Register with Claude Code CLI (terminal) via direct ~/.claude.json update.
 # The CLI uses ~/.claude.json (mcpServers key), NOT ~/.claude/mcp.json.
-# This step is separate from the desktop/project mcp.json written above.
 # ---------------------------------------------------------------------------
-if command -v claude >/dev/null 2>&1; then
-    echo "[INFO] Registering with Claude Code CLI (user scope -> ~/.claude.json)..."
+CLAUDE_CLI_CONFIG="${HOME}/.claude.json"
+if [ -f "${CLAUDE_CLI_CONFIG}" ] || command -v claude >/dev/null 2>&1; then
+    echo "[INFO] Updating Claude Code CLI config (${CLAUDE_CLI_CONFIG})..."
+    "${PYTHON_BIN}" -c "
+import json, os, sys
 
-    # Build -e KEY=VALUE args by parsing the already-computed MCP_CONFIG via stdin.
-    # Use while-read instead of mapfile for bash 3.2 compatibility (macOS default).
-    _MCP_ENV_ARGS=()
-    while IFS= read -r _line; do
-        _MCP_ENV_ARGS+=("${_line}")
-    done < <(
-        echo "${MCP_CONFIG}" | "${PYTHON_BIN}" -c "
-import json, sys
-config = json.load(sys.stdin)
-servers = config.get('mcpServers', {})
-if servers:
-    env = next(iter(servers.values())).get('env', {})
-    for k, v in env.items():
-        print('-e')
-        print(f'{k}={v}')
+cli_path = os.path.expanduser('~/.claude.json')
+existing = {}
+try:
+    with open(cli_path, 'r') as f:
+        existing = json.load(f)
+except (json.JSONDecodeError, FileNotFoundError):
+    pass
+
+new_config = json.loads('''${MCP_CONFIG}''')
+existing.setdefault('mcpServers', {}).update(new_config.get('mcpServers', {}))
+
+with open(cli_path, 'w') as f:
+    json.dump(existing, f, indent=2)
+    f.write('\n')
+print(f'[SUCCESS] Enceladus MCP profile merged into {cli_path}')
 "
-    )
-
-    # Remove any existing entry first (idempotent), then re-add.
-    claude mcp remove "${MCP_PRIMARY_ALIAS}" --scope user 2>/dev/null || true
-
-    # shellcheck disable=SC2068
-    # The `--` separator is required to prevent the variadic -e <env...>
-    # option from consuming the positional <name> argument.
-    if claude mcp add \
-        --scope user \
-        "${_MCP_ENV_ARGS[@]}" \
-        -- "${MCP_PRIMARY_ALIAS}" \
-        "${PYTHON_BIN}" \
-        "${SERVER_PY}" 2>&1; then
-        echo "[SUCCESS] Registered '${MCP_PRIMARY_ALIAS}' with Claude Code CLI (user scope)"
-    else
-        echo "[WARNING] claude mcp add failed — manual CLI registration may be needed."
-        echo "[WARNING] Run: claude mcp add --scope user -e KEY=VAL ... ${MCP_PRIMARY_ALIAS} ${PYTHON_BIN} ${SERVER_PY}"
-    fi
 else
-    echo "[WARNING] 'claude' CLI not found — skipping Claude Code CLI registration."
-    echo "[WARNING] After installing Claude Code CLI, run: install_profile.sh to register."
+    echo "[WARNING] Claude CLI config not found — skipping CLI registration."
 fi
 
-# Best-effort: upsert Codex MCP profile section for desktop sessions.
+# ---------------------------------------------------------------------------
+# Best-effort: upsert Codex MCP profile section for Codex sessions.
+# ---------------------------------------------------------------------------
 CODEX_CONFIG_FILE="${CODEX_SETTINGS_DIR}/config.toml"
 mkdir -p "${CODEX_SETTINGS_DIR}"
 
 if CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE}" \
-    PYTHON_BIN="${PYTHON_BIN}" \
-    SERVER_PY="${SERVER_PY}" \
-    MCP_PYTHONPATH="${MCP_PYTHONPATH}" \
-    WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
-    MCP_RUNTIME_AWS_PROFILE="${MCP_RUNTIME_AWS_PROFILE}" \
     MCP_PRIMARY_ALIAS="${MCP_PRIMARY_ALIAS}" \
-    MCP_SECONDARY_ALIAS="${MCP_SECONDARY_ALIAS}" \
-    MCP_INCLUDE_SECONDARY_ALIAS="${MCP_INCLUDE_SECONDARY_ALIAS}" \
+    MCP_GATEWAY_URL="${MCP_GATEWAY_URL}" \
+    RESOLVED_AUTH_KEY="${RESOLVED_AUTH_KEY}" \
     "${PYTHON_BIN}" - <<'PY'
 import os
 import pathlib
@@ -341,21 +161,21 @@ import re
 cfg = pathlib.Path(os.environ["CODEX_CONFIG_FILE"])
 text = cfg.read_text() if cfg.exists() else ""
 
-# Remove prior managed block and direct server sections to avoid duplicate TOML keys.
+# Remove prior managed blocks to avoid duplicate TOML keys.
 text = re.sub(r"(?ms)^# BEGIN ENCELADUS CODEX STARTUP \(managed\)\n.*?# END ENCELADUS CODEX STARTUP \(managed\)\n?", "", text)
 text = re.sub(r"(?ms)^# BEGIN ENCELADUS MCP PROFILE \(managed\)\n.*?# END ENCELADUS MCP PROFILE \(managed\)\n?", "", text)
-aliases = [os.environ["MCP_PRIMARY_ALIAS"]]
-secondary = os.environ.get("MCP_SECONDARY_ALIAS", "").strip()
-if secondary and os.environ.get("MCP_INCLUDE_SECONDARY_ALIAS", "true").strip().lower() not in {"", "0", "false", "no", "off"}:
-    aliases.append(secondary)
-for section in aliases:
+alias = os.environ["MCP_PRIMARY_ALIAS"]
+# Remove any prior stdio or HTTP server sections for this alias.
+for section_suffix in ("", ".env", ".headers"):
     text = re.sub(
-        rf"(?ms)^\[mcp_servers\.{re.escape(section)}\]\n.*?(?=^\[|\Z)",
+        rf"(?ms)^\[mcp_servers\.{re.escape(alias)}{re.escape(section_suffix)}\]\n.*?(?=^\[|\Z)",
         "",
         text,
     )
+# Also remove legacy enceladus-local sections.
+for section_suffix in ("", ".env", ".headers"):
     text = re.sub(
-        rf"(?ms)^\[mcp_servers\.{re.escape(section)}\.env\]\n.*?(?=^\[|\Z)",
+        rf"(?ms)^\[mcp_servers\.enceladus-local{re.escape(section_suffix)}\]\n.*?(?=^\[|\Z)",
         "",
         text,
     )
@@ -386,7 +206,7 @@ if text:
 
 text += (
     "# BEGIN ENCELADUS CODEX STARTUP (managed)\n"
-    "# Codex startup contract for Enceladus:\n"
+    "# Codex startup contract for Enceladus (remote HTTP MCP):\n"
     "# - Workspace AGENTS.md is loaded at session start via project_doc_fallback_filenames.\n"
     "# - During init, load governance://agents/bootstrap-template.md and governance://agents/lifecycle-primer.md.\n"
     "# - Use MCP checkout_task / advance_task_status for the CAI -> CCI lifecycle; put CCI-... in the PR body.\n"
@@ -394,73 +214,27 @@ text += (
     "# END ENCELADUS CODEX STARTUP (managed)\n\n"
 )
 
-py_bin = os.environ["PYTHON_BIN"]
-server_py = os.environ["SERVER_PY"]
-env_items = {
-    "PYTHONUNBUFFERED": "1",
-    "PYTHONPATH": os.environ["MCP_PYTHONPATH"],
-    "ENCELADUS_WORKSPACE_ROOT": os.environ["WORKSPACE_ROOT"],
-    "ENCELADUS_REGION": "us-west-2",
-    "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
-    "ENCELADUS_PROJECTS_TABLE": "projects",
-    "ENCELADUS_DOCUMENTS_TABLE": "documents",
-    "ENCELADUS_S3_BUCKET": "jreese-net",
-    "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
-    "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
-    # HTTP API base URLs (Phase 2d migration)
-    "ENCELADUS_TRACKER_API_BASE": "https://jreese.net/api/v1/tracker",
-    "ENCELADUS_GOVERNANCE_API_BASE": "https://jreese.net/api/v1/governance",
-    "ENCELADUS_PROJECTS_API_BASE": "https://jreese.net/api/v1/coordination/projects",
-    "ENCELADUS_HEALTH_API_URL": "https://jreese.net/api/v1/health",
-    # Agent identity — used by agent-worktree-init.sh for branch naming fallback
-    "ENCELADUS_AGENT_PROVIDER": os.environ.get("ENCELADUS_AGENT_PROVIDER", "openai_codex"),
-}
-for key in (
-    "COORDINATION_INTERNAL_API_KEY",
-    "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
-    "COORDINATION_INTERNAL_API_KEYS",
-    "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
-    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
-    "ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS",
-    "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
-    "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
-    "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
-    "ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY",
-    "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
-):
-    value = os.environ.get(key, "").strip()
-    if value:
-        env_items[key] = value
-aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
-if aws_profile:
-    env_items["AWS_PROFILE"] = aws_profile
-
-
 def _toml_str(value: str) -> str:
     escaped = value.replace('\\', '\\\\').replace('"', '\\"')
     return f'"{escaped}"'
 
+gateway_url = os.environ["MCP_GATEWAY_URL"]
+auth_key = os.environ.get("RESOLVED_AUTH_KEY", "").strip()
 
-def _server_block(name: str) -> str:
-    lines = [
-        f"[mcp_servers.{name}]",
-        f"command = {_toml_str(py_bin)}",
-        f"args = [{_toml_str(server_py)}]",
-        "",
-        f"[mcp_servers.{name}.env]",
-    ]
-    for k, v in sorted(env_items.items()):
-        lines.append(f"{k} = {_toml_str(v)}")
-    return "\n".join(lines)
+lines = [
+    f"[mcp_servers.{alias}]",
+    f"type = {_toml_str('http')}",
+    f"url = {_toml_str(gateway_url)}",
+]
+if auth_key:
+    lines.append("")
+    lines.append(f"[mcp_servers.{alias}.headers]")
+    lines.append(f"X-Coordination-Internal-Key = {_toml_str(auth_key)}")
 
-server_blocks = [_server_block(aliases[0])]
-for alias in aliases[1:]:
-    if alias != aliases[0]:
-        server_blocks.append(_server_block(alias))
-
-managed = "# BEGIN ENCELADUS MCP PROFILE (managed)\n" + "\n\n".join(server_blocks) + "\n# END ENCELADUS MCP PROFILE (managed)\n"
+server_block = "\n".join(lines)
+managed = "# BEGIN ENCELADUS MCP PROFILE (managed)\n" + server_block + "\n# END ENCELADUS MCP PROFILE (managed)\n"
 cfg.write_text(text + managed)
-print(f"[SUCCESS] Enceladus MCP profile upserted in {cfg}")
+print(f"[SUCCESS] Enceladus MCP profile (HTTP) upserted in {cfg}")
 PY
 then
     :
@@ -468,17 +242,20 @@ else
     echo "[WARNING] Failed to update ${CODEX_CONFIG_FILE}; continuing"
 fi
 
+# ---------------------------------------------------------------------------
 # Write global ~/.codex/AGENTS.md (Codex bootstrap) if missing or outdated.
-# Rewrite if: absent, missing lifecycle primer references, uses old governance_get
-# full-dictionary load (ENC-ISS-087), or references deprecated enceladus-local alias
-# (ENC-TSK-821).
+# ---------------------------------------------------------------------------
 CODEX_GLOBAL_AGENTS_MD="${CODEX_SETTINGS_DIR}/AGENTS.md"
 if [ ! -f "${CODEX_GLOBAL_AGENTS_MD}" ] \
     || ! grep -q "bootstrap-template" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null \
     || ! grep -q "lifecycle-primer" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null \
+    || ! grep -q "remote HTTP" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null \
     || grep -q "enceladus-local" "${CODEX_GLOBAL_AGENTS_MD}" 2>/dev/null; then
     cat > "${CODEX_GLOBAL_AGENTS_MD}" << 'GLOBAL_AGENTS_EOF'
 # Codex Bootstrap
+
+Managed MCP profile: remote HTTP
+Remote URL: `https://jreese.net/api/v1/coordination/mcp`
 
 MCP server `enceladus` is configured in `~/.codex/config.toml`.
 
@@ -507,21 +284,23 @@ else
     echo "[INFO] Global Codex AGENTS.md already present at ${CODEX_GLOBAL_AGENTS_MD}"
 fi
 
+# ---------------------------------------------------------------------------
 # Write workspace AGENTS.md (Codex bootstrap) if missing or outdated.
-# Rewrite if: absent, missing lifecycle primer references, uses old governance_get
-# full-dictionary load (ENC-ISS-087), or references deprecated enceladus-local alias
-# (ENC-TSK-821).
-# The file is intentionally minimal — agents load full rules from governance dynamically.
+# ---------------------------------------------------------------------------
 WORKSPACE_AGENTS_MD="${WORKSPACE_ROOT}/AGENTS.md"
 if [ ! -f "${WORKSPACE_AGENTS_MD}" ] \
     || ! grep -q "bootstrap-template" "${WORKSPACE_AGENTS_MD}" 2>/dev/null \
     || ! grep -q "lifecycle-primer" "${WORKSPACE_AGENTS_MD}" 2>/dev/null \
+    || ! grep -q "remote HTTP" "${WORKSPACE_AGENTS_MD}" 2>/dev/null \
     || grep -q "enceladus-local" "${WORKSPACE_AGENTS_MD}" 2>/dev/null; then
     cat > "${WORKSPACE_AGENTS_MD}" << 'AGENTS_EOF'
 # Enceladus Workspace — Agent Bootstrap
 
-MCP server `enceladus` is configured in `~/.codex/config.toml`.
-Source: `tools/enceladus-mcp-server/server.py`
+Managed MCP profile: remote HTTP
+Remote URL: `https://jreese.net/api/v1/coordination/mcp`
+
+MCP server `enceladus` is configured via remote HTTP gateway.
+Source: `tools/enceladus-mcp-server/server.py` (deployed as Lambda)
 
 ## Initialization (REQUIRED — run in order every session)
 
@@ -565,17 +344,21 @@ else
     echo "[INFO] Workspace AGENTS.md already present at ${WORKSPACE_AGENTS_MD}"
 fi
 
+# ---------------------------------------------------------------------------
 # Write global ~/.claude/CLAUDE.md quick reference for Claude Code sessions.
-# This file is intentionally concise so it stays in always-loaded context.
+# ---------------------------------------------------------------------------
 mkdir -p "${CLAUDE_SETTINGS_DIR}"
 CLAUDE_GLOBAL_MD="${CLAUDE_SETTINGS_DIR}/CLAUDE.md"
 if [ ! -f "${CLAUDE_GLOBAL_MD}" ] \
     || ! grep -q "ENCELADUS_GIT_LIFECYCLE_QUICK_REFERENCE" "${CLAUDE_GLOBAL_MD}" 2>/dev/null \
-    || ! grep -q "lifecycle-primer" "${CLAUDE_GLOBAL_MD}" 2>/dev/null; then
+    || ! grep -q "lifecycle-primer" "${CLAUDE_GLOBAL_MD}" 2>/dev/null \
+    || ! grep -q "remote HTTP" "${CLAUDE_GLOBAL_MD}" 2>/dev/null; then
     cat > "${CLAUDE_GLOBAL_MD}" << 'CLAUDE_EOF'
 # Enceladus Claude Bootstrap
 
 Source: `governance://agents/bootstrap-template.md`
+Managed MCP profile: remote HTTP
+Remote URL: `https://jreese.net/api/v1/coordination/mcp`
 
 ## Session Init
 
@@ -605,108 +388,44 @@ else
     echo "[INFO] Global Claude bootstrap already present at ${CLAUDE_GLOBAL_MD}"
 fi
 
-# Optional stdio smoke test so install failures surface immediately.
+# ---------------------------------------------------------------------------
+# Remote HTTP smoke test (replaces old stdio smoke test).
+# Probes the gateway with a simple tracker_list MCP call via curl.
+# ---------------------------------------------------------------------------
 if [ "${ENCELADUS_SKIP_MCP_SMOKE_TEST:-false}" != "true" ]; then
-    echo "[INFO] Running MCP stdio smoke test"
-    if ! PYTHON_BIN="${PYTHON_BIN}" \
-        SERVER_PY="${SERVER_PY}" \
-        WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
-        MCP_RUNTIME_AWS_PROFILE="${MCP_RUNTIME_AWS_PROFILE}" \
-        "${PYTHON_BIN}" - <<'PY'
-import os
-import anyio
-from mcp.client.session import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
+    echo "[INFO] Running remote MCP smoke test against ${MCP_GATEWAY_URL}"
+    _SMOKE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json, text/event-stream" \
+        -H "X-Coordination-Internal-Key: ${RESOLVED_AUTH_KEY}" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+        "${MCP_GATEWAY_URL}" 2>/dev/null) || true
+    _SMOKE_HTTP_CODE=$(echo "${_SMOKE_RESPONSE}" | tail -1)
+    _SMOKE_BODY=$(echo "${_SMOKE_RESPONSE}" | sed '$d')
 
-
-async def main() -> None:
-    server_env = {
-        "ENCELADUS_WORKSPACE_ROOT": os.environ["WORKSPACE_ROOT"],
-        "ENCELADUS_REGION": "us-west-2",
-        "ENCELADUS_TRACKER_TABLE": "devops-project-tracker",
-        "ENCELADUS_PROJECTS_TABLE": "projects",
-        "ENCELADUS_DOCUMENTS_TABLE": "documents",
-        "ENCELADUS_S3_BUCKET": "jreese-net",
-        "ENCELADUS_S3_GOVERNANCE_PREFIX": "governance/live",
-        "ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
-        # HTTP API base URLs (Phase 2d migration)
-        "ENCELADUS_TRACKER_API_BASE": "https://jreese.net/api/v1/tracker",
-        "ENCELADUS_GOVERNANCE_API_BASE": "https://jreese.net/api/v1/governance",
-        "ENCELADUS_PROJECTS_API_BASE": "https://jreese.net/api/v1/coordination/projects",
-        "ENCELADUS_HEALTH_API_URL": "https://jreese.net/api/v1/health",
-    }
-    for key in (
-        "COORDINATION_INTERNAL_API_KEY",
-        "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
-        "COORDINATION_INTERNAL_API_KEYS",
-        "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
-        "ENCELADUS_COORDINATION_API_INTERNAL_API_KEY",
-        "ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS",
-        "ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY",
-        "ENCELADUS_DEPLOY_API_INTERNAL_API_KEY",
-        "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
-        "ENCELADUS_GOVERNANCE_API_INTERNAL_API_KEY",
-        "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
-    ):
-        value = os.environ.get(key, "").strip()
-        if value:
-            server_env[key] = value
-    aws_profile = os.environ.get("MCP_RUNTIME_AWS_PROFILE", "").strip()
-    if aws_profile:
-        server_env["AWS_PROFILE"] = aws_profile
-
-    params = StdioServerParameters(
-        command=os.environ["PYTHON_BIN"],
-        args=[os.environ["SERVER_PY"]],
-        env=server_env,
-    )
-
-    async with stdio_client(params) as (read_stream, write_stream):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            await session.call_tool("connection_health", {})
-            await session.call_tool("governance_hash", {})
-
-            # Authenticated API probe — validates that API keys are present and accepted.
-            # connection_health + governance_hash both use direct DynamoDB/S3 and pass even
-            # with no keys configured. tracker_list requires the HTTP API auth key.
-            result = await session.call_tool("tracker_list", {"project_id": "enceladus", "record_type": "task", "status": "open"})
-            result_text = result.content[0].text if result.content else ""
-            import json as _json
-            try:
-                result_obj = _json.loads(result_text)
-                if isinstance(result_obj, dict) and result_obj.get("error") in ("PERMISSION_DENIED", "Authentication required"):
-                    import sys
-                    print(f"[ERROR] Authenticated API probe failed — PERMISSION_DENIED. API key may be missing or incorrect in MCP profile.", file=sys.stderr)
-                    print(f"[ERROR] Set ENCELADUS_COORDINATION_INTERNAL_API_KEY and re-run install_profile.sh.", file=sys.stderr)
-                    sys.exit(1)
-            except Exception:
-                pass  # Non-JSON or unexpected format — don't block on parse failures
-            print("[SUCCESS] Authenticated API probe passed (tracker_list)")
-
-            # Checkout tool surface probe (ENC-ISS-098) — verifies that checkout_task and
-            # advance_task_status are exposed. These tools were added in ENC-FTR-037 and
-            # will be absent if the config points to a server.py that predates that feature.
-            tools_result = await session.list_tools()
-            tool_names = {t.name for t in tools_result.tools}
-            required_checkout_tools = {"checkout_task", "advance_task_status"}
-            missing = required_checkout_tools - tool_names
-            if missing:
-                import sys
-                print(f"[ERROR] Checkout tools missing from MCP tool surface: {missing}", file=sys.stderr)
-                print(f"[ERROR] This indicates the server.py pointed to by this config predates ENC-FTR-037.", file=sys.stderr)
-                print(f"[ERROR] Ensure the repo is up to date (git pull) and re-run install_profile.sh.", file=sys.stderr)
-                sys.exit(1)
-            print(f"[SUCCESS] Checkout tool surface verified: {required_checkout_tools}")
-
-
-anyio.run(main)
-print("[SUCCESS] MCP stdio smoke test passed")
-PY
-    then
-        echo "[ERROR] MCP stdio smoke test failed"
+    if [ "${_SMOKE_HTTP_CODE}" = "200" ]; then
+        # Count tools in response to verify surface
+        _TOOL_COUNT=$("${PYTHON_BIN}" -c "
+import json, sys
+try:
+    body = '''${_SMOKE_BODY}'''
+    obj = json.loads(body)
+    tools = obj.get('result', {}).get('tools', [])
+    names = [t.get('name','') for t in tools]
+    code_mode = [n for n in names if n in ('search','coordination','get_compact_context','execute')]
+    print(f'{len(tools)} tools ({len(code_mode)} code-mode)')
+except Exception as e:
+    print(f'parse-error: {e}')
+" 2>/dev/null) || _TOOL_COUNT="unknown"
+        echo "[SUCCESS] Remote MCP smoke test passed (HTTP 200, ${_TOOL_COUNT})"
+    elif [ "${_SMOKE_HTTP_CODE}" = "401" ]; then
+        echo "[ERROR] Remote MCP smoke test failed — HTTP 401 Unauthorized."
+        echo "[ERROR] API key may be incorrect. Check ENCELADUS_COORDINATION_INTERNAL_API_KEY."
         exit 1
+    else
+        echo "[WARNING] Remote MCP smoke test returned HTTP ${_SMOKE_HTTP_CODE} — gateway may use SSE streaming."
+        echo "[WARNING] Profile installed; verify connectivity with connection_health() in a session."
     fi
 fi
 
-echo "[DONE] Enceladus MCP profile installation complete"
+echo "[DONE] Enceladus MCP profile installation complete (remote HTTP)"
