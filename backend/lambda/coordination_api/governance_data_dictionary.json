@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-10.7",
-  "updated_at": "2026-03-10T22:52:00Z",
+  "version": "2026-03-13.1",
+  "updated_at": "2026-03-13T07:30:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -50,12 +50,12 @@
         },
         "acceptance_criteria": {
           "type": "array",
-          "item_type": "string",
+          "item_type": "object|string",
           "constraints": {
             "min_items": 1
           },
-          "definition": "Concrete conditions to mark task complete.",
-          "usage_guidance": "Required for task creation."
+          "definition": "Concrete conditions to mark task complete. ENC-FTR-048: new tasks store criteria as structured objects with description/evidence/evidence_acceptance fields, matching the feature evidence handshake. Legacy plain-string criteria are backward compatible and do not gate closure.",
+          "usage_guidance": "Required for task creation. When structured criteria are present, task closure is gated on all criteria having evidence_acceptance=true. Use tracker_set_acceptance_evidence to set evidence on individual criteria."
         },
         "coordination": {
           "type": "boolean",

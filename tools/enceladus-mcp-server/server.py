@@ -3607,16 +3607,17 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="tracker_set_acceptance_evidence",
             description=(
-                "Set evidence on a specific acceptance criterion of a feature record. "
-                "Part of the governed evidence handshake: features cannot be completed "
-                "until ALL acceptance criteria have evidence and evidence_acceptance=true."
+                "Set evidence on a specific acceptance criterion of a feature or task record. "
+                "Part of the governed evidence handshake: features cannot be completed and "
+                "tasks cannot be closed until ALL structured acceptance criteria have "
+                "evidence and evidence_acceptance=true (ENC-FTR-048)."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "record_id": {
                         "type": "string",
-                        "description": "The feature record ID (must be a feature).",
+                        "description": "The feature or task record ID.",
                     },
                     "criterion_index": {
                         "type": "integer",
