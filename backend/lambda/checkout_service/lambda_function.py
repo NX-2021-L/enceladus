@@ -2050,6 +2050,38 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 )
             transition_evidence["no_code_evidence"] = no_code_evidence
 
+        # ENC-FTR-048: Gate task closure on structured acceptance criteria evidence.
+        # Only applies when the task has structured AC (object form with evidence_acceptance).
+        # Tasks with plain-string AC (legacy) are not gated — backward compatible.
+        ac_list = task.get("acceptance_criteria", [])
+        if ac_list:
+            has_structured = any(isinstance(ac, dict) and "evidence_acceptance" in ac for ac in ac_list)
+            if has_structured:
+                unvalidated = []
+                for i, ac in enumerate(ac_list):
+                    if isinstance(ac, dict):
+                        desc = ac.get("description", f"criterion[{i}]")
+                        if not ac.get("evidence_acceptance", False):
+                            unvalidated.append(f"[{i}] {desc}")
+                    elif isinstance(ac, str):
+                        # Plain string criteria in a mixed list are treated as unvalidated
+                        unvalidated.append(f"[{i}] {ac}")
+                if unvalidated:
+                    return _validation_error(
+                        400,
+                        (
+                            "Cannot close task: not all acceptance criteria have been validated. "
+                            "Use tracker_set_acceptance_evidence to set evidence_acceptance=true "
+                            "on each criterion before closing.\nUnvalidated:\n"
+                            + "\n".join(unvalidated)
+                        ),
+                        task_id=task_id,
+                        current_status=current_status,
+                        target_status=target_status,
+                        transition_type=transition_type,
+                        provider=provider or session_id,
+                    )
+
     else:
         # Generic advance — let tracker_mutation validate the transition
         pass

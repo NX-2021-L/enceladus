@@ -890,7 +890,8 @@ class TestAcceptanceCriteriaPatchNormalization(unittest.TestCase):
             },
         )
 
-    def test_task_acceptance_criteria_json_string_normalized_to_string_list(self):
+    def test_task_acceptance_criteria_json_string_normalized_to_structured_list(self):
+        """ENC-FTR-048: tasks now normalize AC to structured objects like features."""
         body = {
             "field": "acceptance_criteria",
             "value": json.dumps([" first criterion ", "", "second criterion"]),
@@ -910,15 +911,26 @@ class TestAcceptanceCriteriaPatchNormalization(unittest.TestCase):
 
         parsed = json.loads(result.get("body", "{}"))
         self.assertTrue(parsed.get("success"))
-        self.assertEqual(parsed.get("value"), ["first criterion", "second criterion"])
+        self.assertEqual(parsed.get("value"), [
+            {"description": "first criterion", "evidence": "", "evidence_acceptance": False},
+            {"description": "second criterion", "evidence": "", "evidence_acceptance": False},
+        ])
 
         update_kwargs = mock_ddb.update_item.call_args.kwargs
         self.assertEqual(
             update_kwargs["ExpressionAttributeValues"][":val"],
             {
                 "L": [
-                    {"S": "first criterion"},
-                    {"S": "second criterion"},
+                    {"M": {
+                        "description": {"S": "first criterion"},
+                        "evidence": {"S": ""},
+                        "evidence_acceptance": {"BOOL": False},
+                    }},
+                    {"M": {
+                        "description": {"S": "second criterion"},
+                        "evidence": {"S": ""},
+                        "evidence_acceptance": {"BOOL": False},
+                    }},
                 ]
             },
         )
