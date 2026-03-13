@@ -1292,7 +1292,8 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
 
     # Acceptance criteria
     if acceptance_criteria:
-        if record_type == "feature":
+        if record_type in ("feature", "task"):
+            # ENC-FTR-048: features and tasks both use structured AC with evidence tracking
             ac_items = [{"M": {
                 "description": _ser_s(ac), "evidence": _ser_s(""),
                 "evidence_acceptance": {"BOOL": False},
@@ -1630,8 +1631,8 @@ def _validate_feature_production_gate(project_id: str, feature_data: Dict) -> Op
     return None
 
 
-def _normalize_feature_acceptance_criterion(entry: Any, index: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Normalize one feature acceptance criterion to governed map form."""
+def _normalize_acceptance_criterion(entry: Any, index: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Normalize one acceptance criterion to governed map form (features and tasks)."""
     if isinstance(entry, dict):
         description = str(entry.get("description") or "").strip()
         if not description:
@@ -1681,16 +1682,22 @@ def _normalize_acceptance_criteria_value(record_type: str, raw_value: Any) -> Tu
     else:
         parsed_list = [parsed_value]
 
-    if record_type == "feature":
-        normalized_feature_criteria: List[Dict[str, Any]] = []
+    if record_type in ("feature", "task"):
+        # ENC-FTR-048: features and tasks both use structured acceptance criteria.
+        # Pre-filter empty string entries for backward compatibility (tasks previously
+        # silently dropped empties; features reject them — preserve both behaviors).
+        normalized_criteria: List[Dict[str, Any]] = []
         for idx, entry in enumerate(parsed_list):
-            normalized, error = _normalize_feature_acceptance_criterion(entry, idx)
+            # Skip empty strings silently (backward compat with old task string-list path)
+            if isinstance(entry, str) and not entry.strip():
+                continue
+            normalized, error = _normalize_acceptance_criterion(entry, idx)
             if error:
                 return None, error
-            normalized_feature_criteria.append(normalized)
-        if not normalized_feature_criteria:
-            return None, "Feature acceptance_criteria requires at least one criterion."
-        return normalized_feature_criteria, None
+            normalized_criteria.append(normalized)
+        if not normalized_criteria:
+            return None, f"{record_type.capitalize()} acceptance_criteria requires at least one criterion."
+        return normalized_criteria, None
 
     normalized_list = [str(x).strip() for x in parsed_list if str(x).strip()]
     if not normalized_list:
@@ -2855,17 +2862,17 @@ def _handle_acceptance_evidence(project_id: str, record_type: str, record_id: st
 
     item_data = _deser_item(raw_item)
 
-    if item_data.get("record_type") != "feature":
-        return _error(400, f"acceptance-evidence only applies to features. This is a {item_data.get('record_type')}.")
+    if item_data.get("record_type") not in ("feature", "task"):
+        return _error(400, f"acceptance-evidence only applies to features and tasks. This is a {item_data.get('record_type')}.")
 
     ac_list = item_data.get("acceptance_criteria", [])
     if not ac_list:
-        return _error(400, f"Feature '{record_id}' has no acceptance_criteria.")
+        return _error(400, f"Record '{record_id}' has no acceptance_criteria.")
 
     if criterion_index < 0 or criterion_index >= len(ac_list):
         return _error(400,
             f"criterion_index {criterion_index} out of range. "
-            f"Feature has {len(ac_list)} criteria (indices 0-{len(ac_list) - 1}).")
+            f"Record has {len(ac_list)} criteria (indices 0-{len(ac_list) - 1}).")
 
     # Get description from existing criterion
     raw_ac = raw_item.get("acceptance_criteria", {}).get("L", [])
