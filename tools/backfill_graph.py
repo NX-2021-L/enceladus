@@ -32,6 +32,15 @@ RECORD_TYPE_TO_LABEL = {
 }
 
 
+def _bare_id(record_id: str) -> str:
+    """Strip the 'type#' prefix from a composite DynamoDB record_id.
+
+    DynamoDB stores record_ids as 'task#ENC-TSK-890' but related fields
+    and user queries use bare IDs like 'ENC-TSK-890'.
+    """
+    return record_id.split("#", 1)[-1] if "#" in record_id else record_id
+
+
 def get_neo4j_credentials(secret_name: str, region: str) -> Dict[str, str]:
     client = boto3.client("secretsmanager", region_name=region)
     resp = client.get_secret_value(SecretId=secret_name)
@@ -89,7 +98,7 @@ def determine_label(record: Dict[str, Any]) -> Optional[str]:
 
 
 def merge_node(tx, record: Dict[str, Any], label: str):
-    record_id = record.get("record_id", "")
+    record_id = _bare_id(record.get("record_id", ""))
     project_id = record.get("project_id", "")
     props = {
         "record_id": record_id,
@@ -113,44 +122,42 @@ def merge_node(tx, record: Dict[str, Any], label: str):
 
 
 def reconcile_edges(tx, record: Dict[str, Any]):
-    record_id = record.get("record_id", "")
+    record_id = _bare_id(record.get("record_id", ""))
     project_id = record.get("project_id", "")
 
     # CHILD_OF: child -> parent
-    parent = record.get("parent", "")
+    parent = _bare_id(record.get("parent", ""))
     if parent:
         tx.run(
-            """
-            MATCH (child {record_id: $child_id, project_id: $project_id})
-            MATCH (parent {record_id: $parent_id, project_id: $project_id})
-            MERGE (child)-[:CHILD_OF]->(parent)
-            """,
+            "MATCH (child), (parent) "
+            "WHERE child.record_id = $child_id AND child.project_id = $project_id "
+            "AND parent.record_id = $parent_id AND parent.project_id = $project_id "
+            "MERGE (child)-[:CHILD_OF]->(parent)",
             child_id=record_id, parent_id=parent, project_id=project_id,
         )
 
     # BELONGS_TO: record -> project node (if project node exists)
     if project_id:
         tx.run(
-            """
-            MATCH (n {record_id: $record_id, project_id: $project_id})
-            MATCH (p:Project {project_id: $project_id})
-            MERGE (n)-[:BELONGS_TO]->(p)
-            """,
+            "MATCH (n), (p:Project) "
+            "WHERE n.record_id = $record_id AND n.project_id = $project_id "
+            "AND p.project_id = $project_id "
+            "MERGE (n)-[:BELONGS_TO]->(p)",
             record_id=record_id, project_id=project_id,
         )
 
-    # RELATED_TO: from related_ids
-    related_ids = record.get("related_ids", []) or []
-    if isinstance(related_ids, str):
-        related_ids = [related_ids]
-    for rid in related_ids:
+    # RELATED_TO: from related_task_ids
+    related_task_ids = record.get("related_task_ids", []) or []
+    if isinstance(related_task_ids, str):
+        related_task_ids = [related_task_ids]
+    for rid in related_task_ids:
+        rid = _bare_id(rid) if rid else ""
         if rid:
             tx.run(
-                """
-                MATCH (a {record_id: $a_id, project_id: $project_id})
-                MATCH (b {record_id: $b_id, project_id: $project_id})
-                MERGE (a)-[:RELATED_TO]-(b)
-                """,
+                "MATCH (a), (b) "
+                "WHERE a.record_id = $a_id AND a.project_id = $project_id "
+                "AND b.record_id = $b_id AND b.project_id = $project_id "
+                "MERGE (a)-[:RELATED_TO]->(b)",
                 a_id=record_id, b_id=rid, project_id=project_id,
             )
 
@@ -159,13 +166,13 @@ def reconcile_edges(tx, record: Dict[str, Any]):
     if isinstance(related_issue_ids, str):
         related_issue_ids = [related_issue_ids]
     for iid in related_issue_ids:
+        iid = _bare_id(iid) if iid else ""
         if iid:
             tx.run(
-                """
-                MATCH (t {record_id: $task_id, project_id: $project_id})
-                MATCH (i {record_id: $issue_id, project_id: $project_id})
-                MERGE (t)-[:ADDRESSES]->(i)
-                """,
+                "MATCH (t), (i) "
+                "WHERE t.record_id = $task_id AND t.project_id = $project_id "
+                "AND i.record_id = $issue_id AND i.project_id = $project_id "
+                "MERGE (t)-[:ADDRESSES]->(i)",
                 task_id=record_id, issue_id=iid, project_id=project_id,
             )
 
@@ -174,13 +181,13 @@ def reconcile_edges(tx, record: Dict[str, Any]):
     if isinstance(related_feature_ids, str):
         related_feature_ids = [related_feature_ids]
     for fid in related_feature_ids:
+        fid = _bare_id(fid) if fid else ""
         if fid:
             tx.run(
-                """
-                MATCH (t {record_id: $task_id, project_id: $project_id})
-                MATCH (f {record_id: $feature_id, project_id: $project_id})
-                MERGE (t)-[:IMPLEMENTS]->(f)
-                """,
+                "MATCH (t), (f) "
+                "WHERE t.record_id = $task_id AND t.project_id = $project_id "
+                "AND f.record_id = $feature_id AND f.project_id = $project_id "
+                "MERGE (t)-[:IMPLEMENTS]->(f)",
                 task_id=record_id, feature_id=fid, project_id=project_id,
             )
 
