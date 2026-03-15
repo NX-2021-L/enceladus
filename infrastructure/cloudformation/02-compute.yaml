@@ -491,6 +491,55 @@ Resources:
         - Key: Component
           Value: changelog
 
+  GraphSyncFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-graph-sync
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.11
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures: [x86_64]
+      Role: !GetAtt GraphSyncRole.Arn
+      Environment:
+        Variables:
+          NEO4J_SECRET_NAME: enceladus/neo4j/auradb-credentials
+          SECRETS_REGION: !Ref AWS::Region
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: graph
+
+  GraphQueryApiFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: devops-graph-query-api
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 10
+      Architectures: [x86_64]
+      Role: !GetAtt GraphQueryApiRole.Arn
+      Environment:
+        Variables:
+          NEO4J_SECRET_NAME: enceladus/neo4j/auradb-credentials
+          SECRETS_REGION: !Ref AWS::Region
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          CORS_ORIGIN: !Ref CorsOrigin
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: graph
+
   # ---------------------------------------------------------------------------
   # SQS -> Lambda Event Source Mappings
   # ---------------------------------------------------------------------------
@@ -512,6 +561,16 @@ Resources:
       EventSourceArn: !ImportValue
         Fn::Sub: ${DataStackName}-FeedPublishQueueArn
       FunctionName: !Ref FeedPublisherFunction
+      BatchSize: 10
+      Enabled: true
+
+  GraphSyncSqsTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+      FunctionName: !Ref GraphSyncFunction
       BatchSize: 10
       Enabled: true
 
@@ -629,6 +688,28 @@ Resources:
         SqsQueueParameters:
           MessageGroupId: $.dynamodb.NewImage.project_id.S
           MessageDeduplicationId: $.dynamodb.Keys.document_id.S
+
+  TrackerToGraphPipe:
+    Type: AWS::Pipes::Pipe
+    DeletionPolicy: Retain
+    Properties:
+      Name: devops-tracker-to-graph-sync-queue
+      RoleArn: !GetAtt GraphPipeRole.Arn
+      Source: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+      Target: !ImportValue
+        Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+      TargetParameters:
+        SqsQueueParameters:
+          MessageGroupId: $.dynamodb.NewImage.project_id.S
+          MessageDeduplicationId: $.dynamodb.Keys.record_id.S
 
   # ---------------------------------------------------------------------------
   # IAM Roles (placeholder — full policies in each Lambda's deploy.sh)
@@ -871,6 +952,54 @@ Resources:
             Principal:
               Service: pipes.amazonaws.com
             Action: sts:AssumeRole
+
+  GraphSyncRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-graph-sync-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  GraphQueryApiRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-graph-query-api-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  GraphPipeRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: devops-graph-pipe-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pipes.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Project
+          Value: enceladus
 
 Outputs:
   CoordinationApiFunctionArn:
