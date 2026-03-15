@@ -117,6 +117,15 @@ RECORD_TYPE_TO_LABEL = {
     "feature": "Feature",
 }
 
+def _bare_id(record_id: str) -> str:
+    """Strip 'type#' prefix from composite DynamoDB record_id.
+
+    DynamoDB record_id: 'task#ENC-TSK-890' -> 'ENC-TSK-890'
+    Bare IDs pass through unchanged.
+    """
+    return record_id.split("#", 1)[-1] if "#" in record_id else record_id
+
+
 # Properties to copy from DynamoDB record to Neo4j node
 NODE_PROPERTIES = [
     "record_id", "project_id", "title", "status", "priority",
@@ -129,13 +138,13 @@ NODE_PROPERTIES = [
 # ---------------------------------------------------------------------------
 
 def _upsert_node(tx, record: Dict[str, Any]) -> None:
-    """MERGE a node by record_id and set properties."""
+    """MERGE a node by record_id (bare format) and set properties."""
     record_type = record.get("record_type", "")
     label = RECORD_TYPE_TO_LABEL.get(record_type)
     if not label:
         return
 
-    record_id = record.get("record_id", record.get("item_id", ""))
+    record_id = _bare_id(record.get("record_id", record.get("item_id", "")))
     if not record_id:
         return
 
@@ -159,7 +168,7 @@ def _upsert_project_node(tx, project_id: str) -> None:
 
 def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
     """Delete existing edges for node then re-create from record fields."""
-    record_id = record.get("record_id", record.get("item_id", ""))
+    record_id = _bare_id(record.get("record_id", record.get("item_id", "")))
     record_type = record.get("record_type", "")
     label = RECORD_TYPE_TO_LABEL.get(record_type)
     if not label or not record_id:
@@ -167,12 +176,14 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
 
     # Remove all outgoing relationships so we can re-create from current state
     tx.run(
-        f"MATCH (n:{label} {{record_id: $rid}})-[r]->() DELETE r",
+        f"MATCH (n:{label}) WHERE n.record_id = $rid "
+        "OPTIONAL MATCH (n)-[r]->() DELETE r",
         rid=record_id,
     )
     # Also remove incoming RELATED_TO since we'll re-create bidirectionally
     tx.run(
-        f"MATCH ()-[r:RELATED_TO]->(n:{label} {{record_id: $rid}}) DELETE r",
+        f"MATCH (n:{label}) WHERE n.record_id = $rid "
+        "OPTIONAL MATCH ()-[r:RELATED_TO]->(n) DELETE r",
         rid=record_id,
     )
 
@@ -181,26 +192,30 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
     # BELONGS_TO -> Project
     if project_id:
         tx.run(
-            f"MATCH (n:{label} {{record_id: $rid}}), (p:Project {{project_id: $pid}}) "
+            f"MATCH (n:{label}), (p:Project) "
+            "WHERE n.record_id = $rid AND p.project_id = $pid "
             "MERGE (n)-[:BELONGS_TO]->(p)",
             rid=record_id, pid=project_id,
         )
 
     # CHILD_OF -> parent Task
-    parent = record.get("parent", "")
+    parent = _bare_id(record.get("parent", ""))
     if parent and record_type == "task":
         tx.run(
-            "MATCH (child:Task {record_id: $child_id}), (parent:Task {record_id: $parent_id}) "
+            "MATCH (child:Task), (parent:Task) "
+            "WHERE child.record_id = $child_id AND parent.record_id = $parent_id "
             "MERGE (child)-[:CHILD_OF]->(parent)",
             child_id=record_id, parent_id=parent,
         )
 
     # RELATED_TO (bidirectional) from related_task_ids
     for related_id in record.get("related_task_ids", []) or []:
+        related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
         tx.run(
-            f"MATCH (a:{label} {{record_id: $aid}}), (b:Task {{record_id: $bid}}) "
+            f"MATCH (a:{label}), (b:Task) "
+            "WHERE a.record_id = $aid AND b.record_id = $bid "
             "MERGE (a)-[:RELATED_TO]->(b) "
             "MERGE (b)-[:RELATED_TO]->(a)",
             aid=record_id, bid=related_id,
@@ -208,34 +223,40 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
 
     # RELATED_TO from related_issue_ids + ADDRESSES (Task->Issue)
     for related_id in record.get("related_issue_ids", []) or []:
+        related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
         tx.run(
-            f"MATCH (a:{label} {{record_id: $aid}}), (b:Issue {{record_id: $bid}}) "
+            f"MATCH (a:{label}), (b:Issue) "
+            "WHERE a.record_id = $aid AND b.record_id = $bid "
             "MERGE (a)-[:RELATED_TO]->(b) "
             "MERGE (b)-[:RELATED_TO]->(a)",
             aid=record_id, bid=related_id,
         )
         if record_type == "task":
             tx.run(
-                "MATCH (t:Task {record_id: $tid}), (i:Issue {record_id: $iid}) "
+                "MATCH (t:Task), (i:Issue) "
+                "WHERE t.record_id = $tid AND i.record_id = $iid "
                 "MERGE (t)-[:ADDRESSES]->(i)",
                 tid=record_id, iid=related_id,
             )
 
     # RELATED_TO from related_feature_ids + IMPLEMENTS (Task->Feature)
     for related_id in record.get("related_feature_ids", []) or []:
+        related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
         tx.run(
-            f"MATCH (a:{label} {{record_id: $aid}}), (b:Feature {{record_id: $bid}}) "
+            f"MATCH (a:{label}), (b:Feature) "
+            "WHERE a.record_id = $aid AND b.record_id = $bid "
             "MERGE (a)-[:RELATED_TO]->(b) "
             "MERGE (b)-[:RELATED_TO]->(a)",
             aid=record_id, bid=related_id,
         )
         if record_type == "task":
             tx.run(
-                "MATCH (t:Task {record_id: $tid}), (f:Feature {record_id: $fid}) "
+                "MATCH (t:Task), (f:Feature) "
+                "WHERE t.record_id = $tid AND f.record_id = $fid "
                 "MERGE (t)-[:IMPLEMENTS]->(f)",
                 tid=record_id, fid=related_id,
             )
