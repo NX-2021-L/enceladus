@@ -94,6 +94,18 @@
       "lambda_dir": "backend/lambda/governance_audit",
       "workflow_file": ".github/workflows/lambda-governance-audit-deploy.yml",
       "deploy_script": "backend/lambda/governance_audit/deploy.sh"
+    },
+    {
+      "function_name": "devops-graph-sync",
+      "lambda_dir": "backend/lambda/graph_sync",
+      "workflow_file": ".github/workflows/lambda-graph-sync-deploy.yml",
+      "deploy_script": "backend/lambda/graph_sync/deploy.sh"
+    },
+    {
+      "function_name": "devops-graph-query-api",
+      "lambda_dir": "backend/lambda/graph_query_api",
+      "workflow_file": ".github/workflows/lambda-graph-query-api-deploy.yml",
+      "deploy_script": "backend/lambda/graph_query_api/deploy.sh"
     }
   ]
 }
