@@ -1,0 +1,29 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-graph-query-api",
+  "generated_at": "2026-03-14T00:00:00Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "environment": {
+      "NEO4J_SECRET_NAME": "enceladus/neo4j/auradb-credentials",
+      "SECRETS_REGION": "us-west-2",
+      "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
+      "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
+      "CORS_ORIGIN": "https://jreese.net"
+    },
+    "function_arn": "",
+    "handler": "lambda_function.lambda_handler",
+    "last_modified": "",
+    "layers": [],
+    "memory_size": 256,
+    "role": "",
+    "runtime": "python3.11",
+    "timeout": 10,
+    "version": "$LATEST"
+  },
+  "parity_status": "PENDING_DEPLOY",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/graph_query_api/lambda_function.py"
+}

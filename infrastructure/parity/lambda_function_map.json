@@ -108,6 +108,18 @@
       "function_name": "enceladus-governance-audit",
       "region": "us-west-2",
       "repo_entry_path": "backend/lambda/governance_audit/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-graph-sync",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/graph_sync/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
+      "function_name": "devops-graph-query-api",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/graph_query_api/lambda_function.py"
     }
   ],
   "generated_at": "2026-02-24T02:10:00Z"

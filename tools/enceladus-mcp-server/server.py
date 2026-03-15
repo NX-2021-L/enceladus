@@ -242,6 +242,10 @@ PROJECTS_API_INTERNAL_API_KEYS = _collect_nonempty_env_keys(
     "ENCELADUS_PROJECTS_API_INTERNAL_API_KEY",
     "ENCELADUS_PROJECTS_API_INTERNAL_API_KEYS",
 )
+GRAPH_QUERY_API_BASE = os.environ.get(
+    "ENCELADUS_GRAPH_QUERY_API_BASE",
+    "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker/graphsearch",
+)
 HEALTH_API_URL = os.environ.get(
     "ENCELADUS_HEALTH_API_URL",
     "https://jreese.net/api/v1/health",
@@ -3112,8 +3116,9 @@ def _code_mode_tool_catalog() -> list[Tool]:
                         "type": "string",
                         "description": (
                             "Read action identifier such as projects.list, tracker.get, "
-                            "documents.search, deploy.history, changelog.version, "
-                            "governance.dictionary, reference.search, or system.connection_health."
+                            "tracker.graphsearch, documents.search, deploy.history, "
+                            "changelog.version, governance.dictionary, reference.search, "
+                            "or system.connection_health."
                         ),
                     },
                     "arguments": {
@@ -6330,6 +6335,7 @@ _SEARCH_ACTIONS: Dict[str, Dict[str, Any]] = {
     "governance.dictionary": {"tool": "governance_dictionary"},
     "system.connection_health": {"tool": "connection_health"},
     "github.projects_list": {"tool": "github_projects_list"},
+    "tracker.graphsearch": {"tool": "tracker_graphsearch"},
 }
 
 _COORDINATION_ACTIONS: Dict[str, Dict[str, Any]] = {
@@ -7495,6 +7501,88 @@ async def _governance_dictionary(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+# --- Graph Search ---
+
+
+def _graph_query_api_request(
+    query: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """HTTP GET to the graph query API (direct API Gateway, not CloudFront)."""
+    base = GRAPH_QUERY_API_BASE.rstrip("/")
+    url = base
+    if query:
+        encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+        if encoded_qs:
+            url = f"{url}?{encoded_qs}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+
+    key_candidates: List[str] = []
+    for candidate in (
+        COMMON_INTERNAL_API_KEY,
+        *COMMON_INTERNAL_API_KEYS,
+    ):
+        key = str(candidate or "").strip()
+        if key and key not in key_candidates:
+            key_candidates.append(key)
+    if not key_candidates:
+        key_candidates.append("")
+
+    for idx, key in enumerate(key_candidates):
+        attempt_headers = dict(headers)
+        if key:
+            attempt_headers["X-Coordination-Internal-Key"] = key
+        req = urllib.request.Request(url=url, method="GET", headers=attempt_headers)
+        try:
+            with urllib.request.urlopen(req, timeout=20, context=_SSL_CTX) as resp:
+                text = resp.read().decode("utf-8")
+                return json.loads(text) if text else {"success": True}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"raw_body": raw}
+            if exc.code == 401 and idx < len(key_candidates) - 1:
+                continue
+            parsed.setdefault("error", f"Graph query API returned {exc.code}")
+            parsed["http_status"] = exc.code
+            return parsed
+        except urllib.error.URLError as exc:
+            return {"error": f"Graph query API unreachable: {exc.reason}"}
+    return {"error": "Graph query API request failed — no valid API key"}
+
+
+async def _tracker_graphsearch(args: dict) -> list[TextContent]:
+    """Execute a graph search query against the Neo4j graph index."""
+    search_type = args.get("search_type")
+    project_id = args.get("project_id")
+    if not search_type:
+        return _result_text({"error": "search_type is required"})
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+
+    query_params: Dict[str, Any] = {
+        "search_type": search_type,
+        "project_id": project_id,
+    }
+    if args.get("record_id"):
+        query_params["record_id"] = args["record_id"]
+    if args.get("target_id"):
+        query_params["target_id"] = args["target_id"]
+    if args.get("depth") is not None:
+        query_params["depth"] = args["depth"]
+    if args.get("keyword"):
+        query_params["keyword"] = args["keyword"]
+
+    resp = _graph_query_api_request(query=query_params)
+    if resp.get("error"):
+        return _result_text(resp)
+    return _result_text(resp)
+
+
 # --- System ---
 
 
@@ -7901,6 +7989,8 @@ _TOOL_HANDLERS = {
     "github_create_issue": _github_create_issue,
     "github_projects_sync": _github_projects_sync,
     "github_projects_list": _github_projects_list,
+    # ENC-FTR-047: Graph search
+    "tracker_graphsearch": _tracker_graphsearch,
     # ENC-FTR-037: Checkout service tools
     "checkout_task": _checkout_task,
     "release_task": _release_task,

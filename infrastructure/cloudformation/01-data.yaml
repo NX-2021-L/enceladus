@@ -355,6 +355,41 @@ Resources:
         - Key: Component
           Value: feed
 
+  GraphSyncQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: devops-graph-sync-queue.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 86400
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt GraphSyncDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: graph
+
+  GraphSyncDLQ:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: devops-graph-sync-dlq.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: graph
+
   # ---------------------------------------------------------------------------
   # SNS Topics
   # ---------------------------------------------------------------------------
@@ -464,3 +499,15 @@ Outputs:
     Value: !GetAtt ComponentRegistryTable.Arn
     Export:
       Name: !Sub ${AWS::StackName}-ComponentRegistryTableArn
+  GraphSyncQueueUrl:
+    Value: !Ref GraphSyncQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-GraphSyncQueueUrl
+  GraphSyncQueueArn:
+    Value: !GetAtt GraphSyncQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-GraphSyncQueueArn
+  GraphSyncDLQArn:
+    Value: !GetAtt GraphSyncDLQ.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-GraphSyncDLQArn

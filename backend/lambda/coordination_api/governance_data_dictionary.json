@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-13.1",
-  "updated_at": "2026-03-13T07:30:00Z",
+  "version": "2026-03-15.1",
+  "updated_at": "2026-03-15T00:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1949,6 +1949,71 @@
           "definition": "Error response (502): returned when feed_publisher invoke fails or returns a function error."
         }
       }
+    },
+    "tracker.graphsearch": {
+      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch').",
+      "fields": {
+        "search_type": {
+          "type": "enum",
+          "enum": [
+            "traversal",
+            "neighbors",
+            "path",
+            "keyword"
+          ],
+          "definition": "Graph search mode. traversal: walk PARENT_OF hierarchy from record_id. neighbors: all nodes within N hops via any edge type. path: shortest path between two record_ids. keyword: full-text title match + immediate neighbors."
+        },
+        "project_id": {
+          "type": "string",
+          "definition": "Project ID for cross-project isolation. All Cypher queries include WHERE n.project_id = $project_id.",
+          "constraints": {
+            "required": true
+          }
+        },
+        "record_id": {
+          "type": "string",
+          "definition": "Starting record ID for traversal, neighbors, and path search types.",
+          "constraints": {
+            "required_when": "search_type in (traversal, neighbors, path)"
+          }
+        },
+        "target_id": {
+          "type": "string",
+          "definition": "Target record ID for path search type (shortest path destination).",
+          "constraints": {
+            "required_when": "search_type = path"
+          }
+        },
+        "depth": {
+          "type": "integer",
+          "definition": "Maximum traversal depth for traversal, neighbors, and path search types.",
+          "constraints": {
+            "min": 1,
+            "max": 5,
+            "default": 2
+          }
+        },
+        "keyword": {
+          "type": "string",
+          "definition": "Search term for keyword search type. Matches against node title property.",
+          "constraints": {
+            "required_when": "search_type = keyword"
+          }
+        },
+        "response_envelope": {
+          "type": "object",
+          "definition": "Standard response shape: {nodes: [{record_id, project_id, title, status, priority, label, ...}], edges: [{source, target, type}], paths: [[record_id, ...]], summary: string, query_cypher: string}."
+        },
+        "error_envelope": {
+          "type": "object",
+          "definition": "Error response: {error: string, error_code: string}. HTTP 400 for invalid params (depth > 5), 401 for auth failure, 503 when AuraDB unavailable."
+        }
+      },
+      "node_labels": ["Task", "Issue", "Feature", "Project"],
+      "edge_types": ["CHILD_OF", "RELATED_TO", "BELONGS_TO", "ADDRESSES", "IMPLEMENTS"],
+      "data_source": "DynamoDB stream -> EventBridge Pipe -> SQS FIFO -> graph_sync Lambda -> Neo4j AuraDB",
+      "auth": "Cognito JWT cookie OR X-Coordination-Internal-Key header",
+      "covered_lambdas": ["devops-graph-sync", "devops-graph-query-api"]
     }
   }
 }
