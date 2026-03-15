@@ -1,0 +1,26 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-graph-sync",
+  "generated_at": "2026-03-14T00:00:00Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "environment": {
+      "NEO4J_SECRET_NAME": "enceladus/neo4j/auradb-credentials",
+      "SECRETS_REGION": "us-west-2"
+    },
+    "function_arn": "",
+    "handler": "lambda_function.handler",
+    "last_modified": "",
+    "layers": [],
+    "memory_size": 256,
+    "role": "",
+    "runtime": "python3.11",
+    "timeout": 60,
+    "version": "$LATEST"
+  },
+  "parity_status": "PENDING_DEPLOY",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/graph_sync/lambda_function.py"
+}
