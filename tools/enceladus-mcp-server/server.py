@@ -7570,12 +7570,22 @@ async def _tracker_graphsearch(args: dict) -> list[TextContent]:
     }
     if args.get("record_id"):
         query_params["record_id"] = args["record_id"]
-    if args.get("target_id"):
-        query_params["target_id"] = args["target_id"]
     if args.get("depth") is not None:
         query_params["depth"] = args["depth"]
+    if args.get("direction"):
+        query_params["direction"] = args["direction"]
+    if args.get("record_type"):
+        query_params["record_type"] = args["record_type"]
+    # keyword search
     if args.get("keyword"):
-        query_params["keyword"] = args["keyword"]
+        query_params["query"] = args["keyword"]
+    if args.get("query"):
+        query_params["query"] = args["query"]
+    # path search
+    if args.get("from_record_id"):
+        query_params["from_record_id"] = args["from_record_id"]
+    if args.get("to_record_id"):
+        query_params["to_record_id"] = args["to_record_id"]
 
     resp = _graph_query_api_request(query=query_params)
     if resp.get("error"):

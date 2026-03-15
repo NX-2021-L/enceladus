@@ -190,28 +190,28 @@ def _query_traversal(driver, project_id: str, params: Dict) -> Dict:
 
     if direction == "up":
         cypher = (
-            "MATCH path = (start {record_id: $record_id})-[:CHILD_OF*1..$depth]->(ancestor) "
-            "WHERE start.project_id = $project_id "
+            f"MATCH path = (start)-[:CHILD_OF*1..{depth}]->(ancestor) "
+            "WHERE start.record_id = $record_id AND start.project_id = $project_id "
             "UNWIND nodes(path) AS n "
             "RETURN DISTINCT n"
         )
     elif direction == "both":
         cypher = (
-            "MATCH path = (start {record_id: $record_id})-[:CHILD_OF*1..$depth]-(related) "
-            "WHERE start.project_id = $project_id "
+            f"MATCH path = (start)-[:CHILD_OF*1..{depth}]-(related) "
+            "WHERE start.record_id = $record_id AND start.project_id = $project_id "
             "UNWIND nodes(path) AS n "
             "RETURN DISTINCT n"
         )
     else:  # down
         cypher = (
-            "MATCH path = (child)-[:CHILD_OF*1..$depth]->(start {record_id: $record_id}) "
-            "WHERE start.project_id = $project_id "
+            f"MATCH path = (child)-[:CHILD_OF*1..{depth}]->(start) "
+            "WHERE start.record_id = $record_id AND start.project_id = $project_id "
             "UNWIND nodes(path) AS n "
             "RETURN DISTINCT n"
         )
 
     with driver.session() as session:
-        result = session.run(cypher, record_id=record_id, project_id=project_id, depth=depth)
+        result = session.run(cypher, record_id=record_id, project_id=project_id)
         nodes = [_node_to_dict(rec["n"]) for rec in result]
 
     return {
@@ -231,8 +231,8 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
     depth = min(int(params.get("depth", 1)), MAX_DEPTH)
 
     cypher = (
-        "MATCH (start {record_id: $record_id})-[r*1..$depth]-(neighbor) "
-        "WHERE start.project_id = $project_id "
+        f"MATCH (start)-[r*1..{depth}]-(neighbor) "
+        "WHERE start.record_id = $record_id AND start.project_id = $project_id "
         "AND neighbor.project_id = $project_id "
         "RETURN DISTINCT neighbor, "
         "[rel IN r | {type: type(rel), start: startNode(rel).record_id, end: endNode(rel).record_id}][-1] AS edge_info "
@@ -242,7 +242,7 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
     nodes = []
     edges = []
     with driver.session() as session:
-        result = session.run(cypher, record_id=record_id, project_id=project_id, depth=depth, limit=MAX_RESULTS)
+        result = session.run(cypher, record_id=record_id, project_id=project_id, limit=MAX_RESULTS)
         for rec in result:
             nodes.append(_node_to_dict(rec["neighbor"]))
             edge = rec.get("edge_info")
@@ -267,9 +267,9 @@ def _query_path(driver, project_id: str, params: Dict) -> Dict:
     max_depth = min(int(params.get("depth", 5)), MAX_DEPTH)
 
     cypher = (
-        f"MATCH (a {{record_id: $from_id, project_id: $project_id}}), "
-        f"(b {{record_id: $to_id, project_id: $project_id}}), "
-        f"path = shortestPath((a)-[*..{max_depth}]-(b)) "
+        f"MATCH (a), (b), path = shortestPath((a)-[*..{max_depth}]-(b)) "
+        "WHERE a.record_id = $from_id AND a.project_id = $project_id "
+        "AND b.record_id = $to_id AND b.project_id = $project_id "
         "RETURN path"
     )
 
@@ -307,8 +307,8 @@ def _query_path(driver, project_id: str, params: Dict) -> Dict:
 
 def _query_keyword(driver, project_id: str, params: Dict) -> Dict:
     """Title-matched nodes plus immediate neighbors."""
-    query = params.get("query", "")
-    if not query:
+    search_query = params.get("query", "")
+    if not search_query:
         return {"error": "query required for keyword search"}
     record_type = params.get("record_type", "")
 
@@ -319,7 +319,7 @@ def _query_keyword(driver, project_id: str, params: Dict) -> Dict:
             cypher = (
                 f"MATCH (n:{label}) "
                 "WHERE n.project_id = $project_id "
-                "AND (toLower(n.title) CONTAINS toLower($query) OR n.record_id CONTAINS toUpper($query)) "
+                "AND (toLower(n.title) CONTAINS toLower($search_query) OR n.record_id CONTAINS toUpper($search_query)) "
                 "OPTIONAL MATCH (n)-[r]-(neighbor) "
                 "WHERE neighbor.project_id = $project_id "
                 "RETURN DISTINCT n, collect(DISTINCT neighbor) AS neighbors "
@@ -331,7 +331,7 @@ def _query_keyword(driver, project_id: str, params: Dict) -> Dict:
         cypher = (
             "MATCH (n) "
             "WHERE n.project_id = $project_id "
-            "AND (toLower(n.title) CONTAINS toLower($query) OR n.record_id CONTAINS toUpper($query)) "
+            "AND (toLower(n.title) CONTAINS toLower($search_query) OR n.record_id CONTAINS toUpper($search_query)) "
             "OPTIONAL MATCH (n)-[r]-(neighbor) "
             "WHERE neighbor.project_id = $project_id "
             "RETURN DISTINCT n, collect(DISTINCT neighbor) AS neighbors "
@@ -341,7 +341,7 @@ def _query_keyword(driver, project_id: str, params: Dict) -> Dict:
     nodes = []
     seen = set()
     with driver.session() as session:
-        result = session.run(cypher, project_id=project_id, query=query, limit=MAX_RESULTS)
+        result = session.run(cypher, project_id=project_id, search_query=search_query, limit=MAX_RESULTS)
         for rec in result:
             main_node = _node_to_dict(rec["n"])
             rid = main_node.get("record_id", "")
@@ -362,7 +362,7 @@ def _query_keyword(driver, project_id: str, params: Dict) -> Dict:
         "nodes": nodes,
         "edges": [],
         "paths": [],
-        "summary": f"Keyword '{query}': {matched} matches, {len(nodes)} total nodes (with neighbors)",
+        "summary": f"Keyword '{search_query}': {matched} matches, {len(nodes)} total nodes (with neighbors)",
         "query_cypher": cypher,
     }
 
