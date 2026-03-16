@@ -85,7 +85,7 @@ export interface Task {
   // Philosophy fields (ENC-FTR-017)
   category?: string | null
   intent?: string | null
-  acceptance_criteria?: string[]
+  acceptance_criteria?: Array<string | { description: string; evidence?: string; evidence_acceptance?: boolean }>
 }
 
 export interface Issue {
