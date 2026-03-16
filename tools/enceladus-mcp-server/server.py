@@ -7596,6 +7596,25 @@ async def _tracker_graphsearch(args: dict) -> list[TextContent]:
 # --- System ---
 
 
+def _graph_health_check() -> Dict[str, Any]:
+    """Check Neo4j graph index health via graph_query_api /health endpoint."""
+    base = GRAPH_QUERY_API_BASE.rstrip("/")
+    url = f"{base}/health"
+    headers = {"Accept": "application/json", "User-Agent": HTTP_USER_AGENT}
+    for key in (COMMON_INTERNAL_API_KEY, *COMMON_INTERNAL_API_KEYS):
+        key = str(key or "").strip()
+        if not key:
+            continue
+        headers["X-Coordination-Internal-Key"] = key
+        req = urllib.request.Request(url=url, method="GET", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            pass
+    return {"status": "unreachable"}
+
+
 async def _connection_health(args: dict) -> list[TextContent]:
     # --- Phase 2d: HTTP API migration ---
     resp = _health_api_request()
@@ -7607,6 +7626,7 @@ async def _connection_health(args: dict) -> list[TextContent]:
         "document_api_internal_api_key_configured": bool(DOCUMENT_API_INTERNAL_API_KEY),
         "tracker_api_internal_api_key_configured": bool(TRACKER_API_INTERNAL_API_KEY),
     }
+    resp["graph_index"] = _graph_health_check()
     return _result_text(resp)
 
 
