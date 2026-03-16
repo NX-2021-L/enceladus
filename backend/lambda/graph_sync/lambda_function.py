@@ -180,7 +180,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         "OPTIONAL MATCH (n)-[r]->() DELETE r",
         rid=record_id,
     )
-    # Also remove incoming RELATED_TO since we'll re-create bidirectionally
+    # Also remove incoming RELATED_TO since we'll re-create from current state
     tx.run(
         f"MATCH (n:{label}) WHERE n.record_id = $rid "
         "OPTIONAL MATCH ()-[r:RELATED_TO]->(n) DELETE r",
@@ -208,7 +208,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             child_id=record_id, parent_id=parent,
         )
 
-    # RELATED_TO (bidirectional) from related_task_ids
+    # RELATED_TO from related_task_ids (single directed edge, not bidirectional)
     for related_id in record.get("related_task_ids", []) or []:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
@@ -216,8 +216,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         tx.run(
             f"MATCH (a:{label}), (b:Task) "
             "WHERE a.record_id = $aid AND b.record_id = $bid "
-            "MERGE (a)-[:RELATED_TO]->(b) "
-            "MERGE (b)-[:RELATED_TO]->(a)",
+            "MERGE (a)-[:RELATED_TO]->(b)",
             aid=record_id, bid=related_id,
         )
 
@@ -229,8 +228,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         tx.run(
             f"MATCH (a:{label}), (b:Issue) "
             "WHERE a.record_id = $aid AND b.record_id = $bid "
-            "MERGE (a)-[:RELATED_TO]->(b) "
-            "MERGE (b)-[:RELATED_TO]->(a)",
+            "MERGE (a)-[:RELATED_TO]->(b)",
             aid=record_id, bid=related_id,
         )
         if record_type == "task":
@@ -249,8 +247,7 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         tx.run(
             f"MATCH (a:{label}), (b:Feature) "
             "WHERE a.record_id = $aid AND b.record_id = $bid "
-            "MERGE (a)-[:RELATED_TO]->(b) "
-            "MERGE (b)-[:RELATED_TO]->(a)",
+            "MERGE (a)-[:RELATED_TO]->(b)",
             aid=record_id, bid=related_id,
         )
         if record_type == "task":
