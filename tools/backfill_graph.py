@@ -161,13 +161,20 @@ def reconcile_edges(tx, record: Dict[str, Any]):
                 a_id=record_id, b_id=rid, project_id=project_id,
             )
 
-    # ADDRESSES: task -> issue (from related_issue_ids)
+    # RELATED_TO + ADDRESSES: from related_issue_ids
     related_issue_ids = record.get("related_issue_ids", []) or []
     if isinstance(related_issue_ids, str):
         related_issue_ids = [related_issue_ids]
     for iid in related_issue_ids:
         iid = _bare_id(iid) if iid else ""
         if iid:
+            tx.run(
+                "MATCH (a), (b) "
+                "WHERE a.record_id = $a_id AND a.project_id = $project_id "
+                "AND b.record_id = $b_id AND b.project_id = $project_id "
+                "MERGE (a)-[:RELATED_TO]->(b)",
+                a_id=record_id, b_id=iid, project_id=project_id,
+            )
             tx.run(
                 "MATCH (t), (i) "
                 "WHERE t.record_id = $task_id AND t.project_id = $project_id "
@@ -176,13 +183,20 @@ def reconcile_edges(tx, record: Dict[str, Any]):
                 task_id=record_id, issue_id=iid, project_id=project_id,
             )
 
-    # IMPLEMENTS: task -> feature (from related_feature_ids)
+    # RELATED_TO + IMPLEMENTS: from related_feature_ids
     related_feature_ids = record.get("related_feature_ids", []) or []
     if isinstance(related_feature_ids, str):
         related_feature_ids = [related_feature_ids]
     for fid in related_feature_ids:
         fid = _bare_id(fid) if fid else ""
         if fid:
+            tx.run(
+                "MATCH (a), (b) "
+                "WHERE a.record_id = $a_id AND a.project_id = $project_id "
+                "AND b.record_id = $b_id AND b.project_id = $project_id "
+                "MERGE (a)-[:RELATED_TO]->(b)",
+                a_id=record_id, b_id=fid, project_id=project_id,
+            )
             tx.run(
                 "MATCH (t), (f) "
                 "WHERE t.record_id = $task_id AND t.project_id = $project_id "

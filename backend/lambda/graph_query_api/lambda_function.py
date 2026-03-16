@@ -241,13 +241,24 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
 
     nodes = []
     edges = []
+    seen_ids: set = set()
+    seen_edges: set = set()
     with driver.session() as session:
         result = session.run(cypher, record_id=record_id, project_id=project_id, limit=MAX_RESULTS)
         for rec in result:
-            nodes.append(_node_to_dict(rec["neighbor"]))
+            nd = _node_to_dict(rec["neighbor"])
+            rid = nd.get("record_id", "")
+            if rid and rid not in seen_ids:
+                nodes.append(nd)
+                seen_ids.add(rid)
             edge = rec.get("edge_info")
             if edge:
-                edges.append(dict(edge))
+                e = dict(edge)
+                s, t, tp = str(e.get("start", "")), str(e.get("end", "")), str(e.get("type", ""))
+                canon = (min(s, t), max(s, t), tp)
+                if canon not in seen_edges:
+                    edges.append(e)
+                    seen_edges.add(canon)
 
     return {
         "nodes": nodes,
@@ -270,6 +281,7 @@ def _query_path(driver, project_id: str, params: Dict) -> Dict:
         f"MATCH (a), (b), path = shortestPath((a)-[*..{max_depth}]-(b)) "
         "WHERE a.record_id = $from_id AND a.project_id = $project_id "
         "AND b.record_id = $to_id AND b.project_id = $project_id "
+        "AND NONE(n IN nodes(path) WHERE 'Project' IN labels(n)) "
         "RETURN path"
     )
 
