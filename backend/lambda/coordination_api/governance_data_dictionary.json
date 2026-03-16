@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-15.2",
-  "updated_at": "2026-03-15T10:10:00Z",
+  "version": "2026-03-16.1",
+  "updated_at": "2026-03-16T00:17:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -24,8 +24,8 @@
             "closed",
             "deployed"
           ],
-          "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc. ENC-FTR-037 renamed 'pushed' to 'pr' \u2014 backward compat read supported; new tasks must use 'pr'.",
-          "usage_guidance": "Task transitions MUST use advance_task_status MCP tool (checkout service) \u2014 direct tracker_set for task status is rejected with 403 (ENC-FTR-037). Full arc: open -> in-progress -> coding-complete -> committed -> pr -> merged-main -> deploy-init -> deploy-success -> closed. Re-entry: coding-updates -> coding-complete -> committed -> pr -> merged-main. The exact allowed statuses and evidence requirements per gate depend on task.transition_type (ENC-ISS-092) \u2014 see checkout_service.transition_type_matrix. Human override: user_initiated=true in transition_evidence (Cognito JWT required; internal API key returns 403)."
+          "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc. ENC-FTR-037 renamed 'pushed' to 'pr' — backward compat read supported; new tasks must use 'pr'.",
+          "usage_guidance": "Task transitions MUST use advance_task_status MCP tool (checkout service) — direct tracker_set for task status is rejected with 403 (ENC-FTR-037). Full arc: open -> in-progress -> coding-complete -> committed -> pr -> merged-main -> deploy-init -> deploy-success -> closed. Re-entry: coding-updates -> coding-complete -> committed -> pr -> merged-main. The exact allowed statuses and evidence requirements per gate depend on task.transition_type (ENC-ISS-092) — see checkout_service.transition_type_matrix. Human override: user_initiated=true in transition_evidence (Cognito JWT required; internal API key returns 403)."
         },
         "priority": {
           "type": "enum",
@@ -71,7 +71,7 @@
             "no_code"
           ],
           "default": "github_pr_deploy",
-          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Must be set via tracker_set BEFORE checkout_task is called \u2014 treated as immutable after checkout begins. lambda_deploy: PR+commit flow with Lambda update evidence at deploy-success (ENC-FTR-041).",
+          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Must be set via tracker_set BEFORE checkout_task is called — treated as immutable after checkout begins. lambda_deploy: PR+commit flow with Lambda update evidence at deploy-success (ENC-FTR-041).",
           "usage_guidance": "Set with tracker_set before checkout. Default github_pr_deploy is backward compatible and identical to pre-ENC-ISS-092 behavior. no_code: for tasks with no GitHub repo or non-code work (e.g. infra config, CLI installs). code_only: code was committed/merged to main but no deployment is needed. web_deploy: static/CloudFront deployments that do not produce GitHub Actions job objects. See checkout_service.transition_type_matrix for full gate requirements per type."
         },
         "transition_evidence": {
@@ -81,7 +81,7 @@
           "properties": {
             "deploy_evidence": {
               "type": "object",
-              "definition": "Structured GitHub Actions Jobs API response object. Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}. Must be provided verbatim from the API response \u2014 do not construct manually.",
+              "definition": "Structured GitHub Actions Jobs API response object. Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}. Must be provided verbatim from the API response — do not construct manually.",
               "required_fields": {
                 "id": {
                   "type": "integer",
@@ -107,14 +107,14 @@
                   "enum": [
                     "completed"
                   ],
-                  "definition": "GitHub Actions job status. Must be 'completed' \u2014 in-progress or queued jobs are rejected."
+                  "definition": "GitHub Actions job status. Must be 'completed' — in-progress or queued jobs are rejected."
                 },
                 "conclusion": {
                   "type": "enum",
                   "enum": [
                     "success"
                   ],
-                  "definition": "GitHub Actions job conclusion. Must be 'success' \u2014 failure, cancelled, skipped, and timed_out are all rejected."
+                  "definition": "GitHub Actions job conclusion. Must be 'success' — failure, cancelled, skipped, and timed_out are all rejected."
                 },
                 "started_at": {
                   "type": "string",
@@ -205,7 +205,7 @@
                 },
                 "github_verified": {
                   "type": "boolean",
-                  "definition": "Set to true by the checkout service after GitHub compare API confirms the commit is on main. Do not set manually \u2014 the service stamps this field."
+                  "definition": "Set to true by the checkout service after GitHub compare API confirms the commit is on main. Do not set manually — the service stamps this field."
                 }
               },
               "usage_guidance": "Provide as transition_evidence.code_on_main_evidence when calling advance_task_status(target_status=closed) for a code_only task. Only commit_sha is required as input; github_verified is stamped by the service. The commit must already be merged to the main branch before calling this gate."
@@ -215,12 +215,12 @@
               "constraints": {
                 "min_length": 1
               },
-              "definition": "Human-readable verification note for no_code tasks (ENC-ISS-092). Used at the closed gate. No GitHub API validation performed \u2014 the string is stored as-is for audit traceability.",
+              "definition": "Human-readable verification note for no_code tasks (ENC-ISS-092). Used at the closed gate. No GitHub API validation performed — the string is stored as-is for audit traceability.",
               "usage_guidance": "Provide as transition_evidence.no_code_evidence when calling advance_task_status(target_status=closed) for a no_code task. Describe what was done and how it was verified. Example: 'Claude Code CLI installed on jreesewebops EC2 instance i-03aa86d6ce037e5aa. Verified via SSH: claude --version working.'"
             },
             "user_initiated": {
               "type": "boolean",
-              "definition": "When true, indicates a human operator is performing this transition via the UI (ENC-ISS-092). Bypasses all agent checkout gates (ENC-FTR-037), CAI/CCI token requirements, and GitHub validation. Requires Cognito session authentication \u2014 rejected with HTTP 403 if internal API key is used.",
+              "definition": "When true, indicates a human operator is performing this transition via the UI (ENC-ISS-092). Bypasses all agent checkout gates (ENC-FTR-037), CAI/CCI token requirements, and GitHub validation. Requires Cognito session authentication — rejected with HTTP 403 if internal API key is used.",
               "usage_guidance": "Set by the UI only (Submit or Submit + Close button in LifecycleActions). Must be paired with user_note. The tracker_mutation Lambda stamps initiated_by (Cognito username) and initiated_at onto the stored evidence for audit traceability. Borrow-and-restore: if the task is checked out by an agent, the human override temporarily takes ownership, makes the change, then restores the agent's checkout (or releases on close). Cannot be used via MCP/agent paths."
             },
             "user_note": {
@@ -234,7 +234,7 @@
             "merge_evidence": {
               "type": "string_or_object",
               "definition": "Evidence of PR merge for merged-main transitions. May be a free-text string (direct PATCH from UI/legacy) or a structured dict when provided by the checkout service (keys typically include pr_id, merged_at, owner, repo). The Lambda serializes dict values as JSON before storing. ENC-ISS-097.",
-              "usage_guidance": "For checkout-service-routed transitions (advance_task_status), pr_id and merged_at are passed as top-level body fields \u2014 merge_evidence is not required and may be omitted. For legacy direct PATCH callers, provide a non-empty string describing merge confirmation. Dict-type values are accepted and stored as a JSON string."
+              "usage_guidance": "For checkout-service-routed transitions (advance_task_status), pr_id and merged_at are passed as top-level body fields — merge_evidence is not required and may be omitted. For legacy direct PATCH callers, provide a non-empty string describing merge confirmation. Dict-type values are accepted and stored as a JSON string."
             }
           }
         },
@@ -253,27 +253,35 @@
         },
         "subtask_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children. ENC-ISS-106: The checkout service enforces that parent tasks cannot advance lifecycle stages (coding-complete onward) unless all direct children listed here have reached at least that stage. Children at 'closed' satisfy any stage check.",
           "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. ENC-ISS-106: if subtask_ids is non-empty, the checkout service blocks advancement to coding-complete or beyond until every listed child is at or past that status. Not-found children also block advancement. To bypass: use the PWA user_initiated path."
         },
         "related_task_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "IDs of related tasks. Cross-references for traceability.",
           "usage_guidance": "tracker_set(field='related_task_ids', value=['ENC-TSK-NNN', ...]). Accepts list or JSON-stringified list.",
           "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays (e.g. '[\"ENC-TSK-100\"]') and bare ID strings to proper DynamoDB List type. Prevents storage as DynamoDB S type instead of L type."
         },
         "related_issue_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "IDs of related issues. Cross-references for traceability.",
           "usage_guidance": "tracker_set(field='related_issue_ids', value=['ENC-ISS-NNN', ...]). Accepts list or JSON-stringified list.",
           "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         },
         "related_feature_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "IDs of related features. Cross-references for traceability.",
           "usage_guidance": "tracker_set(field='related_feature_ids', value=['ENC-FTR-NNN', ...]). Accepts list or JSON-stringified list.",
           "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
@@ -325,19 +333,25 @@
         },
         "related_task_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "IDs of related tasks. Cross-references for traceability.",
           "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         },
         "related_issue_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "IDs of related issues. Cross-references for traceability.",
           "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         },
         "related_feature_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "IDs of related features. Cross-references for traceability.",
           "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         },
@@ -406,19 +420,25 @@
         },
         "related_task_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "IDs of related tasks. Cross-references for traceability.",
           "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         },
         "related_issue_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "IDs of related issues. Cross-references for traceability.",
           "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         },
         "related_feature_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "definition": "IDs of related features. Cross-references for traceability.",
           "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
         }
@@ -503,7 +523,7 @@
         },
         "file_name": {
           "type": "string",
-          "definition": "Governance file name that was updated (e.g. 'agents.md', 'agents/lifecycle-primer.md'). Informational \u2014 sync always runs _sync_governance_documents() for all governance files to ensure consistency.",
+          "definition": "Governance file name that was updated (e.g. 'agents.md', 'agents/lifecycle-primer.md'). Informational — sync always runs _sync_governance_documents() for all governance files to ensure consistency.",
           "context": "direct Lambda invocation payload"
         },
         "content_hash": {
@@ -1456,7 +1476,9 @@
       "fields": {
         "enforcement_mode": {
           "type": "enum",
-          "values": ["soft_warning"],
+          "values": [
+            "soft_warning"
+          ],
           "definition": "Missing location context fields (hypothesis, technical_notes, location_hint) produce warnings in the response but do not block issue creation.",
           "usage_guidance": "Ontology scoring already penalizes missing fields. Hard 400 enforcement was removed in ENC-ISS-105 because MCP client bindings did not expose these parameters, causing a self-inflicted regression."
         }
@@ -1552,7 +1574,7 @@
         },
         "gate_matrix": {
           "type": "object",
-          "definition": "Per-status evidence requirements enforced by checkout service. Requirements vary by task.transition_type (ENC-ISS-092) \u2014 see checkout_service.transition_type_matrix for full per-type specs. Matrix below documents github_pr_deploy (default arc, unchanged from pre-ENC-ISS-092 behavior).",
+          "definition": "Per-status evidence requirements enforced by checkout service. Requirements vary by task.transition_type (ENC-ISS-092) — see checkout_service.transition_type_matrix for full per-type specs. Matrix below documents github_pr_deploy (default arc, unchanged from pre-ENC-ISS-092 behavior).",
           "usage_guidance": "in-progress: active_agent_session_id required (also sets checkout). coding-complete: no evidence required; issues CAI (skipped for no_code type). committed: commit_sha (40-char hex) required; validated via GitHub API; issues CCI. pr: no evidence required. merged-main: pr_id (int) + merged_at (ISO 8601) required; validated via GitHub API. deploy-init: no evidence required. deploy-success: deploy_evidence (GitHub Actions Jobs API object -- 8 required fields: id, name, run_id, head_sha, status, conclusion, started_at, completed_at) required for github_pr_deploy; web_deploy_evidence {url, http_status, checked_at} for web_deploy type; clears CAI+CCI. closed: live_validation_evidence (non-empty string) for github_pr_deploy/web_deploy; code_on_main_evidence {commit_sha} for code_only; no_code_evidence (non-empty string) for no_code; releases checkout. DVP-ISS-082: committed and merged-main now resolve GitHub owner/repo dynamically from the projects table instead of hardcoding NX-2021-L/enceladus. Resolution order: transition_evidence.owner/repo > project.repo field > parent project.repo > child project.repo. Optional owner/repo in transition_evidence override automatic resolution.",
           "properties": {
             "committed": {
@@ -1664,7 +1686,7 @@
             "committed": "commit_sha (40-char hex; GitHub API validated); CAI required on record; issues CCI token",
             "pr": "CCI required on task record",
             "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
-            "closed": "code_on_main_evidence {commit_sha (40-char hex)} \u2014 GitHub compare API verifies commit is ancestor of main (status: behind or identical); releases checkout"
+            "closed": "code_on_main_evidence {commit_sha (40-char hex)} — GitHub compare API verifies commit is ancestor of main (status: behind or identical); releases checkout"
           },
           "skipped_statuses": [
             "deploy-init",
@@ -1706,14 +1728,14 @@
             "coding-updates",
             "closed"
           ],
-          "auth_requirement": "Cognito session cookie (enceladus_id_token) only \u2014 internal API key rejected with HTTP 403",
+          "auth_requirement": "Cognito session cookie (enceladus_id_token) only — internal API key rejected with HTTP 403",
           "gate_requirements": {
             "any_status": "user_note (non-empty string) required; no checkout required; no GitHub API validation; no CAI/CCI token checks",
             "closed (Submit + Close)": "user_note required; target_status=closed regardless of current status; checkout always released; note posted as worklog history entry (action=worklog, ENC-TSK-841) instead of pending update"
           },
-          "checkout_behavior": "borrow-and-restore \u2014 tracker_mutation temporarily takes checkout ownership as Cognito username; on completion restores previous agent checkout if task was checked out (except on close, which always releases); worklog provider=cognito_username",
+          "checkout_behavior": "borrow-and-restore — tracker_mutation temporarily takes checkout ownership as Cognito username; on completion restores previous agent checkout if task was checked out (except on close, which always releases); worklog provider=cognito_username",
           "audit": "initiated_by (Cognito username) and initiated_at stamped on transition_evidence as permanent audit record; [USER-INITIATED] worklog entry appended",
-          "handled_by": "tracker_mutation Lambda (_apply_user_initiated_advance) \u2014 NOT routed through checkout service gate matrix",
+          "handled_by": "tracker_mutation Lambda (_apply_user_initiated_advance) — NOT routed through checkout service gate matrix",
           "note": "This is not a stored field value. user-initiated is a request-time flag (transition_evidence.user_initiated=true) handled at the API layer. The four agent-path types above (github_pr_deploy, web_deploy, code_only, no_code) are stored on the task record as task.transition_type."
         },
         "lambda_deploy": {
@@ -1837,17 +1859,27 @@
             "related": {
               "type": "array",
               "definition": "Other directories/files related to this component (e.g., shared layers).",
-              "example": ["backend/lambda/shared_layer/"]
+              "example": [
+                "backend/lambda/shared_layer/"
+              ]
             },
             "domains": {
               "type": "object",
               "definition": "For frontend components: domain-to-files mapping. Each key is a domain name, value is array of relative file paths.",
-              "example": {"auth": ["src/lib/authState.tsx", "src/api/auth.ts"]}
+              "example": {
+                "auth": [
+                  "src/lib/authState.tsx",
+                  "src/api/auth.ts"
+                ]
+              }
             },
             "architecture_sections": {
               "type": "array",
               "definition": "ARCHITECTURE.md section numbers relevant to this component.",
-              "example": ["4.1", "5.2"]
+              "example": [
+                "4.1",
+                "5.2"
+              ]
             }
           }
         }
@@ -1977,13 +2009,6 @@
             "required_when": "search_type in (traversal, neighbors, path)"
           }
         },
-        "target_id": {
-          "type": "string",
-          "definition": "Target record ID for path search type (shortest path destination).",
-          "constraints": {
-            "required_when": "search_type = path"
-          }
-        },
         "depth": {
           "type": "integer",
           "definition": "Maximum traversal depth for traversal, neighbors, and path search types.",
@@ -1993,13 +2018,6 @@
             "default": 2
           }
         },
-        "keyword": {
-          "type": "string",
-          "definition": "Search term for keyword search type. Matches against node title property.",
-          "constraints": {
-            "required_when": "search_type = keyword"
-          }
-        },
         "response_envelope": {
           "type": "object",
           "definition": "Standard response shape: {nodes: [{record_id, project_id, title, status, priority, label, ...}], edges: [{source, target, type}], paths: [[record_id, ...]], summary: string, query_cypher: string}."
@@ -2007,13 +2025,62 @@
         "error_envelope": {
           "type": "object",
           "definition": "Error response: {error: string, error_code: string}. HTTP 400 for invalid params (depth > 5), 401 for auth failure, 503 when AuraDB unavailable."
+        },
+        "from_record_id": {
+          "type": "string",
+          "definition": "Source record ID for path search type (shortest path start). Bare tracker ID format (e.g. ENC-TSK-890).",
+          "constraints": {
+            "required_when": "search_type = path"
+          }
+        },
+        "to_record_id": {
+          "type": "string",
+          "definition": "Destination record ID for path search type (shortest path end). Bare tracker ID format.",
+          "constraints": {
+            "required_when": "search_type = path"
+          }
+        },
+        "query": {
+          "type": "string",
+          "definition": "Search term for keyword search type. Matches against node title (case-insensitive CONTAINS) and record_id (case-insensitive). MCP also accepts 'keyword' as an alias.",
+          "constraints": {
+            "required_when": "search_type = keyword"
+          }
+        },
+        "direction": {
+          "type": "enum",
+          "enum": [
+            "up",
+            "down",
+            "both"
+          ],
+          "definition": "Traversal direction for traversal search type. 'down' walks CHILD_OF from children to the start node, 'up' walks from start toward ancestors, 'both' walks in both directions.",
+          "constraints": {
+            "default": "down",
+            "applies_when": "search_type = traversal"
+          }
         }
       },
-      "node_labels": ["Task", "Issue", "Feature", "Project"],
-      "edge_types": ["CHILD_OF", "RELATED_TO", "BELONGS_TO", "ADDRESSES", "IMPLEMENTS"],
+      "node_labels": [
+        "Task",
+        "Issue",
+        "Feature",
+        "Project"
+      ],
+      "edge_types": [
+        "CHILD_OF",
+        "RELATED_TO",
+        "BELONGS_TO",
+        "ADDRESSES",
+        "IMPLEMENTS"
+      ],
       "data_source": "DynamoDB stream -> EventBridge Pipe -> SQS FIFO -> graph_sync Lambda -> Neo4j AuraDB",
       "auth": "Cognito JWT cookie OR X-Coordination-Internal-Key header",
-      "covered_lambdas": ["devops-graph-sync", "devops-graph-query-api"]
+      "covered_lambdas": [
+        "devops-graph-sync",
+        "devops-graph-query-api"
+      ],
+      "usage_guidance": "Use via search(action='tracker.graphsearch', arguments={search_type, project_id, ...}). All record_id values use bare tracker ID format (ENC-TSK-890, not task#ENC-TSK-890). Graph is a read-only derived index; DynamoDB remains source of truth. When graph is unavailable (AuraDB paused/down), returns HTTP 503 GRAPH_UNAVAILABLE with fallback_hint to use tracker.list. Depth guard rejects depth > 5 with HTTP 400."
     }
   }
 }
