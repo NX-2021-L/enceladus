@@ -260,19 +260,26 @@ export function TaskDetailPage() {
         </div>
       )}
 
-      {/* Acceptance Criteria (ENC-FTR-017 philosophy) */}
+      {/* Acceptance Criteria (ENC-FTR-017 philosophy, ENC-FTR-048 structured format) */}
       {task.acceptance_criteria && task.acceptance_criteria.length > 0 && (
         <div className="bg-slate-800 rounded-lg p-4">
           <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
             Acceptance Criteria
           </h3>
-          <ul className="space-y-1.5">
-            {task.acceptance_criteria.map((criterion, i) => (
-              <li key={i} className="flex items-start gap-2 text-sm">
-                <span className="text-blue-400 flex-shrink-0 mt-0.5">&#x2022;</span>
-                <span className="text-slate-300">{criterion}</span>
-              </li>
-            ))}
+          <ul className="space-y-2">
+            {task.acceptance_criteria.map((criterion, i) => {
+              const isStructured = typeof criterion === 'object' && criterion !== null;
+              const text = isStructured ? criterion.description : String(criterion);
+              const accepted = isStructured ? criterion.evidence_acceptance : undefined;
+              return (
+                <li key={i} className="flex items-start gap-2 text-sm">
+                  <span className={`flex-shrink-0 mt-0.5 ${accepted === true ? 'text-emerald-400' : accepted === false ? 'text-slate-600' : 'text-blue-400'}`}>
+                    {accepted === true ? '●' : accepted === false ? '○' : '\u2022'}
+                  </span>
+                  <span className="text-slate-300">{text}</span>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
