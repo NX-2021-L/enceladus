@@ -31,9 +31,19 @@ package_lambda() {
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
   # Install dependencies (PyJWT with crypto support for Cognito JWT validation)
+  # CRITICAL: Must target Lambda's Python 3.11 / Linux x86_64 runtime.
+  # Without --platform/--abi flags, pip installs for the runner's Python
+  # (3.12 on ubuntu-latest), producing .cpython-312 native extensions that
+  # fail to load on Lambda's 3.11 runtime (ENC-ISS-122, same class as
+  # ENC-ISS-041/DVP-ISS-059).
   python3 -m pip install \
     --quiet \
     --upgrade \
+    --platform manylinux2014_x86_64 \
+    --implementation cp \
+    --python-version 3.11 \
+    --abi cp311 \
+    --only-binary=:all: \
     PyJWT>=2.8.0 \
     cryptography>=41.0.0 \
     -t "${build_dir}" >/dev/null
