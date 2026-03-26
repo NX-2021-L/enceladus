@@ -701,10 +701,14 @@ _TRACKER_COUNTER_PREFIX = "counter#"
 _TRACKER_CREATE_MAX_ATTEMPTS = int(os.environ.get("ENCELADUS_TRACKER_CREATE_MAX_ATTEMPTS", "32"))
 
 
-def _get_prefix_map() -> Dict[str, str]:
-    """Build prefix -> project_name map via projects HTTP API."""
+def _get_prefix_map(*, _refresh: bool = False) -> Dict[str, str]:
+    """Build prefix -> project_name map via projects HTTP API.
+
+    On cache miss for a specific prefix, callers should retry with
+    _refresh=True to pick up newly created projects (ENC-ISS-123).
+    """
     global _PREFIX_MAP_CACHE
-    if _PREFIX_MAP_CACHE is not None:
+    if _PREFIX_MAP_CACHE is not None and not _refresh:
         return _PREFIX_MAP_CACHE
     resp = _projects_api_request("GET")
     projects = resp.get("projects", [])
@@ -718,6 +722,18 @@ def _get_prefix_map() -> Dict[str, str]:
     return mapping
 
 
+def _resolve_prefix(prefix: str) -> str:
+    """Resolve a project prefix to project_id, retrying on cache miss."""
+    prefix_map = _get_prefix_map()
+    if prefix in prefix_map:
+        return prefix_map[prefix]
+    # Cache miss — re-fetch in case a new project was created (ENC-ISS-123)
+    prefix_map = _get_prefix_map(_refresh=True)
+    if prefix in prefix_map:
+        return prefix_map[prefix]
+    raise ValueError(f"Unknown project prefix {prefix!r}. Known: {sorted(prefix_map)}")
+
+
 def _parse_record_id(record_id: str) -> Tuple[str, str, str]:
     """Parse 'ENC-TSK-564' into (project_id, record_type, record_id).
 
@@ -729,10 +745,7 @@ def _parse_record_id(record_id: str) -> Tuple[str, str, str]:
     if len(parts) != 3:
         raise ValueError(f"Invalid record ID format: {record_id!r}. Expected PREFIX-TYPE-NNN")
     prefix, type_seg, _num = parts
-    prefix_map = _get_prefix_map()
-    if prefix not in prefix_map:
-        raise ValueError(f"Unknown project prefix {prefix!r}. Known: {sorted(prefix_map)}")
-    project_id = prefix_map[prefix]
+    project_id = _resolve_prefix(prefix)
     record_type = _ID_SEGMENT_TO_TYPE.get(type_seg)
     if not record_type:
         raise ValueError(f"Unknown type segment {type_seg!r} in {record_id!r}")
@@ -746,10 +759,7 @@ def _tracker_key(record_id: str) -> Dict[str, Dict]:
     if len(parts) != 3:
         raise ValueError(f"Invalid record ID format: {record_id!r}. Expected PREFIX-TYPE-NNN")
     prefix, type_seg, _num = parts
-    prefix_map = _get_prefix_map()
-    if prefix not in prefix_map:
-        raise ValueError(f"Unknown project prefix {prefix!r}. Known: {sorted(prefix_map)}")
-    project_name = prefix_map[prefix]
+    project_name = _resolve_prefix(prefix)
     record_type = _ID_SEGMENT_TO_TYPE.get(type_seg)
     if not record_type:
         raise ValueError(f"Unknown type segment {type_seg!r} in {record_id!r}")
