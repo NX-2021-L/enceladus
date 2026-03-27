@@ -298,75 +298,10 @@ deploy_lambda() {
   log "[END] Lambda ready: ${FUNCTION_NAME}"
 }
 
-reconcile_cognito_callback_urls() {
-  # ENC-ISS-124: Ensure the MCP Cognito app client has all required CallbackURLs.
-  # update-user-pool-client is a replace operation, so we must read-merge-write.
-  if [[ -z "${COGNITO_CLIENT_ID}" || -z "${COGNITO_USER_POOL_ID}" ]]; then
-    log "[WARNING] Skipping Cognito callback reconciliation (missing client_id or pool_id)"
-    return 0
-  fi
-
-  log "[START] Reconciling Cognito CallbackURLs for ${COGNITO_CLIENT_ID}"
-
-  POOL="${COGNITO_USER_POOL_ID}" \
-  CLIENT="${COGNITO_CLIENT_ID}" \
-  CREGION="${COGNITO_REGION}" \
-  python3 -c "
-import boto3, os, json
-
-cognito = boto3.client('cognito-idp', region_name=os.environ['CREGION'])
-desc = cognito.describe_user_pool_client(
-    UserPoolId=os.environ['POOL'], ClientId=os.environ['CLIENT']
-)['UserPoolClient']
-
-existing_urls = set(desc.get('CallbackURLs') or [])
-
-# Required callback URIs: Claude.ai remote + localhost for terminal MCP auth
-required_urls = {
-    'https://claude.ai/api/mcp/auth_callback',
-    'https://claude.com/api/mcp/auth_callback',
-    'http://localhost/callback',
-}
-
-missing = required_urls - existing_urls
-if not missing:
-    print('[OK] All required CallbackURLs already present')
-    raise SystemExit(0)
-
-merged = sorted(existing_urls | required_urls)
-print(f'[INFO] Adding missing CallbackURLs: {sorted(missing)}')
-
-# Preserve all existing settings (update is a replace operation)
-kwargs = {
-    'UserPoolId': desc['UserPoolId'],
-    'ClientId': desc['ClientId'],
-    'CallbackURLs': merged,
-}
-for key in [
-    'ClientName', 'RefreshTokenValidity', 'AccessTokenValidity',
-    'IdTokenValidity', 'TokenValidityUnits', 'ReadAttributes',
-    'WriteAttributes', 'ExplicitAuthFlows', 'SupportedIdentityProviders',
-    'LogoutURLs', 'DefaultRedirectURI',
-    'AllowedOAuthFlows', 'AllowedOAuthScopes',
-    'AllowedOAuthFlowsUserPoolClient', 'PreventUserExistenceErrors',
-    'EnableTokenRevocation', 'EnablePropagateAdditionalUserContextData',
-    'AuthSessionValidity',
-]:
-    if key in desc and desc[key] is not None:
-        kwargs[key] = desc[key]
-
-cognito.update_user_pool_client(**kwargs)
-print(f'[OK] CallbackURLs reconciled: {merged}')
-" || { log "[WARNING] Failed to reconcile Cognito callback URLs"; return 0; }
-
-  log "[END] Cognito CallbackURLs reconciled"
-}
-
 main() {
   log "[START] Deploying ${FUNCTION_NAME}"
   package_lambda
   deploy_lambda
-  reconcile_cognito_callback_urls
   rm -f "${ZIP_FILE}"
   log "[SUCCESS] ${FUNCTION_NAME} deployed"
 }
