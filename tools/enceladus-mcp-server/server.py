@@ -8211,8 +8211,8 @@ def _handle_cognito_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, An
         "headers": {"content-type": "application/json", "cache-control": "public, max-age=3600"},
         "body": json.dumps({
             "issuer": base,
-            "authorization_endpoint": f"{cognito_domain}/oauth2/authorize",
-            "token_endpoint": f"{cognito_domain}/oauth2/token",
+            "authorization_endpoint": f"{base}/authorize",
+            "token_endpoint": f"{base}/oauth/token",
             "registration_endpoint": f"{base}/oauth/register",
             "token_endpoint_auth_methods_supported": ["client_secret_post"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
@@ -8226,19 +8226,34 @@ def _handle_cognito_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, An
 
 
 def _handle_cognito_authorize(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Fallback /authorize — redirect to Cognito Hosted UI with PKCE passthrough."""
+    """Proxy /authorize — redirect to Cognito Hosted UI, using a fixed server-side
+    callback URL so that dynamic localhost ports from CLI clients don't need to be
+    registered in Cognito's CallbackURLs.  The client's original redirect_uri and
+    state are encoded into the Cognito state parameter and recovered in /callback.
+    Unsupported params like ``resource`` (RFC 8707) are stripped (ENC-ISS-124)."""
+    import base64 as b64
+
     qs = event.get("queryStringParameters") or {}
+    base = _get_server_base_url(event)
     cognito_domain = COGNITO_DOMAIN.rstrip("/")
 
-    # Build Cognito authorize URL, passing through all OAuth params
+    client_redirect_uri = qs.get("redirect_uri", "")
+    client_state = qs.get("state", "")
+
+    # Encode client redirect_uri + state into an opaque Cognito state blob
+    relay = json.dumps({"ru": client_redirect_uri, "st": client_state}, separators=(",", ":"))
+    cognito_state = b64.urlsafe_b64encode(relay.encode()).decode().rstrip("=")
+
+    # Build Cognito authorize URL with server-side callback
     params = {}
-    for key in ("response_type", "client_id", "redirect_uri", "state",
+    for key in ("response_type", "client_id",
                 "code_challenge", "code_challenge_method", "scope"):
         val = qs.get(key, "")
         if val:
             params[key] = val
+    params["redirect_uri"] = f"{base}/callback"
+    params["state"] = cognito_state
 
-    # Default scope to openid if not specified
     if "scope" not in params:
         params["scope"] = "openid email profile"
 
@@ -8251,15 +8266,75 @@ def _handle_cognito_authorize(event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _handle_cognito_callback(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Server-side OAuth callback — receives the auth code from Cognito and relays
+    it to the client's original redirect_uri (typically http://localhost:{port}/callback)."""
+    import base64 as b64
+
+    qs = event.get("queryStringParameters") or {}
+    code = qs.get("code", "")
+    cognito_state = qs.get("state", "")
+    error = qs.get("error", "")
+
+    # Decode the original client redirect_uri and state
+    client_redirect_uri = ""
+    client_state = ""
+    if cognito_state:
+        try:
+            padded = cognito_state + "=" * (-len(cognito_state) % 4)
+            relay = json.loads(b64.urlsafe_b64decode(padded).decode())
+            client_redirect_uri = relay.get("ru", "")
+            client_state = relay.get("st", "")
+        except Exception:
+            pass
+
+    if error:
+        if client_redirect_uri:
+            sep = "&" if "?" in client_redirect_uri else "?"
+            location = f"{client_redirect_uri}{sep}error={urllib.parse.quote(error, safe='')}"
+            if client_state:
+                location += f"&state={urllib.parse.quote(client_state, safe='')}"
+            return {"statusCode": 302, "headers": {"location": location, "cache-control": "no-store"},
+                    "body": "", "isBase64Encoded": False}
+        return {"statusCode": 400, "headers": {"content-type": "application/json"},
+                "body": json.dumps({"error": error}), "isBase64Encoded": False}
+
+    if not client_redirect_uri:
+        return {"statusCode": 400, "headers": {"content-type": "application/json"},
+                "body": json.dumps({"error": "invalid_state", "error_description": "Could not decode relay state"}),
+                "isBase64Encoded": False}
+
+    # Relay auth code to client's original redirect_uri
+    sep = "&" if "?" in client_redirect_uri else "?"
+    location = f"{client_redirect_uri}{sep}code={urllib.parse.quote(code, safe='')}"
+    if client_state:
+        location += f"&state={urllib.parse.quote(client_state, safe='')}"
+
+    return {
+        "statusCode": 302,
+        "headers": {"location": location, "cache-control": "no-store"},
+        "body": "",
+        "isBase64Encoded": False,
+    }
+
+
 def _handle_cognito_token(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Fallback /oauth/token — proxy to Cognito token endpoint."""
+    """Proxy /oauth/token — forward to Cognito, replacing the client's redirect_uri
+    with the server-side callback URL that was actually used with Cognito."""
     cognito_domain = COGNITO_DOMAIN.rstrip("/")
     token_url = f"{cognito_domain}/oauth2/token"
+    base = _get_server_base_url(event)
 
     body_raw = event.get("body") or ""
     if event.get("isBase64Encoded"):
         import base64 as b64
         body_raw = b64.b64decode(body_raw).decode()
+
+    # Replace client's redirect_uri with the server-side callback used in /authorize
+    params = urllib.parse.parse_qs(body_raw, keep_blank_values=True)
+    if "redirect_uri" in params:
+        params["redirect_uri"] = [f"{base}/callback"]
+        body_raw = urllib.parse.urlencode({k: v[0] for k, v in params.items()})
 
     ctx = ssl.create_default_context()
     try:
@@ -8715,6 +8790,8 @@ def _handle_oauth_route(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return _handle_cognito_oauth_server_metadata(event) if cognito else _handle_oauth_server_metadata(event)
     if path == "/authorize" and method == "GET":
         return _handle_cognito_authorize(event) if cognito else _handle_oauth_authorize(event)
+    if path == "/callback" and method == "GET" and cognito:
+        return _handle_cognito_callback(event)
     if path == "/oauth/token" and method == "POST":
         return _handle_cognito_token(event) if cognito else _handle_oauth_token(event)
     if path == "/oauth/register" and method == "POST":
