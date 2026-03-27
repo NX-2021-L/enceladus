@@ -8211,8 +8211,8 @@ def _handle_cognito_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, An
         "headers": {"content-type": "application/json", "cache-control": "public, max-age=3600"},
         "body": json.dumps({
             "issuer": base,
-            "authorization_endpoint": f"{cognito_domain}/oauth2/authorize",
-            "token_endpoint": f"{cognito_domain}/oauth2/token",
+            "authorization_endpoint": f"{base}/authorize",
+            "token_endpoint": f"{base}/oauth/token",
             "registration_endpoint": f"{base}/oauth/register",
             "token_endpoint_auth_methods_supported": ["client_secret_post"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
