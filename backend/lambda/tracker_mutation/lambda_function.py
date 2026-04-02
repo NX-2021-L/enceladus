@@ -3237,8 +3237,11 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
     })
 
 
-def _handle_delete_relationship(project_id: str, params: Dict) -> Dict:
-    """Delete a typed relationship edge and its inverse atomically.
+def _handle_archive_relationship(project_id: str, params: Dict) -> Dict:
+    """Soft-delete a typed relationship edge by setting status=archived.
+
+    No DynamoDB DeleteItem — data is preserved for audit. Graph sync
+    removes the Neo4j edge when it sees status=archived.
 
     Reads source_id, target_id, relationship_type from query params (not body)
     because APIGW HTTP API does not reliably forward request body for DELETE.
@@ -3255,22 +3258,35 @@ def _handle_delete_relationship(project_id: str, params: Dict) -> Dict:
     inverse_type = _INVERSE_PAIRS[relationship_type]
     forward_sk = f"rel#{source_id}#{relationship_type}#{target_id}"
     inverse_sk = f"rel#{target_id}#{inverse_type}#{source_id}"
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
 
     ddb = _get_ddb()
     try:
         ddb.transact_write_items(
             TransactItems=[
                 {
-                    "Delete": {
+                    "Update": {
                         "TableName": DYNAMODB_TABLE,
                         "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(forward_sk)},
+                        "UpdateExpression": "SET #st = :archived, archived_at = :now",
+                        "ExpressionAttributeNames": {"#st": "status"},
+                        "ExpressionAttributeValues": {
+                            ":archived": _ser_s("archived"),
+                            ":now": _ser_s(now),
+                        },
                         "ConditionExpression": "attribute_exists(record_id)",
                     }
                 },
                 {
-                    "Delete": {
+                    "Update": {
                         "TableName": DYNAMODB_TABLE,
                         "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(inverse_sk)},
+                        "UpdateExpression": "SET #st = :archived, archived_at = :now",
+                        "ExpressionAttributeNames": {"#st": "status"},
+                        "ExpressionAttributeValues": {
+                            ":archived": _ser_s("archived"),
+                            ":now": _ser_s(now),
+                        },
                         "ConditionExpression": "attribute_exists(record_id)",
                     }
                 },
@@ -3284,8 +3300,9 @@ def _handle_delete_relationship(project_id: str, params: Dict) -> Dict:
 
     return _response(200, {
         "success": True,
-        "deleted_forward": forward_sk,
-        "deleted_inverse": inverse_sk,
+        "archived_forward": forward_sk,
+        "archived_inverse": inverse_sk,
+        "archived_at": now,
     })
 
 
@@ -3342,6 +3359,8 @@ def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
         if rec.get("record_type") != "relationship":
             continue
         if rec.get("is_inverse", False):
+            continue
+        if rec.get("status") == "archived":
             continue
         if min_weight:
             try:
@@ -3444,7 +3463,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         if method == "POST":
             return _handle_create_relationship(project_id, body)
         elif method == "DELETE":
-            return _handle_delete_relationship(project_id, query_params)
+            return _handle_archive_relationship(project_id, query_params)
         elif method == "GET":
             return _handle_list_relationships(project_id, query_params)
         else:

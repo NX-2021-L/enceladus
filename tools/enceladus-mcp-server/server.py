@@ -6388,8 +6388,8 @@ if ENABLE_TYPED_RELATIONSHIPS:
     _EXECUTE_ACTIONS["tracker.create_relationship"] = {
         "tool": "tracker_create_relationship", "requires_governance_hash": True,
     }
-    _EXECUTE_ACTIONS["tracker.delete_relationship"] = {
-        "tool": "tracker_delete_relationship", "requires_governance_hash": True,
+    _EXECUTE_ACTIONS["tracker.archive_relationship"] = {
+        "tool": "tracker_archive_relationship", "requires_governance_hash": True,
     }
     _SEARCH_ACTIONS["tracker.list_relationships"] = {
         "tool": "tracker_list_relationships",
@@ -7652,8 +7652,8 @@ async def _tracker_create_relationship(args: dict) -> list:
     return _result_text(resp)
 
 
-async def _tracker_delete_relationship(args: dict) -> list:
-    """Delete a typed relationship edge and its inverse."""
+async def _tracker_archive_relationship(args: dict) -> list:
+    """Archive (soft-delete) a typed relationship edge. Data preserved in DynamoDB."""
     governance_error = _require_governance_hash(args)
     if governance_error:
         return _result_text({"error": governance_error})
@@ -7662,7 +7662,7 @@ async def _tracker_delete_relationship(args: dict) -> list:
     if not project_id:
         return _result_text({"error": "project_id is required"})
 
-    # Send as query params, not body — APIGW HTTP API does not forward body for DELETE
+    # Send as query params — APIGW HTTP API does not forward body for DELETE
     query_params = {
         "source_id": args.get("source_id", ""),
         "target_id": args.get("target_id", ""),
@@ -8118,7 +8118,7 @@ _TOOL_HANDLERS = {
     "tracker_graphsearch": _tracker_graphsearch,
     # ENC-FTR-049: Typed relationship edges
     "tracker_create_relationship": _tracker_create_relationship,
-    "tracker_delete_relationship": _tracker_delete_relationship,
+    "tracker_archive_relationship": _tracker_archive_relationship,
     "tracker_list_relationships": _tracker_list_relationships,
     # ENC-FTR-037: Checkout service tools
     "checkout_task": _checkout_task,
