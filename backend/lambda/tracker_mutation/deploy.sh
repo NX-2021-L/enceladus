@@ -218,6 +218,7 @@ env.update(
         "ENCELADUS_COORDINATION_API_INTERNAL_API_KEYS": effective_keys,
         "COORDINATION_INTERNAL_API_KEY_SCOPES": effective_scopes,
         "CORS_ORIGIN": "https://jreese.net",
+        "ENABLE_LESSON_PRIMITIVE": "true",
     }
 )
 
