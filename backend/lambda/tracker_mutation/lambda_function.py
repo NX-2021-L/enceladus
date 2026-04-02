@@ -3237,11 +3237,15 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
     })
 
 
-def _handle_delete_relationship(project_id: str, body: Dict) -> Dict:
-    """Delete a typed relationship edge and its inverse atomically."""
-    source_id = str(body.get("source_id", "")).strip().upper()
-    target_id = str(body.get("target_id", "")).strip().upper()
-    relationship_type = str(body.get("relationship_type", "")).strip().lower()
+def _handle_delete_relationship(project_id: str, params: Dict) -> Dict:
+    """Delete a typed relationship edge and its inverse atomically.
+
+    Reads source_id, target_id, relationship_type from query params (not body)
+    because APIGW HTTP API does not reliably forward request body for DELETE.
+    """
+    source_id = str(params.get("source_id", "")).strip().upper()
+    target_id = str(params.get("target_id", "")).strip().upper()
+    relationship_type = str(params.get("relationship_type", "")).strip().lower()
 
     if not source_id or not target_id or not relationship_type:
         return _error(400, "source_id, target_id, and relationship_type are required.")
@@ -3440,7 +3444,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         if method == "POST":
             return _handle_create_relationship(project_id, body)
         elif method == "DELETE":
-            return _handle_delete_relationship(project_id, body)
+            return _handle_delete_relationship(project_id, query_params)
         elif method == "GET":
             return _handle_list_relationships(project_id, query_params)
         else:

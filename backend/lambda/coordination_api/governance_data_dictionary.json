@@ -1,6 +1,6 @@
 {
   "version": "2026-04-02.4",
-  "updated_at": "2026-04-02T02:15:00Z",
+  "updated_at": "2026-04-02T02:19:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2309,7 +2309,8 @@
         "pk": "project_id",
         "sk_pattern": "rel#{source_id}#{relationship_type}#{target_id}",
         "inverse_sk_pattern": "rel#{target_id}#{inverse_type}#{source_id}",
-        "table": "devops-project-tracker"
+        "table": "devops-project-tracker",
+        "delete_method": "query_params (source_id, target_id, relationship_type) — APIGW does not forward body for DELETE"
       },
       "covered_lambdas": [
         "devops-tracker-mutation-api",
