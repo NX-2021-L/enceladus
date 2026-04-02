@@ -6,7 +6,7 @@ actions that ephemeral Bedrock Agents can invoke during coordination dispatches.
 This Lambda is registered as an action group executor when a Bedrock Agent is
 created by the dispatch_orchestrator. The agent calls these actions via its
 tool-use interface to interact with the Enceladus tracker, projects, documents,
-and deployment systems.
+deployment systems, and GitHub repositories.
 
 Supported actions (mapped via apiPath + httpMethod):
     GET  /tracker/{recordId}          - Fetch a tracker record by ID
@@ -22,6 +22,11 @@ Supported actions (mapped via apiPath + httpMethod):
     GET  /deployment/{projectId}      - Get deployment state
     GET  /components                  - Get component registry info (ENC-TSK-822)
     GET  /codemap/{projectId}         - Get code navigation map (ENC-TSK-822)
+    POST /github/branch               - Create a Git branch (ENC-TSK-954)
+    POST /github/commit               - Create atomic multi-file commit (ENC-TSK-954)
+    POST /github/pr                   - Create a pull request (ENC-TSK-954)
+    GET  /github/status               - Get branch/PR/CI status (ENC-TSK-954)
+    GET  /schema/version              - Action group schema version (ENC-TSK-956)
 
 Environment variables:
     TRACKER_TABLE       default: devops-project-tracker
@@ -30,20 +35,28 @@ Environment variables:
     DEPLOY_TABLE        default: devops-deployment-manager
     DYNAMODB_REGION     default: us-west-2
     S3_BUCKET           default: jreese-net
+    GITHUB_TOKEN        GitHub PAT for branch/commit/PR operations
+    GITHUB_API_BASE     default: https://api.github.com
+    ALLOWED_REPOS       comma-separated owner/repo pairs (default: NX-2021-L/enceladus)
 
-Related: DVP-TSK-345, DVP-FTR-023
+Related: DVP-TSK-345, DVP-FTR-023, ENC-TSK-952, ENC-FTR-005
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import ssl
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.config import Config
@@ -69,6 +82,20 @@ DOCUMENT_STORAGE_POLICY_ID = os.environ.get(
 )
 COMPLIANCE_ENFORCEMENT_DEFAULT = os.environ.get("COMPLIANCE_ENFORCEMENT_DEFAULT", "enforce")
 S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
+
+# GitHub API configuration (ENC-TSK-954)
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_API_BASE = os.environ.get("GITHUB_API_BASE", "https://api.github.com")
+ALLOWED_REPOS = {
+    r.strip().lower()
+    for r in os.environ.get("ALLOWED_REPOS", "NX-2021-L/enceladus").split(",")
+    if r.strip()
+}
+_BRANCH_NAME_RE = re.compile(r"^agent/[a-zA-Z0-9_-]+/[A-Za-z]+-[A-Za-z]+-\d+")
+
+# Schema versioning (ENC-TSK-956)
+SCHEMA_VERSION = "1.1.0"
+SCHEMA_UPDATED_AT = "2026-04-02T03:30:00Z"
 
 # ---------------------------------------------------------------------------
 # AWS Clients (lazy-init)
@@ -97,6 +124,73 @@ def _get_s3():
 
 def _now_z() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _build_write_source(session_attributes: Optional[Dict] = None) -> Dict[str, Any]:
+    """Build write_source attribution for Bedrock agent mutations (ENC-TSK-955)."""
+    attrs = session_attributes or {}
+    return {
+        "channel": "bedrock_agent_action",
+        "agent_id": str(attrs.get("agentId") or attrs.get("agent_id") or ""),
+        "dispatch_id": str(attrs.get("dispatchId") or attrs.get("dispatch_id") or ""),
+        "timestamp": _now_z(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GitHub API helpers (ENC-TSK-954)
+# ---------------------------------------------------------------------------
+
+
+def _github_request(
+    method: str, path: str, body: Optional[Dict] = None
+) -> Tuple[int, Dict[str, Any]]:
+    """Make an authenticated GitHub API request."""
+    url = f"{GITHUB_API_BASE}{path}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "enceladus-bedrock-agent/1.1",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+
+    data = json.dumps(body).encode() if body else None
+    if data:
+        headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = json.loads(exc.read().decode())
+        except Exception:
+            err_body = {"message": str(exc)}
+        return exc.code, err_body
+    except Exception as exc:
+        return 503, {"message": str(exc)}
+
+
+def _validate_repo(owner: str, repo: str) -> Optional[str]:
+    """Return error string if repo is not in ALLOWED_REPOS, else None."""
+    key = f"{owner}/{repo}".lower()
+    if key not in ALLOWED_REPOS:
+        return f"Repository {owner}/{repo} not in allowed list: {sorted(ALLOWED_REPOS)}"
+    return None
+
+
+def _validate_branch_name(branch_name: str) -> Optional[str]:
+    """Return error string if branch name doesn't follow agent naming convention."""
+    if not _BRANCH_NAME_RE.match(branch_name):
+        return (
+            f"Branch name '{branch_name}' does not match required pattern "
+            f"'agent/{{agent-id}}/{{TRACKER-ID}}...'. "
+            f"Example: agent/bedrock-session-1/ENC-TSK-954-github-tools"
+        )
+    return None
 
 
 def _ser_s(val: str) -> Dict:
@@ -514,6 +608,7 @@ def _handle_tracker_log(parameters: List[Dict], body: Dict) -> Dict[str, Any]:
         }
     }
 
+    ws = _build_write_source()
     ddb.update_item(
         TableName=TRACKER_TABLE,
         Key={
@@ -521,11 +616,12 @@ def _handle_tracker_log(parameters: List[Dict], body: Dict) -> Dict[str, Any]:
             "record_id": _ser_s(sk),
         },
         UpdateExpression=(
-            "SET updated_at = :now, "
+            "SET updated_at = :now, write_source = :ws, "
             "history = list_append(if_not_exists(history, :empty), :entry)"
         ),
         ExpressionAttributeValues={
             ":now": _ser_s(now),
+            ":ws": _ser_value(ws),
             ":entry": {"L": [history_entry]},
             ":empty": {"L": []},
         },
@@ -559,6 +655,7 @@ def _handle_tracker_status(parameters: List[Dict], body: Dict) -> Dict[str, Any]
         }
     }
 
+    ws = _build_write_source()
     ddb.update_item(
         TableName=TRACKER_TABLE,
         Key={
@@ -566,13 +663,14 @@ def _handle_tracker_status(parameters: List[Dict], body: Dict) -> Dict[str, Any]
             "record_id": _ser_s(sk),
         },
         UpdateExpression=(
-            "SET #st = :status, updated_at = :now, "
+            "SET #st = :status, updated_at = :now, write_source = :ws, "
             "history = list_append(if_not_exists(history, :empty), :entry)"
         ),
         ExpressionAttributeNames={"#st": "status"},
         ExpressionAttributeValues={
             ":status": _ser_s(new_status),
             ":now": _ser_s(now),
+            ":ws": _ser_value(ws),
             ":entry": {"L": [history_entry]},
             ":empty": {"L": []},
         },
@@ -620,6 +718,7 @@ def _handle_tracker_create(body: Dict) -> Dict[str, Any]:
     now = _now_z()
     sk = f"{record_type}#{item_id}"
 
+    ws = _build_write_source()
     item = {
         "project_id": _ser_s(project_id),
         "record_id": _ser_s(sk),
@@ -631,6 +730,7 @@ def _handle_tracker_create(body: Dict) -> Dict[str, Any]:
         "created_at": _ser_s(now),
         "updated_at": _ser_s(now),
         "sync_version": {"N": "1"},
+        "write_source": _ser_value(ws),
         "history": {
             "L": [{
                 "M": {
@@ -869,6 +969,267 @@ def _handle_code_map(parameters: List[Dict]) -> Dict[str, Any]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# GitHub Action Handlers (ENC-TSK-954)
+# ---------------------------------------------------------------------------
+
+
+def _handle_github_create_branch(parameters: List[Dict], body: Dict) -> Dict[str, Any]:
+    """POST /github/branch — Create a branch via Git refs API."""
+    owner = body.get("owner") or _get_param(parameters, "owner") or ""
+    repo = body.get("repo") or _get_param(parameters, "repo") or ""
+    branch_name = body.get("branch_name") or _get_param(parameters, "branchName") or ""
+    base_ref = body.get("base_ref") or _get_param(parameters, "baseRef") or "main"
+
+    if not owner or not repo or not branch_name:
+        return {"error": "owner, repo, and branch_name required"}
+
+    repo_err = _validate_repo(owner, repo)
+    if repo_err:
+        return {"error": repo_err}
+    name_err = _validate_branch_name(branch_name)
+    if name_err:
+        return {"error": name_err}
+
+    # Get base ref SHA
+    status, data = _github_request("GET", f"/repos/{owner}/{repo}/git/ref/heads/{base_ref}")
+    if status != 200:
+        return {"error": f"Cannot resolve base ref '{base_ref}': {data.get('message', status)}"}
+    base_sha = data.get("object", {}).get("sha", "")
+
+    # Create branch ref
+    status, data = _github_request("POST", f"/repos/{owner}/{repo}/git/refs", {
+        "ref": f"refs/heads/{branch_name}",
+        "sha": base_sha,
+    })
+    if status not in (200, 201):
+        return {"error": f"Branch creation failed: {data.get('message', status)}"}
+
+    logger.info("[GITHUB] github.branch.created owner=%s repo=%s branch=%s base_sha=%s",
+                owner, repo, branch_name, base_sha[:12])
+    return {"success": True, "branch": branch_name, "base_sha": base_sha, "ref": data.get("ref", "")}
+
+
+def _handle_github_create_commit(parameters: List[Dict], body: Dict) -> Dict[str, Any]:
+    """POST /github/commit — Atomic multi-file commit via Git Data API."""
+    owner = body.get("owner") or _get_param(parameters, "owner") or ""
+    repo = body.get("repo") or _get_param(parameters, "repo") or ""
+    branch = body.get("branch") or _get_param(parameters, "branch") or ""
+    message = body.get("message") or _get_param(parameters, "message") or ""
+    files = body.get("files") or []
+
+    if not owner or not repo or not branch or not message or not files:
+        return {"error": "owner, repo, branch, message, and files required"}
+
+    repo_err = _validate_repo(owner, repo)
+    if repo_err:
+        return {"error": repo_err}
+
+    # 1. Get current branch HEAD
+    status, ref_data = _github_request("GET", f"/repos/{owner}/{repo}/git/ref/heads/{branch}")
+    if status != 200:
+        return {"error": f"Cannot resolve branch '{branch}': {ref_data.get('message', status)}"}
+    parent_sha = ref_data["object"]["sha"]
+
+    # 2. Get base tree
+    status, commit_data = _github_request("GET", f"/repos/{owner}/{repo}/git/commits/{parent_sha}")
+    if status != 200:
+        return {"error": f"Cannot get parent commit: {commit_data.get('message', status)}"}
+    base_tree_sha = commit_data["tree"]["sha"]
+
+    # 3. Create blobs and build tree entries
+    tree_entries = []
+    for f in files:
+        path = f.get("path", "")
+        content = f.get("content", "")
+        if not path:
+            continue
+        # Create blob
+        status, blob = _github_request("POST", f"/repos/{owner}/{repo}/git/blobs", {
+            "content": content,
+            "encoding": "utf-8",
+        })
+        if status not in (200, 201):
+            return {"error": f"Blob creation failed for {path}: {blob.get('message', status)}"}
+        tree_entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+
+    # 4. Create tree
+    status, tree = _github_request("POST", f"/repos/{owner}/{repo}/git/trees", {
+        "base_tree": base_tree_sha,
+        "tree": tree_entries,
+    })
+    if status not in (200, 201):
+        return {"error": f"Tree creation failed: {tree.get('message', status)}"}
+
+    # 5. Create commit
+    status, commit = _github_request("POST", f"/repos/{owner}/{repo}/git/commits", {
+        "message": message,
+        "tree": tree["sha"],
+        "parents": [parent_sha],
+    })
+    if status not in (200, 201):
+        return {"error": f"Commit creation failed: {commit.get('message', status)}"}
+    commit_sha = commit["sha"]
+
+    # 6. Update branch ref
+    status, updated = _github_request("PATCH", f"/repos/{owner}/{repo}/git/refs/heads/{branch}", {
+        "sha": commit_sha,
+    })
+    if status != 200:
+        return {"error": f"Ref update failed: {updated.get('message', status)}"}
+
+    logger.info("[GITHUB] github.commit.created owner=%s repo=%s branch=%s sha=%s files=%d",
+                owner, repo, branch, commit_sha[:12], len(files))
+    return {
+        "success": True,
+        "commit_sha": commit_sha,
+        "tree_sha": tree["sha"],
+        "files_committed": len(tree_entries),
+        "html_url": commit.get("html_url", ""),
+    }
+
+
+def _handle_github_create_pr(parameters: List[Dict], body: Dict) -> Dict[str, Any]:
+    """POST /github/pr — Create a pull request with governance metadata."""
+    owner = body.get("owner") or _get_param(parameters, "owner") or ""
+    repo = body.get("repo") or _get_param(parameters, "repo") or ""
+    title = body.get("title") or _get_param(parameters, "title") or ""
+    pr_body = body.get("body") or _get_param(parameters, "body") or ""
+    head = body.get("head") or _get_param(parameters, "head") or ""
+    base = body.get("base") or _get_param(parameters, "base") or "main"
+
+    if not owner or not repo or not title or not head:
+        return {"error": "owner, repo, title, and head required"}
+
+    repo_err = _validate_repo(owner, repo)
+    if repo_err:
+        return {"error": repo_err}
+
+    status, data = _github_request("POST", f"/repos/{owner}/{repo}/pulls", {
+        "title": title,
+        "body": pr_body,
+        "head": head,
+        "base": base,
+    })
+    if status not in (200, 201):
+        return {"error": f"PR creation failed: {data.get('message', status)}"}
+
+    logger.info("[GITHUB] github.pr.created owner=%s repo=%s pr=%d head=%s",
+                owner, repo, data.get("number", 0), head)
+    return {
+        "success": True,
+        "pr_number": data.get("number"),
+        "pr_url": data.get("html_url", ""),
+        "state": data.get("state", ""),
+    }
+
+
+def _handle_github_status(parameters: List[Dict]) -> Dict[str, Any]:
+    """GET /github/status — Get branch/PR/CI status."""
+    owner = _get_param(parameters, "owner") or ""
+    repo = _get_param(parameters, "repo") or ""
+    branch = _get_param(parameters, "branch")
+    pr_number = _get_param(parameters, "prNumber")
+
+    if not owner or not repo:
+        return {"error": "owner and repo required"}
+
+    repo_err = _validate_repo(owner, repo)
+    if repo_err:
+        return {"error": repo_err}
+
+    result: Dict[str, Any] = {"owner": owner, "repo": repo}
+
+    if pr_number:
+        status, pr_data = _github_request("GET", f"/repos/{owner}/{repo}/pulls/{pr_number}")
+        if status == 200:
+            result["pr"] = {
+                "number": pr_data.get("number"),
+                "state": pr_data.get("state"),
+                "merged": pr_data.get("merged", False),
+                "mergeable": pr_data.get("mergeable"),
+                "title": pr_data.get("title"),
+            }
+
+    if branch:
+        status, ref_data = _github_request("GET", f"/repos/{owner}/{repo}/git/ref/heads/{branch}")
+        if status == 200:
+            head_sha = ref_data.get("object", {}).get("sha", "")
+            result["branch"] = {"name": branch, "head_sha": head_sha}
+
+            # Get CI status for head
+            status, checks = _github_request(
+                "GET", f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
+            )
+            if status == 200:
+                runs = checks.get("check_runs", [])
+                result["checks"] = [
+                    {"name": r.get("name"), "status": r.get("status"), "conclusion": r.get("conclusion")}
+                    for r in runs[:10]
+                ]
+
+    logger.info("[GITHUB] github.pr.status_checked owner=%s repo=%s", owner, repo)
+    return result
+
+
+def _handle_schema_version() -> Dict[str, Any]:
+    """GET /schema/version — Return action group schema version (ENC-TSK-956)."""
+    actions = [
+        "GET /tracker/{recordId}", "GET /tracker/list/{projectId}",
+        "POST /tracker/{recordId}/log", "PUT /tracker/{recordId}/status",
+        "POST /tracker/create", "GET /projects/{projectId}", "GET /projects",
+        "GET /documents/search", "GET /documents/{documentId}",
+        "FUNCTION check_document_policy", "GET /deployment/{projectId}",
+        "GET /components", "GET /codemap/{projectId}",
+        "POST /github/branch", "POST /github/commit",
+        "POST /github/pr", "GET /github/status",
+        "GET /schema/version",
+    ]
+    return {
+        "version": SCHEMA_VERSION,
+        "updated_at": SCHEMA_UPDATED_AT,
+        "actions": actions,
+        "action_count": len(actions),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Rollback Policy Engine (ENC-TSK-962)
+# ---------------------------------------------------------------------------
+
+
+def _rollback_github_state(session_attributes: Optional[Dict] = None) -> Dict[str, Any]:
+    """Attempt to clean up partial GitHub state from a failed agent session."""
+    attrs = session_attributes or {}
+    rollback_log: List[str] = []
+
+    branch_created = attrs.get("github_branch_created")
+    pr_created = attrs.get("github_pr_number")
+    owner = attrs.get("github_owner", "")
+    repo = attrs.get("github_repo", "")
+
+    if not owner or not repo:
+        return {"rollback": "skipped", "reason": "no github context in session"}
+
+    # PR created but not merged → close PR
+    if pr_created and not attrs.get("github_pr_merged"):
+        status, _ = _github_request("PATCH", f"/repos/{owner}/{repo}/pulls/{pr_created}", {
+            "state": "closed",
+        })
+        rollback_log.append(f"PR #{pr_created} close: {'ok' if status == 200 else 'failed'}")
+
+    # Branch created but no PR → delete branch (safe cleanup)
+    elif branch_created and not pr_created:
+        status, _ = _github_request("DELETE", f"/repos/{owner}/{repo}/git/refs/heads/{branch_created}")
+        rollback_log.append(f"Branch {branch_created} delete: {'ok' if status in (200, 204) else 'failed'}")
+
+    if not rollback_log:
+        rollback_log.append("no rollback actions needed")
+
+    logger.info("[ROLLBACK] %s", "; ".join(rollback_log))
+    return {"rollback": "completed", "actions": rollback_log}
+
+
 def _dispatch_function_call(function_name: str, parameters: List[Dict]) -> Dict[str, Any]:
     """Dispatch function-details invocation to the corresponding internal handler."""
     if function_name == "tracker_get":
@@ -915,6 +1276,36 @@ def _dispatch_function_call(function_name: str, parameters: List[Dict]) -> Dict[
         return _handle_component_info(parameters)
     if function_name == "code_map":
         return _handle_code_map(parameters)
+    if function_name == "github_create_branch":
+        return _handle_github_create_branch(parameters, {
+            "owner": _get_param(parameters, "owner") or "",
+            "repo": _get_param(parameters, "repo") or "",
+            "branch_name": _get_param(parameters, "branchName") or "",
+            "base_ref": _get_param(parameters, "baseRef") or "main",
+        })
+    if function_name == "github_create_commit":
+        return _handle_github_create_commit(parameters, {
+            "owner": _get_param(parameters, "owner") or "",
+            "repo": _get_param(parameters, "repo") or "",
+            "branch": _get_param(parameters, "branch") or "",
+            "message": _get_param(parameters, "message") or "",
+            "files": json.loads(_get_param(parameters, "files") or "[]"),
+        })
+    if function_name == "github_create_pr":
+        return _handle_github_create_pr(parameters, {
+            "owner": _get_param(parameters, "owner") or "",
+            "repo": _get_param(parameters, "repo") or "",
+            "title": _get_param(parameters, "title") or "",
+            "body": _get_param(parameters, "body") or "",
+            "head": _get_param(parameters, "head") or "",
+            "base": _get_param(parameters, "base") or "main",
+        })
+    if function_name == "github_status":
+        return _handle_github_status(parameters)
+    if function_name == "schema_version":
+        return _handle_schema_version()
+    if function_name == "rollback_github":
+        return _rollback_github_state()
     return {"error": f"Unknown function: {function_name}"}
 
 
@@ -1002,6 +1393,16 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             result = _handle_component_info(parameters)
         elif api_path.startswith("/codemap/"):
             result = _handle_code_map(parameters)
+        elif api_path.startswith("/github/branch"):
+            result = _handle_github_create_branch(parameters, body)
+        elif api_path.startswith("/github/commit"):
+            result = _handle_github_create_commit(parameters, body)
+        elif api_path.startswith("/github/pr"):
+            result = _handle_github_create_pr(parameters, body)
+        elif api_path.startswith("/github/status"):
+            result = _handle_github_status(parameters)
+        elif api_path.startswith("/schema/version"):
+            result = _handle_schema_version()
         else:
             return _error_response(action_group, api_path, http_method, 404, f"Unknown path: {api_path}")
 
@@ -1013,4 +1414,13 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     except Exception as exc:
         logger.exception("[ERROR] Action failed: %s %s — %s", http_method, api_path, exc)
+        # Attempt GitHub rollback on failure if session has partial state
+        if session_attributes and any(
+            k.startswith("github_") for k in (session_attributes or {})
+        ):
+            try:
+                rollback_result = _rollback_github_state(session_attributes)
+                logger.info("[ROLLBACK] On failure: %s", json.dumps(rollback_result))
+            except Exception as rb_exc:
+                logger.warning("[ROLLBACK] Rollback also failed: %s", rb_exc)
         return _error_response(action_group, api_path, http_method, 500, str(exc))

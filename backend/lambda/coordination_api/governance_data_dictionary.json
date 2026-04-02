@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.7",
-  "updated_at": "2026-04-02T03:28:00Z",
+  "version": "2026-04-02.8",
+  "updated_at": "2026-04-02T03:40:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2121,9 +2121,11 @@
             "tests",
             "tested-by",
             "consumes-from",
-            "produces-for"
+            "produces-for",
+            "dispatches",
+            "dispatched-by"
           ],
-          "usage_guidance": "9 canonical types with inverse pairs. 'relates-to' is self-inverse (symmetric). All others are asymmetric with distinct inverse types."
+          "usage_guidance": "10 canonical types with inverse pairs. 'relates-to' is self-inverse (symmetric). All others are asymmetric with distinct inverse types. 'dispatches/dispatched-by' links coordination requests to dispatched tasks (ENC-TSK-960)."
         },
         "source_id": {
           "type": "string",
@@ -2257,7 +2259,8 @@
         "clones": "cloned-by",
         "affects": "affected-by",
         "tests": "tested-by",
-        "consumes-from": "produces-for"
+        "consumes-from": "produces-for",
+        "dispatches": "dispatched-by"
       },
       "domain_range_constraints": {
         "blocks": {
