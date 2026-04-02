@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.2",
-  "updated_at": "2026-04-02T01:41:00Z",
+  "version": "2026-04-02.3",
+  "updated_at": "2026-04-02T01:49:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2316,7 +2316,18 @@
         "devops-graph-sync",
         "devops-graph-query-api",
         "enceladus-mcp-code"
-      ]
+      ],
+      "mcp_surface": {
+        "execute_actions": [
+          "tracker.create_relationship",
+          "tracker.delete_relationship"
+        ],
+        "search_actions": [
+          "tracker.list_relationships"
+        ],
+        "feature_flag": "ENABLE_TYPED_RELATIONSHIPS",
+        "feature_flag_default": "false"
+      }
     }
   }
 }

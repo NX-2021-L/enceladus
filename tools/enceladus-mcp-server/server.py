@@ -214,6 +214,11 @@ CHECKOUT_SERVICE_API_BASE = os.environ.get(
     "CHECKOUT_SERVICE_API_BASE",
     "https://jreese.net/api/v1/checkout",
 )
+# ENC-FTR-049: Typed relationship edge feature flag
+ENABLE_TYPED_RELATIONSHIPS = os.environ.get(
+    "ENABLE_TYPED_RELATIONSHIPS", "false"
+).lower() == "true"
+
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
     COMMON_INTERNAL_API_KEY,
@@ -6378,6 +6383,18 @@ _EXECUTE_ACTIONS: Dict[str, Dict[str, Any]] = {
     "github.projects_sync": {"tool": "github_projects_sync"},
 }
 
+# ENC-FTR-049: Conditionally register typed relationship actions behind feature flag
+if ENABLE_TYPED_RELATIONSHIPS:
+    _EXECUTE_ACTIONS["tracker.create_relationship"] = {
+        "tool": "tracker_create_relationship", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["tracker.delete_relationship"] = {
+        "tool": "tracker_delete_relationship", "requires_governance_hash": True,
+    }
+    _SEARCH_ACTIONS["tracker.list_relationships"] = {
+        "tool": "tracker_list_relationships",
+    }
+
 _RECORD_CONTEXT_MODES = {"record", "issue", "task", "feature"}
 
 
@@ -7596,10 +7613,78 @@ async def _tracker_graphsearch(args: dict) -> list[TextContent]:
         query_params["from_record_id"] = args["from_record_id"]
     if args.get("to_record_id"):
         query_params["to_record_id"] = args["to_record_id"]
+    # ENC-FTR-049: edge-type filtering and weight thresholds
+    for key in ("edge_types", "edge_type", "min_weight"):
+        if args.get(key) is not None:
+            query_params[key] = args[key]
 
     resp = _graph_query_api_request(query=query_params)
     if resp.get("error"):
         return _result_text(resp)
+    return _result_text(resp)
+
+
+# --- ENC-FTR-049: Typed Relationship Edge Tools ---
+
+
+async def _tracker_create_relationship(args: dict) -> list:
+    """Create a typed relationship edge between two tracker records."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    project_id = args.get("project_id", "")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+
+    payload = {
+        "source_id": args.get("source_id", ""),
+        "target_id": args.get("target_id", ""),
+        "relationship_type": args.get("relationship_type", ""),
+        "reason": args.get("reason", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    for key in ("weight", "confidence", "provenance"):
+        if args.get(key) is not None:
+            payload[key] = args[key]
+
+    resp = _tracker_api_request("POST", f"/{project_id}/relationship", payload=payload)
+    return _result_text(resp)
+
+
+async def _tracker_delete_relationship(args: dict) -> list:
+    """Delete a typed relationship edge and its inverse."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    project_id = args.get("project_id", "")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+
+    payload = {
+        "source_id": args.get("source_id", ""),
+        "target_id": args.get("target_id", ""),
+        "relationship_type": args.get("relationship_type", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+
+    resp = _tracker_api_request("DELETE", f"/{project_id}/relationship", payload=payload)
+    return _result_text(resp)
+
+
+async def _tracker_list_relationships(args: dict) -> list:
+    """List typed relationship edges with optional filters."""
+    project_id = args.get("project_id", "")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+
+    query_params: Dict[str, Any] = {}
+    for key in ("source_id", "target_id", "relationship_type", "min_weight", "provenance", "page_size", "cursor"):
+        if args.get(key) is not None:
+            query_params[key] = args[key]
+
+    resp = _tracker_api_request("GET", f"/{project_id}/relationship", query=query_params)
     return _result_text(resp)
 
 
@@ -8031,6 +8116,10 @@ _TOOL_HANDLERS = {
     "github_projects_list": _github_projects_list,
     # ENC-FTR-047: Graph search
     "tracker_graphsearch": _tracker_graphsearch,
+    # ENC-FTR-049: Typed relationship edges
+    "tracker_create_relationship": _tracker_create_relationship,
+    "tracker_delete_relationship": _tracker_delete_relationship,
+    "tracker_list_relationships": _tracker_list_relationships,
     # ENC-FTR-037: Checkout service tools
     "checkout_task": _checkout_task,
     "release_task": _release_task,
