@@ -6982,11 +6982,11 @@ async def _get_compact_context_meta(args: dict) -> list[TextContent]:
         )
 
     # ENC-FTR-050: Context Node assembly manifest (flagged off by default)
-    if ENABLE_CONTEXT_NODES and args.get("token_budget"):
+    if ENABLE_CONTEXT_NODES and args.get("max_tokens"):
         try:
             import importlib
             _scoring = importlib.import_module("context_node_scoring")
-            token_budget = int(args.get("token_budget", 2500))
+            token_budget = int(args.get("max_tokens", 2500))
             record_id = str(args.get("record_id") or args.get("query") or "")
             # Build candidate list from context sections
             _candidates = []
