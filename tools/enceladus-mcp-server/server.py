@@ -697,9 +697,9 @@ def _ser_value(val: Any) -> Dict:
 
 
 # Record-ID to DynamoDB key mapping (mirrors tracker.py item_key logic)
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature"}
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson"}
 _PREFIX_MAP_CACHE: Optional[Dict[str, str]] = None
-_DEFAULT_STATUS_BY_TYPE = {"task": "open", "issue": "open", "feature": "planned"}
+_DEFAULT_STATUS_BY_TYPE = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft"}
 _RELATION_ID_FIELDS = {
     "related_task_ids",
     "related_issue_ids",
