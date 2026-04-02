@@ -154,6 +154,46 @@ export interface Feature {
   }>
 }
 
+export interface PillarScores {
+  efficiency: number
+  human_protection: number
+  intention: number
+  alignment: number
+}
+
+export interface LessonExtension {
+  description: string
+  timestamp: string
+  provider?: string
+}
+
+export interface Lesson {
+  lesson_id: string
+  project_id: string
+  title: string
+  observation: string
+  insight: string
+  evidence_chain: string[]
+  provenance: string
+  confidence: number
+  pillar_scores: PillarScores
+  resonance_score: number
+  pillar_composite: number
+  extensions: LessonExtension[]
+  category: string
+  status: string
+  lesson_version: number
+  analysis_reference?: string
+  governance_proposal?: string
+  related_task_ids: string[]
+  related_issue_ids: string[]
+  related_feature_ids: string[]
+  history: HistoryEntry[]
+  updated_at: string | null
+  last_update_note: string | null
+  created_at: string | null
+}
+
 export interface FeedEnvelope<T> {
   generated_at: string
   version: string
@@ -174,6 +214,10 @@ export interface IssuesFeed extends FeedEnvelope<Issue> {
 
 export interface FeaturesFeed extends FeedEnvelope<Feature> {
   features: Feature[]
+}
+
+export interface LessonsFeed extends FeedEnvelope<Lesson> {
+  lessons: Lesson[]
 }
 
 export interface DocumentsFeed extends FeedEnvelope<Document> {

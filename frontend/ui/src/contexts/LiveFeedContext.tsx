@@ -21,7 +21,7 @@ import {
 } from 'react'
 import { fetchLiveFeed, fetchLiveFeedDelta } from '../api/feeds'
 import { isSessionExpiredError } from '../lib/authSession'
-import type { Task, Issue, Feature } from '../types/feeds'
+import type { Task, Issue, Feature, Lesson } from '../types/feeds'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,6 +31,7 @@ interface LiveFeedState {
   tasks: Task[]
   issues: Issue[]
   features: Feature[]
+  lessons: Lesson[]
   generatedAt: string | null
   isPending: boolean
   isError: boolean
@@ -40,6 +41,7 @@ const INITIAL_STATE: LiveFeedState = {
   tasks: [],
   issues: [],
   features: [],
+  lessons: [],
   generatedAt: null,
   isPending: true,
   isError: false,
@@ -127,6 +129,7 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
         tasks: data.tasks,
         issues: data.issues,
         features: data.features,
+        lessons: data.lessons ?? [],
         generatedAt: data.generated_at,
         isPending: false,
         isError: false,
@@ -165,17 +168,20 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
       const nextTasks = mergeById(prev.tasks, data.tasks, 'task_id', closedSet)
       const nextIssues = mergeById(prev.issues, data.issues, 'issue_id', closedSet)
       const nextFeatures = mergeById(prev.features, data.features, 'feature_id', closedSet)
+      const nextLessons = mergeById(prev.lessons, data.lessons ?? [], 'lesson_id', closedSet)
 
       // Only trigger a re-render when record content changes.
       if (
         !arraysEqual(nextTasks, prev.tasks) ||
         !arraysEqual(nextIssues, prev.issues) ||
-        !arraysEqual(nextFeatures, prev.features)
+        !arraysEqual(nextFeatures, prev.features) ||
+        !arraysEqual(nextLessons, prev.lessons)
       ) {
         setState({
           tasks: nextTasks,
           issues: nextIssues,
           features: nextFeatures,
+          lessons: nextLessons,
           generatedAt: data.generated_at,
           isPending: false,
           isError: false,
