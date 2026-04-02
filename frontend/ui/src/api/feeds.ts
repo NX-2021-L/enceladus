@@ -1,4 +1,4 @@
-import type { Task, Issue, Feature, ProjectsFeed, TasksFeed, IssuesFeed, FeaturesFeed, DocumentsFeed } from '../types/feeds'
+import type { Task, Issue, Feature, Lesson, ProjectsFeed, TasksFeed, IssuesFeed, FeaturesFeed, DocumentsFeed } from '../types/feeds'
 import { fetchFeed, fetchWithAuth } from './client'
 
 const BASE_URL = import.meta.env.VITE_FEED_BASE_URL || '/mobile/v1'
@@ -19,6 +19,7 @@ export interface LiveFeedResponse {
   tasks: Task[]
   issues: Issue[]
   features: Feature[]
+  lessons?: Lesson[]
 }
 
 export interface LiveFeedDeltaResponse extends LiveFeedResponse {
