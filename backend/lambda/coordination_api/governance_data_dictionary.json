@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.4",
-  "updated_at": "2026-04-02T02:19:00Z",
+  "version": "2026-04-02.5",
+  "updated_at": "2026-04-02T02:28:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2184,6 +2184,21 @@
         "canonical_edge_id": {
           "type": "string",
           "usage_guidance": "The SK of the canonical (forward) edge. For forward edges, equals own SK. For inverse edges, points to the forward edge for traceability."
+        },
+        "status": {
+          "type": "enum",
+          "enum": [
+            "active",
+            "archived"
+          ],
+          "usage_guidance": "Relationships are soft-deleted by setting status=archived. No DynamoDB DeleteItem is ever used. Archived relationships are filtered from list results and removed from the Neo4j projection."
+        },
+        "archived_at": {
+          "type": "string",
+          "constraints": {
+            "format": "iso8601"
+          },
+          "usage_guidance": "Timestamp when the relationship was archived. Set atomically on both forward and inverse edges."
         }
       },
       "owl_characteristics": {
@@ -2310,7 +2325,7 @@
         "sk_pattern": "rel#{source_id}#{relationship_type}#{target_id}",
         "inverse_sk_pattern": "rel#{target_id}#{inverse_type}#{source_id}",
         "table": "devops-project-tracker",
-        "delete_method": "query_params (source_id, target_id, relationship_type) — APIGW does not forward body for DELETE"
+        "delete_method": "soft-delete via UpdateItem (status=archived). No DeleteItem permission needed. Data preserved for audit."
       },
       "covered_lambdas": [
         "devops-tracker-mutation-api",
@@ -2321,7 +2336,7 @@
       "mcp_surface": {
         "execute_actions": [
           "tracker.create_relationship",
-          "tracker.delete_relationship"
+          "tracker.archive_relationship"
         ],
         "search_actions": [
           "tracker.list_relationships"
