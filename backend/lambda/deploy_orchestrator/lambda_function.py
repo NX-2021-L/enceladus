@@ -405,11 +405,11 @@ def _load_prefix_map() -> None:
 
 
 def _infer_record_type(record_id: str) -> Optional[str]:
-    """Infer DynamoDB record_type from item ID like DVP-TSK-074."""
-    m = re.match(r"^[A-Z]{3}-(TSK|FTR|ISS)-\d{3}", record_id)
+    """Infer DynamoDB record_type from item ID like DVP-TSK-074 or DVP-TSK-A01."""
+    m = re.match(r"^[A-Z]{3}-(TSK|FTR|ISS|LSN)-(?:[A-Z]\d{2}|\d{3,})", record_id)
     if not m:
         return None
-    return {"TSK": "task", "FTR": "feature", "ISS": "issue"}.get(m.group(1))
+    return {"TSK": "task", "FTR": "feature", "ISS": "issue", "LSN": "lesson"}.get(m.group(1))
 
 
 def _infer_project_id(record_id: str) -> Optional[str]:

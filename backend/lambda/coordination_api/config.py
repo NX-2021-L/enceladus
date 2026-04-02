@@ -458,6 +458,7 @@ _TYPE_TO_SEGMENT = {
     "task": "TSK",
     "issue": "ISS",
     "feature": "FTR",
+    "lesson": "LSN",
 }
 
 _SEGMENT_TO_TYPE = {v: k for k, v in _TYPE_TO_SEGMENT.items()}
