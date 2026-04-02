@@ -114,19 +114,22 @@ CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 # ENC-FTR-037: checkout service gate key — only checkout_service Lambda may change task status
 CHECKOUT_SERVICE_KEY = os.environ.get("CHECKOUT_SERVICE_KEY", "")
 MAX_NOTE_LENGTH = 2000
+# ENC-FTR-052: Governed Lesson Primitive — feature flag
+ENABLE_LESSON_PRIMITIVE = os.environ.get("ENABLE_LESSON_PRIMITIVE", "false").lower() == "true"
 
 # Valid record types and their closed/default statuses
-_RECORD_TYPES = {"task", "issue", "feature"}
-_CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed"}
-_DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned"}
-_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR"}
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature"}
+_RECORD_TYPES = {"task", "issue", "feature", "lesson"}
+_CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived"}
+_DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft"}
+_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN"}
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson"}
 
 # Category validation per record type
 _VALID_CATEGORIES = {
     "feature": {"epic", "capability", "enhancement", "infrastructure"},
     "task": {"implementation", "investigation", "documentation", "maintenance", "validation"},
     "issue": {"bug", "debt", "risk", "security", "performance"},
+    "lesson": {"pattern", "failure_mode", "resolution_pathway", "opportunity", "principle", "intention"},
 }
 _VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
 _VALID_TRANSITION_TYPES = ("github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code")
@@ -167,6 +170,13 @@ _VALID_TRANSITIONS = {
         "open": {"in-progress", "closed"},
         "in-progress": {"closed"},
     },
+    "lesson": {
+        "draft": {"proposed"},
+        "proposed": {"accepted"},
+        "accepted": {"active"},
+        "active": {"superseded", "archived"},
+        "superseded": {"archived"},
+    },
 }
 
 # Backward (revert) transitions — allowed only with transition_evidence.revert_reason
@@ -189,6 +199,11 @@ _REVERT_TRANSITIONS = {
     "issue": {
         "in-progress": {"open"},
     },
+    "lesson": {
+        "proposed": {"draft"},
+        "accepted": {"proposed"},
+        "active": {"accepted"},
+    },
 }
 
 # EventBridge event config for reopen notifications
@@ -197,7 +212,7 @@ EVENT_SOURCE = "enceladus.tracker"
 EVENT_DETAIL_TYPE_REOPENED = "record.status.reopened"
 
 # Type segment mapping for SK construction
-_TYPE_SEG_TO_SK_PREFIX = {"task": "task", "issue": "issue", "feature": "feature"}
+_TYPE_SEG_TO_SK_PREFIX = {"task": "task", "issue": "issue", "feature": "feature", "lesson": "lesson"}
 
 # Counter management
 _TRACKER_COUNTER_PREFIX = "counter#"
@@ -1218,6 +1233,51 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
                 "Issue missing location_hint — suspected code paths for investigation (ENC-TSK-805)."
             )
 
+    # ENC-FTR-052: Lesson record validation
+    if record_type == "lesson":
+        if not ENABLE_LESSON_PRIMITIVE:
+            return _error(400, "Lesson records are disabled. Set ENABLE_LESSON_PRIMITIVE=true to enable.")
+        observation = str(body.get("observation") or "").strip()
+        insight = str(body.get("insight") or "").strip()
+        evidence_chain = body.get("evidence_chain")
+        analysis_reference = str(body.get("analysis_reference") or "").strip()
+        provenance = str(body.get("provenance") or "agent").strip()
+        if not observation:
+            return _tracker_create_validation_error(
+                "Lesson creation requires 'observation' (what was observed in the data). This field is immutable after creation.",
+                record_type=record_type,
+                missing_required_fields=["observation"],
+                governed_rules=["observation is required and immutable after create (ENC-FTR-052)."],
+            )
+        if not insight:
+            return _tracker_create_validation_error(
+                "Lesson creation requires 'insight' (what was learned from the observation).",
+                record_type=record_type,
+                missing_required_fields=["insight"],
+                governed_rules=["insight is required on lesson creation."],
+            )
+        if not isinstance(evidence_chain, list) or len(evidence_chain) == 0:
+            return _tracker_create_validation_error(
+                "Lesson creation requires 'evidence_chain' (array of tracker record IDs, min 1).",
+                record_type=record_type,
+                missing_required_fields=["evidence_chain"],
+                governed_rules=["evidence_chain must contain at least one tracker record ID."],
+            )
+        for i, eid in enumerate(evidence_chain):
+            if not isinstance(eid, str) or not eid.strip():
+                return _tracker_create_validation_error(
+                    f"evidence_chain[{i}] must be a non-empty string (tracker record ID).",
+                    record_type=record_type,
+                    governed_rules=["Each evidence_chain entry must be a non-empty tracker record ID."],
+                )
+        _VALID_LESSON_PROVENANCE = ("agent", "human", "mining", "system")
+        if provenance not in _VALID_LESSON_PROVENANCE:
+            return _tracker_create_validation_error(
+                f"Invalid provenance '{provenance}'. Allowed: {list(_VALID_LESSON_PROVENANCE)}",
+                record_type=record_type,
+                governed_rules=["provenance must be one of: agent, human, mining, system."],
+            )
+
     if primary_task:
         if record_type not in ("feature", "issue"):
             return _tracker_create_validation_error(
@@ -1325,6 +1385,22 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         item["active_agent_session"] = {"BOOL": False}
         item["active_agent_session_id"] = _ser_s("")
         item["active_agent_session_parent"] = {"BOOL": False}
+    # ENC-FTR-052: Lesson-specific fields
+    if record_type == "lesson":
+        item["observation"] = _ser_s(observation)
+        item["insight"] = _ser_s(insight)
+        item["evidence_chain"] = {"L": [_ser_s(eid.strip()) for eid in evidence_chain]}
+        item["provenance"] = _ser_s(provenance)
+        item["confidence"] = {"N": str(body.get("confidence", 0.5))}
+        item["resonance_score"] = {"N": "0"}
+        item["pillar_scores"] = {"M": {
+            "efficiency": {"N": "0"}, "human_protection": {"N": "0"},
+            "intention": {"N": "0"}, "alignment": {"N": "0"},
+        }}
+        item["extensions"] = {"L": []}
+        item["lesson_version"] = {"N": "1"}
+        if analysis_reference:
+            item["analysis_reference"] = _ser_s(analysis_reference)
     if category:
         item["category"] = _ser_s(category)
     if intent:
@@ -1979,6 +2055,33 @@ def _handle_update_field(
             expected_type="string",
             expected_format="single field name",
         )
+
+    # ENC-FTR-052: Lesson append-only mutation enforcement
+    if record_type == "lesson":
+        if not ENABLE_LESSON_PRIMITIVE:
+            return _error(400, "Lesson records are disabled. Set ENABLE_LESSON_PRIMITIVE=true to enable.")
+        _LESSON_IMMUTABLE_FIELDS = {"observation", "provenance", "evidence_chain", "extensions"}
+        if field == "observation":
+            return _tracker_field_validation_error(
+                "The 'observation' field is immutable after creation. Extend understanding via the extend endpoint.",
+                field=field, record_id=record_id, record_type=record_type,
+                expected_type="immutable",
+                governed_rules=["observation is immutable after create (ENC-FTR-052). Use extensions to add context."],
+            )
+        if field == "extensions":
+            return _tracker_field_validation_error(
+                "The 'extensions' field is append-only. Use POST /{project}/lesson/{id}/extend to add extensions.",
+                field=field, record_id=record_id, record_type=record_type,
+                expected_type="append_only",
+                governed_rules=["extensions is append-only via the extend sub-resource (ENC-FTR-052)."],
+            )
+        if field == "evidence_chain":
+            return _tracker_field_validation_error(
+                "The 'evidence_chain' field is append-only. Use POST /{project}/lesson/{id}/extend with evidence_ids.",
+                field=field, record_id=record_id, record_type=record_type,
+                expected_type="append_only",
+                governed_rules=["evidence_chain is append-only via extensions (ENC-FTR-052)."],
+            )
 
     if field == "acceptance_criteria":
         normalized_criteria, normalize_error = _normalize_acceptance_criteria_value(record_type, value)
@@ -2820,6 +2923,95 @@ def _handle_log(project_id: str, record_type: str, record_id: str, body: Dict) -
     return _response(200, {"success": True, "record_id": record_id, "updated_at": now})
 
 
+def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
+    """POST /{project}/lesson/{id}/extend — append-only extension to a lesson (ENC-FTR-052).
+
+    Adds a contextualization entry to the extensions array without modifying
+    the original observation. Optionally appends new evidence IDs to evidence_chain.
+    Increments lesson_version.
+    """
+    if not ENABLE_LESSON_PRIMITIVE:
+        return _error(400, "Lesson records are disabled. Set ENABLE_LESSON_PRIMITIVE=true to enable.")
+
+    content = str(body.get("content") or "").strip()
+    if not content:
+        return _error(400, "Field 'content' is required for lesson extension.")
+
+    author = str(body.get("author") or body.get("write_source", {}).get("provider", "")).strip()
+    if not author:
+        return _error(400, "Field 'author' (or write_source.provider) is required.")
+
+    new_evidence_ids = body.get("evidence_ids") or []
+    if new_evidence_ids and not isinstance(new_evidence_ids, list):
+        return _error(400, "evidence_ids must be an array of tracker record IDs.")
+
+    _normalize_write_source(body)
+    ddb = _get_ddb()
+    key = _build_key(project_id, "lesson", record_id)
+
+    # Verify record exists and is a lesson
+    try:
+        raw_item = _get_record_raw(project_id, "lesson", record_id)
+    except Exception as exc:
+        logger.error("get_item failed: %s", exc)
+        return _error(500, "Database read failed.")
+    if raw_item is None:
+        return _error(404, f"Lesson not found: {record_id}")
+
+    now = _now_z()
+    extension_entry = {"M": {
+        "timestamp": _ser_s(now),
+        "author": _ser_s(author),
+        "content": _ser_s(content),
+    }}
+    if new_evidence_ids:
+        extension_entry["M"]["evidence_ids"] = {"L": [_ser_s(eid.strip()) for eid in new_evidence_ids if eid.strip()]}
+
+    history_entry = {"M": {
+        "timestamp": _ser_s(now), "status": _ser_s("worklog"),
+        "description": _ser_s(f"Extension added by {author}: {content[:100]}{'...' if len(content) > 100 else ''}"),
+    }}
+
+    # Build update expression: always append extension + history, optionally append evidence
+    update_parts = [
+        "SET updated_at = :now",
+        "last_update_note = :note",
+        "write_source = :wsrc",
+        "sync_version = if_not_exists(sync_version, :zero) + :one",
+        "lesson_version = if_not_exists(lesson_version, :zero) + :one",
+        "extensions = list_append(if_not_exists(extensions, :empty), :ext)",
+        "history = list_append(if_not_exists(history, :empty), :hentry)",
+    ]
+    expr_values = {
+        ":now": _ser_s(now),
+        ":note": _ser_s(f"Extension by {author}"),
+        ":wsrc": _build_write_source(body),
+        ":zero": {"N": "0"}, ":one": {"N": "1"},
+        ":ext": {"L": [extension_entry]},
+        ":hentry": {"L": [history_entry]},
+        ":empty": {"L": []},
+    }
+
+    if new_evidence_ids:
+        update_parts.append("evidence_chain = list_append(if_not_exists(evidence_chain, :empty), :new_ev)")
+        expr_values[":new_ev"] = {"L": [_ser_s(eid.strip()) for eid in new_evidence_ids if eid.strip()]}
+
+    try:
+        ddb.update_item(
+            TableName=DYNAMODB_TABLE, Key=key,
+            UpdateExpression=", ".join(update_parts),
+            ExpressionAttributeValues=expr_values,
+        )
+    except Exception as exc:
+        logger.error("update_item (lesson extend) failed: %s", exc)
+        return _error(500, "Database write failed.")
+
+    return _response(200, {
+        "success": True, "record_id": record_id, "updated_at": now,
+        "evidence_ids_appended": len(new_evidence_ids) if new_evidence_ids else 0,
+    })
+
+
 def _handle_checkout(project_id: str, record_type: str, record_id: str, body: Dict) -> Dict:
     """POST /{project}/{type}/{id}/checkout — session checkout."""
     body["field"] = "active_agent_session"
@@ -3410,13 +3602,13 @@ _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/relationship$"
 )
 _RE_RECORD_SUB = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
 )
 _RE_RECORD = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature)/(?P<id>[A-Za-z0-9_-]+)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson)/(?P<id>[A-Za-z0-9_-]+)$"
 )
 _RE_TYPE_COLLECTION = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson)$"
 )
 _RE_PROJECT = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)$"
@@ -3496,6 +3688,8 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
         if sub == "log" and method == "POST":
             return _handle_log(project_id, record_type, record_id, body)
+        elif sub == "extend" and method == "POST" and record_type == "lesson":
+            return _handle_lesson_extend(project_id, record_id, body)
         elif sub == "checkout" and method == "POST":
             return _handle_checkout(project_id, record_type, record_id, body)
         elif sub == "checkout" and method == "DELETE":
