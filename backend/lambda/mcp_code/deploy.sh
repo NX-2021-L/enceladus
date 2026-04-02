@@ -113,6 +113,8 @@ merged["ENCELADUS_MCP_TRANSPORT"] = os.environ["MCP_TRANSPORT"]
 merged["ENCELADUS_MCP_INTERFACE_MODE"] = "code"
 # ENC-FTR-049: Typed relationship feature flag
 merged["ENABLE_TYPED_RELATIONSHIPS"] = "true"
+# ENC-FTR-050: Context Node feature flag
+merged["ENABLE_CONTEXT_NODES"] = "true"
 
 # Cognito OAuth vars
 cognito_pool = os.environ.get("COGNITO_USER_POOL_ID", "")
