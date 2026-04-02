@@ -111,7 +111,7 @@ _TYPE_SUFFIX_TO_RECORD_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", 
 # Handles both Lambda-created (**Enceladus Record**: `X`) and
 # frontend-created (Enceladus Record: `X`) formats.
 _RE_RECORD_ID = re.compile(
-    r"(?:\*\*)?Enceladus Record(?:\*\*)?:\s*`([A-Z]+-(?:TSK|ISS|FTR|LSN)-(?:[A-Z]\d{2}|\d{3,}))`"
+    r"(?:\*\*)?Enceladus Record(?:\*\*)?:\s*`([A-Z]+-(?:TSK|ISS|FTR|LSN)-[A-Z0-9]{3}(?:-[0-9][A-Z])?)`"
 )
 
 # ---------------------------------------------------------------------------
