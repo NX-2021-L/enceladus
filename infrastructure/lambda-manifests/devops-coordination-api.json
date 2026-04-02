@@ -27,6 +27,7 @@
       "DISPATCH_LOCK_BUFFER_SECONDS": "60",
       "DYNAMODB_REGION": "us-west-2",
       "ENABLE_CLAUDE_HEADLESS": "true",
+      "ENCELADUS_MCP_INTERFACE_MODE": "code",
       "ENCELADUS_MCP_SERVER_PATH": "tools/enceladus-mcp-server/server.py",
       "HOST_V2_AWS_PROFILE": "ec2-role",
       "HOST_V2_ENCELADUS_MCP_INSTALLER": "tools/enceladus-mcp-server/install_profile.sh",

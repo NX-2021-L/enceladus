@@ -41,7 +41,6 @@ from aws_clients import _get_ddb
 from project_utils import _ENCELADUS_MCP_SERVER_MODULE
 
 __all__ = [
-    "_call_mcp_tool",
     "_compute_governance_hash_local",
     "_load_mcp_server_module",
     "_parse_mcp_result",
@@ -108,69 +107,6 @@ def _parse_mcp_result(result: Any) -> Dict[str, Any]:
             raise RuntimeError(str(data.get("error")))
         return data
     return {"result": data}
-
-
-def _call_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    module = _load_mcp_server_module()
-    invocation_id = f"mcpi-{uuid.uuid4().hex[:20]}"
-    sanitized_args = {k: v for k, v in arguments.items() if v is not None}
-    sanitized_args.setdefault("invocation_id", invocation_id)
-    sanitized_args.setdefault("caller_identity", MCP_AUDIT_CALLER_IDENTITY)
-    input_hash = hashlib.sha256(
-        json.dumps(sanitized_args, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
-    started = time.perf_counter()
-    status = "error"
-    error_code = ""
-
-    try:
-        result = asyncio.run(module.call_tool(name, sanitized_args))
-        parsed = _parse_mcp_result(result)
-        status = "success"
-    except Exception as exc:
-        error_code = _classify_mcp_error(exc)
-        raise
-    finally:
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        request_id = str(
-            sanitized_args.get("coordination_request_id")
-            or sanitized_args.get("request_id")
-            or ""
-        )
-        dispatch_id = str(sanitized_args.get("dispatch_id") or "")
-        caller_identity = str(sanitized_args.get("caller_identity") or MCP_AUDIT_CALLER_IDENTITY)
-        audit_payload = {
-            "invocation_id": invocation_id,
-            "caller_identity": caller_identity,
-            "request_id": request_id,
-            "dispatch_id": dispatch_id,
-            "tool_name": name,
-            "input_hash": input_hash,
-            "result_status": status,
-            "latency_ms": latency_ms,
-            "error_code": error_code,
-            "timestamp": _now_z(),
-        }
-        logger.info("[AUDIT] %s", json.dumps(audit_payload, sort_keys=True))
-        _emit_cloudwatch_json(MCP_SERVER_LOG_GROUP, audit_payload, stream_name="mcp-tool-audit")
-        _emit_structured_observability(
-            component="mcp_server",
-            event="tool_invocation",
-            request_id=request_id,
-            dispatch_id=dispatch_id,
-            tool_name=name,
-            latency_ms=latency_ms,
-            error_code=error_code,
-            extra={
-                "invocation_id": invocation_id,
-                "caller_identity": caller_identity,
-                "input_hash": input_hash,
-                "result_status": status,
-            },
-            mirror_log_group=MCP_SERVER_LOG_GROUP,
-        )
-
-    return parsed
 
 
 def _compute_governance_hash_local() -> str:

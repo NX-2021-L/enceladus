@@ -257,12 +257,20 @@ def _dispatch_mcp_jsonrpc_method(method: str, params: Dict[str, Any]) -> Dict[st
 
     if method_name in {"tools/list", "list_tools"}:
         payload = _run_async(module.list_tools())
-        return {"tools": _mcp_to_plain(payload or [])}
+        tools = _mcp_to_plain(payload or [])
+        if _ENCELADUS_DEFAULT_INTERFACE_MODE == "code":
+            tools = [t for t in tools if isinstance(t, dict) and t.get("name") in _ENCELADUS_CODE_MODE_TOOLS]
+        return {"tools": tools}
 
     if method_name in {"tools/call", "call_tool"}:
         tool_name = str(params.get("name") or "").strip()
         if not tool_name:
             raise ValueError("tools/call requires params.name")
+        if _ENCELADUS_DEFAULT_INTERFACE_MODE == "code" and tool_name not in _ENCELADUS_CODE_MODE_TOOLS:
+            raise ValueError(
+                f"Tool '{tool_name}' is not available in code mode. "
+                f"Available: {', '.join(sorted(_ENCELADUS_CODE_MODE_TOOLS))}"
+            )
 
         args = params.get("arguments")
         if args is None:
