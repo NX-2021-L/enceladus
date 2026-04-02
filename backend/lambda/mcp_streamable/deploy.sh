@@ -84,6 +84,7 @@ existing_env = json.loads(os.environ.get("EXISTING_ENV_JSON", "{}"))
 ALLOWED_PREFIXES = (
     "ENCELADUS_",
     "COORDINATION_",
+    "ENABLE_",
     "DYNAMODB_REGION",
     "TRACKER_TABLE",
     "PROJECTS_TABLE",
@@ -128,6 +129,8 @@ package_lambda() {
   build_dir="$(mktemp -d /tmp/deploy-${FUNCTION_NAME}-build-XXXXXX)"
 
   cp "${REPO_ROOT}/tools/enceladus-mcp-server/server.py" "${build_dir}/server.py"
+  # ENC-FTR-050: Context Node scoring engine (imported dynamically by server.py)
+  cp "${REPO_ROOT}/backend/lambda/coordination_api/context_node_scoring.py" "${build_dir}/context_node_scoring.py"
 
   python3 -m pip install \
     --quiet \
