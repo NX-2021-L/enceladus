@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.18",
-  "updated_at": "2026-04-02T17:27:00Z",
+  "version": "2026-04-02.19",
+  "updated_at": "2026-04-02T17:38:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2483,22 +2483,35 @@
         "pillar_scores": {
           "type": "object",
           "constraints": {
+            "required": true,
             "required_keys": ["efficiency", "human_protection", "intention", "alignment"],
             "value_type": "decimal",
             "value_min": 0.0,
-            "value_max": 1.0
+            "value_max": 1.0,
+            "all_zero_rejected": true
           },
           "definition": "Four-pillar constitutional scores. efficiency (weight 0.25): reduces friction, eliminates failure modes. human_protection (weight 0.30): establishes guardrails, protects human life/privacy/security/joy. intention (weight 0.20): declares direction from observed data, turns telemetry into will. alignment (weight 0.25): anchors to vibe board values.",
-          "usage_guidance": "Computed by constitutional scoring function in coordination API. human_protection has highest weight (0.30) — non-negotiable. Composite = 0.25*efficiency + 0.30*human_protection + 0.20*intention + 0.25*alignment."
+          "usage_guidance": "Required on lesson creation (ENC-FTR-054). All-zero submissions rejected. Callers provide their constitutional assessment; the server computes resonance_score and pillar_composite from these values. Updated on extend when new pillar_scores are provided."
+        },
+        "pillar_composite": {
+          "type": "decimal",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0,
+            "derived": true
+          },
+          "definition": "Weighted composite of pillar_scores: 0.25*efficiency + 0.30*human_protection + 0.20*intention + 0.25*alignment. Computed server-side by tracker-mutation Lambda on create and extend.",
+          "usage_guidance": "Never set directly by callers. Derived from pillar_scores by tracker-mutation Lambda. Used for gate threshold checks (accepted: >=0.4, active: >=0.6)."
         },
         "resonance_score": {
           "type": "decimal",
           "constraints": {
             "min": 0.0,
-            "max": 1.0
+            "max": 1.0,
+            "derived": true
           },
           "definition": "Composite alignment with the vibe board (10 anchor words: convergence, will, flow, play, surrender, force, balance, love, resonance, telemetry). Anti-pattern penalties: force>0.7 AND surrender<0.3 => *0.5; intention>0.7 AND flow<0.3 => *0.7; efficiency>0.8 AND love<0.2 => *0.6; convergence>0.8 AND play<0.2 => *0.8.",
-          "usage_guidance": "The loss function. A lesson that optimizes efficiency but creates force without surrender fails the gate. Derived from pillar scores weighted against anchor words."
+          "usage_guidance": "Computed server-side by tracker-mutation Lambda from pillar_scores (ENC-FTR-054). Never set directly by callers. Includes anti-pattern penalties. Recomputed on extend when pillar_scores are updated."
         },
         "confidence": {
           "type": "decimal",

@@ -8176,6 +8176,8 @@ async def _tracker_extend_lesson(args: dict) -> list[TextContent]:
     }
     if args.get("evidence_ids"):
         payload["evidence_ids"] = args["evidence_ids"]
+    if args.get("pillar_scores"):
+        payload["pillar_scores"] = args["pillar_scores"]
 
     resp = _tracker_api_request("POST", f"/{project_id}/lesson/{rid}/extend", payload=payload)
     return _result_text(resp)
