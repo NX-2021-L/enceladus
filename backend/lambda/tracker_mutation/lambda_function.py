@@ -13,6 +13,9 @@ Routes (via API Gateway):
   POST   /api/v1/tracker/{project}/{type}/{id}/checkout           — session checkout
   DELETE /api/v1/tracker/{project}/{type}/{id}/checkout            — session release
   POST   /api/v1/tracker/{project}/{type}/{id}/acceptance-evidence — set evidence
+  POST   /api/v1/tracker/{project}/relationship                    — create typed edge
+  DELETE /api/v1/tracker/{project}/relationship                    — delete typed edge
+  GET    /api/v1/tracker/{project}/relationship                    — list typed edges
   OPTIONS *                                                        — CORS preflight
 
 Auth:
@@ -2950,11 +2953,439 @@ def _handle_acceptance_evidence(project_id: str, record_type: str, record_id: st
 
 
 # ---------------------------------------------------------------------------
+# Typed Relationship Edge Primitive (ENC-FTR-049)
+# ---------------------------------------------------------------------------
+
+_RELATIONSHIP_TYPES = frozenset({
+    "blocks", "blocked-by",
+    "duplicates", "duplicated-by",
+    "relates-to",
+    "parent-of", "child-of",
+    "depends-on", "depended-on-by",
+    "clones", "cloned-by",
+    "affects", "affected-by",
+    "tests", "tested-by",
+    "consumes-from", "produces-for",
+})
+
+_INVERSE_PAIRS: Dict[str, str] = {
+    "blocks": "blocked-by", "blocked-by": "blocks",
+    "duplicates": "duplicated-by", "duplicated-by": "duplicates",
+    "relates-to": "relates-to",
+    "parent-of": "child-of", "child-of": "parent-of",
+    "depends-on": "depended-on-by", "depended-on-by": "depends-on",
+    "clones": "cloned-by", "cloned-by": "clones",
+    "affects": "affected-by", "affected-by": "affects",
+    "tests": "tested-by", "tested-by": "tests",
+    "consumes-from": "produces-for", "produces-for": "consumes-from",
+}
+
+_OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
+    "blocks":        {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "blocked-by":    {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "duplicates":    {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "duplicated-by": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "relates-to":    {"symmetric": True, "irreflexive": True, "transitive": False},
+    "parent-of":     {"asymmetric": True, "irreflexive": True, "transitive": True},
+    "child-of":      {"asymmetric": True, "irreflexive": True, "transitive": True},
+    "depends-on":    {"asymmetric": True, "irreflexive": True, "transitive": True},
+    "depended-on-by": {"asymmetric": True, "irreflexive": True, "transitive": True},
+    "clones":        {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "cloned-by":     {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "affects":       {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "affected-by":   {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "tests":         {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "tested-by":     {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "consumes-from": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "produces-for":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+}
+
+# Domain/range constraints: {relationship_type: {source_types, target_types}}
+# None means any record type is allowed.
+_DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
+    "blocks":        {"source": frozenset({"task", "issue"}), "target": frozenset({"task", "issue"})},
+    "blocked-by":    {"source": frozenset({"task", "issue"}), "target": frozenset({"task", "issue"})},
+    "duplicates":    {"source": None, "target": None},
+    "duplicated-by": {"source": None, "target": None},
+    "relates-to":    {"source": None, "target": None},
+    "parent-of":     {"source": None, "target": None},
+    "child-of":      {"source": None, "target": None},
+    "depends-on":    {"source": frozenset({"task", "issue"}), "target": frozenset({"task", "issue", "feature"})},
+    "depended-on-by": {"source": frozenset({"task", "issue", "feature"}), "target": frozenset({"task", "issue"})},
+    "clones":        {"source": None, "target": None},
+    "cloned-by":     {"source": None, "target": None},
+    "affects":       {"source": frozenset({"issue"}), "target": frozenset({"task", "feature"})},
+    "affected-by":   {"source": frozenset({"task", "feature"}), "target": frozenset({"issue"})},
+    "tests":         {"source": frozenset({"task"}), "target": frozenset({"feature", "issue"})},
+    "tested-by":     {"source": frozenset({"feature", "issue"}), "target": frozenset({"task"})},
+    "consumes-from": {"source": None, "target": None},
+    "produces-for":  {"source": None, "target": None},
+}
+
+_TRANSITIVE_TYPES = frozenset(
+    t for t, chars in _OWL_CHARACTERISTICS.items() if chars.get("transitive")
+)
+
+
+def _record_type_from_id(record_id: str) -> Optional[str]:
+    """Extract record type from a human-readable ID like ENC-TSK-001."""
+    parts = record_id.strip().upper().split("-")
+    if len(parts) < 2:
+        return None
+    return _ID_SEGMENT_TO_TYPE.get(parts[1])
+
+
+def _validate_rel_irreflexive(source_id: str, target_id: str) -> Optional[str]:
+    if source_id.upper() == target_id.upper():
+        return "Self-referencing relationships are not allowed (irreflexive constraint)."
+    return None
+
+
+def _validate_rel_domain_range(
+    relationship_type: str, source_type: Optional[str], target_type: Optional[str]
+) -> Optional[str]:
+    constraints = _DOMAIN_RANGE_CONSTRAINTS.get(relationship_type)
+    if not constraints:
+        return f"Unknown relationship type: {relationship_type}"
+    allowed_source = constraints["source"]
+    allowed_target = constraints["target"]
+    if allowed_source is not None and source_type not in allowed_source:
+        return (
+            f"Domain constraint violation: '{relationship_type}' requires source type "
+            f"in {sorted(allowed_source)}, got '{source_type}'."
+        )
+    if allowed_target is not None and target_type not in allowed_target:
+        return (
+            f"Range constraint violation: '{relationship_type}' requires target type "
+            f"in {sorted(allowed_target)}, got '{target_type}'."
+        )
+    return None
+
+
+def _validate_rel_no_circular(
+    project_id: str, source_id: str, target_id: str, relationship_type: str
+) -> Optional[str]:
+    """BFS from target following same-type edges to detect if source is reachable (cycle)."""
+    if relationship_type not in _TRANSITIVE_TYPES:
+        return None
+    ddb = _get_ddb()
+    visited: set = set()
+    queue = [target_id.upper()]
+    while queue and len(visited) < 100:
+        current = queue.pop(0)
+        if current in visited:
+            continue
+        visited.add(current)
+        if current == source_id.upper():
+            return (
+                f"Circular reference detected: creating '{relationship_type}' from "
+                f"{source_id} to {target_id} would create a cycle."
+            )
+        prefix = f"rel#{current}#{relationship_type}#"
+        resp = ddb.query(
+            TableName=DYNAMODB_TABLE,
+            KeyConditionExpression="project_id = :pid AND begins_with(record_id, :prefix)",
+            ExpressionAttributeValues={
+                ":pid": _ser_s(project_id),
+                ":prefix": _ser_s(prefix),
+            },
+            ProjectionExpression="record_id",
+        )
+        for item in resp.get("Items", []):
+            sk = item.get("record_id", {}).get("S", "")
+            parts = sk.split("#")
+            if len(parts) >= 4:
+                neighbor = parts[3]
+                if neighbor not in visited:
+                    queue.append(neighbor)
+    return None
+
+
+def _validate_rel_endpoints_exist(
+    project_id: str, source_id: str, target_id: str
+) -> Optional[str]:
+    ddb = _get_ddb()
+    for rid in (source_id, target_id):
+        rtype = _record_type_from_id(rid)
+        if not rtype:
+            return f"Cannot determine record type from ID '{rid}'."
+        key = _build_key(project_id, rtype, rid)
+        resp = ddb.get_item(TableName=DYNAMODB_TABLE, Key=key, ProjectionExpression="project_id")
+        if not resp.get("Item"):
+            return f"Record '{rid}' does not exist in project '{project_id}'."
+    return None
+
+
+def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
+    """Create a typed relationship edge with auto-maintained inverse."""
+    source_id = str(body.get("source_id", "")).strip().upper()
+    target_id = str(body.get("target_id", "")).strip().upper()
+    relationship_type = str(body.get("relationship_type", "")).strip().lower()
+    reason = str(body.get("reason", "")).strip()
+    weight = body.get("weight", 1.0)
+    confidence = body.get("confidence", 1.0)
+    provenance = str(body.get("provenance", "agent")).strip().lower()
+
+    if not source_id or not target_id or not relationship_type:
+        return _error(400, "source_id, target_id, and relationship_type are required.")
+    if relationship_type not in _RELATIONSHIP_TYPES:
+        return _error(400, f"Invalid relationship_type '{relationship_type}'. "
+                      f"Valid types: {sorted(_RELATIONSHIP_TYPES)}")
+    if not reason:
+        return _error(400, "reason is required for relationship creation.")
+    if provenance not in ("agent", "human", "system", "migration"):
+        return _error(400, f"Invalid provenance '{provenance}'. "
+                      "Valid: agent, human, system, migration.")
+    try:
+        weight = float(weight)
+        confidence = float(confidence)
+    except (ValueError, TypeError):
+        return _error(400, "weight and confidence must be numeric.")
+    if not (0.0 <= weight <= 1.0):
+        return _error(400, "weight must be between 0.0 and 1.0.")
+    if not (0.0 <= confidence <= 1.0):
+        return _error(400, "confidence must be between 0.0 and 1.0.")
+
+    source_type = _record_type_from_id(source_id)
+    target_type = _record_type_from_id(target_id)
+
+    err = _validate_rel_irreflexive(source_id, target_id)
+    if err:
+        return _error(400, err)
+    err = _validate_rel_domain_range(relationship_type, source_type, target_type)
+    if err:
+        return _error(400, err)
+    err = _validate_rel_endpoints_exist(project_id, source_id, target_id)
+    if err:
+        return _error(404, err)
+    err = _validate_rel_no_circular(project_id, source_id, target_id, relationship_type)
+    if err:
+        return _error(409, err)
+
+    inverse_type = _INVERSE_PAIRS[relationship_type]
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    forward_sk = f"rel#{source_id}#{relationship_type}#{target_id}"
+    inverse_sk = f"rel#{target_id}#{inverse_type}#{source_id}"
+
+    ws = body.get("write_source", {})
+
+    def _rel_item(sk: str, rel_type: str, src: str, tgt: str, is_inv: bool, canon_sk: str) -> Dict:
+        return {
+            "project_id": _ser_s(project_id),
+            "record_id": _ser_s(sk),
+            "record_type": _ser_s("relationship"),
+            "relationship_type": _ser_s(rel_type),
+            "source_id": _ser_s(src),
+            "target_id": _ser_s(tgt),
+            "weight": {"N": str(weight)},
+            "confidence": {"N": str(confidence)},
+            "reason": _ser_s(reason),
+            "provenance": _ser_s(provenance),
+            "is_inverse": {"BOOL": is_inv},
+            "canonical_edge_id": _ser_s(canon_sk),
+            "created_at": _ser_s(now),
+            "updated_at": _ser_s(now),
+            "write_source": _ser_value(ws) if ws else _ser_value({}),
+        }
+
+    forward_item = _rel_item(forward_sk, relationship_type, source_id, target_id, False, forward_sk)
+    inverse_item = _rel_item(inverse_sk, inverse_type, target_id, source_id, True, forward_sk)
+
+    ddb = _get_ddb()
+    try:
+        ddb.transact_write_items(
+            TransactItems=[
+                {
+                    "Put": {
+                        "TableName": DYNAMODB_TABLE,
+                        "Item": forward_item,
+                        "ConditionExpression": "attribute_not_exists(record_id)",
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName": DYNAMODB_TABLE,
+                        "Item": inverse_item,
+                        "ConditionExpression": "attribute_not_exists(record_id)",
+                    }
+                },
+            ]
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "TransactionCanceledException":
+            reasons = exc.response.get("CancellationReasons", [])
+            for r in reasons:
+                if r.get("Code") == "ConditionalCheckFailed":
+                    return _error(409, f"Relationship already exists: {relationship_type} "
+                                  f"from {source_id} to {target_id}.")
+            return _error(500, f"Transaction failed: {exc}")
+        raise
+
+    return _response(201, {
+        "success": True,
+        "forward_edge": forward_sk,
+        "inverse_edge": inverse_sk,
+        "relationship_type": relationship_type,
+        "source_id": source_id,
+        "target_id": target_id,
+        "weight": weight,
+        "confidence": confidence,
+        "reason": reason,
+        "provenance": provenance,
+        "created_at": now,
+    })
+
+
+def _handle_delete_relationship(project_id: str, body: Dict) -> Dict:
+    """Delete a typed relationship edge and its inverse atomically."""
+    source_id = str(body.get("source_id", "")).strip().upper()
+    target_id = str(body.get("target_id", "")).strip().upper()
+    relationship_type = str(body.get("relationship_type", "")).strip().lower()
+
+    if not source_id or not target_id or not relationship_type:
+        return _error(400, "source_id, target_id, and relationship_type are required.")
+    if relationship_type not in _RELATIONSHIP_TYPES:
+        return _error(400, f"Invalid relationship_type '{relationship_type}'.")
+
+    inverse_type = _INVERSE_PAIRS[relationship_type]
+    forward_sk = f"rel#{source_id}#{relationship_type}#{target_id}"
+    inverse_sk = f"rel#{target_id}#{inverse_type}#{source_id}"
+
+    ddb = _get_ddb()
+    try:
+        ddb.transact_write_items(
+            TransactItems=[
+                {
+                    "Delete": {
+                        "TableName": DYNAMODB_TABLE,
+                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(forward_sk)},
+                        "ConditionExpression": "attribute_exists(record_id)",
+                    }
+                },
+                {
+                    "Delete": {
+                        "TableName": DYNAMODB_TABLE,
+                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(inverse_sk)},
+                        "ConditionExpression": "attribute_exists(record_id)",
+                    }
+                },
+            ]
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "TransactionCanceledException":
+            return _error(404, f"Relationship not found: {relationship_type} "
+                          f"from {source_id} to {target_id}.")
+        raise
+
+    return _response(200, {
+        "success": True,
+        "deleted_forward": forward_sk,
+        "deleted_inverse": inverse_sk,
+    })
+
+
+def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
+    """List relationship edges with optional filters."""
+    source_id = str(query_params.get("source_id", "")).strip().upper()
+    target_id = str(query_params.get("target_id", "")).strip().upper()
+    relationship_type = str(query_params.get("relationship_type", "")).strip().lower()
+    min_weight = query_params.get("min_weight", "")
+    provenance_filter = str(query_params.get("provenance", "")).strip().lower()
+    page_size = min(int(query_params.get("page_size", "50")), 200)
+
+    ddb = _get_ddb()
+
+    if source_id and relationship_type:
+        sk_prefix = f"rel#{source_id}#{relationship_type}#"
+    elif source_id:
+        sk_prefix = f"rel#{source_id}#"
+    elif target_id and relationship_type:
+        inverse_type = _INVERSE_PAIRS.get(relationship_type, "")
+        if not inverse_type:
+            return _error(400, f"Invalid relationship_type '{relationship_type}'.")
+        sk_prefix = f"rel#{target_id}#{inverse_type}#"
+    elif target_id:
+        sk_prefix = f"rel#{target_id}#"
+    else:
+        sk_prefix = "rel#"
+
+    kwargs: Dict[str, Any] = {
+        "TableName": DYNAMODB_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
+        "ExpressionAttributeValues": {
+            ":pid": _ser_s(project_id),
+            ":prefix": _ser_s(sk_prefix),
+        },
+        "Limit": page_size,
+    }
+
+    cursor = query_params.get("cursor", "")
+    if cursor:
+        try:
+            import base64
+            decoded = json.loads(base64.b64decode(cursor))
+            kwargs["ExclusiveStartKey"] = decoded
+        except Exception:
+            pass
+
+    resp = ddb.query(**kwargs)
+    items = resp.get("Items", [])
+
+    results = []
+    for item in items:
+        rec = _deser_item(item)
+        if rec.get("record_type") != "relationship":
+            continue
+        if rec.get("is_inverse", False):
+            continue
+        if min_weight:
+            try:
+                if float(rec.get("weight", 1.0)) < float(min_weight):
+                    continue
+            except (ValueError, TypeError):
+                pass
+        if provenance_filter and rec.get("provenance", "") != provenance_filter:
+            continue
+        if target_id and not source_id:
+            pass
+        results.append({
+            "source_id": rec.get("source_id", ""),
+            "target_id": rec.get("target_id", ""),
+            "relationship_type": rec.get("relationship_type", ""),
+            "weight": rec.get("weight", 1.0),
+            "confidence": rec.get("confidence", 1.0),
+            "reason": rec.get("reason", ""),
+            "provenance": rec.get("provenance", ""),
+            "created_at": rec.get("created_at", ""),
+            "canonical_edge_id": rec.get("canonical_edge_id", ""),
+        })
+
+    response_body: Dict[str, Any] = {
+        "success": True,
+        "relationships": results,
+        "count": len(results),
+    }
+
+    last_key = resp.get("LastEvaluatedKey")
+    if last_key:
+        import base64
+        response_body["next_cursor"] = base64.b64encode(
+            json.dumps(last_key, default=str).encode()
+        ).decode()
+
+    return _response(200, response_body)
+
+
+# ---------------------------------------------------------------------------
 # Path parsing & routing
 # ---------------------------------------------------------------------------
 
 # Route patterns — order matters (most specific first)
 _RE_PENDING_UPDATES = re.compile(r"^(?:/api/v1/tracker)?/pending-updates$")
+_RE_RELATIONSHIP = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/relationship$"
+)
 _RE_RECORD_SUB = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence)$"
 )
@@ -2987,6 +3418,33 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         if auth_err:
             return auth_err
         return _handle_pending_updates(query_params)
+
+    # --- Route: typed relationship edges (ENC-FTR-049) ---
+    m_rel = _RE_RELATIONSHIP.match(path)
+    if m_rel:
+        project_id = m_rel.group("project")
+        claims, auth_err = _authenticate(
+            event,
+            ["tracker:read"] if method == "GET" else ["tracker:write"],
+        )
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        try:
+            body = json.loads(event.get("body") or "{}")
+        except (ValueError, TypeError):
+            body = {}
+        _normalize_write_source(body, claims)
+        if method == "POST":
+            return _handle_create_relationship(project_id, body)
+        elif method == "DELETE":
+            return _handle_delete_relationship(project_id, body)
+        elif method == "GET":
+            return _handle_list_relationships(project_id, query_params)
+        else:
+            return _error(405, f"Method {method} not allowed on /relationship.")
 
     # --- Route: sub-resource operations (log, checkout, acceptance-evidence) ---
     m_sub = _RE_RECORD_SUB.match(path)
