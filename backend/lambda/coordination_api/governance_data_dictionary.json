@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.9",
-  "updated_at": "2026-04-02T04:41:00Z",
+  "version": "2026-04-02.10",
+  "updated_at": "2026-04-02T06:10:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2427,6 +2427,241 @@
           "definition": "Suggested model tier for processing this node content. Derived from source record complexity (field count, history length) and priority. haiku=simple/reference, sonnet=standard, opus=complex/critical.",
           "usage_guidance": "Advisory field for future MVC (Model-View-Controller) context routing. Currently informational only — does not affect assembly behavior. Populated by context-node-sync Lambda."
         }
+      }
+    },
+    "tracker.lesson": {
+      "description": "Governed Lesson primitive capturing institutional wisdom as a first-class record type (ENC-FTR-052). Lessons are evidence-gated, append-only, constitutionally scored against four pillars and a vibe board, and can propose governance amendments through human-approval handshake. Stored in devops-project-tracker with lesson# SK prefix. Gated behind ENABLE_LESSON_PRIMITIVE feature flag.",
+      "fields": {
+        "title": {
+          "type": "string",
+          "constraints": {
+            "required": true,
+            "min_length": 1
+          },
+          "definition": "Concise lesson statement. Mutable — can be refined for clarity.",
+          "usage_guidance": "Keep titles actionable and specific. E.g., 'Lambda cold-start cross-AZ DNS adds 200ms' not 'DNS is slow'."
+        },
+        "observation": {
+          "type": "string",
+          "constraints": {
+            "required": true,
+            "min_length": 1,
+            "immutable_after_create": true
+          },
+          "definition": "What was observed in the data. IMMUTABLE after creation. The philosophical core: you do not revise what was observed, you extend understanding of it via extensions.",
+          "usage_guidance": "Write observations as factual statements grounded in evidence_chain records. Any attempt to mutate this field after PutItem is rejected with IMMUTABLE_FIELD error."
+        },
+        "insight": {
+          "type": "string",
+          "constraints": {
+            "required": true,
+            "min_length": 1
+          },
+          "definition": "What was learned from the observation. Mutable only via recomputation when extensions add context. Previous values preserved in history.",
+          "usage_guidance": "Insights should be actionable and specific. State what should change, not just what was noticed."
+        },
+        "evidence_chain": {
+          "type": "array",
+          "constraints": {
+            "required": true,
+            "min_items": 1,
+            "item_type": "string",
+            "item_format": "tracker_id",
+            "append_only": true
+          },
+          "definition": "Array of tracker record IDs that support this lesson. Required, minimum 1. Each ID must resolve to an existing record in the same project. Append-only — new evidence can be added, existing entries cannot be removed.",
+          "usage_guidance": "Cite the specific records from which the lesson was extracted. E.g., ['ENC-ISS-088', 'ENC-TSK-803']. On extend_lesson, new evidence IDs are appended."
+        },
+        "analysis_reference": {
+          "type": "string",
+          "constraints": {
+            "format": "tracker_id_or_document_id"
+          },
+          "definition": "Optional. Task ID or document ID of the analysis that produced this lesson. Provides traceability from lesson to analytical work.",
+          "usage_guidance": "Set to the DVP-FTR-080 mining task or investigation task that generated the lesson."
+        },
+        "pillar_scores": {
+          "type": "object",
+          "constraints": {
+            "required_keys": ["efficiency", "human_protection", "intention", "alignment"],
+            "value_type": "decimal",
+            "value_min": 0.0,
+            "value_max": 1.0
+          },
+          "definition": "Four-pillar constitutional scores. efficiency (weight 0.25): reduces friction, eliminates failure modes. human_protection (weight 0.30): establishes guardrails, protects human life/privacy/security/joy. intention (weight 0.20): declares direction from observed data, turns telemetry into will. alignment (weight 0.25): anchors to vibe board values.",
+          "usage_guidance": "Computed by constitutional scoring function in coordination API. human_protection has highest weight (0.30) — non-negotiable. Composite = 0.25*efficiency + 0.30*human_protection + 0.20*intention + 0.25*alignment."
+        },
+        "resonance_score": {
+          "type": "decimal",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          },
+          "definition": "Composite alignment with the vibe board (10 anchor words: convergence, will, flow, play, surrender, force, balance, love, resonance, telemetry). Anti-pattern penalties: force>0.7 AND surrender<0.3 => *0.5; intention>0.7 AND flow<0.3 => *0.7; efficiency>0.8 AND love<0.2 => *0.6; convergence>0.8 AND play<0.2 => *0.8.",
+          "usage_guidance": "The loss function. A lesson that optimizes efficiency but creates force without surrender fails the gate. Derived from pillar scores weighted against anchor words."
+        },
+        "confidence": {
+          "type": "decimal",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          },
+          "definition": "Confidence in the lesson's validity. Influenced by evidence chain depth, source record diversity, and corroboration. Increases as extensions add supporting evidence.",
+          "usage_guidance": "Agent-created lessons may start at 0.6-0.8. Human-confirmed at 0.9-1.0. Required >= 0.6 for 'active' status, >= 0.8 for self-governance proposals."
+        },
+        "status": {
+          "type": "enum",
+          "enum": [
+            "draft",
+            "proposed",
+            "accepted",
+            "active",
+            "superseded",
+            "archived"
+          ],
+          "definition": "Governed lifecycle status with constitutional scoring gates. draft: pre-evaluation. proposed: passes evidence gate. accepted: passes pillar threshold (composite>=0.4, resonance>=0.3). active: passes higher threshold (composite>=0.6, resonance>=0.5, confidence>=0.6). superseded: replaced by newer lesson. archived: soft-deleted, human approval required.",
+          "usage_guidance": "Status transitions are gated. draft->proposed: evidence_chain>=1, observation and insight non-empty. proposed->accepted: pillar_composite>=0.4, resonance>=0.3, all pillars>0, human_protection>=0.3. accepted->active: pillar_composite>=0.6, resonance>=0.5, confidence>=0.6, evidence>=2. active->superseded: superseding lesson must be active. any->archived: human approval."
+        },
+        "category": {
+          "type": "enum",
+          "enum": [
+            "pattern",
+            "failure_mode",
+            "resolution_pathway",
+            "opportunity",
+            "principle",
+            "intention"
+          ],
+          "definition": "Lesson classification. pattern: recurring behavior. failure_mode: what goes wrong. resolution_pathway: how things get fixed. opportunity: unrealized potential. principle: governing truth. intention: directional declaration.",
+          "usage_guidance": "Choose based on the lesson's primary function. A single observation may yield lessons in multiple categories."
+        },
+        "provenance": {
+          "type": "enum",
+          "enum": [
+            "agent",
+            "human",
+            "mining",
+            "system"
+          ],
+          "definition": "Origin of the lesson. agent: AI-extracted in session. human: user-authored. mining: batch extraction via DVP-FTR-080. system: auto-generated from telemetry.",
+          "usage_guidance": "Set on creation and immutable. Mining-produced lessons (DVP-FTR-080) use 'mining'. Agent session lessons use 'agent'."
+        },
+        "extensions": {
+          "type": "array",
+          "constraints": {
+            "item_type": "object",
+            "item_schema": {
+              "timestamp": "iso8601",
+              "author": "string",
+              "content": "string",
+              "evidence_ids": "array_of_tracker_ids (optional)"
+            },
+            "append_only": true
+          },
+          "definition": "Append-only contextualization entries. Each extension adds understanding without modifying the original observation. Ordered chronologically. Immutable once appended.",
+          "usage_guidance": "Use extend_lesson MCP action to add extensions. Each extension can optionally cite additional evidence_ids which are appended to the lesson's evidence_chain."
+        },
+        "governance_proposal": {
+          "type": "object",
+          "constraints": {
+            "nullable": true,
+            "schema": {
+              "type": "enum:dictionary_amendment|policy_change|new_relationship_type",
+              "payload": "object",
+              "approval_status": "enum:pending|approved|rejected",
+              "approved_by": "string (nullable)",
+              "approved_at": "iso8601 (nullable)",
+              "rejection_reason": "string (nullable)"
+            }
+          },
+          "definition": "Optional governance amendment proposal. Can only be attached when lesson is 'active' with confidence>=0.8, resonance>=0.7, human_protection>=0.5, evidence>=3. Requires human approval — no automatic approvals ever.",
+          "usage_guidance": "Self-governance gate. pending->approved requires human confirmation via MCP. pending->rejected stores reason. Approved proposals trigger coordination API amendment execution."
+        },
+        "lesson_version": {
+          "type": "integer",
+          "constraints": {
+            "min": 1
+          },
+          "definition": "Monotonically increasing version counter. Incremented on each extension append or metadata recomputation.",
+          "usage_guidance": "Used for optimistic concurrency. Do not set manually."
+        }
+      },
+      "dynamodb_key_schema": {
+        "pk": "project_id",
+        "sk_pattern": "lesson#{lesson_id}",
+        "table": "devops-project-tracker",
+        "record_id_format": "{PREFIX}-LSN-{NNN}",
+        "delete_method": "soft-delete via status=archived. No DeleteItem. Data preserved for audit."
+      },
+      "mutation_rules": {
+        "observation": "IMMUTABLE after create. Reject any UpdateExpression targeting this field.",
+        "evidence_chain": "APPEND_ONLY. Only list_append allowed. Reject SET/REMOVE on existing indices.",
+        "extensions": "APPEND_ONLY. Only list_append allowed. Reject SET/REMOVE on existing indices.",
+        "status": "Governed transitions only. See status field usage_guidance for gate requirements."
+      },
+      "constitutional_scoring": {
+        "pillar_weights": {
+          "efficiency": 0.25,
+          "human_protection": 0.30,
+          "intention": 0.20,
+          "alignment": 0.25
+        },
+        "vibe_board_anchors": [
+          "convergence", "will", "flow", "play", "surrender",
+          "force", "balance", "love", "resonance", "telemetry"
+        ],
+        "anti_pattern_penalties": {
+          "force_without_surrender": "force>0.7 AND surrender<0.3 => resonance*=0.5",
+          "intention_without_flow": "intention>0.7 AND flow<0.3 => resonance*=0.7",
+          "efficiency_without_love": "efficiency>0.8 AND love<0.2 => resonance*=0.6",
+          "convergence_without_play": "convergence>0.8 AND play<0.2 => resonance*=0.8"
+        },
+        "self_governance_gate": {
+          "required_status": "active",
+          "min_confidence": 0.8,
+          "min_resonance": 0.7,
+          "min_human_protection": 0.5,
+          "min_evidence_chain": 3
+        }
+      },
+      "context_node_defaults": {
+        "staleness_half_life": 15552000,
+        "structural_importance_baseline": 0.8,
+        "model_routing_hint": "opus"
+      },
+      "typed_relationship_edges": {
+        "learned-from": {
+          "inverse": "teaches",
+          "domain": ["lesson"],
+          "range": ["task", "issue", "feature"],
+          "weight_default": 0.9,
+          "owl_characteristics": {"asymmetric": true, "irreflexive": true, "transitive": false}
+        },
+        "supersedes": {
+          "inverse": "superseded-by",
+          "domain": ["lesson"],
+          "range": ["lesson"],
+          "weight_default": 0.8,
+          "owl_characteristics": {"asymmetric": true, "irreflexive": true, "transitive": false}
+        },
+        "proposes-amendment-to": {
+          "inverse": "amendment-proposed-by",
+          "domain": ["lesson"],
+          "range": ["governance_resource"],
+          "weight_default": 0.5,
+          "owl_characteristics": {"asymmetric": true, "irreflexive": true, "transitive": false}
+        }
+      },
+      "mcp_surface": {
+        "execute_actions": [
+          "tracker.create_lesson",
+          "tracker.extend_lesson"
+        ],
+        "search_actions": [
+          "tracker.list_lessons"
+        ],
+        "feature_flag": "ENABLE_LESSON_PRIMITIVE",
+        "feature_flag_default": "false"
       }
     }
   }
