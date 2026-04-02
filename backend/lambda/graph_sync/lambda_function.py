@@ -13,6 +13,10 @@ of truth. Graph unavailability does NOT affect tracker mutations.
 
 Node labels: Task, Issue, Feature, Project
 Edge types: CHILD_OF, RELATED_TO, BELONGS_TO, ADDRESSES, IMPLEMENTS
+           + ENC-FTR-049 typed edges: BLOCKS, BLOCKED_BY, DUPLICATES, DUPLICATED_BY,
+             RELATES_TO, PARENT_OF, CHILD_OF_TYPED, DEPENDS_ON, DEPENDED_ON_BY,
+             CLONES, CLONED_BY, AFFECTS, AFFECTED_BY, TESTS, TESTED_BY,
+             CONSUMES_FROM, PRODUCES_FOR
 
 Environment variables:
   NEO4J_SECRET_NAME    Secrets Manager secret ID (default: enceladus/neo4j/auradb-credentials)
@@ -259,6 +263,69 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# Typed Relationship Edge Projection (ENC-FTR-049)
+# ---------------------------------------------------------------------------
+
+RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
+    "blocks": "BLOCKS", "blocked-by": "BLOCKED_BY",
+    "duplicates": "DUPLICATES", "duplicated-by": "DUPLICATED_BY",
+    "relates-to": "RELATES_TO",
+    "parent-of": "PARENT_OF", "child-of": "CHILD_OF_TYPED",
+    "depends-on": "DEPENDS_ON", "depended-on-by": "DEPENDED_ON_BY",
+    "clones": "CLONES", "cloned-by": "CLONED_BY",
+    "affects": "AFFECTS", "affected-by": "AFFECTED_BY",
+    "tests": "TESTS", "tested-by": "TESTED_BY",
+    "consumes-from": "CONSUMES_FROM", "produces-for": "PRODUCES_FOR",
+}
+
+
+def _upsert_relationship_edge(tx, record: Dict[str, Any]) -> None:
+    """MERGE a typed relationship edge with properties from a DynamoDB relationship record."""
+    rel_type = record.get("relationship_type", "")
+    edge_label = RELATIONSHIP_TYPE_TO_EDGE_LABEL.get(rel_type)
+    if not edge_label:
+        return
+
+    source_id = _bare_id(record.get("source_id", ""))
+    target_id = _bare_id(record.get("target_id", ""))
+    if not source_id or not target_id:
+        return
+
+    props = {}
+    for key in ("weight", "confidence", "reason", "provenance", "is_inverse", "created_at"):
+        val = record.get(key)
+        if val is not None:
+            props[key] = float(val) if key in ("weight", "confidence") else val
+
+    cypher = (
+        f"MATCH (s {{record_id: $source_id}}), (t {{record_id: $target_id}}) "
+        f"MERGE (s)-[r:{edge_label} {{source_id: $source_id, target_id: $target_id}}]->(t) "
+        "SET r += $props"
+    )
+    tx.run(cypher, source_id=source_id, target_id=target_id, props=props)
+
+
+def _delete_relationship_edge(tx, record_id_sk: str) -> None:
+    """Delete a typed relationship edge from Neo4j using the DynamoDB SK."""
+    parts = record_id_sk.split("#")
+    if len(parts) < 4 or parts[0] != "rel":
+        return
+    source_id = parts[1]
+    rel_type = parts[2]
+    target_id = parts[3]
+
+    edge_label = RELATIONSHIP_TYPE_TO_EDGE_LABEL.get(rel_type)
+    if not edge_label:
+        return
+
+    cypher = (
+        f"MATCH (s {{record_id: $source_id}})-[r:{edge_label}]->(t {{record_id: $target_id}}) "
+        "DELETE r"
+    )
+    tx.run(cypher, source_id=source_id, target_id=target_id)
+
+
 def _delete_node(tx, record_id: str) -> None:
     """DETACH DELETE a node by record_id across all labels."""
     for label in RECORD_TYPE_TO_LABEL.values():
@@ -299,6 +366,17 @@ def _process_record(driver, stream_record: Dict) -> None:
         record = _deser_image(new_image)
         record_type = record.get("record_type", "")
 
+        # ENC-FTR-049: Handle typed relationship records
+        if record_type == "relationship":
+            with driver.session() as session:
+                session.execute_write(lambda tx: _upsert_relationship_edge(tx, record))
+            logger.info(
+                "[INFO] Synced relationship %s -> %s (%s, event=%s)",
+                record.get("source_id", ""), record.get("target_id", ""),
+                record.get("relationship_type", ""), event_name,
+            )
+            return
+
         # Skip non-entity records
         if record_type not in RECORD_TYPE_TO_LABEL:
             return
@@ -326,6 +404,13 @@ def _process_record(driver, stream_record: Dict) -> None:
         keys = dynamodb.get("Keys", {})
         record_id_val = keys.get("record_id", {}).get("S", "")
         if not record_id_val:
+            return
+
+        # ENC-FTR-049: Handle relationship record removal
+        if record_id_val.startswith("rel#"):
+            with driver.session() as session:
+                session.execute_write(lambda tx: _delete_relationship_edge(tx, record_id_val))
+            logger.info("[INFO] Deleted relationship edge %s (event=REMOVE)", record_id_val)
             return
 
         # Extract the actual item_id from the record_id key

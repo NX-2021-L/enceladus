@@ -180,32 +180,50 @@ def _node_to_dict(node) -> Dict[str, Any]:
     return props
 
 
+_ALLOWED_EDGE_TYPES = frozenset({
+    "CHILD_OF", "RELATED_TO", "BELONGS_TO", "ADDRESSES", "IMPLEMENTS",
+    "BLOCKS", "BLOCKED_BY", "DUPLICATES", "DUPLICATED_BY", "RELATES_TO",
+    "PARENT_OF", "CHILD_OF_TYPED", "DEPENDS_ON", "DEPENDED_ON_BY",
+    "CLONES", "CLONED_BY", "AFFECTS", "AFFECTED_BY", "TESTS", "TESTED_BY",
+    "CONSUMES_FROM", "PRODUCES_FOR",
+})
+
+
 def _query_traversal(driver, project_id: str, params: Dict) -> Dict:
-    """Walk CHILD_OF hierarchy from a record_id."""
+    """Walk edge hierarchy from a record_id. Supports configurable edge_type (default CHILD_OF)."""
     record_id = params.get("record_id", "")
     if not record_id:
         return {"error": "record_id required for traversal search"}
     depth = min(int(params.get("depth", 2)), MAX_DEPTH)
     direction = params.get("direction", "down")
+    edge_type = params.get("edge_type", "CHILD_OF").upper()
+    min_weight = params.get("min_weight", "")
+
+    if edge_type not in _ALLOWED_EDGE_TYPES:
+        return {"error": f"Invalid edge_type: {edge_type}. Allowed: {sorted(_ALLOWED_EDGE_TYPES)}"}
+
+    weight_filter = ""
+    if min_weight:
+        weight_filter = f" AND ALL(rel IN relationships(path) WHERE COALESCE(rel.weight, 1.0) >= {float(min_weight)})"
 
     if direction == "up":
         cypher = (
-            f"MATCH path = (start)-[:CHILD_OF*1..{depth}]->(ancestor) "
-            "WHERE start.record_id = $record_id AND start.project_id = $project_id "
+            f"MATCH path = (start)-[:{edge_type}*1..{depth}]->(ancestor) "
+            f"WHERE start.record_id = $record_id AND start.project_id = $project_id{weight_filter} "
             "UNWIND nodes(path) AS n "
             "RETURN DISTINCT n"
         )
     elif direction == "both":
         cypher = (
-            f"MATCH path = (start)-[:CHILD_OF*1..{depth}]-(related) "
-            "WHERE start.record_id = $record_id AND start.project_id = $project_id "
+            f"MATCH path = (start)-[:{edge_type}*1..{depth}]-(related) "
+            f"WHERE start.record_id = $record_id AND start.project_id = $project_id{weight_filter} "
             "UNWIND nodes(path) AS n "
             "RETURN DISTINCT n"
         )
     else:  # down
         cypher = (
-            f"MATCH path = (child)-[:CHILD_OF*1..{depth}]->(start) "
-            "WHERE start.record_id = $record_id AND start.project_id = $project_id "
+            f"MATCH path = (child)-[:{edge_type}*1..{depth}]->(start) "
+            f"WHERE start.record_id = $record_id AND start.project_id = $project_id{weight_filter} "
             "UNWIND nodes(path) AS n "
             "RETURN DISTINCT n"
         )
@@ -218,22 +236,40 @@ def _query_traversal(driver, project_id: str, params: Dict) -> Dict:
         "nodes": nodes,
         "edges": [],
         "paths": [],
-        "summary": f"Traversal ({direction}) from {record_id}, depth {depth}: {len(nodes)} nodes",
+        "summary": f"Traversal ({direction}, {edge_type}) from {record_id}, depth {depth}: {len(nodes)} nodes",
         "query_cypher": cypher,
     }
 
 
 def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
-    """Find all nodes within N hops via any edge type."""
+    """Find all nodes within N hops via any (or filtered) edge types."""
     record_id = params.get("record_id", "")
     if not record_id:
         return {"error": "record_id required for neighbors search"}
     depth = min(int(params.get("depth", 1)), MAX_DEPTH)
+    edge_types_param = params.get("edge_types", "")
+    min_weight = params.get("min_weight", "")
+
+    # Build edge pattern: either wildcard or type-filtered
+    if edge_types_param:
+        types = [t.strip().upper() for t in edge_types_param.split(",") if t.strip()]
+        invalid = [t for t in types if t not in _ALLOWED_EDGE_TYPES]
+        if invalid:
+            return {"error": f"Invalid edge_types: {invalid}. Allowed: {sorted(_ALLOWED_EDGE_TYPES)}"}
+        type_union = "|".join(types)
+        edge_pattern = f"[r:{type_union}*1..{depth}]"
+    else:
+        edge_pattern = f"[r*1..{depth}]"
+
+    weight_filter = ""
+    if min_weight:
+        weight_filter = f"AND ALL(rel IN r WHERE COALESCE(rel.weight, 1.0) >= {float(min_weight)}) "
 
     cypher = (
-        f"MATCH (start)-[r*1..{depth}]-(neighbor) "
-        "WHERE start.record_id = $record_id AND start.project_id = $project_id "
-        "AND neighbor.project_id = $project_id "
+        f"MATCH (start)-{edge_pattern}-(neighbor) "
+        f"WHERE start.record_id = $record_id AND start.project_id = $project_id "
+        f"AND neighbor.project_id = $project_id "
+        f"{weight_filter}"
         "RETURN DISTINCT neighbor, "
         "[rel IN r | {type: type(rel), start: startNode(rel).record_id, end: endNode(rel).record_id}][-1] AS edge_info "
         "LIMIT $limit"
