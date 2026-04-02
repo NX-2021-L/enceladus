@@ -63,6 +63,7 @@ Resources:
           SSM_REGION: !Ref AWS::Region
           SECRETS_REGION: !Ref AWS::Region
           CORS_ORIGIN: !Ref CorsOrigin
+          ENCELADUS_MCP_INTERFACE_MODE: code
           DOCUMENT_API_LAMBDA_NAME: devops-document-api
           COMPONENTS_TABLE: component-registry
       Tags:
