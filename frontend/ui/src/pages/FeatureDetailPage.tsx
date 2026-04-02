@@ -16,6 +16,8 @@ import { RelatedItems } from '../components/shared/RelatedItems'
 import type { RecordInfo } from '../components/shared/RelatedItems'
 import { ParentRecord } from '../components/shared/ParentRecord'
 import { ChildRecords } from '../components/shared/ChildRecords'
+import { TypedRelationshipSection } from '../components/shared/TypedRelationshipSection'
+import { ContextNodeBadges } from '../components/shared/ContextNodeBadges'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
 import { CopyButton } from '../components/shared/CopyButton'
@@ -229,6 +231,21 @@ export function FeatureDetailPage() {
         allIssues={allIssues}
         allFeatures={allFeatures}
       />
+
+      {/* Context Node Badges (ENC-ISS-138 / ENC-TSK-A57) */}
+      {feature.context_node && (
+        <ContextNodeBadges contextNode={feature.context_node} />
+      )}
+
+      {/* Typed Relationship Edges (ENC-ISS-137 / ENC-TSK-A57) */}
+      {feature.typed_relationships && feature.typed_relationships.length > 0 && (
+        <TypedRelationshipSection
+          edges={feature.typed_relationships}
+          allTasks={allTasks}
+          allIssues={allIssues}
+          allFeatures={allFeatures}
+        />
+      )}
 
       {/* User Story (ENC-FTR-017 philosophy) */}
       {feature.user_story && (
