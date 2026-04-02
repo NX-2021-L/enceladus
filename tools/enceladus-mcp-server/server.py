@@ -7662,14 +7662,14 @@ async def _tracker_delete_relationship(args: dict) -> list:
     if not project_id:
         return _result_text({"error": "project_id is required"})
 
-    payload = {
+    # Send as query params, not body — APIGW HTTP API does not forward body for DELETE
+    query_params = {
         "source_id": args.get("source_id", ""),
         "target_id": args.get("target_id", ""),
         "relationship_type": args.get("relationship_type", ""),
-        "governance_hash": args.get("governance_hash", ""),
     }
 
-    resp = _tracker_api_request("DELETE", f"/{project_id}/relationship", payload=payload)
+    resp = _tracker_api_request("DELETE", f"/{project_id}/relationship", query=query_params)
     return _result_text(resp)
 
 
