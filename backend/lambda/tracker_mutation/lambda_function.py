@@ -206,6 +206,110 @@ _REVERT_TRANSITIONS = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-054: Constitutional scoring (canonical: coordination_api/lambda_function.py:7247-7350)
+# Pure functions copied here so every write path gets atomic scoring during PutItem.
+# ---------------------------------------------------------------------------
+
+_LESSON_PILLAR_WEIGHTS = {
+    "efficiency": 0.25,
+    "human_protection": 0.30,
+    "intention": 0.20,
+    "alignment": 0.25,
+}
+
+_VIBE_BOARD_ANCHORS = {
+    "convergence": 0.12, "will": 0.10, "flow": 0.10, "play": 0.08,
+    "surrender": 0.10, "force": 0.08, "balance": 0.12, "love": 0.10,
+    "resonance": 0.12, "telemetry": 0.08,
+}
+
+_REQUIRED_PILLARS = {"efficiency", "human_protection", "intention", "alignment"}
+
+
+def _compute_lesson_pillar_composite(pillar_scores):
+    """Weighted pillar composite: 0.25*eff + 0.30*hp + 0.20*int + 0.25*aln."""
+    composite = 0.0
+    for pillar, weight in _LESSON_PILLAR_WEIGHTS.items():
+        composite += weight * max(0.0, min(1.0, float(pillar_scores.get(pillar, 0.0))))
+    return round(composite, 4)
+
+
+def _compute_resonance_score(pillar_scores, anchor_alignments=None):
+    """Vibe board resonance with anti-pattern penalties. Returns [0.0, 1.0]."""
+    if anchor_alignments:
+        raw = sum(w * max(0.0, min(1.0, float(anchor_alignments.get(word, 0.0))))
+                  for word, w in _VIBE_BOARD_ANCHORS.items())
+    else:
+        eff = float(pillar_scores.get("efficiency", 0.0))
+        hp = float(pillar_scores.get("human_protection", 0.0))
+        intent = float(pillar_scores.get("intention", 0.0))
+        align = float(pillar_scores.get("alignment", 0.0))
+        anchor_alignments = {
+            "convergence": (eff + align) / 2, "will": intent,
+            "flow": (eff + intent) / 2, "play": align * 0.8,
+            "surrender": hp * 0.9, "force": eff * 0.7,
+            "balance": (eff + hp + intent + align) / 4, "love": hp,
+            "resonance": align, "telemetry": (intent + eff) / 2,
+        }
+        raw = sum(w * max(0.0, min(1.0, anchor_alignments.get(word, 0.0)))
+                  for word, w in _VIBE_BOARD_ANCHORS.items())
+
+    # Anti-pattern penalties
+    if float(anchor_alignments.get("force", 0)) > 0.7 and float(anchor_alignments.get("surrender", 0)) < 0.3:
+        raw *= 0.5
+    if float(anchor_alignments.get("will", 0)) > 0.7 and float(anchor_alignments.get("flow", 0)) < 0.3:
+        raw *= 0.7
+    if float(pillar_scores.get("efficiency", 0)) > 0.8 and float(anchor_alignments.get("love", 0)) < 0.2:
+        raw *= 0.6
+    if float(anchor_alignments.get("convergence", 0)) > 0.8 and float(anchor_alignments.get("play", 0)) < 0.2:
+        raw *= 0.8
+
+    return round(max(0.0, min(1.0, raw)), 4)
+
+
+def _validate_pillar_scores(raw_pillar_scores, record_type="lesson"):
+    """Validate pillar_scores dict. Returns (parsed_dict, error_response_or_None)."""
+    if not isinstance(raw_pillar_scores, dict):
+        return None, _tracker_create_validation_error(
+            "Lesson creation requires 'pillar_scores' (object with efficiency, human_protection, intention, alignment, each in [0.0, 1.0]).",
+            record_type=record_type,
+            missing_required_fields=["pillar_scores"],
+            governed_rules=["pillar_scores is required on lesson creation (ENC-FTR-054)."],
+        )
+    missing = _REQUIRED_PILLARS - set(raw_pillar_scores.keys())
+    if missing:
+        return None, _tracker_create_validation_error(
+            f"pillar_scores missing required keys: {sorted(missing)}. All four pillars are required.",
+            record_type=record_type,
+            governed_rules=["pillar_scores must include: efficiency, human_protection, intention, alignment."],
+        )
+    parsed = {}
+    for pillar in _REQUIRED_PILLARS:
+        try:
+            val = float(raw_pillar_scores[pillar])
+        except (TypeError, ValueError):
+            return None, _tracker_create_validation_error(
+                f"pillar_scores.{pillar} must be a number in [0.0, 1.0]. Got: {raw_pillar_scores[pillar]!r}",
+                record_type=record_type,
+                governed_rules=[f"pillar_scores.{pillar} must be numeric in [0.0, 1.0]."],
+            )
+        if val < 0.0 or val > 1.0:
+            return None, _tracker_create_validation_error(
+                f"pillar_scores.{pillar} = {val} is out of range [0.0, 1.0].",
+                record_type=record_type,
+                governed_rules=[f"pillar_scores.{pillar} must be in [0.0, 1.0]."],
+            )
+        parsed[pillar] = val
+    if all(v == 0.0 for v in parsed.values()):
+        return None, _tracker_create_validation_error(
+            "All pillar_scores are zero. At least one pillar must be > 0 for constitutional evaluation.",
+            record_type=record_type,
+            governed_rules=["At least one pillar score must be > 0 (ENC-FTR-054 AC1)."],
+        )
+    return parsed, None
+
+
 # EventBridge event config for reopen notifications
 EVENT_BUS = os.environ.get("EVENT_BUS", "default")
 EVENT_SOURCE = "enceladus.tracker"
@@ -1277,6 +1381,10 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
                 record_type=record_type,
                 governed_rules=["provenance must be one of: agent, human, mining, system."],
             )
+        # ENC-FTR-054: Require and validate pillar_scores for server-side scoring
+        parsed_pillar_scores, pillar_err = _validate_pillar_scores(body.get("pillar_scores"), record_type)
+        if pillar_err:
+            return pillar_err
 
     if primary_task:
         if record_type not in ("feature", "issue"):
@@ -1392,11 +1500,12 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         item["evidence_chain"] = {"L": [_ser_s(eid.strip()) for eid in evidence_chain]}
         item["provenance"] = _ser_s(provenance)
         item["confidence"] = {"N": str(body.get("confidence", 0.5))}
-        item["resonance_score"] = {"N": "0"}
-        item["pillar_scores"] = {"M": {
-            "efficiency": {"N": "0"}, "human_protection": {"N": "0"},
-            "intention": {"N": "0"}, "alignment": {"N": "0"},
-        }}
+        # ENC-FTR-054: Compute constitutional scores server-side
+        pillar_composite = _compute_lesson_pillar_composite(parsed_pillar_scores)
+        resonance_score = _compute_resonance_score(parsed_pillar_scores)
+        item["pillar_scores"] = {"M": {k: {"N": str(v)} for k, v in parsed_pillar_scores.items()}}
+        item["resonance_score"] = {"N": str(resonance_score)}
+        item["pillar_composite"] = {"N": str(pillar_composite)}
         item["extensions"] = {"L": []}
         item["lesson_version"] = {"N": "1"}
         if analysis_reference:
@@ -2945,6 +3054,14 @@ def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
     if new_evidence_ids and not isinstance(new_evidence_ids, list):
         return _error(400, "evidence_ids must be an array of tracker record IDs.")
 
+    # ENC-FTR-054: Optional pillar_scores update triggers score recomputation
+    updated_pillar_scores = None
+    raw_ps = body.get("pillar_scores")
+    if raw_ps:
+        updated_pillar_scores, ps_err = _validate_pillar_scores(raw_ps, "lesson")
+        if ps_err:
+            return ps_err
+
     _normalize_write_source(body)
     ddb = _get_ddb()
     key = _build_key(project_id, "lesson", record_id)
@@ -2995,6 +3112,17 @@ def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
     if new_evidence_ids:
         update_parts.append("evidence_chain = list_append(if_not_exists(evidence_chain, :empty), :new_ev)")
         expr_values[":new_ev"] = {"L": [_ser_s(eid.strip()) for eid in new_evidence_ids if eid.strip()]}
+
+    # ENC-FTR-054: Recompute scores if pillar_scores updated
+    if updated_pillar_scores:
+        new_composite = _compute_lesson_pillar_composite(updated_pillar_scores)
+        new_resonance = _compute_resonance_score(updated_pillar_scores)
+        update_parts.append("pillar_scores = :ps")
+        update_parts.append("resonance_score = :rs")
+        update_parts.append("pillar_composite = :pc")
+        expr_values[":ps"] = {"M": {k: {"N": str(v)} for k, v in updated_pillar_scores.items()}}
+        expr_values[":rs"] = {"N": str(new_resonance)}
+        expr_values[":pc"] = {"N": str(new_composite)}
 
     try:
         ddb.update_item(
