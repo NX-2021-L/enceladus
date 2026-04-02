@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.22",
-  "updated_at": "2026-04-02T20:30:00Z",
+  "version": "2026-04-02.23",
+  "updated_at": "2026-04-02T20:50:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2797,7 +2797,7 @@
       }
     },
     "feed_query.status_normalization": {
-      "description": "Feed query Lambda status normalization whitelists controlling which lifecycle states are preserved in the live feed API response. Previously collapsed many task states to open. Now preserves all governed lifecycle states including coding_complete, committed, pushed, pr, merged_main, deploy_init, deploy_success, coding_updates. Feature states now include production and deprecated.",
+      "description": "Feed query Lambda status normalization whitelists controlling which lifecycle states are preserved in the live feed API response. Previously collapsed many task states to open. Now preserves all governed lifecycle states including coding_complete, committed, pushed, pr, merged_main, deploy_init, deploy_success, coding_updates. Feature states now include production and deprecated. Lesson records added with draft/active/graduated/deprecated statuses (ENC-TSK-A55).",
       "fields": {
         "task_statuses": {
           "type": "set",
@@ -2838,6 +2838,16 @@
             "closed"
           ],
           "definition": "Whitelist of valid issue status values."
+        },
+        "lesson_statuses": {
+          "type": "set",
+          "enum": [
+            "draft",
+            "active",
+            "graduated",
+            "deprecated"
+          ],
+          "definition": "Whitelist of valid lesson status values."
         }
       }
     }

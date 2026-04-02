@@ -1,6 +1,5 @@
 import { useMemo } from 'react'
 import { useLiveFeed } from '../contexts/LiveFeedContext'
-import type { Lesson } from '../types/feeds'
 
 /**
  * Returns all lessons from the live feed.
