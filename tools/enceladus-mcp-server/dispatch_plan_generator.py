@@ -1114,6 +1114,9 @@ def build_dispatch_plan(
 
         if feed_sub:
             dispatch_entry["feed_subscription"] = feed_sub
+        target_task_ids = group.get("target_task_ids")
+        if isinstance(target_task_ids, list) and target_task_ids:
+            dispatch_entry["target_task_ids"] = [str(task_id).strip() for task_id in target_task_ids if str(task_id).strip()]
 
         # Bedrock-specific provider config (DVP-TSK-335)
         if provider == "aws_bedrock_agent":
@@ -1309,6 +1312,11 @@ def generate_dispatch_plan(
     related_record_ids = request.get("related_record_ids", [])
     if isinstance(related_record_ids, str):
         related_record_ids = [r.strip() for r in related_record_ids.split(",") if r.strip()]
+    dispatch_target_task_ids = request.get("dispatch_target_task_ids", [])
+    if isinstance(dispatch_target_task_ids, str):
+        dispatch_target_task_ids = [r.strip() for r in dispatch_target_task_ids.split(",") if r.strip()]
+    elif not isinstance(dispatch_target_task_ids, list):
+        dispatch_target_task_ids = []
     requestor_session_id = request.get("requestor_session_id")
     source_request_ids = request.get("source_requests") or [request_id]
 
@@ -1385,6 +1393,10 @@ def generate_dispatch_plan(
             "fork_from_thread_id": provider_prefs.get("fork_from_thread_id"),
             "model": provider_prefs.get("model"),
         }]
+
+    if dispatch_target_task_ids:
+        for group in dispatch_groups:
+            group["target_task_ids"] = list(dispatch_target_task_ids)
 
     # 5d: Conflict detection
     conflicts = detect_conflicts(project_id, related_record_ids, active_dispatches)
