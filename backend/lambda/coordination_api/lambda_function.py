@@ -938,6 +938,29 @@ def _verify_token(token: str) -> Dict[str, Any]:
     return claims
 
 
+def _get_client_ip(event: Dict[str, Any]) -> str:
+    """Extract client IP from Lambda event for observability logging."""
+    rc = (event.get("requestContext") or {}).get("http") or event.get("requestContext") or {}
+    return (
+        rc.get("sourceIp")
+        or (event.get("headers") or {}).get("x-forwarded-for", "").split(",")[0].strip()
+        or "unknown"
+    )
+
+
+def _log_auth_failure(endpoint: str, error_type: str, event: Dict[str, Any], **extra: Any) -> None:
+    """Emit structured auth failure log without leaking tokens or secrets."""
+    payload: Dict[str, Any] = {
+        "event": "auth_failure",
+        "endpoint": endpoint,
+        "error_type": error_type,
+        "client_ip": _get_client_ip(event),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    payload.update(extra)
+    logger.warning("[AUTH_FAILURE] %s", json.dumps(payload, sort_keys=True, default=str))
+
+
 def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     # Optional internal auth path for trusted orchestrators / smoke tests.
     headers = event.get("headers") or {}
@@ -961,12 +984,15 @@ def _authenticate(event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Opti
 
     token = _extract_token(event)
     if not token:
+        _log_auth_failure("/coordination", "no_token", event)
         return None, _error(401, "Authentication required. Please sign in.")
 
     try:
         claims = _verify_token(token)
         return claims, None
     except ValueError as exc:
+        _log_auth_failure("/coordination", "token_validation_failed", event,
+                          error_detail=str(exc))
         return None, _error(401, str(exc))
 
 

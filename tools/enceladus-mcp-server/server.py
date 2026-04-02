@@ -8314,6 +8314,29 @@ def _handle_cognito_oauth_server_metadata(event: Dict[str, Any]) -> Dict[str, An
     }
 
 
+def _get_client_ip(event: Dict[str, Any]) -> str:
+    """Extract client IP from Lambda event for observability logging."""
+    rc = (event.get("requestContext") or {}).get("http") or {}
+    return (
+        rc.get("sourceIp")
+        or (event.get("headers") or {}).get("x-forwarded-for", "").split(",")[0].strip()
+        or "unknown"
+    )
+
+
+def _log_auth_failure(endpoint: str, error_type: str, event: Dict[str, Any], **extra: Any) -> None:
+    """Emit structured auth failure log without leaking tokens or secrets."""
+    payload: Dict[str, Any] = {
+        "event": "auth_failure",
+        "endpoint": endpoint,
+        "error_type": error_type,
+        "client_ip": _get_client_ip(event),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    payload.update(extra)
+    logger.warning("[AUTH_FAILURE] %s", json.dumps(payload, sort_keys=True))
+
+
 def _handle_cognito_authorize(event: Dict[str, Any]) -> Dict[str, Any]:
     """Proxy /authorize — redirect to Cognito Hosted UI, using a fixed server-side
     callback URL so that dynamic localhost ports from CLI clients don't need to be
@@ -8325,6 +8348,20 @@ def _handle_cognito_authorize(event: Dict[str, Any]) -> Dict[str, Any]:
     qs = event.get("queryStringParameters") or {}
     base = _get_server_base_url(event)
     cognito_domain = COGNITO_DOMAIN.rstrip("/")
+
+    # Validate required OAuth params (ENC-TSK-930 AC3)
+    missing = [p for p in ("response_type", "client_id") if not qs.get(p)]
+    if missing:
+        _log_auth_failure("/authorize", "missing_params", event, missing_params=missing)
+        return {
+            "statusCode": 400,
+            "headers": {"content-type": "application/json", "cache-control": "no-store"},
+            "body": json.dumps({
+                "error": "invalid_request",
+                "error_description": f"Missing required parameter(s): {', '.join(missing)}",
+            }),
+            "isBase64Encoded": False,
+        }
 
     client_redirect_uri = qs.get("redirect_uri", "")
     client_state = qs.get("state", "")
@@ -8355,6 +8392,26 @@ def _handle_cognito_authorize(event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _callback_error_html(title: str, detail: str) -> Dict[str, Any]:
+    """Return a user-facing HTML error page for /callback failures (ENC-TSK-930 AC3)."""
+    html = (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<title>Authentication Error</title>"
+        "<style>body{font-family:system-ui,sans-serif;max-width:480px;margin:60px auto;"
+        "text-align:center;color:#333}h1{font-size:1.4em;color:#c00}"
+        "p{margin:1em 0;line-height:1.5}</style></head><body>"
+        f"<h1>{title}</h1><p>{detail}</p>"
+        "<p>Please close this window and try again.</p>"
+        "</body></html>"
+    )
+    return {
+        "statusCode": 400,
+        "headers": {"content-type": "text/html; charset=utf-8", "cache-control": "no-store"},
+        "body": html,
+        "isBase64Encoded": False,
+    }
+
+
 def _handle_cognito_callback(event: Dict[str, Any]) -> Dict[str, Any]:
     """Server-side OAuth callback — receives the auth code from Cognito and relays
     it to the client's original redirect_uri (typically http://localhost:{port}/callback)."""
@@ -8364,6 +8421,7 @@ def _handle_cognito_callback(event: Dict[str, Any]) -> Dict[str, Any]:
     code = qs.get("code", "")
     cognito_state = qs.get("state", "")
     error = qs.get("error", "")
+    error_description = qs.get("error_description", "")
 
     # Decode the original client redirect_uri and state
     client_redirect_uri = ""
@@ -8375,9 +8433,12 @@ def _handle_cognito_callback(event: Dict[str, Any]) -> Dict[str, Any]:
             client_redirect_uri = relay.get("ru", "")
             client_state = relay.get("st", "")
         except Exception:
-            pass
+            _log_auth_failure("/callback", "invalid_state", event)
 
     if error:
+        _log_auth_failure("/callback", "cognito_error", event,
+                          cognito_error_code=error,
+                          has_redirect=bool(client_redirect_uri))
         if client_redirect_uri:
             sep = "&" if "?" in client_redirect_uri else "?"
             location = f"{client_redirect_uri}{sep}error={urllib.parse.quote(error, safe='')}"
@@ -8385,13 +8446,22 @@ def _handle_cognito_callback(event: Dict[str, Any]) -> Dict[str, Any]:
                 location += f"&state={urllib.parse.quote(client_state, safe='')}"
             return {"statusCode": 302, "headers": {"location": location, "cache-control": "no-store"},
                     "body": "", "isBase64Encoded": False}
-        return {"statusCode": 400, "headers": {"content-type": "application/json"},
-                "body": json.dumps({"error": error}), "isBase64Encoded": False}
+        detail = error_description or error
+        return _callback_error_html("Authentication Failed", detail)
 
     if not client_redirect_uri:
-        return {"statusCode": 400, "headers": {"content-type": "application/json"},
-                "body": json.dumps({"error": "invalid_state", "error_description": "Could not decode relay state"}),
-                "isBase64Encoded": False}
+        _log_auth_failure("/callback", "missing_redirect_uri", event)
+        return _callback_error_html(
+            "Invalid Request",
+            "Could not determine where to send you back. The relay state was missing or corrupted.",
+        )
+
+    if not code:
+        _log_auth_failure("/callback", "missing_code", event)
+        return _callback_error_html(
+            "Authorization Failed",
+            "No authorization code was received from the identity provider.",
+        )
 
     # Relay auth code to client's original redirect_uri
     sep = "&" if "?" in client_redirect_uri else "?"
@@ -8419,8 +8489,22 @@ def _handle_cognito_token(event: Dict[str, Any]) -> Dict[str, Any]:
         import base64 as b64
         body_raw = b64.b64decode(body_raw).decode()
 
-    # Replace client's redirect_uri with the server-side callback used in /authorize
+    # Validate grant_type is present (ENC-TSK-930 AC3)
     params = urllib.parse.parse_qs(body_raw, keep_blank_values=True)
+    grant_type = (params.get("grant_type") or [""])[0]
+    if not grant_type:
+        _log_auth_failure("/oauth/token", "missing_grant_type", event)
+        return {
+            "statusCode": 400,
+            "headers": {"content-type": "application/json", "cache-control": "no-store"},
+            "body": json.dumps({
+                "error": "invalid_request",
+                "error_description": "Missing required parameter: grant_type",
+            }),
+            "isBase64Encoded": False,
+        }
+
+    # Replace client's redirect_uri with the server-side callback used in /authorize
     if "redirect_uri" in params:
         params["redirect_uri"] = [f"{base}/callback"]
         body_raw = urllib.parse.urlencode({k: v[0] for k, v in params.items()})
@@ -8449,6 +8533,10 @@ def _handle_cognito_token(event: Dict[str, Any]) -> Dict[str, Any]:
             }
     except urllib.error.HTTPError as exc:
         err_body = exc.read().decode("utf-8", errors="replace") if exc.fp else "{}"
+        _log_auth_failure("/oauth/token", "cognito_rejected", event,
+                          cognito_error_code=exc.code,
+                          grant_type=grant_type)
+        # Return Cognito's error as-is (RFC 6749 format)
         return {
             "statusCode": exc.code,
             "headers": {"content-type": "application/json"},
@@ -8456,6 +8544,8 @@ def _handle_cognito_token(event: Dict[str, Any]) -> Dict[str, Any]:
             "isBase64Encoded": False,
         }
     except Exception as exc:
+        _log_auth_failure("/oauth/token", "proxy_error", event,
+                          error_class=type(exc).__name__)
         return {
             "statusCode": 502,
             "headers": {"content-type": "application/json"},
@@ -8919,6 +9009,8 @@ async def _handle_lambda_event(event: Dict[str, Any]) -> Dict[str, Any]:
         try:
             _verify_cognito_jwt(token)
         except ValueError as exc:
+            _log_auth_failure("/mcp", "jwt_validation_failed", event,
+                              error_detail=str(exc))
             return {
                 "statusCode": 401,
                 "headers": {
