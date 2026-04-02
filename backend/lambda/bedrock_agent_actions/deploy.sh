@@ -21,6 +21,8 @@ COMPLIANCE_ENFORCEMENT_DEFAULT="${COMPLIANCE_ENFORCEMENT_DEFAULT:-enforce}"
 S3_BUCKET="${S3_BUCKET:-jreese-net}"
 S3_DOC_PREFIX="${S3_DOC_PREFIX:-agent-documents}"
 S3_REFERENCE_PREFIX="${S3_REFERENCE_PREFIX:-reference}"
+GITHUB_APP_ID="${GITHUB_APP_ID:-}"
+GITHUB_INSTALLATION_ID="${GITHUB_INSTALLATION_ID:-}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -151,6 +153,9 @@ ensure_function() {
       --function-name "${FUNCTION_NAME}" \
       --region "${REGION}" \
       --zip-file "fileb://${zip_path}" >/dev/null
+    aws lambda wait function-updated-v2 \
+      --function-name "${FUNCTION_NAME}" \
+      --region "${REGION}"
   else
     log "[START] creating Lambda function: ${FUNCTION_NAME}"
     aws lambda create-function \
@@ -166,6 +171,19 @@ ensure_function() {
 
   aws lambda wait function-active-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
 
+  # Read existing Lambda env vars to preserve GITHUB_TOKEN if already set
+  local existing_env='{}'
+  if aws lambda get-function-configuration \
+      --function-name "${FUNCTION_NAME}" \
+      --region "${REGION}" >/dev/null 2>&1; then
+    existing_env="$(aws lambda get-function-configuration \
+      --function-name "${FUNCTION_NAME}" \
+      --region "${REGION}" \
+      --query 'Environment.Variables' \
+      --output json 2>/dev/null || echo '{}')"
+    [[ "${existing_env}" == "None" ]] && existing_env='{}'
+  fi
+
   env_file="$(mktemp /tmp/${FUNCTION_NAME}-env-XXXXXX)"
   TRACKER_TABLE="${TRACKER_TABLE}" \
   PROJECTS_TABLE="${PROJECTS_TABLE}" \
@@ -177,12 +195,19 @@ ensure_function() {
   COMPLIANCE_ENFORCEMENT_DEFAULT="${COMPLIANCE_ENFORCEMENT_DEFAULT}" \
   DYNAMODB_REGION="${REGION}" \
   S3_BUCKET="${S3_BUCKET}" \
+  GITHUB_APP_ID="${GITHUB_APP_ID}" \
+  GITHUB_INSTALLATION_ID="${GITHUB_INSTALLATION_ID}" \
+  EXISTING_ENV_JSON="${existing_env}" \
   python3 - "${env_file}" <<'PY'
 import json
 import os
 import sys
 
 path = sys.argv[1]
+existing_env = json.loads(os.environ.get("EXISTING_ENV_JSON", "{}"))
+if not isinstance(existing_env, dict):
+    existing_env = {}
+
 env_vars = {
     "TRACKER_TABLE": os.environ["TRACKER_TABLE"],
     "PROJECTS_TABLE": os.environ["PROJECTS_TABLE"],
@@ -194,7 +219,15 @@ env_vars = {
     "COMPLIANCE_ENFORCEMENT_DEFAULT": os.environ["COMPLIANCE_ENFORCEMENT_DEFAULT"],
     "DYNAMODB_REGION": os.environ["DYNAMODB_REGION"],
     "S3_BUCKET": os.environ["S3_BUCKET"],
+    "GITHUB_APP_ID": os.environ.get("GITHUB_APP_ID", ""),
+    "GITHUB_INSTALLATION_ID": os.environ.get("GITHUB_INSTALLATION_ID", ""),
+    "ALLOWED_REPOS": "NX-2021-L/enceladus",
 }
+# Preserve GITHUB_TOKEN from existing Lambda env if set (provisioned manually)
+existing_token = existing_env.get("GITHUB_TOKEN", "")
+if existing_token:
+    env_vars["GITHUB_TOKEN"] = existing_token
+
 with open(path, "w", encoding="utf-8") as f:
     json.dump({"Variables": env_vars}, f)
 PY
