@@ -854,46 +854,141 @@ def _classify_related_ids(related_ids: List[str]) -> Dict[str, List[str]]:
 # ---------------------------------------------------------------------------
 
 _SEQUENCE_CAPACITY = 3573  # 999 numeric + 2574 alphanumeric (A01-Z99)
+_BASE36_CAPACITY = 46655   # ZZZ in base-36 (ENC-FTR-056)
+
+_BASE36_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _b36_to_str(v: int) -> str:
+    """Convert a base-36 value (0-46655) to a 3-char string. Internal helper."""
+    r = []
+    for _ in range(3):
+        r.append(_BASE36_CHARS[v % 36])
+        v //= 36
+    return "".join(reversed(r))
+
+
+def _str_to_b36(s: str) -> int:
+    """Convert a 3-char base-36 string to an integer. Internal helper."""
+    result = 0
+    for ch in s:
+        idx = _BASE36_CHARS.find(ch)
+        if idx < 0:
+            raise ValueError(f"Invalid base-36 character {ch!r} in sequence {s!r}")
+        result = result * 36 + idx
+    return result
+
+
+def _is_legacy_pattern(s: str) -> bool:
+    """Check if a 3-char string matches a legacy encoding pattern."""
+    if s.isdigit():
+        return True
+    if len(s) == 3 and s[0].isalpha() and s[1:].isdigit():
+        num = int(s[1:])
+        if 1 <= num <= 99:
+            return True
+    return False
+
+
+# Precompute the extended-range mapping table at module load time.
+# Maps index (0-43081) -> base-36 value for non-legacy 3-char strings.
+# Reverse map: base-36 value -> counter value (3574 + index).
+_EXT_B36_TO_COUNTER: dict = {}  # base-36 int value -> counter int
+_EXT_COUNTER_TO_B36: list = []  # index -> base-36 int value
+
+def _init_extended_tables():
+    idx = 0
+    for v in range(46656):
+        s = _b36_to_str(v)
+        if not _is_legacy_pattern(s):
+            _EXT_COUNTER_TO_B36.append(v)
+            _EXT_B36_TO_COUNTER[v] = 3574 + idx
+            idx += 1
+
+_init_extended_tables()
+
+
+def _encode_base36(n: int) -> str:
+    """Encode a non-negative integer into a 3-char sequence (ENC-FTR-056).
+
+    Encoding scheme preserves backward compatibility:
+    - 0-999:     zero-padded decimal ('000'-'999') — matches legacy format
+    - 1000-3573: legacy alphanumeric ('A01'-'Z99') — matches legacy format
+    - 3574-46655: mapped to non-legacy 3-char base-36 strings via lookup table
+
+    Total capacity: 46,656 per record type per project.
+    >=46656 -> ValueError (capacity exhausted)
+    """
+    if n < 0:
+        raise ValueError(f"Counter must be >= 0, got {n}")
+    if n > _BASE36_CAPACITY:
+        raise ValueError(
+            f"Base-36 capacity exhausted at counter {n}. "
+            f"Maximum is {_BASE36_CAPACITY} per record type per project."
+        )
+    # Legacy numeric range: 0-999
+    if n <= 999:
+        return str(n).zfill(3)
+    # Legacy alphanumeric range: 1000-3573
+    offset = n - 1000
+    letter_index = offset // 99
+    number = (offset % 99) + 1
+    if letter_index <= 25:
+        return chr(65 + letter_index) + str(number).zfill(2)
+    # Extended range: 3574-46655 -> non-legacy base-36 string via table
+    ext_idx = n - 3574
+    return _b36_to_str(_EXT_COUNTER_TO_B36[ext_idx])
+
+
+def _decode_base36(s: str) -> int:
+    """Decode a sequence string back into an integer (ENC-FTR-056).
+
+    Handles all formats in priority order:
+    1. Legacy numeric (all digits): parse as decimal integer
+    2. Legacy alphanumeric (letter + 2 digits, A01-Z99): decode as legacy
+    3. Extended base-36 (non-legacy 3-char strings): decode via lookup table
+    4. Longer strings: parse as plain integer (legacy overflow)
+    """
+    if not s:
+        raise ValueError("Empty sequence")
+    s = s.upper()
+    # Legacy numeric (all digits, including 4+ digit overflow IDs)
+    if s.isdigit():
+        return int(s)
+    # Legacy alphanumeric A01-Z99: single letter followed by exactly 2 digits
+    if len(s) == 3 and s[0].isalpha() and s[1:].isdigit():
+        letter_index = ord(s[0]) - 65
+        number = int(s[1:])
+        if 0 <= letter_index <= 25 and 1 <= number <= 99:
+            return 1000 + (letter_index * 99) + (number - 1)
+    # Extended base-36: look up in the reverse table
+    try:
+        b36_val = _str_to_b36(s)
+    except ValueError:
+        raise ValueError(f"Invalid sequence: {s!r}")
+    counter = _EXT_B36_TO_COUNTER.get(b36_val)
+    if counter is not None:
+        return counter
+    raise ValueError(f"Invalid sequence: {s!r}")
 
 
 def _format_sequence(counter: int) -> str:
     """Encode an integer counter into a 3-char record ID sequence.
 
-    1-999   -> '001'-'999'  (zero-padded numeric)
-    1000+   -> 'A01'-'Z99'  (alphanumeric rollover)
-    >=3574  -> CapacityError
+    Now uses base-36 encoding (ENC-FTR-056). Counter starts at 1.
+    Legacy compatibility: counters 1-999 still produce '001'-'999'.
     """
     if counter < 1:
         raise ValueError(f"Counter must be >= 1, got {counter}")
-    if counter <= 999:
-        return str(counter).zfill(3)
-    offset = counter - 1000
-    letter_index = offset // 99
-    number = (offset % 99) + 1
-    if letter_index > 25:
-        raise ValueError(
-            f"Sequence capacity exhausted at counter {counter}. "
-            f"Maximum is {_SEQUENCE_CAPACITY} per record type per project."
-        )
-    return chr(65 + letter_index) + str(number).zfill(2)
+    return _encode_base36(counter)
 
 
 def _parse_sequence(seq: str) -> int:
-    """Decode a 3-char record ID sequence back into an integer counter."""
-    if not seq:
-        raise ValueError("Empty sequence")
-    if seq.isdigit():
-        return int(seq)
-    if len(seq) == 3 and seq[0].isalpha() and seq[1:].isdigit():
-        letter_index = ord(seq[0].upper()) - 65
-        number = int(seq[1:])
-        if 0 <= letter_index <= 25 and 1 <= number <= 99:
-            return 1000 + (letter_index * 99) + (number - 1)
-    # Legacy overflow IDs (e.g. "1000") — parse as plain int
-    try:
-        return int(seq)
-    except ValueError:
-        raise ValueError(f"Invalid sequence: {seq!r}")
+    """Decode a record ID sequence back into an integer counter.
+
+    Delegates to _decode_base36 which handles legacy numeric, A01-Z99, and base-36 formats.
+    """
+    return _decode_base36(seq)
 
 
 # ---------------------------------------------------------------------------
@@ -921,7 +1016,7 @@ def _max_existing_number(project_id: str, record_type: str) -> int:
             parts = human_id.split("-")
             if len(parts) >= 3:
                 try:
-                    max_num = max(max_num, _parse_sequence(parts[-1]))
+                    max_num = max(max_num, _decode_base36(parts[-1]))
                 except ValueError:
                     pass
         last_key = query_resp.get("LastEvaluatedKey")
@@ -970,7 +1065,59 @@ def _next_record_id(project_id: str, prefix: str, record_type: str) -> str:
     )
     attrs = update_resp.get("Attributes", {})
     next_num = int(attrs.get("next_num", {"N": str(seed_num + 1)}).get("N", str(seed_num + 1)))
-    return f"{prefix}-{type_suffix}-{_format_sequence(next_num)}"
+    return f"{prefix}-{type_suffix}-{_encode_base36(next_num)}"
+
+
+_SUBTASK_SUFFIX_CAPACITY = 260  # 10 digits * 26 letters = 260 sub-tasks per parent
+
+
+def _next_subtask_suffix(project_id: str, parent_root_id: str) -> str:
+    """Allocate the next sub-task suffix for a parent task (ENC-FTR-056).
+
+    Uses a per-parent atomic counter: key {project_id, counter#subtask#{parent_root_id}}.
+    Counter n -> suffix: digit = n // 26, letter = chr('A' + n % 26).
+    Returns 2-char string like '0A', '0B', ..., '0Z', '1A', ..., '9Z'.
+    Raises ValueError at n >= 260.
+    """
+    ddb = _get_ddb()
+    counter_key = {
+        "project_id": _ser_s(project_id),
+        "record_id": _ser_s(f"{_TRACKER_COUNTER_PREFIX}subtask#{parent_root_id}"),
+    }
+
+    now = _now_z()
+    update_resp = ddb.update_item(
+        TableName=DYNAMODB_TABLE,
+        Key=counter_key,
+        UpdateExpression=(
+            "SET next_num = if_not_exists(next_num, :seed) + :one, "
+            "updated_at = :now, "
+            "created_at = if_not_exists(created_at, :now), "
+            "record_type = if_not_exists(record_type, :counter_type), "
+            "item_id = if_not_exists(item_id, :counter_item_id)"
+        ),
+        ExpressionAttributeValues={
+            ":seed": {"N": "0"},
+            ":one": {"N": "1"},
+            ":now": _ser_s(now),
+            ":counter_type": _ser_s("counter"),
+            ":counter_item_id": _ser_s(f"COUNTER-SUBTASK-{parent_root_id}"),
+        },
+        ReturnValues="UPDATED_NEW",
+    )
+    attrs = update_resp.get("Attributes", {})
+    # next_num starts at 1 after first increment; subtract 1 for zero-based suffix
+    n = int(attrs.get("next_num", {"N": "1"}).get("N", "1")) - 1
+
+    if n >= _SUBTASK_SUFFIX_CAPACITY:
+        raise ValueError(
+            f"Sub-task capacity exhausted for parent {parent_root_id}. "
+            f"Maximum is {_SUBTASK_SUFFIX_CAPACITY} sub-tasks per parent."
+        )
+
+    digit = n // 26
+    letter = chr(ord("A") + n % 26)
+    return f"{digit}{letter}"
 
 
 # ---------------------------------------------------------------------------
@@ -1269,6 +1416,27 @@ def _handle_pending_updates(query_params: Dict) -> Dict:
         return _error(500, "Database query failed.")
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-056: Hierarchical Sub-Task ID Decision Layer
+# ---------------------------------------------------------------------------
+# _should_use_hierarchical_id() heuristic rules (advisory — not yet enforced):
+#
+# 1. Caller explicitly sets is_child=True and parent_task_id — always use
+#    hierarchical ID generation (_next_subtask_suffix).
+# 2. If a coordination dispatch creates tasks under a feature's primary_task,
+#    it MAY set is_child=True to create sub-tasks rather than siblings.
+# 3. When the agent plan-capture protocol creates a task tree, the root task
+#    uses _next_record_id() and child tasks use is_child=True with the root
+#    as parent_task_id.
+# 4. Manual / PWA-created tasks default to is_child=False (standard IDs).
+# 5. Sub-task IDs are only valid for record_type="task". Attempting is_child
+#    on features, issues, or lessons returns a 400 validation error.
+# 6. The parent_task_id may itself be a sub-task (ENC-TSK-001-0A), but the
+#    parent_root used for counter scoping is always the 3-segment root
+#    (ENC-TSK-001), keeping all children flat under the same root.
+# ---------------------------------------------------------------------------
+
+
 def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict:
     """POST /{project}/{type} — create a new tracker record."""
     title = body.get("title", "").strip()
@@ -1297,6 +1465,35 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
     coordination = body.get("coordination", False)
     coordination_request_id = str(body.get("coordination_request_id") or "").strip()
     dispatch_id = str(body.get("dispatch_id") or "").strip()
+    is_child = bool(body.get("is_child", False))
+    parent_task_id = str(body.get("parent_task_id") or "").strip()
+
+    # ENC-FTR-056: Validate is_child / parent_task_id pairing
+    if is_child and not parent_task_id:
+        return _tracker_create_validation_error(
+            "is_child=true requires parent_task_id.",
+            record_type=record_type,
+            missing_required_fields=["parent_task_id"],
+            governed_rules=["is_child=true requires parent_task_id to generate hierarchical ID."],
+        )
+    if not is_child and parent_task_id:
+        return _tracker_create_validation_error(
+            "parent_task_id provided without is_child=true.",
+            record_type=record_type,
+            governed_rules=["parent_task_id is only valid when is_child=true."],
+        )
+    if is_child and record_type != "task":
+        return _tracker_create_validation_error(
+            f"is_child is only valid for task records, not {record_type}.",
+            record_type=record_type,
+            governed_rules=["Hierarchical sub-task IDs are only supported for task records."],
+        )
+    if is_child and parent_task_id and "-TSK-" not in parent_task_id.upper():
+        return _tracker_create_validation_error(
+            f"parent_task_id must reference a task ID (contains -TSK-). Got: '{parent_task_id}'.",
+            record_type=record_type,
+            governed_rules=["parent_task_id must reference an existing task ID containing -TSK-."],
+        )
 
     if dispatch_id:
         coordination = True
@@ -1574,10 +1771,19 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         if body.get(forbidden_field):
             return _error(400, f"Field '{forbidden_field}' must not be provided — record IDs are generated server-side.")
 
-    # Create with counter-based ID allocation
+    # Create with counter-based ID allocation (or hierarchical sub-task ID)
     try:
         for attempt in range(1, _TRACKER_CREATE_MAX_ATTEMPTS + 1):
-            new_id = _next_record_id(project_id, prefix, record_type)
+            if is_child and parent_task_id:
+                # ENC-FTR-056: Generate hierarchical sub-task ID
+                parent_upper = parent_task_id.upper()
+                parent_parts = parent_upper.split("-")
+                parent_root = "-".join(parent_parts[:3])  # PREFIX-TSK-CCC
+                suffix = _next_subtask_suffix(project_id, parent_root)
+                new_id = f"{parent_root}-{suffix}"
+                item["parent"] = _ser_s(parent_upper)
+            else:
+                new_id = _next_record_id(project_id, prefix, record_type)
             sk = f"{record_type}#{new_id}"
             item["record_id"] = _ser_s(sk)
             item["item_id"] = _ser_s(new_id)
@@ -1593,9 +1799,41 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
                 raise
         else:
             return _error(500, f"Failed to allocate unique record ID after {_TRACKER_CREATE_MAX_ATTEMPTS} attempts.")
+    except ValueError as ve:
+        # Sub-task capacity exhausted
+        logger.error("create failed (capacity): %s", ve)
+        return _error(400, str(ve))
     except Exception as exc:
         logger.error("create failed: %s", exc)
         return _error(500, "Database write failed.")
+
+    # ENC-FTR-056: Update parent record's subtask_ids list
+    if is_child and parent_task_id:
+        try:
+            parent_upper = parent_task_id.upper()
+            parent_parts = parent_upper.split("-")
+            parent_root = "-".join(parent_parts[:3])
+            parent_type_seg = parent_parts[1] if len(parent_parts) >= 2 else "TSK"
+            parent_type = _ID_SEGMENT_TO_TYPE.get(parent_type_seg, "task")
+            parent_sk = f"{parent_type}#{parent_upper}"
+            ddb.update_item(
+                TableName=DYNAMODB_TABLE,
+                Key={
+                    "project_id": _ser_s(project_id),
+                    "record_id": _ser_s(parent_sk),
+                },
+                UpdateExpression=(
+                    "SET subtask_ids = list_append(if_not_exists(subtask_ids, :empty_list), :new_child), "
+                    "updated_at = :now"
+                ),
+                ExpressionAttributeValues={
+                    ":empty_list": {"L": []},
+                    ":new_child": {"L": [_ser_s(new_id)]},
+                    ":now": _ser_s(_now_z()),
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to update parent subtask_ids for %s: %s", parent_task_id, exc)
 
     # Best-effort bidirectional relationships
     bidi_warnings = []
@@ -1606,7 +1844,7 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
             try:
                 target_id_upper = target_id.upper()
                 target_parts = target_id_upper.split("-")
-                if len(target_parts) != 3:
+                if len(target_parts) < 3 or len(target_parts) > 4:
                     continue
                 target_type_seg = target_parts[1]
                 target_type = _ID_SEGMENT_TO_TYPE.get(target_type_seg)

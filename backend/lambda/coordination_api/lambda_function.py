@@ -1255,10 +1255,10 @@ def _build_record_id(prefix: str, record_type: str, seq: int) -> str:
 
 def _key_for_record_id(record_id: str) -> Tuple[str, str, str]:
     parts = record_id.upper().split("-")
-    if len(parts) != 3:
+    if len(parts) < 3 or len(parts) > 4:
         raise ValueError(f"Invalid record ID: {record_id}")
 
-    prefix, segment, _ = parts
+    prefix, segment = parts[0], parts[1]
     record_type = _SEGMENT_TO_TYPE.get(segment)
     if not record_type:
         raise ValueError(f"Unsupported record ID segment '{segment}'")
