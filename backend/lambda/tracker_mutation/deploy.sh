@@ -284,6 +284,8 @@ ensure_api_routes() {
     "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout"
     "DELETE /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout"
     "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence"
+    # ENC-FTR-052: Lesson extend sub-resource
+    "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend"
     # ENC-FTR-049: Typed relationship edge routes
     "GET /api/v1/tracker/{projectId}/relationship"
     "DELETE /api/v1/tracker/{projectId}/relationship"
@@ -295,6 +297,7 @@ ensure_api_routes() {
     "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/log"
     "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout"
     "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence"
+    "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend"
   )
 
   local existing_route_keys
