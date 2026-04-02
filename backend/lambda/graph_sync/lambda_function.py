@@ -368,13 +368,23 @@ def _process_record(driver, stream_record: Dict) -> None:
 
         # ENC-FTR-049: Handle typed relationship records
         if record_type == "relationship":
+            rel_status = record.get("status", "")
+            record_id_sk = record.get("record_id", "")
             with driver.session() as session:
-                session.execute_write(lambda tx: _upsert_relationship_edge(tx, record))
-            logger.info(
-                "[INFO] Synced relationship %s -> %s (%s, event=%s)",
-                record.get("source_id", ""), record.get("target_id", ""),
-                record.get("relationship_type", ""), event_name,
-            )
+                if rel_status == "archived":
+                    # Soft-deleted: remove edge from Neo4j projection
+                    session.execute_write(lambda tx: _delete_relationship_edge(tx, record_id_sk))
+                    logger.info(
+                        "[INFO] Archived relationship edge removed from graph: %s",
+                        record_id_sk,
+                    )
+                else:
+                    session.execute_write(lambda tx: _upsert_relationship_edge(tx, record))
+                    logger.info(
+                        "[INFO] Synced relationship %s -> %s (%s, event=%s)",
+                        record.get("source_id", ""), record.get("target_id", ""),
+                        record.get("relationship_type", ""), event_name,
+                    )
             return
 
         # Skip non-entity records
