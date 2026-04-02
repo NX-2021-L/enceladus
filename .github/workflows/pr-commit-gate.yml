@@ -67,6 +67,7 @@ jobs:
             if [ "$VALID" = "true" ]; then
               TASK_ID=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('task_id','unknown'))" 2>/dev/null || echo "unknown")
               echo "✅ commit-complete-id is valid. Associated task: $TASK_ID"
+              echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
               exit 0
             else
               REASON=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('reason','unknown'))" 2>/dev/null || echo "unknown")
@@ -81,4 +82,25 @@ jobs:
             echo "::error::Checkout service validation failed (HTTP $HTTP_CODE). Cannot verify commit-complete-id."
             echo "::error::Response: $HTTP_BODY"
             exit 1
+          fi
+
+      # ENC-TSK-963: Agent provenance validation for Bedrock-authored PRs
+      - name: Validate agent provenance (Bedrock PRs)
+        if: startsWith(github.event.pull_request.head.ref, 'agent/')
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "Agent-authored PR detected: $HEAD_REF"
+
+          # Check for Bedrock dispatch ID tag in PR body
+          DISPATCH_ID=$(echo "$PR_BODY" | grep -oE 'Bedrock-Dispatch-ID:\s*\S+' | head -1 || true)
+
+          if [ -z "$DISPATCH_ID" ]; then
+            echo "::warning::Agent PR on branch $HEAD_REF does not contain Bedrock-Dispatch-ID tag."
+            echo "::warning::For Bedrock-authored PRs, include 'Bedrock-Dispatch-ID: {dispatch_id}' in the PR body."
+            echo "provenance=unverified" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ Agent provenance tag found: $DISPATCH_ID"
+            echo "provenance=verified" >> "$GITHUB_OUTPUT"
           fi
