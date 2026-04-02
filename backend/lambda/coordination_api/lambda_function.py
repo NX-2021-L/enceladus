@@ -455,6 +455,7 @@ _TYPE_TO_SEGMENT = {
     "task": "TSK",
     "issue": "ISS",
     "feature": "FTR",
+    "lesson": "LSN",
 }
 
 _SEGMENT_TO_TYPE = {v: k for k, v in _TYPE_TO_SEGMENT.items()}
@@ -1234,8 +1235,22 @@ def _next_tracker_sequence(project_id: str, record_type: str) -> int:
         return seed_num + 1
 
 
+def _format_sequence(counter: int) -> str:
+    """Encode an integer counter into a 3-char record ID sequence (ENC-ISS-132)."""
+    if counter < 1:
+        raise ValueError(f"Counter must be >= 1, got {counter}")
+    if counter <= 999:
+        return str(counter).zfill(3)
+    offset = counter - 1000
+    letter_index = offset // 99
+    number = (offset % 99) + 1
+    if letter_index > 25:
+        raise ValueError(f"Sequence capacity exhausted at counter {counter}")
+    return chr(65 + letter_index) + str(number).zfill(2)
+
+
 def _build_record_id(prefix: str, record_type: str, seq: int) -> str:
-    return f"{prefix}-{_TYPE_TO_SEGMENT[record_type]}-{seq:03d}"
+    return f"{prefix}-{_TYPE_TO_SEGMENT[record_type]}-{_format_sequence(seq)}"
 
 
 def _key_for_record_id(record_id: str) -> Tuple[str, str, str]:

@@ -709,7 +709,7 @@ _RELATION_FIELDS = set(_RELATION_ID_FIELDS) | {"depends_on"}
 _DEPENDENCY_TYPES = ("task", "issue", "feature")
 _SINGLE_CHAR_TOKEN_RE = re.compile(r"^[A-Za-z0-9,\-\s]$")
 _COORDINATION_REQUEST_ID_RE = re.compile(r"^(CRQ|DSP)-[A-Z0-9-]{3,64}$", re.IGNORECASE)
-_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR"}
+_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN"}
 _TRACKER_COUNTER_PREFIX = "counter#"
 _TRACKER_CREATE_MAX_ATTEMPTS = int(os.environ.get("ENCELADUS_TRACKER_CREATE_MAX_ATTEMPTS", "32"))
 
