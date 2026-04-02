@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.23",
-  "updated_at": "2026-04-02T20:50:00Z",
+  "version": "2026-04-02.24",
+  "updated_at": "2026-04-02T22:45:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2793,6 +2793,27 @@
         "default_mode": {
           "type": "string",
           "definition": "_ENCELADUS_DEFAULT_INTERFACE_MODE in config.py. Changed from raw to code (ENC-TSK-A38). Affects all dispatch paths."
+        }
+      }
+    },
+    "feed_query.record_extensions": {
+      "description": "Feed query record extension fields added to task/issue/feature/lesson payloads in the /api/v1/feed response (ENC-TSK-A57). typed_relationships: typed relationship edges from rel# DynamoDB items. subtask_ids: plan tree hierarchy. context_node: context node scores (when ENABLE_CONTEXT_NODES active).",
+      "fields": {
+        "typed_relationships": {
+          "type": "array",
+          "item_type": "object",
+          "definition": "Typed relationship edges from ENC-FTR-049 rel# DynamoDB items, attached per record. Each edge: {relationship_type, target_id, weight, confidence, reason, created_at}. Only present when edges exist for the record.",
+          "usage_guidance": "Used by TypedRelationshipSection PWA component to display grouped relationship edges on detail pages."
+        },
+        "subtask_ids": {
+          "type": "array",
+          "definition": "Task subtask_ids now included in feed task transform for PlanTree PWA component. Previously stripped.",
+          "usage_guidance": "Used by PlanTree component to render parent-child hierarchy up to 3 levels on task detail pages."
+        },
+        "context_node": {
+          "type": "object",
+          "definition": "Context node metadata scores (freshness_score, structural_importance, information_density, access_frequency) joined from context node DynamoDB items when ENABLE_CONTEXT_NODES feature flag is active.",
+          "usage_guidance": "Used by ContextNodeBadges PWA component. Returns null/absent when feature flag is off or no context node exists."
         }
       }
     },
