@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.5",
-  "updated_at": "2026-04-02T02:28:00Z",
+  "version": "2026-04-02.6",
+  "updated_at": "2026-04-02T03:16:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2343,6 +2343,81 @@
         ],
         "feature_flag": "ENABLE_TYPED_RELATIONSHIPS",
         "feature_flag_default": "false"
+      }
+    },
+    "context.node": {
+      "description": "Context Node primitive for mathematically-optimized context assembly (ENC-FTR-050). Each node wraps a tracker record or document with scored metadata enabling greedy knapsack context packing within a token budget. Created and updated by DynamoDB Streams consumer on tracker mutations. Gated behind ENABLE_CONTEXT_NODES feature flag.",
+      "fields": {
+        "token_cost": {
+          "type": "integer",
+          "constraints": {
+            "min": 0
+          },
+          "definition": "Computed token count for serializing this node into context. Measured via tiktoken cl100k_base encoding. Updated on source record mutation via DynamoDB Streams.",
+          "usage_guidance": "Read-only computed field. Do not set manually. Updated by context-node-sync Lambda on each source record change."
+        },
+        "information_density": {
+          "type": "decimal",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          },
+          "definition": "Ratio of unique information to total tokens, range [0.0, 1.0]. Higher values indicate less redundancy. Computed from field-level entropy analysis of the source record.",
+          "usage_guidance": "Read-only computed field. Useful for identifying high-signal vs boilerplate records. Records with density < 0.2 are candidates for exclusion."
+        },
+        "freshness_score": {
+          "type": "decimal",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          },
+          "definition": "Temporal relevance score, range [0.0, 1.0]. Computed via exponential decay: freshness = exp(-ln(2) * age_seconds / half_life_seconds). Age measured from source record updated_at. Half-life varies by record type.",
+          "usage_guidance": "Recomputed at assembly time (not persisted as-is since it changes continuously). staleness_half_life determines decay rate. Nodes with freshness < 0.1 are auto-flagged as stale."
+        },
+        "access_frequency": {
+          "type": "integer",
+          "constraints": {
+            "min": 0
+          },
+          "definition": "Number of times this node has been included in a context assembly. Incremented by get_compact_context when the knapsack packer selects this node.",
+          "usage_guidance": "Persisted counter. Used as a popularity signal in multi-signal scoring. Higher values indicate frequently-needed context."
+        },
+        "relevance_score": {
+          "type": "decimal",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          },
+          "definition": "Query-dependent relevance, range [0.0, 1.0]. Computed at assembly time via Reciprocal Rank Fusion (RRF) combining keyword match and semantic similarity. Not persisted — ephemeral per-query.",
+          "usage_guidance": "Computed at assembly time only. Not stored on the DynamoDB record. Feeds into the multi-signal scoring function as the w1-weighted primary signal."
+        },
+        "structural_importance": {
+          "type": "decimal",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          },
+          "definition": "Graph-derived importance, range [0.0, 1.0]. Computed via Personalized PageRank (PPR) seeded from the current task/issue, using typed edge weights from ENC-FTR-049 Relationship Edge primitive.",
+          "usage_guidance": "Computed via PPR against Neo4j graph index. Requires graph_index healthy. Falls back to 0.5 (neutral) when graph unavailable. Edge type weights: blocks=1.0, depends_on=0.8, implements=0.7, addresses=0.7, child_of=0.6, relates_to=0.3, belongs_to=0.1."
+        },
+        "staleness_half_life": {
+          "type": "integer",
+          "constraints": {
+            "min": 1
+          },
+          "definition": "Type-specific decay half-life in seconds for freshness computation. Defaults: task=604800 (7 days), issue=259200 (3 days), feature=2592000 (30 days), document=7776000 (90 days).",
+          "usage_guidance": "Set on node creation based on source record type. Can be overridden per-node for special cases (e.g., time-sensitive documents). Used in freshness decay formula."
+        },
+        "model_routing_hint": {
+          "type": "enum",
+          "enum": [
+            "haiku",
+            "sonnet",
+            "opus"
+          ],
+          "definition": "Suggested model tier for processing this node content. Derived from source record complexity (field count, history length) and priority. haiku=simple/reference, sonnet=standard, opus=complex/critical.",
+          "usage_guidance": "Advisory field for future MVC (Model-View-Controller) context routing. Currently informational only — does not affect assembly behavior. Populated by context-node-sync Lambda."
+        }
       }
     }
   }
