@@ -4075,7 +4075,65 @@ def _build_bedrock_dispatch_prompt(prompt: str, project_id: str) -> Tuple[str, D
     if section in base_prompt:
         return base_prompt, context
     merged = f"{base_prompt}\n\nBedrock agent policy context:\n{section}" if base_prompt else section
+
+    # PPR context enrichment for dispatches (ENC-TSK-966)
+    # Append component registry and code map context when project_id is available
+    if project_id:
+        try:
+            component_context = _build_dispatch_component_context(project_id)
+            if component_context:
+                merged = f"{merged}\n\nComponent context:\n{component_context}"
+                context["component_context_loaded"] = True
+        except Exception as exc:
+            logger.warning("[DISPATCH_CONTEXT] Component context assembly failed: %s", exc)
+            context["component_context_loaded"] = False
+
     return merged, context
+
+
+def _build_dispatch_component_context(project_id: str) -> str:
+    """Build component registry context for Bedrock dispatch prompts (ENC-TSK-966).
+
+    Fetches active components for the project and formats source paths
+    for inclusion in the agent's context. Token-budgeted to ~2000 chars.
+    """
+    try:
+        ddb = _get_ddb()
+        components_table = os.environ.get("COMPONENTS_TABLE", "component-registry")
+        resp = ddb.query(
+            TableName=components_table,
+            IndexName="project-name-index",
+            KeyConditionExpression="project_id = :pid",
+            FilterExpression="#st = :active",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":pid": {"S": project_id},
+                ":active": {"S": "active"},
+            },
+            Limit=20,
+        )
+        items = resp.get("Items", [])
+        if not items:
+            return ""
+
+        lines = [f"Project {project_id} components:"]
+        for item in items:
+            comp_id = (item.get("component_id") or {}).get("S", "")
+            category = (item.get("category") or {}).get("S", "")
+            source_paths = item.get("source_paths")
+            primary = ""
+            if source_paths and "M" in source_paths:
+                sp_map = source_paths["M"]
+                primary = (sp_map.get("primary") or {}).get("S", "")
+            line = f"  - {comp_id} ({category})"
+            if primary:
+                line += f": {primary}"
+            lines.append(line)
+
+        result = "\n".join(lines)
+        return result[:2000]
+    except Exception:
+        return ""
 
 
 def _decode_bedrock_chunk_text(raw: Any) -> str:
@@ -4232,6 +4290,15 @@ def _dispatch_bedrock_api(request: Dict[str, Any], prompt: Optional[str], dispat
         },
     )
 
+    # Record DISPATCHES typed edge (ENC-TSK-960)
+    _record_dispatch_edge(
+        request_id=str(request.get("request_id") or ""),
+        dispatch_id=dispatch_id,
+        provider="aws_bedrock_agent",
+        model_id=agent_id,
+        project_id=str(request.get("project_id") or ""),
+    )
+
     return {
         "dispatch_id": dispatch_id,
         "execution_id": execution_id,
@@ -4247,6 +4314,52 @@ def _dispatch_bedrock_api(request: Dict[str, Any], prompt: Optional[str], dispat
         "status": "succeeded",
         "provider_result": provider_result,
     }
+
+
+def _record_dispatch_edge(
+    request_id: str,
+    dispatch_id: str,
+    provider: str,
+    model_id: str,
+    project_id: str,
+) -> None:
+    """Record a DISPATCHES typed relationship edge (ENC-TSK-960).
+
+    Creates a governed relationship between the coordination request and the
+    dispatched work, using the ENC-FTR-049 typed edge infrastructure.
+    Best-effort — failures are logged but do not block dispatch.
+    """
+    if not request_id or not dispatch_id:
+        return
+    try:
+        ddb = _get_ddb()
+        now = _now_z()
+        edge_id = f"rel#{request_id}#dispatches#{dispatch_id}"
+        item = {
+            "project_id": {"S": project_id or "enceladus"},
+            "record_id": {"S": edge_id},
+            "record_type": {"S": "relationship"},
+            "relationship_type": {"S": "dispatches"},
+            "source_id": {"S": request_id},
+            "target_id": {"S": dispatch_id},
+            "properties": {"M": {
+                "provider": {"S": provider},
+                "model_id": {"S": model_id},
+                "weight": {"N": "1.0"},
+                "confidence": {"N": "1.0"},
+                "reason": {"S": "bedrock_dispatch"},
+            }},
+            "created_at": {"S": now},
+            "created_by": {"S": "coordination_api"},
+            "write_source": {"M": {
+                "channel": {"S": "coordination_api"},
+                "timestamp": {"S": now},
+            }},
+        }
+        ddb.put_item(TableName=TRACKER_TABLE, Item=item)
+        logger.info("[DISPATCH_EDGE] dispatches edge created: %s -> %s", request_id, dispatch_id)
+    except Exception as exc:
+        logger.warning("[DISPATCH_EDGE] Failed to record dispatches edge: %s", exc)
 
 
 def _dispatch_openai_codex_api(
@@ -6399,6 +6512,8 @@ def _normalize_callback_body(body: Dict[str, Any], provider: str) -> Dict[str, A
         return _normalize_codex_callback(body)
     elif provider == "aws_native":
         return _normalize_aws_native_callback(body)
+    elif provider == "aws_bedrock_agent":
+        return _normalize_bedrock_agent_callback(body)
     # Fallback: treat as already-normalized generic callback
     return body
 
@@ -6754,6 +6869,61 @@ def _normalize_aws_native_callback(body: Dict[str, Any]) -> Dict[str, Any]:
 
     normalized["feed_updates"] = detail.get("feed_updates") or body.get("feed_updates") or {}
 
+    return normalized
+
+
+def _normalize_bedrock_agent_callback(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize Bedrock agent callback with GitHub merge evidence (ENC-TSK-958).
+
+    Bedrock agent callbacks may include GitHub-specific evidence fields when
+    the agent performed code operations: commit_sha, pr_number, pr_url,
+    branch_name, and structured merge_evidence.
+    """
+    normalized: Dict[str, Any] = {
+        "provider": "aws_bedrock_agent",
+    }
+
+    # State normalization
+    raw_state = str(body.get("state") or body.get("status") or "").strip().lower()
+    if raw_state in ("succeeded", "completed", "success"):
+        normalized["state"] = "succeeded"
+    elif raw_state in ("failed", "error"):
+        normalized["state"] = "failed"
+    elif raw_state in ("cancelled", "canceled"):
+        normalized["state"] = "cancelled"
+    else:
+        normalized["state"] = raw_state if raw_state else "failed"
+
+    normalized["dispatch_id"] = str(body.get("dispatch_id") or "")
+    normalized["execution_id"] = str(
+        body.get("execution_id") or body.get("agent_session_id") or ""
+    )
+    normalized["summary"] = str(body.get("summary") or "")[:2000]
+
+    # GitHub evidence fields (ENC-TSK-958)
+    details: Dict[str, Any] = {}
+    for gh_field in ("commit_sha", "pr_number", "pr_url", "branch_name",
+                     "merge_commit_sha", "cai_id", "cci_id"):
+        val = body.get(gh_field)
+        if val is not None:
+            details[gh_field] = val
+
+    merge_evidence = body.get("merge_evidence")
+    if isinstance(merge_evidence, dict):
+        details["merge_evidence"] = merge_evidence
+
+    if body.get("details") and isinstance(body["details"], dict):
+        details.update(body["details"])
+    normalized["details"] = details
+
+    # Warn if code-producing dispatch lacks GitHub evidence
+    if normalized["state"] == "succeeded" and not details.get("commit_sha"):
+        logger.warning(
+            "[CALLBACK] Bedrock succeeded callback without commit_sha for dispatch=%s",
+            normalized["dispatch_id"],
+        )
+
+    normalized["feed_updates"] = body.get("feed_updates") or {}
     return normalized
 
 

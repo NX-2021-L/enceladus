@@ -43,6 +43,7 @@ KNOWN_CHANNELS = frozenset({
     "tracker_cli",
     "mutation_api",
     "feed_publisher",
+    "bedrock_agent_action",
 })
 # Record types to skip (metadata rows, not user-facing records)
 SKIP_RECORD_TYPES = frozenset({"reference"})
@@ -127,6 +128,21 @@ def _check_write_source(image: Dict[str, Any]) -> Optional[Dict[str, str]]:
             "type": "UNKNOWN_CHANNEL",
             "message": f"write_source channel '{channel}' is not a recognized write path",
         }
+
+    # Bedrock agent anomaly checks (ENC-TSK-964)
+    if channel == "bedrock_agent_action" and isinstance(write_source, dict):
+        agent_id = write_source.get("agent_id", "")
+        dispatch_id = write_source.get("dispatch_id", "")
+        if not agent_id:
+            return {
+                "type": "BEDROCK_MISSING_AGENT_ID",
+                "message": "bedrock_agent_action write missing agent_id — cannot trace provenance",
+            }
+        if not dispatch_id:
+            return {
+                "type": "BEDROCK_MISSING_DISPATCH_ID",
+                "message": "bedrock_agent_action write missing dispatch_id — cannot link to coordination request",
+            }
 
     return None
 
