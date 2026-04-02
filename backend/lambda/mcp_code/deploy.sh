@@ -97,6 +97,7 @@ ALLOWED_PREFIXES = (
     "SECRETS_REGION",
     "MCP_AUDIT_",
     "MCP_SERVER_",
+    "ENABLE_",
 )
 
 merged = {}
@@ -110,6 +111,8 @@ for env in [existing_env, source_env]:
 # Force code-mode settings
 merged["ENCELADUS_MCP_TRANSPORT"] = os.environ["MCP_TRANSPORT"]
 merged["ENCELADUS_MCP_INTERFACE_MODE"] = "code"
+# ENC-FTR-049: Typed relationship feature flag
+merged["ENABLE_TYPED_RELATIONSHIPS"] = "true"
 
 # Cognito OAuth vars
 cognito_pool = os.environ.get("COGNITO_USER_POOL_ID", "")
