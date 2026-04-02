@@ -86,6 +86,12 @@ export interface Task {
   category?: string | null
   intent?: string | null
   acceptance_criteria?: Array<string | { description: string; evidence?: string; evidence_acceptance?: boolean }>
+  // Plan tree fields (ENC-ISS-139 / ENC-TSK-A57)
+  subtask_ids?: string[]
+  transition_type?: string | null
+  // Extensions (ENC-TSK-A57)
+  typed_relationships?: TypedRelationshipEdge[]
+  context_node?: ContextNodeMeta
 }
 
 export interface Issue {
@@ -119,6 +125,9 @@ export interface Issue {
     observed_by?: string
     timestamp?: string
   }>
+  // Extensions (ENC-TSK-A57)
+  typed_relationships?: TypedRelationshipEdge[]
+  context_node?: ContextNodeMeta
 }
 
 export interface Feature {
@@ -152,6 +161,9 @@ export interface Feature {
     evidence: string
     evidence_acceptance: boolean
   }>
+  // Extensions (ENC-TSK-A57)
+  typed_relationships?: TypedRelationshipEdge[]
+  context_node?: ContextNodeMeta
 }
 
 export interface PillarScores {
@@ -192,6 +204,33 @@ export interface Lesson {
   updated_at: string | null
   last_update_note: string | null
   created_at: string | null
+}
+
+// --- Typed relationship edges (ENC-FTR-049 / ENC-ISS-137) ---
+
+export interface TypedRelationshipEdge {
+  relationship_type: string
+  target_id: string
+  weight: number
+  confidence: number
+  reason: string | null
+  created_at: string | null
+}
+
+// --- Context node metadata (ENC-FTR-050 / ENC-ISS-138) ---
+
+export interface ContextNodeMeta {
+  freshness_score: number
+  structural_importance: number
+  information_density: number
+  access_frequency: number
+}
+
+// Mixin for records that may have typed relationships and context nodes
+export interface RecordExtensions {
+  typed_relationships?: TypedRelationshipEdge[]
+  context_node?: ContextNodeMeta
+  subtask_ids?: string[]
 }
 
 export interface FeedEnvelope<T> {
