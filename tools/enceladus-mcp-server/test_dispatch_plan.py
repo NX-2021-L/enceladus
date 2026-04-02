@@ -406,6 +406,7 @@ def test_plan_assembly():
             "execution_mode": "claude_agent_sdk",
             "outcomes": ["outcome A", "outcome B"],
             "sequence_order": 0,
+            "target_task_ids": ["ENC-TSK-972"],
         },
     ]
 
@@ -427,11 +428,55 @@ def test_plan_assembly():
     assert plan["project_id"] == "devops"
     assert len(plan["dispatches"]) == 1
     assert plan["dispatches"][0]["provider"] == "claude_agent_sdk"
+    assert plan["dispatches"][0]["target_task_ids"] == ["ENC-TSK-972"]
     assert plan["dispatches"][0]["callback_config"]["endpoint"].endswith("/callback")
     assert plan["rollback_policy"]["on_partial_failure"] == "continue"
     assert plan["dispatches"][0].get("feed_subscription") is not None
 
     _pass(f"plan assembled: {plan['plan_id'][:8]}..., {len(plan['dispatches'])} dispatch(es)")
+
+
+def test_generate_dispatch_plan_preserves_target_task_ids():
+    _header("Plan Assembly Preserves Target Tasks")
+
+    original_load_request = dpg.load_coordination_request
+    original_load_project_metadata = dpg.load_project_metadata
+    original_load_deployment_state = dpg.load_deployment_state
+    original_query_active_dispatches = dpg.query_active_dispatches
+    original_compute_governance_hash = dpg.compute_governance_hash
+    original_test_connection_health = dpg.test_connection_health
+
+    try:
+        dpg.load_coordination_request = lambda _request_id: {
+            "request_id": "CRQ-TARGET-001",
+            "project_id": "enceladus",
+            "initiative_title": "Dispatch existing task directly",
+            "outcomes": ["Refactor coordination dispatch semantics"],
+            "constraints": {},
+            "related_record_ids": ["ENC-TSK-972", "ENC-ISS-128"],
+            "dispatch_target_task_ids": ["ENC-TSK-972"],
+            "requestor_session_id": "session-target-1",
+            "source_requests": ["CRQ-TARGET-001"],
+            "provider_session": {"preferred_provider": "openai_codex"},
+        }
+        dpg.load_project_metadata = lambda project_id: {"project_id": project_id}
+        dpg.load_deployment_state = lambda _project_id: "ACTIVE"
+        dpg.query_active_dispatches = lambda _project_id: []
+        dpg.compute_governance_hash = lambda: "e" * 64
+        dpg.test_connection_health = lambda: {"dynamodb": "ok", "s3": "ok", "api_gateway": "ok"}
+
+        plan = dpg.generate_dispatch_plan("CRQ-TARGET-001")
+    finally:
+        dpg.load_coordination_request = original_load_request
+        dpg.load_project_metadata = original_load_project_metadata
+        dpg.load_deployment_state = original_load_deployment_state
+        dpg.query_active_dispatches = original_query_active_dispatches
+        dpg.compute_governance_hash = original_compute_governance_hash
+        dpg.test_connection_health = original_test_connection_health
+
+    assert plan["dispatches"], "expected at least one dispatch"
+    assert plan["dispatches"][0]["target_task_ids"] == ["ENC-TSK-972"]
+    _pass("generate_dispatch_plan carries dispatch_target_task_ids into dispatch entries")
 
 
 # =================================================================

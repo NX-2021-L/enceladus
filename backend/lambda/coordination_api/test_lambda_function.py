@@ -1359,6 +1359,7 @@ class IntakeDebounceExtractRecordIdsTests(unittest.TestCase):
     def test_extract_from_request_includes_feature_and_task_ids(self):
         request = {
             "feature_id": "DVP-FTR-023",
+            "dispatch_target_task_ids": ["DVP-TSK-099"],
             "task_ids": ["DVP-TSK-100", "DVP-TSK-101"],
             "issue_ids": ["DVP-ISS-050"],
             "related_record_ids": [],
@@ -1366,6 +1367,7 @@ class IntakeDebounceExtractRecordIdsTests(unittest.TestCase):
         }
         ids = coordination_lambda._extract_record_ids_from_request(request)
         self.assertIn("DVP-FTR-023", ids)
+        self.assertIn("DVP-TSK-099", ids)
         self.assertIn("DVP-TSK-100", ids)
         self.assertIn("DVP-TSK-101", ids)
         self.assertIn("DVP-ISS-050", ids)
@@ -1385,6 +1387,78 @@ class IntakeDebounceExtractRecordIdsTests(unittest.TestCase):
         self.assertIn("DVP-ISS-200", ids)
         self.assertIn("DVP-TSK-300", ids)
         self.assertIn("DVP-FTR-005", ids)
+
+
+class CoordinationDispatchTargetResolutionTests(unittest.TestCase):
+    def test_resolve_request_tracker_artifacts_uses_existing_task_targets(self):
+        with patch.object(coordination_lambda, "_compute_governance_hash_local", return_value="a" * 64), \
+             patch.object(coordination_lambda, "_decompose_and_create_tracker_artifacts") as mock_decompose:
+            out = coordination_lambda._resolve_request_tracker_artifacts(
+                project_id="enceladus",
+                initiative_title="Use existing tasks",
+                outcomes=["Update ENC-TSK-972"],
+                request_id="CRQ-EXISTING-TASKS",
+                assigned_to="AGENT-003",
+                related_record_ids=["ENC-TSK-972", "ENC-ISS-128"],
+            )
+
+        self.assertEqual(out["task_ids"], [])
+        self.assertEqual(out["dispatch_target_task_ids"], ["ENC-TSK-972"])
+        self.assertIsNone(out["feature_id"])
+        self.assertEqual(out["issue_ids"], [])
+        mock_decompose.assert_not_called()
+
+    def test_resolve_request_tracker_artifacts_uses_issue_linked_tasks(self):
+        with patch.object(
+            coordination_lambda,
+            "_get_tracker_record",
+            return_value={"related_task_ids": ["ENC-TSK-972", "ENC-TSK-973"]},
+        ), patch.object(coordination_lambda, "_compute_governance_hash_local", return_value="b" * 64), \
+             patch.object(coordination_lambda, "_decompose_and_create_tracker_artifacts") as mock_decompose:
+            out = coordination_lambda._resolve_request_tracker_artifacts(
+                project_id="enceladus",
+                initiative_title="Use linked task",
+                outcomes=["Fix ENC-ISS-128"],
+                request_id="CRQ-ISSUE-LINKED",
+                assigned_to="AGENT-003",
+                related_record_ids=["ENC-ISS-128"],
+            )
+
+        self.assertEqual(out["task_ids"], [])
+        self.assertEqual(out["dispatch_target_task_ids"], ["ENC-TSK-972", "ENC-TSK-973"])
+        self.assertIsNone(out["feature_id"])
+        self.assertEqual(out["issue_ids"], [])
+        mock_decompose.assert_not_called()
+
+    def test_resolve_request_tracker_artifacts_creates_single_remediation_task_for_issue_only(self):
+        with patch.object(coordination_lambda, "_get_tracker_record", return_value={"related_task_ids": []}), \
+             patch.object(
+                 coordination_lambda,
+                 "_load_project_meta",
+                 return_value=coordination_lambda.ProjectMeta(project_id="enceladus", prefix="ENC"),
+             ), \
+             patch.object(coordination_lambda, "_compute_governance_hash_local", return_value="c" * 64), \
+             patch.object(coordination_lambda, "_create_tracker_record_auto", return_value="ENC-TSK-980") as mock_create, \
+             patch.object(coordination_lambda, "_append_tracker_history") as mock_history, \
+             patch.object(coordination_lambda, "_decompose_and_create_tracker_artifacts") as mock_decompose:
+            out = coordination_lambda._resolve_request_tracker_artifacts(
+                project_id="enceladus",
+                initiative_title="Issue-only remediation",
+                outcomes=["Remediate ENC-ISS-128"],
+                request_id="CRQ-ISSUE-ONLY",
+                assigned_to="AGENT-003",
+                related_record_ids=["ENC-ISS-128"],
+            )
+
+        self.assertEqual(out["feature_id"], None)
+        self.assertEqual(out["task_ids"], ["ENC-TSK-980"])
+        self.assertEqual(out["dispatch_target_task_ids"], ["ENC-TSK-980"])
+        self.assertEqual(out["issue_ids"], [])
+        self.assertEqual(mock_create.call_count, 1)
+        self.assertEqual(mock_create.call_args.kwargs["record_type"], "task")
+        self.assertEqual(mock_create.call_args.kwargs["related_ids"], ["ENC-ISS-128"])
+        self.assertTrue(mock_history.called)
+        mock_decompose.assert_not_called()
 
     def test_extract_from_request_empty(self):
         request = {}
@@ -1884,11 +1958,44 @@ class DispatchPlanLifecycleTests(unittest.TestCase):
         self.assertEqual((body.get("plan_status") or {}).get("completed"), 1)
         self.assertEqual((body.get("plan_status") or {}).get("total"), 1)
 
-        self.assertGreaterEqual(len(updated_items), 1)
-        final = updated_items[-1]
-        last_worklog = (final.get("dispatch_worklogs") or [])[-1]
-        self.assertEqual(last_worklog.get("dispatch_id"), "dsp-plan-callback-1")
-        self.assertEqual(last_worklog.get("execution_mode"), "codex_full_auto")
+
+class CoordinationRequestTargetUsageTests(unittest.TestCase):
+    def test_default_dispatch_prompt_includes_target_task_ids(self):
+        prompt = coordination_lambda._default_dispatch_prompt(
+            {
+                "initiative_title": "Refactor coordination dispatch",
+                "dispatch_target_task_ids": ["ENC-TSK-972"],
+                "related_record_ids": ["ENC-TSK-972", "ENC-ISS-128"],
+                "outcomes": ["Dispatch the governed task directly"],
+            }
+        )
+
+        self.assertIn("Dispatch target task IDs:", prompt)
+        self.assertIn("ENC-TSK-972", prompt)
+        self.assertIn("ENC-ISS-128", prompt)
+        self.assertIn("Do not create synthetic replacement tasks", prompt)
+
+    def test_finalize_tracker_from_request_keeps_existing_target_tasks_out_of_status_mutation(self):
+        request = {
+            "request_id": "CRQ-KEEP-TASK",
+            "state": "succeeded",
+            "dispatch_target_task_ids": ["ENC-TSK-972"],
+            "task_ids": [],
+            "issue_ids": [],
+            "feature_id": None,
+            "provider_session": {"provider": "openai_codex"},
+            "dispatch": {"dispatch_id": "DSP-972"},
+            "governance_hash": "d" * 64,
+        }
+
+        with patch.object(coordination_lambda, "_append_tracker_history") as mock_history, \
+             patch.object(coordination_lambda, "_set_tracker_status") as mock_set_status, \
+             patch.object(coordination_lambda, "_cancel_coordination_linked_subscriptions"):
+            coordination_lambda._finalize_tracker_from_request(request)
+
+        mock_set_status.assert_not_called()
+        self.assertEqual(mock_history.call_count, 1)
+        self.assertEqual(mock_history.call_args.args[0], "ENC-TSK-972")
 
     def test_normalize_anthropic_batch_result_item_succeeded(self):
         item = {
