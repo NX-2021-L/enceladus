@@ -382,7 +382,7 @@ _VALID_TERMINAL_STATES = {"succeeded", "failed", "cancelled", "dead_letter"}
 _VALID_PROVIDERS = {"claude_agent_sdk", "openai_codex", "aws_native", "aws_bedrock_agent"}
 _CLAUDE_PERMISSION_MODES = {"plan", "acceptEdits", "default"}
 _ENCELADUS_INTERFACE_MODES = {"raw", "code"}
-_ENCELADUS_DEFAULT_INTERFACE_MODE = "raw"
+_ENCELADUS_DEFAULT_INTERFACE_MODE = "code"
 _ENCELADUS_CODE_MODE_TOOLS = {
     "search",
     "coordination",
