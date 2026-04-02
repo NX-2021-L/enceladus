@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-26.1",
-  "updated_at": "2026-03-27T00:20:00Z",
+  "version": "2026-04-02.1",
+  "updated_at": "2026-04-02T01:30:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2081,6 +2081,225 @@
         "devops-graph-query-api"
       ],
       "usage_guidance": "Use via search(action='tracker.graphsearch', arguments={search_type, project_id, ...}). All record_id values use bare tracker ID format (ENC-TSK-890, not task#ENC-TSK-890). Graph is a read-only derived index; DynamoDB remains source of truth. When graph is unavailable (AuraDB paused/down), returns HTTP 503 GRAPH_UNAVAILABLE with fallback_hint to use tracker.list. Depth guard rejects depth > 5 with HTTP 400."
+    },
+    "tracker.relationship": {
+      "description": "First-class governed typed relationship edge between tracker records (ENC-FTR-049). Stored in devops-project-tracker with rel# SK prefix. Each relationship creates an atomic forward+inverse pair. DynamoDB is system of record; Neo4j receives MERGE projections via DynamoDB Streams.",
+      "fields": {
+        "relationship_type": {
+          "type": "enum",
+          "enum": [
+            "blocks",
+            "blocked-by",
+            "duplicates",
+            "duplicated-by",
+            "relates-to",
+            "parent-of",
+            "child-of",
+            "depends-on",
+            "depended-on-by",
+            "clones",
+            "cloned-by",
+            "affects",
+            "affected-by",
+            "tests",
+            "tested-by",
+            "consumes-from",
+            "produces-for"
+          ],
+          "usage_guidance": "9 canonical types with inverse pairs. 'relates-to' is self-inverse (symmetric). All others are asymmetric with distinct inverse types."
+        },
+        "source_id": {
+          "type": "string",
+          "constraints": {
+            "format": "tracker_id",
+            "required": true
+          },
+          "usage_guidance": "Bare tracker ID (e.g., ENC-TSK-890). Must exist in the same project."
+        },
+        "target_id": {
+          "type": "string",
+          "constraints": {
+            "format": "tracker_id",
+            "required": true
+          },
+          "usage_guidance": "Bare tracker ID (e.g., ENC-ISS-042). Must exist in the same project. Cannot equal source_id (irreflexive)."
+        },
+        "weight": {
+          "type": "number",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0,
+            "default": 1.0
+          },
+          "usage_guidance": "Edge importance weight. 1.0 = full weight, 0.0 = minimal. Used by graph traversal for priority ordering and context assembly scoring."
+        },
+        "confidence": {
+          "type": "number",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0,
+            "default": 1.0
+          },
+          "usage_guidance": "Confidence that this relationship is correct. Agent-created edges may start at 0.8; human-confirmed edges at 1.0."
+        },
+        "reason": {
+          "type": "string",
+          "constraints": {
+            "required": true,
+            "min_length": 1
+          },
+          "usage_guidance": "Human-readable explanation of why this relationship exists. Required on creation."
+        },
+        "provenance": {
+          "type": "enum",
+          "enum": [
+            "agent",
+            "human",
+            "system",
+            "migration"
+          ],
+          "usage_guidance": "Who/what created this relationship. 'agent' for AI-created, 'human' for user-created, 'system' for auto-generated, 'migration' for bulk imports."
+        },
+        "is_inverse": {
+          "type": "boolean",
+          "usage_guidance": "True for the auto-maintained inverse edge. False for the canonical forward edge. Inverse edges are filtered out of list results by default."
+        },
+        "canonical_edge_id": {
+          "type": "string",
+          "usage_guidance": "The SK of the canonical (forward) edge. For forward edges, equals own SK. For inverse edges, points to the forward edge for traceability."
+        }
+      },
+      "owl_characteristics": {
+        "blocks": {
+          "asymmetric": true,
+          "irreflexive": true,
+          "transitive": false
+        },
+        "duplicates": {
+          "asymmetric": true,
+          "irreflexive": true,
+          "transitive": false
+        },
+        "relates-to": {
+          "symmetric": true,
+          "irreflexive": true,
+          "transitive": false
+        },
+        "parent-of": {
+          "asymmetric": true,
+          "irreflexive": true,
+          "transitive": true
+        },
+        "depends-on": {
+          "asymmetric": true,
+          "irreflexive": true,
+          "transitive": true
+        },
+        "clones": {
+          "asymmetric": true,
+          "irreflexive": true,
+          "transitive": false
+        },
+        "affects": {
+          "asymmetric": true,
+          "irreflexive": true,
+          "transitive": false
+        },
+        "tests": {
+          "asymmetric": true,
+          "irreflexive": true,
+          "transitive": false
+        },
+        "consumes-from": {
+          "asymmetric": true,
+          "irreflexive": true,
+          "transitive": false
+        }
+      },
+      "inverse_pairs": {
+        "blocks": "blocked-by",
+        "duplicates": "duplicated-by",
+        "relates-to": "relates-to",
+        "parent-of": "child-of",
+        "depends-on": "depended-on-by",
+        "clones": "cloned-by",
+        "affects": "affected-by",
+        "tests": "tested-by",
+        "consumes-from": "produces-for"
+      },
+      "domain_range_constraints": {
+        "blocks": {
+          "source_types": [
+            "task",
+            "issue"
+          ],
+          "target_types": [
+            "task",
+            "issue"
+          ]
+        },
+        "depends-on": {
+          "source_types": [
+            "task",
+            "issue"
+          ],
+          "target_types": [
+            "task",
+            "issue",
+            "feature"
+          ]
+        },
+        "affects": {
+          "source_types": [
+            "issue"
+          ],
+          "target_types": [
+            "task",
+            "feature"
+          ]
+        },
+        "tests": {
+          "source_types": [
+            "task"
+          ],
+          "target_types": [
+            "feature",
+            "issue"
+          ]
+        },
+        "duplicates": {
+          "source_types": null,
+          "target_types": null
+        },
+        "relates-to": {
+          "source_types": null,
+          "target_types": null
+        },
+        "parent-of": {
+          "source_types": null,
+          "target_types": null
+        },
+        "clones": {
+          "source_types": null,
+          "target_types": null
+        },
+        "consumes-from": {
+          "source_types": null,
+          "target_types": null
+        }
+      },
+      "dynamodb_key_schema": {
+        "pk": "project_id",
+        "sk_pattern": "rel#{source_id}#{relationship_type}#{target_id}",
+        "inverse_sk_pattern": "rel#{target_id}#{inverse_type}#{source_id}",
+        "table": "devops-project-tracker"
+      },
+      "covered_lambdas": [
+        "devops-tracker-mutation-api",
+        "devops-graph-sync",
+        "devops-graph-query-api",
+        "enceladus-mcp-code"
+      ]
     }
   }
 }
