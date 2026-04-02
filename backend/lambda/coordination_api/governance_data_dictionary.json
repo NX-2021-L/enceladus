@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.20",
-  "updated_at": "2026-04-02T17:58:00Z",
+  "version": "2026-04-02.21",
+  "updated_at": "2026-04-02T19:45:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2749,6 +2749,35 @@
             "LSN"
           ],
           "definition": "Type segment codes: TSK=task, ISS=issue, FTR=feature, LSN=lesson."
+        }
+      }
+    },
+    "mcp_server.interface_mode": {
+      "description": "MCP server interface mode controlling which tool surface is exposed to agents. Code mode (default) exposes 4 composite meta-tools plus connection_health, providing 75-85% token savings and stronger governance. Raw mode (30+ tools) is deprecated with zero legitimate consumers. Defense-in-depth: the coordination_api gateway additionally filters tools/list and rejects tools/call for non-code-mode tools.",
+      "fields": {
+        "ENCELADUS_MCP_INTERFACE_MODE": {
+          "type": "enum",
+          "enum": [
+            "code",
+            "raw"
+          ],
+          "definition": "Interface mode selector. Read by server.py at module import time. Set on all Lambda environments and host-v2 MCP profiles.",
+          "usage_guidance": "MUST be set to code. Raw is retained only for emergency rollback."
+        },
+        "code_mode_tools": {
+          "type": "set",
+          "enum": [
+            "search",
+            "execute",
+            "get_compact_context",
+            "coordination",
+            "connection_health"
+          ],
+          "definition": "The 5 tools exposed in code mode. Any tool not in this set is rejected by the gateway."
+        },
+        "default_mode": {
+          "type": "string",
+          "definition": "_ENCELADUS_DEFAULT_INTERFACE_MODE in config.py. Changed from raw to code (ENC-TSK-A38). Affects all dispatch paths."
         }
       }
     }
