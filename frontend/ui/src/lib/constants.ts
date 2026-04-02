@@ -26,15 +26,24 @@ export const STATUS_COLORS: Record<string, string> = {
   active: 'bg-emerald-500/20 text-emerald-400',
   archived: 'bg-slate-500/20 text-slate-400',
   'coding-complete': 'bg-cyan-500/20 text-cyan-400',
+  coding_complete: 'bg-cyan-500/20 text-cyan-400',
   committed: 'bg-indigo-500/20 text-indigo-400',
+  pr: 'bg-violet-500/20 text-violet-400',
   pushed: 'bg-violet-500/20 text-violet-400',
   'merged-main': 'bg-fuchsia-500/20 text-fuchsia-400',
+  merged_main: 'bg-fuchsia-500/20 text-fuchsia-400',
   'deploy-init': 'bg-amber-500/20 text-amber-400',
+  deploy_init: 'bg-amber-500/20 text-amber-400',
   'deploy-success': 'bg-emerald-500/20 text-emerald-400',
+  deploy_success: 'bg-emerald-500/20 text-emerald-400',
   'coding-updates': 'bg-orange-500/20 text-orange-400',
-  deployed: 'bg-emerald-500/20 text-emerald-400', // legacy compat — kept until TSK-704 migration
+  coding_updates: 'bg-orange-500/20 text-orange-400',
+  deployed: 'bg-emerald-500/20 text-emerald-400',
   production: 'bg-green-500/20 text-green-400',
   deprecated: 'bg-slate-500/20 text-slate-400',
+  // Lesson statuses
+  draft: 'bg-slate-500/20 text-slate-400',
+  graduated: 'bg-green-500/20 text-green-400',
 }
 
 export const PRIORITY_COLORS: Record<string, string> = {
@@ -66,15 +75,24 @@ export const STATUS_LABELS: Record<string, string> = {
   active: 'Active',
   archived: 'Archived',
   'coding-complete': 'Coding Complete',
+  coding_complete: 'Coding Complete',
   committed: 'Committed',
+  pr: 'PR',
   pushed: 'Pushed',
   'merged-main': 'Merged (Main)',
+  merged_main: 'Merged (Main)',
   'deploy-init': 'Deploy: Init',
+  deploy_init: 'Deploy: Init',
   'deploy-success': 'Deploy: Success',
+  deploy_success: 'Deploy: Success',
   'coding-updates': 'Coding Updates',
-  deployed: 'Deployed', // legacy compat
+  coding_updates: 'Coding Updates',
+  deployed: 'Deployed',
   production: 'Production',
   deprecated: 'Deprecated',
+  // Lesson statuses
+  draft: 'Draft',
+  graduated: 'Graduated',
 }
 
 export const TASK_STATUSES = ['open', 'in-progress', 'coding-complete', 'committed', 'pushed', 'merged-main', 'deploy-init', 'deploy-success', 'coding-updates', 'closed'] as const
@@ -107,18 +125,22 @@ export const PRIORITY_ORDER: Record<string, number> = {
   P3: 3,
 }
 
-export const FEED_RECORD_TYPES = ['task', 'issue', 'feature'] as const
+export const LESSON_STATUSES = ['draft', 'active', 'graduated', 'deprecated'] as const
+
+export const FEED_RECORD_TYPES = ['task', 'issue', 'feature', 'lesson'] as const
 
 export const RECORD_TYPE_LABELS: Record<string, string> = {
   task: 'Tasks',
   issue: 'Issues',
   feature: 'Features',
+  lesson: 'Lessons',
 }
 
 export const RECORD_TYPE_COLORS: Record<string, string> = {
   task: 'bg-blue-500/20 text-blue-400',
   issue: 'bg-amber-500/20 text-amber-400',
   feature: 'bg-emerald-500/20 text-emerald-400',
+  lesson: 'bg-purple-500/20 text-purple-400',
 }
 
 export const SORT_OPTIONS_FEED = [
