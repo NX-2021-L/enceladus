@@ -8187,12 +8187,12 @@ async def _tracker_list_lessons(args: dict) -> list[TextContent]:
     if not project_id:
         return _result_text({"error": "project_id is required"})
 
-    params: Dict[str, str] = {"record_type": "lesson"}
+    query_params: Dict[str, str] = {"type": "lesson"}
     for key in ("status", "category", "page_size", "cursor"):
         if args.get(key):
-            params[key] = str(args[key])
+            query_params[key] = str(args[key])
 
-    resp = _tracker_api_request("GET", f"/{project_id}/lesson", query=params)
+    resp = _tracker_api_request("GET", f"/{project_id}", query=query_params)
     return _result_text(resp)
 
 
