@@ -32,7 +32,7 @@ def test_since_delta_applies_lookback_and_returns_no_cache(monkeypatch):
 
     def _fake_query_incremental(since_iso: str):
         captured["since_iso"] = since_iso
-        return [], [], [], ["ENC-TSK-123"]
+        return [], [], [], [], ["ENC-TSK-123"]
 
     monkeypatch.setattr(feed_query, "_query_incremental", _fake_query_incremental)
 

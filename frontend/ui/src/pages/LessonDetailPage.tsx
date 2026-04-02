@@ -153,7 +153,7 @@ export default function LessonDetailPage() {
       {lesson.history && lesson.history.length > 0 && (
         <section>
           <h2 className="text-sm font-semibold text-slate-300 mb-2">History</h2>
-          <HistoryFeed history={lesson.history} />
+          <HistoryFeed entries={lesson.history} />
         </section>
       )}
     </div>
