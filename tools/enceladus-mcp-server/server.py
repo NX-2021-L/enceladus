@@ -222,6 +222,10 @@ ENABLE_TYPED_RELATIONSHIPS = os.environ.get(
 ENABLE_CONTEXT_NODES = os.environ.get(
     "ENABLE_CONTEXT_NODES", "false"
 ).lower() == "true"
+# ENC-FTR-052: Governed Lesson Primitive feature flag
+ENABLE_LESSON_PRIMITIVE = os.environ.get(
+    "ENABLE_LESSON_PRIMITIVE", "false"
+).lower() == "true"
 
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
@@ -6399,7 +6403,19 @@ if ENABLE_TYPED_RELATIONSHIPS:
         "tool": "tracker_list_relationships",
     }
 
-_RECORD_CONTEXT_MODES = {"record", "issue", "task", "feature"}
+# ENC-FTR-052: Conditionally register lesson actions behind feature flag
+if ENABLE_LESSON_PRIMITIVE:
+    _EXECUTE_ACTIONS["tracker.create_lesson"] = {
+        "tool": "tracker_create_lesson", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["tracker.extend_lesson"] = {
+        "tool": "tracker_extend_lesson", "requires_governance_hash": True,
+    }
+    _SEARCH_ACTIONS["tracker.list_lessons"] = {
+        "tool": "tracker_list_lessons",
+    }
+
+_RECORD_CONTEXT_MODES = {"record", "issue", "task", "feature", "lesson"}
 
 
 def _merge_meta_tool_arguments(args: Dict[str, Any], reserved: set[str]) -> Dict[str, Any]:
@@ -8108,6 +8124,79 @@ async def _validate_commit_complete(args: dict) -> list[TextContent]:
 
 
 # -------------------------------------------------------------------
+# ENC-FTR-052: Governed Lesson Primitive handlers
+# -------------------------------------------------------------------
+
+
+async def _tracker_create_lesson(args: dict) -> list[TextContent]:
+    """Create a new lesson record with evidence chain validation."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    project_id = args.get("project_id", "")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+
+    payload: Dict[str, Any] = {
+        "title": args.get("title", ""),
+        "observation": args.get("observation", ""),
+        "insight": args.get("insight", ""),
+        "evidence_chain": args.get("evidence_chain", []),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    for key in ("category", "provenance", "confidence", "analysis_reference",
+                "pillar_scores", "priority", "description", "related"):
+        if args.get(key) is not None:
+            payload[key] = args[key]
+
+    resp = _tracker_api_request("POST", f"/{project_id}/lesson", payload=payload)
+    return _result_text(resp)
+
+
+async def _tracker_extend_lesson(args: dict) -> list[TextContent]:
+    """Append an extension to a lesson (append-only contextualization)."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = args.get("record_id", "")
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    payload: Dict[str, Any] = {
+        "content": args.get("content", ""),
+        "author": args.get("author", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("evidence_ids"):
+        payload["evidence_ids"] = args["evidence_ids"]
+
+    resp = _tracker_api_request("POST", f"/{project_id}/lesson/{rid}/extend", payload=payload)
+    return _result_text(resp)
+
+
+async def _tracker_list_lessons(args: dict) -> list[TextContent]:
+    """List lesson records for a project with optional filters."""
+    project_id = args.get("project_id", "")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+
+    params: Dict[str, str] = {"record_type": "lesson"}
+    for key in ("status", "category", "page_size", "cursor"):
+        if args.get(key):
+            params[key] = str(args[key])
+
+    resp = _tracker_api_request("GET", f"/{project_id}/lesson", params=params)
+    return _result_text(resp)
+
+
+# -------------------------------------------------------------------
 # Handler dispatch map
 # -------------------------------------------------------------------
 
@@ -8173,6 +8262,10 @@ _TOOL_HANDLERS = {
     "advance_task_status": _advance_task_status,
     "append_worklog": _append_worklog,
     "validate_commit_complete": _validate_commit_complete,
+    # ENC-FTR-052: Governed Lesson Primitive
+    "tracker_create_lesson": _tracker_create_lesson,
+    "tracker_extend_lesson": _tracker_extend_lesson,
+    "tracker_list_lessons": _tracker_list_lessons,
 }
 
 
