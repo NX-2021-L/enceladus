@@ -8192,7 +8192,7 @@ async def _tracker_list_lessons(args: dict) -> list[TextContent]:
         if args.get(key):
             params[key] = str(args[key])
 
-    resp = _tracker_api_request("GET", f"/{project_id}/lesson", params=params)
+    resp = _tracker_api_request("GET", f"/{project_id}/lesson", query=params)
     return _result_text(resp)
 
 
