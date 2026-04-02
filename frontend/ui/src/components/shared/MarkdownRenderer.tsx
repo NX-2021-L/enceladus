@@ -4,14 +4,14 @@ import ReactMarkdown from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
 import { CodeBlock } from './CodeBlock'
 
-// Matches XXX-TSK-NNN, XXX-ISS-NNN, XXX-FTR-NNN (with optional child suffix), and DOC-XXXXXXXXXXXX
-const ID_PATTERN = /\b([A-Z]{2,4}-(?:TSK|ISS|FTR)-\d{3}(?:-\d[A-Z])?|DOC-[A-F0-9]{12})\b/g
+// Matches XXX-TSK-NNN, XXX-ISS-NNN, XXX-FTR-NNN, XXX-LSN-NNN (with alphanumeric sequences), and DOC-XXXXXXXXXXXX
+const ID_PATTERN = /\b([A-Z]{2,4}-(?:TSK|ISS|FTR|LSN)-(?:[A-Z]\d{2}|\d{3})(?:-\d[A-Z])?|DOC-[A-F0-9]{12})\b/g
 
 function idToPath(id: string): string {
   if (id.startsWith('DOC-')) return `/documents/${id}`
   const parts = id.split('-')
   const type = parts[1]
-  const typeMap: Record<string, string> = { TSK: 'tasks', ISS: 'issues', FTR: 'features' }
+  const typeMap: Record<string, string> = { TSK: 'tasks', ISS: 'issues', FTR: 'features', LSN: 'lessons' }
   const route = typeMap[type]
   return route ? `/${route}/${id}` : ''
 }

@@ -18,7 +18,7 @@
  */
 
 /** Current release version — update this on every deployment */
-export const APP_VERSION = '0.17.0'
+export const APP_VERSION = '1.0.0'
 
 /** Structured release history — newest first */
 export interface ReleaseNote {

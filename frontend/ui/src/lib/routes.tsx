@@ -34,6 +34,7 @@ const IssueDetailPage = lazy(() =>
 const FeatureDetailPage = lazy(() =>
   import('../pages/FeatureDetailPage').then((module) => ({ default: module.FeatureDetailPage })),
 )
+const LessonDetailPage = lazy(() => import('../pages/LessonDetailPage'))
 const DocumentsListPage = lazy(() =>
   import('../pages/DocumentsListPage').then((module) => ({ default: module.DocumentsListPage })),
 )
@@ -94,6 +95,7 @@ export const router = createBrowserRouter(
         { path: '/tasks/:taskId', element: withSuspense(<TaskDetailPage />) },
         { path: '/issues/:issueId', element: withSuspense(<IssueDetailPage />) },
         { path: '/features/:featureId', element: withSuspense(<FeatureDetailPage />) },
+        { path: '/lessons/:lessonId', element: withSuspense(<LessonDetailPage />) },
         // Redirects for old list routes (bookmarks, shared links)
         { path: '/tasks', element: <Navigate to="/feed" replace /> },
         { path: '/issues', element: <Navigate to="/feed" replace /> },

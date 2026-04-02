@@ -75,9 +75,14 @@ VALID_DELIVERY_MODES = {"poll", "push"}
 _CLOSED_STATUSES = {"closed", "complete", "completed"}
 
 # Status normalisation mappings
-_STATUS_TASK = {"open", "closed", "in_progress", "planned"}
-_STATUS_ISSUE = {"open", "closed"}
-_STATUS_FEATURE = {"planned", "in_progress", "completed", "closed"}
+_STATUS_TASK = {
+    "open", "closed", "in_progress", "planned",
+    "coding_complete", "committed", "pushed", "pr",
+    "merged_main", "deploy_init", "deploy_success",
+    "coding_updates", "deployed",
+}
+_STATUS_ISSUE = {"open", "in_progress", "closed"}
+_STATUS_FEATURE = {"planned", "in_progress", "completed", "closed", "production", "deprecated"}
 _VALID_PRIORITIES = {"P0", "P1", "P2", "P3"}
 _VALID_SEVERITIES = {"low", "medium", "high", "critical"}
 

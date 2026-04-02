@@ -388,7 +388,7 @@ TRACKER_PRIORITY_ENUM = ("P0", "P1", "P2", "P3")
 GSI_PROJECT_TYPE = "project-type-index"
 
 SERVER_NAME = "enceladus"
-SERVER_VERSION = "0.4.3"
+SERVER_VERSION = "1.0.0"
 HTTP_USER_AGENT = os.environ.get("ENCELADUS_HTTP_USER_AGENT", f"enceladus-mcp-server/{SERVER_VERSION}")
 
 MCP_TRANSPORT = os.environ.get("ENCELADUS_MCP_TRANSPORT", "stdio")
