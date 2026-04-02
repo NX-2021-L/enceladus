@@ -748,16 +748,18 @@ def _resolve_prefix(prefix: str) -> str:
 
 
 def _parse_record_id(record_id: str) -> Tuple[str, str, str]:
-    """Parse 'ENC-TSK-564' into (project_id, record_type, record_id).
+    """Parse 'ENC-TSK-564' or 'ENC-TSK-564-0A' into (project_id, record_type, record_id).
 
     Returns (project_id, record_type, normalized_record_id).
+    Accepts 3-segment (base) and 4-segment (sub-task) IDs (ENC-FTR-056).
     Raises ValueError if format is invalid or prefix unknown.
     """
     record_id = record_id.strip().upper()
     parts = record_id.split("-")
-    if len(parts) != 3:
-        raise ValueError(f"Invalid record ID format: {record_id!r}. Expected PREFIX-TYPE-NNN")
-    prefix, type_seg, _num = parts
+    if len(parts) < 3 or len(parts) > 4:
+        raise ValueError(f"Invalid record ID format: {record_id!r}. Expected PREFIX-TYPE-NNN or PREFIX-TYPE-NNN-SS")
+    prefix = parts[0]
+    type_seg = parts[1]
     project_id = _resolve_prefix(prefix)
     record_type = _ID_SEGMENT_TO_TYPE.get(type_seg)
     if not record_type:
@@ -766,12 +768,13 @@ def _parse_record_id(record_id: str) -> Tuple[str, str, str]:
 
 
 def _tracker_key(record_id: str) -> Dict[str, Dict]:
-    """Convert a record ID like 'DVP-TSK-245' into DynamoDB key dict."""
+    """Convert a record ID like 'DVP-TSK-245' or 'DVP-TSK-245-0A' into DynamoDB key dict."""
     record_id = record_id.strip().upper()
     parts = record_id.split("-")
-    if len(parts) != 3:
-        raise ValueError(f"Invalid record ID format: {record_id!r}. Expected PREFIX-TYPE-NNN")
-    prefix, type_seg, _num = parts
+    if len(parts) < 3 or len(parts) > 4:
+        raise ValueError(f"Invalid record ID format: {record_id!r}. Expected PREFIX-TYPE-NNN or PREFIX-TYPE-NNN-SS")
+    prefix = parts[0]
+    type_seg = parts[1]
     project_name = _resolve_prefix(prefix)
     record_type = _ID_SEGMENT_TO_TYPE.get(type_seg)
     if not record_type:
@@ -803,12 +806,94 @@ def _tracker_counter_key(project_id: str, record_type: str) -> Dict[str, Dict[st
     }
 
 
+_BASE36_CHARS_MCP = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _b36_to_str_mcp(v: int) -> str:
+    r = []
+    for _ in range(3):
+        r.append(_BASE36_CHARS_MCP[v % 36])
+        v //= 36
+    return "".join(reversed(r))
+
+def _str_to_b36_mcp(s: str) -> int:
+    result = 0
+    for ch in s:
+        idx = _BASE36_CHARS_MCP.find(ch)
+        if idx < 0:
+            raise ValueError(f"Invalid base-36 character {ch!r}")
+        result = result * 36 + idx
+    return result
+
+def _is_legacy_pattern_mcp(s: str) -> bool:
+    if s.isdigit():
+        return True
+    if len(s) == 3 and s[0].isalpha() and s[1:].isdigit():
+        num = int(s[1:])
+        if 1 <= num <= 99:
+            return True
+    return False
+
+_EXT_B36_TO_COUNTER_MCP: dict = {}
+_EXT_COUNTER_TO_B36_MCP: list = []
+
+def _init_ext_tables_mcp():
+    idx = 0
+    for v in range(46656):
+        s = _b36_to_str_mcp(v)
+        if not _is_legacy_pattern_mcp(s):
+            _EXT_COUNTER_TO_B36_MCP.append(v)
+            _EXT_B36_TO_COUNTER_MCP[v] = 3574 + idx
+            idx += 1
+
+_init_ext_tables_mcp()
+
+
+def _encode_base36(n: int) -> str:
+    """Encode a non-negative integer into a 3-char sequence (ENC-FTR-056)."""
+    if n < 0:
+        raise ValueError(f"Counter must be >= 0, got {n}")
+    if n > 46655:
+        raise ValueError(f"Base-36 capacity exhausted at counter {n}.")
+    if n <= 999:
+        return str(n).zfill(3)
+    offset = n - 1000
+    letter_index = offset // 99
+    number = (offset % 99) + 1
+    if letter_index <= 25:
+        return chr(65 + letter_index) + str(number).zfill(2)
+    ext_idx = n - 3574
+    return _b36_to_str_mcp(_EXT_COUNTER_TO_B36_MCP[ext_idx])
+
+
+def _decode_base36(s: str) -> int:
+    """Decode a sequence string back into an integer (ENC-FTR-056)."""
+    if not s:
+        raise ValueError("Empty sequence")
+    s = s.upper()
+    if s.isdigit():
+        return int(s)
+    if len(s) == 3 and s[0].isalpha() and s[1:].isdigit():
+        letter_index = ord(s[0]) - 65
+        number = int(s[1:])
+        if 0 <= letter_index <= 25 and 1 <= number <= 99:
+            return 1000 + (letter_index * 99) + (number - 1)
+    try:
+        b36_val = _str_to_b36_mcp(s)
+    except ValueError:
+        raise ValueError(f"Invalid sequence: {s!r}")
+    counter = _EXT_B36_TO_COUNTER_MCP.get(b36_val)
+    if counter is not None:
+        return counter
+    raise ValueError(f"Invalid sequence: {s!r}")
+
+
 def _record_numeric_suffix(record_id: str) -> Optional[int]:
     parts = str(record_id).strip().split("-")
     if len(parts) < 3:
         return None
     try:
-        return int(parts[-1])
+        return _decode_base36(parts[2])
     except ValueError:
         return None
 
@@ -875,7 +960,7 @@ def _next_tracker_record_id(ddb: Any, project_id: str, prefix: str, record_type:
     attrs = update_resp.get("Attributes", {})
     next_num_attr = attrs.get("next_num", {"N": str(seed_num + 1)})
     next_num = int(str(next_num_attr.get("N", str(seed_num + 1))))
-    return f"{prefix}-{type_suffix}-{next_num:03d}"
+    return f"{prefix}-{type_suffix}-{_encode_base36(next_num)}"
 
 
 def _is_conditional_check_failed(exc: Exception) -> bool:
@@ -5332,7 +5417,7 @@ async def _tracker_create(args: dict) -> list[TextContent]:
                 "success_metrics", "related", "dispatch_id",
                 "coordination", "coordination_request_id", "acceptance_criteria",
                 "user_story", "category", "intent", "evidence", "primary_task",
-                "provider"):
+                "provider", "is_child", "parent_task_id"):
         if args.get(key) is not None:
             payload[key] = args[key]
 

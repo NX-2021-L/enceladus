@@ -72,7 +72,7 @@ __all__ = [
 def _extract_record_ids_from_body(request_body: Dict[str, Any]) -> set:
     """Extract all tracker record IDs referenced anywhere in an incoming request body."""
     ids: set = set()
-    _ID_PATTERN = re.compile(r"\b[A-Z]{3}-(?:TSK|ISS|FTR|LSN)-(?:[A-Z]\d{2}|\d{3,4})(?:-[0-9][A-Z])?\b")
+    _ID_PATTERN = re.compile(r"\b[A-Z]{3}-(?:TSK|ISS|FTR|LSN)-[A-Z0-9]{3}(?:-[0-9][A-Z])?\b")
 
     for rid in request_body.get("related_record_ids") or []:
         if isinstance(rid, str) and rid.strip():
@@ -92,7 +92,7 @@ def _extract_record_ids_from_body(request_body: Dict[str, Any]) -> set:
 def _extract_record_ids_from_request(request: Dict[str, Any]) -> set:
     """Extract record IDs from a persisted coordination request item."""
     ids: set = set()
-    _ID_PATTERN = re.compile(r"\b[A-Z]{3}-(?:TSK|ISS|FTR|LSN)-(?:[A-Z]\d{2}|\d{3,4})(?:-[0-9][A-Z])?\b")
+    _ID_PATTERN = re.compile(r"\b[A-Z]{3}-(?:TSK|ISS|FTR|LSN)-[A-Z0-9]{3}(?:-[0-9][A-Z])?\b")
 
     for rid in request.get("related_record_ids") or []:
         if isinstance(rid, str) and rid.strip():

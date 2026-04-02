@@ -83,35 +83,104 @@ def _load_project_meta(project_id: str) -> ProjectMeta:
     return ProjectMeta(project_id=project_id, prefix=prefix)
 
 
-def _format_sequence(counter: int) -> str:
-    """Encode an integer counter into a 3-char record ID sequence (ENC-ISS-132)."""
-    if counter < 1:
-        raise ValueError(f"Counter must be >= 1, got {counter}")
-    if counter <= 999:
-        return str(counter).zfill(3)
-    offset = counter - 1000
+_BASE36_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _b36_to_str(v: int) -> str:
+    r = []
+    for _ in range(3):
+        r.append(_BASE36_CHARS[v % 36])
+        v //= 36
+    return "".join(reversed(r))
+
+def _str_to_b36(s: str) -> int:
+    result = 0
+    for ch in s:
+        idx = _BASE36_CHARS.find(ch)
+        if idx < 0:
+            raise ValueError(f"Invalid base-36 character {ch!r}")
+        result = result * 36 + idx
+    return result
+
+def _is_legacy_pattern(s: str) -> bool:
+    if s.isdigit():
+        return True
+    if len(s) == 3 and s[0].isalpha() and s[1:].isdigit():
+        num = int(s[1:])
+        if 1 <= num <= 99:
+            return True
+    return False
+
+_EXT_B36_TO_COUNTER: dict = {}
+_EXT_COUNTER_TO_B36: list = []
+
+def _init_ext_tables():
+    idx = 0
+    for v in range(46656):
+        s = _b36_to_str(v)
+        if not _is_legacy_pattern(s):
+            _EXT_COUNTER_TO_B36.append(v)
+            _EXT_B36_TO_COUNTER[v] = 3574 + idx
+            idx += 1
+
+_init_ext_tables()
+
+
+def _encode_base36(n: int) -> str:
+    """Encode a non-negative integer into a 3-char sequence (ENC-FTR-056)."""
+    if n < 0:
+        raise ValueError(f"Counter must be >= 0, got {n}")
+    if n > 46655:
+        raise ValueError(f"Base-36 capacity exhausted at counter {n}.")
+    if n <= 999:
+        return str(n).zfill(3)
+    offset = n - 1000
     letter_index = offset // 99
     number = (offset % 99) + 1
-    if letter_index > 25:
-        raise ValueError(f"Sequence capacity exhausted at counter {counter}")
-    return chr(65 + letter_index) + str(number).zfill(2)
+    if letter_index <= 25:
+        return chr(65 + letter_index) + str(number).zfill(2)
+    ext_idx = n - 3574
+    return _b36_to_str(_EXT_COUNTER_TO_B36[ext_idx])
 
 
-def _parse_sequence(seq: str) -> int:
-    """Decode a record ID sequence back into an integer counter (ENC-ISS-132)."""
-    if not seq:
+def _decode_base36(s: str) -> int:
+    """Decode a sequence string back into an integer (ENC-FTR-056)."""
+    if not s:
         raise ValueError("Empty sequence")
-    if seq.isdigit():
-        return int(seq)
-    if len(seq) == 3 and seq[0].isalpha() and seq[1:].isdigit():
-        letter_index = ord(seq[0].upper()) - 65
-        number = int(seq[1:])
+    s = s.upper()
+    if s.isdigit():
+        return int(s)
+    if len(s) == 3 and s[0].isalpha() and s[1:].isdigit():
+        letter_index = ord(s[0]) - 65
+        number = int(s[1:])
         if 0 <= letter_index <= 25 and 1 <= number <= 99:
             return 1000 + (letter_index * 99) + (number - 1)
     try:
-        return int(seq)
+        b36_val = _str_to_b36(s)
     except ValueError:
-        raise ValueError(f"Invalid sequence: {seq!r}")
+        raise ValueError(f"Invalid sequence: {s!r}")
+    counter = _EXT_B36_TO_COUNTER.get(b36_val)
+    if counter is not None:
+        return counter
+    raise ValueError(f"Invalid sequence: {s!r}")
+
+
+def _format_sequence(counter: int) -> str:
+    """Encode an integer counter into a 3-char record ID sequence (ENC-FTR-056).
+
+    Now uses base-36 encoding. Counter starts at 1.
+    """
+    if counter < 1:
+        raise ValueError(f"Counter must be >= 1, got {counter}")
+    return _encode_base36(counter)
+
+
+def _parse_sequence(seq: str) -> int:
+    """Decode a record ID sequence back into an integer counter (ENC-FTR-056).
+
+    Delegates to _decode_base36 which handles all legacy formats.
+    """
+    return _decode_base36(seq)
 
 
 def _next_tracker_sequence(project_id: str, record_type: str) -> int:
@@ -194,10 +263,10 @@ def _build_record_id(prefix: str, record_type: str, seq: int) -> str:
 
 def _key_for_record_id(record_id: str) -> Tuple[str, str, str]:
     parts = record_id.upper().split("-")
-    if len(parts) != 3:
+    if len(parts) < 3 or len(parts) > 4:
         raise ValueError(f"Invalid record ID: {record_id}")
 
-    prefix, segment, _ = parts
+    prefix, segment = parts[0], parts[1]
     record_type = _SEGMENT_TO_TYPE.get(segment)
     if not record_type:
         raise ValueError(f"Unsupported record ID segment '{segment}'")
