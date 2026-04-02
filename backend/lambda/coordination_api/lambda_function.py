@@ -1899,6 +1899,37 @@ def _tracker_record_snapshot(record_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _get_tracker_record(record_id: str) -> Optional[Dict[str, Any]]:
+    normalized_id = str(record_id or "").strip().upper()
+    parts = normalized_id.split("-")
+    if len(parts) < 3:
+        return None
+
+    prefix, segment = parts[0], parts[1]
+    segment_alias = "TSK" if segment == "TASK" else segment
+    record_type = _SEGMENT_TO_TYPE.get(segment_alias)
+    if not record_type:
+        return None
+
+    project_id = _resolve_project_id_for_prefix(prefix)
+    if not project_id:
+        return None
+
+    sk = f"{record_type}#{normalized_id}"
+    try:
+        resp = _get_ddb().get_item(
+            TableName=TRACKER_TABLE,
+            Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
+            ConsistentRead=True,
+        )
+    except (BotoCoreError, ClientError) as exc:
+        logger.warning("Failed reading tracker record for %s: %s", record_id, exc)
+        return None
+
+    item = resp.get("Item")
+    return _deserialize(item) if item else None
+
+
 def _collect_tracker_snapshots(record_ids: Sequence[str]) -> Dict[str, Optional[Dict[str, Any]]]:
     snapshots: Dict[str, Optional[Dict[str, Any]]] = {}
     seen: set[str] = set()
@@ -2439,12 +2470,40 @@ def _extract_record_ids_from_request(request: Dict[str, Any]) -> set:
     fid = request.get("feature_id")
     if fid:
         ids.add(fid.upper())
+    for tid in request.get("dispatch_target_task_ids") or []:
+        ids.add(str(tid).strip().upper())
     for tid in request.get("task_ids") or []:
         ids.add(tid.upper())
     for iid in request.get("issue_ids") or []:
         ids.add(iid.upper())
 
     return ids
+
+
+def _normalize_tracker_record_ids(record_ids: Sequence[Any]) -> List[str]:
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw in record_ids:
+        record_id = str(raw or "").strip().upper()
+        if not record_id or record_id in seen:
+            continue
+        seen.add(record_id)
+        normalized.append(record_id)
+    return normalized
+
+
+def _classify_request_record_ids(record_ids: Sequence[Any]) -> Dict[str, List[str]]:
+    classified: Dict[str, List[str]] = {"feature": [], "task": [], "issue": []}
+    for record_id in _normalize_tracker_record_ids(record_ids):
+        parts = record_id.split("-")
+        if len(parts) < 3:
+            continue
+        segment = parts[1]
+        segment = "TSK" if segment == "TASK" else segment
+        record_type = _SEGMENT_TO_TYPE.get(segment)
+        if record_type in classified:
+            classified[record_type].append(record_id)
+    return classified
 
 
 def _find_intake_candidates(project_id: str, now_epoch: int) -> List[Dict[str, Any]]:
@@ -3171,9 +3230,123 @@ def _decompose_and_create_tracker_artifacts(
         "feature_id": feature_id,
         "task_ids": task_ids,
         "issue_ids": issue_ids,
+        "dispatch_target_task_ids": list(task_ids),
         "acceptance_criteria": acceptance_criteria,
         "governance_hash": governance_hash,
     }
+
+
+def _resolve_issue_linked_task_ids(issue_ids: Sequence[str]) -> List[str]:
+    linked_task_ids: List[str] = []
+    seen: set[str] = set()
+    for issue_id in _normalize_tracker_record_ids(issue_ids):
+        issue = _get_tracker_record(issue_id) or {}
+        for raw_task_id in issue.get("related_task_ids") or []:
+            task_id = str(raw_task_id or "").strip().upper()
+            if not task_id or task_id in seen:
+                continue
+            if task_id.split("-")[1:2] not in (["TSK"], ["TASK"]):
+                continue
+            seen.add(task_id)
+            linked_task_ids.append(task_id)
+    return linked_task_ids
+
+
+def _resolve_request_tracker_artifacts(
+    project_id: str,
+    initiative_title: str,
+    outcomes: Sequence[str],
+    request_id: str,
+    assigned_to: str,
+    related_record_ids: Sequence[str],
+) -> Dict[str, Any]:
+    related_ids = _normalize_tracker_record_ids(related_record_ids)
+    classified = _classify_request_record_ids(related_ids)
+    direct_task_ids = list(classified.get("task") or [])
+    issue_ids = list(classified.get("issue") or [])
+
+    if direct_task_ids:
+        return {
+            "feature_id": None,
+            "task_ids": [],
+            "issue_ids": [],
+            "dispatch_target_task_ids": direct_task_ids,
+            "acceptance_criteria": [
+                f"Outcome {idx}: {outcome}" for idx, outcome in enumerate(outcomes, start=1)
+            ],
+            "governance_hash": _compute_governance_hash_local(),
+        }
+
+    linked_task_ids = _resolve_issue_linked_task_ids(issue_ids)
+    if linked_task_ids:
+        return {
+            "feature_id": None,
+            "task_ids": [],
+            "issue_ids": [],
+            "dispatch_target_task_ids": linked_task_ids,
+            "acceptance_criteria": [
+                f"Outcome {idx}: {outcome}" for idx, outcome in enumerate(outcomes, start=1)
+            ],
+            "governance_hash": _compute_governance_hash_local(),
+        }
+
+    if issue_ids:
+        meta = _load_project_meta(project_id)
+        governance_hash = _compute_governance_hash_local()
+        if not governance_hash:
+            raise RuntimeError("Missing governance hash")
+
+        acceptance_criteria = [
+            f"Outcome {idx}: {outcome}" for idx, outcome in enumerate(outcomes, start=1)
+        ]
+        invocation_meta = {
+            "governance_hash": governance_hash,
+            "coordination_request_id": request_id,
+            "dispatch_id": "",
+            "provider": "",
+            "timestamp": _now_z(),
+        }
+        meta_json = json.dumps(invocation_meta, sort_keys=True)
+        task_id = _create_tracker_record_auto(
+            project_id=project_id,
+            prefix=meta.prefix,
+            record_type="task",
+            title=f"Remediate request: {initiative_title[:90]}",
+            description=(
+                f"Created from coordination request {request_id} because related issues "
+                f"had no linked remediation task. Initiative: {initiative_title}. "
+                f"Invocation metadata: {meta_json}"
+            ),
+            priority="P1",
+            assigned_to=assigned_to,
+            related_ids=issue_ids,
+            acceptance_criteria=acceptance_criteria,
+            governance_hash=governance_hash,
+            coordination_request_id=request_id,
+        )
+        _append_tracker_history(
+            task_id,
+            "worklog",
+            f"MCP_INVOCATION: {meta_json}",
+            governance_hash=governance_hash,
+            coordination_request_id=request_id,
+        )
+        return {
+            "feature_id": None,
+            "task_ids": [task_id],
+            "issue_ids": [],
+            "dispatch_target_task_ids": [task_id],
+            "acceptance_criteria": acceptance_criteria,
+            "governance_hash": governance_hash,
+        }
+
+    return _decompose_and_create_tracker_artifacts(
+        project_id=project_id,
+        initiative_title=initiative_title,
+        outcomes=outcomes,
+        request_id=request_id,
+        assigned_to=assigned_to,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3766,6 +3939,42 @@ def _prepend_managed_session_bootstrap(prompt: str, project_id: str) -> str:
     return f"{bootstrap}\n\n{base_prompt}"
 
 
+def _request_dispatch_target_task_ids(request: Dict[str, Any]) -> List[str]:
+    target_ids = request.get("dispatch_target_task_ids")
+    if target_ids is None:
+        target_ids = request.get("task_ids") or []
+    return _normalize_tracker_record_ids(target_ids)
+
+
+def _default_dispatch_prompt(request: Dict[str, Any]) -> str:
+    initiative = str(request.get("initiative_title") or "").strip()
+    outcomes = [str(item).strip() for item in (request.get("outcomes") or []) if str(item).strip()]
+    target_task_ids = _request_dispatch_target_task_ids(request)
+    related_record_ids = [
+        record_id
+        for record_id in _normalize_tracker_record_ids(request.get("related_record_ids") or [])
+        if record_id not in set(target_task_ids)
+    ]
+
+    lines: List[str] = []
+    if initiative:
+        lines.append(f"Initiative: {initiative}")
+    if target_task_ids:
+        lines.append("Dispatch target task IDs:")
+        lines.extend(f"- {task_id}" for task_id in target_task_ids)
+        lines.append(
+            "Treat the listed governed tasks as the primary work units. "
+            "Do not create synthetic replacement tasks unless the governed task itself requires a follow-up."
+        )
+    if related_record_ids:
+        lines.append("Related record IDs:")
+        lines.extend(f"- {record_id}" for record_id in related_record_ids)
+    if outcomes:
+        lines.append("Outcomes:")
+        lines.extend(f"- {item}" for item in outcomes)
+    return "\n".join(lines).strip()
+
+
 def _read_mcp_resource_text(uri: str) -> str:
     uri = str(uri or "").strip()
     if not uri:
@@ -4163,17 +4372,7 @@ def _dispatch_bedrock_api(request: Dict[str, Any], prompt: Optional[str], dispat
     if not agent_id or not agent_alias_id:
         raise RuntimeError("Bedrock agent dispatch requires agent_id and agent_alias_id configuration")
 
-    resolved_prompt = str(prompt or "").strip()
-    if not resolved_prompt:
-        initiative = str(request.get("initiative_title") or "").strip()
-        outcomes = [str(item).strip() for item in (request.get("outcomes") or []) if str(item).strip()]
-        lines = []
-        if initiative:
-            lines.append(f"Initiative: {initiative}")
-        if outcomes:
-            lines.append("Outcomes:")
-            lines.extend(f"- {item}" for item in outcomes)
-        resolved_prompt = "\n".join(lines).strip()
+    resolved_prompt = str(prompt or "").strip() or _default_dispatch_prompt(request)
     if not resolved_prompt:
         raise RuntimeError("Missing prompt for bedrock_agent dispatch")
 
@@ -4371,17 +4570,7 @@ def _dispatch_openai_codex_api(
     provider_session = request.get("provider_session") or {}
     model = str(provider_session.get("model") or DEFAULT_OPENAI_CODEX_MODEL).strip() or DEFAULT_OPENAI_CODEX_MODEL
 
-    resolved_prompt = str(prompt or "").strip()
-    if not resolved_prompt:
-        initiative = str(request.get("initiative_title") or "").strip()
-        outcomes = [str(item).strip() for item in (request.get("outcomes") or []) if str(item).strip()]
-        lines = []
-        if initiative:
-            lines.append(f"Initiative: {initiative}")
-        if outcomes:
-            lines.append("Outcomes:")
-            lines.extend(f"- {item}" for item in outcomes)
-        resolved_prompt = "\n".join(lines).strip()
+    resolved_prompt = str(prompt or "").strip() or _default_dispatch_prompt(request)
     if not resolved_prompt:
         raise RuntimeError(f"Missing prompt for {execution_mode} dispatch")
     resolved_prompt, governance_context = _build_managed_session_prompt(
@@ -4850,17 +5039,7 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         str(tool).strip() for tool in allowed_raw_tools if str(tool).strip()
     ]
 
-    resolved_prompt = str(prompt or "").strip()
-    if not resolved_prompt:
-        initiative = str(request.get("initiative_title") or "").strip()
-        outcomes = [str(item).strip() for item in (request.get("outcomes") or []) if str(item).strip()]
-        lines = []
-        if initiative:
-            lines.append(f"Initiative: {initiative}")
-        if outcomes:
-            lines.append("Outcomes:")
-            lines.extend(f"- {item}" for item in outcomes)
-        resolved_prompt = "\n".join(lines).strip()
+    resolved_prompt = str(prompt or "").strip() or _default_dispatch_prompt(request)
     if not resolved_prompt:
         raise RuntimeError("Missing prompt for claude_agent_sdk dispatch")
     resolved_prompt, governance_context = _build_managed_session_prompt(
@@ -5287,6 +5466,7 @@ def _build_result_payload(
         items_modified = list(
             dict.fromkeys(
                 ([request.get("feature_id")] if request.get("feature_id") else [])
+                + list(request.get("dispatch_target_task_ids") or [])
                 + list(request.get("task_ids") or [])
                 + list(request.get("issue_ids") or [])
             )
@@ -5574,7 +5754,8 @@ def _build_ssm_commands(
     request_id = request["request_id"]
     provider_session = request.get("provider_session") or {}
 
-    managed_prompt = _prepend_managed_session_bootstrap(str(prompt or ""), project)
+    resolved_prompt = str(prompt or "").strip() or _default_dispatch_prompt(request)
+    managed_prompt = _prepend_managed_session_bootstrap(resolved_prompt, project)
     escaped_prompt = json.dumps(managed_prompt)
     escaped_thread_id = json.dumps(str(provider_session.get("thread_id") or provider_session.get("session_id") or ""))
     escaped_fork_thread_id = json.dumps(
@@ -6164,6 +6345,11 @@ def _finalize_tracker_from_request(request: Dict[str, Any]) -> None:
     state = request.get("state")
     rid = request["request_id"]
     task_ids = list(request.get("task_ids") or [])
+    dispatch_target_task_ids = [
+        task_id
+        for task_id in _request_dispatch_target_task_ids(request)
+        if task_id not in set(task_ids)
+    ]
     issue_ids = list(request.get("issue_ids") or [])
     feature_id = request.get("feature_id")
     provider = (
@@ -6200,6 +6386,16 @@ def _finalize_tracker_from_request(request: Dict[str, Any]) -> None:
                 dispatch_id=dispatch_id,
                 provider=provider,
             )
+        for tid in dispatch_target_task_ids:
+            _append_tracker_history(
+                tid,
+                "worklog",
+                f"Coordination request {rid} succeeded; existing governed task remained authoritative.",
+                governance_hash=governance_hash,
+                coordination_request_id=rid,
+                dispatch_id=dispatch_id,
+                provider=provider,
+            )
         for iid in issue_ids:
             _append_tracker_history(
                 iid,
@@ -6225,6 +6421,16 @@ def _finalize_tracker_from_request(request: Dict[str, Any]) -> None:
                 provider=provider,
             )
         for tid in task_ids:
+            _append_tracker_history(
+                tid,
+                "worklog",
+                f"Coordination request {rid} {state}: {detail}",
+                governance_hash=governance_hash,
+                coordination_request_id=rid,
+                dispatch_id=dispatch_id,
+                provider=provider,
+            )
+        for tid in dispatch_target_task_ids:
             _append_tracker_history(
                 tid,
                 "worklog",
@@ -8134,12 +8340,13 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
     assigned_to = str(body.get("assigned_to") or "AGENT-003")
 
     try:
-        decomposition = _decompose_and_create_tracker_artifacts(
+        decomposition = _resolve_request_tracker_artifacts(
             project_id=project_id,
             initiative_title=initiative_title,
             outcomes=outcomes,
             request_id=request_id,
             assigned_to=assigned_to,
+            related_record_ids=sorted(incoming_record_ids) if incoming_record_ids else [],
         )
     except Exception as exc:
         logger.exception("decomposition failed")
@@ -8186,6 +8393,7 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
         "feature_id": decomposition["feature_id"],
         "task_ids": decomposition["task_ids"],
         "issue_ids": decomposition["issue_ids"],
+        "dispatch_target_task_ids": decomposition.get("dispatch_target_task_ids") or [],
         "acceptance_criteria": decomposition["acceptance_criteria"],
         "governance_hash": decomposition.get("governance_hash"),
         "result": None,
@@ -8209,13 +8417,14 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
         logger.exception("put request failed")
         return _error(500, f"Failed persisting coordination request: {exc}")
 
-    _append_tracker_history(
-        decomposition["feature_id"],
-        "worklog",
-        f"Coordination request {request_id} intake_received (debounce expires {debounce_expires_iso})",
-        governance_hash=decomposition.get("governance_hash"),
-        coordination_request_id=request_id,
-    )
+    if decomposition.get("feature_id"):
+        _append_tracker_history(
+            decomposition["feature_id"],
+            "worklog",
+            f"Coordination request {request_id} intake_received (debounce expires {debounce_expires_iso})",
+            governance_hash=decomposition.get("governance_hash"),
+            coordination_request_id=request_id,
+        )
 
     # --- skip_debounce: auto-promote to queued and dispatch immediately ---
     if skip_debounce:

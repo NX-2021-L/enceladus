@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.8",
-  "updated_at": "2026-04-02T03:40:00Z",
+  "version": "2026-04-02.9",
+  "updated_at": "2026-04-02T04:41:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -834,6 +834,12 @@
           "item_type": "string",
           "definition": "Optional raw MCP tool allowlist used internally by code-mode action resolution.",
           "usage_guidance": "Code-mode sessions pass this boundary to the MCP server via COORDINATION_ALLOWED_RAW_TOOLS[_JSON]. Meta-tools may resolve only to raw tools listed here."
+        },
+        "dispatch_target_task_ids": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Existing or newly created governed task IDs that a coordination request should dispatch directly.",
+          "usage_guidance": "When present, coordination treats these task IDs as the authoritative work units for dispatch planning and prompt context. Existing governed tasks listed here must not be auto-created or auto-closed by coordination bookkeeping alone."
         }
       }
     },
