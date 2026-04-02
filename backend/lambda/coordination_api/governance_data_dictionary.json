@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-02.1",
-  "updated_at": "2026-04-02T01:30:00Z",
+  "version": "2026-04-02.2",
+  "updated_at": "2026-04-02T01:41:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1983,7 +1983,7 @@
       }
     },
     "tracker.graphsearch": {
-      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch').",
+      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges.",
       "fields": {
         "search_type": {
           "type": "enum",
@@ -2059,6 +2059,22 @@
             "default": "down",
             "applies_when": "search_type = traversal"
           }
+        },
+        "edge_types": {
+          "type": "string",
+          "usage_guidance": "Comma-separated list of Neo4j edge type labels for neighbors query. Filters traversal to only specified edge types. Example: 'BLOCKS,DEPENDS_ON'. When omitted, all edge types are traversed."
+        },
+        "edge_type": {
+          "type": "string",
+          "usage_guidance": "Single Neo4j edge type label for traversal query. Replaces the default CHILD_OF. Example: 'DEPENDS_ON' to walk dependency chains."
+        },
+        "min_weight": {
+          "type": "number",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          },
+          "usage_guidance": "Minimum weight threshold for edge filtering in neighbors and traversal queries. Legacy edges without a weight property default to 1.0 via COALESCE. Example: 0.5 filters out low-confidence edges."
         }
       },
       "node_labels": [
@@ -2080,7 +2096,8 @@
         "devops-graph-sync",
         "devops-graph-query-api"
       ],
-      "usage_guidance": "Use via search(action='tracker.graphsearch', arguments={search_type, project_id, ...}). All record_id values use bare tracker ID format (ENC-TSK-890, not task#ENC-TSK-890). Graph is a read-only derived index; DynamoDB remains source of truth. When graph is unavailable (AuraDB paused/down), returns HTTP 503 GRAPH_UNAVAILABLE with fallback_hint to use tracker.list. Depth guard rejects depth > 5 with HTTP 400."
+      "usage_guidance": "Use via search(action='tracker.graphsearch', arguments={search_type, project_id, ...}). All record_id values use bare tracker ID format (ENC-TSK-890, not task#ENC-TSK-890). Graph is a read-only derived index; DynamoDB remains source of truth. When graph is unavailable (AuraDB paused/down), returns HTTP 503 GRAPH_UNAVAILABLE with fallback_hint to use tracker.list. Depth guard rejects depth > 5 with HTTP 400.",
+      "field_count": 13
     },
     "tracker.relationship": {
       "description": "First-class governed typed relationship edge between tracker records (ENC-FTR-049). Stored in devops-project-tracker with rel# SK prefix. Each relationship creates an atomic forward+inverse pair. DynamoDB is system of record; Neo4j receives MERGE projections via DynamoDB Streams.",
