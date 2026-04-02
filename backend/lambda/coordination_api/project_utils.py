@@ -83,6 +83,37 @@ def _load_project_meta(project_id: str) -> ProjectMeta:
     return ProjectMeta(project_id=project_id, prefix=prefix)
 
 
+def _format_sequence(counter: int) -> str:
+    """Encode an integer counter into a 3-char record ID sequence (ENC-ISS-132)."""
+    if counter < 1:
+        raise ValueError(f"Counter must be >= 1, got {counter}")
+    if counter <= 999:
+        return str(counter).zfill(3)
+    offset = counter - 1000
+    letter_index = offset // 99
+    number = (offset % 99) + 1
+    if letter_index > 25:
+        raise ValueError(f"Sequence capacity exhausted at counter {counter}")
+    return chr(65 + letter_index) + str(number).zfill(2)
+
+
+def _parse_sequence(seq: str) -> int:
+    """Decode a record ID sequence back into an integer counter (ENC-ISS-132)."""
+    if not seq:
+        raise ValueError("Empty sequence")
+    if seq.isdigit():
+        return int(seq)
+    if len(seq) == 3 and seq[0].isalpha() and seq[1:].isdigit():
+        letter_index = ord(seq[0].upper()) - 65
+        number = int(seq[1:])
+        if 0 <= letter_index <= 25 and 1 <= number <= 99:
+            return 1000 + (letter_index * 99) + (number - 1)
+    try:
+        return int(seq)
+    except ValueError:
+        raise ValueError(f"Invalid sequence: {seq!r}")
+
+
 def _next_tracker_sequence(project_id: str, record_type: str) -> int:
     def _max_existing_tracker_sequence() -> int:
         max_num = 0
@@ -104,7 +135,7 @@ def _next_tracker_sequence(project_id: str, record_type: str) -> int:
                 if len(parts) < 3:
                     continue
                 try:
-                    n = int(parts[-1])
+                    n = _parse_sequence(parts[-1])
                 except ValueError:
                     continue
                 if n > max_num:
@@ -158,7 +189,7 @@ def _next_tracker_sequence(project_id: str, record_type: str) -> int:
 
 
 def _build_record_id(prefix: str, record_type: str, seq: int) -> str:
-    return f"{prefix}-{_TYPE_TO_SEGMENT[record_type]}-{seq:03d}"
+    return f"{prefix}-{_TYPE_TO_SEGMENT[record_type]}-{_format_sequence(seq)}"
 
 
 def _key_for_record_id(record_id: str) -> Tuple[str, str, str]:

@@ -850,6 +850,53 @@ def _classify_related_ids(related_ids: List[str]) -> Dict[str, List[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Sequence encoding (ENC-ISS-132: alphanumeric rollover after 999)
+# ---------------------------------------------------------------------------
+
+_SEQUENCE_CAPACITY = 3573  # 999 numeric + 2574 alphanumeric (A01-Z99)
+
+
+def _format_sequence(counter: int) -> str:
+    """Encode an integer counter into a 3-char record ID sequence.
+
+    1-999   -> '001'-'999'  (zero-padded numeric)
+    1000+   -> 'A01'-'Z99'  (alphanumeric rollover)
+    >=3574  -> CapacityError
+    """
+    if counter < 1:
+        raise ValueError(f"Counter must be >= 1, got {counter}")
+    if counter <= 999:
+        return str(counter).zfill(3)
+    offset = counter - 1000
+    letter_index = offset // 99
+    number = (offset % 99) + 1
+    if letter_index > 25:
+        raise ValueError(
+            f"Sequence capacity exhausted at counter {counter}. "
+            f"Maximum is {_SEQUENCE_CAPACITY} per record type per project."
+        )
+    return chr(65 + letter_index) + str(number).zfill(2)
+
+
+def _parse_sequence(seq: str) -> int:
+    """Decode a 3-char record ID sequence back into an integer counter."""
+    if not seq:
+        raise ValueError("Empty sequence")
+    if seq.isdigit():
+        return int(seq)
+    if len(seq) == 3 and seq[0].isalpha() and seq[1:].isdigit():
+        letter_index = ord(seq[0].upper()) - 65
+        number = int(seq[1:])
+        if 0 <= letter_index <= 25 and 1 <= number <= 99:
+            return 1000 + (letter_index * 99) + (number - 1)
+    # Legacy overflow IDs (e.g. "1000") — parse as plain int
+    try:
+        return int(seq)
+    except ValueError:
+        raise ValueError(f"Invalid sequence: {seq!r}")
+
+
+# ---------------------------------------------------------------------------
 # Counter management for record creation
 # ---------------------------------------------------------------------------
 
@@ -874,7 +921,7 @@ def _max_existing_number(project_id: str, record_type: str) -> int:
             parts = human_id.split("-")
             if len(parts) >= 3:
                 try:
-                    max_num = max(max_num, int(parts[-1]))
+                    max_num = max(max_num, _parse_sequence(parts[-1]))
                 except ValueError:
                     pass
         last_key = query_resp.get("LastEvaluatedKey")
@@ -923,7 +970,7 @@ def _next_record_id(project_id: str, prefix: str, record_type: str) -> str:
     )
     attrs = update_resp.get("Attributes", {})
     next_num = int(attrs.get("next_num", {"N": str(seed_num + 1)}).get("N", str(seed_num + 1)))
-    return f"{prefix}-{type_suffix}-{next_num:03d}"
+    return f"{prefix}-{type_suffix}-{_format_sequence(next_num)}"
 
 
 # ---------------------------------------------------------------------------
@@ -1521,6 +1568,11 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         for field_name, ids in _classify_related_ids(related_ids).items():
             if ids:
                 item[field_name] = {"L": [_ser_s(i) for i in ids]}
+
+    # ENC-ISS-132: Reject externally-provided record IDs — IDs are server-generated only
+    for forbidden_field in ("item_id", "record_id"):
+        if body.get(forbidden_field):
+            return _error(400, f"Field '{forbidden_field}' must not be provided — record IDs are generated server-side.")
 
     # Create with counter-based ID allocation
     try:
