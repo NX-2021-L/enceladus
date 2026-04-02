@@ -1,13 +1,14 @@
 import { Link } from 'react-router-dom'
 
-const ID_SPLIT = /\b([A-Z]+-(?:TSK|ISS|FTR)-\d{3,}|DOC-[A-F0-9]{12})\b/
-const ID_TEST = /^(?:[A-Z]+-(?:TSK|ISS|FTR)-\d{3,}|DOC-[A-F0-9]{12})$/
+const ID_SPLIT = /\b([A-Z]+-(?:TSK|ISS|FTR|LSN)-(?:[A-Z]\d{2}|\d{3,})|DOC-[A-F0-9]{12})\b/
+const ID_TEST = /^(?:[A-Z]+-(?:TSK|ISS|FTR|LSN)-(?:[A-Z]\d{2}|\d{3,})|DOC-[A-F0-9]{12})$/
 
 function routeForId(id: string): string {
   if (id.startsWith('DOC-')) return `/documents/${id}`
   if (id.includes('-TSK-')) return `/tasks/${id}`
   if (id.includes('-ISS-')) return `/issues/${id}`
   if (id.includes('-FTR-')) return `/features/${id}`
+  if (id.includes('-LSN-')) return `/lessons/${id}`
   return '#'
 }
 

@@ -1,6 +1,6 @@
 {
   "version": "2026-04-02.22",
-  "updated_at": "2026-04-02T21:00:00Z",
+  "updated_at": "2026-04-02T20:30:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2793,6 +2793,51 @@
         "default_mode": {
           "type": "string",
           "definition": "_ENCELADUS_DEFAULT_INTERFACE_MODE in config.py. Changed from raw to code (ENC-TSK-A38). Affects all dispatch paths."
+        }
+      }
+    },
+    "feed_query.status_normalization": {
+      "description": "Feed query Lambda status normalization whitelists controlling which lifecycle states are preserved in the live feed API response. Previously collapsed many task states to open. Now preserves all governed lifecycle states including coding_complete, committed, pushed, pr, merged_main, deploy_init, deploy_success, coding_updates. Feature states now include production and deprecated.",
+      "fields": {
+        "task_statuses": {
+          "type": "set",
+          "enum": [
+            "open",
+            "closed",
+            "in_progress",
+            "planned",
+            "coding_complete",
+            "committed",
+            "pushed",
+            "pr",
+            "merged_main",
+            "deploy_init",
+            "deploy_success",
+            "coding_updates",
+            "deployed"
+          ],
+          "definition": "Whitelist of valid task status values preserved by feed_query _normalize_status. Values not in this set default to open."
+        },
+        "feature_statuses": {
+          "type": "set",
+          "enum": [
+            "planned",
+            "in_progress",
+            "completed",
+            "closed",
+            "production",
+            "deprecated"
+          ],
+          "definition": "Whitelist of valid feature status values."
+        },
+        "issue_statuses": {
+          "type": "set",
+          "enum": [
+            "open",
+            "in_progress",
+            "closed"
+          ],
+          "definition": "Whitelist of valid issue status values."
         }
       }
     }
