@@ -315,6 +315,13 @@ def _ddb_int(item: Dict[str, Any], key: str, default: int = 0) -> int:
         return default
 
 
+def _ddb_float(item: Dict[str, Any], key: str, default: float = 0.0) -> float:
+    try:
+        return float(item.get(key, {}).get("N", str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
 def _ddb_bool(item: Dict[str, Any], key: str, default: bool = False) -> bool:
     """Extract a boolean from a DynamoDB item, handling both BOOL and string types."""
     attr = item.get(key, {})
@@ -899,10 +906,58 @@ def _transform_feature_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[s
     }
 
 
+_STATUS_LESSON = {"draft", "active", "graduated", "deprecated"}
+
+
+def _ddb_map(item: Dict[str, Any], key: str) -> Dict[str, Any]:
+    """Extract a DynamoDB Map attribute as a plain dict with N values as floats."""
+    attr = item.get(key, {})
+    m = attr.get("M", {})
+    result = {}
+    for k, v in m.items():
+        if "N" in v:
+            result[k] = float(v["N"])
+        elif "S" in v:
+            result[k] = v["S"]
+        elif "BOOL" in v:
+            result[k] = v["BOOL"]
+    return result
+
+
+def _transform_lesson_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str, Any]:
+    return {
+        "lesson_id": _ddb_str(item, "item_id"),
+        "project_id": project_id,
+        "title": _ddb_str(item, "title"),
+        "observation": _ddb_str(item, "observation"),
+        "insight": _ddb_str(item, "insight"),
+        "evidence_chain": _ddb_str_set(item, "evidence_chain"),
+        "provenance": _ddb_str(item, "provenance"),
+        "confidence": _ddb_float(item, "confidence"),
+        "pillar_scores": _ddb_map(item, "pillar_scores"),
+        "resonance_score": _ddb_float(item, "resonance_score"),
+        "pillar_composite": _ddb_float(item, "pillar_composite"),
+        "extensions": _ddb_list_of_maps(item, "extensions"),
+        "category": _ddb_str(item, "category") or None,
+        "status": _normalize_status(_ddb_str(item, "status"), _STATUS_LESSON, "active"),
+        "lesson_version": _ddb_int(item, "lesson_version", 1),
+        "analysis_reference": _ddb_str(item, "analysis_reference") or None,
+        "governance_proposal": _ddb_str(item, "governance_proposal") or None,
+        "related_task_ids": _ddb_str_set(item, "related_task_ids"),
+        "related_issue_ids": _ddb_str_set(item, "related_issue_ids"),
+        "related_feature_ids": _ddb_str_set(item, "related_feature_ids"),
+        "history": [],
+        "updated_at": _ddb_str(item, "updated_at") or None,
+        "last_update_note": _ddb_str(item, "last_update_note") or None,
+        "created_at": _ddb_str(item, "created_at") or None,
+    }
+
+
 _TRANSFORM = {
     "task": _transform_task_from_ddb,
     "issue": _transform_issue_from_ddb,
     "feature": _transform_feature_from_ddb,
+    "lesson": _transform_lesson_from_ddb,
 }
 
 
@@ -914,6 +969,7 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
     all_tasks: List[Dict[str, Any]] = []
     all_issues: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
+    all_lessons: List[Dict[str, Any]] = []
 
     for proj in projects:
         pid = proj["project_id"]
@@ -939,6 +995,8 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
                         all_issues.append(transformed)
                     elif record_type == "feature":
                         all_features.append(transformed)
+                    elif record_type == "lesson":
+                        all_lessons.append(transformed)
         except (BotoCoreError, ClientError) as exc:
             logger.error("DynamoDB query failed for project %s: %s", pid, exc)
             continue
@@ -946,8 +1004,9 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
     all_tasks.sort(key=lambda x: x.get("task_id", ""))
     all_issues.sort(key=lambda x: x.get("issue_id", ""))
     all_features.sort(key=lambda x: x.get("feature_id", ""))
+    all_lessons.sort(key=lambda x: x.get("lesson_id", ""))
 
-    return all_tasks, all_issues, all_features
+    return all_tasks, all_issues, all_features, all_lessons
 
 
 def _query_incremental(
@@ -972,7 +1031,7 @@ def _query_incremental(
     changed_keys: List[Dict[str, Dict[str, str]]] = []
     key_to_type: Dict[str, str] = {}  # "project_id#record_id" -> record_type
 
-    for rtype in ("task", "issue", "feature"):
+    for rtype in ("task", "issue", "feature", "lesson"):
         try:
             paginator = ddb.get_paginator("query")
             for page in paginator.paginate(
@@ -998,12 +1057,13 @@ def _query_incremental(
             logger.error("Incremental GSI query failed for %s: %s", rtype, exc)
 
     if not changed_keys:
-        return [], [], [], []
+        return [], [], [], [], []
 
     # Step 2: BatchGetItem for full records (max 100 per request).
     all_tasks: List[Dict[str, Any]] = []
     all_issues: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
+    all_lessons: List[Dict[str, Any]] = []
     closed_ids: List[str] = []
 
     for batch_start in range(0, len(changed_keys), 100):
@@ -1051,6 +1111,8 @@ def _query_incremental(
                     all_issues.append(transformed)
                 elif record_type == "feature":
                     all_features.append(transformed)
+                elif record_type == "lesson":
+                    all_lessons.append(transformed)
 
         except (BotoCoreError, ClientError) as exc:
             logger.error("BatchGetItem failed: %s", exc)
@@ -1058,8 +1120,9 @@ def _query_incremental(
     all_tasks.sort(key=lambda x: x.get("task_id", ""))
     all_issues.sort(key=lambda x: x.get("issue_id", ""))
     all_features.sort(key=lambda x: x.get("feature_id", ""))
+    all_lessons.sort(key=lambda x: x.get("lesson_id", ""))
 
-    return all_tasks, all_issues, all_features, closed_ids
+    return all_tasks, all_issues, all_features, all_lessons, closed_ids
 
 
 # ---------------------------------------------------------------------------
@@ -1191,7 +1254,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             parsed_since - dt.timedelta(seconds=INCREMENTAL_LOOKBACK_SECONDS)
         )
         try:
-            tasks, issues, features, closed_ids = _query_incremental(incremental_since)
+            tasks, issues, features, lessons, closed_ids = _query_incremental(incremental_since)
         except Exception as exc:
             logger.error("incremental feed query failed: %s", exc)
             return _error(500, "Failed to query feed delta. Please try again.")
@@ -1202,6 +1265,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "tasks": tasks,
             "issues": issues,
             "features": features,
+            "lessons": lessons,
             "closed_ids": closed_ids,
         }
         return {
@@ -1216,7 +1280,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     # --- Full query (existing behaviour, unchanged) ---
     try:
-        tasks, issues, features = _query_all_records()
+        tasks, issues, features, lessons = _query_all_records()
     except Exception as exc:
         logger.error("feed query failed: %s", exc)
         return _error(500, "Failed to query feed data. Please try again.")
@@ -1224,7 +1288,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     subscription_meta = {
         "subscription_id": None,
         "scope_applied": False,
-        "items_matched": len(tasks) + len(issues) + len(features),
+        "items_matched": len(tasks) + len(issues) + len(features) + len(lessons),
     }
 
     subscription_id = str(qs.get("subscription_id") or "").strip()
@@ -1264,6 +1328,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "tasks": tasks,
             "issues": issues,
             "features": features,
+            "lessons": lessons,
             "subscription": subscription_meta,
         },
     )
