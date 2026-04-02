@@ -844,6 +844,9 @@ def _transform_task_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
         "category": _ddb_str(item, "category") or None,
         "intent": _ddb_str(item, "intent") or None,
         "acceptance_criteria": _ddb_str_set(item, "acceptance_criteria"),
+        # Plan tree fields (ENC-ISS-139 / ENC-TSK-A57)
+        "subtask_ids": _ddb_str_set(item, "subtask_ids"),
+        "transition_type": _ddb_str(item, "transition_type") or None,
     }
     session_id = _ddb_str(item, "active_agent_session_id")
     if session_id:
@@ -1007,6 +1010,73 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
     all_lessons.sort(key=lambda x: x.get("lesson_id", ""))
 
     return all_tasks, all_issues, all_features, all_lessons
+
+
+# ---------------------------------------------------------------------------
+# Typed relationship edges (ENC-ISS-137 / ENC-FTR-049 / ENC-TSK-A57)
+# ---------------------------------------------------------------------------
+
+def _query_typed_relationships(project_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """Query typed relationship edges for given projects.
+
+    Returns a dict mapping source_record_id -> list of edge dicts.
+    Each edge: {relationship_type, target_id, weight, confidence, reason, created_at}
+    """
+    ddb = _get_ddb()
+    edges_by_source: Dict[str, List[Dict[str, Any]]] = {}
+
+    for pid in project_ids:
+        try:
+            paginator = ddb.get_paginator("query")
+            for page in paginator.paginate(
+                TableName=DYNAMODB_TABLE,
+                KeyConditionExpression="project_id = :pid AND begins_with(SK, :rel_prefix)",
+                ExpressionAttributeValues={
+                    ":pid": {"S": pid},
+                    ":rel_prefix": {"S": "rel#"},
+                },
+            ):
+                for raw_item in page.get("Items", []):
+                    sk = _ddb_str(raw_item, "SK")
+                    if not sk or not sk.startswith("rel#"):
+                        continue
+                    # SK format: rel#{source_id}#{relationship_type}#{target_id}
+                    parts = sk.split("#", 4)
+                    if len(parts) < 4:
+                        continue
+                    _, source_id, rel_type, target_id = parts[0], parts[1], parts[2], parts[3]
+
+                    status = _ddb_str(raw_item, "status")
+                    if status == "archived":
+                        continue
+
+                    edge = {
+                        "relationship_type": rel_type,
+                        "target_id": target_id,
+                        "weight": _ddb_float(raw_item, "weight"),
+                        "confidence": _ddb_float(raw_item, "confidence"),
+                        "reason": _ddb_str(raw_item, "reason") or None,
+                        "created_at": _ddb_str(raw_item, "created_at") or None,
+                    }
+                    edges_by_source.setdefault(source_id, []).append(edge)
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("Relationship query failed for project %s: %s", pid, exc)
+            continue
+
+    return edges_by_source
+
+
+def _attach_typed_relationships(
+    records: List[Dict[str, Any]],
+    id_key: str,
+    edges_by_source: Dict[str, List[Dict[str, Any]]],
+) -> None:
+    """Attach typed_relationships array to each record that has edges."""
+    for record in records:
+        record_id = record.get(id_key, "")
+        edges = edges_by_source.get(record_id, [])
+        if edges:
+            record["typed_relationships"] = edges
 
 
 def _query_incremental(
@@ -1284,6 +1354,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except Exception as exc:
         logger.error("feed query failed: %s", exc)
         return _error(500, "Failed to query feed data. Please try again.")
+
+    # --- Attach typed relationship edges (ENC-ISS-137 / ENC-TSK-A57) ---
+    try:
+        project_ids = list({r.get("project_id", "") for r in tasks + issues + features + lessons if r.get("project_id")})
+        if project_ids:
+            edges_by_source = _query_typed_relationships(project_ids)
+            _attach_typed_relationships(tasks, "task_id", edges_by_source)
+            _attach_typed_relationships(issues, "issue_id", edges_by_source)
+            _attach_typed_relationships(features, "feature_id", edges_by_source)
+            _attach_typed_relationships(lessons, "lesson_id", edges_by_source)
+    except Exception as exc:
+        logger.warning("Failed to attach typed relationships: %s", exc)
 
     subscription_meta = {
         "subscription_id": None,

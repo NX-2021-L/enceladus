@@ -19,6 +19,9 @@ import { RelatedItems } from '../components/shared/RelatedItems'
 import type { RecordInfo } from '../components/shared/RelatedItems'
 import { ParentRecord } from '../components/shared/ParentRecord'
 import { ChildRecords } from '../components/shared/ChildRecords'
+import { TypedRelationshipSection } from '../components/shared/TypedRelationshipSection'
+import { ContextNodeBadges } from '../components/shared/ContextNodeBadges'
+import { PlanTree } from '../components/shared/PlanTree'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
 import { CopyButton } from '../components/shared/CopyButton'
@@ -239,6 +242,26 @@ export function TaskDetailPage() {
         allIssues={allIssues}
         allFeatures={allFeatures}
       />
+
+      {/* Plan Tree (ENC-ISS-139 / ENC-TSK-A57) */}
+      {task.subtask_ids && task.subtask_ids.length > 0 && (
+        <PlanTree rootTask={task} allTasks={allTasks} />
+      )}
+
+      {/* Context Node Badges (ENC-ISS-138 / ENC-TSK-A57) */}
+      {task.context_node && (
+        <ContextNodeBadges contextNode={task.context_node} />
+      )}
+
+      {/* Typed Relationship Edges (ENC-ISS-137 / ENC-TSK-A57) */}
+      {task.typed_relationships && task.typed_relationships.length > 0 && (
+        <TypedRelationshipSection
+          edges={task.typed_relationships}
+          allTasks={allTasks}
+          allIssues={allIssues}
+          allFeatures={allFeatures}
+        />
+      )}
 
       {/* Intent (ENC-FTR-017 philosophy) */}
       {task.intent && (

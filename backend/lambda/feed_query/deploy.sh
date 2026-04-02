@@ -26,12 +26,10 @@ package_lambda() {
 
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
-  # Install PyJWT with crypto support
-  python3 -m pip install \
-    --quiet \
-    --upgrade \
-    "PyJWT[crypto]>=2.8.0" \
-    -t "${build_dir}" >/dev/null
+  # NOTE: PyJWT[crypto] is provided by the enceladus-shared Lambda layer.
+  # Do NOT pip-install it here — bundling a local copy shadows the layer
+  # and causes "JWT library not available" errors due to cryptography
+  # binary mismatches (ENC-ISS-134 / ENC-TSK-A57).
 
   (
     cd "${build_dir}"
