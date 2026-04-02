@@ -218,6 +218,10 @@ CHECKOUT_SERVICE_API_BASE = os.environ.get(
 ENABLE_TYPED_RELATIONSHIPS = os.environ.get(
     "ENABLE_TYPED_RELATIONSHIPS", "false"
 ).lower() == "true"
+# ENC-FTR-050: Context Node feature flag (default off — all new code paths gated)
+ENABLE_CONTEXT_NODES = os.environ.get(
+    "ENABLE_CONTEXT_NODES", "false"
+).lower() == "true"
 
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
@@ -6960,6 +6964,49 @@ async def _get_compact_context_meta(args: dict) -> list[TextContent]:
             message=f"Unknown context mode '{mode}'",
             mode=mode,
         )
+
+    # ENC-FTR-050: Context Node assembly manifest (flagged off by default)
+    if ENABLE_CONTEXT_NODES and args.get("token_budget"):
+        try:
+            import importlib
+            _scoring = importlib.import_module("context_node_scoring")
+            token_budget = int(args.get("token_budget", 2500))
+            record_id = str(args.get("record_id") or args.get("query") or "")
+            # Build candidate list from context sections
+            _candidates = []
+            for section_key, section_val in context.items():
+                if isinstance(section_val, dict):
+                    _est_tokens = len(json.dumps(section_val, default=str)) // 4
+                    _candidates.append({
+                        "record_id": section_key,
+                        "title": section_key,
+                        "token_cost": _est_tokens,
+                        "record_type": "task",
+                        "updated_at": section_val.get("updated_at", "2026-01-01T00:00:00Z"),
+                    })
+            if _candidates:
+                _inc, _exc, _manifest = _scoring.score_candidates(
+                    _candidates, query=record_id, seed_record_id=record_id,
+                    budget=token_budget, graph_healthy=False,
+                )
+                context["context_assembly_manifest"] = {
+                    "enabled": True,
+                    "token_budget": token_budget,
+                    **_manifest,
+                    "included_sections": [i.get("record_id", "") for i in _inc],
+                    "excluded_sections": [e.get("record_id", "") for e in _exc],
+                }
+                # AC9: Telemetry logging
+                logger.info(
+                    "[CONTEXT_NODE_TELEMETRY] mode=%s budget=%d used=%d efficiency=%.4f "
+                    "included=%d excluded=%d",
+                    mode, token_budget, _manifest.get("tokens_used", 0),
+                    _manifest.get("packing_efficiency", 0),
+                    _manifest.get("items_included", 0),
+                    _manifest.get("items_excluded", 0),
+                )
+        except Exception as _cn_err:
+            warnings.append(f"context_node_scoring unavailable: {_cn_err}")
 
     return _meta_tool_success(
         "get_compact_context",
