@@ -115,6 +115,8 @@ merged["ENCELADUS_MCP_INTERFACE_MODE"] = "code"
 merged["ENABLE_TYPED_RELATIONSHIPS"] = "true"
 # ENC-FTR-050: Context Node feature flag
 merged["ENABLE_CONTEXT_NODES"] = "true"
+# ENC-FTR-052: Governed Lesson Primitive feature flag
+merged["ENABLE_LESSON_PRIMITIVE"] = "true"
 
 # Cognito OAuth vars
 cognito_pool = os.environ.get("COGNITO_USER_POOL_ID", "")
