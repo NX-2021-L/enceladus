@@ -315,6 +315,8 @@ MCP_AUDIT_CALLER_IDENTITY = os.environ.get("MCP_AUDIT_CALLER_IDENTITY", "devops-
 COORDINATION_PUBLIC_BASE_URL = os.environ.get("COORDINATION_PUBLIC_BASE_URL", "https://jreese.net")
 COORDINATION_MCP_HTTP_PATH = os.environ.get("COORDINATION_MCP_HTTP_PATH", "/api/v1/coordination/mcp")
 ENABLE_MCP_GOVERNANCE_PROMPT = os.environ.get("ENABLE_MCP_GOVERNANCE_PROMPT", "true").lower() == "true"
+# ENC-FTR-052: Governed Lesson Primitive
+ENABLE_LESSON_PRIMITIVE = os.environ.get("ENABLE_LESSON_PRIMITIVE", "false").lower() == "true"
 GOVERNANCE_PROMPT_MAX_CHARS = int(os.environ.get("GOVERNANCE_PROMPT_MAX_CHARS", "120000"))
 GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK = (
     "governance://agents.md",
@@ -7235,6 +7237,185 @@ def _evaluate_plan_terminal_state(request: Dict[str, Any]) -> Optional[str]:
     else:
         # "continue" — if any succeeded, the plan succeeded with partial failures
         return "succeeded" if (plan_status["completed"] - plan_status["failed"]) > 0 else "failed"
+
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-052: Lesson Constitutional Scoring & Governance Handshake
+# ---------------------------------------------------------------------------
+
+# Pillar weights — human_protection has highest weight (non-negotiable)
+_LESSON_PILLAR_WEIGHTS = {
+    "efficiency": 0.25,
+    "human_protection": 0.30,
+    "intention": 0.20,
+    "alignment": 0.25,
+}
+
+# Vibe board anchor words with weights (the philosophical loss function)
+_VIBE_BOARD_ANCHORS = {
+    "convergence": 0.12, "will": 0.10, "flow": 0.10, "play": 0.08,
+    "surrender": 0.10, "force": 0.08, "balance": 0.12, "love": 0.10,
+    "resonance": 0.12, "telemetry": 0.08,
+}
+
+# Lesson status transition gates
+_LESSON_TRANSITION_GATES = {
+    "proposed": {"min_evidence_chain": 1},
+    "accepted": {"min_pillar_composite": 0.4, "min_resonance": 0.3, "min_all_pillars": 0.01, "min_human_protection": 0.3},
+    "active": {"min_pillar_composite": 0.6, "min_resonance": 0.5, "min_confidence": 0.6, "min_evidence_chain": 2},
+}
+
+# Self-governance gate — must ALL be true for a lesson to propose governance amendments
+_SELF_GOVERNANCE_GATE = {
+    "required_status": "active",
+    "min_confidence": 0.8,
+    "min_resonance": 0.7,
+    "min_human_protection": 0.5,
+    "min_evidence_chain": 3,
+}
+
+
+def _compute_lesson_pillar_composite(pillar_scores: Dict[str, float]) -> float:
+    """Compute weighted pillar composite from four-pillar scores (ENC-FTR-052 AC6).
+
+    Returns composite in [0.0, 1.0].
+    """
+    composite = 0.0
+    for pillar, weight in _LESSON_PILLAR_WEIGHTS.items():
+        score = max(0.0, min(1.0, float(pillar_scores.get(pillar, 0.0))))
+        composite += weight * score
+    return round(composite, 4)
+
+
+def _compute_resonance_score(pillar_scores: Dict[str, float], anchor_alignments: Optional[Dict[str, float]] = None) -> float:
+    """Compute vibe board resonance score with anti-pattern penalties (ENC-FTR-052 AC7).
+
+    If anchor_alignments is provided, it maps each vibe board word to a [0,1] alignment.
+    If not provided, derives from pillar scores as a reasonable approximation.
+
+    Returns resonance_score in [0.0, 1.0].
+    """
+    if anchor_alignments:
+        # Direct computation from provided alignments
+        raw = 0.0
+        for word, weight in _VIBE_BOARD_ANCHORS.items():
+            raw += weight * max(0.0, min(1.0, float(anchor_alignments.get(word, 0.0))))
+    else:
+        # Derive from pillar scores as approximation
+        eff = float(pillar_scores.get("efficiency", 0.0))
+        hp = float(pillar_scores.get("human_protection", 0.0))
+        intent = float(pillar_scores.get("intention", 0.0))
+        align = float(pillar_scores.get("alignment", 0.0))
+        # Map pillars to anchor word approximations
+        anchor_approx = {
+            "convergence": (eff + align) / 2,
+            "will": intent,
+            "flow": (eff + intent) / 2,
+            "play": align * 0.8,
+            "surrender": hp * 0.9,
+            "force": eff * 0.7,
+            "balance": (eff + hp + intent + align) / 4,
+            "love": hp,
+            "resonance": align,
+            "telemetry": (intent + eff) / 2,
+        }
+        raw = 0.0
+        for word, weight in _VIBE_BOARD_ANCHORS.items():
+            raw += weight * max(0.0, min(1.0, anchor_approx.get(word, 0.0)))
+        anchor_alignments = anchor_approx
+
+    # Anti-pattern penalties
+    force_val = float(anchor_alignments.get("force", 0.0))
+    surrender_val = float(anchor_alignments.get("surrender", 0.0))
+    intention_val = float(anchor_alignments.get("will", 0.0))
+    flow_val = float(anchor_alignments.get("flow", 0.0))
+    eff_val = float(anchor_alignments.get("convergence", 0.0))  # proxy
+    love_val = float(anchor_alignments.get("love", 0.0))
+    convergence_val = float(anchor_alignments.get("convergence", 0.0))
+    play_val = float(anchor_alignments.get("play", 0.0))
+
+    # Force without surrender is coercion, not will
+    if force_val > 0.7 and surrender_val < 0.3:
+        raw *= 0.5
+    # Intention without flow is rigidity, not direction
+    if intention_val > 0.7 and flow_val < 0.3:
+        raw *= 0.7
+    # Efficiency without love is extraction, not optimization
+    if float(pillar_scores.get("efficiency", 0.0)) > 0.8 and love_val < 0.2:
+        raw *= 0.6
+    # Convergence without play is conformity, not alignment
+    if convergence_val > 0.8 and play_val < 0.2:
+        raw *= 0.8
+
+    return round(max(0.0, min(1.0, raw)), 4)
+
+
+def _validate_lesson_transition_gate(
+    target_status: str,
+    pillar_scores: Dict[str, float],
+    resonance_score: float,
+    confidence: float,
+    evidence_chain_length: int,
+) -> Optional[str]:
+    """Validate whether a lesson meets the gate requirements for a status transition.
+
+    Returns None if gate passes, or an error message string if it fails.
+    """
+    gate = _LESSON_TRANSITION_GATES.get(target_status)
+    if not gate:
+        return None  # No gate for this transition
+
+    composite = _compute_lesson_pillar_composite(pillar_scores)
+
+    if "min_evidence_chain" in gate and evidence_chain_length < gate["min_evidence_chain"]:
+        return f"Gate requires at least {gate['min_evidence_chain']} evidence chain entries, got {evidence_chain_length}."
+
+    if "min_pillar_composite" in gate and composite < gate["min_pillar_composite"]:
+        return f"Pillar composite {composite:.2f} below minimum {gate['min_pillar_composite']}."
+
+    if "min_resonance" in gate and resonance_score < gate["min_resonance"]:
+        return f"Resonance score {resonance_score:.2f} below minimum {gate['min_resonance']}."
+
+    if "min_confidence" in gate and confidence < gate["min_confidence"]:
+        return f"Confidence {confidence:.2f} below minimum {gate['min_confidence']}."
+
+    if "min_human_protection" in gate:
+        hp = float(pillar_scores.get("human_protection", 0.0))
+        if hp < gate["min_human_protection"]:
+            return f"human_protection pillar {hp:.2f} below non-negotiable minimum {gate['min_human_protection']}."
+
+    if "min_all_pillars" in gate:
+        for p_name, p_val in pillar_scores.items():
+            if float(p_val) < gate["min_all_pillars"]:
+                return f"Pillar '{p_name}' is {float(p_val):.2f} — all pillars must be > {gate['min_all_pillars']}."
+
+    return None
+
+
+def _validate_self_governance_gate(
+    status: str,
+    confidence: float,
+    resonance_score: float,
+    pillar_scores: Dict[str, float],
+    evidence_chain_length: int,
+) -> Optional[str]:
+    """Validate whether a lesson qualifies for self-governance (proposing amendments).
+
+    Returns None if qualified, or an error message if not.
+    """
+    gate = _SELF_GOVERNANCE_GATE
+    if status != gate["required_status"]:
+        return f"Lesson must be '{gate['required_status']}' to propose amendments, currently '{status}'."
+    if confidence < gate["min_confidence"]:
+        return f"Confidence {confidence:.2f} below self-governance minimum {gate['min_confidence']}."
+    if resonance_score < gate["min_resonance"]:
+        return f"Resonance {resonance_score:.2f} below self-governance minimum {gate['min_resonance']}."
+    hp = float(pillar_scores.get("human_protection", 0.0))
+    if hp < gate["min_human_protection"]:
+        return f"human_protection {hp:.2f} below self-governance minimum {gate['min_human_protection']}."
+    if evidence_chain_length < gate["min_evidence_chain"]:
+        return f"Evidence chain ({evidence_chain_length}) below self-governance minimum {gate['min_evidence_chain']}."
+    return None
 
 
 # ---------------------------------------------------------------------------
