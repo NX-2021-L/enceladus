@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.43",
-  "updated_at": "2026-04-03T09:15:00Z",
+  "version": "2026-04-03.44",
+  "updated_at": "2026-04-03T09:22:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2239,9 +2239,11 @@
             "consumes-from",
             "produces-for",
             "dispatches",
-            "dispatched-by"
+            "dispatched-by",
+            "hands-off",
+            "handed-off-by"
           ],
-          "usage_guidance": "10 canonical types with inverse pairs. 'relates-to' is self-inverse (symmetric). All others are asymmetric with distinct inverse types. 'dispatches/dispatched-by' links coordination requests to dispatched tasks (ENC-TSK-960)."
+          "usage_guidance": "11 canonical types with inverse pairs. 'relates-to' is self-inverse (symmetric). All others are asymmetric with distinct inverse types. 'dispatches/dispatched-by' links coordination requests to dispatched tasks (ENC-TSK-960). 'hands-off/handed-off-by' links source records to handoff documents (ENC-FTR-061)."
         },
         "source_id": {
           "type": "string",

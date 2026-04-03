@@ -322,6 +322,8 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     # ENC-FTR-052 / ENC-TSK-983: Lesson edge types
     "learned-from": "LEARNED_FROM", "teaches": "TEACHES",
     "supersedes": "SUPERSEDES", "superseded-by": "SUPERSEDED_BY",
+    # ENC-FTR-061: Handoff edge types
+    "hands-off": "HANDS_OFF", "handed-off-by": "HANDED_OFF_BY",
 }
 
 
