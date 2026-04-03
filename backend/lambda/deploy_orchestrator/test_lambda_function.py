@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import sys
 import unittest
@@ -54,6 +55,52 @@ class DeployOrchestratorIntegrationAnalysisTests(unittest.TestCase):
         result = deploy_orchestrator._analyze_integration(requests)
         self.assertEqual(result["status"], "warning")
         self.assertTrue(any("version.ts" in msg for msg in result["warnings"]))
+
+
+class DeployOrchestratorHandlerTests(unittest.TestCase):
+    def _sqs_record(self, body: dict | None = None, *, message_id: str = "msg-1", raw_body: str | None = None) -> dict:
+        payload = raw_body if raw_body is not None else json.dumps(body or {})
+        return {"messageId": message_id, "body": payload}
+
+    def test_handler_returns_batch_failure_for_malformed_messages(self) -> None:
+        event = {
+            "Records": [
+                self._sqs_record(raw_body="not-json", message_id="bad-1"),
+                self._sqs_record({"project_id": "enceladus"}, message_id="good-1"),
+            ]
+        }
+
+        with patch.object(deploy_orchestrator, "_orchestrate_deployment") as orchestrate:
+            result = deploy_orchestrator.handler(event, None)
+
+        orchestrate.assert_called_once_with("enceladus")
+        self.assertEqual(result, {"batchItemFailures": [{"itemIdentifier": "bad-1"}]})
+
+    def test_handler_maps_project_failures_back_to_message_ids(self) -> None:
+        event = {
+            "Records": [
+                self._sqs_record({"project_id": "enceladus"}, message_id="enc-1"),
+                self._sqs_record({"project_id": "enceladus"}, message_id="enc-2"),
+                self._sqs_record({"project_id": "devops"}, message_id="dev-1"),
+            ]
+        }
+
+        def _orchestrate(project_id: str) -> None:
+            if project_id == "enceladus":
+                raise RuntimeError("boom")
+
+        with patch.object(deploy_orchestrator, "_orchestrate_deployment", side_effect=_orchestrate):
+            result = deploy_orchestrator.handler(event, None)
+
+        self.assertEqual(
+            result,
+            {
+                "batchItemFailures": [
+                    {"itemIdentifier": "enc-1"},
+                    {"itemIdentifier": "enc-2"},
+                ]
+            },
+        )
 
 
 class DeployOrchestratorFallbackTests(unittest.TestCase):

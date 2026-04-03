@@ -41,7 +41,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import boto3
 from botocore.config import Config
@@ -215,23 +215,26 @@ def _all_project_entries() -> List[FeedProjectEntry]:
 # ---------------------------------------------------------------------------
 
 
-def _extract_project_ids_from_sqs_event(event: Dict[str, Any]) -> Set[str]:
-    """Parse SQS event records to find which project IDs were affected.
-
-    Each SQS message body is a JSON-encoded DynamoDB Stream record (as forwarded
-    by the EventBridge Pipe). We extract project_id from the DynamoDB image.
-    """
+def _extract_project_ids_and_failures_from_sqs_event(
+    event: Dict[str, Any],
+) -> Tuple[Set[str], List[str]]:
+    """Parse SQS event records to find affected project IDs and failed messages."""
     affected: Set[str] = set()
+    failed_message_ids: List[str] = []
     for record in event.get("Records", []):
+        message_id = record.get("messageId")
         try:
             body = json.loads(record.get("body", "{}"))
         except (json.JSONDecodeError, TypeError):
             logger.warning("Could not parse SQS record body as JSON")
+            if message_id:
+                failed_message_ids.append(message_id)
             continue
 
         # EventBridge Pipe forwards the DynamoDB stream record directly
         # Alternatively the body may already be parsed as the stream event
         ddb_record = body.get("dynamodb", body)
+        found_project_id = False
         for image_key in ("NewImage", "OldImage"):
             image = ddb_record.get(image_key, {})
             if not image:
@@ -241,10 +244,34 @@ def _extract_project_ids_from_sqs_event(event: Dict[str, Any]) -> Set[str]:
             project_id = project_id_attr.get("S") or project_id_attr.get("s")
             if project_id:
                 affected.add(project_id)
+                found_project_id = True
                 break
+        if not found_project_id and message_id:
+            logger.warning("Could not resolve project_id from SQS record body")
+            failed_message_ids.append(message_id)
 
     logger.info("Affected project IDs from SQS event: %s", sorted(affected))
+    return affected, failed_message_ids
+
+
+def _extract_project_ids_from_sqs_event(event: Dict[str, Any]) -> Set[str]:
+    """Backwards-compatible helper returning only the affected project IDs."""
+    affected, _ = _extract_project_ids_and_failures_from_sqs_event(event)
     return affected
+
+
+def _batch_failure_response(message_ids: List[str]) -> Dict[str, Any]:
+    """Return the Lambda partial-batch failure contract for SQS triggers."""
+    failures = []
+    seen: Set[str] = set()
+    for message_id in message_ids:
+        if not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        failures.append({"itemIdentifier": message_id})
+    if not failures:
+        return {}
+    return {"batchItemFailures": failures}
 
 
 # ---------------------------------------------------------------------------
@@ -264,72 +291,74 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         DRY_RUN,
     )
 
+    record_message_ids = [
+        record.get("messageId")
+        for record in event.get("Records", [])
+        if record.get("messageId")
+    ]
+
     if DRY_RUN:
         logger.info("feed_publisher: DRY_RUN mode — S3/CF/SNS/EB writes suppressed")
 
     # 1. Extract affected project IDs (informational — we always regenerate all projects)
-    affected_projects = _extract_project_ids_from_sqs_event(event)
+    affected_projects, failed_message_ids = _extract_project_ids_and_failures_from_sqs_event(event)
     if not affected_projects:
         logger.warning("feed_publisher: no affected project IDs found in event; proceeding with full regeneration")
 
-    # 2. Fetch all project data from DynamoDB
-    generated_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    all_entries = _all_project_entries()
-    ddb = _ddb_client()
-    all_project_data: Dict[str, Dict[str, Any]] = {}
-
-    for entry in all_entries:
-        try:
-            all_project_data[entry.name] = fetch_from_dynamodb(
-                entry,
-                table=TRACKER_TABLE,
-                region=TRACKER_REGION,
-            )
-        except Exception as exc:
-            logger.error("feed_publisher: DynamoDB fetch failed for project=%s: %s", entry.name, exc)
-            all_project_data[entry.name] = {"tasks": [], "issues": [], "features": []}
-
-    # 2b. Fetch all document data from the documents DynamoDB table
-    all_documents_data: Dict[str, List[Dict[str, Any]]] = {}
-    for entry in all_entries:
-        try:
-            all_documents_data[entry.name] = fetch_documents_from_dynamodb(
-                entry,
-                table=DOCUMENTS_TABLE,
-                region=DOCUMENTS_REGION,
-            )
-        except Exception as exc:
-            logger.error("feed_publisher: documents DynamoDB fetch failed for project=%s: %s", entry.name, exc)
-            all_documents_data[entry.name] = []
-
-    # 3. Generate mobile feeds locally in /tmp
-    feed_dir = FEED_TEMP_DIR
     try:
+        # 2. Fetch all project data from DynamoDB
+        generated_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        all_entries = _all_project_entries()
+        ddb = _ddb_client()
+        all_project_data: Dict[str, Dict[str, Any]] = {}
+
+        for entry in all_entries:
+            try:
+                all_project_data[entry.name] = fetch_from_dynamodb(
+                    entry,
+                    table=TRACKER_TABLE,
+                    region=TRACKER_REGION,
+                )
+            except Exception as exc:
+                logger.error("feed_publisher: DynamoDB fetch failed for project=%s: %s", entry.name, exc)
+                all_project_data[entry.name] = {"tasks": [], "issues": [], "features": []}
+
+        # 2b. Fetch all document data from the documents DynamoDB table
+        all_documents_data: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in all_entries:
+            try:
+                all_documents_data[entry.name] = fetch_documents_from_dynamodb(
+                    entry,
+                    table=DOCUMENTS_TABLE,
+                    region=DOCUMENTS_REGION,
+                )
+            except Exception as exc:
+                logger.error("feed_publisher: documents DynamoDB fetch failed for project=%s: %s", entry.name, exc)
+                all_documents_data[entry.name] = []
+
+        # 3. Generate mobile feeds locally in /tmp
+        feed_dir = FEED_TEMP_DIR
         generate_mobile_feeds(all_entries, all_project_data, generated_at, feed_dir)
-    except Exception as exc:
-        logger.error("feed_publisher: generate_mobile_feeds failed: %s", exc)
-        raise
 
-    # 3a. Generate documents feed (separate from tracker feeds)
-    try:
-        generate_documents_feed(all_entries, all_documents_data, generated_at, feed_dir)
-    except Exception as exc:
-        logger.error("feed_publisher: generate_documents_feed failed: %s", exc)
-        # Non-fatal: tracker feeds are already generated
+        # 3a. Generate documents feed (separate from tracker feeds)
+        try:
+            generate_documents_feed(all_entries, all_documents_data, generated_at, feed_dir)
+        except Exception as exc:
+            logger.error("feed_publisher: generate_documents_feed failed: %s", exc)
+            # Non-fatal: tracker feeds are already generated
 
-    # 3b. Freshness SLA check — warns if feeds lag behind source data
-    check_freshness_sla(generated_at, all_project_data)
+        # 3b. Freshness SLA check — warns if feeds lag behind source data
+        check_freshness_sla(generated_at, all_project_data)
 
-    # 4. Fetch reference docs from S3 (via DynamoDB metadata) and stage in /tmp/reference/
-    try:
-        s3_client = boto3.client("s3", region_name="us-east-1")
-        generate_reference_docs_from_s3(all_entries, feed_dir, ddb, table=TRACKER_TABLE, s3_client=s3_client)
-    except Exception as exc:
-        logger.error("feed_publisher: generate_reference_docs_from_s3 failed: %s", exc)
-        # Non-fatal: continue without reference docs
+        # 4. Fetch reference docs from S3 (via DynamoDB metadata) and stage in /tmp/reference/
+        try:
+            s3_client = boto3.client("s3", region_name="us-east-1")
+            generate_reference_docs_from_s3(all_entries, feed_dir, ddb, table=TRACKER_TABLE, s3_client=s3_client)
+        except Exception as exc:
+            logger.error("feed_publisher: generate_reference_docs_from_s3 failed: %s", exc)
+            # Non-fatal: continue without reference docs
 
-    # 5. Publish feed files to S3
-    try:
+        # 5. Publish feed files to S3
         uploaded_keys = publish_mobile_feeds_to_s3(
             feed_dir=feed_dir,
             bucket=FEED_BUCKET,
@@ -337,90 +366,85 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             dry_run=DRY_RUN,
         )
         logger.info("feed_publisher: published %d files to S3", len(uploaded_keys))
-    except Exception as exc:
-        logger.error("feed_publisher: publish_mobile_feeds_to_s3 failed: %s", exc)
-        raise
 
-    # 5b. Write analytics sync-stage JSON for Trino/Superset pipeline
-    analytics_stage_prefixes = {}  # project_name -> {artifact -> s3_prefix_uri}
-    try:
-        for entry in all_entries:
-            project_data = all_project_data.get(entry.name, {})
-            stage_prefixes = write_analytics_sync_stage(
-                project_name=entry.name,
-                project_data=project_data,
-                bucket=ANALYTICS_BUCKET,
-                region=ANALYTICS_REGION,
-                dry_run=DRY_RUN,
-            )
-            if stage_prefixes:
-                analytics_stage_prefixes[entry.name] = stage_prefixes
-        logger.info(
-            "feed_publisher: wrote analytics sync-stage for %d projects",
-            len(analytics_stage_prefixes),
-        )
-    except Exception as exc:
-        logger.error("feed_publisher: analytics sync-stage write failed: %s", exc)
-        # Non-fatal: mobile feeds are already published
-
-    # 6. CloudFront invalidation
-    try:
-        inv_id = invalidate_mobile_cf(
-            distribution_id=CF_DISTRIBUTION,
-            dry_run=DRY_RUN,
-        )
-        logger.info("feed_publisher: CF invalidation id=%s", inv_id)
-    except Exception as exc:
-        logger.error("feed_publisher: CloudFront invalidation failed: %s", exc)
-        # Non-fatal: feeds are published even if invalidation fails
-
-    # 7. SNS signal for Trino/Superset pipeline
-    try:
-        today = dt.date.today()
-        for entry in all_entries:
-            publish_sync_message(
-                project_name=entry.name,
-                sync_date=today,
-                artifact_names=["tasks", "issues", "features"],
-                sns_topic=SNS_TOPIC,
-                dry_run=DRY_RUN,
-            )
-    except Exception as exc:
-        logger.error("feed_publisher: SNS publish failed: %s", exc)
-        # Non-fatal
-
-    # 8. Per-project EventBridge events for Trino/Superset pipeline
-    for project_name, stage_prefixes in analytics_stage_prefixes.items():
+        # 5b. Write analytics sync-stage JSON for Trino/Superset pipeline
+        analytics_stage_prefixes = {}  # project_name -> {artifact -> s3_prefix_uri}
         try:
-            # Extract the ingest_ts suffix from the first stage_prefix URI
-            first_prefix = next(iter(stage_prefixes.values()), "")
-            sync_suffix = first_prefix.rstrip("/").split("ingest_ts=")[-1].split("/")[0] if "ingest_ts=" in first_prefix else ""
-            eb_payload = {
-                "project": project_name,
-                "sync_date": dt.date.today().isoformat(),
-                "artifacts": list(stage_prefixes.keys()),
-                "stage_prefixes": stage_prefixes,
-                "sync_run_id": f"{sync_suffix}-{project_name}",
-                "sync_target_suffix": sync_suffix,
-                "generated_at": generated_at,
-            }
-            publish_eventbridge_event(
-                message=eb_payload,
-                bus_name=EVENT_BUS,
-                dry_run=DRY_RUN,
+            for entry in all_entries:
+                project_data = all_project_data.get(entry.name, {})
+                stage_prefixes = write_analytics_sync_stage(
+                    project_name=entry.name,
+                    project_data=project_data,
+                    bucket=ANALYTICS_BUCKET,
+                    region=ANALYTICS_REGION,
+                    dry_run=DRY_RUN,
+                )
+                if stage_prefixes:
+                    analytics_stage_prefixes[entry.name] = stage_prefixes
+            logger.info(
+                "feed_publisher: wrote analytics sync-stage for %d projects",
+                len(analytics_stage_prefixes),
             )
         except Exception as exc:
-            logger.error("feed_publisher: EventBridge publish failed for project=%s: %s", project_name, exc)
-            # Non-fatal: continue with remaining projects
+            logger.error("feed_publisher: analytics sync-stage write failed: %s", exc)
+            # Non-fatal: mobile feeds are already published
 
-    logger.info(
-        "feed_publisher: complete. generated_at=%s affected=%s",
-        generated_at,
-        sorted(affected_projects),
-    )
-    return {
-        "statusCode": 200,
-        "generated_at": generated_at,
-        "affected_projects": sorted(affected_projects),
-        "dry_run": DRY_RUN,
-    }
+        # 6. CloudFront invalidation
+        try:
+            inv_id = invalidate_mobile_cf(
+                distribution_id=CF_DISTRIBUTION,
+                dry_run=DRY_RUN,
+            )
+            logger.info("feed_publisher: CF invalidation id=%s", inv_id)
+        except Exception as exc:
+            logger.error("feed_publisher: CloudFront invalidation failed: %s", exc)
+            # Non-fatal: feeds are published even if invalidation fails
+
+        # 7. SNS signal for Trino/Superset pipeline
+        try:
+            today = dt.date.today()
+            for entry in all_entries:
+                publish_sync_message(
+                    project_name=entry.name,
+                    sync_date=today,
+                    artifact_names=["tasks", "issues", "features"],
+                    sns_topic=SNS_TOPIC,
+                    dry_run=DRY_RUN,
+                )
+        except Exception as exc:
+            logger.error("feed_publisher: SNS publish failed: %s", exc)
+            # Non-fatal
+
+        # 8. Per-project EventBridge events for Trino/Superset pipeline
+        for project_name, stage_prefixes in analytics_stage_prefixes.items():
+            try:
+                # Extract the ingest_ts suffix from the first stage_prefix URI
+                first_prefix = next(iter(stage_prefixes.values()), "")
+                sync_suffix = first_prefix.rstrip("/").split("ingest_ts=")[-1].split("/")[0] if "ingest_ts=" in first_prefix else ""
+                eb_payload = {
+                    "project": project_name,
+                    "sync_date": dt.date.today().isoformat(),
+                    "artifacts": list(stage_prefixes.keys()),
+                    "stage_prefixes": stage_prefixes,
+                    "sync_run_id": f"{sync_suffix}-{project_name}",
+                    "sync_target_suffix": sync_suffix,
+                    "generated_at": generated_at,
+                }
+                publish_eventbridge_event(
+                    message=eb_payload,
+                    bus_name=EVENT_BUS,
+                    dry_run=DRY_RUN,
+                )
+            except Exception as exc:
+                logger.error("feed_publisher: EventBridge publish failed for project=%s: %s", project_name, exc)
+                # Non-fatal: continue with remaining projects
+
+        logger.info(
+            "feed_publisher: complete. generated_at=%s affected=%s",
+            generated_at,
+            sorted(affected_projects),
+        )
+        return _batch_failure_response(failed_message_ids)
+    except Exception as exc:
+        logger.error("feed_publisher: batch failed, marking all records for retry: %s", exc, exc_info=True)
+        return _batch_failure_response(record_message_ids)
