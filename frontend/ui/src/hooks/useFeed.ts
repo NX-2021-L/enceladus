@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { feedKeys, fetchTasks, fetchIssues, fetchFeatures } from '../api/feeds'
 import { useLiveFeed } from '../contexts/LiveFeedContext'
 import { PRIORITY_ORDER } from '../lib/constants'
-import type { Task, Issue, Feature, Lesson } from '../types/feeds'
+import type { Task, Issue, Feature, Lesson, Plan } from '../types/feeds'
 import type { FeedItem } from '../types/feed'
 import type { FeedFilters } from '../types/filters'
 
@@ -26,7 +26,7 @@ interface UseFeedOptions {
 
 export function useFeed(filters?: FeedFilters, _options?: UseFeedOptions) {
   // Live data from the global delta-polling provider (ENC-TSK-609).
-  const { tasks: liveTasks, issues: liveIssues, features: liveFeatures, lessons: liveLessons, generatedAt: liveGeneratedAt } = useLiveFeed()
+  const { tasks: liveTasks, issues: liveIssues, features: liveFeatures, lessons: liveLessons, plans: livePlans, generatedAt: liveGeneratedAt } = useLiveFeed()
   const hasLiveSnapshot = liveGeneratedAt !== null
 
   // S3 feeds as fallback for initial load before LiveFeedProvider hydrates.
@@ -38,6 +38,7 @@ export function useFeed(filters?: FeedFilters, _options?: UseFeedOptions) {
   const issues: Issue[] = hasLiveSnapshot ? liveIssues : (issuesQuery.data?.issues ?? [])
   const features: Feature[] = hasLiveSnapshot ? liveFeatures : (featuresQuery.data?.features ?? [])
   const lessons: Lesson[] = hasLiveSnapshot ? liveLessons : []
+  const plans: Plan[] = hasLiveSnapshot ? livePlans : []
 
   // Pending only while live context hasn't loaded AND S3 feeds are still loading.
   const isPending = !hasLiveSnapshot
@@ -54,7 +55,7 @@ export function useFeed(filters?: FeedFilters, _options?: UseFeedOptions) {
   const items = useMemo(() => {
     const merged: FeedItem[] = []
 
-    const types = filters?.recordType?.length ? filters.recordType : ['task', 'issue', 'feature', 'lesson']
+    const types = filters?.recordType?.length ? filters.recordType : ['task', 'issue', 'feature', 'lesson', 'plan']
 
     if (types.includes('task') && tasks.length) {
       for (const t of tasks) {
@@ -74,6 +75,11 @@ export function useFeed(filters?: FeedFilters, _options?: UseFeedOptions) {
     if (types.includes('lesson') && lessons.length) {
       for (const l of lessons) {
         merged.push({ _type: 'lesson', _id: l.lesson_id, _updated_at: l.updated_at, _created_at: l.created_at, data: l })
+      }
+    }
+    if (types.includes('plan') && plans.length) {
+      for (const p of plans) {
+        merged.push({ _type: 'plan', _id: p.plan_id, _updated_at: p.updated_at, _created_at: p.created_at, data: p })
       }
     }
 
@@ -126,6 +132,7 @@ export function useFeed(filters?: FeedFilters, _options?: UseFeedOptions) {
     issues,
     features,
     lessons,
+    plans,
     filters?.projectId,
     filters?.recordType,
     filters?.status,
