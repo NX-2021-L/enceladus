@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v4/**'
     paths:
       - "backend/lambda/github_integration/**"
       - ".github/workflows/github-integration-deploy.yml"
@@ -21,7 +22,7 @@ permissions:
 
 env:
   AWS_REGION: us-west-2
-  DEPLOY_FUNCTION_NAME: devops-github-integration
+  DEPLOY_FUNCTION_NAME: devops-github-integration${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
 
 jobs:
   deploy:
@@ -29,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
-      group: github-integration-deploy-main
+      group: github-integration-deploy-${{ github.ref_name }}
       cancel-in-progress: false
     defaults:
       run:
@@ -53,6 +54,7 @@ jobs:
           COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_INSTALLATION_ID: ${{ secrets.GH_INSTALLATION_ID }}
+          ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
         run: |
           set -euo pipefail
           chmod +x backend/lambda/github_integration/deploy.sh

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v4/**'
     paths:
       - "backend/lambda/bedrock_agent_actions/**"
       - ".github/workflows/lambda-bedrock-agent-actions-deploy.yml"
@@ -27,6 +28,7 @@ jobs:
       function_name: "enceladus-bedrock-agent-actions"
       lambda_dir: "backend/lambda/bedrock_agent_actions"
       deploy_script: "backend/lambda/bedrock_agent_actions/deploy.sh"
+      environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
       COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}

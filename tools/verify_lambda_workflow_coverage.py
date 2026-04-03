@@ -18,6 +18,25 @@ from typing import Dict, List, Set
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
 MANIFEST_PATH = REPO_ROOT / "infrastructure/lambda_workflow_manifest.json"
+SIMPLE_SUB_PATTERN = re.compile(r"""^!Sub\s+['"](?P<value>[^'"]+)['"]$""")
+
+
+def _normalize_function_name(value: str) -> str | None:
+    value = value.strip()
+    if not value:
+        return None
+
+    if not value.startswith("!"):
+        return value.strip('"\'')
+
+    match = SIMPLE_SUB_PATTERN.match(value)
+    if not match:
+        return None
+
+    normalized = match.group("value").replace("${EnvironmentSuffix}", "")
+    if "${" in normalized:
+        return None
+    return normalized
 
 
 def _parse_production_lambdas(template_path: Path) -> List[str]:
@@ -32,9 +51,10 @@ def _parse_production_lambdas(template_path: Path) -> List[str]:
             continue
 
         if expect_function_name and line.startswith("FunctionName:"):
-            value = line.split("FunctionName:", 1)[1].strip().strip('"\'')
-            if value and not value.startswith("!"):
-                names.append(value)
+            value = line.split("FunctionName:", 1)[1].strip()
+            normalized = _normalize_function_name(value)
+            if normalized:
+                names.append(normalized)
             expect_function_name = False
 
     return names

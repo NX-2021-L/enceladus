@@ -21,6 +21,11 @@ on:
         required: false
         type: string
         default: ""
+      environment_suffix:
+        description: Function name suffix for environment (e.g. "-gamma")
+        required: false
+        type: string
+        default: ""
       force_static_credentials:
         description: Force static-key credential setup instead of OIDC role assume.
         required: false
@@ -62,11 +67,11 @@ permissions:
 
 jobs:
   deploy:
-    name: Deploy ${{ inputs.function_name }}
+    name: Deploy ${{ inputs.function_name }}${{ inputs.environment_suffix }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: lambda-deploy-${{ inputs.function_name }}-main
+      group: lambda-deploy-${{ inputs.function_name }}${{ inputs.environment_suffix }}-${{ github.ref_name }}
       cancel-in-progress: false
 
     steps:
@@ -107,6 +112,7 @@ jobs:
           ENCELADUS_COGNITO_CLIENT_ID: ${{ secrets.ENCELADUS_COGNITO_CLIENT_ID }}
           ENCELADUS_COGNITO_CLIENT_SECRET: ${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}
           ENCELADUS_COGNITO_DOMAIN: ${{ secrets.ENCELADUS_COGNITO_DOMAIN }}
+          ENVIRONMENT_SUFFIX: ${{ inputs.environment_suffix }}
         run: |
           set -euo pipefail
           chmod +x "${{ inputs.deploy_script }}"
@@ -117,7 +123,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          function_name="${{ inputs.function_name }}"
+          function_name="${{ inputs.function_name }}${{ inputs.environment_suffix }}"
           lambda_dir="${{ inputs.lambda_dir }}"
           extra_files="${{ inputs.package_extra_files }}"
 
@@ -181,6 +187,6 @@ jobs:
           set -euo pipefail
           aws lambda get-function-configuration \
             --region "us-west-2" \
-            --function-name "${{ inputs.function_name }}" \
+            --function-name "${{ inputs.function_name }}${{ inputs.environment_suffix }}" \
             --query '{FunctionName:FunctionName,LastModified:LastModified,Runtime:Runtime,State:State,LastUpdateStatus:LastUpdateStatus}' \
             --output table
