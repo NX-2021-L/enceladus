@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.41",
-  "updated_at": "2026-04-03T08:37:00Z",
+  "version": "2026-04-03.42",
+  "updated_at": "2026-04-03T09:10:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -514,6 +514,64 @@
           "constraints": {
             "max_items": 100
           }
+        }
+      }
+    },
+    "document.handoff": {
+      "description": "Handoff document subtype schema (ENC-FTR-061). Structured inter-session continuity documents with lifecycle semantics. Created via document_api PUT with document_subtype=handoff. Status transitions: pending->claimed->completed, any->stale.",
+      "fields": {
+        "document_subtype": {
+          "type": "enum",
+          "enum": ["general", "handoff", "blueprint", "narrative", "session-log"],
+          "definition": "Document subtype classification. Stored on all documents (defaults to 'general' for existing docs). When 'handoff', additional handoff-specific fields are required/available.",
+          "usage_guidance": "Set at creation via document_api PUT body. Cannot be changed after creation."
+        },
+        "source_record_id": {
+          "type": "string",
+          "constraints": {"min_length": 1},
+          "definition": "Tracker record ID that originated this handoff (e.g. ENC-TSK-B52). Required when document_subtype=handoff.",
+          "usage_guidance": "Set at creation. Creates the source anchor for graph HANDS_OFF edge (Phase 3)."
+        },
+        "handoff_status": {
+          "type": "enum",
+          "enum": ["pending", "claimed", "completed", "stale"],
+          "definition": "Handoff lifecycle status. pending: awaiting pickup. claimed: an agent has taken ownership. completed: handoff work done. stale: expired or superseded.",
+          "usage_guidance": "Auto-set to 'pending' on creation. Transition via PATCH with handoff_status field. Valid transitions: pending->{claimed,stale}, claimed->{completed,stale}. completed and stale are terminal."
+        },
+        "prerequisite_state": {
+          "type": "string",
+          "definition": "Description of system state that must be true before the handoff can be executed. Optional.",
+          "usage_guidance": "Set at creation or via PATCH. Consuming agent should verify before proceeding."
+        },
+        "action_checklist": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Ordered list of steps the consuming agent should execute. Optional.",
+          "usage_guidance": "Set at creation or via PATCH. Items are plain-text strings."
+        },
+        "verification_criteria": {
+          "type": "string",
+          "definition": "How to verify the handoff was executed correctly. Optional.",
+          "usage_guidance": "Set at creation or via PATCH. Consuming agent should check after completing work."
+        },
+        "expires_at": {
+          "type": "string",
+          "constraints": {"format": "ISO 8601 datetime"},
+          "definition": "Optional expiry timestamp. After this time, handoff should be considered stale.",
+          "usage_guidance": "Set at creation or via PATCH. No server-side enforcement yet — consuming agents should check."
+        },
+        "claimed_by": {
+          "type": "string",
+          "definition": "Identity of the agent/user that claimed this handoff. Set automatically when handoff_status transitions to 'claimed'."
+        },
+        "claimed_at": {
+          "type": "string",
+          "constraints": {"format": "ISO 8601 datetime"},
+          "definition": "Timestamp when handoff was claimed. Set automatically with claimed_by."
+        },
+        "created_by_session": {
+          "type": "string",
+          "definition": "Session identity of the agent that created this handoff document. Set from auth claims at creation."
         }
       }
     },

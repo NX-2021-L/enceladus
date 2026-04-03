@@ -130,6 +130,20 @@ MIN_COMPLIANCE_SCORE = int(os.environ.get("MIN_COMPLIANCE_SCORE", "0"))
 ALLOWED_FILE_EXTENSIONS = {".md", ".markdown"}
 
 # ---------------------------------------------------------------------------
+# Handoff document schema (ENC-FTR-061 / ENC-TSK-B52)
+# ---------------------------------------------------------------------------
+
+DOCUMENT_SUBTYPES = {"general", "handoff", "blueprint", "narrative", "session-log"}
+HANDOFF_STATUSES = {"pending", "claimed", "completed", "stale"}
+HANDOFF_STATUS_TRANSITIONS = {
+    "pending": {"claimed", "stale"},
+    "claimed": {"completed", "stale"},
+    "completed": set(),
+    "stale": set(),
+}
+HANDOFF_REQUIRED_FIELDS = {"source_record_id"}  # required when subtype=handoff
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -1030,6 +1044,31 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     related_items = [str(r).strip() for r in related_items[:MAX_RELATED_ITEMS] if str(r).strip()]
     keywords = [str(k).strip().lower() for k in keywords[:MAX_KEYWORDS] if str(k).strip()]
 
+    # Document subtype (ENC-FTR-061)
+    document_subtype = str(body.get("document_subtype", "general")).strip().lower()
+    if document_subtype not in DOCUMENT_SUBTYPES:
+        return _error(400, f"Invalid document_subtype '{document_subtype}'. Must be one of: {', '.join(sorted(DOCUMENT_SUBTYPES))}")
+
+    # Handoff-specific fields
+    handoff_fields: Dict[str, Any] = {}
+    if document_subtype == "handoff":
+        source_record_id = str(body.get("source_record_id", "")).strip()
+        if not source_record_id:
+            return _error(400, "Field 'source_record_id' is required when document_subtype is 'handoff'.")
+        handoff_fields["source_record_id"] = source_record_id
+        handoff_fields["handoff_status"] = "pending"
+        handoff_fields["prerequisite_state"] = str(body.get("prerequisite_state", "")).strip()
+        handoff_fields["verification_criteria"] = str(body.get("verification_criteria", "")).strip()
+        # action_checklist: array of checklist items
+        action_checklist = body.get("action_checklist", [])
+        if not isinstance(action_checklist, list):
+            return _error(400, "Field 'action_checklist' must be an array of strings.")
+        handoff_fields["action_checklist"] = [str(a).strip() for a in action_checklist if str(a).strip()]
+        # optional expiry
+        expires_at = str(body.get("expires_at", "")).strip()
+        if expires_at:
+            handoff_fields["expires_at"] = expires_at
+
     # Generate document ID
     document_id = f"DOC-{uuid.uuid4().hex[:12].upper()}"
     now = _now_z()
@@ -1049,6 +1088,7 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         "project_id": {"S": project_id},
         "title": {"S": title},
         "description": {"S": description},
+        "document_subtype": {"S": document_subtype},
         "file_name": {"S": file_name or f"{document_id}.md"},
         "s3_bucket": {"S": S3_BUCKET},
         "s3_key": {"S": s3_key},
@@ -1066,6 +1106,20 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         "compliance_warnings": _serialize_list(compliance["compliance_warnings"]),
         "compliance_checked_at": {"S": now},
     }
+
+    # Add handoff-specific fields to DynamoDB item
+    if handoff_fields:
+        item["source_record_id"] = {"S": handoff_fields["source_record_id"]}
+        item["handoff_status"] = {"S": handoff_fields["handoff_status"]}
+        item["created_by_session"] = {"S": claims.get("sub", "unknown")}
+        if handoff_fields.get("prerequisite_state"):
+            item["prerequisite_state"] = {"S": handoff_fields["prerequisite_state"]}
+        if handoff_fields.get("verification_criteria"):
+            item["verification_criteria"] = {"S": handoff_fields["verification_criteria"]}
+        if handoff_fields.get("action_checklist"):
+            item["action_checklist"] = _serialize_list(handoff_fields["action_checklist"])
+        if handoff_fields.get("expires_at"):
+            item["expires_at"] = {"S": handoff_fields["expires_at"]}
 
     try:
         ddb.put_item(TableName=DOCUMENTS_TABLE, Item=item)
@@ -1172,6 +1226,12 @@ def _list_by_project(qs: Dict) -> Dict:
         return _error(500, "Database query failed.")
 
     docs = [_deserialize_item(item) for item in items]
+
+    # document_subtype filter (ENC-FTR-061)
+    subtype_filter = qs.get("document_subtype", "").strip().lower()
+    if subtype_filter:
+        docs = [d for d in docs if d.get("document_subtype", "general") == subtype_filter]
+
     docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
     sliced = docs[:PAGE_SIZE]
     return _response(
@@ -1273,6 +1333,50 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             )
         expr_parts.append("file_name = :file_name")
         attr_values[":file_name"] = {"S": file_name}
+
+    # Handoff status transitions (ENC-FTR-061)
+    current_subtype = existing.get("document_subtype", {}).get("S", "general")
+    if "handoff_status" in body:
+        if current_subtype != "handoff":
+            return _error(400, "Cannot set handoff_status on a non-handoff document.")
+        new_handoff_status = str(body["handoff_status"]).strip().lower()
+        if new_handoff_status not in HANDOFF_STATUSES:
+            return _error(400, f"Invalid handoff_status '{new_handoff_status}'. Must be one of: {', '.join(sorted(HANDOFF_STATUSES))}")
+        current_handoff_status = existing.get("handoff_status", {}).get("S", "pending")
+        allowed = HANDOFF_STATUS_TRANSITIONS.get(current_handoff_status, set())
+        if new_handoff_status != current_handoff_status and new_handoff_status not in allowed:
+            return _error(
+                400,
+                f"Cannot transition handoff_status from '{current_handoff_status}' to '{new_handoff_status}'. "
+                f"Allowed transitions: {', '.join(sorted(allowed)) if allowed else 'none (terminal state)'}",
+            )
+        expr_parts.append("handoff_status = :hs")
+        attr_values[":hs"] = {"S": new_handoff_status}
+        # Record claim metadata
+        if new_handoff_status == "claimed":
+            claimed_by = claims.get("email") or claims.get("sub", "unknown")
+            expr_parts.append("claimed_by = :cb")
+            expr_parts.append("claimed_at = :ca")
+            attr_values[":cb"] = {"S": claimed_by}
+            attr_values[":ca"] = {"S": now}
+
+    # Handoff metadata fields (only on handoff documents)
+    if current_subtype == "handoff":
+        if "prerequisite_state" in body:
+            expr_parts.append("prerequisite_state = :ps")
+            attr_values[":ps"] = {"S": str(body["prerequisite_state"]).strip()}
+        if "verification_criteria" in body:
+            expr_parts.append("verification_criteria = :vc")
+            attr_values[":vc"] = {"S": str(body["verification_criteria"]).strip()}
+        if "action_checklist" in body:
+            checklist = body["action_checklist"]
+            if not isinstance(checklist, list):
+                return _error(400, "'action_checklist' must be an array of strings.")
+            expr_parts.append("action_checklist = :acl")
+            attr_values[":acl"] = _serialize_list([str(a).strip() for a in checklist if str(a).strip()])
+        if "expires_at" in body:
+            expr_parts.append("expires_at = :exp")
+            attr_values[":exp"] = {"S": str(body["expires_at"]).strip()}
 
     # Content update — re-upload to S3
     if "content" in body:
@@ -1395,6 +1499,11 @@ def _handle_search(qs: Dict) -> Dict:
         docs = [d for d in docs if title_search in d.get("title", "").lower()]
     if status_filter:
         docs = [d for d in docs if d.get("status", "active") == status_filter]
+
+    # document_subtype filter (ENC-FTR-061)
+    subtype_filter = qs.get("document_subtype", "").strip().lower()
+    if subtype_filter:
+        docs = [d for d in docs if d.get("document_subtype", "general") == subtype_filter]
 
     # Don't include content in search results
     for d in docs:
