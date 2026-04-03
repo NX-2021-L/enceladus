@@ -233,6 +233,32 @@ export interface RecordExtensions {
   subtask_ids?: string[]
 }
 
+// --- Plan record type (ENC-FTR-058) ---
+
+export interface Plan {
+  plan_id: string
+  project_id: string
+  title: string
+  description: string
+  status: 'drafted' | 'started' | 'complete' | 'incomplete'
+  priority: 'P0' | 'P1' | 'P2' | 'P3'
+  category: string | null
+  objectives_set: string[]
+  attached_documents: string[]
+  related_feature_id: string | null
+  checkout_state: string | null
+  checked_out_by: string | null
+  checked_out_at: string | null
+  related_task_ids: string[]
+  related_issue_ids: string[]
+  related_feature_ids: string[]
+  history: HistoryEntry[]
+  updated_at: string | null
+  last_update_note: string | null
+  created_at: string | null
+  typed_relationships?: TypedRelationshipEdge[]
+}
+
 export interface FeedEnvelope<T> {
   generated_at: string
   version: string
@@ -257,6 +283,10 @@ export interface FeaturesFeed extends FeedEnvelope<Feature> {
 
 export interface LessonsFeed extends FeedEnvelope<Lesson> {
   lessons: Lesson[]
+}
+
+export interface PlansFeed extends FeedEnvelope<Plan> {
+  plans: Plan[]
 }
 
 export interface DocumentsFeed extends FeedEnvelope<Document> {
