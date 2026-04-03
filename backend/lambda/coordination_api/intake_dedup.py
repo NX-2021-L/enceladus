@@ -9,7 +9,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from botocore.exceptions import ClientError
 
@@ -46,6 +46,7 @@ from persistence import _append_state_transition, _update_request
 
 __all__ = [
     "_active_host_dispatches",
+    "_classify_record_ids",
     "_cleanup_dispatch_host",
     "_count_active_host_dispatches",
     "_decompose_and_create_tracker_artifacts",
@@ -87,6 +88,50 @@ def _extract_record_ids_from_body(request_body: Dict[str, Any]) -> set:
         ids.update(_ID_PATTERN.findall(json.dumps(constraints).upper()))
 
     return ids
+
+
+_RECORD_TYPE_PATTERN = re.compile(
+    r"^[A-Z]{3}-(TSK|ISS|FTR|LSN|PLN)-[A-Z0-9]{3}(?:-[0-9][A-Z])?$"
+)
+
+_TYPE_SEGMENT_MAP = {
+    "TSK": "task",
+    "ISS": "issue",
+    "FTR": "feature",
+    "LSN": "lesson",
+    "PLN": "plan",
+}
+
+
+def _classify_record_ids(record_ids: Set[str]) -> Dict[str, List[str]]:
+    """Classify a set of tracker record IDs by their record type segment.
+
+    Returns a dict with keys 'task_ids', 'issue_ids', 'feature_ids', and
+    'other_ids', each containing sorted lists of matching IDs.  Used by the
+    intake path to decide whether existing governed records can satisfy a
+    coordination request without synthesizing new tracker artifacts.
+    """
+    result: Dict[str, List[str]] = {
+        "task_ids": [],
+        "issue_ids": [],
+        "feature_ids": [],
+        "other_ids": [],
+    }
+    for rid in sorted(record_ids):
+        m = _RECORD_TYPE_PATTERN.match(rid)
+        if not m:
+            result["other_ids"].append(rid)
+            continue
+        record_type = _TYPE_SEGMENT_MAP.get(m.group(1))
+        if record_type == "task":
+            result["task_ids"].append(rid)
+        elif record_type == "issue":
+            result["issue_ids"].append(rid)
+        elif record_type == "feature":
+            result["feature_ids"].append(rid)
+        else:
+            result["other_ids"].append(rid)
+    return result
 
 
 def _extract_record_ids_from_request(request: Dict[str, Any]) -> set:
