@@ -2052,6 +2052,47 @@ def _validate_deploy_evidence(deploy_evidence) -> Optional[str]:
     return None
 
 
+def _validate_web_deploy_evidence(web_deploy_evidence) -> Optional[str]:
+    """Validate web_deploy_evidence for static/CloudFront deployments (ENC-ISS-144).
+
+    Required fields: url (HTTPS), http_status (200), checked_at (ISO 8601).
+    Returns None if valid, or an error string describing the first violation.
+    """
+    if not web_deploy_evidence:
+        return (
+            "Cannot transition to 'deploy-success': transition_evidence.web_deploy_evidence required "
+            "for web_deploy tasks. Must contain {url, http_status, checked_at}."
+        )
+    if not isinstance(web_deploy_evidence, dict):
+        return (
+            "Cannot transition to 'deploy-success': transition_evidence.web_deploy_evidence must be "
+            "a structured object with url, http_status, checked_at."
+        )
+    url = str(web_deploy_evidence.get("url", "")).strip()
+    if not url.startswith("https://"):
+        return (
+            f"Cannot transition to 'deploy-success': web_deploy_evidence.url must start with "
+            f"'https://'. Got: '{url}'."
+        )
+    http_status = web_deploy_evidence.get("http_status")
+    try:
+        http_status_int = int(http_status)
+    except (TypeError, ValueError):
+        http_status_int = -1
+    if http_status_int != 200:
+        return (
+            f"Cannot transition to 'deploy-success': web_deploy_evidence.http_status must be 200. "
+            f"Got: '{http_status}'."
+        )
+    checked_at = str(web_deploy_evidence.get("checked_at", "")).strip()
+    if not _is_valid_iso8601(checked_at):
+        return (
+            f"Cannot transition to 'deploy-success': web_deploy_evidence.checked_at must be "
+            f"a valid ISO 8601 datetime with T separator. Got: '{checked_at}'."
+        )
+    return None
+
+
 def _validate_feature_production_gate(project_id: str, feature_data: Dict) -> Optional[Dict]:
     """Enforce: feature -> production requires >=1 child task, all deploy-success/closed recursively."""
     primary = (feature_data.get("primary_task") or "").strip()
@@ -2787,21 +2828,37 @@ def _handle_update_field(
                 )
 
         if not is_revert and record_type == "task" and new_lower == "deploy-success":
-            # ENC-TSK-726: deploy_evidence must be a structured GitHub Actions Jobs API payload.
-            # Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}
-            de_err = _validate_deploy_evidence(transition_evidence.get("deploy_evidence"))
-            if de_err:
-                return _tracker_field_validation_error(
-                    de_err,
-                    field="status",
-                    record_id=record_id,
-                    record_type=record_type,
-                    expected_type="object",
-                    expected_format=(
-                        "transition_evidence.deploy_evidence with id, name, run_id, "
-                        "head_sha, status, conclusion, started_at, completed_at"
-                    ),
-                )
+            # ENC-TSK-726 / ENC-ISS-144: deploy evidence validation is transition_type-aware.
+            # web_deploy: accepts web_deploy_evidence {url, http_status, checked_at}
+            # github_pr_deploy / lambda_deploy: requires deploy_evidence (GH Actions Jobs API)
+            task_transition_type = (item_data.get("transition_type") or "github_pr_deploy").strip().lower()
+            if task_transition_type == "web_deploy":
+                wde_err = _validate_web_deploy_evidence(transition_evidence.get("web_deploy_evidence"))
+                if wde_err:
+                    return _tracker_field_validation_error(
+                        wde_err,
+                        field="status",
+                        record_id=record_id,
+                        record_type=record_type,
+                        expected_type="object",
+                        expected_format=(
+                            "transition_evidence.web_deploy_evidence with url, http_status, checked_at"
+                        ),
+                    )
+            else:
+                de_err = _validate_deploy_evidence(transition_evidence.get("deploy_evidence"))
+                if de_err:
+                    return _tracker_field_validation_error(
+                        de_err,
+                        field="status",
+                        record_id=record_id,
+                        record_type=record_type,
+                        expected_type="object",
+                        expected_format=(
+                            "transition_evidence.deploy_evidence with id, name, run_id, "
+                            "head_sha, status, conclusion, started_at, completed_at"
+                        ),
+                    )
 
         if not is_revert and record_type == "task" and new_lower == "closed" and current_status == "deploy-success":
             live_validation_evidence = transition_evidence.get("live_validation_evidence", "").strip()
