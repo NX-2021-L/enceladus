@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.45",
-  "updated_at": "2026-04-03T09:56:00Z",
+  "version": "2026-04-03.46",
+  "updated_at": "2026-04-03T10:20:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -901,7 +901,7 @@
           "type": "array",
           "item_type": "string",
           "definition": "Existing or newly created governed task IDs that a coordination request should dispatch directly.",
-          "usage_guidance": "When present, coordination treats these task IDs as the authoritative work units for dispatch planning and prompt context. Existing governed tasks listed here must not be auto-created or auto-closed by coordination bookkeeping alone."
+          "usage_guidance": "When present, coordination treats these task IDs as the authoritative work units for dispatch planning and prompt context. Existing governed tasks listed here must not be auto-created or auto-closed by coordination bookkeeping alone. ENC-ISS-128: When related_record_ids contains explicit task IDs, the intake path now skips _decompose_and_create_tracker_artifacts and uses the supplied records directly."
         }
       }
     },
