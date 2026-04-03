@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.25",
-  "updated_at": "2026-04-03T00:15:00Z",
+  "version": "2026-04-03.26",
+  "updated_at": "2026-04-03T01:09:47Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -71,8 +71,12 @@
             "no_code"
           ],
           "default": "github_pr_deploy",
-          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Must be set via tracker_set BEFORE checkout_task is called \u2014 treated as immutable after checkout begins. lambda_deploy: PR+commit flow with Lambda update evidence at deploy-success (ENC-FTR-041).",
-          "usage_guidance": "Set with tracker_set before checkout. Default github_pr_deploy is backward compatible and identical to pre-ENC-ISS-092 behavior. no_code: for tasks with no GitHub repo or non-code work (e.g. infra config, CLI installs). code_only: code was committed/merged to main but no deployment is needed. web_deploy: static/CloudFront deployments that do not produce GitHub Actions job objects. See checkout_service.transition_type_matrix for full gate requirements per type."
+          "immutable_values": [
+            "no_code",
+            "code_only"
+          ],
+          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Must be set via tracker_set BEFORE checkout_task is called \u2014 treated as immutable after checkout begins. ENC-FTR-060 additionally seals no_code and code_only at task creation: if either the current or proposed value is in immutable_values, post-creation transition_type mutations must be rejected to preserve lifecycle integrity documented by ENC-ISS-145. lambda_deploy: PR+commit flow with Lambda update evidence at deploy-success (ENC-FTR-041).",
+          "usage_guidance": "Set with tracker_set before checkout. Default github_pr_deploy is backward compatible and identical to pre-ENC-ISS-092 behavior. no_code: for tasks with no GitHub repo or non-code work (e.g. infra config, CLI installs). code_only: code was committed/merged to main but no deployment is needed. Do not change a task to or from no_code or code_only after creation \u2014 those values are sealed by ENC-FTR-060 because changing them can bypass or corrupt gate semantics (ENC-ISS-145). web_deploy: static/CloudFront deployments that do not produce GitHub Actions job objects. See checkout_service.transition_type_matrix for full gate requirements per type."
         },
         "transition_evidence": {
           "type": "object",
