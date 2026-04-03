@@ -188,6 +188,8 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "CONSUMES_FROM", "PRODUCES_FOR",
     # ENC-ISS-150: Plan edge types (projected by graph_sync)
     "PLAN_CONTAINS", "PLAN_ATTACHED_DOC", "PLAN_IMPLEMENTS",
+    # ENC-TSK-983: Lesson edge types
+    "LEARNED_FROM", "TEACHES", "SUPERSEDES", "SUPERSEDED_BY",
 })
 
 
