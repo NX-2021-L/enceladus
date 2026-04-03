@@ -1318,11 +1318,18 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
 
     if "status" in body:
         status = str(body["status"]).strip().lower()
-        if status not in ("active", "archived"):
+        # ENC-ISS-158: For handoff documents, accept handoff lifecycle values
+        # and route them to handoff_status instead of the document-level status.
+        _patch_subtype = existing.get("document_subtype", {}).get("S", "general")
+        if _patch_subtype == "handoff" and status in HANDOFF_STATUSES:
+            if "handoff_status" not in body:
+                body["handoff_status"] = status
+        elif status not in ("active", "archived"):
             return _error(400, "Status must be 'active' or 'archived'.")
-        expr_parts.append("#status = :status")
-        attr_names["#status"] = "status"
-        attr_values[":status"] = {"S": status}
+        else:
+            expr_parts.append("#status = :status")
+            attr_names["#status"] = "status"
+            attr_values[":status"] = {"S": status}
 
     if "file_name" in body:
         file_name = str(body.get("file_name") or "").strip()
