@@ -851,6 +851,30 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SqsEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeDeployQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-DeployQueueArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
 
   DeployFinalizeRole:
     Type: AWS::IAM::Role
@@ -890,6 +914,30 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SqsEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeFeedQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-FeedPublishQueueArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
 
   GovernanceAuditRole:
     Type: AWS::IAM::Role
@@ -903,6 +951,31 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBStreamEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
 
   DocPrepRole:
     Type: AWS::IAM::Role
@@ -971,6 +1044,34 @@ Resources:
             Principal:
               Service: pipes.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipeSourceDynamoDBStreams
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerAndDocumentsStreams
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: ${DataStackName}-TrackerStreamArn
+                  - !ImportValue
+                    Fn::Sub: ${DataStackName}-DocumentsStreamArn
+        - PolicyName: PipeTargetSqs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteFeedPublishQueue
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-FeedPublishQueueArn
 
   GraphSyncRole:
     Type: AWS::IAM::Role
@@ -984,6 +1085,30 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SqsEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeGraphSyncQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1016,6 +1141,31 @@ Resources:
             Principal:
               Service: pipes.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipeSourceDynamoDBStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+        - PolicyName: PipeTargetSqs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteGraphSyncQueue
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       Tags:
         - Key: Project
           Value: enceladus
