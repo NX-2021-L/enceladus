@@ -5417,7 +5417,9 @@ async def _tracker_create(args: dict) -> list[TextContent]:
                 "success_metrics", "related", "dispatch_id",
                 "coordination", "coordination_request_id", "acceptance_criteria",
                 "user_story", "category", "intent", "evidence", "primary_task",
-                "provider", "is_child", "parent_task_id"):
+                "provider", "is_child", "parent_task_id",
+                # ENC-TSK-A97: Plan-specific fields
+                "objectives_set", "attached_documents", "related_feature_id"):
         if args.get(key) is not None:
             payload[key] = args[key]
 
@@ -6499,6 +6501,12 @@ if ENABLE_LESSON_PRIMITIVE:
     _SEARCH_ACTIONS["tracker.list_lessons"] = {
         "tool": "tracker_list_lessons",
     }
+
+# ENC-FTR-058 / ENC-TSK-A97: Plan action aliases in code-mode surface
+_SEARCH_ACTIONS["plan.objectives_status"] = {"tool": "plan_objectives_status"}
+_EXECUTE_ACTIONS["plan.create"] = {"tool": "tracker_create", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.checkout"] = {"tool": "checkout_task", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.advance"] = {"tool": "advance_task_status", "requires_governance_hash": True}
 
 _RECORD_CONTEXT_MODES = {"record", "issue", "task", "feature", "lesson"}
 
@@ -8211,6 +8219,69 @@ async def _validate_commit_complete(args: dict) -> list[TextContent]:
 
 
 # -------------------------------------------------------------------
+# ENC-FTR-058 / ENC-TSK-A97: Plan objectives status handler
+# -------------------------------------------------------------------
+
+
+async def _plan_objectives_status(args: dict) -> list[TextContent]:
+    """Return the completion status of all objectives in a plan's objectives_set."""
+    record_id = args.get("record_id", "")
+    if not record_id:
+        return _result_text({"error": "record_id is required (plan ID)"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "plan":
+        return _result_text({"error": f"record_id must be a plan, got {record_type}"})
+
+    # Fetch the plan record
+    plan_resp = _tracker_api_request("GET", f"/{project_id}/plan/{rid}")
+    if isinstance(plan_resp, dict) and plan_resp.get("error"):
+        return _result_text(plan_resp)
+
+    objectives_set = plan_resp.get("objectives_set", []) or []
+    if not objectives_set:
+        return _result_text({
+            "plan_id": record_id,
+            "status": plan_resp.get("status", ""),
+            "objectives": [],
+            "summary": {"total": 0, "closed": 0, "open": 0, "progress_pct": 0},
+        })
+
+    # Resolve each objective's current status
+    terminal_statuses = {"closed", "completed", "complete", "archived", "deprecated", "production"}
+    objectives = []
+    for obj_id in objectives_set:
+        try:
+            obj_proj, obj_type, obj_rid = _parse_record_id(obj_id)
+            obj_resp = _tracker_api_request("GET", f"/{obj_proj}/{obj_type}/{obj_rid}")
+            obj_status = obj_resp.get("status", "unknown") if isinstance(obj_resp, dict) else "unknown"
+            obj_title = obj_resp.get("title", obj_id) if isinstance(obj_resp, dict) else obj_id
+        except (ValueError, Exception):
+            obj_status = "unknown"
+            obj_title = obj_id
+        objectives.append({"id": obj_id, "title": obj_title, "status": obj_status})
+
+    closed_count = sum(1 for o in objectives if o["status"] in terminal_statuses)
+    total = len(objectives)
+
+    return _result_text({
+        "plan_id": record_id,
+        "status": plan_resp.get("status", ""),
+        "objectives": objectives,
+        "summary": {
+            "total": total,
+            "closed": closed_count,
+            "open": total - closed_count,
+            "progress_pct": round((closed_count / total) * 100) if total > 0 else 0,
+        },
+    })
+
+
+# -------------------------------------------------------------------
 # ENC-FTR-052: Governed Lesson Primitive handlers
 # -------------------------------------------------------------------
 
@@ -8355,6 +8426,8 @@ _TOOL_HANDLERS = {
     "tracker_create_lesson": _tracker_create_lesson,
     "tracker_extend_lesson": _tracker_extend_lesson,
     "tracker_list_lessons": _tracker_list_lessons,
+    # ENC-FTR-058 / ENC-TSK-A97: Plan tools
+    "plan_objectives_status": _plan_objectives_status,
 }
 
 
