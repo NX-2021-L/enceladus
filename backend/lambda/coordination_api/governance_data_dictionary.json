@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.48",
-  "updated_at": "2026-04-03T22:01:00Z",
+  "version": "2026-04-03.49",
+  "updated_at": "2026-04-03T22:24:41Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -3072,6 +3072,23 @@
             "deprecated"
           ],
           "definition": "Whitelist of valid lesson status values."
+        }
+      }
+    },
+    "neo4j.backup_runtime": {
+      "description": "Operational contract for the scheduled Neo4j-to-S3 backup worker introduced for gamma validation and disaster-readiness (ENC-TSK-B85). The Lambda exports graph state to S3 on a daily EventBridge schedule; DynamoDB remains the authoritative restore source and backfill_graph.py is the primary rebuild path.",
+      "fields": {
+        "schedule_expression": {
+          "type": "string",
+          "definition": "EventBridge schedule expression that invokes the backup worker. Current contract: cron(0 3 * * ? *) for daily execution at 03:00 UTC."
+        },
+        "artifact_s3_prefix": {
+          "type": "string",
+          "definition": "S3 prefix where backup artifacts are written. Current contract: s3://jreese-net/neo4j-backups/<YYYY>/<MM>/<DD>/..."
+        },
+        "restore_strategy": {
+          "type": "string",
+          "definition": "Primary restore path for Enceladus graph recovery. Backup artifacts serve as audit/reference snapshots; governed recovery uses DynamoDB re-projection via tools/backfill_graph.py with a target rebuild window of under 15 minutes for the current corpus."
         }
       }
     },
