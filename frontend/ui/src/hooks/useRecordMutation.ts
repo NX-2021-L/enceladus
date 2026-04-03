@@ -12,7 +12,7 @@ import { closeRecord, submitNote, submitWorklog, reopenRecord, setField, setChec
 import type { MutationResult } from '../api/mutations'
 import { feedKeys } from '../api/feeds'
 
-type RecordType = 'task' | 'issue' | 'feature'
+type RecordType = 'task' | 'issue' | 'feature' | 'plan'
 
 interface MutationVars {
   projectId: string
@@ -40,16 +40,19 @@ export function useRecordMutation() {
     task: feedKeys.tasks,
     issue: feedKeys.issues,
     feature: feedKeys.features,
+    plan: feedKeys.liveFeed,
   }
   const idFieldMap: Record<RecordType, string> = {
     task: 'task_id',
     issue: 'issue_id',
     feature: 'feature_id',
+    plan: 'plan_id',
   }
   const pluralMap: Record<RecordType, string> = {
     task: 'tasks',
     issue: 'issues',
     feature: 'features',
+    plan: 'plans',
   }
 
   return useMutation<MutationResult, Error, MutationVars, { snapshot: unknown; feedKey: readonly unknown[] }>({
@@ -70,10 +73,10 @@ export function useRecordMutation() {
       // Determine target status for optimistic update
       let targetStatus: string | undefined
       if (action === 'close') {
-        const closedStatusMap: Record<RecordType, string> = { task: 'closed', issue: 'closed', feature: 'completed' }
+        const closedStatusMap: Record<RecordType, string> = { task: 'closed', issue: 'closed', feature: 'completed', plan: 'complete' }
         targetStatus = closedStatusMap[recordType]
       } else if (action === 'reopen') {
-        const defaultStatusMap: Record<RecordType, string> = { task: 'open', issue: 'open', feature: 'planned' }
+        const defaultStatusMap: Record<RecordType, string> = { task: 'open', issue: 'open', feature: 'planned', plan: 'drafted' }
         targetStatus = defaultStatusMap[recordType]
       } else if (action === 'set_field' && field === 'status' && value) {
         targetStatus = value
