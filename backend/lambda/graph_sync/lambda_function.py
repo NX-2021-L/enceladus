@@ -120,6 +120,7 @@ RECORD_TYPE_TO_LABEL = {
     "issue": "Issue",
     "feature": "Feature",
     "plan": "Plan",  # ENC-FTR-058
+    "lesson": "Lesson",  # ENC-FTR-052 / ENC-TSK-983
 }
 
 def _bare_id(record_id: str) -> str:
@@ -263,6 +264,42 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 tid=record_id, fid=related_id,
             )
 
+    # ENC-ISS-150 / ENC-TSK-B14: Plan-specific edge projections
+    if record_type == "plan":
+        # PLAN_CONTAINS -> each objective (Task/Issue/Feature)
+        for obj_id in record.get("objectives_set", []) or []:
+            obj_id = _bare_id(obj_id) if obj_id else ""
+            if not obj_id:
+                continue
+            tx.run(
+                "MATCH (p:Plan), (t {record_id: $tid}) "
+                "WHERE p.record_id = $pid "
+                "MERGE (p)-[:PLAN_CONTAINS]->(t)",
+                pid=record_id, tid=obj_id,
+            )
+
+        # PLAN_ATTACHED_DOC -> each document
+        for doc_id in record.get("attached_documents", []) or []:
+            doc_id = str(doc_id).strip() if doc_id else ""
+            if not doc_id:
+                continue
+            tx.run(
+                "MATCH (p:Plan), (d {record_id: $did}) "
+                "WHERE p.record_id = $pid "
+                "MERGE (p)-[:PLAN_ATTACHED_DOC]->(d)",
+                pid=record_id, did=doc_id,
+            )
+
+        # PLAN_IMPLEMENTS -> related feature
+        feat_id = _bare_id(record.get("related_feature_id", "") or "")
+        if feat_id:
+            tx.run(
+                "MATCH (p:Plan), (f:Feature) "
+                "WHERE p.record_id = $pid AND f.record_id = $fid "
+                "MERGE (p)-[:PLAN_IMPLEMENTS]->(f)",
+                pid=record_id, fid=feat_id,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Typed Relationship Edge Projection (ENC-FTR-049)
@@ -278,6 +315,15 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "affects": "AFFECTS", "affected-by": "AFFECTED_BY",
     "tests": "TESTS", "tested-by": "TESTED_BY",
     "consumes-from": "CONSUMES_FROM", "produces-for": "PRODUCES_FOR",
+    # ENC-ISS-150 / ENC-TSK-B14: Plan edge types
+    "plan-contains": "PLAN_CONTAINS",
+    "plan-attached-doc": "PLAN_ATTACHED_DOC",
+    "plan-implements": "PLAN_IMPLEMENTS",
+    # ENC-FTR-052 / ENC-TSK-983: Lesson edge types
+    "learned-from": "LEARNED_FROM", "teaches": "TEACHES",
+    "supersedes": "SUPERSEDES", "superseded-by": "SUPERSEDED_BY",
+    # ENC-FTR-061: Handoff edge types
+    "hands-off": "HANDS_OFF", "handed-off-by": "HANDED_OFF_BY",
 }
 
 

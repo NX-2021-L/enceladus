@@ -260,8 +260,8 @@
           "items": {
             "type": "string"
           },
-          "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children. ENC-ISS-106: The checkout service enforces that parent tasks cannot advance lifecycle stages (coding-complete onward) unless all direct children listed here have reached at least that stage. Children at 'closed' satisfy any stage check.",
-          "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. ENC-ISS-106: if subtask_ids is non-empty, the checkout service blocks advancement to coding-complete or beyond until every listed child is at or past that status. Not-found children also block advancement. To bypass: use the PWA user_initiated path."
+          "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children. ENC-ISS-106: The checkout service enforces that parent tasks cannot advance lifecycle stages (coding-complete onward) unless all direct children listed here have reached at least that stage. Children at 'closed' satisfy any stage check. ENC-ISS-140: append-only once task leaves open status or has been checked out — tracker mutation rejects removal attempts to prevent subtask gate bypass.",
+          "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. ENC-ISS-106: if subtask_ids is non-empty, the checkout service blocks advancement to coding-complete or beyond until every listed child is at or past that status. Not-found children also block advancement. ENC-ISS-140: once set on a non-open task (or one that has been checked out), entries cannot be removed — only appended. To bypass: use the PWA user_initiated path."
         },
         "related_task_ids": {
           "type": "array",
@@ -514,6 +514,86 @@
           "constraints": {
             "max_items": 100
           }
+        }
+      }
+    },
+    "document.handoff": {
+      "description": "Handoff document subtype schema (ENC-FTR-061). Structured inter-session continuity documents with lifecycle semantics. Created via document_api PUT with document_subtype=handoff. Status transitions: pending->claimed->completed, any->stale.",
+      "fields": {
+        "document_subtype": {
+          "type": "enum",
+          "enum": [
+            "general",
+            "handoff",
+            "blueprint",
+            "narrative",
+            "session-log"
+          ],
+          "definition": "Document subtype classification. Stored on all documents (defaults to 'general' for existing docs). When 'handoff', additional handoff-specific fields are required/available.",
+          "usage_guidance": "Set at creation via document_api PUT body. Cannot be changed after creation."
+        },
+        "source_record_id": {
+          "type": "string",
+          "constraints": {
+            "min_length": 1
+          },
+          "definition": "Tracker record ID that originated this handoff (e.g. ENC-TSK-B52). Required when document_subtype=handoff.",
+          "usage_guidance": "Set at creation. Creates the source anchor for graph HANDS_OFF edge (Phase 3)."
+        },
+        "handoff_status": {
+          "type": "enum",
+          "enum": [
+            "pending",
+            "claimed",
+            "completed",
+            "stale"
+          ],
+          "definition": "Handoff lifecycle status. pending: awaiting pickup. claimed: an agent has taken ownership. completed: handoff work done. stale: expired or superseded.",
+          "usage_guidance": "Auto-set to 'pending' on creation. Transition via PATCH with handoff_status field, or via the status field (ENC-ISS-158 routing). Valid transitions: pending->{claimed,stale}, claimed->{completed,stale}. completed and stale are terminal."
+        },
+        "prerequisite_state": {
+          "type": "string",
+          "definition": "Description of system state that must be true before the handoff can be executed. Optional.",
+          "usage_guidance": "Set at creation or via PATCH. Consuming agent should verify before proceeding."
+        },
+        "action_checklist": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Ordered list of steps the consuming agent should execute. Optional.",
+          "usage_guidance": "Set at creation or via PATCH. Items are plain-text strings."
+        },
+        "verification_criteria": {
+          "type": "string",
+          "definition": "How to verify the handoff was executed correctly. Optional.",
+          "usage_guidance": "Set at creation or via PATCH. Consuming agent should check after completing work."
+        },
+        "expires_at": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "Optional expiry timestamp. After this time, handoff should be considered stale.",
+          "usage_guidance": "Set at creation or via PATCH. No server-side enforcement yet — consuming agents should check."
+        },
+        "claimed_by": {
+          "type": "string",
+          "definition": "Identity of the agent/user that claimed this handoff. Set automatically when handoff_status transitions to 'claimed'."
+        },
+        "claimed_at": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "Timestamp when handoff was claimed. Set automatically with claimed_by."
+        },
+        "created_by_session": {
+          "type": "string",
+          "definition": "Session identity of the agent that created this handoff document. Set from auth claims at creation."
+        },
+        "status_routing": {
+          "type": "string",
+          "definition": "ENC-ISS-158: When documents.patch receives a handoff lifecycle value (pending/claimed/completed/stale) in the status field for a handoff document, it routes the value to handoff_status instead of rejecting it. This enables MCP callers to use the standard status field for handoff lifecycle transitions without knowing about the separate handoff_status field.",
+          "usage_guidance": "Callers can use either documents.patch(status='claimed') or documents.patch(handoff_status='claimed') on handoff documents. Both produce the same result. Non-handoff documents still enforce status in {active, archived}."
         }
       }
     },
@@ -843,7 +923,7 @@
           "type": "array",
           "item_type": "string",
           "definition": "Existing or newly created governed task IDs that a coordination request should dispatch directly.",
-          "usage_guidance": "When present, coordination treats these task IDs as the authoritative work units for dispatch planning and prompt context. Existing governed tasks listed here must not be auto-created or auto-closed by coordination bookkeeping alone."
+          "usage_guidance": "When present, coordination treats these task IDs as the authoritative work units for dispatch planning and prompt context. Existing governed tasks listed here must not be auto-created or auto-closed by coordination bookkeeping alone. ENC-ISS-128: When related_record_ids contains explicit task IDs, the intake path now skips _decompose_and_create_tracker_artifacts and uses the supplied records directly."
         }
       }
     },
@@ -1481,6 +1561,30 @@
         }
       }
     },
+    "mcp_server.handoff_tools": {
+      "description": "MCP execute actions for governed handoff document lifecycle (ENC-FTR-061, ENC-TSK-B53). Three actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag. All route through document_api HTTP API.",
+      "fields": {
+        "document.create_handoff": {
+          "type": "execute_action",
+          "definition": "Creates a handoff document with document_subtype=handoff. Requires project_id, title, content, source_record_id. Optionally accepts prerequisite_state, verification_criteria, action_checklist, expires_at, description, keywords, related_items. Returns document_id on success.",
+          "usage_guidance": "execute(steps=[{action: 'document.create_handoff', arguments: {governance_hash, project_id, title, content, source_record_id, ...}}])"
+        },
+        "document.claim_handoff": {
+          "type": "execute_action",
+          "definition": "Transitions a handoff document from pending to claimed. The document_api auto-stamps claimed_by and claimed_at from the authenticated caller.",
+          "usage_guidance": "execute(steps=[{action: 'document.claim_handoff', arguments: {governance_hash, document_id}}])"
+        },
+        "document.complete_handoff": {
+          "type": "execute_action",
+          "definition": "Transitions a handoff document from claimed to completed.",
+          "usage_guidance": "execute(steps=[{action: 'document.complete_handoff', arguments: {governance_hash, document_id}}])"
+        },
+        "feature_flag": {
+          "type": "string",
+          "definition": "ENABLE_HANDOFF_PRIMITIVE environment variable. When 'true', the 3 handoff actions are registered in the execute action registry. Default 'false'."
+        }
+      }
+    },
     "tracker.issue_location_context": {
       "description": "Issue creation location context enforcement (ENC-TSK-805, softened by ENC-ISS-105). hypothesis/technical_notes and location_hint are recommended for issues but no longer hard-block creation.",
       "fields": {
@@ -1495,7 +1599,7 @@
       }
     },
     "checkout_service.config": {
-      "description": "Runtime configuration requirements for the checkout service Lambda (ENC-ISS-088). Documents constraints on env var values to ensure correct inter-service routing.",
+      "description": "Runtime configuration requirements for the checkout service Lambda (ENC-ISS-088, ENC-TSK-B26). Documents constraints on env var values to ensure correct inter-service routing and GitHub App authentication.",
       "fields": {
         "TRACKER_API_BASE": {
           "type": "string",
@@ -1510,6 +1614,21 @@
           "type": "string",
           "definition": "DynamoDB table name for project records. Used by _resolve_github_repo() to look up the project's GitHub repo URL for commit/PR validation (DVP-ISS-082).",
           "usage_guidance": "Default: 'projects'. The checkout service Lambda IAM role must have dynamodb:GetItem and dynamodb:Scan permissions on this table."
+        },
+        "GITHUB_APP_ID": {
+          "type": "string",
+          "definition": "GitHub App numeric ID for generating installation access tokens (ENC-TSK-B26). Replaces static GITHUB_TOKEN PAT.",
+          "usage_guidance": "Set to the Enceladus GitHub App ID (currently 2946766). If unset, GitHub API calls fall back to unauthenticated (60 req/hr rate limit on public repos)."
+        },
+        "GITHUB_INSTALLATION_ID": {
+          "type": "string",
+          "definition": "GitHub App installation ID for the NX-2021-L organization (ENC-TSK-B26).",
+          "usage_guidance": "Set to the installation ID (currently 112392089). Required together with GITHUB_APP_ID."
+        },
+        "GITHUB_PRIVATE_KEY_SECRET": {
+          "type": "string",
+          "definition": "Secrets Manager secret name containing the GitHub App RSA private key (ENC-TSK-B26). Used to generate short-lived JWTs exchanged for installation tokens.",
+          "usage_guidance": "Default: 'devops/github-app/enceladus-private-key'. Lambda IAM role must have secretsmanager:GetSecretValue on this secret."
         }
       }
     },
@@ -2091,14 +2210,23 @@
         "Task",
         "Issue",
         "Feature",
-        "Project"
+        "Project",
+        "Plan",
+        "Lesson"
       ],
       "edge_types": [
         "CHILD_OF",
         "RELATED_TO",
         "BELONGS_TO",
         "ADDRESSES",
-        "IMPLEMENTS"
+        "IMPLEMENTS",
+        "PLAN_CONTAINS",
+        "PLAN_ATTACHED_DOC",
+        "PLAN_IMPLEMENTS",
+        "LEARNED_FROM",
+        "TEACHES",
+        "SUPERSEDES",
+        "SUPERSEDED_BY"
       ],
       "data_source": "DynamoDB stream -> EventBridge Pipe -> SQS FIFO -> graph_sync Lambda -> Neo4j AuraDB",
       "auth": "Cognito JWT cookie OR X-Coordination-Internal-Key header",
@@ -2133,9 +2261,11 @@
             "consumes-from",
             "produces-for",
             "dispatches",
-            "dispatched-by"
+            "dispatched-by",
+            "hands-off",
+            "handed-off-by"
           ],
-          "usage_guidance": "10 canonical types with inverse pairs. 'relates-to' is self-inverse (symmetric). All others are asymmetric with distinct inverse types. 'dispatches/dispatched-by' links coordination requests to dispatched tasks (ENC-TSK-960)."
+          "usage_guidance": "11 canonical types with inverse pairs. 'relates-to' is self-inverse (symmetric). All others are asymmetric with distinct inverse types. 'dispatches/dispatched-by' links coordination requests to dispatched tasks (ENC-TSK-960). 'hands-off/handed-off-by' links source records to handoff documents (ENC-FTR-061)."
         },
         "source_id": {
           "type": "string",
@@ -2833,7 +2963,7 @@
             "complete",
             "incomplete"
           ],
-          "definition": "Plan lifecycle. drafted: initial state. started: at least one objective task checked out. complete: all objectives closed. incomplete: abandoned with reason."
+          "definition": "Plan lifecycle. drafted: initial state. started: at least one objective task checked out. complete: all objectives closed (ENC-ISS-155: tracker mutation validates all objectives_set entries are in terminal status before accepting). incomplete: abandoned with reason."
         },
         "objectives_set": {
           "type": "array",

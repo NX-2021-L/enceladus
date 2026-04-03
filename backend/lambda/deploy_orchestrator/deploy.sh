@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 # ---------------------------------------------------------------------------
 # deploy.sh — Deploy deploy_orchestrator Lambda (ENC-ISS-102)
 # ---------------------------------------------------------------------------
@@ -8,16 +10,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
-FUNCTION_NAME="${FUNCTION_NAME:-devops-deploy-orchestrator}"
-ROLE_NAME="${ROLE_NAME:-devops-deploy-orchestrator-lambda-role}"
-ROLE_POLICY_NAME="${ROLE_POLICY_NAME:-devops-deploy-orchestrator-inline}"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-deploy-orchestrator${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-deploy-orchestrator-lambda-role${ENVIRONMENT_SUFFIX}}"
+ROLE_POLICY_NAME="${ROLE_POLICY_NAME:-devops-deploy-orchestrator-inline${ENVIRONMENT_SUFFIX}}"
 
-DEPLOY_TABLE="${DEPLOY_TABLE:-devops-deployment-manager}"
-TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker}"
-PROJECTS_TABLE="${PROJECTS_TABLE:-projects}"
+DEPLOY_TABLE="${DEPLOY_TABLE:-devops-deployment-manager${ENVIRONMENT_SUFFIX}}"
+TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker${ENVIRONMENT_SUFFIX}}"
+PROJECTS_TABLE="${PROJECTS_TABLE:-projects${ENVIRONMENT_SUFFIX}}"
 CONFIG_BUCKET="${CONFIG_BUCKET:-jreese-net}"
 CONFIG_PREFIX="${CONFIG_PREFIX:-deploy-config}"
-CODEBUILD_PROJECT="${CODEBUILD_PROJECT:-devops-ui-deploy-builder}"
+CODEBUILD_PROJECT="${CODEBUILD_PROJECT:-devops-ui-deploy-builder${ENVIRONMENT_SUFFIX}}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -96,7 +98,7 @@ ensure_role() {
       "Sid": "SQSConsumer",
       "Effect": "Allow",
       "Action": ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
-      "Resource": "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:devops-deploy-queue.fifo"
+      "Resource": "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:devops-deploy-queue${ENVIRONMENT_SUFFIX}.fifo"
     }
   ]
 }

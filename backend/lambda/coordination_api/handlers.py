@@ -104,6 +104,7 @@ from decomposition import (
     _validate_provider_session,
 )
 from intake_dedup import (
+    _classify_record_ids,
     _cleanup_dispatch_host,
     _count_active_host_dispatches,
     _decompose_and_create_tracker_artifacts,
@@ -764,17 +765,49 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
 
     assigned_to = str(body.get("assigned_to") or "AGENT-003")
 
-    try:
-        decomposition = _decompose_and_create_tracker_artifacts(
-            project_id=project_id,
-            initiative_title=initiative_title,
-            outcomes=outcomes,
-            request_id=request_id,
-            assigned_to=assigned_to,
+    # --- ENC-ISS-128: Dispatch existing governed records when supplied ---
+    # Extract explicitly supplied related_record_ids (not regex-mined from
+    # outcomes/constraints).  When the caller provides existing task IDs, use
+    # them directly instead of synthesizing new tracker artifacts.
+    explicit_record_ids = {
+        str(rid).strip().upper()
+        for rid in (body.get("related_record_ids") or [])
+        if isinstance(rid, str) and rid.strip()
+    }
+    classified = _classify_record_ids(explicit_record_ids) if explicit_record_ids else None
+
+    if classified and classified["task_ids"]:
+        # Existing governed tasks were explicitly supplied — skip decomposition.
+        decomposition = {
+            "feature_id": classified["feature_ids"][0] if classified["feature_ids"] else None,
+            "task_ids": classified["task_ids"],
+            "issue_ids": classified["issue_ids"],
+            "acceptance_criteria": [
+                f"Outcome {idx}: {outcome}"
+                for idx, outcome in enumerate(outcomes, start=1)
+            ],
+            "governance_hash": None,
+            "skipped_decomposition": True,
+        }
+        logger.info(
+            "[INFO] ENC-ISS-128: dispatching %d existing task(s) for request %s "
+            "(skipped artifact synthesis): %s",
+            len(classified["task_ids"]),
+            request_id,
+            classified["task_ids"],
         )
-    except Exception as exc:
-        logger.exception("decomposition failed")
-        return _error(500, f"Failed creating tracker decomposition artifacts: {exc}")
+    else:
+        try:
+            decomposition = _decompose_and_create_tracker_artifacts(
+                project_id=project_id,
+                initiative_title=initiative_title,
+                outcomes=outcomes,
+                request_id=request_id,
+                assigned_to=assigned_to,
+            )
+        except Exception as exc:
+            logger.exception("decomposition failed")
+            return _error(500, f"Failed creating tracker decomposition artifacts: {exc}")
 
     item = {
         "request_id": request_id,
@@ -840,13 +873,14 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
         logger.exception("put request failed")
         return _error(500, f"Failed persisting coordination request: {exc}")
 
-    _append_tracker_history(
-        decomposition["feature_id"],
-        "worklog",
-        f"Coordination request {request_id} intake_received (debounce expires {debounce_expires_iso})",
-        governance_hash=decomposition.get("governance_hash"),
-        coordination_request_id=request_id,
-    )
+    if decomposition.get("feature_id"):
+        _append_tracker_history(
+            decomposition["feature_id"],
+            "worklog",
+            f"Coordination request {request_id} intake_received (debounce expires {debounce_expires_iso})",
+            governance_hash=decomposition.get("governance_hash"),
+            coordination_request_id=request_id,
+        )
 
     return _response(
         201,

@@ -226,6 +226,10 @@ ENABLE_CONTEXT_NODES = os.environ.get(
 ENABLE_LESSON_PRIMITIVE = os.environ.get(
     "ENABLE_LESSON_PRIMITIVE", "false"
 ).lower() == "true"
+# ENC-FTR-061: Governed Handoff Primitive feature flag
+ENABLE_HANDOFF_PRIMITIVE = os.environ.get(
+    "ENABLE_HANDOFF_PRIMITIVE", "false"
+).lower() == "true"
 
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
@@ -5417,7 +5421,9 @@ async def _tracker_create(args: dict) -> list[TextContent]:
                 "success_metrics", "related", "dispatch_id",
                 "coordination", "coordination_request_id", "acceptance_criteria",
                 "user_story", "category", "intent", "evidence", "primary_task",
-                "provider", "is_child", "parent_task_id"):
+                "provider", "is_child", "parent_task_id",
+                # ENC-TSK-A97: Plan-specific fields
+                "objectives_set", "attached_documents", "related_feature_id"):
         if args.get(key) is not None:
             payload[key] = args[key]
 
@@ -5572,6 +5578,101 @@ async def _documents_patch(args: dict) -> list[TextContent]:
             "[ERROR] documents_patch: document API auth failed for document %s — "
             "check ENCELADUS_DOCUMENT_API_INTERNAL_API_KEY config. "
             "Direct datastore fallback is disabled (agent IAM denies all DynamoDB/S3 writes).",
+            document_id,
+        )
+    return _result_text(result)
+
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-061: Governed Handoff Primitive — MCP execute actions
+# ---------------------------------------------------------------------------
+
+
+async def _document_create_handoff(args: dict) -> list[TextContent]:
+    """Create a handoff document with required fields."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    project_id = str(args.get("project_id") or "").strip()
+    title = str(args.get("title") or "").strip()
+    content = str(args.get("content") or "").strip()
+    source_record_id = str(args.get("source_record_id") or "").strip()
+
+    if not project_id:
+        return _result_text(_error_payload("INVALID_INPUT", "project_id is required"))
+    if not title:
+        return _result_text(_error_payload("INVALID_INPUT", "title is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not source_record_id:
+        return _result_text(_error_payload("INVALID_INPUT", "source_record_id is required for handoff documents"))
+
+    body: Dict[str, Any] = {
+        "project_id": project_id,
+        "title": title,
+        "content": content,
+        "document_subtype": "handoff",
+        "source_record_id": source_record_id,
+    }
+    for key in ("prerequisite_state", "verification_criteria", "expires_at"):
+        val = args.get(key)
+        if val is not None:
+            body[key] = str(val).strip()
+    if "action_checklist" in args:
+        checklist = args["action_checklist"]
+        if isinstance(checklist, list):
+            body["action_checklist"] = checklist
+    for key in ("description", "keywords", "related_items"):
+        if key in args and args.get(key) is not None:
+            body[key] = args[key]
+
+    result = _document_api_request("PUT", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_create_handoff: document API auth failed for project %s",
+            project_id,
+        )
+    return _result_text(result)
+
+
+async def _document_claim_handoff(args: dict) -> list[TextContent]:
+    """Transition a handoff document from pending to claimed."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(_error_payload("INVALID_INPUT", "document_id is required"))
+
+    body: Dict[str, Any] = {"handoff_status": "claimed"}
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_claim_handoff: document API auth failed for document %s",
+            document_id,
+        )
+    return _result_text(result)
+
+
+async def _document_complete_handoff(args: dict) -> list[TextContent]:
+    """Transition a handoff document from claimed to completed."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(_error_payload("INVALID_INPUT", "document_id is required"))
+
+    body: Dict[str, Any] = {"handoff_status": "completed"}
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_complete_handoff: document API auth failed for document %s",
             document_id,
         )
     return _result_text(result)
@@ -6499,6 +6600,25 @@ if ENABLE_LESSON_PRIMITIVE:
     _SEARCH_ACTIONS["tracker.list_lessons"] = {
         "tool": "tracker_list_lessons",
     }
+
+# ENC-FTR-061: Conditionally register handoff actions behind feature flag
+if ENABLE_HANDOFF_PRIMITIVE:
+    _EXECUTE_ACTIONS["document.create_handoff"] = {
+        "tool": "document_create_handoff", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.claim_handoff"] = {
+        "tool": "document_claim_handoff", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.complete_handoff"] = {
+        "tool": "document_complete_handoff", "requires_governance_hash": True,
+    }
+
+# ENC-FTR-058 / ENC-TSK-A97: Plan action aliases in code-mode surface
+_SEARCH_ACTIONS["plan.objectives_status"] = {"tool": "plan_objectives_status"}
+_EXECUTE_ACTIONS["plan.create"] = {"tool": "tracker_create", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.checkout"] = {"tool": "checkout_task", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.advance"] = {"tool": "advance_task_status", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.add_objective"] = {"tool": "plan_add_objective", "requires_governance_hash": True}
 
 _RECORD_CONTEXT_MODES = {"record", "issue", "task", "feature", "lesson"}
 
@@ -8211,6 +8331,142 @@ async def _validate_commit_complete(args: dict) -> list[TextContent]:
 
 
 # -------------------------------------------------------------------
+# ENC-FTR-058 / ENC-TSK-A97: Plan objectives status handler
+# -------------------------------------------------------------------
+
+
+async def _plan_objectives_status(args: dict) -> list[TextContent]:
+    """Return the completion status of all objectives in a plan's objectives_set."""
+    record_id = args.get("record_id", "")
+    if not record_id:
+        return _result_text({"error": "record_id is required (plan ID)"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "plan":
+        return _result_text({"error": f"record_id must be a plan, got {record_type}"})
+
+    # Fetch the plan record
+    plan_resp = _tracker_api_request("GET", f"/{project_id}/plan/{rid}")
+    if isinstance(plan_resp, dict) and plan_resp.get("error"):
+        return _result_text(plan_resp)
+    plan = plan_resp.get("record", plan_resp) if isinstance(plan_resp, dict) else plan_resp
+
+    objectives_set = plan.get("objectives_set", []) or []
+    if not objectives_set:
+        return _result_text({
+            "plan_id": record_id,
+            "status": plan.get("status", ""),
+            "objectives": [],
+            "summary": {"total": 0, "closed": 0, "open": 0, "progress_pct": 0},
+        })
+
+    # Resolve each objective's current status
+    terminal_statuses = {"closed", "completed", "complete", "archived", "deprecated", "production"}
+    objectives = []
+    for obj_id in objectives_set:
+        try:
+            obj_proj, obj_type, obj_rid = _parse_record_id(obj_id)
+            obj_resp = _tracker_api_request("GET", f"/{obj_proj}/{obj_type}/{obj_rid}")
+            obj_record = obj_resp.get("record", obj_resp) if isinstance(obj_resp, dict) else obj_resp
+            obj_status = obj_record.get("status", "unknown") if isinstance(obj_record, dict) else "unknown"
+            obj_title = obj_record.get("title", obj_id) if isinstance(obj_record, dict) else obj_id
+        except (ValueError, Exception):
+            obj_status = "unknown"
+            obj_title = obj_id
+        objectives.append({"id": obj_id, "title": obj_title, "status": obj_status})
+
+    closed_count = sum(1 for o in objectives if o["status"] in terminal_statuses)
+    total = len(objectives)
+
+    return _result_text({
+        "plan_id": record_id,
+        "status": plan.get("status", ""),
+        "objectives": objectives,
+        "summary": {
+            "total": total,
+            "closed": closed_count,
+            "open": total - closed_count,
+            "progress_pct": round((closed_count / total) * 100) if total > 0 else 0,
+        },
+    })
+
+
+# ENC-TSK-B70: plan.add_objective — append a task to a plan's objectives_set
+async def _plan_add_objective(args: dict) -> list[TextContent]:
+    """Append a task ID to a plan's objectives_set (read-merge-write via tracker PATCH)."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = str(args.get("record_id") or "").strip()
+    objective_task_id = str(args.get("objective_task_id") or "").strip()
+    if not record_id:
+        return _result_text({"error": "record_id is required (plan ID)"})
+    if not objective_task_id:
+        return _result_text({"error": "objective_task_id is required (task ID to add as objective)"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "plan":
+        return _result_text({"error": f"record_id must be a plan, got {record_type}"})
+
+    # Validate objective_task_id looks like a valid record ID
+    try:
+        _parse_record_id(objective_task_id)
+    except ValueError as exc:
+        return _result_text({"error": f"Invalid objective_task_id: {exc}"})
+
+    # Read current plan to get existing objectives_set
+    plan_resp = _tracker_api_request("GET", f"/{project_id}/plan/{rid}")
+    if isinstance(plan_resp, dict) and plan_resp.get("error"):
+        return _result_text(plan_resp)
+    plan = plan_resp.get("record", plan_resp) if isinstance(plan_resp, dict) else plan_resp
+
+    current_objectives = plan.get("objectives_set", []) or []
+    if not isinstance(current_objectives, list):
+        current_objectives = []
+
+    # Idempotent: skip if already present
+    if objective_task_id in current_objectives:
+        return _result_text({
+            "success": True,
+            "record_id": record_id,
+            "objective_task_id": objective_task_id,
+            "action": "already_present",
+            "objectives_set": current_objectives,
+        })
+
+    # Append and write back via tracker PATCH (append-only enforcement in Lambda)
+    updated_objectives = current_objectives + [objective_task_id]
+    patch_payload: Dict[str, Any] = {
+        "field": "objectives_set",
+        "value": updated_objectives,
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("provider"):
+        patch_payload["provider"] = args["provider"]
+
+    patch_resp = _tracker_api_request("PATCH", f"/{project_id}/plan/{rid}", payload=patch_payload)
+    if isinstance(patch_resp, dict) and patch_resp.get("error"):
+        return _result_text(patch_resp)
+
+    return _result_text({
+        "success": True,
+        "record_id": record_id,
+        "objective_task_id": objective_task_id,
+        "action": "added",
+        "objectives_set": updated_objectives,
+    })
+
+
+# -------------------------------------------------------------------
 # ENC-FTR-052: Governed Lesson Primitive handlers
 # -------------------------------------------------------------------
 
@@ -8355,6 +8611,13 @@ _TOOL_HANDLERS = {
     "tracker_create_lesson": _tracker_create_lesson,
     "tracker_extend_lesson": _tracker_extend_lesson,
     "tracker_list_lessons": _tracker_list_lessons,
+    # ENC-FTR-058 / ENC-TSK-A97: Plan tools
+    "plan_objectives_status": _plan_objectives_status,
+    "plan_add_objective": _plan_add_objective,
+    # ENC-FTR-061: Governed Handoff Primitive
+    "document_create_handoff": _document_create_handoff,
+    "document_claim_handoff": _document_claim_handoff,
+    "document_complete_handoff": _document_complete_handoff,
 }
 
 

@@ -186,6 +186,12 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "PARENT_OF", "CHILD_OF_TYPED", "DEPENDS_ON", "DEPENDED_ON_BY",
     "CLONES", "CLONED_BY", "AFFECTS", "AFFECTED_BY", "TESTS", "TESTED_BY",
     "CONSUMES_FROM", "PRODUCES_FOR",
+    # ENC-ISS-150: Plan edge types (projected by graph_sync)
+    "PLAN_CONTAINS", "PLAN_ATTACHED_DOC", "PLAN_IMPLEMENTS",
+    # ENC-TSK-983: Lesson edge types
+    "LEARNED_FROM", "TEACHES", "SUPERSEDES", "SUPERSEDED_BY",
+    # ENC-FTR-061: Handoff edge types
+    "HANDS_OFF", "HANDED_OFF_BY",
 })
 
 

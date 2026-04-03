@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 # ---------------------------------------------------------------------------
 # deploy.sh — Deploy checkout_service Lambda (enceladus-checkout-service)
 #
@@ -17,16 +19,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
-FUNCTION_NAME="enceladus-checkout-service"
-AUTO_FUNCTION_NAME="enceladus-checkout-service-auto"
+FUNCTION_NAME="enceladus-checkout-service${ENVIRONMENT_SUFFIX}"
+AUTO_FUNCTION_NAME="enceladus-checkout-service-auto${ENVIRONMENT_SUFFIX}"
 API_ID="${API_ID:-8nkzqkmxqc}"
-TOKENS_TABLE="${TOKENS_TABLE:-enceladus-checkout-tokens}"
+TOKENS_TABLE="${TOKENS_TABLE:-enceladus-checkout-tokens${ENVIRONMENT_SUFFIX}}"
 
 COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_b2D0V3E1k}"
 COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 CHECKOUT_SERVICE_KEY="${CHECKOUT_SERVICE_KEY:-}"
-GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+GITHUB_APP_ID="${GITHUB_APP_ID:-}"
+GITHUB_INSTALLATION_ID="${GITHUB_INSTALLATION_ID:-}"
+GITHUB_PRIVATE_KEY_SECRET="${GITHUB_PRIVATE_KEY_SECRET:-devops/github-app/enceladus-private-key}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -35,7 +39,7 @@ log() {
 # ---------------------------------------------------------------------------
 # Resolve internal API key from coordination_api Lambda (same pattern as tracker_mutation)
 # ---------------------------------------------------------------------------
-COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
+COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api${ENVIRONMENT_SUFFIX}}"
 
 resolve_internal_api_key() {
   if [[ -n "${COORDINATION_INTERNAL_API_KEY}" ]]; then
@@ -60,6 +64,45 @@ for name in ("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY", "COORDINATION_INTERN
         print(value)
         break
 PY
+}
+
+# ---------------------------------------------------------------------------
+# Resolve GitHub App ID and Installation ID from github_integration Lambda
+# ---------------------------------------------------------------------------
+resolve_github_app_id() {
+  if [[ -n "${GITHUB_APP_ID}" ]]; then
+    printf '%s' "${GITHUB_APP_ID}"
+    return
+  fi
+  local existing
+  existing="$(aws lambda get-function-configuration \
+    --function-name "devops-github-integration${ENVIRONMENT_SUFFIX}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.GITHUB_APP_ID' \
+    --output text 2>/dev/null || true)"
+  if [[ "${existing}" != "None" && -n "${existing}" ]]; then
+    printf '%s' "${existing}"
+    return
+  fi
+  log "[WARN] Could not resolve GITHUB_APP_ID"
+}
+
+resolve_github_installation_id() {
+  if [[ -n "${GITHUB_INSTALLATION_ID}" ]]; then
+    printf '%s' "${GITHUB_INSTALLATION_ID}"
+    return
+  fi
+  local existing
+  existing="$(aws lambda get-function-configuration \
+    --function-name "devops-github-integration${ENVIRONMENT_SUFFIX}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables.GITHUB_INSTALLATION_ID' \
+    --output text 2>/dev/null || true)"
+  if [[ "${existing}" != "None" && -n "${existing}" ]]; then
+    printf '%s' "${existing}"
+    return
+  fi
+  log "[WARN] Could not resolve GITHUB_INSTALLATION_ID"
 }
 
 # ---------------------------------------------------------------------------
@@ -154,7 +197,7 @@ package_lambda() {
 # Ensure Lambda execution role exists
 # ---------------------------------------------------------------------------
 ensure_lambda_role() {
-  local role_name="enceladus-checkout-service-role"
+  local role_name="enceladus-checkout-service-role${ENVIRONMENT_SUFFIX}"
   local role_arn="arn:aws:iam::${ACCOUNT_ID}:role/${role_name}"
 
   if aws iam get-role --role-name "${role_name}" >/dev/null 2>&1; then
@@ -181,7 +224,7 @@ ensure_lambda_role() {
   # Inline policy for DynamoDB token table
   aws iam put-role-policy \
     --role-name "${role_name}" \
-    --policy-name checkout-tokens-policy \
+    --policy-name "checkout-tokens-policy${ENVIRONMENT_SUFFIX}" \
     --policy-document "{
       \"Version\":\"2012-10-17\",
       \"Statement\":[{
@@ -192,6 +235,19 @@ ensure_lambda_role() {
           \"dynamodb:DeleteItem\"
         ],
         \"Resource\":\"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TOKENS_TABLE}\"
+      }]
+    }"
+
+  # Inline policy for Secrets Manager (GitHub App private key) — ENC-TSK-B26
+  aws iam put-role-policy \
+    --role-name "${role_name}" \
+    --policy-name "checkout-secrets-policy${ENVIRONMENT_SUFFIX}" \
+    --policy-document "{
+      \"Version\":\"2012-10-17\",
+      \"Statement\":[{
+        \"Effect\":\"Allow\",
+        \"Action\":[\"secretsmanager:GetSecretValue\"],
+        \"Resource\":\"arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:devops/github-app/enceladus-private-key-*\"
       }]
     }"
 
@@ -224,6 +280,10 @@ deploy_lambda() {
       --function-name "${fn_name}" \
       --region "${REGION}" \
       --handler "${handler}" \
+      --runtime python3.12 \
+      --architectures arm64 \
+      --timeout 30 \
+      --memory-size 256 \
       --environment "${env_json}" \
       --layers "${layer_arn}" >/dev/null
     aws lambda wait function-updated-v2 --function-name "${fn_name}" --region "${REGION}"
@@ -233,6 +293,7 @@ deploy_lambda() {
       --function-name "${fn_name}" \
       --region "${REGION}" \
       --runtime python3.12 \
+      --architectures arm64 \
       --role "${role_arn}" \
       --handler "${handler}" \
       --zip-file "fileb://${zip_path}" \
@@ -347,7 +408,7 @@ ensure_api_routes() {
 # EventBridge rule for auto-checkout (every 5 minutes)
 # ---------------------------------------------------------------------------
 ensure_eventbridge_rule() {
-  local rule_name="enceladus-checkout-auto"
+  local rule_name="enceladus-checkout-auto${ENVIRONMENT_SUFFIX}"
   local auto_fn_arn="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${AUTO_FUNCTION_NAME}"
 
   log "[START] Ensuring EventBridge rule: ${rule_name}"
@@ -407,10 +468,19 @@ main() {
     exit 1
   fi
 
+  # Resolve GitHub App config
+  local effective_app_id
+  effective_app_id="$(resolve_github_app_id)"
+  local effective_install_id
+  effective_install_id="$(resolve_github_installation_id)"
+  if [[ -z "${effective_app_id}" || -z "${effective_install_id}" ]]; then
+    log "[WARN] GitHub App not fully configured — commit/PR validation will be unauthenticated"
+  fi
+
   # Shared layer ARN (PyJWT + cryptography)
   local layer_arn
   layer_arn="$(aws lambda list-layer-versions \
-    --layer-name enceladus-shared \
+    --layer-name "enceladus-shared${ENVIRONMENT_SUFFIX}" \
     --region "${REGION}" \
     --query 'LayerVersions[0].LayerVersionArn' \
     --output text 2>/dev/null || echo "None")"
@@ -435,7 +505,9 @@ print(json.dumps({"Variables": {
     "COORDINATION_INTERNAL_API_KEY": "${effective_key}",
     "ENCELADUS_COORDINATION_INTERNAL_API_KEY": "${effective_key}",
     "CHECKOUT_SERVICE_KEY": "${checkout_key}",
-    "GITHUB_TOKEN": "${GITHUB_TOKEN}",
+    "GITHUB_APP_ID": "${effective_app_id}",
+    "GITHUB_INSTALLATION_ID": "${effective_install_id}",
+    "GITHUB_PRIVATE_KEY_SECRET": "${GITHUB_PRIVATE_KEY_SECRET}",
     "CHECKOUT_TOKENS_TABLE": "${TOKENS_TABLE}",
     "CHECKOUT_TOKENS_REGION": "${REGION}",
     "TRACKER_API_BASE": "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker",
@@ -462,13 +534,18 @@ PY
 
   rm -f "${zip_path}"
 
-  log ""
-  log "--- Configuring API routes ---"
-  ensure_api_routes
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    log ""
+    log "--- Configuring API routes ---"
+    ensure_api_routes
 
-  log ""
-  log "--- Configuring EventBridge rule ---"
-  ensure_eventbridge_rule
+    log ""
+    log "--- Configuring EventBridge rule ---"
+    ensure_eventbridge_rule
+  else
+    log ""
+    log "[INFO] Skipping API route and EventBridge configuration for gamma (ENVIRONMENT_SUFFIX=${ENVIRONMENT_SUFFIX})"
+  fi
 
   log ""
   log "=========================================="

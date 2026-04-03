@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 API_ID="${API_ID:-8nkzqkmxqc}"
-FUNCTION_NAME="${FUNCTION_NAME:-devops-graph-query-api}"
-ROLE_NAME="${ROLE_NAME:-devops-graph-query-api-lambda-role}"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-graph-query-api${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-graph-query-api-lambda-role${ENVIRONMENT_SUFFIX}}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}"
 
@@ -252,7 +254,11 @@ ensure_api_route() {
 main() {
   ensure_role
   ensure_lambda
-  ensure_api_route
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    ensure_api_route
+  else
+    log "[SKIP] API route configuration skipped for suffixed environment (${ENVIRONMENT_SUFFIX})"
+  fi
   log "[SUCCESS] graph-query-api deploy complete"
 }
 

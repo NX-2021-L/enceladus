@@ -92,6 +92,30 @@ export function DocumentsListPage() {
         placeholder="Search documents..."
       />
 
+      {/* Subtype filter (ENC-FTR-061) */}
+      <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+        <button
+          onClick={() => setFilter('subtype', undefined as unknown as string)}
+          className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-medium min-h-[32px] ${
+            !filters.subtype
+              ? 'bg-blue-500/20 text-blue-400'
+              : 'bg-slate-800 text-slate-400'
+          }`}
+        >
+          All Types
+        </button>
+        <button
+          onClick={() => setFilter('subtype', 'handoff')}
+          className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-medium min-h-[32px] ${
+            filters.subtype === 'handoff'
+              ? 'bg-amber-500/20 text-amber-400'
+              : 'bg-slate-800 text-slate-400'
+          }`}
+        >
+          Handoffs
+        </button>
+      </div>
+
       <FilterBar
         options={DOCUMENT_STATUSES}
         selected={filters.status ?? []}

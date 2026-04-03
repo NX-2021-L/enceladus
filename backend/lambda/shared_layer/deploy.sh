@@ -9,27 +9,31 @@
 # Part of ENC-TSK-525: Extract shared Lambda layer.
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
-LAYER_NAME="${LAYER_NAME:-enceladus-shared}"
-RUNTIME="python3.11"
+LAYER_NAME="${LAYER_NAME:-enceladus-shared${ENVIRONMENT_SUFFIX}}"
+RUNTIME="python3.12"
 
 # All Enceladus Lambda functions that should use this layer.
 ALL_FUNCTIONS=(
-    devops-coordination-api
-    devops-tracker-mutation-api
-    devops-document-api
-    devops-project-service
-    devops-feed-query-api
-    devops-coordination-monitor-api
-    devops-deploy-intake
-    devops-reference-search
-    devops-deploy-orchestrator
-    devops-deploy-finalize
-    devops-feed-publisher
-    enceladus-governance-audit
-    enceladus-bedrock-agent-actions
-    devops-doc-prep
+    "devops-coordination-api${ENVIRONMENT_SUFFIX}"
+    "devops-tracker-mutation-api${ENVIRONMENT_SUFFIX}"
+    "devops-document-api${ENVIRONMENT_SUFFIX}"
+    "devops-project-service${ENVIRONMENT_SUFFIX}"
+    "devops-feed-query-api${ENVIRONMENT_SUFFIX}"
+    "devops-coordination-monitor-api${ENVIRONMENT_SUFFIX}"
+    "devops-deploy-intake${ENVIRONMENT_SUFFIX}"
+    "devops-reference-search${ENVIRONMENT_SUFFIX}"
+    "devops-deploy-orchestrator${ENVIRONMENT_SUFFIX}"
+    "devops-deploy-finalize${ENVIRONMENT_SUFFIX}"
+    "devops-feed-publisher${ENVIRONMENT_SUFFIX}"
+    "enceladus-governance-audit${ENVIRONMENT_SUFFIX}"
+    "enceladus-bedrock-agent-actions${ENVIRONMENT_SUFFIX}"
+    "devops-doc-prep${ENVIRONMENT_SUFFIX}"
+    "enceladus-checkout-service${ENVIRONMENT_SUFFIX}"
+    "enceladus-checkout-service-auto${ENVIRONMENT_SUFFIX}"
 )
 
 log() {

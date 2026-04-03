@@ -12,6 +12,20 @@ Parameters:
   Environment:
     Type: String
     Default: production
+    AllowedValues: [production, gamma]
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+    Description: >
+      Appended to every resource name. Production uses "" (zero drift),
+      gamma uses "-gamma" for parallel deployment.
+  S3EnvPrefix:
+    Type: String
+    Default: ""
+    Description: >
+      Prefix for S3 paths in gamma. Production uses "" (no prefix),
+      gamma uses "gamma/" to isolate S3 content.
   DataStackName:
     Type: String
     Default: enceladus-data
@@ -32,6 +46,9 @@ Parameters:
     Type: String
     Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:2
 
+Conditions:
+  IsProduction: !Equals [!Ref Environment, "production"]
+
 Resources:
   # ---------------------------------------------------------------------------
   # Lambda Functions — API Tier (Cognito-authenticated, API GW proxied)
@@ -41,14 +58,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-coordination-api
+      FunctionName: !Sub "devops-coordination-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 120
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt CoordinationApiRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -56,16 +73,16 @@ Resources:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          COORDINATION_TABLE: coordination-requests
-          TRACKER_TABLE: devops-project-tracker
-          PROJECTS_TABLE: projects
+          COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           SSM_REGION: !Ref AWS::Region
           SECRETS_REGION: !Ref AWS::Region
           CORS_ORIGIN: !Ref CorsOrigin
           ENCELADUS_MCP_INTERFACE_MODE: code
-          DOCUMENT_API_LAMBDA_NAME: devops-document-api
-          COMPONENTS_TABLE: component-registry
+          DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
+          COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
       Tags:
         - Key: Project
           Value: enceladus
@@ -76,14 +93,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-tracker-mutation-api
+      FunctionName: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt TrackerMutationRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -91,9 +108,9 @@ Resources:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          DYNAMODB_TABLE: devops-project-tracker
+          DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
-          PROJECTS_TABLE: projects
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
       Tags:
         - Key: Project
           Value: enceladus
@@ -104,14 +121,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-document-api
+      FunctionName: !Sub "devops-document-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt DocumentApiRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -119,14 +136,14 @@ Resources:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          DOCUMENTS_TABLE: documents
-          PROJECTS_TABLE: projects
-          TRACKER_TABLE: devops-project-tracker
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           S3_BUCKET: !Ref S3Bucket
-          S3_PREFIX: agent-documents
-          S3_REFERENCE_PREFIX: mobile/v1/reference
-          S3_GOVERNANCE_PREFIX: governance/live
+          S3_PREFIX: !Sub "${S3EnvPrefix}agent-documents"
+          S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
+          S3_GOVERNANCE_PREFIX: !Sub "${S3EnvPrefix}governance/live"
       Tags:
         - Key: Project
           Value: enceladus
@@ -137,14 +154,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-project-service
+      FunctionName: !Sub "devops-project-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt ProjectServiceRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -152,11 +169,11 @@ Resources:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          PROJECTS_TABLE: projects
-          TRACKER_TABLE: devops-project-tracker
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           S3_BUCKET: !Ref S3Bucket
-          S3_REFERENCE_PREFIX: mobile/v1/reference
+          S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
       Tags:
         - Key: Project
           Value: enceladus
@@ -167,14 +184,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-feed-query-api
+      FunctionName: !Sub "devops-feed-query-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 60  # ENC-TSK-797: increased from 15 for synchronous feed_publisher invoke
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt FeedQueryRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -182,10 +199,10 @@ Resources:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          DYNAMODB_TABLE: devops-project-tracker
+          DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
-          PROJECTS_TABLE: projects
-          FEED_PUBLISHER_FUNCTION: devops-feed-publisher
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          FEED_PUBLISHER_FUNCTION: !Sub "devops-feed-publisher${EnvironmentSuffix}"
       Tags:
         - Key: Project
           Value: enceladus
@@ -196,14 +213,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-coordination-monitor-api
+      FunctionName: !Sub "devops-coordination-monitor-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt CoordinationMonitorRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -211,7 +228,7 @@ Resources:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          COORDINATION_TABLE: coordination-requests
+          COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
       Tags:
         - Key: Project
@@ -223,14 +240,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-deploy-intake
+      FunctionName: !Sub "devops-deploy-intake${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 120
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt DeployIntakeRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -238,11 +255,11 @@ Resources:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          DEPLOY_TABLE: devops-deployment-manager
+          DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DEPLOY_REGION: !Ref AWS::Region
-          PROJECTS_TABLE: projects
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
-          CONFIG_PREFIX: deployment-config
+          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deployment-config"
           CORS_ORIGIN: !Ref CorsOrigin
       Tags:
         - Key: Project
@@ -254,14 +271,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-reference-search
+      FunctionName: !Sub "devops-reference-search${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt ReferenceSearchRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -270,7 +287,7 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           S3_BUCKET: !Ref S3Bucket
-          S3_REFERENCE_PREFIX: mobile/v1/reference
+          S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
       Tags:
         - Key: Project
           Value: enceladus
@@ -281,14 +298,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: auth-refresh
+      FunctionName: !Sub "auth-refresh${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 128
       Timeout: 10
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt AuthRefreshRole.Arn
       Environment:
         Variables:
@@ -309,22 +326,22 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-deploy-orchestrator
+      FunctionName: !Sub "devops-deploy-orchestrator${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt DeployOrchestratorRole.Arn
       Environment:
         Variables:
-          DEPLOY_TABLE: devops-deployment-manager
+          DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DEPLOY_REGION: !Ref AWS::Region
-          PROJECTS_TABLE: projects
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
-          CONFIG_PREFIX: deployment-config
+          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deployment-config"
           CODEBUILD_PROJECT: devops-ui-deploy-builder
       Tags:
         - Key: Project
@@ -336,23 +353,23 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-deploy-finalize
+      FunctionName: !Sub "devops-deploy-finalize${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt DeployFinalizeRole.Arn
       Environment:
         Variables:
-          DEPLOY_TABLE: devops-deployment-manager
+          DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DEPLOY_REGION: !Ref AWS::Region
-          PROJECTS_TABLE: projects
-          TRACKER_TABLE: devops-project-tracker
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
-          CONFIG_PREFIX: deployment-config
+          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deployment-config"
       Tags:
         - Key: Project
           Value: enceladus
@@ -363,24 +380,24 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-feed-publisher
+      FunctionName: !Sub "devops-feed-publisher${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.handler
       MemorySize: 512
       Timeout: 600
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt FeedPublisherRole.Arn
       Description: Event-driven mobile feed publisher triggered by DynamoDB Streams via SQS FIFO
       Environment:
         Variables:
-          TRACKER_TABLE: devops-project-tracker
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           TRACKER_REGION: !Ref AWS::Region
-          PROJECTS_TABLE: projects
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           PROJECTS_REGION: !Ref AWS::Region
           FEED_BUCKET: !Ref S3Bucket
-          FEED_PREFIX: mobile/v1
+          FEED_PREFIX: !Sub "${S3EnvPrefix}mobile/v1"
           EVENT_BUS: default
       Tags:
         - Key: Project
@@ -392,14 +409,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: enceladus-governance-audit
+      FunctionName: !Sub "enceladus-governance-audit${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.handler
       MemorySize: 128
       Timeout: 30
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt GovernanceAuditRole.Arn
       Tags:
         - Key: Project
@@ -411,20 +428,20 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-doc-prep
+      FunctionName: !Sub "devops-doc-prep${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt DocPrepRole.Arn
       Environment:
         Variables:
-          DOCUMENTS_TABLE: documents
-          PROJECTS_TABLE: projects
-          TRACKER_TABLE: devops-project-tracker
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           S3_BUCKET: !Ref S3Bucket
       Tags:
@@ -437,25 +454,25 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: enceladus-bedrock-agent-actions
+      FunctionName: !Sub "enceladus-bedrock-agent-actions${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt BedrockActionsRole.Arn
       Environment:
         Variables:
-          DOCUMENTS_TABLE: documents
-          PROJECTS_TABLE: projects
-          TRACKER_TABLE: devops-project-tracker
-          DEPLOY_TABLE: devops-deployment-manager
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           S3_BUCKET: !Ref S3Bucket
-          GOVERNANCE_POLICIES_TABLE: governance-policies
-          AGENT_COMPLIANCE_TABLE: agent-compliance-violations
+          GOVERNANCE_POLICIES_TABLE: !Sub "governance-policies${EnvironmentSuffix}"
+          AGENT_COMPLIANCE_TABLE: !Sub "agent-compliance-violations${EnvironmentSuffix}"
       Tags:
         - Key: Project
           Value: enceladus
@@ -466,14 +483,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-changelog-api
+      FunctionName: !Sub "devops-changelog-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt ChangelogApiRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -481,10 +498,10 @@ Resources:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          DEPLOY_TABLE: devops-deployment-manager
+          DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           CONFIG_BUCKET: !Ref S3Bucket
-          CONFIG_PREFIX: deploy-config
+          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
           CORS_ORIGIN: !Ref CorsOrigin
       Tags:
         - Key: Project
@@ -496,14 +513,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-graph-sync
+      FunctionName: !Sub "devops-graph-sync${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 60
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt GraphSyncRole.Arn
       Environment:
         Variables:
@@ -519,14 +536,14 @@ Resources:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
     Properties:
-      FunctionName: devops-graph-query-api
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Role: !GetAtt GraphQueryApiRole.Arn
       Environment:
         Variables:
@@ -603,7 +620,7 @@ Resources:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
     Properties:
-      Name: devops-coordination-batch-poller
+      Name: !Sub "devops-coordination-batch-poller${EnvironmentSuffix}"
       ScheduleExpression: rate(5 minutes)
       State: ENABLED
       Targets:
@@ -614,7 +631,7 @@ Resources:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
     Properties:
-      Name: devops-deploy-codebuild-finalize
+      Name: !Sub "devops-deploy-codebuild-finalize${EnvironmentSuffix}"
       EventPattern:
         source:
           - aws.codebuild
@@ -633,9 +650,10 @@ Resources:
 
   ProjectJsonSyncRule:
     Type: AWS::Events::Rule
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
-      Name: on-project-json-sync
+      Name: !Sub "on-project-json-sync${EnvironmentSuffix}"
       EventPattern:
         source:
           - devops.json-sync
@@ -654,7 +672,7 @@ Resources:
     Type: AWS::Pipes::Pipe
     DeletionPolicy: Retain
     Properties:
-      Name: devops-tracker-to-feed-queue
+      Name: !Sub "devops-tracker-to-feed-queue${EnvironmentSuffix}"
       RoleArn: !GetAtt FeedPipeRole.Arn
       Source: !ImportValue
         Fn::Sub: ${DataStackName}-TrackerStreamArn
@@ -676,7 +694,7 @@ Resources:
     Type: AWS::Pipes::Pipe
     DeletionPolicy: Retain
     Properties:
-      Name: devops-documents-to-feed-queue
+      Name: !Sub "devops-documents-to-feed-queue${EnvironmentSuffix}"
       RoleArn: !GetAtt FeedPipeRole.Arn
       Source: !ImportValue
         Fn::Sub: ${DataStackName}-DocumentsStreamArn
@@ -698,7 +716,7 @@ Resources:
     Type: AWS::Pipes::Pipe
     DeletionPolicy: Retain
     Properties:
-      Name: devops-tracker-to-graph-sync-queue
+      Name: !Sub "devops-tracker-to-graph-sync-queue${EnvironmentSuffix}"
       RoleArn: !GetAtt GraphPipeRole.Arn
       Source: !ImportValue
         Fn::Sub: ${DataStackName}-TrackerStreamArn
@@ -724,7 +742,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-coordination-api-lambda-role
+      RoleName: !Sub "devops-coordination-api-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -740,7 +758,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-tracker-mutation-lambda-role
+      RoleName: !Sub "devops-tracker-mutation-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -753,7 +771,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-document-api-lambda-role
+      RoleName: !Sub "devops-document-api-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -766,7 +784,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-project-service-lambda-role
+      RoleName: !Sub "devops-project-service-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -779,7 +797,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-feed-query-lambda-role
+      RoleName: !Sub "devops-feed-query-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -796,14 +814,14 @@ Resources:
                 Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource:
-                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher
-                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher:*
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}:*"
 
   CoordinationMonitorRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-coordination-monitor-lambda-role
+      RoleName: !Sub "devops-coordination-monitor-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -816,7 +834,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-deploy-intake-lambda-role
+      RoleName: !Sub "devops-deploy-intake-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -829,7 +847,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-deploy-orchestrator-lambda-role
+      RoleName: !Sub "devops-deploy-orchestrator-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -837,12 +855,36 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SqsEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeDeployQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-DeployQueueArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
 
   DeployFinalizeRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-deploy-finalize-lambda-role
+      RoleName: !Sub "devops-deploy-finalize-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -855,7 +897,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-reference-search-lambda-role
+      RoleName: !Sub "devops-reference-search-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -868,7 +910,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-feed-publisher-lambda-role
+      RoleName: !Sub "devops-feed-publisher-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -876,12 +918,36 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SqsEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeFeedQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-FeedPublishQueueArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
 
   GovernanceAuditRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: enceladus-governance-audit-role
+      RoleName: !Sub "enceladus-governance-audit-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -889,12 +955,37 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBStreamEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
 
   DocPrepRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-doc-prep-lambda-role
+      RoleName: !Sub "devops-doc-prep-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -907,7 +998,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: enceladus-bedrock-actions-lambda-role
+      RoleName: !Sub "enceladus-bedrock-actions-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -920,7 +1011,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-changelog-api-lambda-role
+      RoleName: !Sub "devops-changelog-api-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -936,7 +1027,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: auth-refresh-lambda-role
+      RoleName: !Sub "auth-refresh-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -949,7 +1040,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-feed-pipe-role
+      RoleName: !Sub "devops-feed-pipe-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -957,12 +1048,40 @@ Resources:
             Principal:
               Service: pipes.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipeSourceDynamoDBStreams
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerAndDocumentsStreams
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: ${DataStackName}-TrackerStreamArn
+                  - !ImportValue
+                    Fn::Sub: ${DataStackName}-DocumentsStreamArn
+        - PolicyName: PipeTargetSqs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteFeedPublishQueue
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-FeedPublishQueueArn
 
   GraphSyncRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-graph-sync-lambda-role
+      RoleName: !Sub "devops-graph-sync-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -970,6 +1089,30 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SqsEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeGraphSyncQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -978,7 +1121,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-graph-query-api-lambda-role
+      RoleName: !Sub "devops-graph-query-api-lambda-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -994,7 +1137,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: devops-graph-pipe-role
+      RoleName: !Sub "devops-graph-pipe-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -1002,6 +1145,31 @@ Resources:
             Principal:
               Service: pipes.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipeSourceDynamoDBStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+        - PolicyName: PipeTargetSqs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteGraphSyncQueue
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       Tags:
         - Key: Project
           Value: enceladus

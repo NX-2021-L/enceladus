@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v4/**'
     paths:
       - "infrastructure/cloudformation/03-api.yaml"
       - "infrastructure/cloudformation/resource-import-api.json"
@@ -38,6 +39,7 @@ permissions:
 env:
   AWS_REGION: us-west-2
   TEMPLATE_FILE: infrastructure/cloudformation/03-api.yaml
+  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
   DEFAULT_STACK_NAME: enceladus-api
   DEFAULT_COMPUTE_STACK_NAME: enceladus-compute
   DEFAULT_API_NAME: devops-tracker-api
@@ -48,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
-      group: cloudformation-api-stack-deploy-main
+      group: cloudformation-api-stack-deploy-${{ github.ref_name }}
       cancel-in-progress: false
 
     steps:
@@ -81,9 +83,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          stack_name="${INPUT_STACK_NAME:-${DEFAULT_STACK_NAME}}"
-          compute_stack_name="${INPUT_COMPUTE_STACK_NAME:-${DEFAULT_COMPUTE_STACK_NAME}}"
-          api_name="${INPUT_API_NAME:-${DEFAULT_API_NAME}}"
+          stack_name="${INPUT_STACK_NAME:-${DEFAULT_STACK_NAME}}${ENVIRONMENT_SUFFIX}"
+          compute_stack_name="${INPUT_COMPUTE_STACK_NAME:-${DEFAULT_COMPUTE_STACK_NAME}}${ENVIRONMENT_SUFFIX}"
+          api_name="${INPUT_API_NAME:-${DEFAULT_API_NAME}}${ENVIRONMENT_SUFFIX}"
 
           {
             echo "stack_name=${stack_name}"

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v4/**'
     paths:
       - "backend/lambda/deploy_intake/**"
       - ".github/workflows/lambda-deploy-intake-deploy.yml"
@@ -27,6 +28,7 @@ jobs:
       function_name: "devops-deploy-intake"
       lambda_dir: "backend/lambda/deploy_intake"
       deploy_script: "backend/lambda/deploy_intake/deploy.sh"
+      environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
       COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}

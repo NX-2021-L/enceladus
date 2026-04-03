@@ -6,12 +6,27 @@ Description: >
   NOTE: API Gateway already exists. Use resource import to adopt it.
 
 Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+    Description: >
+      Appended to Lambda function name references in integration URIs.
+      Production uses "" (zero drift), gamma uses "-gamma".
+  CorsOrigin:
+    Type: String
+    Default: "https://jreese.net"
+    Description: >
+      CORS AllowOrigins value. Override for gamma environment.
   ComputeStackName:
     Type: String
     Default: enceladus-compute
   ApiName:
     Type: String
     Default: devops-tracker-api
+
+Conditions:
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -26,7 +41,7 @@ Resources:
       ProtocolType: HTTP
       CorsConfiguration:
         AllowOrigins:
-          - https://jreese.net
+          - !Ref CorsOrigin
         AllowMethods:
           - GET
           - POST
@@ -42,9 +57,18 @@ Resources:
           - X-Checkout-Assistant-Key
         AllowCredentials: true
 
-  # NOTE: $default stage exists but AWS::ApiGatewayV2::Stage does not support
-  # CloudFormation import. The stage is managed directly via API Gateway console.
-  # AutoDeploy is enabled on the $default stage.
+  # NOTE: Production $default stage was created manually and cannot be imported
+  # into CloudFormation. For non-production environments (gamma), the stage is
+  # created by CFn directly. AutoDeploy eliminates the need for a separate
+  # AWS::ApiGatewayV2::Deployment resource.
+  ApiDefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      Description: !Sub "Default stage for ${EnvironmentSuffix} environment"
 
   # ---------------------------------------------------------------------------
   # Integrations (Lambda proxy)
@@ -55,7 +79,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-api
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-api${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -64,7 +88,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -73,7 +97,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-document-api
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-document-api${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -82,7 +106,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-project-service
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-project-service${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -91,7 +115,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-query-api
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-query-api${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -100,7 +124,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-monitor-api
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-monitor-api${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -109,7 +133,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-intake
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-intake${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -118,7 +142,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-reference-search
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-reference-search${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -130,7 +154,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-doc-prep
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-doc-prep${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -139,7 +163,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:auth-refresh
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:auth-refresh${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
@@ -148,7 +172,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-github-integration
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-github-integration${EnvironmentSuffix}"
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
