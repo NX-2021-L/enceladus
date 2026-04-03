@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v4/**'
     paths:
       - "backend/lambda/auth_refresh/**"
       - ".github/workflows/lambda-auth-refresh-deploy.yml"
@@ -26,6 +27,7 @@ jobs:
     with:
       function_name: "auth-refresh"
       lambda_dir: "backend/lambda/auth_refresh"
+      environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
       COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}

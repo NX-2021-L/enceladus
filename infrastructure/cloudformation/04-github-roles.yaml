@@ -56,6 +56,7 @@ Resources:
               StringLike:
                 token.actions.githubusercontent.com:sub:
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/v4/*"
       Policies:
         - PolicyName: CloudFormationDeployPolicy
           PolicyDocument:
@@ -111,6 +112,7 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:devops-*"
                   - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-*"
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:auth-refresh*"
 
               # CloudWatch Logs (for error reporting in workflow)
               - Sid: LogsReadOnly
