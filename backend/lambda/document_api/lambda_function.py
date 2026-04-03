@@ -1334,8 +1334,23 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         expr_parts.append("file_name = :file_name")
         attr_values[":file_name"] = {"S": file_name}
 
+    # Document subtype backfill (ENC-TSK-B57): allow setting document_subtype on existing docs
+    if "document_subtype" in body:
+        new_subtype = str(body["document_subtype"]).strip().lower()
+        if new_subtype not in DOCUMENT_SUBTYPES:
+            return _error(400, f"Invalid document_subtype '{new_subtype}'. Must be one of: {', '.join(sorted(DOCUMENT_SUBTYPES))}")
+        expr_parts.append("document_subtype = :dst")
+        attr_values[":dst"] = {"S": new_subtype}
+    if "source_record_id" in body:
+        expr_parts.append("source_record_id = :sri")
+        attr_values[":sri"] = {"S": str(body["source_record_id"]).strip()}
+    if "created_by_session" in body:
+        expr_parts.append("created_by_session = :cbs")
+        attr_values[":cbs"] = {"S": str(body["created_by_session"]).strip()}
+
     # Handoff status transitions (ENC-FTR-061)
-    current_subtype = existing.get("document_subtype", {}).get("S", "general")
+    # Re-read subtype after potential PATCH update above
+    current_subtype = body.get("document_subtype", existing.get("document_subtype", {}).get("S", "general"))
     if "handoff_status" in body:
         if current_subtype != "handoff":
             return _error(400, "Cannot set handoff_status on a non-handoff document.")
