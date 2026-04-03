@@ -25,6 +25,9 @@ Parameters:
     Type: String
     Default: devops-tracker-api
 
+Conditions:
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+
 Resources:
   # ---------------------------------------------------------------------------
   # HTTP API
@@ -54,9 +57,18 @@ Resources:
           - X-Checkout-Assistant-Key
         AllowCredentials: true
 
-  # NOTE: $default stage exists but AWS::ApiGatewayV2::Stage does not support
-  # CloudFormation import. The stage is managed directly via API Gateway console.
-  # AutoDeploy is enabled on the $default stage.
+  # NOTE: Production $default stage was created manually and cannot be imported
+  # into CloudFormation. For non-production environments (gamma), the stage is
+  # created by CFn directly. AutoDeploy eliminates the need for a separate
+  # AWS::ApiGatewayV2::Deployment resource.
+  ApiDefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      Description: !Sub "Default stage for ${EnvironmentSuffix} environment"
 
   # ---------------------------------------------------------------------------
   # Integrations (Lambda proxy)
