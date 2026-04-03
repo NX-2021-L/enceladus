@@ -14,7 +14,6 @@ import { ErrorState } from '../components/shared/ErrorState'
 import { CopyButton } from '../components/shared/CopyButton'
 import { formatDate } from '../lib/formatters'
 import { useLiveFeed } from '../contexts/LiveFeedContext'
-import type { Task, Issue, Feature } from '../types/feeds'
 
 function getRecordPath(id: string): string {
   if (id.includes('-TSK-')) return `/tasks/${id}`
