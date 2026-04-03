@@ -401,5 +401,139 @@ class CheckoutRouteTests(unittest.TestCase):
         self.assertTrue(parsed.get("checkout"))
 
 
+class PlanRouteTests(unittest.TestCase):
+    """ENC-TSK-B10: Verify plan record type routes match correctly."""
+
+    def _plan_event(self, method, path, body=None, internal_key="valid-key"):
+        return {
+            "requestContext": {"http": {"method": method, "path": path}},
+            "headers": {"x-coordination-internal-key": internal_key, "host": "example.com"},
+            "body": json.dumps(body or {}),
+            "rawPath": path,
+        }
+
+    # AC1: POST /api/v1/tracker/{project}/plan creates a plan record
+    @patch.object(tracker_mutation, "_validate_project_exists", return_value=None)
+    @patch.object(tracker_mutation, "_get_project_prefix", return_value="ENC")
+    @patch.object(tracker_mutation, "_get_ddb")
+    def test_post_plan_creates_record(self, mock_get_ddb, _mock_prefix, _mock_proj):
+        fake_ddb = MagicMock()
+        mock_get_ddb.return_value = fake_ddb
+        # Counter query returns empty (first plan)
+        fake_ddb.query.return_value = {"Items": [], "Count": 0}
+        fake_ddb.put_item.return_value = {}
+
+        with patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"), \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEYS", ("valid-key",)):
+            event = self._plan_event(
+                "POST", "/api/v1/tracker/enceladus/plan",
+                body={"title": "Test Plan", "category": "tactical"},
+            )
+            resp = tracker_mutation.lambda_handler(event, None)
+
+        self.assertEqual(resp["statusCode"], 201)
+        parsed = json.loads(resp["body"])
+        self.assertTrue(parsed["success"])
+        self.assertIn("ENC-PLN-", parsed["record_id"])
+
+    # AC2: PATCH /api/v1/tracker/{project}/plan/{id} routes correctly
+    @patch.object(tracker_mutation, "_validate_project_exists", return_value=None)
+    @patch.object(tracker_mutation, "_get_ddb")
+    def test_patch_plan_routes(self, mock_get_ddb, _mock_proj):
+        fake_ddb = MagicMock()
+        mock_get_ddb.return_value = fake_ddb
+        fake_ddb.get_item.return_value = {
+            "Item": {
+                "project_id": {"S": "enceladus"},
+                "record_id": {"S": "plan#ENC-PLN-001"},
+                "record_type": {"S": "plan"},
+                "item_id": {"S": "ENC-PLN-001"},
+                "title": {"S": "Test Plan"},
+                "status": {"S": "drafted"},
+                "sync_version": {"N": "1"},
+                "created_at": {"S": "2026-04-03T00:00:00Z"},
+                "updated_at": {"S": "2026-04-03T00:00:00Z"},
+                "history": {"L": []},
+                "objectives_set": {"L": []},
+                "coordination": {"BOOL": False},
+            }
+        }
+        fake_ddb.update_item.return_value = {}
+
+        with patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"), \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEYS", ("valid-key",)):
+            event = self._plan_event(
+                "PATCH", "/api/v1/tracker/enceladus/plan/ENC-PLN-001",
+                body={"field": "title", "value": "Updated Plan"},
+            )
+            resp = tracker_mutation.lambda_handler(event, None)
+
+        self.assertEqual(resp["statusCode"], 200)
+
+    # AC3: GET /api/v1/tracker/{project}/plan/{id} returns plan record
+    @patch.object(tracker_mutation, "_validate_project_exists", return_value=None)
+    @patch.object(tracker_mutation, "_get_ddb")
+    def test_get_plan_routes(self, mock_get_ddb, _mock_proj):
+        fake_ddb = MagicMock()
+        mock_get_ddb.return_value = fake_ddb
+        fake_ddb.get_item.return_value = {
+            "Item": {
+                "project_id": {"S": "enceladus"},
+                "record_id": {"S": "plan#ENC-PLN-001"},
+                "record_type": {"S": "plan"},
+                "item_id": {"S": "ENC-PLN-001"},
+                "title": {"S": "Test Plan"},
+                "status": {"S": "drafted"},
+                "sync_version": {"N": "1"},
+                "created_at": {"S": "2026-04-03T00:00:00Z"},
+                "updated_at": {"S": "2026-04-03T00:00:00Z"},
+                "history": {"L": []},
+                "objectives_set": {"L": []},
+                "coordination": {"BOOL": False},
+            }
+        }
+
+        with patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"), \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEYS", ("valid-key",)):
+            event = self._plan_event(
+                "GET", "/api/v1/tracker/enceladus/plan/ENC-PLN-001",
+            )
+            resp = tracker_mutation.lambda_handler(event, None)
+
+        self.assertEqual(resp["statusCode"], 200)
+        parsed = json.loads(resp["body"])
+        self.assertTrue(parsed["success"])
+        self.assertEqual(parsed["record"]["item_id"], "ENC-PLN-001")
+
+    def test_plan_regex_matches_type_collection(self):
+        """Route regex for POST /plan matches."""
+        m = tracker_mutation._RE_TYPE_COLLECTION.match("/api/v1/tracker/enceladus/plan")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("type"), "plan")
+
+    def test_plan_regex_matches_record(self):
+        """Route regex for GET/PATCH /plan/{id} matches."""
+        m = tracker_mutation._RE_RECORD.match("/api/v1/tracker/enceladus/plan/ENC-PLN-001")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("type"), "plan")
+        self.assertEqual(m.group("id"), "ENC-PLN-001")
+
+    def test_plan_regex_matches_subresource(self):
+        """Route regex for POST /plan/{id}/log matches."""
+        m = tracker_mutation._RE_RECORD_SUB.match("/api/v1/tracker/enceladus/plan/ENC-PLN-001/log")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("type"), "plan")
+
+    def test_plan_type_seg_to_sk_prefix(self):
+        """Plan SK prefix is registered."""
+        self.assertEqual(tracker_mutation._TYPE_SEG_TO_SK_PREFIX["plan"], "plan")
+
+    def test_classify_related_ids_includes_plan(self):
+        """_classify_related_ids recognizes PLN segment."""
+        result = tracker_mutation._classify_related_ids(["ENC-PLN-001"])
+        self.assertIn("related_plan_ids", result)
+        self.assertEqual(result["related_plan_ids"], ["ENC-PLN-001"])
+
+
 if __name__ == "__main__":
     unittest.main()
