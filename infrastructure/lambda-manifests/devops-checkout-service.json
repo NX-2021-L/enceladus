@@ -8,7 +8,7 @@
   "repo_entry_path": "backend/lambda/checkout_service/lambda_function.py",
   "planned_configuration": {
     "architectures": [
-      "x86_64"
+      "arm64"
     ],
     "environment_vars": {
       "TRACKER_API_BASE": "https://jreese.net/api/v1",
@@ -21,7 +21,7 @@
     },
     "handler": "lambda_function.lambda_handler",
     "memory_size": 256,
-    "runtime": "python3.11",
+    "runtime": "python3.12",
     "timeout": 30,
     "layers": []
   },
