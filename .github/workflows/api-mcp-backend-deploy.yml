@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v4/**'
     paths:
       - "backend/lambda/coordination_api/**"
       - "tools/enceladus-mcp-server/**"
@@ -22,7 +23,7 @@ permissions:
 
 env:
   AWS_REGION: us-west-2
-  DEPLOY_FUNCTION_NAME: devops-coordination-api
+  DEPLOY_FUNCTION_NAME: devops-coordination-api${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
 
 jobs:
   deploy:
@@ -30,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
-      group: api-mcp-backend-deploy-main
+      group: api-mcp-backend-deploy-${{ github.ref_name }}
       cancel-in-progress: false
     defaults:
       run:
@@ -54,6 +55,7 @@ jobs:
           COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
           COORDINATION_INTERNAL_API_KEY_PREVIOUS: ${{ secrets.COORDINATION_INTERNAL_API_KEY_PREVIOUS }}
           COORDINATION_INTERNAL_API_KEY_SCOPES: ${{ secrets.COORDINATION_INTERNAL_API_KEY_SCOPES }}
+          ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
         run: |
           set -euo pipefail
           chmod +x backend/lambda/coordination_api/deploy.sh
