@@ -8241,12 +8241,13 @@ async def _plan_objectives_status(args: dict) -> list[TextContent]:
     plan_resp = _tracker_api_request("GET", f"/{project_id}/plan/{rid}")
     if isinstance(plan_resp, dict) and plan_resp.get("error"):
         return _result_text(plan_resp)
+    plan = plan_resp.get("record", plan_resp) if isinstance(plan_resp, dict) else plan_resp
 
-    objectives_set = plan_resp.get("objectives_set", []) or []
+    objectives_set = plan.get("objectives_set", []) or []
     if not objectives_set:
         return _result_text({
             "plan_id": record_id,
-            "status": plan_resp.get("status", ""),
+            "status": plan.get("status", ""),
             "objectives": [],
             "summary": {"total": 0, "closed": 0, "open": 0, "progress_pct": 0},
         })
@@ -8258,8 +8259,9 @@ async def _plan_objectives_status(args: dict) -> list[TextContent]:
         try:
             obj_proj, obj_type, obj_rid = _parse_record_id(obj_id)
             obj_resp = _tracker_api_request("GET", f"/{obj_proj}/{obj_type}/{obj_rid}")
-            obj_status = obj_resp.get("status", "unknown") if isinstance(obj_resp, dict) else "unknown"
-            obj_title = obj_resp.get("title", obj_id) if isinstance(obj_resp, dict) else obj_id
+            obj_record = obj_resp.get("record", obj_resp) if isinstance(obj_resp, dict) else obj_resp
+            obj_status = obj_record.get("status", "unknown") if isinstance(obj_record, dict) else "unknown"
+            obj_title = obj_record.get("title", obj_id) if isinstance(obj_record, dict) else obj_id
         except (ValueError, Exception):
             obj_status = "unknown"
             obj_title = obj_id
@@ -8270,7 +8272,7 @@ async def _plan_objectives_status(args: dict) -> list[TextContent]:
 
     return _result_text({
         "plan_id": record_id,
-        "status": plan_resp.get("status", ""),
+        "status": plan.get("status", ""),
         "objectives": objectives,
         "summary": {
             "total": total,
