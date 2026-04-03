@@ -11,15 +11,17 @@ set -euo pipefail
 #   - CloudFront behavior for /api/v1/coordination/monitor*
 # ---------------------------------------------------------------------------
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 API_ID="${API_ID:-8nkzqkmxqc}"
 CF_DIST_ID="${CF_DIST_ID:-E2BOQXCW1TA6Y4}"
 
-FUNCTION_NAME="devops-coordination-monitor-api"
-ROLE_NAME="devops-coordination-monitor-lambda-role"
-COORDINATION_TABLE="coordination-requests"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-coordination-monitor-api${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-coordination-monitor-lambda-role${ENVIRONMENT_SUFFIX}}"
+COORDINATION_TABLE="${COORDINATION_TABLE:-coordination-requests${ENVIRONMENT_SUFFIX}}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -341,8 +343,12 @@ main() {
 
   ensure_role
   deploy_lambda
-  ensure_api_routes
-  ensure_cloudfront_behavior
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    ensure_api_routes
+    ensure_cloudfront_behavior
+  else
+    log "[SKIP] API route and CloudFront configuration skipped for suffixed environment (${ENVIRONMENT_SUFFIX})"
+  fi
 
   log "=========================================="
   log "[SUCCESS] Coordination Monitor API deployed"

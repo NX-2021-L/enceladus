@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 # ---------------------------------------------------------------------------
 # deploy.sh — Deploy document_api Lambda (ENC-TSK-506)
 # ---------------------------------------------------------------------------
@@ -8,13 +10,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
-FUNCTION_NAME="${FUNCTION_NAME:-devops-document-api}"
-ROLE_NAME="${ROLE_NAME:-devops-document-api-lambda-role}"
-ROLE_POLICY_NAME="${ROLE_POLICY_NAME:-devops-document-api-inline}"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-document-api${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-document-api-lambda-role${ENVIRONMENT_SUFFIX}}"
+ROLE_POLICY_NAME="${ROLE_POLICY_NAME:-devops-document-api-inline${ENVIRONMENT_SUFFIX}}"
 
-DOCUMENTS_TABLE="${DOCUMENTS_TABLE:-documents}"
-PROJECTS_TABLE="${PROJECTS_TABLE:-projects}"
-TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker}"
+DOCUMENTS_TABLE="${DOCUMENTS_TABLE:-documents${ENVIRONMENT_SUFFIX}}"
+PROJECTS_TABLE="${PROJECTS_TABLE:-projects${ENVIRONMENT_SUFFIX}}"
+TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker${ENVIRONMENT_SUFFIX}}"
 DYNAMODB_REGION="${DYNAMODB_REGION:-us-west-2}"
 S3_BUCKET="${S3_BUCKET:-jreese-net}"
 S3_PREFIX="${S3_PREFIX:-agent-documents}"
@@ -25,7 +27,7 @@ COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}"
 COORDINATION_INTERNAL_API_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES:-}"
-COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
+COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api${ENVIRONMENT_SUFFIX}}"
 GOVERNANCE_PROJECT_ID="${GOVERNANCE_PROJECT_ID:-devops}"
 GOVERNANCE_KEYWORD="${GOVERNANCE_KEYWORD:-governance-file}"
 PROJECT_REFERENCE_KEYWORD="${PROJECT_REFERENCE_KEYWORD:-project-reference}"

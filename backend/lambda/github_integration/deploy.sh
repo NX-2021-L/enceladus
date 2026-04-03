@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 API_ID="${API_ID:-8nkzqkmxqc}"
-FUNCTION_NAME="${FUNCTION_NAME:-devops-github-integration}"
-ROLE_NAME="${ROLE_NAME:-devops-github-integration-lambda-role}"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-github-integration${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-github-integration-lambda-role${ENVIRONMENT_SUFFIX}}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}"
 GITHUB_APP_ID="${GITHUB_APP_ID:-}"
 GITHUB_INSTALLATION_ID="${GITHUB_INSTALLATION_ID:-}"
 ALLOWED_REPOS="${ALLOWED_REPOS:-NX-2021-L/enceladus}"
 GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET:-devops/github-app/webhook-secret}"
-TRACKER_API_BASE="${TRACKER_API_BASE:-https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker}"
+TRACKER_API_BASE="${TRACKER_API_BASE:-https://${API_ID}.execute-api.${REGION}.amazonaws.com/api/v1/tracker}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -307,7 +309,11 @@ ensure_api_route() {
 main() {
   ensure_role
   ensure_lambda
-  ensure_api_route
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    ensure_api_route
+  else
+    log "[INFO] Skipping API Gateway route setup for suffixed environment (${ENVIRONMENT_SUFFIX})"
+  fi
   log "[SUCCESS] github-integration deploy complete"
 }
 

@@ -10,10 +10,12 @@ set -euo pipefail
 # Related: ENC-TSK-564 (Phase 2a)
 # ---------------------------------------------------------------------------
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
-FUNCTION_NAME="devops-tracker-mutation-api"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-tracker-mutation-api${ENVIRONMENT_SUFFIX}}"
 API_ID="${API_ID:-8nkzqkmxqc}"
 
 # Cognito config
@@ -24,7 +26,7 @@ COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}"
 COORDINATION_INTERNAL_API_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES:-}"
-COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
+COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api${ENVIRONMENT_SUFFIX}}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -172,10 +174,15 @@ ensure_env_vars() {
     --output json 2>/dev/null || echo '{}')"
   [[ "${existing_env_json}" == "None" || -z "${existing_env_json}" ]] && existing_env_json='{}'
 
+  local dynamodb_table="devops-project-tracker${ENVIRONMENT_SUFFIX}"
+  local projects_table="projects${ENVIRONMENT_SUFFIX}"
+
   env_json="$(EXISTING_ENV_JSON="${existing_env_json}" \
     COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID}" \
     COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID}" \
     DYNAMODB_REGION="${REGION}" \
+    DYNAMODB_TABLE="${dynamodb_table}" \
+    PROJECTS_TABLE="${projects_table}" \
     EFFECTIVE_KEY="${effective_key}" \
     EFFECTIVE_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS}" \
     EFFECTIVE_KEYS_CSV="${effective_keys_csv}" \
@@ -205,9 +212,9 @@ env.update(
     {
         "COGNITO_USER_POOL_ID": os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E1k"),
         "COGNITO_CLIENT_ID": os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk"),
-        "DYNAMODB_TABLE": "devops-project-tracker",
+        "DYNAMODB_TABLE": os.environ.get("DYNAMODB_TABLE", "devops-project-tracker"),
         "DYNAMODB_REGION": os.environ.get("DYNAMODB_REGION", "us-west-2"),
-        "PROJECTS_TABLE": "projects",
+        "PROJECTS_TABLE": os.environ.get("PROJECTS_TABLE", "projects"),
         "COORDINATION_INTERNAL_API_KEY": effective_key,
         "COORDINATION_INTERNAL_API_KEY_PREVIOUS": effective_prev,
         "ENCELADUS_COORDINATION_INTERNAL_API_KEY": effective_key,
@@ -369,7 +376,11 @@ main() {
 
   log ""
   log "--- Configuring API Routes ---"
-  ensure_api_routes
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    ensure_api_routes
+  else
+    log "[SKIP] API route configuration skipped for suffixed environment (${ENVIRONMENT_SUFFIX})"
+  fi
 
   log ""
   log "=========================================="
