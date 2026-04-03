@@ -599,6 +599,8 @@ Resources:
         Fn::Sub: ${DataStackName}-DeployQueueArn
       FunctionName: !Ref DeployOrchestratorFunction
       BatchSize: 1
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
       Enabled: true
 
   FeedPublisherSqsTrigger:
@@ -609,6 +611,8 @@ Resources:
         Fn::Sub: ${DataStackName}-FeedPublishQueueArn
       FunctionName: !Ref FeedPublisherFunction
       BatchSize: 10
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
       Enabled: true
 
   GraphSyncSqsTrigger:
