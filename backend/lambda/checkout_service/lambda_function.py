@@ -393,6 +393,63 @@ def _log_task(
 
 
 # ---------------------------------------------------------------------------
+# Plan tracker API helpers (ENC-FTR-058 Phase 2)
+# ---------------------------------------------------------------------------
+
+def _get_plan(project_id: str, plan_id: str) -> Tuple[int, dict]:
+    status, body = _tracker_request("GET", f"/{project_id}/plan/{plan_id}")
+    if status == 200 and isinstance(body, dict) and isinstance(body.get("record"), dict):
+        return status, body["record"]
+    return status, body
+
+
+def _set_plan_field(
+    project_id: str,
+    plan_id: str,
+    field: str,
+    value: Any,
+    provider: Optional[str] = None,
+    transition_evidence: Optional[dict] = None,
+    governance_hash: Optional[str] = None,
+) -> Tuple[int, dict]:
+    payload: dict = {"field": field, "value": value}
+    if provider:
+        payload["provider"] = provider
+    if transition_evidence:
+        payload["transition_evidence"] = transition_evidence
+    if governance_hash:
+        payload["governance_hash"] = governance_hash
+    return _tracker_request("PATCH", f"/{project_id}/plan/{plan_id}", payload)
+
+
+def _checkout_plan(project_id: str, plan_id: str, provider: str) -> Tuple[int, dict]:
+    return _tracker_request(
+        "POST",
+        f"/{project_id}/plan/{plan_id}/checkout",
+        {"provider": provider},
+    )
+
+
+def _release_plan(project_id: str, plan_id: str) -> Tuple[int, dict]:
+    return _tracker_request("DELETE", f"/{project_id}/plan/{plan_id}/checkout", {})
+
+
+def _log_plan(
+    project_id: str,
+    plan_id: str,
+    description: str,
+    provider: Optional[str] = None,
+    governance_hash: Optional[str] = None,
+) -> Tuple[int, dict]:
+    payload: dict = {"description": description}
+    if provider:
+        payload["provider"] = provider
+    if governance_hash:
+        payload["governance_hash"] = governance_hash
+    return _tracker_request("POST", f"/{project_id}/plan/{plan_id}/log", payload)
+
+
+# ---------------------------------------------------------------------------
 # GitHub API helpers
 # ---------------------------------------------------------------------------
 
@@ -706,6 +763,20 @@ _TRANSITION_TYPE_SUMMARY: Dict[str, str] = {
     "code_only": "PR workflow with no deploy stages; close with code_on_main_evidence.",
     "no_code": "No GitHub lifecycle; close with a non-empty no_code_evidence note.",
 }
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-058 Phase 2: Plan lifecycle constants
+# ---------------------------------------------------------------------------
+
+PLAN_ALLOWED_TRANSITIONS: Dict[str, list] = {
+    "drafted": ["started"],
+    "started": ["complete", "incomplete"],
+    "incomplete": ["started"],
+}
+
+PLAN_TERMINAL_STATUSES: frozenset = frozenset({
+    "closed", "completed", "complete", "archived", "deprecated", "production",
+})
 
 _COMMIT_EVIDENCE_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -2199,6 +2270,249 @@ def _handle_validate_cci(cci_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# ENC-FTR-058 Phase 2: Plan checkout handlers
+# ---------------------------------------------------------------------------
+
+
+def _handle_plan_checkout(project_id: str, plan_id: str, body: dict) -> dict:
+    """POST .../checkout — Check out a plan and advance drafted→started."""
+    provider = (body.get("active_agent_session_id") or "").strip()
+    if not provider:
+        return _error(400, "active_agent_session_id is required in request body")
+
+    status, result = _checkout_plan(project_id, plan_id, provider)
+    if status not in (200, 201):
+        return _error(
+            status,
+            result.get("error", f"Plan checkout failed (HTTP {status})"),
+        )
+
+    # If plan is in drafted status, advance to started
+    _, plan = _get_plan(project_id, plan_id)
+    current_status = (plan.get("status") or "").strip().lower()
+    if current_status == "drafted":
+        status2, result2 = _set_plan_field(
+            project_id, plan_id, "status", "started",
+            provider=provider,
+            governance_hash=result.get("governance_hash"),
+        )
+        if status2 not in (200, 201):
+            logger.warning(
+                "Plan checkout OK for %s/%s but status advance to started failed: %s",
+                project_id, plan_id, result2,
+            )
+
+    _, plan = _get_plan(project_id, plan_id)
+    return _response(200, {
+        "success": True,
+        "plan": plan,
+        "checked_out_by": provider,
+        "checked_out_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def _handle_plan_release(project_id: str, plan_id: str, body: dict) -> dict:
+    """DELETE .../checkout — Release plan checkout with mandatory check-in (ENC-TSK-A90)."""
+    checkin_summary = (body.get("checkin_summary") or "").strip()
+    if not checkin_summary:
+        return _error(
+            400,
+            "checkin_summary is required when releasing a plan checkout. "
+            "Provide a summary of progress made during this session.",
+        )
+
+    provider = (body.get("provider") or "").strip()
+    governance_hash = body.get("governance_hash")
+
+    log_status, log_result = _log_plan(
+        project_id, plan_id,
+        f"[CHECK-IN] {checkin_summary}",
+        provider=provider,
+        governance_hash=governance_hash,
+    )
+    if log_status not in (200, 201):
+        logger.warning(
+            "Plan check-in log failed for %s/%s: %s", project_id, plan_id, log_result,
+        )
+
+    status, result = _release_plan(project_id, plan_id)
+    if status not in (200, 201):
+        return _error(status, result.get("error", f"Plan release failed (HTTP {status})"))
+
+    return _response(200, {"success": True, "plan_id": plan_id})
+
+
+def _validate_plan_objectives_complete(
+    project_id: str,
+    plan: dict,
+) -> Optional[dict]:
+    """Validate all objectives are in a terminal status (ENC-TSK-A89 completion gate)."""
+    objectives = plan.get("objectives_set") or []
+    if not objectives:
+        return _error(
+            400,
+            "Cannot complete plan: objectives_set is empty. "
+            "A plan must have at least one objective to complete.",
+        )
+
+    incomplete: list = []
+    for obj_id in objectives:
+        obj_id = str(obj_id).strip()
+        if not obj_id:
+            continue
+        obj_status_code, obj_record = _get_task(project_id, obj_id)
+        if obj_status_code != 200:
+            for rtype in ("feature", "issue", "plan"):
+                obj_status_code, obj_record = _tracker_request(
+                    "GET", f"/{project_id}/{rtype}/{obj_id}",
+                )
+                if obj_status_code == 200:
+                    if isinstance(obj_record, dict) and isinstance(obj_record.get("record"), dict):
+                        obj_record = obj_record["record"]
+                    break
+        if obj_status_code != 200:
+            incomplete.append((obj_id, "not_found"))
+            continue
+        obj_status = (obj_record.get("status") or "unknown").strip().lower()
+        if obj_status not in PLAN_TERMINAL_STATUSES:
+            incomplete.append((obj_id, obj_status))
+
+    if not incomplete:
+        return None
+
+    detail_lines = [f"  - {oid} ({ostatus})" for oid, ostatus in incomplete[:20]]
+    if len(incomplete) > 20:
+        detail_lines.append(f"  ... and {len(incomplete) - 20} more")
+    return _error(
+        400,
+        (
+            f"Cannot complete plan: {len(incomplete)} objective(s) are not in a terminal "
+            f"status (ENC-TSK-A89 completion gate):\n"
+            + "\n".join(detail_lines)
+            + f"\nTerminal statuses: {sorted(PLAN_TERMINAL_STATUSES)}"
+        ),
+    )
+
+
+def _handle_plan_advance(project_id: str, plan_id: str, body: dict) -> dict:
+    """POST .../advance — Advance plan status through lifecycle."""
+    target_status = (body.get("target_status") or "").strip().lower()
+    provider = (body.get("provider") or "").strip()
+    transition_evidence = body.get("transition_evidence") or {}
+    governance_hash = body.get("governance_hash")
+
+    if not target_status:
+        return _error(400, "target_status is required")
+    if not provider:
+        return _error(400, "provider is required for plan advance requests")
+
+    status, plan = _get_plan(project_id, plan_id)
+    if status != 200:
+        return _error(status, plan.get("error", f"Plan not found: {plan_id}"))
+
+    current_status = (plan.get("status") or "").strip().lower()
+
+    if not plan.get("active_agent_session", False):
+        return _error(
+            409,
+            f"Plan {plan_id} must be checked out before advancing. "
+            "Call POST .../checkout first.",
+        )
+
+    allowed = PLAN_ALLOWED_TRANSITIONS.get(current_status, [])
+    if target_status not in allowed:
+        return _error(
+            400,
+            f"Cannot advance plan from '{current_status}' to '{target_status}'. "
+            f"Allowed transitions: {allowed}",
+        )
+
+    if target_status == "complete":
+        gate_error = _validate_plan_objectives_complete(project_id, plan)
+        if gate_error is not None:
+            return gate_error
+
+    if target_status == "incomplete":
+        incomplete_reason = (transition_evidence.get("incomplete_reason") or "").strip()
+        if not incomplete_reason:
+            return _error(
+                400,
+                "transition_evidence.incomplete_reason is required when marking a plan incomplete.",
+            )
+        _log_plan(
+            project_id, plan_id,
+            f"[INFO] Plan marked incomplete: {incomplete_reason}",
+            provider=provider,
+            governance_hash=governance_hash,
+        )
+
+    set_status, set_result = _set_plan_field(
+        project_id, plan_id, "status", target_status,
+        provider=provider,
+        transition_evidence=transition_evidence if transition_evidence else None,
+        governance_hash=governance_hash,
+    )
+    if set_status not in (200, 201):
+        return _error(
+            set_status,
+            set_result.get("error", f"Plan advance failed (HTTP {set_status})"),
+        )
+
+    if target_status in ("complete", "incomplete"):
+        _release_plan(project_id, plan_id)
+
+    _, updated_plan = _get_plan(project_id, plan_id)
+    return _response(200, {
+        "success": True,
+        "plan": updated_plan,
+        "previous_status": current_status,
+        "new_status": target_status,
+    })
+
+
+def _handle_plan_log(project_id: str, plan_id: str, body: dict) -> dict:
+    """POST .../log — Append worklog to a checked-out plan."""
+    description = (body.get("description") or "").strip()
+    if not description:
+        return _error(400, "description is required")
+    provider = body.get("provider")
+    governance_hash = body.get("governance_hash")
+
+    status, plan = _get_plan(project_id, plan_id)
+    if status != 200:
+        return _error(status, plan.get("error", f"Plan not found: {plan_id}"))
+
+    if not plan.get("active_agent_session", False):
+        return _error(409, (
+            "Plan must be checked out to append worklog. "
+            "Call POST .../checkout first."
+        ))
+
+    log_status, log_result = _log_plan(project_id, plan_id, description, provider, governance_hash)
+    if log_status not in (200, 201):
+        return _error(log_status, log_result.get("error", f"Worklog append failed (HTTP {log_status})"))
+
+    return _response(200, {"success": True, "plan_id": plan_id})
+
+
+def _handle_plan_status(project_id: str, plan_id: str) -> dict:
+    """GET .../status — Return plan checkout + state."""
+    status, plan = _get_plan(project_id, plan_id)
+    if status != 200:
+        return _error(status, plan.get("error", f"Plan not found: {plan_id}"))
+
+    return _response(200, {
+        "plan_id": plan_id,
+        "project_id": project_id,
+        "status": plan.get("status"),
+        "active_agent_session": plan.get("active_agent_session", False),
+        "active_agent_session_id": plan.get("active_agent_session_id", ""),
+        "objectives_set": plan.get("objectives_set", []),
+        "plan": plan,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Route dispatcher
 # ---------------------------------------------------------------------------
 
@@ -2217,6 +2531,16 @@ def _parse_path(raw_path: str) -> dict:
             "route": "task_action",
             "project_id": m.group(1),
             "task_id": m.group(2),
+            "action": m.group(3),
+        }
+
+    # /api/v1/checkout/{project}/plan/{plan_id}/{action}  (ENC-FTR-058)
+    m = re.match(r'^/api/v1/checkout/([^/]+)/plan/([^/]+)/([^/]+)$', path)
+    if m:
+        return {
+            "route": "plan_action",
+            "project_id": m.group(1),
+            "plan_id": m.group(2),
             "action": m.group(3),
         }
 
@@ -2281,6 +2605,35 @@ def lambda_handler(event: dict, context: Any) -> dict:
             return _error(405, f"Method {method} not allowed for status")
 
         return _error(404, f"Unknown action: {action}")
+
+    if route == "plan_action":
+        project_id = parsed["project_id"]
+        plan_id = parsed["plan_id"]
+        action = parsed["action"]
+
+        if action == "checkout":
+            if method == "POST":
+                return _handle_plan_checkout(project_id, plan_id, body)
+            elif method == "DELETE":
+                return _handle_plan_release(project_id, plan_id, body)
+            return _error(405, f"Method {method} not allowed for plan checkout")
+
+        if action == "advance":
+            if method == "POST":
+                return _handle_plan_advance(project_id, plan_id, body)
+            return _error(405, f"Method {method} not allowed for plan advance")
+
+        if action == "log":
+            if method == "POST":
+                return _handle_plan_log(project_id, plan_id, body)
+            return _error(405, f"Method {method} not allowed for plan log")
+
+        if action == "status":
+            if method == "GET":
+                return _handle_plan_status(project_id, plan_id)
+            return _error(405, f"Method {method} not allowed for plan status")
+
+        return _error(404, f"Unknown plan action: {action}")
 
     return _error(404, f"Route not found: {raw_path}")
 
