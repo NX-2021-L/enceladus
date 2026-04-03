@@ -252,7 +252,10 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
 
     # Build edge pattern: either wildcard or type-filtered
     if edge_types_param:
-        types = [t.strip().upper() for t in edge_types_param.split(",") if t.strip()]
+        if isinstance(edge_types_param, list):
+            types = [t.strip().upper() for t in edge_types_param if t.strip()]
+        else:
+            types = [t.strip().upper() for t in str(edge_types_param).split(",") if t.strip()]
         invalid = [t for t in types if t not in _ALLOWED_EDGE_TYPES]
         if invalid:
             return {"error": f"Invalid edge_types: {invalid}. Allowed: {sorted(_ALLOWED_EDGE_TYPES)}"}
@@ -430,6 +433,12 @@ SEARCH_HANDLERS = {
 def _handle_search(event: Dict) -> Dict:
     """Handle GET /api/v1/tracker/graphsearch."""
     qs = event.get("queryStringParameters") or {}
+
+    # ENC-ISS-149: Normalize edge_types from multiValueQueryStringParameters
+    # (REST API v1 delivers repeated keys as a list there).
+    multi_qs = event.get("multiValueQueryStringParameters") or {}
+    if "edge_types" in multi_qs and isinstance(multi_qs["edge_types"], list):
+        qs["edge_types"] = ",".join(multi_qs["edge_types"])
 
     project_id = qs.get("project_id", "")
     if not project_id:
