@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v4/**'
     paths:
       - "backend/lambda/checkout_service/**"
       - ".github/workflows/lambda-checkout-service-deploy.yml"
@@ -28,6 +29,7 @@ jobs:
       function_name: "enceladus-checkout-service"
       lambda_dir: "backend/lambda/checkout_service"
       package_extra_files: "transition_type_matrix.py"
+      environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
 
@@ -38,5 +40,6 @@ jobs:
       function_name: "enceladus-checkout-service-auto"
       lambda_dir: "backend/lambda/checkout_service"
       package_extra_files: "transition_type_matrix.py"
+      environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v4/**'
     paths:
       - "backend/lambda/deploy_finalize/**"
       - ".github/workflows/lambda-deploy-finalize-deploy.yml"
@@ -26,6 +27,7 @@ jobs:
     with:
       function_name: "devops-deploy-finalize"
       lambda_dir: "backend/lambda/deploy_finalize"
+      environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
       COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}

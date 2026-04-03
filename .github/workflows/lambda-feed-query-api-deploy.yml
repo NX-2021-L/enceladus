@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v4/**'
     paths:
       - "backend/lambda/feed_query/**"
       - ".github/workflows/lambda-feed-query-api-deploy.yml"
@@ -27,6 +28,7 @@ jobs:
       function_name: "devops-feed-query-api"
       lambda_dir: "backend/lambda/feed_query"
       deploy_script: "backend/lambda/feed_query/deploy.sh"
+      environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
       COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
