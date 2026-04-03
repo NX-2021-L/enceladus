@@ -911,6 +911,34 @@ def _transform_feature_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[s
 
 _STATUS_LESSON = {"draft", "active", "graduated", "deprecated"}
 
+# ENC-FTR-058: Plan record type
+_STATUS_PLAN = {"drafted", "started", "complete", "incomplete"}
+
+
+def _transform_plan_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str, Any]:
+    return {
+        "plan_id": _ddb_str(item, "item_id"),
+        "project_id": project_id,
+        "title": _ddb_str(item, "title"),
+        "description": _ddb_str(item, "description") or "",
+        "status": _normalize_status(_ddb_str(item, "status"), _STATUS_PLAN, "drafted"),
+        "priority": _normalize_priority(_ddb_str(item, "priority", "P2")),
+        "category": _ddb_str(item, "category") or None,
+        "objectives_set": _ddb_str_set(item, "objectives_set"),
+        "attached_documents": _ddb_str_set(item, "attached_documents"),
+        "related_feature_id": _ddb_str(item, "related_feature_id") or None,
+        "checkout_state": _ddb_str(item, "checkout_state") or None,
+        "checked_out_by": _ddb_str(item, "checked_out_by") or None,
+        "checked_out_at": _ddb_str(item, "checked_out_at") or None,
+        "related_task_ids": _ddb_str_set(item, "related_task_ids"),
+        "related_issue_ids": _ddb_str_set(item, "related_issue_ids"),
+        "related_feature_ids": _ddb_str_set(item, "related_feature_ids"),
+        "history": [],
+        "updated_at": _ddb_str(item, "updated_at") or None,
+        "last_update_note": _ddb_str(item, "last_update_note") or None,
+        "created_at": _ddb_str(item, "created_at") or None,
+    }
+
 
 def _ddb_map(item: Dict[str, Any], key: str) -> Dict[str, Any]:
     """Extract a DynamoDB Map attribute as a plain dict with N values as floats."""
@@ -961,6 +989,7 @@ _TRANSFORM = {
     "issue": _transform_issue_from_ddb,
     "feature": _transform_feature_from_ddb,
     "lesson": _transform_lesson_from_ddb,
+    "plan": _transform_plan_from_ddb,
 }
 
 
@@ -973,6 +1002,7 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
     all_issues: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
     all_lessons: List[Dict[str, Any]] = []
+    all_plans: List[Dict[str, Any]] = []
 
     for proj in projects:
         pid = proj["project_id"]
@@ -1000,6 +1030,8 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
                         all_features.append(transformed)
                     elif record_type == "lesson":
                         all_lessons.append(transformed)
+                    elif record_type == "plan":
+                        all_plans.append(transformed)
         except (BotoCoreError, ClientError) as exc:
             logger.error("DynamoDB query failed for project %s: %s", pid, exc)
             continue
@@ -1008,8 +1040,9 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
     all_issues.sort(key=lambda x: x.get("issue_id", ""))
     all_features.sort(key=lambda x: x.get("feature_id", ""))
     all_lessons.sort(key=lambda x: x.get("lesson_id", ""))
+    all_plans.sort(key=lambda x: x.get("plan_id", ""))
 
-    return all_tasks, all_issues, all_features, all_lessons
+    return all_tasks, all_issues, all_features, all_lessons, all_plans
 
 
 # ---------------------------------------------------------------------------
@@ -1101,7 +1134,7 @@ def _query_incremental(
     changed_keys: List[Dict[str, Dict[str, str]]] = []
     key_to_type: Dict[str, str] = {}  # "project_id#record_id" -> record_type
 
-    for rtype in ("task", "issue", "feature", "lesson"):
+    for rtype in ("task", "issue", "feature", "lesson", "plan"):
         try:
             paginator = ddb.get_paginator("query")
             for page in paginator.paginate(
@@ -1127,13 +1160,14 @@ def _query_incremental(
             logger.error("Incremental GSI query failed for %s: %s", rtype, exc)
 
     if not changed_keys:
-        return [], [], [], [], []
+        return [], [], [], [], [], []
 
     # Step 2: BatchGetItem for full records (max 100 per request).
     all_tasks: List[Dict[str, Any]] = []
     all_issues: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
     all_lessons: List[Dict[str, Any]] = []
+    all_plans: List[Dict[str, Any]] = []
     closed_ids: List[str] = []
 
     for batch_start in range(0, len(changed_keys), 100):
@@ -1183,6 +1217,8 @@ def _query_incremental(
                     all_features.append(transformed)
                 elif record_type == "lesson":
                     all_lessons.append(transformed)
+                elif record_type == "plan":
+                    all_plans.append(transformed)
 
         except (BotoCoreError, ClientError) as exc:
             logger.error("BatchGetItem failed: %s", exc)
@@ -1191,8 +1227,9 @@ def _query_incremental(
     all_issues.sort(key=lambda x: x.get("issue_id", ""))
     all_features.sort(key=lambda x: x.get("feature_id", ""))
     all_lessons.sort(key=lambda x: x.get("lesson_id", ""))
+    all_plans.sort(key=lambda x: x.get("plan_id", ""))
 
-    return all_tasks, all_issues, all_features, all_lessons, closed_ids
+    return all_tasks, all_issues, all_features, all_lessons, all_plans, closed_ids
 
 
 # ---------------------------------------------------------------------------
@@ -1324,7 +1361,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             parsed_since - dt.timedelta(seconds=INCREMENTAL_LOOKBACK_SECONDS)
         )
         try:
-            tasks, issues, features, lessons, closed_ids = _query_incremental(incremental_since)
+            tasks, issues, features, lessons, plans, closed_ids = _query_incremental(incremental_since)
         except Exception as exc:
             logger.error("incremental feed query failed: %s", exc)
             return _error(500, "Failed to query feed delta. Please try again.")
@@ -1336,6 +1373,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "issues": issues,
             "features": features,
             "lessons": lessons,
+            "plans": plans,
             "closed_ids": closed_ids,
         }
         return {
@@ -1350,27 +1388,28 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     # --- Full query (existing behaviour, unchanged) ---
     try:
-        tasks, issues, features, lessons = _query_all_records()
+        tasks, issues, features, lessons, plans = _query_all_records()
     except Exception as exc:
         logger.error("feed query failed: %s", exc)
         return _error(500, "Failed to query feed data. Please try again.")
 
     # --- Attach typed relationship edges (ENC-ISS-137 / ENC-TSK-A57) ---
     try:
-        project_ids = list({r.get("project_id", "") for r in tasks + issues + features + lessons if r.get("project_id")})
+        project_ids = list({r.get("project_id", "") for r in tasks + issues + features + lessons + plans if r.get("project_id")})
         if project_ids:
             edges_by_source = _query_typed_relationships(project_ids)
             _attach_typed_relationships(tasks, "task_id", edges_by_source)
             _attach_typed_relationships(issues, "issue_id", edges_by_source)
             _attach_typed_relationships(features, "feature_id", edges_by_source)
             _attach_typed_relationships(lessons, "lesson_id", edges_by_source)
+            _attach_typed_relationships(plans, "plan_id", edges_by_source)
     except Exception as exc:
         logger.warning("Failed to attach typed relationships: %s", exc)
 
     subscription_meta = {
         "subscription_id": None,
         "scope_applied": False,
-        "items_matched": len(tasks) + len(issues) + len(features) + len(lessons),
+        "items_matched": len(tasks) + len(issues) + len(features) + len(lessons) + len(plans),
     }
 
     subscription_id = str(qs.get("subscription_id") or "").strip()
@@ -1411,6 +1450,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "issues": issues,
             "features": features,
             "lessons": lessons,
+            "plans": plans,
             "subscription": subscription_meta,
         },
     )

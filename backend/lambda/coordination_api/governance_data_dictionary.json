@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.25",
-  "updated_at": "2026-04-03T00:15:00Z",
+  "version": "2026-04-03.26",
+  "updated_at": "2026-04-03T00:55:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2814,6 +2814,60 @@
           "type": "object",
           "definition": "Context node metadata scores (freshness_score, structural_importance, information_density, access_frequency) joined from context node DynamoDB items when ENABLE_CONTEXT_NODES feature flag is active.",
           "usage_guidance": "Used by ContextNodeBadges PWA component. Returns null/absent when feature flag is off or no context node exists."
+        }
+      }
+    },
+    "tracker.plan": {
+      "description": "Plan tracker records (ENC-FTR-058). First-class governed primitive replacing [Plan] parent tasks. Plans own objectives sets, enforce checkout contracts, and marry features to their implementation phases. Plans replace the parent-task pattern for multi-phase work.",
+      "fields": {
+        "status": {
+          "type": "enum",
+          "enum": ["drafted", "started", "complete", "incomplete"],
+          "definition": "Plan lifecycle. drafted: initial state. started: at least one objective task checked out. complete: all objectives closed. incomplete: abandoned with reason."
+        },
+        "objectives_set": {
+          "type": "array",
+          "items": {"type": "string"},
+          "definition": "Array of record IDs (tasks, issues, features — not lessons) that this plan governs. Append-only when plan status is not 'incomplete'. Immutability enforced at DynamoDB level.",
+          "usage_guidance": "Set via tracker.set or plan.add_objective MCP action. Removal blocked unless plan is 'incomplete'."
+        },
+        "attached_documents": {
+          "type": "array",
+          "items": {"type": "string"},
+          "definition": "Array of DOC-* IDs attached to this plan as reference material."
+        },
+        "related_feature_id": {
+          "type": "string",
+          "definition": "The feature this plan implements. Creates a plan-implements typed relationship edge."
+        },
+        "category": {
+          "type": "enum",
+          "enum": ["strategic", "tactical", "operational", "remediation"],
+          "definition": "Plan category."
+        },
+        "checkout_state": {
+          "type": "string",
+          "definition": "Plan checkout state. Empty when not checked out."
+        }
+      }
+    },
+    "tracker.plan.relationship_types": {
+      "description": "Typed relationship edge types introduced by ENC-FTR-058 for plan records.",
+      "fields": {
+        "plan-contains": {
+          "type": "relationship",
+          "definition": "Plan → task/issue/feature. Indicates the target record is an objective of this plan.",
+          "inverse": "contained-by-plan"
+        },
+        "plan-attached-doc": {
+          "type": "relationship",
+          "definition": "Plan → document. Attaches a document as reference material for the plan.",
+          "inverse": "doc-attached-to-plan"
+        },
+        "plan-implements": {
+          "type": "relationship",
+          "definition": "Plan → feature. The plan is the implementation vehicle for this feature.",
+          "inverse": "implemented-by-plan"
         }
       }
     },
