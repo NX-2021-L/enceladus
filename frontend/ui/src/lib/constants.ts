@@ -93,11 +93,16 @@ export const STATUS_LABELS: Record<string, string> = {
   // Lesson statuses
   draft: 'Draft',
   graduated: 'Graduated',
+  // Plan statuses
+  drafted: 'Drafted',
+  complete: 'Complete',
+  incomplete: 'Incomplete',
 }
 
 export const TASK_STATUSES = ['open', 'in-progress', 'coding-complete', 'committed', 'pushed', 'merged-main', 'deploy-init', 'deploy-success', 'coding-updates', 'closed'] as const
 export const ISSUE_STATUSES = ['open', 'in-progress', 'closed'] as const
 export const FEATURE_STATUSES = ['planned', 'in-progress', 'completed', 'production', 'deprecated'] as const
+export const PLAN_STATUSES = ['drafted', 'started', 'complete', 'incomplete'] as const
 export const PRIORITIES = ['P0', 'P1', 'P2', 'P3'] as const
 export const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
 

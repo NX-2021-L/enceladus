@@ -194,7 +194,7 @@ async function requestWithRetry(
 
 async function mutateWithRetry(
   projectId: string,
-  recordType: 'task' | 'issue' | 'feature',
+  recordType: 'task' | 'issue' | 'feature' | 'plan',
   recordId: string,
   body: Record<string, unknown>,
 ): Promise<MutationResult> {
@@ -208,7 +208,7 @@ async function mutateWithRetry(
 
 export async function closeRecord(
   projectId: string,
-  recordType: 'task' | 'issue' | 'feature',
+  recordType: 'task' | 'issue' | 'feature' | 'plan',
   recordId: string,
 ): Promise<MutationResult> {
   return mutateWithRetry(projectId, recordType, recordId, { action: 'close' })
@@ -216,7 +216,7 @@ export async function closeRecord(
 
 export async function submitNote(
   projectId: string,
-  recordType: 'task' | 'issue' | 'feature',
+  recordType: 'task' | 'issue' | 'feature' | 'plan',
   recordId: string,
   note: string,
 ): Promise<MutationResult> {
@@ -225,7 +225,7 @@ export async function submitNote(
 
 export async function reopenRecord(
   projectId: string,
-  recordType: 'task' | 'issue' | 'feature',
+  recordType: 'task' | 'issue' | 'feature' | 'plan',
   recordId: string,
 ): Promise<MutationResult> {
   return mutateWithRetry(projectId, recordType, recordId, { action: 'reopen' })
@@ -233,7 +233,7 @@ export async function reopenRecord(
 
 export async function submitWorklog(
   projectId: string,
-  recordType: 'task' | 'issue' | 'feature',
+  recordType: 'task' | 'issue' | 'feature' | 'plan',
   recordId: string,
   note: string,
 ): Promise<MutationResult> {
@@ -242,7 +242,7 @@ export async function submitWorklog(
 
 export async function setField(
   projectId: string,
-  recordType: 'task' | 'issue' | 'feature',
+  recordType: 'task' | 'issue' | 'feature' | 'plan',
   recordId: string,
   field: string,
   value: string,
@@ -253,7 +253,7 @@ export async function setField(
 
 export async function setCheckout(
   projectId: string,
-  recordType: 'task' | 'issue' | 'feature',
+  recordType: 'task' | 'issue' | 'feature' | 'plan',
   recordId: string,
   checkedOut: boolean,
 ): Promise<MutationResult> {
