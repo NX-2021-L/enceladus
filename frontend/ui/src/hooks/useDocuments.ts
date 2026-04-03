@@ -51,6 +51,9 @@ export function useDocs2(filters: DocumentFilters) {
     if (filters.status?.length) {
       docs = docs.filter((d) => filters.status!.includes(d.status))
     }
+    if (filters.subtype) {
+      docs = docs.filter((d) => (d.document_subtype ?? 'general') === filters.subtype)
+    }
     const sortBy = filters.sortBy ?? 'updated:desc'
     const colonIdx = sortBy.indexOf(':')
     const field = colonIdx > -1 ? sortBy.slice(0, colonIdx) : sortBy
@@ -66,7 +69,7 @@ export function useDocs2(filters: DocumentFilters) {
       }
       return dir === 'asc' ? cmp : -cmp
     })
-  }, [rawDocs, filters.status, filters.sortBy])
+  }, [rawDocs, filters.status, filters.subtype, filters.sortBy])
 
   const defaultProject = useMemo(() => {
     if (!countsQuery.data) return undefined
