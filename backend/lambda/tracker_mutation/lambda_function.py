@@ -118,11 +118,11 @@ MAX_NOTE_LENGTH = 2000
 ENABLE_LESSON_PRIMITIVE = os.environ.get("ENABLE_LESSON_PRIMITIVE", "false").lower() == "true"
 
 # Valid record types and their closed/default statuses
-_RECORD_TYPES = {"task", "issue", "feature", "lesson"}
-_CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived"}
-_DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft"}
-_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN"}
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson"}
+_RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan"}
+_CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived", "plan": "complete"}
+_DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted"}
+_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN"}
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
 
 # Category validation per record type
 _VALID_CATEGORIES = {
@@ -130,6 +130,7 @@ _VALID_CATEGORIES = {
     "task": {"implementation", "investigation", "documentation", "maintenance", "validation"},
     "issue": {"bug", "debt", "risk", "security", "performance"},
     "lesson": {"pattern", "failure_mode", "resolution_pathway", "opportunity", "principle", "intention"},
+    "plan": {"strategic", "tactical", "operational", "remediation"},
 }
 _VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
 _VALID_TRANSITION_TYPES = ("github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code")
@@ -177,6 +178,11 @@ _VALID_TRANSITIONS = {
         "active": {"superseded", "archived"},
         "superseded": {"archived"},
     },
+    "plan": {
+        "drafted": {"started"},
+        "started": {"complete", "incomplete"},
+        "incomplete": {"started"},
+    },
 }
 
 # Backward (revert) transitions — allowed only with transition_evidence.revert_reason
@@ -203,6 +209,9 @@ _REVERT_TRANSITIONS = {
         "proposed": {"draft"},
         "accepted": {"proposed"},
         "active": {"accepted"},
+    },
+    "plan": {
+        "started": {"incomplete"},
     },
 }
 
@@ -1630,6 +1639,26 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         if pillar_err:
             return pillar_err
 
+    # ENC-FTR-058: Plan-specific validation
+    plan_objectives_set = []
+    plan_attached_documents = []
+    plan_related_feature_id = ""
+    if record_type == "plan":
+        raw_objectives = body.get("objectives_set") or body.get("objectives") or []
+        if isinstance(raw_objectives, list):
+            for i, obj_id in enumerate(raw_objectives):
+                if not isinstance(obj_id, str) or not obj_id.strip():
+                    return _tracker_create_validation_error(
+                        f"objectives_set[{i}] must be a non-empty string (record ID).",
+                        record_type=record_type,
+                        governed_rules=["Each objective must be a valid tracker record ID (task/issue/feature)."],
+                    )
+            plan_objectives_set = [o.strip() for o in raw_objectives if o.strip()]
+        raw_docs = body.get("attached_documents") or []
+        if isinstance(raw_docs, list):
+            plan_attached_documents = [d.strip() for d in raw_docs if isinstance(d, str) and d.strip()]
+        plan_related_feature_id = str(body.get("related_feature_id") or "").strip()
+
     if primary_task:
         if record_type not in ("feature", "issue"):
             return _tracker_create_validation_error(
@@ -1754,6 +1783,15 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         item["lesson_version"] = {"N": "1"}
         if analysis_reference:
             item["analysis_reference"] = _ser_s(analysis_reference)
+    # ENC-FTR-058: Plan-specific fields
+    if record_type == "plan":
+        item["objectives_set"] = {"L": [_ser_s(o) for o in plan_objectives_set]}
+        item["attached_documents"] = {"L": [_ser_s(d) for d in plan_attached_documents]}
+        if plan_related_feature_id:
+            item["related_feature_id"] = _ser_s(plan_related_feature_id)
+        item["checkout_state"] = _ser_s("")
+        item["checked_out_by"] = _ser_s("")
+        item["checked_out_at"] = _ser_s("")
     if category:
         item["category"] = _ser_s(category)
     if intent:
@@ -2522,6 +2560,36 @@ def _handle_update_field(
                 expected_type="append_only",
                 governed_rules=["evidence_chain is append-only via extensions (ENC-FTR-052)."],
             )
+
+    # ENC-FTR-058: Plan objectives_set immutability enforcement
+    if record_type == "plan" and field == "objectives_set":
+        # Objectives can only be appended, never removed, unless plan is in 'incomplete' status.
+        # Read current plan status to check.
+        try:
+            key = {"project_id": {"S": project_id}, "record_id": {"S": f"plan#{record_id}"}}
+            resp = _get_ddb().get_item(TableName=DYNAMODB_TABLE, Key=key, ConsistentRead=True)
+            plan_item = resp.get("Item", {})
+            plan_status = (plan_item.get("status", {}).get("S", "") or "").strip().lower()
+            if plan_status != "incomplete":
+                # Check that new value is a superset of existing objectives
+                existing_objectives = set()
+                for obj in plan_item.get("objectives_set", {}).get("L", []):
+                    existing_objectives.add(obj.get("S", ""))
+                new_objectives = set()
+                if isinstance(value, list):
+                    new_objectives = {str(v).strip() for v in value if str(v).strip()}
+                removed = existing_objectives - new_objectives
+                if removed:
+                    return _tracker_field_validation_error(
+                        f"Cannot remove objectives from plan when status is '{plan_status}'. "
+                        f"Objectives are append-only unless plan transitions to 'incomplete'. "
+                        f"Attempted to remove: {', '.join(sorted(removed))}",
+                        field=field, record_id=record_id, record_type=record_type,
+                        expected_type="append_only",
+                        governed_rules=["Plan objectives_set is append-only unless status is 'incomplete' (ENC-FTR-058)."],
+                    )
+        except Exception as exc:
+            logger.warning("Failed to validate objectives_set immutability: %s", exc)
 
     if field == "acceptance_criteria":
         normalized_criteria, normalize_error = _normalize_acceptance_criteria_value(record_type, value)
@@ -3633,6 +3701,10 @@ _RELATIONSHIP_TYPES = frozenset({
     "affects", "affected-by",
     "tests", "tested-by",
     "consumes-from", "produces-for",
+    # ENC-FTR-058: Plan primitive relationship types
+    "plan-contains", "contained-by-plan",
+    "plan-attached-doc", "doc-attached-to-plan",
+    "plan-implements", "implemented-by-plan",
 })
 
 _INVERSE_PAIRS: Dict[str, str] = {
@@ -3645,6 +3717,10 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "affects": "affected-by", "affected-by": "affects",
     "tests": "tested-by", "tested-by": "tests",
     "consumes-from": "produces-for", "produces-for": "consumes-from",
+    # ENC-FTR-058: Plan primitive
+    "plan-contains": "contained-by-plan", "contained-by-plan": "plan-contains",
+    "plan-attached-doc": "doc-attached-to-plan", "doc-attached-to-plan": "plan-attached-doc",
+    "plan-implements": "implemented-by-plan", "implemented-by-plan": "plan-implements",
 }
 
 _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
@@ -3665,6 +3741,13 @@ _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
     "tested-by":     {"asymmetric": True, "irreflexive": True, "transitive": False},
     "consumes-from": {"asymmetric": True, "irreflexive": True, "transitive": False},
     "produces-for":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+    # ENC-FTR-058: Plan primitive
+    "plan-contains":      {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "contained-by-plan":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "plan-attached-doc":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "doc-attached-to-plan": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "plan-implements":    {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "implemented-by-plan": {"asymmetric": True, "irreflexive": True, "transitive": False},
 }
 
 # Domain/range constraints: {relationship_type: {source_types, target_types}}
@@ -3687,6 +3770,13 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     "tested-by":     {"source": frozenset({"feature", "issue"}), "target": frozenset({"task"})},
     "consumes-from": {"source": None, "target": None},
     "produces-for":  {"source": None, "target": None},
+    # ENC-FTR-058: Plan primitive
+    "plan-contains":      {"source": frozenset({"plan"}), "target": frozenset({"task", "issue", "feature"})},
+    "contained-by-plan":  {"source": frozenset({"task", "issue", "feature"}), "target": frozenset({"plan"})},
+    "plan-attached-doc":  {"source": frozenset({"plan"}), "target": None},  # target can be any (documents are not a record type)
+    "doc-attached-to-plan": {"source": None, "target": frozenset({"plan"})},
+    "plan-implements":    {"source": frozenset({"plan"}), "target": frozenset({"feature"})},
+    "implemented-by-plan": {"source": frozenset({"feature"}), "target": frozenset({"plan"})},
 }
 
 _TRANSITIVE_TYPES = frozenset(

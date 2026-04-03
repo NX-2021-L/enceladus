@@ -119,6 +119,7 @@ RECORD_TYPE_TO_LABEL = {
     "task": "Task",
     "issue": "Issue",
     "feature": "Feature",
+    "plan": "Plan",  # ENC-FTR-058
 }
 
 def _bare_id(record_id: str) -> str:
