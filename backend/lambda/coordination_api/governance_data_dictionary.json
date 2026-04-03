@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.42",
-  "updated_at": "2026-04-03T09:10:00Z",
+  "version": "2026-04-03.43",
+  "updated_at": "2026-04-03T09:15:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1536,6 +1536,30 @@
         "freshness": {
           "type": "behavior",
           "definition": "Architecture excerpts include freshness field: 'live' for direct file reads (always fresh, no cache needed per DOC-CA6AFFD18E98 §4.1). S3 cached reads reserved for future cross-platform agent support."
+        }
+      }
+    },
+    "mcp_server.handoff_tools": {
+      "description": "MCP execute actions for governed handoff document lifecycle (ENC-FTR-061, ENC-TSK-B53). Three actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag. All route through document_api HTTP API.",
+      "fields": {
+        "document.create_handoff": {
+          "type": "execute_action",
+          "definition": "Creates a handoff document with document_subtype=handoff. Requires project_id, title, content, source_record_id. Optionally accepts prerequisite_state, verification_criteria, action_checklist, expires_at, description, keywords, related_items. Returns document_id on success.",
+          "usage_guidance": "execute(steps=[{action: 'document.create_handoff', arguments: {governance_hash, project_id, title, content, source_record_id, ...}}])"
+        },
+        "document.claim_handoff": {
+          "type": "execute_action",
+          "definition": "Transitions a handoff document from pending to claimed. The document_api auto-stamps claimed_by and claimed_at from the authenticated caller.",
+          "usage_guidance": "execute(steps=[{action: 'document.claim_handoff', arguments: {governance_hash, document_id}}])"
+        },
+        "document.complete_handoff": {
+          "type": "execute_action",
+          "definition": "Transitions a handoff document from claimed to completed.",
+          "usage_guidance": "execute(steps=[{action: 'document.complete_handoff', arguments: {governance_hash, document_id}}])"
+        },
+        "feature_flag": {
+          "type": "string",
+          "definition": "ENABLE_HANDOFF_PRIMITIVE environment variable. When 'true', the 3 handoff actions are registered in the execute action registry. Default 'false'."
         }
       }
     },

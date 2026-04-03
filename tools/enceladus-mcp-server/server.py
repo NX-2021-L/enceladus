@@ -226,6 +226,10 @@ ENABLE_CONTEXT_NODES = os.environ.get(
 ENABLE_LESSON_PRIMITIVE = os.environ.get(
     "ENABLE_LESSON_PRIMITIVE", "false"
 ).lower() == "true"
+# ENC-FTR-061: Governed Handoff Primitive feature flag
+ENABLE_HANDOFF_PRIMITIVE = os.environ.get(
+    "ENABLE_HANDOFF_PRIMITIVE", "false"
+).lower() == "true"
 
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
@@ -5579,6 +5583,101 @@ async def _documents_patch(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-061: Governed Handoff Primitive — MCP execute actions
+# ---------------------------------------------------------------------------
+
+
+async def _document_create_handoff(args: dict) -> list[TextContent]:
+    """Create a handoff document with required fields."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    project_id = str(args.get("project_id") or "").strip()
+    title = str(args.get("title") or "").strip()
+    content = str(args.get("content") or "").strip()
+    source_record_id = str(args.get("source_record_id") or "").strip()
+
+    if not project_id:
+        return _result_text(_error_payload("INVALID_INPUT", "project_id is required"))
+    if not title:
+        return _result_text(_error_payload("INVALID_INPUT", "title is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not source_record_id:
+        return _result_text(_error_payload("INVALID_INPUT", "source_record_id is required for handoff documents"))
+
+    body: Dict[str, Any] = {
+        "project_id": project_id,
+        "title": title,
+        "content": content,
+        "document_subtype": "handoff",
+        "source_record_id": source_record_id,
+    }
+    for key in ("prerequisite_state", "verification_criteria", "expires_at"):
+        val = args.get(key)
+        if val is not None:
+            body[key] = str(val).strip()
+    if "action_checklist" in args:
+        checklist = args["action_checklist"]
+        if isinstance(checklist, list):
+            body["action_checklist"] = checklist
+    for key in ("description", "keywords", "related_items"):
+        if key in args and args.get(key) is not None:
+            body[key] = args[key]
+
+    result = _document_api_request("PUT", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_create_handoff: document API auth failed for project %s",
+            project_id,
+        )
+    return _result_text(result)
+
+
+async def _document_claim_handoff(args: dict) -> list[TextContent]:
+    """Transition a handoff document from pending to claimed."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(_error_payload("INVALID_INPUT", "document_id is required"))
+
+    body: Dict[str, Any] = {"handoff_status": "claimed"}
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_claim_handoff: document API auth failed for document %s",
+            document_id,
+        )
+    return _result_text(result)
+
+
+async def _document_complete_handoff(args: dict) -> list[TextContent]:
+    """Transition a handoff document from claimed to completed."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    if not document_id:
+        return _result_text(_error_payload("INVALID_INPUT", "document_id is required"))
+
+    body: Dict[str, Any] = {"handoff_status": "completed"}
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_complete_handoff: document API auth failed for document %s",
+            document_id,
+        )
+    return _result_text(result)
+
+
 async def _check_document_policy(args: dict) -> list[TextContent]:
     operation = str(args.get("operation") or "").strip()
     storage_target = str(args.get("storage_target") or "").strip()
@@ -6500,6 +6599,18 @@ if ENABLE_LESSON_PRIMITIVE:
     }
     _SEARCH_ACTIONS["tracker.list_lessons"] = {
         "tool": "tracker_list_lessons",
+    }
+
+# ENC-FTR-061: Conditionally register handoff actions behind feature flag
+if ENABLE_HANDOFF_PRIMITIVE:
+    _EXECUTE_ACTIONS["document.create_handoff"] = {
+        "tool": "document_create_handoff", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.claim_handoff"] = {
+        "tool": "document_claim_handoff", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.complete_handoff"] = {
+        "tool": "document_complete_handoff", "requires_governance_hash": True,
     }
 
 # ENC-FTR-058 / ENC-TSK-A97: Plan action aliases in code-mode surface
@@ -8430,6 +8541,10 @@ _TOOL_HANDLERS = {
     "tracker_list_lessons": _tracker_list_lessons,
     # ENC-FTR-058 / ENC-TSK-A97: Plan tools
     "plan_objectives_status": _plan_objectives_status,
+    # ENC-FTR-061: Governed Handoff Primitive
+    "document_create_handoff": _document_create_handoff,
+    "document_claim_handoff": _document_claim_handoff,
+    "document_complete_handoff": _document_complete_handoff,
 }
 
 
