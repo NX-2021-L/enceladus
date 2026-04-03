@@ -2,14 +2,15 @@ import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useRecordMutation } from '../../hooks/useRecordMutation'
 import { isMutationRetryExhaustedError } from '../../api/mutations'
-import { TASK_STATUSES, ISSUE_STATUSES, FEATURE_STATUSES, STATUS_LABELS } from '../../lib/constants'
+import { TASK_STATUSES, ISSUE_STATUSES, FEATURE_STATUSES, PLAN_STATUSES, STATUS_LABELS } from '../../lib/constants'
 
-type RecordType = 'task' | 'issue' | 'feature'
+type RecordType = 'task' | 'issue' | 'feature' | 'plan'
 
 const LIFECYCLE_MAP: Record<RecordType, readonly string[]> = {
   task: TASK_STATUSES,
   issue: ISSUE_STATUSES,
   feature: FEATURE_STATUSES,
+  plan: PLAN_STATUSES,
 }
 
 function getNextStatus(recordType: RecordType, current: string): string | null {

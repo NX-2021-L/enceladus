@@ -3,12 +3,13 @@
  * Shows objectives set with status, attached documents, and lifecycle actions.
  */
 
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { StatusChip } from '../components/shared/StatusChip'
 import { PriorityBadge } from '../components/shared/PriorityBadge'
 import { MarkdownRenderer } from '../components/shared/MarkdownRenderer'
 import { HistoryFeed } from '../components/shared/HistoryFeed'
+import { LifecycleActions } from '../components/shared/LifecycleActions'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
 import { CopyButton } from '../components/shared/CopyButton'
@@ -45,6 +46,8 @@ export function PlanDetailPage() {
     ['closed', 'completed', 'complete', 'production'].includes(o.status)
   ).length
 
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+
   if (isPending) return <LoadingState />
   if (isError) return <ErrorState message="Failed to load plan data" />
   if (!plan) return <ErrorState message={`Plan ${planId} not found`} />
@@ -76,10 +79,27 @@ export function PlanDetailPage() {
             </Link>
           )}
         </div>
+        <div className="flex flex-wrap items-center gap-2 mt-3">
+          <LifecycleActions
+            recordType="plan"
+            currentStatus={plan.status}
+            projectId={plan.project_id}
+            recordId={plan.plan_id}
+            onSuccess={(msg) => { setToast({ type: 'success', message: msg }); setTimeout(() => setToast(null), 4000) }}
+            onError={(msg) => { setToast({ type: 'error', message: msg }); setTimeout(() => setToast(null), 8000) }}
+          />
+        </div>
         <div className="text-xs text-slate-500 mt-2">
           Created {formatDate(plan.created_at)} · Updated {formatDate(plan.updated_at)}
         </div>
       </div>
+
+      {/* Toast feedback */}
+      {toast && (
+        <div className={`rounded-lg p-3 text-sm ${toast.type === 'success' ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700' : 'bg-red-900/60 text-red-300 border border-red-700'}`}>
+          {toast.message}
+        </div>
+      )}
 
       {/* Description */}
       {plan.description && (
