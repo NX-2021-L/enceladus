@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.34",
-  "updated_at": "2026-04-03T04:30:00Z",
+  "version": "2026-04-03.35",
+  "updated_at": "2026-04-03T05:01:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2107,7 +2107,8 @@
         "Issue",
         "Feature",
         "Project",
-        "Plan"
+        "Plan",
+        "Lesson"
       ],
       "edge_types": [
         "CHILD_OF",
@@ -2117,7 +2118,11 @@
         "IMPLEMENTS",
         "PLAN_CONTAINS",
         "PLAN_ATTACHED_DOC",
-        "PLAN_IMPLEMENTS"
+        "PLAN_IMPLEMENTS",
+        "LEARNED_FROM",
+        "TEACHES",
+        "SUPERSEDES",
+        "SUPERSEDED_BY"
       ],
       "data_source": "DynamoDB stream -> EventBridge Pipe -> SQS FIFO -> graph_sync Lambda -> Neo4j AuraDB",
       "auth": "Cognito JWT cookie OR X-Coordination-Internal-Key header",

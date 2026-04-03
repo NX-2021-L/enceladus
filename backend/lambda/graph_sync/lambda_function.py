@@ -120,6 +120,7 @@ RECORD_TYPE_TO_LABEL = {
     "issue": "Issue",
     "feature": "Feature",
     "plan": "Plan",  # ENC-FTR-058
+    "lesson": "Lesson",  # ENC-FTR-052 / ENC-TSK-983
 }
 
 def _bare_id(record_id: str) -> str:
@@ -318,6 +319,9 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "plan-contains": "PLAN_CONTAINS",
     "plan-attached-doc": "PLAN_ATTACHED_DOC",
     "plan-implements": "PLAN_IMPLEMENTS",
+    # ENC-FTR-052 / ENC-TSK-983: Lesson edge types
+    "learned-from": "LEARNED_FROM", "teaches": "TEACHES",
+    "supersedes": "SUPERSEDES", "superseded-by": "SUPERSEDED_BY",
 }
 
 
