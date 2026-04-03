@@ -30,6 +30,13 @@ HALF_LIFE_SECONDS = {
     "issue": 259200,      # 3 days
     "feature": 2592000,   # 30 days
     "document": 7776000,  # 90 days
+    "lesson": 15552000,   # 180 days (ENC-FTR-052 / ENC-TSK-984)
+}
+
+# --- Lesson context node defaults (ENC-FTR-052 governance) ---
+LESSON_CONTEXT_DEFAULTS = {
+    "structural_importance_baseline": 0.8,
+    "model_routing_hint": "opus",
 }
 
 # --- PPR edge weight defaults (from OWL ontology) ---
@@ -46,6 +53,15 @@ PPR_EDGE_WEIGHTS = {
     "RELATES_TO": 0.3,
     "RELATED_TO": 0.3,
     "BELONGS_TO": 0.1,
+    # ENC-FTR-052 / ENC-TSK-984: Lesson edge weights
+    "LEARNED_FROM": 0.9,
+    "TEACHES": 0.9,
+    "SUPERSEDES": 0.8,
+    "SUPERSEDED_BY": 0.8,
+    # ENC-FTR-058: Plan edge weights
+    "PLAN_CONTAINS": 0.7,
+    "PLAN_IMPLEMENTS": 0.7,
+    "PLAN_ATTACHED_DOC": 0.3,
 }
 
 # --- RRF constant ---
@@ -64,7 +80,7 @@ def compute_freshness(updated_at_iso: str, record_type: str,
 
     Args:
         updated_at_iso: ISO 8601 timestamp of last update.
-        record_type: One of 'task', 'issue', 'feature', 'document'.
+        record_type: One of 'task', 'issue', 'feature', 'document', 'lesson'.
         half_life_override: Optional override for half-life in seconds.
         now: Optional current time as Unix timestamp (for testing).
 
