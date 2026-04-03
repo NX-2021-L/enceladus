@@ -52,6 +52,8 @@ from transition_type_matrix import (
     MATRIX_VERSION,
     DEPLOY_SUCCESS_EVIDENCE,
     IMMUTABLE_TRANSITION_TYPES,
+    STRICTNESS_RANK,
+    VALID_TRANSITION_TYPES,
     get_deploy_success_gate,
     is_immutable_type,
 )
@@ -141,14 +143,10 @@ _VALID_CATEGORIES = {
     "plan": {"strategic", "tactical", "operational", "remediation"},
 }
 _VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
-_VALID_TRANSITION_TYPES = ("github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code")
-_STRICTNESS_RANK = {
-    "github_pr_deploy": 0,
-    "lambda_deploy": 1,
-    "web_deploy": 1,
-    "code_only": 2,
-    "no_code": 3,
-}
+# ENC-ISS-145: Use canonical matrix as sole source of truth for transition types and strictness.
+# Local duplicates removed — all references now point to transition_type_matrix imports.
+_VALID_TRANSITION_TYPES = tuple(sorted(VALID_TRANSITION_TYPES))
+_STRICTNESS_RANK = STRICTNESS_RANK
 
 # Status transition rules — strictly sequential, one step forward only (ENC-FTR-022)
 # ENC-FTR-035: 'deployed' replaced by deploy-init / deploy-success + coding-updates re-entry arc.
@@ -2635,6 +2633,36 @@ def _handle_update_field(
                 governed_rules=["evidence_chain is append-only via extensions (ENC-FTR-052)."],
             )
 
+    # ENC-ISS-140: subtask_ids immutability enforcement.
+    # Once a task has subtask_ids set and is past 'open' status (or has been checked out),
+    # entries cannot be removed — only appended. This prevents agents from clearing
+    # subtask_ids to bypass the ENC-ISS-106 subtask completion gate.
+    if record_type == "task" and field == "subtask_ids":
+        current_status = (item_data.get("status", "") or "").strip().lower()
+        has_been_checked_out = bool(item_data.get("checked_out_at"))
+        existing_subtask_ids = set()
+        for st in item_data.get("subtask_ids", {}).get("L", []):
+            existing_subtask_ids.add(st.get("S", ""))
+        existing_subtask_ids.discard("")
+        if existing_subtask_ids and (current_status != "open" or has_been_checked_out):
+            new_subtask_ids = set()
+            if isinstance(value, list):
+                new_subtask_ids = {str(v).strip() for v in value if str(v).strip()}
+            removed = existing_subtask_ids - new_subtask_ids
+            if removed:
+                return _tracker_field_validation_error(
+                    f"Cannot remove entries from subtask_ids on a task that is past 'open' "
+                    f"status or has been checked out (current status: '{current_status}'). "
+                    f"subtask_ids is append-only to preserve the ENC-ISS-106 subtask "
+                    f"completion gate. Attempted to remove: {', '.join(sorted(removed))}",
+                    field=field, record_id=record_id, record_type=record_type,
+                    expected_type="append_only",
+                    governed_rules=[
+                        "subtask_ids is append-only once task leaves 'open' or has been checked out (ENC-ISS-140).",
+                        "Use PWA user_initiated path to override if needed.",
+                    ],
+                )
+
     # ENC-FTR-058: Plan objectives_set immutability enforcement
     if record_type == "plan" and field == "objectives_set":
         # Objectives can only be appended, never removed, unless plan is in 'incomplete' status.
@@ -2942,6 +2970,51 @@ def _handle_update_field(
                     governed_rules=[
                         f"valid revert targets require transition_evidence.revert_reason: {sorted(revert_targets)}",
                     ],
+                )
+
+        # --- ENC-ISS-155: Plan completion gate ---
+        # When setting a plan to 'complete', validate all objectives_set entries
+        # are in a terminal status (closed/completed/complete/archived).
+        if record_type == "plan" and new_lower == "complete" and not is_revert:
+            objectives_set_raw = item_data.get("objectives_set", {}).get("L", [])
+            objective_ids = [o.get("S", "") for o in objectives_set_raw if o.get("S", "")]
+            if not objective_ids:
+                return _tracker_field_validation_error(
+                    "Cannot complete plan with empty objectives_set. "
+                    "Add at least one objective before completing.",
+                    field=field, record_id=record_id, record_type=record_type,
+                    expected_type="gate",
+                    governed_rules=["Plan completion requires all objectives in terminal status (ENC-ISS-155)."],
+                )
+            terminal_statuses = {"closed", "completed", "complete", "archived"}
+            lagging = []
+            for obj_id in objective_ids:
+                try:
+                    obj_prefix = obj_id.split("-")[1].upper() if "-" in obj_id else "TSK"
+                    type_prefix_map = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
+                    obj_type = type_prefix_map.get(obj_prefix, "task")
+                    obj_sk = f"{obj_type}#{obj_id}"
+                    obj_key = {"project_id": {"S": project_id}, "record_id": {"S": obj_sk}}
+                    obj_resp = _get_ddb().get_item(TableName=DYNAMODB_TABLE, Key=obj_key, ConsistentRead=True)
+                    obj_item = obj_resp.get("Item")
+                    if not obj_item:
+                        lagging.append({"id": obj_id, "status": "NOT_FOUND"})
+                        continue
+                    obj_status = (obj_item.get("status", {}).get("S", "") or "").strip().lower()
+                    if obj_status not in terminal_statuses:
+                        lagging.append({"id": obj_id, "status": obj_status})
+                except Exception as exc:
+                    logger.warning("Failed to check objective %s status: %s", obj_id, exc)
+                    lagging.append({"id": obj_id, "status": "CHECK_FAILED"})
+            if lagging:
+                lagging_summary = ", ".join(f"{l['id']} ({l['status']})" for l in lagging)
+                return _tracker_field_validation_error(
+                    f"Cannot complete plan: {len(lagging)} objective(s) not in terminal status. "
+                    f"Lagging: {lagging_summary}. "
+                    "All objectives must reach closed/completed/archived before plan completion.",
+                    field=field, record_id=record_id, record_type=record_type,
+                    expected_type="gate",
+                    governed_rules=["Plan completion requires all objectives in terminal status (ENC-ISS-155)."],
                 )
 
         # --- Evidence-gated forward transitions (ENC-FTR-022 / ENC-FTR-035) ---
