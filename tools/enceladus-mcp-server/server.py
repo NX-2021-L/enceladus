@@ -8083,8 +8083,8 @@ async def _checkout_task(args: dict) -> list[TextContent]:
     except ValueError as exc:
         return _result_text({"error": str(exc)})
 
-    if record_type != "task":
-        return _result_text({"error": f"checkout_task only applies to tasks, not {record_type}"})
+    if record_type not in ("task", "plan"):
+        return _result_text({"error": f"checkout only applies to tasks and plans, not {record_type}"})
 
     payload: Dict[str, Any] = {
         "active_agent_session_id": active_agent_session_id,
@@ -8114,6 +8114,8 @@ async def _release_task(args: dict) -> list[TextContent]:
     payload: Dict[str, Any] = {"governance_hash": args.get("governance_hash", "")}
     if args.get("provider"):
         payload["provider"] = args["provider"]
+    if args.get("checkin_summary"):
+        payload["checkin_summary"] = args["checkin_summary"]
 
     resp = _checkout_api_request("DELETE", f"/{project_id}/{record_type}/{rid}/checkout", payload=payload)
     if isinstance(resp, dict) and resp.get("success"):
@@ -8133,8 +8135,8 @@ async def _advance_task_status(args: dict) -> list[TextContent]:
     except ValueError as exc:
         return _result_text({"error": str(exc)})
 
-    if record_type != "task":
-        return _result_text({"error": f"advance_task_status only applies to tasks, not {record_type}"})
+    if record_type not in ("task", "plan"):
+        return _result_text({"error": f"advance_task_status only applies to tasks and plans, not {record_type}"})
 
     payload: Dict[str, Any] = {
         "target_status": args["target_status"],
