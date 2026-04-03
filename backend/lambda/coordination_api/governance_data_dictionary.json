@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.31",
-  "updated_at": "2026-04-03T02:55:00Z",
+  "version": "2026-04-03.32",
+  "updated_at": "2026-04-03T03:05:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2091,14 +2091,18 @@
         "Task",
         "Issue",
         "Feature",
-        "Project"
+        "Project",
+        "Plan"
       ],
       "edge_types": [
         "CHILD_OF",
         "RELATED_TO",
         "BELONGS_TO",
         "ADDRESSES",
-        "IMPLEMENTS"
+        "IMPLEMENTS",
+        "PLAN_CONTAINS",
+        "PLAN_ATTACHED_DOC",
+        "PLAN_IMPLEMENTS"
       ],
       "data_source": "DynamoDB stream -> EventBridge Pipe -> SQS FIFO -> graph_sync Lambda -> Neo4j AuraDB",
       "auth": "Cognito JWT cookie OR X-Coordination-Internal-Key header",
