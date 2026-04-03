@@ -280,6 +280,10 @@ deploy_lambda() {
       --function-name "${fn_name}" \
       --region "${REGION}" \
       --handler "${handler}" \
+      --runtime python3.12 \
+      --architectures arm64 \
+      --timeout 30 \
+      --memory-size 256 \
       --environment "${env_json}" \
       --layers "${layer_arn}" >/dev/null
     aws lambda wait function-updated-v2 --function-name "${fn_name}" --region "${REGION}"
@@ -289,6 +293,7 @@ deploy_lambda() {
       --function-name "${fn_name}" \
       --region "${REGION}" \
       --runtime python3.12 \
+      --architectures arm64 \
       --role "${role_arn}" \
       --handler "${handler}" \
       --zip-file "fileb://${zip_path}" \
