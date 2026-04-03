@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.46",
-  "updated_at": "2026-04-03T10:20:00Z",
+  "version": "2026-04-03.47",
+  "updated_at": "2026-04-03T21:05:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -522,21 +522,34 @@
       "fields": {
         "document_subtype": {
           "type": "enum",
-          "enum": ["general", "handoff", "blueprint", "narrative", "session-log"],
+          "enum": [
+            "general",
+            "handoff",
+            "blueprint",
+            "narrative",
+            "session-log"
+          ],
           "definition": "Document subtype classification. Stored on all documents (defaults to 'general' for existing docs). When 'handoff', additional handoff-specific fields are required/available.",
           "usage_guidance": "Set at creation via document_api PUT body. Cannot be changed after creation."
         },
         "source_record_id": {
           "type": "string",
-          "constraints": {"min_length": 1},
+          "constraints": {
+            "min_length": 1
+          },
           "definition": "Tracker record ID that originated this handoff (e.g. ENC-TSK-B52). Required when document_subtype=handoff.",
           "usage_guidance": "Set at creation. Creates the source anchor for graph HANDS_OFF edge (Phase 3)."
         },
         "handoff_status": {
           "type": "enum",
-          "enum": ["pending", "claimed", "completed", "stale"],
+          "enum": [
+            "pending",
+            "claimed",
+            "completed",
+            "stale"
+          ],
           "definition": "Handoff lifecycle status. pending: awaiting pickup. claimed: an agent has taken ownership. completed: handoff work done. stale: expired or superseded.",
-          "usage_guidance": "Auto-set to 'pending' on creation. Transition via PATCH with handoff_status field. Valid transitions: pending->{claimed,stale}, claimed->{completed,stale}. completed and stale are terminal."
+          "usage_guidance": "Auto-set to 'pending' on creation. Transition via PATCH with handoff_status field, or via the status field (ENC-ISS-158 routing). Valid transitions: pending->{claimed,stale}, claimed->{completed,stale}. completed and stale are terminal."
         },
         "prerequisite_state": {
           "type": "string",
@@ -556,7 +569,9 @@
         },
         "expires_at": {
           "type": "string",
-          "constraints": {"format": "ISO 8601 datetime"},
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
           "definition": "Optional expiry timestamp. After this time, handoff should be considered stale.",
           "usage_guidance": "Set at creation or via PATCH. No server-side enforcement yet — consuming agents should check."
         },
@@ -566,12 +581,19 @@
         },
         "claimed_at": {
           "type": "string",
-          "constraints": {"format": "ISO 8601 datetime"},
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
           "definition": "Timestamp when handoff was claimed. Set automatically with claimed_by."
         },
         "created_by_session": {
           "type": "string",
           "definition": "Session identity of the agent that created this handoff document. Set from auth claims at creation."
+        },
+        "status_routing": {
+          "type": "string",
+          "definition": "ENC-ISS-158: When documents.patch receives a handoff lifecycle value (pending/claimed/completed/stale) in the status field for a handoff document, it routes the value to handoff_status instead of rejecting it. This enables MCP callers to use the standard status field for handoff lifecycle transitions without knowing about the separate handoff_status field.",
+          "usage_guidance": "Callers can use either documents.patch(status='claimed') or documents.patch(handoff_status='claimed') on handoff documents. Both produce the same result. Non-handoff documents still enforce status in {active, archived}."
         }
       }
     },
