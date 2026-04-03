@@ -179,6 +179,50 @@ def _utc_now_compact() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _extract_project_message_ids_from_sqs_event(
+    event: Dict[str, Any],
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Return project_id -> message IDs plus malformed/unusable message IDs."""
+    project_message_ids: Dict[str, List[str]] = defaultdict(list)
+    failed_message_ids: List[str] = []
+
+    for record in event.get("Records", []):
+        message_id = record.get("messageId")
+        try:
+            body = json.loads(record.get("body", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to parse SQS message body")
+            if message_id:
+                failed_message_ids.append(message_id)
+            continue
+
+        project_id = body.get("project_id")
+        if not project_id:
+            logger.warning("No valid project_id found in SQS message")
+            if message_id:
+                failed_message_ids.append(message_id)
+            continue
+
+        if message_id:
+            project_message_ids[project_id].append(message_id)
+
+    return project_message_ids, failed_message_ids
+
+
+def _batch_failure_response(message_ids: List[str]) -> Dict[str, Any]:
+    """Return the Lambda partial-batch failure contract for SQS triggers."""
+    failures = []
+    seen: Set[str] = set()
+    for message_id in message_ids:
+        if not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        failures.append({"itemIdentifier": message_id})
+    if not failures:
+        return {}
+    return {"batchItemFailures": failures}
+
+
 # ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
@@ -1137,30 +1181,24 @@ def _start_codebuild(
 # ---------------------------------------------------------------------------
 
 
-def handler(event: Dict[str, Any], context: Any) -> None:
+def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """SQS FIFO Lambda handler."""
     logger.info(f"deploy_orchestrator: received {len(event.get('Records', []))} SQS message(s)")
 
-    # Extract project IDs from SQS messages
-    project_ids: Set[str] = set()
-    for record in event.get("Records", []):
-        try:
-            body = json.loads(record.get("body", "{}"))
-            pid = body.get("project_id")
-            if pid:
-                project_ids.add(pid)
-        except (json.JSONDecodeError, TypeError):
-            logger.warning(f"Failed to parse SQS message body")
+    project_message_ids, failed_message_ids = _extract_project_message_ids_from_sqs_event(event)
 
-    if not project_ids:
+    if not project_message_ids:
         logger.warning("No valid project IDs found in SQS messages")
-        return
+        return _batch_failure_response(failed_message_ids)
 
-    for project_id in project_ids:
+    for project_id, message_ids in project_message_ids.items():
         try:
             _orchestrate_deployment(project_id)
         except Exception as e:
             logger.error(f"Orchestration failed for {project_id}: {e}", exc_info=True)
+            failed_message_ids.extend(message_ids)
+
+    return _batch_failure_response(failed_message_ids)
 
 
 def _orchestrate_deployment(project_id: str) -> None:
