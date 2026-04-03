@@ -19,6 +19,7 @@ Do not proceed with any work until steps 1-5 are complete.
 ## Git Lifecycle Quick Reference
 
 - Set `task.components` and `task.transition_type` before `checkout_task`.
+- Treat `task.transition_type` as immutable after creation when either the current or proposed value is `no_code` or `code_only`; agents must never change a task into or out of those sealed types post-creation (ENC-FTR-060, ENC-ISS-145).
 - `checkout_task` is required before code changes; never edit from the shared main checkout.
 - `coding-complete` returns `CAI-...`; `committed` requires `commit_sha` and returns `CCI-...`.
 - Put the `CCI-...` token in the PR body before opening or updating the PR.
