@@ -48,6 +48,14 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
+from transition_type_matrix import (
+    MATRIX_VERSION,
+    DEPLOY_SUCCESS_EVIDENCE,
+    IMMUTABLE_TRANSITION_TYPES,
+    get_deploy_success_gate,
+    is_immutable_type,
+)
+
 try:
     import jwt
     from jwt.algorithms import RSAAlgorithm
@@ -2131,6 +2139,72 @@ def _validate_web_deploy_evidence(web_deploy_evidence) -> Optional[str]:
     return None
 
 
+def _validate_lambda_deploy_evidence(lambda_deploy_evidence) -> Optional[str]:
+    """Validate lambda_deploy_evidence for Lambda function deployments (ENC-FTR-059).
+
+    Required fields: FunctionArn, FunctionName, Version (numeric), CodeSha256, CodeSize,
+    ConfigSha256, LastModified, RevisionId, State (must be Active),
+    LastUpdateStatus (must be Successful).
+    Returns None if valid, or an error string describing the first violation.
+    """
+    if not lambda_deploy_evidence:
+        return (
+            "Cannot transition to 'deploy-success': "
+            "transition_evidence.lambda_deploy_evidence required for lambda_deploy tasks. "
+            "Must be an AWS Lambda GetFunctionConfiguration response object."
+        )
+    if not isinstance(lambda_deploy_evidence, dict):
+        return (
+            "Cannot transition to 'deploy-success': "
+            "transition_evidence.lambda_deploy_evidence must be a structured object."
+        )
+    required = (
+        "FunctionArn", "FunctionName", "Version", "CodeSha256", "CodeSize",
+        "ConfigSha256", "LastModified", "RevisionId", "State", "LastUpdateStatus",
+    )
+    missing = [f for f in required if not lambda_deploy_evidence.get(f)]
+    if missing:
+        return (
+            f"Cannot transition to 'deploy-success': lambda_deploy_evidence missing "
+            f"required field(s): {', '.join(missing)}. "
+            "Source: AWS Lambda GetFunctionConfiguration after UpdateFunctionCode with Publish=true."
+        )
+    state = str(lambda_deploy_evidence.get("State", "")).strip()
+    if state != "Active":
+        return (
+            f"Cannot transition to 'deploy-success': lambda_deploy_evidence.State must be "
+            f"'Active'. Got: '{state}'. Poll until Active before submitting evidence."
+        )
+    update_status = str(lambda_deploy_evidence.get("LastUpdateStatus", "")).strip()
+    if update_status != "Successful":
+        return (
+            f"Cannot transition to 'deploy-success': lambda_deploy_evidence.LastUpdateStatus "
+            f"must be 'Successful'. Got: '{update_status}'."
+        )
+    return None
+
+
+# ENC-FTR-059: Matrix-driven deploy-success validator registry for tracker mutation.
+# Maps transition_type → (evidence_key, validator_fn, format_description).
+_DEPLOY_SUCCESS_VALIDATORS: Dict[str, tuple] = {
+    "github_pr_deploy": (
+        "deploy_evidence",
+        _validate_deploy_evidence,
+        "transition_evidence.deploy_evidence with id, name, run_id, head_sha, status, conclusion, started_at, completed_at",
+    ),
+    "lambda_deploy": (
+        "lambda_deploy_evidence",
+        _validate_lambda_deploy_evidence,
+        "transition_evidence.lambda_deploy_evidence with FunctionArn, FunctionName, Version, State=Active, LastUpdateStatus=Successful",
+    ),
+    "web_deploy": (
+        "web_deploy_evidence",
+        _validate_web_deploy_evidence,
+        "transition_evidence.web_deploy_evidence with url, http_status, checked_at",
+    ),
+}
+
+
 def _validate_feature_production_gate(project_id: str, feature_data: Dict) -> Optional[Dict]:
     """Enforce: feature -> production requires >=1 child task, all deploy-success/closed recursively."""
     primary = (feature_data.get("primary_task") or "").strip()
@@ -2716,6 +2790,54 @@ def _handle_update_field(
                     "transition_type selects the lifecycle arc and should be set before checkout.",
                 ],
             )
+        # ENC-TSK-B07: Immutability enforcement for no_code and code_only.
+        # Once set, these types cannot be changed. Other types can be tightened.
+        current_tt = (item_data.get("transition_type") or "").strip().lower()
+        if current_tt:
+            if is_immutable_type(current_tt) and normalized_transition_type != current_tt:
+                logger.warning(
+                    "IMMUTABILITY VIOLATION: %s transition_type change blocked: "
+                    "'%s' -> '%s' (current is immutable)",
+                    record_id, current_tt, normalized_transition_type,
+                )
+                return _error(
+                    422,
+                    f"transition_type '{current_tt}' is immutable once set and cannot be "
+                    f"changed to '{normalized_transition_type}'. Release the task and create "
+                    "a new one with the desired transition_type.",
+                    field=field,
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="enum",
+                    violations=[{
+                        "field": "transition_type",
+                        "current_value": current_tt,
+                        "rejected_value": normalized_transition_type,
+                        "rule": "no_code and code_only transition_types are immutable once set",
+                    }],
+                )
+            if is_immutable_type(normalized_transition_type) and current_tt != normalized_transition_type:
+                logger.warning(
+                    "IMMUTABILITY VIOLATION: %s transition_type change blocked: "
+                    "'%s' -> '%s' (target is immutable and differs from current)",
+                    record_id, current_tt, normalized_transition_type,
+                )
+                return _error(
+                    422,
+                    f"Cannot set transition_type to immutable value '{normalized_transition_type}' "
+                    f"when current value is '{current_tt}'. The task must be created with "
+                    f"'{normalized_transition_type}' from the start.",
+                    field=field,
+                    record_id=record_id,
+                    record_type=record_type,
+                    expected_type="enum",
+                    violations=[{
+                        "field": "transition_type",
+                        "current_value": current_tt,
+                        "rejected_value": normalized_transition_type,
+                        "rule": "no_code and code_only can only be set as the initial transition_type",
+                    }],
+                )
 
     if field == "status":
         # ENC-FTR-037: Task status transitions must go through checkout_service.
@@ -2896,24 +3018,24 @@ def _handle_update_field(
                 )
 
         if not is_revert and record_type == "task" and new_lower == "deploy-success":
-            # ENC-TSK-726 / ENC-ISS-144: deploy evidence validation is transition_type-aware.
-            # web_deploy: accepts web_deploy_evidence {url, http_status, checked_at}
-            # github_pr_deploy / lambda_deploy: requires deploy_evidence (GH Actions Jobs API)
+            # ENC-FTR-059: Matrix-driven deploy evidence validation (v{MATRIX_VERSION}).
+            # Replaces hardcoded if/else branching with registry lookup.
             task_transition_type = (item_data.get("transition_type") or "github_pr_deploy").strip().lower()
-            if task_transition_type == "web_deploy":
-                wde_err = _validate_web_deploy_evidence(transition_evidence.get("web_deploy_evidence"))
-                if wde_err:
+            validator_entry = _DEPLOY_SUCCESS_VALIDATORS.get(task_transition_type)
+            if validator_entry:
+                ev_key, validator_fn, format_desc = validator_entry
+                ev_err = validator_fn(transition_evidence.get(ev_key))
+                if ev_err:
                     return _tracker_field_validation_error(
-                        wde_err,
+                        ev_err,
                         field="status",
                         record_id=record_id,
                         record_type=record_type,
                         expected_type="object",
-                        expected_format=(
-                            "transition_evidence.web_deploy_evidence with url, http_status, checked_at"
-                        ),
+                        expected_format=format_desc,
                     )
             else:
+                # Unknown transition_type at deploy-success — fall back to deploy_evidence
                 de_err = _validate_deploy_evidence(transition_evidence.get("deploy_evidence"))
                 if de_err:
                     return _tracker_field_validation_error(
