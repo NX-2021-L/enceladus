@@ -1,6 +1,6 @@
 {
   "version": "2026-04-03.30",
-  "updated_at": "2026-04-03T02:20:00Z",
+  "updated_at": "2026-04-03T02:30:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1558,7 +1558,7 @@
       }
     },
     "checkout_service.advance_request": {
-      "description": "Request schema for POST /api/v1/checkout/{project}/task/{task_id}/advance (ENC-FTR-037). Checkout service validates evidence and advances task status through the tracker lifecycle.",
+      "description": "Request schema for POST /api/v1/checkout/{project}/task/{task_id}/advance (ENC-FTR-037, ENC-FTR-059). Checkout service validates evidence via canonical transition_type_matrix (v1) and advances task status. Response includes matrix_version. B08: checkout_transition_type is stamped at checkout.task and integrity-checked at every advance — mismatch returns 409.",
       "fields": {
         "target_status": {
           "type": "enum",
@@ -1635,7 +1635,7 @@
       }
     },
     "checkout_service.transition_type_matrix": {
-      "description": "Per-type lifecycle arc definitions for task.transition_type (ENC-ISS-092). Specifies allowed target_status values and gate evidence requirements for each arc. Default arc is github_pr_deploy (backward compatible). The tracker_mutation Lambda also performs transition_type-aware arc expansion for checkout-service-authenticated requests (ENC-TSK-754): no_code tasks gain coding-complete->closed, code_only tasks gain merged-main->closed, preventing tracker_mutation's hardcoded _VALID_TRANSITIONS from blocking checkout-service-validated arc shortcuts.",
+      "description": "Per-type lifecycle arc definitions for task.transition_type (ENC-ISS-092, ENC-FTR-059). v1 canonical matrix embedded as Python constant in both checkout_service and tracker_mutation Lambdas (transition_type_matrix.py). Gate contracts loaded at runtime via matrix lookup — no hardcoded transition_type conditionals remain in either Lambda. MATRIX_VERSION=1, source document DOC-B5B807D7C2CE. B07: no_code and code_only transition_types are immutable once set. B08: transition_type stamped at checkout and integrity-checked at every advance.",
       "fields": {
         "github_pr_deploy": {
           "type": "arc_spec",
