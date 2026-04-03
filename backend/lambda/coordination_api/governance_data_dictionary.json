@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.27",
-  "updated_at": "2026-04-03T01:20:51Z",
+  "version": "2026-04-03.28",
+  "updated_at": "2026-04-03T01:31:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2822,7 +2822,7 @@
       }
     },
     "tracker.plan": {
-      "description": "Plan tracker records (ENC-FTR-058). First-class governed primitive replacing [Plan] parent tasks. Plans own objectives sets, enforce checkout contracts, and marry features to their implementation phases. Plans replace the parent-task pattern for multi-phase work.",
+      "description": "Plan tracker records (ENC-FTR-058). First-class governed primitive replacing [Plan] parent tasks. Plans own objectives sets, enforce checkout contracts, and marry features to their implementation phases. Plans replace the parent-task pattern for multi-phase work. ENC-TSK-B10: Lambda routing regexes now include plan in POST/GET/PATCH route matching.",
       "fields": {
         "status": {
           "type": "enum",

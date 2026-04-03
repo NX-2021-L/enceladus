@@ -325,7 +325,7 @@ EVENT_SOURCE = "enceladus.tracker"
 EVENT_DETAIL_TYPE_REOPENED = "record.status.reopened"
 
 # Type segment mapping for SK construction
-_TYPE_SEG_TO_SK_PREFIX = {"task": "task", "issue": "issue", "feature": "feature", "lesson": "lesson"}
+_TYPE_SEG_TO_SK_PREFIX = {"task": "task", "issue": "issue", "feature": "feature", "lesson": "lesson", "plan": "plan"}
 
 # Counter management
 _TRACKER_COUNTER_PREFIX = "counter#"
@@ -850,7 +850,7 @@ def _classify_related_ids(related_ids: List[str]) -> Dict[str, List[str]]:
         if len(parts) < 2:
             continue
         type_seg = parts[1]
-        rtype = {"TSK": "task", "ISS": "issue", "FTR": "feature"}.get(type_seg)
+        rtype = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}.get(type_seg)
         if not rtype:
             continue
         field = f"related_{rtype}_ids"
@@ -2986,6 +2986,8 @@ def _handle_update_field(
             parent_type = "issue"
         elif "-FTR-" in value:
             parent_type = "feature"
+        elif "-PLN-" in value:
+            parent_type = "plan"
         if parent_type and parent_type != record_type:
             return _tracker_field_validation_error(
                 (
@@ -4167,13 +4169,13 @@ _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/relationship$"
 )
 _RE_RECORD_SUB = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
 )
 _RE_RECORD = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson)/(?P<id>[A-Za-z0-9_-]+)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan)/(?P<id>[A-Za-z0-9_-]+)$"
 )
 _RE_TYPE_COLLECTION = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan)$"
 )
 _RE_PROJECT = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)$"
