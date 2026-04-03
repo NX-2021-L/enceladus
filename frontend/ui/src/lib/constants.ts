@@ -127,13 +127,14 @@ export const PRIORITY_ORDER: Record<string, number> = {
 
 export const LESSON_STATUSES = ['draft', 'active', 'graduated', 'deprecated'] as const
 
-export const FEED_RECORD_TYPES = ['task', 'issue', 'feature', 'lesson'] as const
+export const FEED_RECORD_TYPES = ['task', 'issue', 'feature', 'lesson', 'plan'] as const
 
 export const RECORD_TYPE_LABELS: Record<string, string> = {
   task: 'Tasks',
   issue: 'Issues',
   feature: 'Features',
   lesson: 'Lessons',
+  plan: 'Plans',
 }
 
 export const RECORD_TYPE_COLORS: Record<string, string> = {
@@ -141,6 +142,7 @@ export const RECORD_TYPE_COLORS: Record<string, string> = {
   issue: 'bg-amber-500/20 text-amber-400',
   feature: 'bg-emerald-500/20 text-emerald-400',
   lesson: 'bg-purple-500/20 text-purple-400',
+  plan: 'bg-indigo-500/20 text-indigo-400',
 }
 
 export const SORT_OPTIONS_FEED = [
