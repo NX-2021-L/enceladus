@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 LAYER_NAME="${LAYER_NAME:-enceladus-shared}"
-RUNTIME="python3.11"
+RUNTIME="python3.12"
 
 # All Enceladus Lambda functions that should use this layer.
 ALL_FUNCTIONS=(
@@ -30,6 +30,8 @@ ALL_FUNCTIONS=(
     enceladus-governance-audit
     enceladus-bedrock-agent-actions
     devops-doc-prep
+    enceladus-checkout-service
+    enceladus-checkout-service-auto
 )
 
 log() {
