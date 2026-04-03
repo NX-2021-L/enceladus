@@ -30,7 +30,9 @@ Environment variables:
     COORDINATION_INTERNAL_API_KEY  internal key for calling tracker API
     COORDINATION_INTERNAL_API_KEYS CSV of accepted internal keys (multi-key support)
     CHECKOUT_SERVICE_KEY          secret this service presents to tracker_mutation (X-Checkout-Service-Key)
-    GITHUB_TOKEN                  GitHub PAT for commit/PR validation (optional — public repos only)
+    GITHUB_APP_ID                 GitHub App numeric ID (ENC-TSK-B26)
+    GITHUB_INSTALLATION_ID        GitHub App installation ID for NX-2021-L org
+    GITHUB_PRIVATE_KEY_SECRET     Secrets Manager secret name for App private key (default: devops/github-app/enceladus-private-key)
     CHECKOUT_TOKENS_TABLE         DynamoDB table for token storage (default: enceladus-checkout-tokens)
     CHECKOUT_TOKENS_REGION        AWS region for token table (default: us-west-2)
     COGNITO_USER_POOL_ID          us-east-1_b2D0V3E1k
@@ -115,7 +117,12 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 TRACKER_API_BASE = os.environ.get("TRACKER_API_BASE", "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker").rstrip("/")
 CHECKOUT_SERVICE_KEY = os.environ.get("CHECKOUT_SERVICE_KEY", "")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+# ENC-TSK-B26: GitHub App installation tokens replace static PAT
+GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID", "")
+GITHUB_INSTALLATION_ID = os.environ.get("GITHUB_INSTALLATION_ID", "")
+GITHUB_PRIVATE_KEY_SECRET = os.environ.get(
+    "GITHUB_PRIVATE_KEY_SECRET", "devops/github-app/enceladus-private-key"
+)
 CHECKOUT_TOKENS_TABLE = os.environ.get("CHECKOUT_TOKENS_TABLE", "enceladus-checkout-tokens")
 CHECKOUT_TOKENS_REGION = os.environ.get("CHECKOUT_TOKENS_REGION", "us-west-2")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
@@ -171,6 +178,103 @@ _PRIMARY_INTERNAL_KEY = (
 # DynamoDB client for checkout token storage
 # ---------------------------------------------------------------------------
 _ddb = boto3.client("dynamodb", region_name=CHECKOUT_TOKENS_REGION)
+
+# ---------------------------------------------------------------------------
+# GitHub App installation token (ENC-TSK-B26)
+# Replaces static GITHUB_TOKEN PAT with runtime token generation from
+# GitHub App private key stored in Secrets Manager.
+# ---------------------------------------------------------------------------
+_sm_client = None
+_private_key_cache: Optional[str] = None
+_private_key_fetched_at: float = 0.0
+_PRIVATE_KEY_TTL: float = 3600.0  # re-fetch private key from SM every hour
+
+_installation_token_cache: Optional[str] = None
+_installation_token_expires_at: float = 0.0
+
+
+def _get_secretsmanager():
+    global _sm_client
+    if _sm_client is None:
+        _sm_client = boto3.client("secretsmanager", region_name=CHECKOUT_TOKENS_REGION)
+    return _sm_client
+
+
+def _get_github_private_key() -> str:
+    """Fetch GitHub App private key from Secrets Manager (cached with TTL)."""
+    global _private_key_cache, _private_key_fetched_at
+    now = time.time()
+    if _private_key_cache and (now - _private_key_fetched_at) < _PRIVATE_KEY_TTL:
+        return _private_key_cache
+    sm = _get_secretsmanager()
+    resp = sm.get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
+    _private_key_cache = resp["SecretString"]
+    _private_key_fetched_at = now
+    return _private_key_cache
+
+
+def _generate_app_jwt() -> str:
+    """Generate a short-lived RS256 JWT for the GitHub App."""
+    if not _JWT_AVAILABLE:
+        raise ValueError("PyJWT library not available — cannot generate GitHub App JWT")
+    if not GITHUB_APP_ID:
+        raise ValueError("GITHUB_APP_ID environment variable not set")
+    now = int(time.time())
+    payload = {
+        "iat": now - 60,
+        "exp": now + (9 * 60),
+        "iss": int(GITHUB_APP_ID),
+    }
+    private_key = _get_github_private_key()
+    return jwt.encode(payload, private_key, algorithm="RS256")
+
+
+def _get_installation_token() -> str:
+    """Get a cached GitHub App installation token, refreshing when near expiry."""
+    global _installation_token_cache, _installation_token_expires_at
+    now = time.time()
+    # Refresh with 5-minute buffer before the 1-hour expiry
+    if _installation_token_cache and now < (_installation_token_expires_at - 300):
+        return _installation_token_cache
+
+    if not GITHUB_INSTALLATION_ID:
+        raise ValueError("GITHUB_INSTALLATION_ID environment variable not set")
+
+    app_jwt = _generate_app_jwt()
+    url = f"{GITHUB_API_BASE}/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {app_jwt}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            _installation_token_cache = data["token"]
+            # GitHub installation tokens expire in 1 hour
+            _installation_token_expires_at = now + 3600
+            return _installation_token_cache
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        logger.error("GitHub installation token exchange failed: %s %s", exc.code, body)
+        raise ValueError(f"GitHub token exchange failed ({exc.code}): {body}") from exc
+
+
+def _get_github_token() -> Optional[str]:
+    """Return a valid GitHub token for API calls, or None if unconfigured."""
+    if not GITHUB_APP_ID or not GITHUB_INSTALLATION_ID:
+        logger.warning("GitHub App not configured — API calls will be unauthenticated")
+        return None
+    try:
+        return _get_installation_token()
+    except Exception as exc:
+        logger.error("Failed to obtain GitHub installation token: %s", exc)
+        return None
+
 
 # ---------------------------------------------------------------------------
 # CORS helpers
@@ -470,8 +574,9 @@ def _log_plan(
 def _github_request(path: str) -> Tuple[int, dict]:
     url = f"{GITHUB_API_BASE}{path}"
     headers = {"User-Agent": "checkout-service/1.0", "Accept": "application/vnd.github+json"}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    token = _get_github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
