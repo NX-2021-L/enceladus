@@ -127,7 +127,7 @@ export const PRIORITY_ORDER: Record<string, number> = {
 
 export const LESSON_STATUSES = ['draft', 'active', 'graduated', 'deprecated'] as const
 
-export const FEED_RECORD_TYPES = ['task', 'issue', 'feature', 'lesson', 'plan'] as const
+export const FEED_RECORD_TYPES = ['task', 'issue', 'feature', 'lesson'] as const
 
 export const RECORD_TYPE_LABELS: Record<string, string> = {
   task: 'Tasks',
