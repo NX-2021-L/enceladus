@@ -106,6 +106,12 @@
       "lambda_dir": "backend/lambda/graph_query_api",
       "workflow_file": ".github/workflows/lambda-graph-query-api-deploy.yml",
       "deploy_script": "backend/lambda/graph_query_api/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-neo4j-backup",
+      "lambda_dir": "backend/lambda/neo4j_backup",
+      "workflow_file": ".github/workflows/lambda-neo4j-backup-deploy.yml",
+      "deploy_script": "backend/lambda/neo4j_backup/deploy.sh"
     }
   ]
 }

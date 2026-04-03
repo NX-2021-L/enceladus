@@ -559,6 +559,35 @@ Resources:
           Value: graph
 
   # ---------------------------------------------------------------------------
+  # Neo4j Backup Lambda
+  # ---------------------------------------------------------------------------
+
+  Neo4jBackupFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Architectures: [arm64]
+      Role: !GetAtt Neo4jBackupRole.Arn
+      Environment:
+        Variables:
+          NEO4J_SECRET_NAME: enceladus/neo4j/auradb-credentials
+          S3_BUCKET: !Ref S3Bucket
+          S3_PREFIX: !Sub "${S3EnvPrefix}neo4j-backups/"
+          SECRETS_REGION: !Ref "AWS::Region"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: neo4j-backup
+
+  # ---------------------------------------------------------------------------
   # SQS -> Lambda Event Source Mappings
   # ---------------------------------------------------------------------------
 
@@ -643,6 +672,24 @@ Resources:
       Targets:
         - Arn: !GetAtt DeployFinalizeFunction.Arn
           Id: deploy-finalize-target
+
+  Neo4jBackupSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-neo4j-backup-daily${EnvironmentSuffix}"
+      ScheduleExpression: "cron(0 3 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt Neo4jBackupFunction.Arn
+          Id: neo4j-backup-daily
+
+  Neo4jBackupPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Neo4jBackupFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt Neo4jBackupSchedule.Arn
 
   ProjectJsonSyncRule:
     Type: AWS::Events::Rule
@@ -1125,6 +1172,44 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  Neo4jBackupRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-neo4j-backup-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: Neo4jBackupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: SecretsManagerNeo4j
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials*"
+              - Sid: S3BackupWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}neo4j-backups/*"
       Tags:
         - Key: Project
           Value: enceladus
