@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 API_ID="${API_ID:-8nkzqkmxqc}"
-FUNCTION_NAME="${FUNCTION_NAME:-devops-coordination-api}"
-ROLE_NAME="${ROLE_NAME:-devops-coordination-api-lambda-role}"
-TABLE_NAME="${TABLE_NAME:-coordination-requests}"
-TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker}"
-PROJECTS_TABLE="${PROJECTS_TABLE:-projects}"
-GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE:-governance-policies}"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-coordination-api${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-coordination-api-lambda-role${ENVIRONMENT_SUFFIX}}"
+TABLE_NAME="${TABLE_NAME:-coordination-requests${ENVIRONMENT_SUFFIX}}"
+TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker${ENVIRONMENT_SUFFIX}}"
+PROJECTS_TABLE="${PROJECTS_TABLE:-projects${ENVIRONMENT_SUFFIX}}"
+GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE:-governance-policies${ENVIRONMENT_SUFFIX}}"
 GOVERNANCE_DICTIONARY_POLICY_ID="${GOVERNANCE_DICTIONARY_POLICY_ID:-governance_data_dictionary}"
-COMPONENTS_TABLE="${COMPONENTS_TABLE:-component-registry}"
+COMPONENTS_TABLE="${COMPONENTS_TABLE:-component-registry${ENVIRONMENT_SUFFIX}}"
 HOST_V2_INSTANCE_ID="${HOST_V2_INSTANCE_ID:-i-0523f94e99ec15a1e}"
 HOST_V2_ENCELADUS_MCP_INSTALLER="${HOST_V2_ENCELADUS_MCP_INSTALLER:-tools/enceladus-mcp-server/install_profile.sh}"
 HOST_V2_MCP_PROFILE_PATH="${HOST_V2_MCP_PROFILE_PATH:-.claude/mcp.json}"
@@ -32,8 +34,8 @@ HOST_V2_FLEET_INSTANCE_TTL_SECONDS="${HOST_V2_FLEET_INSTANCE_TTL_SECONDS:-3600}"
 HOST_V2_FLEET_SWEEP_ON_DISPATCH="${HOST_V2_FLEET_SWEEP_ON_DISPATCH:-true}"
 HOST_V2_FLEET_SWEEP_GRACE_SECONDS="${HOST_V2_FLEET_SWEEP_GRACE_SECONDS:-300}"
 HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL="${HOST_V2_FLEET_AUTO_TERMINATE_ON_TERMINAL:-true}"
-HOST_V2_FLEET_TAG_MANAGED_BY_VALUE="${HOST_V2_FLEET_TAG_MANAGED_BY_VALUE:-enceladus-coordination}"
-HOST_V2_FLEET_NAME_PREFIX="${HOST_V2_FLEET_NAME_PREFIX:-enceladus-host-v2-fleet}"
+HOST_V2_FLEET_TAG_MANAGED_BY_VALUE="${HOST_V2_FLEET_TAG_MANAGED_BY_VALUE:-enceladus-coordination${ENVIRONMENT_SUFFIX}}"
+HOST_V2_FLEET_NAME_PREFIX="${HOST_V2_FLEET_NAME_PREFIX:-enceladus-host-v2-fleet${ENVIRONMENT_SUFFIX}}"
 HOST_V2_FLEET_PASSROLE_ARN="${HOST_V2_FLEET_PASSROLE_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/*}"
 ENCELADUS_MCP_SERVER_PATH="${ENCELADUS_MCP_SERVER_PATH:-server.py}"
 S3_BUCKET="${S3_BUCKET:-jreese-net}"
@@ -54,8 +56,8 @@ DEAD_LETTER_SNS_TOPIC_ARN="${DEAD_LETTER_SNS_TOPIC_ARN:-}"
 MCP_SERVER_LOG_GROUP="${MCP_SERVER_LOG_GROUP:-/enceladus/mcp/server}"
 WORKER_RUNTIME_LOG_GROUP="${WORKER_RUNTIME_LOG_GROUP:-/enceladus/coordination/worker-runtime}"
 LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-90}"
-BEDROCK_AGENT_ROLE_ARN="${BEDROCK_AGENT_ROLE_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/enceladus-bedrock-agent-execution-role}"
-BEDROCK_AGENT_ACTION_GROUP_LAMBDA_ARN="${BEDROCK_AGENT_ACTION_GROUP_LAMBDA_ARN:-arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:enceladus-bedrock-agent-actions}"
+BEDROCK_AGENT_ROLE_ARN="${BEDROCK_AGENT_ROLE_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/enceladus-bedrock-agent-execution-role${ENVIRONMENT_SUFFIX}}"
+BEDROCK_AGENT_ACTION_GROUP_LAMBDA_ARN="${BEDROCK_AGENT_ACTION_GROUP_LAMBDA_ARN:-arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:enceladus-bedrock-agent-actions${ENVIRONMENT_SUFFIX}}"
 BEDROCK_AGENT_DEFAULT_MODEL="${BEDROCK_AGENT_DEFAULT_MODEL:-anthropic.claude-3-5-sonnet-20241022-v2:0}"
 BEDROCK_AGENT_CREATION_TIMEOUT_SECONDS="${BEDROCK_AGENT_CREATION_TIMEOUT_SECONDS:-120}"
 BEDROCK_AGENT_CLEANUP="${BEDROCK_AGENT_CLEANUP:-true}"
@@ -183,8 +185,8 @@ ensure_role() {
       "Effect": "Allow",
       "Action": ["dynamodb:GetItem", "dynamodb:Query"],
       "Resource": [
-        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/documents",
-        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/documents/index/*"
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/documents${ENVIRONMENT_SUFFIX}",
+        "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/documents${ENVIRONMENT_SUFFIX}/index/*"
       ]
     },
     {
@@ -327,7 +329,7 @@ ensure_role() {
 POLICY
   aws iam put-role-policy \
     --role-name "${ROLE_NAME}" \
-    --policy-name "devops-coordination-api-inline" \
+    --policy-name "devops-coordination-api-inline${ENVIRONMENT_SUFFIX}" \
     --policy-document "file://${policy_file}" >/dev/null
   rm -f "${policy_file}"
   log "[END] IAM inline policy updated"
@@ -732,7 +734,7 @@ env_vars = {
     "S3_BUCKET": "jreese-net",
     "S3_GOVERNANCE_PREFIX": "governance/live",
     "S3_GOVERNANCE_HISTORY_PREFIX": "governance/history",
-    "DOCUMENTS_TABLE": "documents",
+    "DOCUMENTS_TABLE": "documents${ENVIRONMENT_SUFFIX}",
     "DEBOUNCE_WINDOW_SECONDS": os.environ["DEBOUNCE_WINDOW_SECONDS"],
     "DISPATCH_LOCK_BUFFER_SECONDS": os.environ["DISPATCH_LOCK_BUFFER_SECONDS"],
     "DEAD_LETTER_TIMEOUT_MULTIPLIER": os.environ["DEAD_LETTER_TIMEOUT_MULTIPLIER"],
@@ -1045,7 +1047,11 @@ main() {
   ensure_terminal_cognito_credentials || log "[WARNING] terminal Cognito credential provisioning failed (non-fatal). Manual setup may be required — see ENC-ISS-076."
   sync_governance_dictionary
   ensure_observability_log_groups
-  ensure_api_integration_and_routes
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    ensure_api_integration_and_routes
+  else
+    log "[INFO] Skipping API route configuration for gamma (ENVIRONMENT_SUFFIX=${ENVIRONMENT_SUFFIX})"
+  fi
   smoke_hint
   log "[SUCCESS] coordination API deploy complete"
 }

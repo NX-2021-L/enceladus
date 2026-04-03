@@ -12,16 +12,18 @@ set -euo pipefail
 #   - Lambda invoke permission for API Gateway
 # ---------------------------------------------------------------------------
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 API_ID="${API_ID:-8nkzqkmxqc}"
 CF_DIST_ID="${CF_DIST_ID:-E2BOQXCW1TA6Y4}"
 
-FUNCTION_NAME="devops-reference-search"
-ROLE_NAME="devops-reference-search-lambda-role"
-S3_BUCKET="jreese-net"
-S3_REFERENCE_PREFIX="mobile/v1/reference"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-reference-search${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-reference-search-lambda-role${ENVIRONMENT_SUFFIX}}"
+S3_BUCKET="${S3_BUCKET:-jreese-net}"
+S3_REFERENCE_PREFIX="${S3_REFERENCE_PREFIX:-mobile/v1/reference}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -348,11 +350,19 @@ main() {
 
   log ""
   log "--- Phase 3: API Gateway Routes ---"
-  ensure_api_routes
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    ensure_api_routes
+  else
+    log "[SKIP] API route configuration skipped for suffixed environment (${ENVIRONMENT_SUFFIX})"
+  fi
 
   log ""
   log "--- Phase 4: CloudFront Behavior ---"
-  ensure_cloudfront_behavior
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    ensure_cloudfront_behavior
+  else
+    log "[SKIP] CloudFront configuration skipped for suffixed environment (${ENVIRONMENT_SUFFIX})"
+  fi
 
   log ""
   log "=========================================="

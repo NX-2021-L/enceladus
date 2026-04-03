@@ -12,21 +12,23 @@ set -euo pipefail
 #   - CloudFront behavior for /api/v1/changelog/*
 # ---------------------------------------------------------------------------
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 API_ID="${API_ID:-8nkzqkmxqc}"
 CF_DIST_ID="${CF_DIST_ID:-E2BOQXCW1TA6Y4}"
 
-FUNCTION_NAME="devops-changelog-api"
-ROLE_NAME="devops-changelog-api-lambda-role"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-changelog-api${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-changelog-api-lambda-role${ENVIRONMENT_SUFFIX}}"
 
-DEPLOY_TABLE="${DEPLOY_TABLE:-devops-deployment-manager}"
+DEPLOY_TABLE="${DEPLOY_TABLE:-devops-deployment-manager${ENVIRONMENT_SUFFIX}}"
 CONFIG_BUCKET="${CONFIG_BUCKET:-jreese-net}"
 CONFIG_PREFIX="${CONFIG_PREFIX:-deploy-config}"
 COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_b2D0V3E1k}"
 COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
-COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
+COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api${ENVIRONMENT_SUFFIX}}"
 CORS_ORIGIN="${CORS_ORIGIN:-https://jreese.net}"
 
 log() {
@@ -385,11 +387,19 @@ main() {
 
   log ""
   log "--- API Gateway ---"
-  ensure_api_routes
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    ensure_api_routes
+  else
+    log "[SKIP] API route configuration skipped for suffixed environment (${ENVIRONMENT_SUFFIX})"
+  fi
 
   log ""
   log "--- CloudFront ---"
-  ensure_cloudfront_behavior
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    ensure_cloudfront_behavior
+  else
+    log "[SKIP] CloudFront configuration skipped for suffixed environment (${ENVIRONMENT_SUFFIX})"
+  fi
 
   log ""
   log "=========================================="

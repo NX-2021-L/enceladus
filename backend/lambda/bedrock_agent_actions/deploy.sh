@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 
-FUNCTION_NAME="${FUNCTION_NAME:-enceladus-bedrock-agent-actions}"
-ROLE_NAME="${ROLE_NAME:-enceladus-bedrock-actions-lambda-role}"
-POLICY_NAME="${POLICY_NAME:-enceladus-bedrock-actions-inline}"
+FUNCTION_NAME="${FUNCTION_NAME:-enceladus-bedrock-agent-actions${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-enceladus-bedrock-actions-lambda-role${ENVIRONMENT_SUFFIX}}"
+POLICY_NAME="${POLICY_NAME:-enceladus-bedrock-actions-inline${ENVIRONMENT_SUFFIX}}"
 
-TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker}"
-PROJECTS_TABLE="${PROJECTS_TABLE:-projects}"
-DOCUMENTS_TABLE="${DOCUMENTS_TABLE:-documents}"
-DEPLOY_TABLE="${DEPLOY_TABLE:-devops-deployment-manager}"
-COORDINATION_TABLE="${COORDINATION_TABLE:-coordination-requests}"
-GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE:-governance-policies}"
-AGENT_COMPLIANCE_TABLE="${AGENT_COMPLIANCE_TABLE:-agent-compliance-violations}"
+TRACKER_TABLE="${TRACKER_TABLE:-devops-project-tracker${ENVIRONMENT_SUFFIX}}"
+PROJECTS_TABLE="${PROJECTS_TABLE:-projects${ENVIRONMENT_SUFFIX}}"
+DOCUMENTS_TABLE="${DOCUMENTS_TABLE:-documents${ENVIRONMENT_SUFFIX}}"
+DEPLOY_TABLE="${DEPLOY_TABLE:-devops-deployment-manager${ENVIRONMENT_SUFFIX}}"
+COORDINATION_TABLE="${COORDINATION_TABLE:-coordination-requests${ENVIRONMENT_SUFFIX}}"
+GOVERNANCE_POLICIES_TABLE="${GOVERNANCE_POLICIES_TABLE:-governance-policies${ENVIRONMENT_SUFFIX}}"
+AGENT_COMPLIANCE_TABLE="${AGENT_COMPLIANCE_TABLE:-agent-compliance-violations${ENVIRONMENT_SUFFIX}}"
 DOCUMENT_STORAGE_POLICY_ID="${DOCUMENT_STORAGE_POLICY_ID:-document_storage_cloud_only}"
 COMPLIANCE_ENFORCEMENT_DEFAULT="${COMPLIANCE_ENFORCEMENT_DEFAULT:-enforce}"
 S3_BUCKET="${S3_BUCKET:-jreese-net}"
