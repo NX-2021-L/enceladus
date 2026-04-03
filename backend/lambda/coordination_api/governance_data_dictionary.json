@@ -2944,6 +2944,31 @@
           "definition": "Whitelist of valid lesson status values."
         }
       }
+    },
+    "checkout_service.plan_checkout": {
+      "description": "Plan checkout contract in the checkout service Lambda (ENC-FTR-058 Phase 2). Plans use a simplified lifecycle (drafted/started/complete/incomplete) with objectives-based completion gates and mandatory check-in on release. No CAI/CCI tokens.",
+      "fields": {
+        "plan_lifecycle": {
+          "type": "object",
+          "definition": "Valid plan status transitions. drafted->started (on first checkout), started->complete (all objectives terminal), started->incomplete (with reason), incomplete->started (re-entry)."
+        },
+        "completion_gate": {
+          "type": "object",
+          "definition": "ENC-TSK-A89: advance to complete validates all objectives_set records are in terminal status (closed/completed/complete/archived/deprecated/production). Returns 400 with incomplete objectives list on failure."
+        },
+        "mandatory_checkin": {
+          "type": "object",
+          "definition": "ENC-TSK-A90: plan release requires non-empty checkin_summary in request body. Summary is logged as [CHECK-IN] worklog entry before checkout release."
+        },
+        "no_token_flow": {
+          "type": "boolean",
+          "definition": "Plans do not issue CAI or CCI tokens. No commit, PR, or deploy stages."
+        },
+        "api_routes": {
+          "type": "array",
+          "definition": "API Gateway routes: POST/DELETE .../plan/{planId}/checkout, POST .../plan/{planId}/advance, POST .../plan/{planId}/log, GET .../plan/{planId}/status."
+        }
+      }
     }
   }
 }
