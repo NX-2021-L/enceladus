@@ -6618,6 +6618,7 @@ _SEARCH_ACTIONS["plan.objectives_status"] = {"tool": "plan_objectives_status"}
 _EXECUTE_ACTIONS["plan.create"] = {"tool": "tracker_create", "requires_governance_hash": True}
 _EXECUTE_ACTIONS["plan.checkout"] = {"tool": "checkout_task", "requires_governance_hash": True}
 _EXECUTE_ACTIONS["plan.advance"] = {"tool": "advance_task_status", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.add_objective"] = {"tool": "plan_add_objective", "requires_governance_hash": True}
 
 _RECORD_CONTEXT_MODES = {"record", "issue", "task", "feature", "lesson"}
 
@@ -8394,6 +8395,77 @@ async def _plan_objectives_status(args: dict) -> list[TextContent]:
     })
 
 
+# ENC-TSK-B70: plan.add_objective — append a task to a plan's objectives_set
+async def _plan_add_objective(args: dict) -> list[TextContent]:
+    """Append a task ID to a plan's objectives_set (read-merge-write via tracker PATCH)."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = str(args.get("record_id") or "").strip()
+    objective_task_id = str(args.get("objective_task_id") or "").strip()
+    if not record_id:
+        return _result_text({"error": "record_id is required (plan ID)"})
+    if not objective_task_id:
+        return _result_text({"error": "objective_task_id is required (task ID to add as objective)"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "plan":
+        return _result_text({"error": f"record_id must be a plan, got {record_type}"})
+
+    # Validate objective_task_id looks like a valid record ID
+    try:
+        _parse_record_id(objective_task_id)
+    except ValueError as exc:
+        return _result_text({"error": f"Invalid objective_task_id: {exc}"})
+
+    # Read current plan to get existing objectives_set
+    plan_resp = _tracker_api_request("GET", f"/{project_id}/plan/{rid}")
+    if isinstance(plan_resp, dict) and plan_resp.get("error"):
+        return _result_text(plan_resp)
+    plan = plan_resp.get("record", plan_resp) if isinstance(plan_resp, dict) else plan_resp
+
+    current_objectives = plan.get("objectives_set", []) or []
+    if not isinstance(current_objectives, list):
+        current_objectives = []
+
+    # Idempotent: skip if already present
+    if objective_task_id in current_objectives:
+        return _result_text({
+            "success": True,
+            "record_id": record_id,
+            "objective_task_id": objective_task_id,
+            "action": "already_present",
+            "objectives_set": current_objectives,
+        })
+
+    # Append and write back via tracker PATCH (append-only enforcement in Lambda)
+    updated_objectives = current_objectives + [objective_task_id]
+    patch_payload: Dict[str, Any] = {
+        "field": "objectives_set",
+        "value": updated_objectives,
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("provider"):
+        patch_payload["provider"] = args["provider"]
+
+    patch_resp = _tracker_api_request("PATCH", f"/{project_id}/plan/{rid}", payload=patch_payload)
+    if isinstance(patch_resp, dict) and patch_resp.get("error"):
+        return _result_text(patch_resp)
+
+    return _result_text({
+        "success": True,
+        "record_id": record_id,
+        "objective_task_id": objective_task_id,
+        "action": "added",
+        "objectives_set": updated_objectives,
+    })
+
+
 # -------------------------------------------------------------------
 # ENC-FTR-052: Governed Lesson Primitive handlers
 # -------------------------------------------------------------------
@@ -8541,6 +8613,7 @@ _TOOL_HANDLERS = {
     "tracker_list_lessons": _tracker_list_lessons,
     # ENC-FTR-058 / ENC-TSK-A97: Plan tools
     "plan_objectives_status": _plan_objectives_status,
+    "plan_add_objective": _plan_add_objective,
     # ENC-FTR-061: Governed Handoff Primitive
     "document_create_handoff": _document_create_handoff,
     "document_claim_handoff": _document_claim_handoff,
