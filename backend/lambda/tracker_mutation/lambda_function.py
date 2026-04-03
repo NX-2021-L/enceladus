@@ -2976,8 +2976,13 @@ def _handle_update_field(
         # When setting a plan to 'complete', validate all objectives_set entries
         # are in a terminal status (closed/completed/complete/archived).
         if record_type == "plan" and new_lower == "complete" and not is_revert:
-            objectives_set_raw = item_data.get("objectives_set", {}).get("L", [])
-            objective_ids = [o.get("S", "") for o in objectives_set_raw if o.get("S", "")]
+            # item_data is already deserialized — objectives_set is a plain list of strings
+            raw_objectives = item_data.get("objectives_set", [])
+            if isinstance(raw_objectives, dict):
+                # DynamoDB format fallback (raw get_item response)
+                objective_ids = [o.get("S", "") for o in raw_objectives.get("L", []) if o.get("S", "")]
+            else:
+                objective_ids = [str(o).strip() for o in (raw_objectives or []) if str(o).strip()]
             if not objective_ids:
                 return _tracker_field_validation_error(
                     "Cannot complete plan with empty objectives_set. "
