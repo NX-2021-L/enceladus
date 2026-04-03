@@ -456,6 +456,7 @@ _TYPE_TO_SEGMENT = {
     "issue": "ISS",
     "feature": "FTR",
     "lesson": "LSN",
+    "plan": "PLN",
 }
 
 _SEGMENT_TO_TYPE = {v: k for k, v in _TYPE_TO_SEGMENT.items()}
@@ -464,6 +465,7 @@ _DEFAULT_STATUS = {
     "task": "open",
     "issue": "open",
     "feature": "planned",
+    "plan": "drafted",
 }
 
 
