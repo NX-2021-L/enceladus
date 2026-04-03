@@ -190,6 +190,8 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "PLAN_CONTAINS", "PLAN_ATTACHED_DOC", "PLAN_IMPLEMENTS",
     # ENC-TSK-983: Lesson edge types
     "LEARNED_FROM", "TEACHES", "SUPERSEDES", "SUPERSEDED_BY",
+    # ENC-FTR-061: Handoff edge types
+    "HANDS_OFF", "HANDED_OFF_BY",
 })
 
 
