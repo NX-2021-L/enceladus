@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.30",
-  "updated_at": "2026-04-03T02:30:00Z",
+  "version": "2026-04-03.31",
+  "updated_at": "2026-04-03T02:55:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2072,7 +2072,7 @@
         },
         "edge_types": {
           "type": "string",
-          "usage_guidance": "Comma-separated list of Neo4j edge type labels for neighbors query. Filters traversal to only specified edge types. Example: 'BLOCKS,DEPENDS_ON'. When omitted, all edge types are traversed."
+          "usage_guidance": "Edge type labels for neighbors query. Accepts comma-separated string ('BLOCKS,DEPENDS_ON') or array via MCP (['BLOCKS', 'DEPENDS_ON']). MCP server encodes arrays as repeated query keys (doseq=True); graph_query_api normalizes from multiValueQueryStringParameters or comma-split string (ENC-ISS-149). When omitted, all edge types are traversed."
         },
         "edge_type": {
           "type": "string",

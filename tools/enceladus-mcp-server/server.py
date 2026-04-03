@@ -7686,7 +7686,7 @@ def _graph_query_api_request(
     base = GRAPH_QUERY_API_BASE.rstrip("/")
     url = base
     if query:
-        encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+        encoded_qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None}, doseq=True)
         if encoded_qs:
             url = f"{url}?{encoded_qs}"
     headers = {
