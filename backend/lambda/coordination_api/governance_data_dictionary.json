@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.39",
-  "updated_at": "2026-04-03T07:28:00Z",
+  "version": "2026-04-03.40",
+  "updated_at": "2026-04-03T08:15:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -260,8 +260,8 @@
           "items": {
             "type": "string"
           },
-          "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children. ENC-ISS-106: The checkout service enforces that parent tasks cannot advance lifecycle stages (coding-complete onward) unless all direct children listed here have reached at least that stage. Children at 'closed' satisfy any stage check.",
-          "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. ENC-ISS-106: if subtask_ids is non-empty, the checkout service blocks advancement to coding-complete or beyond until every listed child is at or past that status. Not-found children also block advancement. To bypass: use the PWA user_initiated path."
+          "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children. ENC-ISS-106: The checkout service enforces that parent tasks cannot advance lifecycle stages (coding-complete onward) unless all direct children listed here have reached at least that stage. Children at 'closed' satisfy any stage check. ENC-ISS-140: append-only once task leaves open status or has been checked out — tracker mutation rejects removal attempts to prevent subtask gate bypass.",
+          "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. ENC-ISS-106: if subtask_ids is non-empty, the checkout service blocks advancement to coding-complete or beyond until every listed child is at or past that status. Not-found children also block advancement. ENC-ISS-140: once set on a non-open task (or one that has been checked out), entries cannot be removed — only appended. To bypass: use the PWA user_initiated path."
         },
         "related_task_ids": {
           "type": "array",
@@ -2857,7 +2857,7 @@
             "complete",
             "incomplete"
           ],
-          "definition": "Plan lifecycle. drafted: initial state. started: at least one objective task checked out. complete: all objectives closed. incomplete: abandoned with reason."
+          "definition": "Plan lifecycle. drafted: initial state. started: at least one objective task checked out. complete: all objectives closed (ENC-ISS-155: tracker mutation validates all objectives_set entries are in terminal status before accepting). incomplete: abandoned with reason."
         },
         "objectives_set": {
           "type": "array",
