@@ -7,7 +7,8 @@ import { CodeBlock, detectLanguageFromFilename } from '../components/shared/Code
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
 import { CopyButton } from '../components/shared/CopyButton'
-import { formatDate } from '../lib/formatters'
+import { formatDate, timeAgo } from '../lib/formatters'
+import { HANDOFF_STATUS_COLORS, HANDOFF_STATUS_LABELS } from '../lib/constants'
 import { ProjectPrimaryDocumentsPage } from './ProjectPrimaryDocumentsPage'
 import {
   buildCanonicalDocumentPath,
@@ -84,6 +85,73 @@ export function DocumentDetailPage() {
           <span>Updated {formatDate(doc.updated_at)}</span>
         </div>
       </div>
+
+      {/* Handoff Metadata (ENC-FTR-061) */}
+      {doc.document_subtype === 'handoff' && (
+        <div className="bg-slate-800 rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider">
+              Handoff
+            </h3>
+            {doc.handoff_status && (
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${HANDOFF_STATUS_COLORS[doc.handoff_status] ?? 'bg-slate-500/20 text-slate-400'}`}>
+                {HANDOFF_STATUS_LABELS[doc.handoff_status] ?? doc.handoff_status}
+              </span>
+            )}
+          </div>
+
+          {doc.source_record_id && (
+            <div>
+              <dt className="text-xs text-slate-500 mb-0.5">Source Record</dt>
+              <dd>
+                <Link
+                  to={doc.source_record_id.includes('-TSK-') ? `/tasks/${doc.source_record_id}`
+                    : doc.source_record_id.includes('-ISS-') ? `/issues/${doc.source_record_id}`
+                    : doc.source_record_id.includes('-FTR-') ? `/features/${doc.source_record_id}`
+                    : `/tasks/${doc.source_record_id}`}
+                  className="text-sm text-blue-400 hover:text-blue-300 font-mono"
+                >
+                  {doc.source_record_id}
+                </Link>
+              </dd>
+            </div>
+          )}
+
+          {doc.prerequisite_state && (
+            <div>
+              <dt className="text-xs text-slate-500 mb-0.5">Prerequisites</dt>
+              <dd className="text-sm text-slate-300">{doc.prerequisite_state}</dd>
+            </div>
+          )}
+
+          {doc.verification_criteria && (
+            <div>
+              <dt className="text-xs text-slate-500 mb-0.5">Verification Criteria</dt>
+              <dd className="text-sm text-slate-300">{doc.verification_criteria}</dd>
+            </div>
+          )}
+
+          {doc.action_checklist && doc.action_checklist.length > 0 && (
+            <div>
+              <dt className="text-xs text-slate-500 mb-1">Action Checklist</dt>
+              <dd className="space-y-1">
+                {doc.action_checklist.map((item, i) => (
+                  <div key={i} className="flex items-start gap-2 text-sm text-slate-300">
+                    <span className="text-slate-500 flex-shrink-0">{i + 1}.</span>
+                    <span>{item}</span>
+                  </div>
+                ))}
+              </dd>
+            </div>
+          )}
+
+          <div className="flex gap-4 text-xs text-slate-500 pt-1 border-t border-slate-700">
+            {doc.claimed_by && <span>Claimed by: {doc.claimed_by}</span>}
+            {doc.claimed_at && <span>Claimed: {timeAgo(doc.claimed_at)}</span>}
+            {doc.expires_at && <span>Expires: {formatDate(doc.expires_at)}</span>}
+          </div>
+        </div>
+      )}
 
       {/* Description */}
       {doc.description && (

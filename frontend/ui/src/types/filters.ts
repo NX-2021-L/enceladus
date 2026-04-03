@@ -24,6 +24,7 @@ export interface FeatureFilters {
 export interface DocumentFilters {
   projectId?: string
   status?: string[]
+  subtype?: string
   search?: string
   sortBy?: string
 }

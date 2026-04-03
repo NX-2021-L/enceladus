@@ -293,6 +293,9 @@ export interface DocumentsFeed extends FeedEnvelope<Document> {
   documents: Document[]
 }
 
+export type DocumentSubtype = 'general' | 'handoff' | 'blueprint' | 'narrative' | 'session-log'
+export type HandoffStatus = 'pending' | 'claimed' | 'completed' | 'stale'
+
 export interface Document {
   document_id: string
   project_id: string
@@ -310,4 +313,15 @@ export interface Document {
   updated_at: string
   version: number
   content?: string
+  // Handoff fields (ENC-FTR-061)
+  document_subtype?: DocumentSubtype
+  source_record_id?: string
+  handoff_status?: HandoffStatus
+  prerequisite_state?: string
+  action_checklist?: string[]
+  verification_criteria?: string
+  expires_at?: string
+  claimed_by?: string
+  claimed_at?: string
+  created_by_session?: string
 }
