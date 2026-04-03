@@ -3,6 +3,7 @@ import type { Document } from '../../types/feeds'
 import { StatusChip } from '../shared/StatusChip'
 import { timeAgo } from '../../lib/formatters'
 import { buildCanonicalDocumentPathFromDoc } from '../../lib/documentUrls'
+import { HANDOFF_STATUS_COLORS } from '../../lib/constants'
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -29,6 +30,14 @@ export function DocumentRow({ doc }: { doc: Document }) {
       </div>
       <div className="flex items-center gap-2 mt-1.5">
         <StatusChip status={doc.status} />
+        {doc.document_subtype === 'handoff' && doc.handoff_status && (
+          <span className={`text-xs px-1.5 py-0.5 rounded ${HANDOFF_STATUS_COLORS[doc.handoff_status] ?? 'bg-slate-500/20 text-slate-400'}`}>
+            {doc.handoff_status}
+          </span>
+        )}
+        {doc.source_record_id && (
+          <span className="text-xs text-slate-500 font-mono">{doc.source_record_id}</span>
+        )}
         {doc.keywords.length > 0 && (
           <div className="flex gap-1 overflow-hidden">
             {doc.keywords.slice(0, 3).map((kw) => (

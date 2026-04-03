@@ -97,6 +97,10 @@ export const STATUS_LABELS: Record<string, string> = {
   drafted: 'Drafted',
   complete: 'Complete',
   incomplete: 'Incomplete',
+  // Handoff statuses
+  pending: 'Pending',
+  claimed: 'Claimed',
+  stale: 'Stale',
 }
 
 export const TASK_STATUSES = ['open', 'in-progress', 'coding-complete', 'committed', 'pushed', 'merged-main', 'deploy-init', 'deploy-success', 'coding-updates', 'closed'] as const
@@ -209,6 +213,23 @@ export const SORT_OPTIONS_COORDINATION = [
 ] as const
 
 export const DOCUMENT_STATUSES = ['active', 'archived'] as const
+
+// Handoff document subtypes and statuses (ENC-FTR-061)
+export const DOCUMENT_SUBTYPES = ['general', 'handoff', 'blueprint', 'narrative', 'session-log'] as const
+
+export const HANDOFF_STATUS_COLORS: Record<string, string> = {
+  pending: 'bg-amber-500/20 text-amber-400',
+  claimed: 'bg-blue-500/20 text-blue-400',
+  completed: 'bg-emerald-500/20 text-emerald-400',
+  stale: 'bg-slate-500/20 text-slate-400',
+}
+
+export const HANDOFF_STATUS_LABELS: Record<string, string> = {
+  pending: 'Pending',
+  claimed: 'Claimed',
+  completed: 'Completed',
+  stale: 'Stale',
+}
 
 export const SORT_OPTIONS_DOCUMENTS = [
   { value: 'updated', label: 'Last Updated' },
