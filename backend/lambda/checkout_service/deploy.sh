@@ -26,7 +26,9 @@ COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_b2D0V3E1k}"
 COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 CHECKOUT_SERVICE_KEY="${CHECKOUT_SERVICE_KEY:-}"
-GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+GITHUB_APP_ID="${GITHUB_APP_ID:-}"
+GITHUB_INSTALLATION_ID="${GITHUB_INSTALLATION_ID:-}"
+GITHUB_PRIVATE_KEY_SECRET="${GITHUB_PRIVATE_KEY_SECRET:-devops/github-app/enceladus-private-key}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -60,6 +62,45 @@ for name in ("ENCELADUS_COORDINATION_API_INTERNAL_API_KEY", "COORDINATION_INTERN
         print(value)
         break
 PY
+}
+
+# ---------------------------------------------------------------------------
+# Resolve GitHub App ID and Installation ID from github_integration Lambda
+# ---------------------------------------------------------------------------
+resolve_github_app_id() {
+  if [[ -n "${GITHUB_APP_ID}" ]]; then
+    printf '%s' "${GITHUB_APP_ID}"
+    return
+  fi
+  local existing
+  existing="$(aws lambda get-function-configuration \
+    --function-name devops-github-integration \
+    --region "${REGION}" \
+    --query 'Environment.Variables.GITHUB_APP_ID' \
+    --output text 2>/dev/null || true)"
+  if [[ "${existing}" != "None" && -n "${existing}" ]]; then
+    printf '%s' "${existing}"
+    return
+  fi
+  log "[WARN] Could not resolve GITHUB_APP_ID"
+}
+
+resolve_github_installation_id() {
+  if [[ -n "${GITHUB_INSTALLATION_ID}" ]]; then
+    printf '%s' "${GITHUB_INSTALLATION_ID}"
+    return
+  fi
+  local existing
+  existing="$(aws lambda get-function-configuration \
+    --function-name devops-github-integration \
+    --region "${REGION}" \
+    --query 'Environment.Variables.GITHUB_INSTALLATION_ID' \
+    --output text 2>/dev/null || true)"
+  if [[ "${existing}" != "None" && -n "${existing}" ]]; then
+    printf '%s' "${existing}"
+    return
+  fi
+  log "[WARN] Could not resolve GITHUB_INSTALLATION_ID"
 }
 
 # ---------------------------------------------------------------------------
@@ -192,6 +233,19 @@ ensure_lambda_role() {
           \"dynamodb:DeleteItem\"
         ],
         \"Resource\":\"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TOKENS_TABLE}\"
+      }]
+    }"
+
+  # Inline policy for Secrets Manager (GitHub App private key) — ENC-TSK-B26
+  aws iam put-role-policy \
+    --role-name "${role_name}" \
+    --policy-name checkout-secrets-policy \
+    --policy-document "{
+      \"Version\":\"2012-10-17\",
+      \"Statement\":[{
+        \"Effect\":\"Allow\",
+        \"Action\":[\"secretsmanager:GetSecretValue\"],
+        \"Resource\":\"arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:devops/github-app/enceladus-private-key-*\"
       }]
     }"
 
@@ -407,6 +461,15 @@ main() {
     exit 1
   fi
 
+  # Resolve GitHub App config
+  local effective_app_id
+  effective_app_id="$(resolve_github_app_id)"
+  local effective_install_id
+  effective_install_id="$(resolve_github_installation_id)"
+  if [[ -z "${effective_app_id}" || -z "${effective_install_id}" ]]; then
+    log "[WARN] GitHub App not fully configured — commit/PR validation will be unauthenticated"
+  fi
+
   # Shared layer ARN (PyJWT + cryptography)
   local layer_arn
   layer_arn="$(aws lambda list-layer-versions \
@@ -435,7 +498,9 @@ print(json.dumps({"Variables": {
     "COORDINATION_INTERNAL_API_KEY": "${effective_key}",
     "ENCELADUS_COORDINATION_INTERNAL_API_KEY": "${effective_key}",
     "CHECKOUT_SERVICE_KEY": "${checkout_key}",
-    "GITHUB_TOKEN": "${GITHUB_TOKEN}",
+    "GITHUB_APP_ID": "${effective_app_id}",
+    "GITHUB_INSTALLATION_ID": "${effective_install_id}",
+    "GITHUB_PRIVATE_KEY_SECRET": "${GITHUB_PRIVATE_KEY_SECRET}",
     "CHECKOUT_TOKENS_TABLE": "${TOKENS_TABLE}",
     "CHECKOUT_TOKENS_REGION": "${REGION}",
     "TRACKER_API_BASE": "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker",

@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.32",
-  "updated_at": "2026-04-03T03:05:00Z",
+  "version": "2026-04-03.33",
+  "updated_at": "2026-04-03T03:58:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1495,7 +1495,7 @@
       }
     },
     "checkout_service.config": {
-      "description": "Runtime configuration requirements for the checkout service Lambda (ENC-ISS-088). Documents constraints on env var values to ensure correct inter-service routing.",
+      "description": "Runtime configuration requirements for the checkout service Lambda (ENC-ISS-088, ENC-TSK-B26). Documents constraints on env var values to ensure correct inter-service routing and GitHub App authentication.",
       "fields": {
         "TRACKER_API_BASE": {
           "type": "string",
@@ -1510,6 +1510,21 @@
           "type": "string",
           "definition": "DynamoDB table name for project records. Used by _resolve_github_repo() to look up the project's GitHub repo URL for commit/PR validation (DVP-ISS-082).",
           "usage_guidance": "Default: 'projects'. The checkout service Lambda IAM role must have dynamodb:GetItem and dynamodb:Scan permissions on this table."
+        },
+        "GITHUB_APP_ID": {
+          "type": "string",
+          "definition": "GitHub App numeric ID for generating installation access tokens (ENC-TSK-B26). Replaces static GITHUB_TOKEN PAT.",
+          "usage_guidance": "Set to the Enceladus GitHub App ID (currently 2946766). If unset, GitHub API calls fall back to unauthenticated (60 req/hr rate limit on public repos)."
+        },
+        "GITHUB_INSTALLATION_ID": {
+          "type": "string",
+          "definition": "GitHub App installation ID for the NX-2021-L organization (ENC-TSK-B26).",
+          "usage_guidance": "Set to the installation ID (currently 112392089). Required together with GITHUB_APP_ID."
+        },
+        "GITHUB_PRIVATE_KEY_SECRET": {
+          "type": "string",
+          "definition": "Secrets Manager secret name containing the GitHub App RSA private key (ENC-TSK-B26). Used to generate short-lived JWTs exchanged for installation tokens.",
+          "usage_guidance": "Default: 'devops/github-app/enceladus-private-key'. Lambda IAM role must have secretsmanager:GetSecretValue on this secret."
         }
       }
     },
