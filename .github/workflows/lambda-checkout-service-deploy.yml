@@ -27,6 +27,7 @@ jobs:
     with:
       function_name: "enceladus-checkout-service"
       lambda_dir: "backend/lambda/checkout_service"
+      package_extra_files: "transition_type_matrix.py"
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
 
@@ -36,5 +37,6 @@ jobs:
     with:
       function_name: "enceladus-checkout-service-auto"
       lambda_dir: "backend/lambda/checkout_service"
+      package_extra_files: "transition_type_matrix.py"
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}

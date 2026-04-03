@@ -83,6 +83,20 @@ from urllib.parse import unquote
 import boto3
 from botocore.exceptions import ClientError
 
+from transition_type_matrix import (
+    MATRIX_VERSION,
+    MATRIX_DOCUMENT_ID,
+    ALLOWED_TRANSITIONS_BY_TYPE as _MATRIX_ALLOWED_TRANSITIONS,
+    STRICTNESS_RANK as _MATRIX_STRICTNESS_RANK,
+    VALID_TRANSITION_TYPES as _MATRIX_VALID_TYPES,
+    GITHUB_PR_TYPES as _MATRIX_GITHUB_PR_TYPES,
+    DEPLOY_SUCCESS_EVIDENCE,
+    CLOSED_EVIDENCE,
+    get_deploy_success_gate,
+    get_closed_gate,
+    uses_github_pr as _matrix_uses_github_pr,
+)
+
 try:
     import jwt
     from jwt.algorithms import RSAAlgorithm
@@ -640,12 +654,23 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
 
     # Step 3: Return current task state
     _, task = _get_task(project_id, task_id)
+
+    # ENC-TSK-B08: Stamp transition_type at checkout time for integrity checking.
+    # If the transition_type is later mutated between checkout and advance, the
+    # advance will be rejected as a governance integrity violation.
+    checkout_transition_type = (task.get("transition_type") or "github_pr_deploy").strip().lower()
+    _set_task_field(
+        project_id, task_id, "checkout_transition_type", checkout_transition_type,
+        provider=provider,
+    )
+
     return _response(200, {
         "success": True,
         "task": task,
         "checked_out_by": provider,
         "checked_out_at": datetime.now(timezone.utc).isoformat(),
         "coordination_request_id": coordination_request_id or None,
+        "checkout_transition_type": checkout_transition_type,
     })
 
 
@@ -661,43 +686,15 @@ def _handle_release(project_id: str, task_id: str, body: dict) -> dict:
 # ENC-ISS-092: Transition type lifecycle arcs
 # ---------------------------------------------------------------------------
 
-#: Transition types that use the full GitHub PR/commit validation flow.
-_GITHUB_PR_TYPES = {"github_pr_deploy", "web_deploy", "code_only", "lambda_deploy"}
+# ---------------------------------------------------------------------------
+# ENC-FTR-059: Transition type constants sourced from canonical matrix v{MATRIX_VERSION}
+# Source: transition_type_matrix.py (DOC-B5B807D7C2CE)
+# ---------------------------------------------------------------------------
+_GITHUB_PR_TYPES = _MATRIX_GITHUB_PR_TYPES
+ALLOWED_TRANSITIONS_BY_TYPE: dict = _MATRIX_ALLOWED_TRANSITIONS
+VALID_TRANSITION_TYPES: set = _MATRIX_VALID_TYPES
 
-#: Per-type allowed target_status values. Any status NOT in this list returns 400.
-ALLOWED_TRANSITIONS_BY_TYPE: dict = {
-    "github_pr_deploy": [
-        "in-progress", "coding-complete", "committed", "pr",
-        "merged-main", "deploy-init", "deploy-success", "closed",
-    ],
-    "lambda_deploy": [
-        "in-progress", "coding-complete", "committed", "pr",
-        "merged-main", "deploy-init", "deploy-success", "closed",
-    ],
-    "web_deploy": [
-        "in-progress", "coding-complete", "committed", "pr",
-        "merged-main", "deploy-init", "deploy-success", "closed",
-    ],
-    "code_only": [
-        "in-progress", "coding-complete", "committed", "pr",
-        "merged-main", "closed",
-    ],
-    "no_code": [
-        "in-progress", "coding-complete", "closed",
-    ],
-}
-
-VALID_TRANSITION_TYPES: set = set(ALLOWED_TRANSITIONS_BY_TYPE.keys())
-
-#: ENC-FTR-041: Strictness ranking for component registry enforcement.
-#: Lower rank = more strict. Task transition_type rank must be <= component's required rank.
-STRICTNESS_RANK: dict = {
-    "github_pr_deploy": 0,  # strictest: full CI PR + GH Actions deploy job
-    "lambda_deploy": 1,     # PR + Lambda update evidence (no GH Actions job object)
-    "web_deploy": 1,        # PR + HTTP verification of live site
-    "code_only": 2,         # PR only, no deploy step
-    "no_code": 3,           # least strict: no GitHub, no code
-}
+STRICTNESS_RANK: dict = _MATRIX_STRICTNESS_RANK
 
 _TRANSITION_TYPE_SUMMARY: Dict[str, str] = {
     "github_pr_deploy": "Full PR workflow with GitHub Actions deploy evidence.",
@@ -1234,6 +1231,19 @@ def _validate_code_on_main_evidence(
 
 
 # ---------------------------------------------------------------------------
+# ENC-FTR-059: Matrix-driven deploy-success validator registry
+# Maps transition_type → validator function for deploy-success evidence.
+# A new transition_type that reuses an existing evidence shape just references
+# the same validator — no new code needed.
+# ---------------------------------------------------------------------------
+_DEPLOY_SUCCESS_VALIDATORS: Dict[str, Any] = {
+    "github_pr_deploy": _validate_github_actions_deploy_evidence,
+    "lambda_deploy": _validate_lambda_deploy_evidence,
+    "web_deploy": _validate_web_deploy_evidence,
+}
+
+
+# ---------------------------------------------------------------------------
 # ENC-ISS-106: Subtask lifecycle gate
 # ---------------------------------------------------------------------------
 
@@ -1526,6 +1536,34 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
             transition_type, task_id,
         )
         transition_type = "github_pr_deploy"
+
+    # --- ENC-TSK-B08: Transition type integrity check ---
+    # If transition_type was stamped at checkout, verify it hasn't been mutated.
+    checkout_tt = (task.get("checkout_transition_type") or "").strip().lower()
+    if checkout_tt and checkout_tt != transition_type:
+        logger.warning(
+            "GOVERNANCE INTEGRITY VIOLATION: task %s transition_type mutated "
+            "from '%s' (at checkout) to '%s' (current)",
+            task_id, checkout_tt, transition_type,
+        )
+        return _validation_error(
+            409,
+            (
+                f"Governance integrity violation: task transition_type was '{checkout_tt}' "
+                f"at checkout but is now '{transition_type}'. The transition_type field "
+                "must not be mutated between checkout and advance. Release and re-checkout "
+                "with the correct transition_type."
+            ),
+            task_id=task_id,
+            current_status=current_status,
+            target_status=target_status,
+            transition_type=transition_type,
+            provider=provider or session_id,
+            extra_details={
+                "checkout_transition_type": checkout_tt,
+                "current_transition_type": transition_type,
+            },
+        )
 
     if target_status != "in-progress":
         # in-progress is handled by checkout below; all other statuses are arc-gated
@@ -1824,76 +1862,35 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
             )
 
     elif target_status == "deploy-success":
-        # Unreachable for code_only and no_code (blocked above)
-        if transition_type == "web_deploy":
-            # web_deploy arc: validate HTTP curl evidence instead of GH Actions object
-            web_evidence = (
-                transition_evidence.get("web_deploy_evidence")
-                or body.get("web_deploy_evidence")
+        # ENC-FTR-059: Matrix-driven deploy-success gate dispatch (v{MATRIX_VERSION})
+        # Unreachable for code_only and no_code (blocked by ALLOWED_TRANSITIONS_BY_TYPE above)
+        ds_gate = get_deploy_success_gate(transition_type)
+        if not ds_gate:
+            return _validation_error(
+                400,
+                f"deploy-success gate is not applicable for transition_type '{transition_type}'.",
+                task_id=task_id, current_status=current_status, target_status=target_status,
+                transition_type=transition_type, provider=provider or session_id,
             )
-            if not web_evidence or not isinstance(web_evidence, dict):
-                failure_count = _increment_failure_count(
-                    project_id, task_id, task, "deploy-success", provider
-                )
-                if failure_count >= 3:
-                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _validation_error(
-                    400,
-                    (
-                        "transition_evidence.web_deploy_evidence is required for deploy-success "
-                        "on web_deploy tasks."
-                    ),
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.web_deploy_evidence"],
-                )
-            valid, reason = _validate_web_deploy_evidence(web_evidence)
-            if not valid:
-                failure_count = _increment_failure_count(
-                    project_id, task_id, task, "deploy-success", provider
-                )
-                if failure_count >= 3:
-                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _validation_error(
-                    400,
-                    f"web_deploy_evidence validation failed: {reason}",
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.web_deploy_evidence"],
-                )
-            transition_evidence["web_deploy_evidence"] = web_evidence
-        elif transition_type == "lambda_deploy":
-            # lambda_deploy arc: validate Lambda update evidence (ENC-FTR-041)
-            lambda_evidence = (
-                transition_evidence.get("lambda_deploy_evidence")
-                or body.get("lambda_deploy_evidence")
+        ev_key = ds_gate["evidence_key"]
+        ev_label = ds_gate["label"]
+        evidence_obj = transition_evidence.get(ev_key) or body.get(ev_key)
+        if not evidence_obj or not isinstance(evidence_obj, dict):
+            failure_count = _increment_failure_count(
+                project_id, task_id, task, "deploy-success", provider
             )
-            if not lambda_evidence or not isinstance(lambda_evidence, dict):
-                failure_count = _increment_failure_count(
-                    project_id, task_id, task, "deploy-success", provider
-                )
-                if failure_count >= 3:
-                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _validation_error(
-                    400,
-                    (
-                        "transition_evidence.lambda_deploy_evidence is required for deploy-success "
-                        "on lambda_deploy tasks."
-                    ),
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.lambda_deploy_evidence"],
-                )
-            valid, reason = _validate_lambda_deploy_evidence(lambda_evidence)
+            if failure_count >= 3:
+                _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
+            return _validation_error(
+                400,
+                f"{ev_label} is required for deploy-success on {transition_type} tasks.",
+                task_id=task_id, current_status=current_status, target_status=target_status,
+                transition_type=transition_type, provider=provider or session_id,
+                required_fields=[ev_label],
+            )
+        validator_fn = _DEPLOY_SUCCESS_VALIDATORS.get(transition_type)
+        if validator_fn:
+            valid, reason = validator_fn(evidence_obj)
             if not valid:
                 failure_count = _increment_failure_count(
                     project_id, task_id, task, "deploy-success", provider
@@ -1902,153 +1899,87 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                     _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
                 return _validation_error(
                     400,
-                    f"lambda_deploy_evidence validation failed: {reason}",
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.lambda_deploy_evidence"],
+                    f"{ev_key} validation failed: {reason}",
+                    task_id=task_id, current_status=current_status, target_status=target_status,
+                    transition_type=transition_type, provider=provider or session_id,
+                    required_fields=[ev_label],
                 )
-            transition_evidence["lambda_deploy_evidence"] = lambda_evidence
-        else:
-            # github_pr_deploy arc: validate GH Actions Jobs API object
-            deploy_evidence = transition_evidence.get("deploy_evidence") or body.get("deploy_evidence")
-            if not deploy_evidence or not isinstance(deploy_evidence, dict):
-                failure_count = _increment_failure_count(
-                    project_id, task_id, task, "deploy-success", provider
-                )
-                if failure_count >= 3:
-                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _validation_error(
-                    400,
-                    "transition_evidence.deploy_evidence (GitHub Actions Jobs API object) is required for deploy-success",
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.deploy_evidence"],
-                )
-            valid, reason = _validate_github_actions_deploy_evidence(deploy_evidence)
-            if not valid:
-                failure_count = _increment_failure_count(
-                    project_id, task_id, task, "deploy-success", provider
-                )
-                if failure_count >= 3:
-                    _invoke_assistant(task_id, task, "deploy-success", transition_evidence)
-                return _validation_error(
-                    400,
-                    f"deploy_evidence validation failed: {reason}",
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.deploy_evidence"],
-                )
-            transition_evidence["deploy_evidence"] = deploy_evidence
+        transition_evidence[ev_key] = evidence_obj
+        logger.info(
+            "deploy-success gate passed for %s (type=%s, matrix_version=%d)",
+            task_id, transition_type, MATRIX_VERSION,
+        )
         # Clear CAI and CCI tokens from task after successful deploy (all arc types)
         response_extras["tokens_cleared"] = True
 
     elif target_status == "closed":
-        if transition_type in ("github_pr_deploy", "web_deploy", "lambda_deploy"):
-            # Full arc: require live_validation_evidence string
-            live_validation_evidence = (
-                transition_evidence.get("live_validation_evidence")
-                or body.get("live_validation_evidence")
-                or ""
-            ).strip()
-            if not live_validation_evidence:
-                return _validation_error(
-                    400,
-                    "transition_evidence.live_validation_evidence is required for closed",
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.live_validation_evidence"],
-                )
-            transition_evidence["live_validation_evidence"] = live_validation_evidence
+        # ENC-FTR-059: Matrix-driven closed gate dispatch (v{MATRIX_VERSION})
+        cl_gate = get_closed_gate(transition_type)
+        if cl_gate:
+            ev_key = cl_gate["evidence_key"]
+            ev_type = cl_gate.get("evidence_type", "string")
+            ev_label = cl_gate["label"]
+            validator_id = cl_gate.get("validator_id")
 
-        elif transition_type == "code_only":
-            # code_only arc: verify commit is on main via GitHub compare API
-            code_evidence = (
-                transition_evidence.get("code_on_main_evidence")
-                or body.get("code_on_main_evidence")
+            if ev_type == "object":
+                # Object evidence (e.g. code_on_main_evidence)
+                evidence_obj = transition_evidence.get(ev_key) or body.get(ev_key)
+                if not evidence_obj or not isinstance(evidence_obj, dict):
+                    return _validation_error(
+                        400,
+                        f"{ev_label} is required for closed on {transition_type} tasks.",
+                        task_id=task_id, current_status=current_status, target_status=target_status,
+                        transition_type=transition_type, provider=provider or session_id,
+                        required_fields=[ev_label],
+                    )
+                if validator_id == "code_on_main":
+                    # code_on_main requires GitHub compare API validation
+                    owner = transition_evidence.get("owner")
+                    repo = transition_evidence.get("repo")
+                    if not owner or not repo:
+                        resolved_owner, resolved_repo = _resolve_github_repo(project_id)
+                        owner = owner or resolved_owner
+                        repo = repo or resolved_repo
+                    if not owner or not repo:
+                        return _validation_error(
+                            400,
+                            (
+                                f"Cannot resolve GitHub repo for project '{project_id}'. "
+                                "Provide owner and repo in transition_evidence, or set the "
+                                "project's repo field in the projects table."
+                            ),
+                            task_id=task_id, current_status=current_status,
+                            target_status=target_status, transition_type=transition_type,
+                            provider=provider or session_id,
+                            required_fields=["transition_evidence.owner", "transition_evidence.repo"],
+                        )
+                    valid, reason = _validate_code_on_main_evidence(owner, repo, evidence_obj)
+                    if not valid:
+                        return _validation_error(
+                            400, f"{ev_key} validation failed: {reason}",
+                            task_id=task_id, current_status=current_status,
+                            target_status=target_status, transition_type=transition_type,
+                            provider=provider or session_id, required_fields=[ev_label],
+                        )
+                transition_evidence[ev_key] = evidence_obj
+            else:
+                # String evidence (live_validation_evidence, no_code_evidence)
+                str_evidence = (
+                    transition_evidence.get(ev_key) or body.get(ev_key) or ""
+                ).strip()
+                if not str_evidence:
+                    return _validation_error(
+                        400,
+                        f"{ev_label} is required for closed on {transition_type} tasks.",
+                        task_id=task_id, current_status=current_status, target_status=target_status,
+                        transition_type=transition_type, provider=provider or session_id,
+                        required_fields=[ev_label],
+                    )
+                transition_evidence[ev_key] = str_evidence
+            logger.info(
+                "closed gate passed for %s (type=%s, matrix_version=%d)",
+                task_id, transition_type, MATRIX_VERSION,
             )
-            if not code_evidence or not isinstance(code_evidence, dict):
-                return _validation_error(
-                    400,
-                    (
-                        "transition_evidence.code_on_main_evidence is required for closed "
-                        "on code_only tasks."
-                    ),
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.code_on_main_evidence"],
-                )
-            owner = transition_evidence.get("owner")
-            repo = transition_evidence.get("repo")
-            if not owner or not repo:
-                resolved_owner, resolved_repo = _resolve_github_repo(project_id)
-                owner = owner or resolved_owner
-                repo = repo or resolved_repo
-            if not owner or not repo:
-                return _validation_error(
-                    400,
-                    (
-                        f"Cannot resolve GitHub repo for project '{project_id}'. "
-                        "Provide owner and repo in transition_evidence, or set the "
-                        "project's repo field in the projects table."
-                    ),
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.owner", "transition_evidence.repo"],
-                )
-            valid, reason = _validate_code_on_main_evidence(owner, repo, code_evidence)
-            if not valid:
-                return _validation_error(
-                    400,
-                    f"code_on_main_evidence validation failed: {reason}",
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.code_on_main_evidence"],
-                )
-            transition_evidence["code_on_main_evidence"] = code_evidence
-
-        elif transition_type == "no_code":
-            # no_code arc: non-empty free-text evidence, no GitHub call
-            no_code_evidence = (
-                transition_evidence.get("no_code_evidence")
-                or body.get("no_code_evidence")
-                or ""
-            ).strip()
-            if not no_code_evidence:
-                return _validation_error(
-                    400,
-                    (
-                        "transition_evidence.no_code_evidence is required for closed "
-                        "on no_code tasks. Provide a non-empty description of what was done."
-                    ),
-                    task_id=task_id,
-                    current_status=current_status,
-                    target_status=target_status,
-                    transition_type=transition_type,
-                    provider=provider or session_id,
-                    required_fields=["transition_evidence.no_code_evidence"],
-                )
-            transition_evidence["no_code_evidence"] = no_code_evidence
 
         # ENC-FTR-048: Gate task closure on structured acceptance criteria evidence.
         # Only applies when the task has structured AC (object form with evidence_acceptance).
@@ -2122,11 +2053,16 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
 
     # --- Return updated task ---
     _, updated_task = _get_task(project_id, task_id)
+    logger.info(
+        "advance OK: %s %s->%s (type=%s, matrix_version=%d)",
+        task_id, current_status, target_status, transition_type, MATRIX_VERSION,
+    )
     return _response(200, {
         "success": True,
         "task": updated_task,
         "previous_status": current_status,
         "new_status": target_status,
+        "matrix_version": MATRIX_VERSION,
         **response_extras,
     })
 

@@ -123,6 +123,7 @@ package_lambda() {
   zip_path="/tmp/${FUNCTION_NAME}.zip"
 
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
+  cp "${SCRIPT_DIR}/transition_type_matrix.py" "${build_dir}/"
 
   # NOTE: PyJWT is provided by the enceladus-shared Lambda layer (shared_layer/deploy.sh).
   # Do NOT bundle dependencies here - cross-platform binary compatibility issues.
