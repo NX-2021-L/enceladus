@@ -1,0 +1,232 @@
+[
+  {
+    "name": "auth-refresh",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 128,
+    "timeout": 10,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-coordination-api",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 512,
+    "timeout": 120,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-coordination-monitor-api",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 30,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-changelog-api",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 30,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-deploy-finalize",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 120,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-deploy-intake",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 512,
+    "timeout": 120,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-deploy-orchestrator",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 120,
+    "sqs_mappings": [
+      {
+        "uuid": "659716e0-702b-4e79-82c0-23ba86c04da6",
+        "event_source_arn": "arn:aws:sqs:us-west-2:356364570033:devops-deploy-queue.fifo",
+        "report_batch": [],
+        "state": "Enabled"
+      }
+    ]
+  },
+  {
+    "name": "devops-doc-prep",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 30,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-document-api",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 30,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-feed-publisher",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 512,
+    "timeout": 600,
+    "sqs_mappings": [
+      {
+        "uuid": "47777561-8817-41fd-bffa-5b4481fce200",
+        "event_source_arn": "arn:aws:sqs:us-west-2:356364570033:devops-feed-publish-queue.fifo",
+        "report_batch": [],
+        "state": "Enabled"
+      }
+    ]
+  },
+  {
+    "name": "devops-feed-query-api",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 60,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-project-service",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 30,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-reference-search",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 10,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-tracker-mutation-api",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 10,
+    "sqs_mappings": []
+  },
+  {
+    "name": "enceladus-bedrock-agent-actions",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 30,
+    "sqs_mappings": []
+  },
+  {
+    "name": "enceladus-governance-audit",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 128,
+    "timeout": 30,
+    "sqs_mappings": []
+  },
+  {
+    "name": "devops-graph-sync",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 60,
+    "sqs_mappings": [
+      {
+        "uuid": "e8f71222-00f0-4a95-9149-d71af5fcb734",
+        "event_source_arn": "arn:aws:sqs:us-west-2:356364570033:devops-graph-sync-queue.fifo",
+        "report_batch": [],
+        "state": "Enabled"
+      }
+    ]
+  },
+  {
+    "name": "devops-graph-query-api",
+    "runtime": "python3.11",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 10,
+    "sqs_mappings": []
+  },
+  {
+    "name": "enceladus-checkout-service",
+    "runtime": "python3.12",
+    "architectures": [
+      "x86_64"
+    ],
+    "snap_start": "Off",
+    "memory_size": 256,
+    "timeout": 30,
+    "sqs_mappings": []
+  }
+]
