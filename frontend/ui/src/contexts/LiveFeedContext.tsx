@@ -21,7 +21,7 @@ import {
 } from 'react'
 import { fetchLiveFeed, fetchLiveFeedDelta } from '../api/feeds'
 import { isSessionExpiredError } from '../lib/authSession'
-import type { Task, Issue, Feature, Lesson } from '../types/feeds'
+import type { Task, Issue, Feature, Lesson, Plan } from '../types/feeds'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,6 +32,7 @@ interface LiveFeedState {
   issues: Issue[]
   features: Feature[]
   lessons: Lesson[]
+  plans: Plan[]
   generatedAt: string | null
   isPending: boolean
   isError: boolean
@@ -42,6 +43,7 @@ const INITIAL_STATE: LiveFeedState = {
   issues: [],
   features: [],
   lessons: [],
+  plans: [],
   generatedAt: null,
   isPending: true,
   isError: false,
@@ -130,6 +132,7 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
         issues: data.issues,
         features: data.features,
         lessons: data.lessons ?? [],
+        plans: data.plans ?? [],
         generatedAt: data.generated_at,
         isPending: false,
         isError: false,
@@ -169,19 +172,22 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
       const nextIssues = mergeById(prev.issues, data.issues, 'issue_id', closedSet)
       const nextFeatures = mergeById(prev.features, data.features, 'feature_id', closedSet)
       const nextLessons = mergeById(prev.lessons, data.lessons ?? [], 'lesson_id', closedSet)
+      const nextPlans = mergeById(prev.plans, data.plans ?? [], 'plan_id', closedSet)
 
       // Only trigger a re-render when record content changes.
       if (
         !arraysEqual(nextTasks, prev.tasks) ||
         !arraysEqual(nextIssues, prev.issues) ||
         !arraysEqual(nextFeatures, prev.features) ||
-        !arraysEqual(nextLessons, prev.lessons)
+        !arraysEqual(nextLessons, prev.lessons) ||
+        !arraysEqual(nextPlans, prev.plans)
       ) {
         setState({
           tasks: nextTasks,
           issues: nextIssues,
           features: nextFeatures,
           lessons: nextLessons,
+          plans: nextPlans,
           generatedAt: data.generated_at,
           isPending: false,
           isError: false,
