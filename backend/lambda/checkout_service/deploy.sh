@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 # ---------------------------------------------------------------------------
 # deploy.sh — Deploy checkout_service Lambda (enceladus-checkout-service)
 #
@@ -17,10 +19,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
-FUNCTION_NAME="enceladus-checkout-service"
-AUTO_FUNCTION_NAME="enceladus-checkout-service-auto"
+FUNCTION_NAME="enceladus-checkout-service${ENVIRONMENT_SUFFIX}"
+AUTO_FUNCTION_NAME="enceladus-checkout-service-auto${ENVIRONMENT_SUFFIX}"
 API_ID="${API_ID:-8nkzqkmxqc}"
-TOKENS_TABLE="${TOKENS_TABLE:-enceladus-checkout-tokens}"
+TOKENS_TABLE="${TOKENS_TABLE:-enceladus-checkout-tokens${ENVIRONMENT_SUFFIX}}"
 
 COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_b2D0V3E1k}"
 COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
@@ -37,7 +39,7 @@ log() {
 # ---------------------------------------------------------------------------
 # Resolve internal API key from coordination_api Lambda (same pattern as tracker_mutation)
 # ---------------------------------------------------------------------------
-COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
+COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api${ENVIRONMENT_SUFFIX}}"
 
 resolve_internal_api_key() {
   if [[ -n "${COORDINATION_INTERNAL_API_KEY}" ]]; then
@@ -74,7 +76,7 @@ resolve_github_app_id() {
   fi
   local existing
   existing="$(aws lambda get-function-configuration \
-    --function-name devops-github-integration \
+    --function-name "devops-github-integration${ENVIRONMENT_SUFFIX}" \
     --region "${REGION}" \
     --query 'Environment.Variables.GITHUB_APP_ID' \
     --output text 2>/dev/null || true)"
@@ -92,7 +94,7 @@ resolve_github_installation_id() {
   fi
   local existing
   existing="$(aws lambda get-function-configuration \
-    --function-name devops-github-integration \
+    --function-name "devops-github-integration${ENVIRONMENT_SUFFIX}" \
     --region "${REGION}" \
     --query 'Environment.Variables.GITHUB_INSTALLATION_ID' \
     --output text 2>/dev/null || true)"
@@ -195,7 +197,7 @@ package_lambda() {
 # Ensure Lambda execution role exists
 # ---------------------------------------------------------------------------
 ensure_lambda_role() {
-  local role_name="enceladus-checkout-service-role"
+  local role_name="enceladus-checkout-service-role${ENVIRONMENT_SUFFIX}"
   local role_arn="arn:aws:iam::${ACCOUNT_ID}:role/${role_name}"
 
   if aws iam get-role --role-name "${role_name}" >/dev/null 2>&1; then
@@ -222,7 +224,7 @@ ensure_lambda_role() {
   # Inline policy for DynamoDB token table
   aws iam put-role-policy \
     --role-name "${role_name}" \
-    --policy-name checkout-tokens-policy \
+    --policy-name "checkout-tokens-policy${ENVIRONMENT_SUFFIX}" \
     --policy-document "{
       \"Version\":\"2012-10-17\",
       \"Statement\":[{
@@ -239,7 +241,7 @@ ensure_lambda_role() {
   # Inline policy for Secrets Manager (GitHub App private key) — ENC-TSK-B26
   aws iam put-role-policy \
     --role-name "${role_name}" \
-    --policy-name checkout-secrets-policy \
+    --policy-name "checkout-secrets-policy${ENVIRONMENT_SUFFIX}" \
     --policy-document "{
       \"Version\":\"2012-10-17\",
       \"Statement\":[{
@@ -401,7 +403,7 @@ ensure_api_routes() {
 # EventBridge rule for auto-checkout (every 5 minutes)
 # ---------------------------------------------------------------------------
 ensure_eventbridge_rule() {
-  local rule_name="enceladus-checkout-auto"
+  local rule_name="enceladus-checkout-auto${ENVIRONMENT_SUFFIX}"
   local auto_fn_arn="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${AUTO_FUNCTION_NAME}"
 
   log "[START] Ensuring EventBridge rule: ${rule_name}"
@@ -473,7 +475,7 @@ main() {
   # Shared layer ARN (PyJWT + cryptography)
   local layer_arn
   layer_arn="$(aws lambda list-layer-versions \
-    --layer-name enceladus-shared \
+    --layer-name "enceladus-shared${ENVIRONMENT_SUFFIX}" \
     --region "${REGION}" \
     --query 'LayerVersions[0].LayerVersionArn' \
     --output text 2>/dev/null || echo "None")"
@@ -527,13 +529,18 @@ PY
 
   rm -f "${zip_path}"
 
-  log ""
-  log "--- Configuring API routes ---"
-  ensure_api_routes
+  if [[ -z "${ENVIRONMENT_SUFFIX}" ]]; then
+    log ""
+    log "--- Configuring API routes ---"
+    ensure_api_routes
 
-  log ""
-  log "--- Configuring EventBridge rule ---"
-  ensure_eventbridge_rule
+    log ""
+    log "--- Configuring EventBridge rule ---"
+    ensure_eventbridge_rule
+  else
+    log ""
+    log "[INFO] Skipping API route and EventBridge configuration for gamma (ENVIRONMENT_SUFFIX=${ENVIRONMENT_SUFFIX})"
+  fi
 
   log ""
   log "=========================================="

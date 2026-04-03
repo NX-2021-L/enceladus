@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 # ---------------------------------------------------------------------------
 # deploy.sh — Deploy deploy_intake Lambda (ENC-TSK-506)
 # ---------------------------------------------------------------------------
@@ -8,22 +10,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
-FUNCTION_NAME="${FUNCTION_NAME:-devops-deploy-intake}"
-ROLE_NAME="${ROLE_NAME:-devops-deploy-intake-lambda-role}"
-ROLE_POLICY_NAME="${ROLE_POLICY_NAME:-devops-deploy-intake-inline}"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-deploy-intake${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-deploy-intake-lambda-role${ENVIRONMENT_SUFFIX}}"
+ROLE_POLICY_NAME="${ROLE_POLICY_NAME:-devops-deploy-intake-inline${ENVIRONMENT_SUFFIX}}"
 
-DEPLOY_TABLE="${DEPLOY_TABLE:-devops-deployment-manager}"
-PROJECTS_TABLE="${PROJECTS_TABLE:-projects}"
+DEPLOY_TABLE="${DEPLOY_TABLE:-devops-deployment-manager${ENVIRONMENT_SUFFIX}}"
+PROJECTS_TABLE="${PROJECTS_TABLE:-projects${ENVIRONMENT_SUFFIX}}"
 CONFIG_BUCKET="${CONFIG_BUCKET:-jreese-net}"
 CONFIG_PREFIX="${CONFIG_PREFIX:-deploy-config}"
-SQS_QUEUE_URL="${SQS_QUEUE_URL:-https://sqs.us-west-2.amazonaws.com/356364570033/devops-deploy-queue.fifo}"
+SQS_QUEUE_URL="${SQS_QUEUE_URL:-https://sqs.us-west-2.amazonaws.com/356364570033/devops-deploy-queue${ENVIRONMENT_SUFFIX}.fifo}"
 COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_b2D0V3E1k}"
 COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-6q607dk3liirhtecgps7hifmlk}"
 COORDINATION_INTERNAL_API_KEY="${COORDINATION_INTERNAL_API_KEY:-}"
 COORDINATION_INTERNAL_API_KEY_PREVIOUS="${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}"
 COORDINATION_INTERNAL_API_KEY_SCOPES="${COORDINATION_INTERNAL_API_KEY_SCOPES:-}"
-COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api}"
-DOC_PREP_LAMBDA_NAME="${DOC_PREP_LAMBDA_NAME:-devops-doc-prep}"
+COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api${ENVIRONMENT_SUFFIX}}"
+DOC_PREP_LAMBDA_NAME="${DOC_PREP_LAMBDA_NAME:-devops-doc-prep${ENVIRONMENT_SUFFIX}}"
 CORS_ORIGIN="${CORS_ORIGIN:-https://jreese.net}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
@@ -83,7 +85,7 @@ ensure_role() {
       "Sid": "SQSSendMessage",
       "Effect": "Allow",
       "Action": ["sqs:SendMessage", "sqs:GetQueueUrl"],
-      "Resource": "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:devops-deploy-queue.fifo"
+      "Resource": "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:devops-deploy-queue${ENVIRONMENT_SUFFIX}.fifo"
     },
     {
       "Sid": "InvokeDocPrepLambda",
@@ -175,7 +177,7 @@ resolve_github_token() {
 
   local existing
   existing="$(aws lambda get-function-configuration \
-    --function-name "enceladus-checkout-service" \
+    --function-name "enceladus-checkout-service${ENVIRONMENT_SUFFIX}" \
     --region "${REGION}" \
     --query 'Environment.Variables.GITHUB_TOKEN' \
     --output text 2>/dev/null || true)"

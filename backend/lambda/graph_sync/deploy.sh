@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
-FUNCTION_NAME="${FUNCTION_NAME:-devops-graph-sync}"
-ROLE_NAME="${ROLE_NAME:-devops-graph-sync-lambda-role}"
+FUNCTION_NAME="${FUNCTION_NAME:-devops-graph-sync${ENVIRONMENT_SUFFIX}}"
+ROLE_NAME="${ROLE_NAME:-devops-graph-sync-lambda-role${ENVIRONMENT_SUFFIX}}"
+SQS_QUEUE_NAME="devops-graph-sync-queue${ENVIRONMENT_SUFFIX}.fifo"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -49,7 +52,7 @@ ensure_role() {
       "Sid": "SQSGraphSyncQueue",
       "Effect": "Allow",
       "Action": ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
-      "Resource": "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:devops-graph-sync-queue.fifo"
+      "Resource": "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:${SQS_QUEUE_NAME}"
     }
   ]
 }
