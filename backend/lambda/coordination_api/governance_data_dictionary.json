@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-04.50",
-  "updated_at": "2026-04-04T02:48:00Z",
+  "version": "2026-04-04.51",
+  "updated_at": "2026-04-04T18:50:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -3072,6 +3072,23 @@
             "deprecated"
           ],
           "definition": "Whitelist of valid lesson status values."
+        }
+      }
+    },
+    "feed_query.history_inclusion": {
+      "description": "Feed query Lambda history array population behavior (ENC-TSK-C01). All 5 record-type transform functions (_transform_task_from_ddb, _transform_issue_from_ddb, _transform_feature_from_ddb, _transform_plan_from_ddb, _transform_lesson_from_ddb) now extract history entries from DynamoDB L-type attributes via _ddb_history(). Previously hardcoded as empty arrays, blocking PWA history display.",
+      "fields": {
+        "max_history_entries": {
+          "type": "integer",
+          "definition": "Maximum number of history entries returned per record in the feed API response. When a record has more entries, only the most recent N are included. Current value: 50."
+        },
+        "entry_shape": {
+          "type": "object",
+          "definition": "Each history entry is normalized to {timestamp: string, status: string, description: string}, matching the HistoryEntry TypeScript interface consumed by the PWA HistoryFeed component."
+        },
+        "extraction_source": {
+          "type": "string",
+          "definition": "History is extracted from the DynamoDB 'history' attribute (L type containing M entries). Missing or malformed entries are skipped gracefully."
         }
       }
     },

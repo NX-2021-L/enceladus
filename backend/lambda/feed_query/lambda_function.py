@@ -349,6 +349,35 @@ def _ddb_str_set(item: Dict[str, Any], key: str) -> List[str]:
     return []
 
 
+MAX_HISTORY_ENTRIES = 50
+
+
+def _ddb_history(item: Dict[str, Any], key: str = "history") -> List[Dict[str, str]]:
+    """Extract history entries from a DynamoDB item, capped at MAX_HISTORY_ENTRIES.
+
+    Returns a list of {timestamp, status, description} dicts matching the
+    HistoryEntry TypeScript interface consumed by the PWA HistoryFeed component.
+    Only the most recent entries are returned when the list exceeds the cap.
+    """
+    attr = item.get(key, {})
+    raw_list = attr.get("L")
+    if not isinstance(raw_list, list):
+        return []
+    entries: List[Dict[str, str]] = []
+    for entry in raw_list:
+        if not isinstance(entry, dict) or "M" not in entry:
+            continue
+        m = entry["M"]
+        entries.append({
+            "timestamp": m.get("timestamp", {}).get("S", ""),
+            "status": m.get("status", {}).get("S", ""),
+            "description": m.get("description", {}).get("S", ""),
+        })
+    if len(entries) > MAX_HISTORY_ENTRIES:
+        entries = entries[-MAX_HISTORY_ENTRIES:]
+    return entries
+
+
 def _ddb_list_of_maps(item: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
     """Extract a list of maps from a DynamoDB item (L type containing M types).
 
@@ -827,7 +856,7 @@ def _transform_task_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
         "checklist_total": _ddb_int(item, "checklist_total"),
         "checklist_done": _ddb_int(item, "checklist_done"),
         "checklist": [],
-        "history": [],
+        "history": _ddb_history(item),
         "updated_at": _ddb_str(item, "updated_at") or None,
         "last_update_note": _ddb_str(item, "last_update_note") or None,
         "created_at": _ddb_str(item, "created_at") or None,
@@ -867,7 +896,7 @@ def _transform_issue_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str
         "related_feature_ids": _ddb_str_set(item, "related_feature_ids"),
         "related_task_ids": _ddb_str_set(item, "related_task_ids"),
         "related_issue_ids": _ddb_str_set(item, "related_issue_ids"),
-        "history": [],
+        "history": _ddb_history(item),
         "updated_at": _ddb_str(item, "updated_at") or None,
         "last_update_note": _ddb_str(item, "last_update_note") or None,
         "created_at": _ddb_str(item, "created_at") or None,
@@ -894,7 +923,7 @@ def _transform_feature_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[s
         "related_task_ids": _ddb_str_set(item, "related_task_ids"),
         "related_feature_ids": _ddb_str_set(item, "related_feature_ids"),
         "related_issue_ids": _ddb_str_set(item, "related_issue_ids"),
-        "history": [],
+        "history": _ddb_history(item),
         "updated_at": _ddb_str(item, "updated_at") or None,
         "last_update_note": _ddb_str(item, "last_update_note") or None,
         "created_at": _ddb_str(item, "created_at") or None,
@@ -933,7 +962,7 @@ def _transform_plan_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
         "related_task_ids": _ddb_str_set(item, "related_task_ids"),
         "related_issue_ids": _ddb_str_set(item, "related_issue_ids"),
         "related_feature_ids": _ddb_str_set(item, "related_feature_ids"),
-        "history": [],
+        "history": _ddb_history(item),
         "updated_at": _ddb_str(item, "updated_at") or None,
         "last_update_note": _ddb_str(item, "last_update_note") or None,
         "created_at": _ddb_str(item, "created_at") or None,
@@ -977,7 +1006,7 @@ def _transform_lesson_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[st
         "related_task_ids": _ddb_str_set(item, "related_task_ids"),
         "related_issue_ids": _ddb_str_set(item, "related_issue_ids"),
         "related_feature_ids": _ddb_str_set(item, "related_feature_ids"),
-        "history": [],
+        "history": _ddb_history(item),
         "updated_at": _ddb_str(item, "updated_at") or None,
         "last_update_note": _ddb_str(item, "last_update_note") or None,
         "created_at": _ddb_str(item, "created_at") or None,
