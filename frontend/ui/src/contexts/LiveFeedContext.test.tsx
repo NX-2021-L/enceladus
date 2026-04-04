@@ -79,7 +79,7 @@ describe('LiveFeedContext', () => {
       features: [],
     })
 
-    // Delta returns a sparse update (only status changed, no intent/AC/history)
+    // Delta returns a sparse update with empty sentinels (matches live feed API)
     mockFetchLiveFeedDelta.mockResolvedValue({
       generated_at: deltaGeneratedAt,
       version: '1.0',
@@ -87,8 +87,11 @@ describe('LiveFeedContext', () => {
         task_id: 'ENC-TSK-001',
         project_id: 'enceladus',
         title: 'Task ENC-TSK-001',
+        description: '',
         status: 'in-progress',
         priority: 'P1',
+        checklist: [],
+        history: [],
         updated_at: deltaGeneratedAt,
       }],
       issues: [],
