@@ -27,6 +27,7 @@ jobs:
     with:
       function_name: "devops-deploy-finalize"
       lambda_dir: "backend/lambda/deploy_finalize"
+      deploy_script: "backend/lambda/deploy_finalize/deploy.sh"
       environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}

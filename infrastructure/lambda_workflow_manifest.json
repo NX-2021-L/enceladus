@@ -4,7 +4,8 @@
     {
       "function_name": "auth-refresh",
       "lambda_dir": "backend/lambda/auth_refresh",
-      "workflow_file": ".github/workflows/lambda-auth-refresh-deploy.yml"
+      "workflow_file": ".github/workflows/lambda-auth-refresh-deploy.yml",
+      "deploy_script": "backend/lambda/auth_refresh/deploy.sh"
     },
     {
       "function_name": "devops-coordination-api",
@@ -27,7 +28,8 @@
     {
       "function_name": "devops-deploy-finalize",
       "lambda_dir": "backend/lambda/deploy_finalize",
-      "workflow_file": ".github/workflows/lambda-deploy-finalize-deploy.yml"
+      "workflow_file": ".github/workflows/lambda-deploy-finalize-deploy.yml",
+      "deploy_script": "backend/lambda/deploy_finalize/deploy.sh"
     },
     {
       "function_name": "devops-deploy-intake",
@@ -38,12 +40,14 @@
     {
       "function_name": "devops-deploy-orchestrator",
       "lambda_dir": "backend/lambda/deploy_orchestrator",
-      "workflow_file": ".github/workflows/lambda-deploy-orchestrator-deploy.yml"
+      "workflow_file": ".github/workflows/lambda-deploy-orchestrator-deploy.yml",
+      "deploy_script": "backend/lambda/deploy_orchestrator/deploy.sh"
     },
     {
       "function_name": "devops-doc-prep",
       "lambda_dir": "backend/lambda/doc_prep",
-      "workflow_file": ".github/workflows/lambda-doc-prep-deploy.yml"
+      "workflow_file": ".github/workflows/lambda-doc-prep-deploy.yml",
+      "deploy_script": "backend/lambda/doc_prep/deploy.sh"
     },
     {
       "function_name": "devops-document-api",
@@ -55,6 +59,7 @@
       "function_name": "devops-feed-publisher",
       "lambda_dir": "backend/lambda/feed_publisher",
       "workflow_file": ".github/workflows/lambda-feed-publisher-deploy.yml",
+      "deploy_script": "backend/lambda/feed_publisher/deploy.sh",
       "package_extra_files": [
         "feed_utils.py"
       ]

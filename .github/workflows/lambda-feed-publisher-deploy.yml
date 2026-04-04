@@ -27,6 +27,7 @@ jobs:
     with:
       function_name: "devops-feed-publisher"
       lambda_dir: "backend/lambda/feed_publisher"
+      deploy_script: "backend/lambda/feed_publisher/deploy.sh"
       package_extra_files: "feed_utils.py"
       environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
