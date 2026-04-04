@@ -71,5 +71,65 @@ class CheckoutServiceErrorContextTests(unittest.TestCase):
         )
 
 
+class TestCodeOnMainEvidenceValidator(unittest.TestCase):
+    """ENC-ISS-161: code_only close gate must accept any valid main ancestor SHA."""
+
+    @patch.object(checkout_service, "_github_request")
+    def test_ancestor_sha_accepted_ahead_status(self, mock_gh):
+        """When sha is ancestor of main, compare returns 'ahead' (main ahead of sha)."""
+        mock_gh.return_value = (200, {"status": "ahead", "ahead_by": 5})
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus",
+            {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"}
+        )
+        self.assertTrue(valid, reason)
+
+    @patch.object(checkout_service, "_github_request")
+    def test_identical_sha_accepted(self, mock_gh):
+        """When sha IS main HEAD, compare returns 'identical'."""
+        mock_gh.return_value = (200, {"status": "identical"})
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus",
+            {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"}
+        )
+        self.assertTrue(valid, reason)
+
+    @patch.object(checkout_service, "_github_request")
+    def test_behind_status_rejected(self, mock_gh):
+        """'behind' means main is behind sha — sha is NOT an ancestor, reject."""
+        mock_gh.return_value = (200, {"status": "behind"})
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus",
+            {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"}
+        )
+        self.assertFalse(valid)
+        self.assertIn("not on main", reason)
+
+    @patch.object(checkout_service, "_github_request")
+    def test_diverged_status_rejected(self, mock_gh):
+        """'diverged' means sha and main have diverged — reject."""
+        mock_gh.return_value = (200, {"status": "diverged"})
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus",
+            {"commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac"}
+        )
+        self.assertFalse(valid)
+        self.assertIn("not on main", reason)
+
+    def test_missing_commit_sha_rejected(self):
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus", {}
+        )
+        self.assertFalse(valid)
+        self.assertIn("commit_sha is required", reason)
+
+    def test_invalid_sha_format_rejected(self):
+        valid, reason = checkout_service._validate_code_on_main_evidence(
+            "NX-2021-L", "enceladus", {"commit_sha": "not-a-sha"}
+        )
+        self.assertFalse(valid)
+        self.assertIn("40-char hex", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
