@@ -227,6 +227,102 @@ ensure_function_url() {
   fi
 }
 
+ALIAS_NAME="${ALIAS_NAME:-live}"
+PROVISIONED_CONCURRENCY="${PROVISIONED_CONCURRENCY:-1}"
+
+publish_version_and_alias() {
+  log "[START] publishing Lambda version: ${FUNCTION_NAME}"
+  local version
+  version="$(aws lambda publish-version \
+    --function-name "${FUNCTION_NAME}" \
+    --description "v4-arm64-$(date -u +%Y%m%d-%H%M%S)" \
+    --region "${REGION}" \
+    --query 'Version' --output text)"
+  log "[OK] published version: ${version}"
+
+  if aws lambda get-alias \
+    --function-name "${FUNCTION_NAME}" \
+    --name "${ALIAS_NAME}" \
+    --region "${REGION}" >/dev/null 2>&1; then
+    log "[START] updating alias '${ALIAS_NAME}' -> version ${version}"
+    aws lambda update-alias \
+      --function-name "${FUNCTION_NAME}" \
+      --name "${ALIAS_NAME}" \
+      --function-version "${version}" \
+      --region "${REGION}" >/dev/null
+  else
+    log "[START] creating alias '${ALIAS_NAME}' -> version ${version}"
+    aws lambda create-alias \
+      --function-name "${FUNCTION_NAME}" \
+      --name "${ALIAS_NAME}" \
+      --function-version "${version}" \
+      --description "Alias for provisioned concurrency" \
+      --region "${REGION}" >/dev/null
+  fi
+  log "[OK] alias '${ALIAS_NAME}' points to version ${version}"
+
+  if [[ "${PROVISIONED_CONCURRENCY}" -gt 0 ]]; then
+    log "[START] configuring provisioned concurrency: ${PROVISIONED_CONCURRENCY} on ${ALIAS_NAME}"
+    aws lambda put-provisioned-concurrency-config \
+      --function-name "${FUNCTION_NAME}" \
+      --qualifier "${ALIAS_NAME}" \
+      --provisioned-concurrent-executions "${PROVISIONED_CONCURRENCY}" \
+      --region "${REGION}" >/dev/null
+    log "[OK] provisioned concurrency config submitted; will become READY asynchronously"
+  fi
+
+  # Ensure Function URL on alias (so provisioned instances serve traffic)
+  ensure_alias_function_url
+}
+
+ensure_alias_function_url() {
+  local cors_config='{"AllowOrigins":["https://claude.ai"],"AllowMethods":["*"],"AllowHeaders":["Content-Type","Authorization","Accept","Mcp-Session-Id"],"ExposeHeaders":["Mcp-Session-Id"],"AllowCredentials":true,"MaxAge":86400}'
+
+  if aws lambda get-function-url-config \
+    --function-name "${FUNCTION_NAME}" \
+    --qualifier "${ALIAS_NAME}" \
+    --region "${REGION}" >/dev/null 2>&1; then
+    log "[OK] Function URL exists for ${FUNCTION_NAME}:${ALIAS_NAME}"
+    aws lambda update-function-url-config \
+      --function-name "${FUNCTION_NAME}" \
+      --qualifier "${ALIAS_NAME}" \
+      --auth-type NONE \
+      --cors "${cors_config}" \
+      --region "${REGION}" >/dev/null || log "[WARNING] unable to update alias Function URL CORS"
+  else
+    log "[START] creating Function URL for alias ${ALIAS_NAME}"
+    if ! aws lambda create-function-url-config \
+      --function-name "${FUNCTION_NAME}" \
+      --qualifier "${ALIAS_NAME}" \
+      --auth-type NONE \
+      --cors "${cors_config}" \
+      --invoke-mode BUFFERED \
+      --region "${REGION}" >/dev/null; then
+      log "[WARNING] unable to create alias Function URL."
+      return 0
+    fi
+    log "[END] created alias Function URL: ${FUNCTION_NAME}:${ALIAS_NAME}"
+  fi
+
+  aws lambda add-permission \
+    --function-name "${FUNCTION_NAME}" \
+    --qualifier "${ALIAS_NAME}" \
+    --statement-id "FunctionURLAllowPublicAccess-${ALIAS_NAME}" \
+    --action lambda:InvokeFunctionUrl \
+    --principal "*" \
+    --function-url-auth-type NONE \
+    --region "${REGION}" >/dev/null 2>&1 || true
+
+  aws lambda add-permission \
+    --function-name "${FUNCTION_NAME}" \
+    --qualifier "${ALIAS_NAME}" \
+    --statement-id "FunctionURLAllowPublicInvoke-${ALIAS_NAME}" \
+    --action lambda:InvokeFunction \
+    --principal "*" \
+    --invoked-via-function-url \
+    --region "${REGION}" >/dev/null 2>&1 || true
+}
+
 deploy_lambda() {
   local role_arn env_file
   role_arn="$(resolve_role_arn)"
@@ -304,6 +400,9 @@ deploy_lambda() {
 
   ensure_function_url
   rm -f "${env_file}"
+
+  # ENC-TSK-B83: Publish version + alias + provisioned concurrency
+  publish_version_and_alias
 
   log "[END] Lambda ready: ${FUNCTION_NAME}"
 }
