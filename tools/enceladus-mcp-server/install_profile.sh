@@ -22,7 +22,7 @@ CLAUDE_SETTINGS_DIR="${ENCELADUS_MCP_CLAUDE_SETTINGS_DIR:-${HOME}/.claude}"
 CODEX_SETTINGS_DIR="${ENCELADUS_MCP_CODEX_SETTINGS_DIR:-${HOME}/.codex}"
 
 # Remote MCP gateway URL (ENC-TSK-862, ENC-TSK-864)
-MCP_GATEWAY_URL="${ENCELADUS_MCP_GATEWAY_URL:-https://jreese.net/api/v1/coordination/mcp}"
+MCP_GATEWAY_URL="${ENCELADUS_MCP_GATEWAY_URL:-https://mcp.jreese.net}"
 
 # Python is needed for JSON/TOML config file manipulation only (not for MCP runtime).
 PYTHON_BIN="${ENCELADUS_MCP_PYTHON_BIN:-$(command -v python3 || true)}"
@@ -256,7 +256,7 @@ if [ ! -f "${CODEX_GLOBAL_AGENTS_MD}" ] \
 # Codex Bootstrap
 
 Managed MCP profile: remote HTTP
-Remote URL: `https://jreese.net/api/v1/coordination/mcp`
+Remote URL: `https://mcp.jreese.net`
 
 MCP server `enceladus` is configured in `~/.codex/config.toml`.
 
@@ -298,7 +298,7 @@ if [ ! -f "${WORKSPACE_AGENTS_MD}" ] \
 # Enceladus Workspace — Agent Bootstrap
 
 Managed MCP profile: remote HTTP
-Remote URL: `https://jreese.net/api/v1/coordination/mcp`
+Remote URL: `https://mcp.jreese.net`
 
 MCP server `enceladus` is configured via remote HTTP gateway.
 Source: `tools/enceladus-mcp-server/server.py` (deployed as Lambda)
@@ -359,7 +359,7 @@ if [ ! -f "${CLAUDE_GLOBAL_MD}" ] \
 
 Source: `governance://agents/bootstrap-template.md`
 Managed MCP profile: remote HTTP
-Remote URL: `https://jreese.net/api/v1/coordination/mcp`
+Remote URL: `https://mcp.jreese.net`
 
 ## Session Init
 

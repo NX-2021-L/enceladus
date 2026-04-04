@@ -1,7 +1,8 @@
 # Enceladus Workspace — Agent Bootstrap
 
-MCP server `enceladus` is configured in `~/.codex/config.toml`.
-Source: `tools/enceladus-mcp-server/server.py`
+Managed MCP profile: remote HTTP (code-mode only)
+Remote URL: `https://mcp.jreese.net`
+Source: `tools/enceladus-mcp-server/server.py` (deployed as Lambda)
 
 ## Initialization (REQUIRED — run in order every session)
 
