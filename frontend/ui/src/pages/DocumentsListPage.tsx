@@ -1,9 +1,11 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useDocs2 } from '../hooks/useDocuments'
 import { useProjects } from '../hooks/useProjects'
 import { useFilterState } from '../hooks/useFilterState'
 import { useInfiniteList } from '../hooks/useInfiniteList'
+import { useLiveFeed } from '../contexts/LiveFeedContext'
 import { DocumentRow } from '../components/cards/DocumentRow'
+import { PlanRow } from '../components/cards/PlanRow'
 import { SearchInput } from '../components/shared/SearchInput'
 import { FilterBar } from '../components/shared/FilterBar'
 import { SortPicker } from '../components/shared/SortPicker'
@@ -32,6 +34,22 @@ export function DocumentsListPage() {
     refetch,
   } = useDocs2(filters)
 
+  // Plans from live feed (ENC-FTR-058 / ENC-ISS-152)
+  const { plans: allPlans } = useLiveFeed()
+  const filteredPlans = useMemo(() => {
+    let result = allPlans
+    if (filters.projectId) {
+      result = result.filter((p) => p.project_id === filters.projectId)
+    }
+    if (filters.search) {
+      const q = filters.search.toLowerCase()
+      result = result.filter(
+        (p) => p.title.toLowerCase().includes(q) || p.plan_id.toLowerCase().includes(q),
+      )
+    }
+    return result
+  }, [allPlans, filters.projectId, filters.search])
+
   const selectedProject = filters.projectId ?? defaultProject
 
   const { visible, sentinelRef, hasMore, resetPage } = useInfiniteList(documents)
@@ -49,7 +67,7 @@ export function DocumentsListPage() {
       {/* Header with count + refresh */}
       <div className="flex items-center justify-between">
         <span className="text-xs text-slate-500">
-          {visible.length} of {totalMatches} documents
+          {filteredPlans.length + visible.length} of {filteredPlans.length + totalMatches} items
         </span>
         <button
           onClick={() => refetch()}
@@ -130,12 +148,36 @@ export function DocumentsListPage() {
         onChange={(v) => setFilter('sortBy', v)}
       />
 
+      {/* Plans section (ENC-FTR-058 / ENC-ISS-152) */}
+      {filteredPlans.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">
+              Plans
+            </span>
+            <span className="text-xs text-slate-500">({filteredPlans.length})</span>
+          </div>
+          {filteredPlans.map((p) => (
+            <PlanRow key={p.plan_id} plan={p} />
+          ))}
+        </div>
+      )}
+
+      {/* Documents section */}
       {isPending ? (
         <LoadingState />
       ) : isError ? (
         <ErrorState />
       ) : (
         <div className="space-y-2">
+          {filteredPlans.length > 0 && (visible.length > 0) && (
+            <div className="flex items-center gap-2 pt-2">
+              <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                Documents
+              </span>
+              <span className="text-xs text-slate-500">({totalMatches})</span>
+            </div>
+          )}
           {visible.length ? (
             <>
               {visible.map((d) => (
@@ -144,7 +186,7 @@ export function DocumentsListPage() {
               <ScrollSentinel sentinelRef={sentinelRef} hasMore={hasMore} />
             </>
           ) : (
-            <EmptyState message="No documents match your filters" />
+            !filteredPlans.length && <EmptyState message="No documents match your filters" />
           )}
         </div>
       )}
