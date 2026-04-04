@@ -59,9 +59,43 @@ const POLL_INTERVAL = 3_000
 const FULL_REFRESH_AGE_MS = 30 * 60 * 1_000 // 30 min
 
 /**
+ * Returns true if `val` is an "empty sentinel" that the live feed API uses
+ * as a placeholder for fields it doesn't populate (e.g. `""`, `[]`).
+ * These should not overwrite richer data already held in state.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isEmptySentinel(val: any): boolean {
+  if (val === '' || val === null || val === undefined) return true
+  if (Array.isArray(val) && val.length === 0) return true
+  return false
+}
+
+/**
+ * Shallow-merge `incoming` into `existing`, skipping empty sentinel values
+ * in `incoming` when `existing` has richer data for that field (ENC-ISS-148).
+ * The live feed API returns sparse records with hardcoded empty strings and
+ * empty arrays for fields like description, history, and checklist.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function shallowMergeRecord<T extends Record<string, any>>(existing: T, incoming: T): T {
+  const merged = { ...existing }
+  for (const key of Object.keys(incoming)) {
+    const incomingVal = incoming[key]
+    const existingVal = existing[key]
+    // Only skip the incoming value if it's an empty sentinel AND the existing
+    // value is richer. If both are empty, or the field is new, take incoming.
+    if (isEmptySentinel(incomingVal) && !isEmptySentinel(existingVal)) {
+      continue
+    }
+    merged[key] = incomingVal
+  }
+  return merged as T
+}
+
+/**
  * Upsert `delta` into `existing` by `idKey`, removing any IDs in `closedIds`.
- * Delta items are shallow-merged into existing records so that fields present
- * in the full record but absent from the sparse feed snapshot are preserved
+ * Delta items are shallow-merged into existing records, preserving richer
+ * field values from prior loads when the delta carries empty sentinels
  * (fixes ENC-ISS-148: acceptance_criteria / intent / history disappearing).
  * Returns a new array only when contents actually changed.
  */
@@ -82,9 +116,7 @@ function mergeById<T extends Record<string, any>>(
   for (const item of delta) {
     const id = String(item[idKey])
     const prev = map.get(id)
-    // Shallow-merge: spread existing fields first, then overlay delta fields.
-    // Only non-undefined delta values overwrite existing ones.
-    map.set(id, prev ? { ...prev, ...item } : item)
+    map.set(id, prev ? shallowMergeRecord(prev, item) : item)
   }
 
   const merged = Array.from(map.values())
