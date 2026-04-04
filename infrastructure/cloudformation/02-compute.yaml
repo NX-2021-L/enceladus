@@ -66,6 +66,10 @@ Resources:
       MemorySize: 512
       Timeout: 120
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt CoordinationApiRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -101,6 +105,10 @@ Resources:
       MemorySize: 256
       Timeout: 10
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt TrackerMutationRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -129,6 +137,10 @@ Resources:
       MemorySize: 256
       Timeout: 30
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt DocumentApiRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -162,6 +174,10 @@ Resources:
       MemorySize: 256
       Timeout: 30
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt ProjectServiceRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -192,6 +208,10 @@ Resources:
       MemorySize: 256
       Timeout: 60  # ENC-TSK-797: increased from 15 for synchronous feed_publisher invoke
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt FeedQueryRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -221,6 +241,10 @@ Resources:
       MemorySize: 256
       Timeout: 30
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt CoordinationMonitorRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -248,6 +272,10 @@ Resources:
       MemorySize: 512
       Timeout: 120
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt DeployIntakeRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -279,6 +307,10 @@ Resources:
       MemorySize: 256
       Timeout: 10
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt ReferenceSearchRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -306,6 +338,10 @@ Resources:
       MemorySize: 128
       Timeout: 10
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt AuthRefreshRole.Arn
       Environment:
         Variables:
@@ -334,6 +370,10 @@ Resources:
       MemorySize: 256
       Timeout: 120
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt DeployOrchestratorRole.Arn
       Environment:
         Variables:
@@ -361,6 +401,10 @@ Resources:
       MemorySize: 256
       Timeout: 120
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt DeployFinalizeRole.Arn
       Environment:
         Variables:
@@ -388,6 +432,10 @@ Resources:
       MemorySize: 512
       Timeout: 600
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt FeedPublisherRole.Arn
       Description: Event-driven mobile feed publisher triggered by DynamoDB Streams via SQS FIFO
       Environment:
@@ -417,6 +465,10 @@ Resources:
       MemorySize: 128
       Timeout: 30
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt GovernanceAuditRole.Arn
       Tags:
         - Key: Project
@@ -436,6 +488,10 @@ Resources:
       MemorySize: 256
       Timeout: 30
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt DocPrepRole.Arn
       Environment:
         Variables:
@@ -462,6 +518,10 @@ Resources:
       MemorySize: 256
       Timeout: 30
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt BedrockActionsRole.Arn
       Environment:
         Variables:
@@ -491,6 +551,10 @@ Resources:
       MemorySize: 256
       Timeout: 30
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt ChangelogApiRole.Arn
       Layers:
         - !Ref SharedLayerArn
@@ -521,6 +585,10 @@ Resources:
       MemorySize: 256
       Timeout: 60
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt GraphSyncRole.Arn
       Environment:
         Variables:
@@ -544,6 +612,10 @@ Resources:
       MemorySize: 256
       Timeout: 10
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt GraphQueryApiRole.Arn
       Environment:
         Variables:
@@ -574,6 +646,10 @@ Resources:
       MemorySize: 512
       Timeout: 300
       Architectures: [arm64]
+      SnapStart: !If
+        - IsProduction
+        - !Ref AWS::NoValue
+        - ApplyOn: PublishedVersions
       Role: !GetAtt Neo4jBackupRole.Arn
       Environment:
         Variables:

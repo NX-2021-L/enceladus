@@ -27,6 +27,7 @@ jobs:
     with:
       function_name: "auth-refresh"
       lambda_dir: "backend/lambda/auth_refresh"
+      deploy_script: "backend/lambda/auth_refresh/deploy.sh"
       environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
