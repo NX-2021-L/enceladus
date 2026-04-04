@@ -27,6 +27,7 @@ jobs:
     with:
       function_name: "devops-doc-prep"
       lambda_dir: "backend/lambda/doc_prep"
+      deploy_script: "backend/lambda/doc_prep/deploy.sh"
       environment_suffix: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
     secrets:
       AWS_BACKEND_ROLE_TO_ASSUME: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
