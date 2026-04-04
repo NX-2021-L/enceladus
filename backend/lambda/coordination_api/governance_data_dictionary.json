@@ -1,6 +1,6 @@
 {
   "version": "2026-04-04.50",
-  "updated_at": "2026-04-04T02:45:00Z",
+  "updated_at": "2026-04-04T02:48:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1815,7 +1815,7 @@
             "committed": "commit_sha (40-char hex; GitHub API validated); CAI required on record; issues CCI token",
             "pr": "CCI required on task record",
             "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
-            "closed": "code_on_main_evidence {commit_sha (40-char hex)} — GitHub compare API verifies commit is ancestor of main (status: behind or identical); releases checkout"
+            "closed": "code_on_main_evidence {commit_sha (40-char hex)} — GitHub compare API verifies commit is ancestor of main (ENC-ISS-161: compare {sha}...main status: ahead or identical); releases checkout"
           },
           "skipped_statuses": [
             "deploy-init",
