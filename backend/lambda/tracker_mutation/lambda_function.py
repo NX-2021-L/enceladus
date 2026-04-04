@@ -2138,42 +2138,91 @@ def _validate_web_deploy_evidence(web_deploy_evidence) -> Optional[str]:
 
 
 def _validate_lambda_deploy_evidence(lambda_deploy_evidence) -> Optional[str]:
-    """Validate lambda_deploy_evidence for Lambda function deployments (ENC-FTR-059).
+    """Validate lambda_deploy_evidence for Lambda function deployments (ENC-FTR-059, ENC-ISS-162).
 
-    Required fields: FunctionArn, FunctionName, Version (numeric), CodeSha256, CodeSize,
-    ConfigSha256, LastModified, RevisionId, State (must be Active),
-    LastUpdateStatus (must be Successful).
+    Accepts two shapes:
+    1. Simplified 4-field schema (governance.dictionary): {function_name, version, updated_at, status}
+       - status must be 'Success'
+       - updated_at must be ISO 8601 with 'T' separator
+    2. Full AWS GetFunctionConfiguration response: {FunctionArn, FunctionName, Version, ...}
+       - State must be 'Active', LastUpdateStatus must be 'Successful'
+
+    Shape is auto-detected by presence of 'function_name' (simplified) vs 'FunctionArn' (full AWS).
     Returns None if valid, or an error string describing the first violation.
     """
     if not lambda_deploy_evidence:
         return (
             "Cannot transition to 'deploy-success': "
             "transition_evidence.lambda_deploy_evidence required for lambda_deploy tasks. "
-            "Must be an AWS Lambda GetFunctionConfiguration response object."
+            "Accepts simplified {function_name, version, updated_at, status} or full AWS GetFunctionConfiguration."
         )
     if not isinstance(lambda_deploy_evidence, dict):
         return (
             "Cannot transition to 'deploy-success': "
             "transition_evidence.lambda_deploy_evidence must be a structured object."
         )
+
+    # ENC-ISS-162: Auto-detect schema shape — simplified (lowercase) vs full AWS (PascalCase)
+    if lambda_deploy_evidence.get("function_name") or not lambda_deploy_evidence.get("FunctionArn"):
+        # Simplified 4-field schema: {function_name, version, updated_at, status}
+        return _validate_lambda_deploy_evidence_simplified(lambda_deploy_evidence)
+
+    # Full AWS GetFunctionConfiguration shape
+    return _validate_lambda_deploy_evidence_full(lambda_deploy_evidence)
+
+
+def _validate_lambda_deploy_evidence_simplified(evidence: dict) -> Optional[str]:
+    """Validate simplified lambda_deploy_evidence: {function_name, version, updated_at, status}."""
+    function_name = (evidence.get("function_name") or "").strip()
+    if not function_name:
+        return "lambda_deploy_evidence.function_name is required"
+
+    version = (evidence.get("version") or "").strip()
+    if not version:
+        return "lambda_deploy_evidence.version is required"
+
+    updated_at = (evidence.get("updated_at") or "").strip()
+    if not updated_at:
+        return "lambda_deploy_evidence.updated_at is required"
+    if "T" not in updated_at:
+        return (
+            f"lambda_deploy_evidence.updated_at must be ISO 8601 with 'T' separator, "
+            f"got: '{updated_at}'"
+        )
+    try:
+        dt.datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        return f"lambda_deploy_evidence.updated_at is not a valid ISO 8601 timestamp: {exc}"
+
+    status = (evidence.get("status") or "").strip()
+    if not status:
+        return "lambda_deploy_evidence.status is required"
+    if status != "Success":
+        return f"lambda_deploy_evidence.status must be 'Success', got: '{status}'"
+
+    return None
+
+
+def _validate_lambda_deploy_evidence_full(evidence: dict) -> Optional[str]:
+    """Validate full AWS GetFunctionConfiguration lambda_deploy_evidence."""
     required = (
         "FunctionArn", "FunctionName", "Version", "CodeSha256", "CodeSize",
         "ConfigSha256", "LastModified", "RevisionId", "State", "LastUpdateStatus",
     )
-    missing = [f for f in required if not lambda_deploy_evidence.get(f)]
+    missing = [f for f in required if not evidence.get(f)]
     if missing:
         return (
             f"Cannot transition to 'deploy-success': lambda_deploy_evidence missing "
             f"required field(s): {', '.join(missing)}. "
             "Source: AWS Lambda GetFunctionConfiguration after UpdateFunctionCode with Publish=true."
         )
-    state = str(lambda_deploy_evidence.get("State", "")).strip()
+    state = str(evidence.get("State", "")).strip()
     if state != "Active":
         return (
             f"Cannot transition to 'deploy-success': lambda_deploy_evidence.State must be "
             f"'Active'. Got: '{state}'. Poll until Active before submitting evidence."
         )
-    update_status = str(lambda_deploy_evidence.get("LastUpdateStatus", "")).strip()
+    update_status = str(evidence.get("LastUpdateStatus", "")).strip()
     if update_status != "Successful":
         return (
             f"Cannot transition to 'deploy-success': lambda_deploy_evidence.LastUpdateStatus "
@@ -2193,7 +2242,7 @@ _DEPLOY_SUCCESS_VALIDATORS: Dict[str, tuple] = {
     "lambda_deploy": (
         "lambda_deploy_evidence",
         _validate_lambda_deploy_evidence,
-        "transition_evidence.lambda_deploy_evidence with FunctionArn, FunctionName, Version, State=Active, LastUpdateStatus=Successful",
+        "transition_evidence.lambda_deploy_evidence: simplified {function_name, version, updated_at, status=Success} or full AWS {FunctionArn, FunctionName, Version, State=Active, LastUpdateStatus=Successful}",
     ),
     "web_deploy": (
         "web_deploy_evidence",

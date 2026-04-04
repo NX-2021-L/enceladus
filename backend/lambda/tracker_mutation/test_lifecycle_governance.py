@@ -689,6 +689,122 @@ class TestDeploySuccessGate(unittest.TestCase):
         self.assertTrue(result.get("success"), result)
 
 
+class TestLambdaDeployEvidenceValidator(unittest.TestCase):
+    """ENC-ISS-162: lambda_deploy_evidence accepts both simplified and full AWS shapes."""
+
+    def _patch_and_call(self, transition_evidence=None):
+        body = {"field": "status", "value": "deploy-success", "provider": "codex"}
+        if transition_evidence:
+            body["transition_evidence"] = transition_evidence
+        mock_ddb = MagicMock()
+        mock_ddb.get_item.return_value = {
+            "Item": _mock_checked_out_task(
+                status="deploy-init", agent_id="codex",
+                extra={"transition_type": {"S": "lambda_deploy"}}
+            )
+        }
+        mock_ddb.update_item.return_value = {}
+        with patch.object(tracker_mutation, "_get_ddb", return_value=mock_ddb):
+            result = _call_update_field(
+                "enceladus", "task", "ENC-TSK-001", body
+            )
+        return json.loads(result.get("body", "{}"))
+
+    # --- simplified 4-field schema (governance.dictionary) ---
+
+    def test_simplified_4_field_schema_accepted(self):
+        """Simplified {function_name, version, updated_at, status} passes."""
+        result = self._patch_and_call({"lambda_deploy_evidence": {
+            "function_name": "devops-tracker-mutation",
+            "version": "42",
+            "updated_at": "2026-04-04T02:00:00Z",
+            "status": "Success",
+        }})
+        self.assertTrue(result.get("success"), result)
+
+    def test_simplified_missing_function_name_rejected(self):
+        result = self._patch_and_call({"lambda_deploy_evidence": {
+            "version": "42",
+            "updated_at": "2026-04-04T02:00:00Z",
+            "status": "Success",
+        }})
+        self.assertIn("error", result)
+        self.assertIn("function_name", result["error"])
+
+    def test_simplified_missing_status_rejected(self):
+        result = self._patch_and_call({"lambda_deploy_evidence": {
+            "function_name": "devops-tracker-mutation",
+            "version": "42",
+            "updated_at": "2026-04-04T02:00:00Z",
+        }})
+        self.assertIn("error", result)
+        self.assertIn("status", result["error"])
+
+    def test_simplified_wrong_status_rejected(self):
+        result = self._patch_and_call({"lambda_deploy_evidence": {
+            "function_name": "devops-tracker-mutation",
+            "version": "42",
+            "updated_at": "2026-04-04T02:00:00Z",
+            "status": "Failed",
+        }})
+        self.assertIn("error", result)
+        self.assertIn("Success", result["error"])
+
+    def test_simplified_invalid_updated_at_rejected(self):
+        result = self._patch_and_call({"lambda_deploy_evidence": {
+            "function_name": "devops-tracker-mutation",
+            "version": "42",
+            "updated_at": "not-a-date",
+            "status": "Success",
+        }})
+        self.assertIn("error", result)
+        self.assertIn("updated_at", result["error"])
+
+    # --- full AWS GetFunctionConfiguration shape (backward compat) ---
+
+    def test_full_aws_shape_accepted(self):
+        """Full GetFunctionConfiguration response still passes."""
+        result = self._patch_and_call({"lambda_deploy_evidence": {
+            "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:devops-tracker-mutation:42",
+            "FunctionName": "devops-tracker-mutation",
+            "Version": "42",
+            "CodeSha256": "abc123",
+            "CodeSize": 12345,
+            "ConfigSha256": "def456",
+            "LastModified": "2026-04-04T02:00:00.000+0000",
+            "RevisionId": "rev-123",
+            "State": "Active",
+            "LastUpdateStatus": "Successful",
+        }})
+        self.assertTrue(result.get("success"), result)
+
+    def test_full_aws_wrong_state_rejected(self):
+        result = self._patch_and_call({"lambda_deploy_evidence": {
+            "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:devops-tracker-mutation:42",
+            "FunctionName": "devops-tracker-mutation",
+            "Version": "42",
+            "CodeSha256": "abc123",
+            "CodeSize": 12345,
+            "ConfigSha256": "def456",
+            "LastModified": "2026-04-04T02:00:00.000+0000",
+            "RevisionId": "rev-123",
+            "State": "Pending",
+            "LastUpdateStatus": "Successful",
+        }})
+        self.assertIn("error", result)
+        self.assertIn("Active", result["error"])
+
+    # --- edge cases ---
+
+    def test_none_evidence_rejected(self):
+        result = self._patch_and_call({"lambda_deploy_evidence": None})
+        self.assertIn("error", result)
+
+    def test_string_evidence_rejected(self):
+        result = self._patch_and_call({"lambda_deploy_evidence": "some-string"})
+        self.assertIn("error", result)
+
+
 class TestDeploySuccessToClosedGate(unittest.TestCase):
     """task -> closed (from deploy-success) requires live_validation_evidence."""
 

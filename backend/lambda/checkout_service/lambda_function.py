@@ -1378,8 +1378,9 @@ def _validate_code_on_main_evidence(
             f"got: '{commit_sha}'"
         )
 
-    # Call GitHub compare API: {sha}...main
-    # status "behind" or "identical" means commit is an ancestor of main
+    # Call GitHub compare API: {sha}...main (base=sha, head=main)
+    # ENC-ISS-161: status "ahead" means main has commits sha doesn't = sha is an ancestor.
+    # status "identical" means sha IS main HEAD. Both are valid.
     compare_path = f"/repos/{owner}/{repo}/compare/{commit_sha}...main"
     status, body = _github_request(compare_path)
     if status == 404:
@@ -1394,11 +1395,11 @@ def _validate_code_on_main_evidence(
         )
 
     compare_status = body.get("status", "")
-    if compare_status not in ("behind", "identical"):
+    if compare_status not in ("ahead", "identical"):
         return False, (
             f"Commit '{commit_sha}' is not on main "
             f"(GitHub compare status: '{compare_status}'). "
-            "Commit must be an ancestor of main (status 'behind' or 'identical')."
+            "Commit must be an ancestor of main (status 'ahead' or 'identical')."
         )
 
     # Stamp verification flag for audit trail

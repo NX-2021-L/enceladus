@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-03.49",
-  "updated_at": "2026-04-03T22:24:41Z",
+  "version": "2026-04-04.50",
+  "updated_at": "2026-04-04T02:48:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1815,7 +1815,7 @@
             "committed": "commit_sha (40-char hex; GitHub API validated); CAI required on record; issues CCI token",
             "pr": "CCI required on task record",
             "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
-            "closed": "code_on_main_evidence {commit_sha (40-char hex)} — GitHub compare API verifies commit is ancestor of main (status: behind or identical); releases checkout"
+            "closed": "code_on_main_evidence {commit_sha (40-char hex)} — GitHub compare API verifies commit is ancestor of main (ENC-ISS-161: compare {sha}...main status: ahead or identical); releases checkout"
           },
           "skipped_statuses": [
             "deploy-init",
@@ -1885,7 +1885,7 @@
             "pr": "CCI required on task record",
             "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
             "deploy-init": "checkout required; no evidence",
-            "deploy-success": "lambda_deploy_evidence object with: function_name (str), version (str), updated_at (ISO 8601 with T), status='Success'. Does NOT accept deploy_evidence (GH Actions) or web_deploy_evidence.",
+            "deploy-success": "lambda_deploy_evidence object. Accepts two shapes (ENC-ISS-162): simplified {function_name, version, updated_at (ISO 8601 with T), status='Success'} or full AWS GetFunctionConfiguration {FunctionArn, FunctionName, Version, CodeSha256, CodeSize, ConfigSha256, LastModified, RevisionId, State='Active', LastUpdateStatus='Successful'}. Auto-detected by presence of function_name (simplified) vs FunctionArn (full). Does NOT accept deploy_evidence (GH Actions) or web_deploy_evidence.",
             "closed": "live_validation_evidence (non-empty string); releases checkout"
           },
           "added_by": "ENC-FTR-041"

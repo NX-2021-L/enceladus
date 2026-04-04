@@ -25,6 +25,11 @@
     "timeout": 30,
     "version": "$LATEST"
   },
+  "alias": {
+    "name": "live",
+    "description": "Alias for provisioned concurrency",
+    "provisioned_concurrency": 1
+  },
   "parity_status": "PENDING_DEPLOY",
   "region": "us-west-2",
   "repo_entry_path": "tools/enceladus-mcp-server/server.py"
