@@ -78,7 +78,7 @@ function isEmptySentinel(val: any): boolean {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function shallowMergeRecord<T extends Record<string, any>>(existing: T, incoming: T): T {
-  const merged = { ...existing }
+  const merged: Record<string, any> = { ...existing }
   for (const key of Object.keys(incoming)) {
     const incomingVal = incoming[key]
     const existingVal = existing[key]
