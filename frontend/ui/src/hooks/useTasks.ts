@@ -42,9 +42,11 @@ export function useTasks(filters?: TaskFilters) {
       const s3 = s3Map.get(live.task_id)
       if (!s3) return live
       // Spread S3 (rich base) then overlay live fields, skipping empty sentinels
-      const merged = { ...s3 } as Record<string, unknown>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const merged: Record<string, any> = { ...s3 }
       for (const key of Object.keys(live)) {
-        const val = (live as Record<string, unknown>)[key]
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const val = (live as any)[key]
         const existing = merged[key]
         // Skip empty sentinels ('', [], null) when S3 has richer data
         if (
