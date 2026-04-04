@@ -60,6 +60,9 @@ const FULL_REFRESH_AGE_MS = 30 * 60 * 1_000 // 30 min
 
 /**
  * Upsert `delta` into `existing` by `idKey`, removing any IDs in `closedIds`.
+ * Delta items are shallow-merged into existing records so that fields present
+ * in the full record but absent from the sparse feed snapshot are preserved
+ * (fixes ENC-ISS-148: acceptance_criteria / intent / history disappearing).
  * Returns a new array only when contents actually changed.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -77,7 +80,11 @@ function mergeById<T extends Record<string, any>>(
     if (!closedIds.has(id)) map.set(id, item)
   }
   for (const item of delta) {
-    map.set(String(item[idKey]), item)
+    const id = String(item[idKey])
+    const prev = map.get(id)
+    // Shallow-merge: spread existing fields first, then overlay delta fields.
+    // Only non-undefined delta values overwrite existing ones.
+    map.set(id, prev ? { ...prev, ...item } : item)
   }
 
   const merged = Array.from(map.values())
