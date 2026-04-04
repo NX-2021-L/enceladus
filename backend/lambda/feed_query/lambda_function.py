@@ -349,7 +349,7 @@ def _ddb_str_set(item: Dict[str, Any], key: str) -> List[str]:
     return []
 
 
-MAX_HISTORY_ENTRIES = 50
+MAX_HISTORY_ENTRIES = 10
 
 
 def _ddb_history(item: Dict[str, Any], key: str = "history") -> List[Dict[str, str]]:

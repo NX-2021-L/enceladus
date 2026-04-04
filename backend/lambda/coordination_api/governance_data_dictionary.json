@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-04.51",
-  "updated_at": "2026-04-04T18:50:00Z",
+  "version": "2026-04-04.52",
+  "updated_at": "2026-04-04T18:55:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -3080,7 +3080,7 @@
       "fields": {
         "max_history_entries": {
           "type": "integer",
-          "definition": "Maximum number of history entries returned per record in the feed API response. When a record has more entries, only the most recent N are included. Current value: 50."
+          "definition": "Maximum number of history entries returned per record in the feed API response. When a record has more entries, only the most recent N are included. Current value: 10. Reduced from initial 50 due to Lambda 6MB response payload limit with 3000+ records."
         },
         "entry_shape": {
           "type": "object",
