@@ -59,6 +59,64 @@ describe('LiveFeedContext', () => {
     vi.useRealTimers()
   })
 
+  it('preserves detail fields when delta contains sparse record update (ENC-ISS-148)', async () => {
+    const baseTime = new Date()
+    const baselineGeneratedAt = baseTime.toISOString()
+    const deltaGeneratedAt = new Date(baseTime.getTime() + 3000).toISOString()
+
+    const fullTask = {
+      ...task('ENC-TSK-001'),
+      intent: 'Prevent data loss on re-render',
+      acceptance_criteria: [{ description: 'Fields preserved', evidence: '', evidence_acceptance: false }],
+      history: [{ timestamp: '2026-02-26T01:00:00Z', status: 'created', description: 'Created' }],
+    }
+
+    mockFetchLiveFeed.mockResolvedValue({
+      generated_at: baselineGeneratedAt,
+      version: '1.0',
+      tasks: [fullTask],
+      issues: [],
+      features: [],
+    })
+
+    // Delta returns a sparse update (only status changed, no intent/AC/history)
+    mockFetchLiveFeedDelta.mockResolvedValue({
+      generated_at: deltaGeneratedAt,
+      version: '1.0',
+      tasks: [{
+        task_id: 'ENC-TSK-001',
+        project_id: 'enceladus',
+        title: 'Task ENC-TSK-001',
+        status: 'in-progress',
+        priority: 'P1',
+        updated_at: deltaGeneratedAt,
+      }],
+      issues: [],
+      features: [],
+      closed_ids: [],
+    })
+
+    const { result } = renderHook(() => useLiveFeed(), { wrapper })
+
+    await waitFor(() => expect(result.current.generatedAt).toBe(baselineGeneratedAt))
+    expect(result.current.tasks[0].intent).toBe('Prevent data loss on re-render')
+    expect(result.current.tasks[0].acceptance_criteria).toHaveLength(1)
+
+    // Trigger delta poll
+    await act(async () => {
+      vi.advanceTimersByTime(3000)
+    })
+
+    await waitFor(() => expect(result.current.generatedAt).toBe(deltaGeneratedAt))
+
+    // Status should be updated
+    expect(result.current.tasks[0].status).toBe('in-progress')
+    // Detail fields from original full record should be preserved
+    expect(result.current.tasks[0].intent).toBe('Prevent data loss on re-render')
+    expect(result.current.tasks[0].acceptance_criteria).toHaveLength(1)
+    expect(result.current.tasks[0].history).toHaveLength(1)
+  })
+
   it('does not update context state when delta payload has no record changes', async () => {
     const baseTime = new Date()
     const baselineGeneratedAt = baseTime.toISOString()
