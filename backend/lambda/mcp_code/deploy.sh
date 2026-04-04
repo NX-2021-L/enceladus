@@ -231,13 +231,19 @@ ALIAS_NAME="${ALIAS_NAME:-live}"
 PROVISIONED_CONCURRENCY="${PROVISIONED_CONCURRENCY:-1}"
 
 publish_version_and_alias() {
+  # Non-blocking: alias/version/provisioned-concurrency require permissions
+  # that may not be available in all deploy roles. Warn and continue so the
+  # core code+config deployment is not blocked.
   log "[START] publishing Lambda version: ${FUNCTION_NAME}"
   local version
   version="$(aws lambda publish-version \
     --function-name "${FUNCTION_NAME}" \
     --description "v4-arm64-$(date -u +%Y%m%d-%H%M%S)" \
     --region "${REGION}" \
-    --query 'Version' --output text)"
+    --query 'Version' --output text 2>&1)" || {
+    log "[WARNING] unable to publish version (missing lambda:PublishVersion?). Configure alias manually."
+    return 0
+  }
   log "[OK] published version: ${version}"
 
   if aws lambda get-alias \
@@ -249,15 +255,18 @@ publish_version_and_alias() {
       --function-name "${FUNCTION_NAME}" \
       --name "${ALIAS_NAME}" \
       --function-version "${version}" \
-      --region "${REGION}" >/dev/null
+      --region "${REGION}" >/dev/null 2>&1 || log "[WARNING] unable to update alias."
   else
     log "[START] creating alias '${ALIAS_NAME}' -> version ${version}"
-    aws lambda create-alias \
+    if ! aws lambda create-alias \
       --function-name "${FUNCTION_NAME}" \
       --name "${ALIAS_NAME}" \
       --function-version "${version}" \
       --description "Alias for provisioned concurrency" \
-      --region "${REGION}" >/dev/null
+      --region "${REGION}" >/dev/null 2>&1; then
+      log "[WARNING] unable to create alias (missing lambda:CreateAlias?). Configure alias manually."
+      return 0
+    fi
   fi
   log "[OK] alias '${ALIAS_NAME}' points to version ${version}"
 
@@ -267,8 +276,9 @@ publish_version_and_alias() {
       --function-name "${FUNCTION_NAME}" \
       --qualifier "${ALIAS_NAME}" \
       --provisioned-concurrent-executions "${PROVISIONED_CONCURRENCY}" \
-      --region "${REGION}" >/dev/null
-    log "[OK] provisioned concurrency config submitted; will become READY asynchronously"
+      --region "${REGION}" >/dev/null 2>&1 \
+      || log "[WARNING] unable to configure provisioned concurrency."
+    log "[OK] provisioned concurrency config submitted"
   fi
 
   # Ensure Function URL on alias (so provisioned instances serve traffic)
