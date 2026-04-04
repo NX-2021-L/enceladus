@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { feedKeys, fetchTasks } from '../api/feeds'
 import { useLiveFeed } from '../contexts/LiveFeedContext'
 import { PRIORITY_ORDER } from '../lib/constants'
+import type { Task } from '../types/feeds'
 import type { TaskFilters } from '../types/filters'
 
 function compareDates(a: string | null, b: string | null): number {
@@ -25,8 +26,37 @@ export function useTasks(filters?: TaskFilters) {
   // S3 feed as fallback for initial load before LiveFeedProvider hydrates.
   const s3Query = useQuery({ queryKey: feedKeys.tasks, queryFn: fetchTasks })
 
-  // Prefer live data; fall back to S3 when live context hasn't loaded yet.
-  const allTasks = hasLiveSnapshot ? liveTasks : (s3Query.data?.tasks ?? [])
+  // ENC-ISS-148: The live feed API returns sparse task snapshots (missing
+  // description, history, checklist, etc.) while S3 has full records.
+  // When both are available, merge live data onto S3 data so detail fields
+  // are preserved while status/priority stay current from live polling.
+  const allTasks = useMemo(() => {
+    if (!hasLiveSnapshot) return s3Query.data?.tasks ?? []
+    const s3Tasks = s3Query.data?.tasks
+    if (!s3Tasks?.length) return liveTasks
+
+    const s3Map = new Map<string, Task>()
+    for (const t of s3Tasks) s3Map.set(t.task_id, t)
+
+    return liveTasks.map((live) => {
+      const s3 = s3Map.get(live.task_id)
+      if (!s3) return live
+      // Spread S3 (rich base) then overlay live fields, skipping empty sentinels
+      const merged = { ...s3 } as Record<string, unknown>
+      for (const key of Object.keys(live)) {
+        const val = (live as Record<string, unknown>)[key]
+        const existing = merged[key]
+        // Skip empty sentinels ('', [], null) when S3 has richer data
+        if (
+          (val === '' || val === null || (Array.isArray(val) && val.length === 0)) &&
+          existing != null && existing !== '' && !(Array.isArray(existing) && existing.length === 0)
+        ) continue
+        merged[key] = val
+      }
+      return merged as Task
+    })
+  }, [hasLiveSnapshot, liveTasks, s3Query.data?.tasks])
+
   const isPending = !hasLiveSnapshot && s3Query.isPending
   const isError = !hasLiveSnapshot && s3Query.isError
 
