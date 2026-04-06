@@ -5560,7 +5560,7 @@ async def _documents_patch(args: dict) -> list[TextContent]:
         )
 
     body: Dict[str, Any] = {}
-    for key in ("title", "content", "description", "keywords", "related_items", "status", "file_name"):
+    for key in ("title", "content", "description", "keywords", "related_items", "status", "file_name", "document_maturity_state"):
         if key in args and args.get(key) is not None:
             body[key] = args.get(key)
     if not body:
