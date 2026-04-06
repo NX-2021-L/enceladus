@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-06.52",
-  "updated_at": "2026-04-06T18:11:29Z",
+  "version": "2026-04-06.53",
+  "updated_at": "2026-04-06T19:58:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -3204,7 +3204,7 @@
       }
     },
     "docstore.document": {
-      "description": "Document store document record with GDMP maturity lifecycle (ENC-FTR-065). Documents track compliance and maturity state through a governed pipeline.",
+      "description": "Document store document record with GDMP maturity lifecycle (ENC-FTR-065). Documents track compliance and maturity state through a governed pipeline. document_maturity_state is forwarded through MCP server documents.patch handler (ENC-ISS-167).",
       "fields": {
         "document_maturity_state": {
           "type": "enum",
