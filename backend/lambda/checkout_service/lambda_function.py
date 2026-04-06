@@ -43,7 +43,7 @@ Environment variables:
     CHECKOUT_ASSISTANT_KEY        secret key for checkout-service-assistant auto-remediation
     COORDINATION_API_BASE         base URL for coordination API (default: https://jreese.net/api/v1/coordination)
 
-Related: ENC-FTR-037, ENC-ISS-092, ENC-FTR-041, ENC-ISS-106
+Related: ENC-FTR-037, ENC-ISS-092, ENC-FTR-041, ENC-ISS-106, ENC-ISS-172
 
 ENC-ISS-092: Added ``transition_type`` field support. Tasks may now declare one of four
 lifecycle arcs (github_pr_deploy, web_deploy, code_only, no_code) that determine which
@@ -65,6 +65,13 @@ subtask_ids) cannot advance from coding-complete onward unless all direct childr
 have reached at least the target status. Children at 'closed' satisfy any stage.
 The gate only applies to agent-initiated advances through the checkout service;
 PWA user_initiated transitions bypass this gate (same as component enforcement).
+
+ENC-ISS-172 / ENC-TSK-C15: Added component registry pre-validation to checkout.task.
+_handle_checkout() now validates task.transition_type against the component registry
+BEFORE writing the checkout lock, status mutation, or CAI token. If any registered
+component enforces a stricter minimum transition_type than the task declares, checkout
+is rejected with a 400 error. This surfaces incompatibilities at the earliest possible
+enforcement point, before transition_type becomes immutable per ENC-FTR-060.
 """
 
 from __future__ import annotations
@@ -788,6 +795,70 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
         )
 
     coordination_request_id = body.get("coordination_request_id", "")
+
+    # ENC-TSK-C15 / ENC-ISS-172: Component registry pre-validation.
+    # Validate transition_type against component registry BEFORE writing any
+    # state (checkout lock, status mutation, CAI token). This surfaces
+    # incompatibilities at the earliest enforcement point, before
+    # transition_type becomes immutable per ENC-FTR-060.
+    pre_status, pre_task = _get_task(project_id, task_id)
+    if pre_status != 200:
+        return _error(pre_status, pre_task.get("error", f"Task not found: {task_id}"))
+
+    pre_components = pre_task.get("components") or []
+    if pre_components:
+        pre_transition_type = (pre_task.get("transition_type") or "github_pr_deploy").strip().lower()
+        required_type = _get_required_transition_type(pre_components)
+        if required_type is not None:
+            task_rank = STRICTNESS_RANK.get(pre_transition_type, 99)
+            required_rank = STRICTNESS_RANK.get(required_type, 0)
+            if task_rank > required_rank:
+                # Identify the specific conflicting component for the error message
+                conflicting_component = None
+                for cid in pre_components:
+                    try:
+                        resp = _ddb.get_item(
+                            TableName=COMPONENTS_TABLE,
+                            Key={"component_id": {"S": str(cid)}},
+                        )
+                        item = resp.get("Item")
+                        if not item:
+                            continue
+                        comp_type = item.get("transition_type", {}).get("S", "github_pr_deploy")
+                        comp_rank = STRICTNESS_RANK.get(comp_type, 0)
+                        if comp_rank < task_rank:
+                            conflicting_component = cid
+                            break
+                    except Exception:
+                        continue
+                return _validation_error(
+                    400,
+                    (
+                        f"Task transition_type '{pre_transition_type}' (rank {task_rank}) is less strict "
+                        f"than required '{required_type}' (rank {required_rank}) enforced by component "
+                        f"'{conflicting_component or pre_components[0]}'. Update task.transition_type "
+                        f"to at least '{required_type}' before checking out."
+                    ),
+                    task_id=task_id,
+                    target_status="in-progress",
+                    transition_type=pre_transition_type,
+                    provider=provider,
+                    component_required_transition_type=required_type,
+                    extra_details={
+                        "task_transition_type": pre_transition_type,
+                        "conflicting_component": conflicting_component or pre_components[0],
+                        "components": pre_components,
+                    },
+                    example_fix={
+                        "tool": "tracker_set",
+                        "arguments": {
+                            "record_id": task_id,
+                            "field": "transition_type",
+                            "value": required_type,
+                            "governance_hash": "<governance_hash>",
+                        },
+                    },
+                )
 
     # Step 1: Check out the task (sets active_agent_session=True)
     status, result = _checkout_task(project_id, task_id, provider)

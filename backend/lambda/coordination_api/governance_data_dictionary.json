@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-06.54",
-  "updated_at": "2026-04-06T21:00:00Z",
+  "version": "2026-04-06.55",
+  "updated_at": "2026-04-06T23:06:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1754,6 +1754,11 @@
               "releases_checkout": true
             }
           }
+        },
+        "component_registry_prevalidation": {
+          "type": "object",
+          "definition": "checkout.task validates transition_type against the component registry before writing any state. If any registered component enforces a minimum transition_type stricter than the task's declared type, checkout is rejected with a 400 error before the checkout lock, CAI token, or status mutation is written. This surfaces incompatibilities before transition_type becomes immutable per ENC-FTR-060. Introduced by ENC-TSK-C15 (ENC-ISS-172).",
+          "usage_guidance": "If checkout.task returns a 400 with 'conflicting_component' in the error details, the agent must update task.transition_type via tracker.set to at least the required type before retrying checkout. Empty or absent task.components bypasses this check (no components = no constraint)."
         }
       }
     },
