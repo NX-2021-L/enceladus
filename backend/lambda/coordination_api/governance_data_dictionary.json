@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-06.53",
-  "updated_at": "2026-04-06T19:58:00Z",
+  "version": "2026-04-06.54",
+  "updated_at": "2026-04-06T21:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -3200,6 +3200,67 @@
         "governing_feature": {
           "type": "string",
           "definition": "ENC-FTR-066"
+        }
+      }
+    },
+    "governance.authority": {
+      "description": "Governance file mutation authority envelope (ENC-TSK-C13, ENC-ISS-171). Defines the write-authority constraint for governance files stored in the S3 governance store. governance.update is architecturally unavailable in code-mode agent sessions — all governance file mutations require execution by a privileged terminal agent under product-lead IAM via direct S3 archive+put.",
+      "fields": {
+        "governed_files": {
+          "type": "array",
+          "definition": "The governance files subject to the authority constraint. Each entry identifies a file_name and its S3 target key.",
+          "items": [
+            {
+              "file_name": "agents.md",
+              "s3_target": "s3://jreese-net/governance/live/agents.md"
+            },
+            {
+              "file_name": "governance_data_dictionary.json",
+              "s3_target": "s3://jreese-net/governance/live/governance_data_dictionary.json"
+            }
+          ]
+        },
+        "mutation_execution_path": {
+          "type": "string",
+          "definition": "The only authorized execution path for governance file mutations: product-lead IAM (io-dev-admin) via direct S3 archive+put, dispatched by the coordination lead to a Codex terminal agent. Code-mode agent sessions (enceladus-agent-cli IAM) have explicit deny on all S3 writes.",
+          "value": "coordination_lead → codex_terminal_agent → s3:PutObject (io-dev-admin IAM)"
+        },
+        "agent_delegation_protocol": {
+          "type": "string",
+          "definition": "When an agent session produces governance file content, it must NOT attempt governance.update. Instead: (1) prepare the full updated file content, (2) append a GOVERNANCE_SYNC_REQUIRED HANDOFF block to the task worklog with file_name, content_source, s3_target, archive_path, and change_summary, (3) advance to coding-complete and await coordination lead dispatch.",
+          "reference": "agents.md §13 Governance File Authority"
+        },
+        "handoff_block_fields": {
+          "type": "object",
+          "definition": "Required fields in a GOVERNANCE_SYNC_REQUIRED HANDOFF block appended to a task worklog when governance file changes are produced by an agent session.",
+          "fields": {
+            "file_name": {
+              "type": "string",
+              "definition": "The governance file being updated (e.g. agents.md, governance_data_dictionary.json)."
+            },
+            "content_source": {
+              "type": "string",
+              "definition": "Where the updated content lives — repo file path + commit SHA, or a document ID from the document store."
+            },
+            "s3_target": {
+              "type": "string",
+              "definition": "Full S3 URI for the live governance file (e.g. s3://jreese-net/governance/live/agents.md)."
+            },
+            "archive_path": {
+              "type": "string",
+              "definition": "S3 URI pattern for the pre-mutation backup (e.g. s3://jreese-net/governance/archive/agents.md/2026-04-06T21:00:00Z.bak)."
+            },
+            "change_summary": {
+              "type": "string",
+              "definition": "One-line description of what changed in the governance file."
+            }
+          }
+        },
+        "code_mode_availability": {
+          "type": "string",
+          "enum": ["unavailable"],
+          "definition": "governance.update is NOT available in code-mode agent sessions. The MCP server exposes the tool in the execute action list, but the underlying coordination_api requires product-lead IAM scope (io-dev-admin) which code-mode sessions do not have. Attempting it returns a permission error.",
+          "governing_issue": "ENC-ISS-171"
         }
       }
     },
