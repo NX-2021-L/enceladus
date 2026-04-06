@@ -664,6 +664,71 @@ Resources:
           Value: neo4j-backup
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-C10: Graph Health Metrics Lambda (CloudWatch proxy path)
+  # ---------------------------------------------------------------------------
+
+  GraphHealthMetricsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 120
+      Architectures: [arm64]
+      Role: !GetAtt GraphHealthMetricsRole.Arn
+      Environment:
+        Variables:
+          NEO4J_SECRET_NAME: enceladus/neo4j/auradb-credentials
+          CLOUDWATCH_NAMESPACE: Enceladus/GraphHealth
+          PROJECT_ID: enceladus
+          SECRETS_REGION: !Ref "AWS::Region"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: graph-health-metrics
+
+  GraphHealthMetricsSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-graph-health-daily${EnvironmentSuffix}"
+      ScheduleExpression: "cron(0 8 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt GraphHealthMetricsFunction.Arn
+          Id: graph-health-daily
+
+  GraphHealthMetricsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GraphHealthMetricsFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GraphHealthMetricsSchedule.Arn
+
+  GraphConnectivityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-graph-connectivity-low${EnvironmentSuffix}"
+      AlarmDescription: >-
+        Graph edge density below threshold indicates graph is approaching
+        disconnection — PLAN_CONTAINS / IMPLEMENTS traversals may degrade.
+      Namespace: Enceladus/GraphHealth
+      MetricName: FiedlerAlgebraicConnectivity
+      Dimensions:
+        - Name: ProjectId
+          Value: enceladus
+      Statistic: Average
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 0.1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+
+  # ---------------------------------------------------------------------------
   # SQS -> Lambda Event Source Mappings
   # ---------------------------------------------------------------------------
 
@@ -1290,6 +1355,44 @@ Resources:
                 Action:
                   - s3:PutObject
                 Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}neo4j-backups/*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ENC-TSK-C10: Graph Health Metrics Lambda IAM Role
+  GraphHealthMetricsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "enceladus-graph-health-metrics-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GraphHealthMetricsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              - Sid: SecretsManagerNeo4j
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials*"
       Tags:
         - Key: Project
           Value: enceladus
