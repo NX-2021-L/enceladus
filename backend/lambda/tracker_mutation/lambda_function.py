@@ -2712,20 +2712,37 @@ def _handle_update_field(
                     ],
                 )
 
-    # ENC-FTR-058: Plan objectives_set immutability enforcement
+    # ENC-FTR-058 / ENC-TSK-C09: Plan objectives_set immutability enforcement
+    # Objectives are append-only unless: plan is 'incomplete', or a governed removal/replacement
+    # signal is present from the MCP server's plan.remove_objective / plan.replace_objectives actions.
     if record_type == "plan" and field == "objectives_set":
-        # Objectives can only be appended, never removed, unless plan is in 'incomplete' status.
-        # Read current plan status to check.
+        is_governed_removal = body.get("remove_objective") is True
+        is_governed_replacement = body.get("replace_objectives") is True
         try:
             key = {"project_id": {"S": project_id}, "record_id": {"S": f"plan#{record_id}"}}
             resp = _get_ddb().get_item(TableName=DYNAMODB_TABLE, Key=key, ConsistentRead=True)
             plan_item = resp.get("Item", {})
             plan_status = (plan_item.get("status", {}).get("S", "") or "").strip().lower()
-            if plan_status != "incomplete":
-                # Check that new value is a superset of existing objectives
-                existing_objectives = set()
-                for obj in plan_item.get("objectives_set", {}).get("L", []):
-                    existing_objectives.add(obj.get("S", ""))
+
+            # Governed replacement is only allowed in 'drafted' status
+            if is_governed_replacement and plan_status != "drafted":
+                return _tracker_field_validation_error(
+                    f"Bulk replacement of objectives is only permitted in drafted status. "
+                    f"Use plan.add_objective or plan.remove_objective to modify an active plan. "
+                    f"Current plan status: {plan_status}.",
+                    field=field, record_id=record_id, record_type=record_type,
+                    expected_type="drafted_only",
+                    governed_rules=["plan.replace_objectives requires plan status 'drafted' (ENC-TSK-C09)."],
+                )
+
+            # Skip append-only enforcement for governed removals, replacements, or incomplete status
+            if not is_governed_removal and not is_governed_replacement and plan_status != "incomplete":
+                # Semantic set-difference on task IDs (ENC-TSK-C09: fix superset false-positive)
+                existing_objectives = {
+                    obj.get("S", "").strip()
+                    for obj in plan_item.get("objectives_set", {}).get("L", [])
+                    if obj.get("S", "").strip()
+                }
                 new_objectives = set()
                 if isinstance(value, list):
                     new_objectives = {str(v).strip() for v in value if str(v).strip()}

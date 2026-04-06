@@ -1049,6 +1049,16 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     if document_subtype not in DOCUMENT_SUBTYPES:
         return _error(400, f"Invalid document_subtype '{document_subtype}'. Must be one of: {', '.join(sorted(DOCUMENT_SUBTYPES))}")
 
+    # ENC-TSK-C10 / ENC-FTR-065: Document maturity state (GDMP pipeline)
+    VALID_MATURITY_STATES = {"raw", "compliant", "contextualized", "mature"}
+    document_maturity_state = str(body.get("document_maturity_state", "raw")).strip().lower()
+    if document_maturity_state not in VALID_MATURITY_STATES:
+        return _error(
+            400,
+            f"Invalid document_maturity_state '{document_maturity_state}'. "
+            f"Must be one of: {', '.join(sorted(VALID_MATURITY_STATES))}",
+        )
+
     # Handoff-specific fields
     handoff_fields: Dict[str, Any] = {}
     if document_subtype == "handoff":
@@ -1105,6 +1115,7 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         "compliance_score": {"N": str(compliance["compliance_score"])},
         "compliance_warnings": _serialize_list(compliance["compliance_warnings"]),
         "compliance_checked_at": {"S": now},
+        "document_maturity_state": {"S": document_maturity_state},
     }
 
     # Add handoff-specific fields to DynamoDB item
@@ -1232,6 +1243,11 @@ def _list_by_project(qs: Dict) -> Dict:
     if subtype_filter:
         docs = [d for d in docs if d.get("document_subtype", "general") == subtype_filter]
 
+    # ENC-TSK-C10 / ENC-FTR-065: maturity_state filter
+    maturity_filter = qs.get("maturity_state", "").strip().lower()
+    if maturity_filter:
+        docs = [d for d in docs if d.get("document_maturity_state", "") == maturity_filter]
+
     docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
     sliced = docs[:PAGE_SIZE]
     return _response(
@@ -1340,6 +1356,19 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             )
         expr_parts.append("file_name = :file_name")
         attr_values[":file_name"] = {"S": file_name}
+
+    # ENC-TSK-C10 / ENC-FTR-065: Document maturity state update
+    if "document_maturity_state" in body:
+        VALID_MATURITY_STATES_PATCH = {"raw", "compliant", "contextualized", "mature"}
+        dms = str(body["document_maturity_state"]).strip().lower()
+        if dms not in VALID_MATURITY_STATES_PATCH:
+            return _error(
+                400,
+                f"Invalid document_maturity_state '{dms}'. "
+                f"Must be one of: {', '.join(sorted(VALID_MATURITY_STATES_PATCH))}",
+            )
+        expr_parts.append("document_maturity_state = :dms")
+        attr_values[":dms"] = {"S": dms}
 
     # Handoff status transitions (ENC-FTR-061)
     current_subtype = existing.get("document_subtype", {}).get("S", "general")

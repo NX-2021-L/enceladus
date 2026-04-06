@@ -6613,12 +6613,15 @@ if ENABLE_HANDOFF_PRIMITIVE:
         "tool": "document_complete_handoff", "requires_governance_hash": True,
     }
 
-# ENC-FTR-058 / ENC-TSK-A97: Plan action aliases in code-mode surface
+# ENC-FTR-058 / ENC-TSK-A97 / ENC-TSK-C09: Plan action aliases in code-mode surface
 _SEARCH_ACTIONS["plan.objectives_status"] = {"tool": "plan_objectives_status"}
 _EXECUTE_ACTIONS["plan.create"] = {"tool": "tracker_create", "requires_governance_hash": True}
-_EXECUTE_ACTIONS["plan.checkout"] = {"tool": "checkout_task", "requires_governance_hash": True}
-_EXECUTE_ACTIONS["plan.advance"] = {"tool": "advance_task_status", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.checkout"] = {"tool": "plan_checkout", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.advance"] = {"tool": "plan_advance", "requires_governance_hash": True}
 _EXECUTE_ACTIONS["plan.add_objective"] = {"tool": "plan_add_objective", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.remove_objective"] = {"tool": "plan_remove_objective", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.reorder_objectives"] = {"tool": "plan_reorder_objectives", "requires_governance_hash": True}
+_EXECUTE_ACTIONS["plan.replace_objectives"] = {"tool": "plan_replace_objectives", "requires_governance_hash": True}
 
 _RECORD_CONTEXT_MODES = {"record", "issue", "task", "feature", "lesson"}
 
@@ -8466,6 +8469,282 @@ async def _plan_add_objective(args: dict) -> list[TextContent]:
     })
 
 
+# ENC-TSK-C09: Dedicated plan checkout handler — routes to checkout service plan endpoint
+async def _plan_checkout(args: dict) -> list[TextContent]:
+    """plan_checkout — Check out a plan via the checkout service."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = str(args.get("record_id") or "").strip()
+    if not record_id:
+        return _result_text({"error": "record_id is required (plan ID)"})
+
+    active_agent_session_id = (args.get("active_agent_session_id") or "").strip()
+    if not active_agent_session_id:
+        return _result_text({"error": "active_agent_session_id is required"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "plan":
+        return _result_text({"error": f"plan.checkout requires a plan record_id, got {record_type}"})
+
+    payload: Dict[str, Any] = {
+        "active_agent_session_id": active_agent_session_id,
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("coordination_request_id"):
+        payload["coordination_request_id"] = args["coordination_request_id"]
+
+    resp = _checkout_api_request("POST", f"/{project_id}/plan/{rid}/checkout", payload=payload)
+    return _result_text(resp)
+
+
+# ENC-TSK-C09: Dedicated plan advance handler — routes to checkout service plan endpoint
+async def _plan_advance(args: dict) -> list[TextContent]:
+    """plan_advance — Advance a plan's lifecycle status via the checkout service."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = str(args.get("record_id") or "").strip()
+    if not record_id:
+        return _result_text({"error": "record_id is required (plan ID)"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "plan":
+        return _result_text({"error": f"plan.advance requires a plan record_id, got {record_type}"})
+
+    payload: Dict[str, Any] = {
+        "target_status": args.get("target_status", ""),
+        "provider": args.get("provider", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("transition_evidence"):
+        payload["transition_evidence"] = args["transition_evidence"]
+
+    resp = _checkout_api_request("POST", f"/{project_id}/plan/{rid}/advance", payload=payload)
+    return _result_text(resp)
+
+
+# ENC-TSK-C09: plan.remove_objective — remove a task from a plan's objectives_set
+async def _plan_remove_objective(args: dict) -> list[TextContent]:
+    """Remove a task ID from a plan's objectives_set. Cannot remove closed objectives."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = str(args.get("record_id") or "").strip()
+    objective_task_id = str(args.get("objective_task_id") or "").strip()
+    if not record_id:
+        return _result_text({"error": "record_id is required (plan ID)"})
+    if not objective_task_id:
+        return _result_text({"error": "objective_task_id is required (task ID to remove)"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "plan":
+        return _result_text({"error": f"plan.remove_objective requires a plan record_id, got {record_type}"})
+
+    # Read current plan
+    plan_resp = _tracker_api_request("GET", f"/{project_id}/plan/{rid}")
+    if isinstance(plan_resp, dict) and plan_resp.get("error"):
+        return _result_text(plan_resp)
+    plan = plan_resp.get("record", plan_resp) if isinstance(plan_resp, dict) else plan_resp
+
+    current_objectives = plan.get("objectives_set", []) or []
+    if not isinstance(current_objectives, list):
+        current_objectives = []
+
+    if objective_task_id not in current_objectives:
+        return _result_text({
+            "error": f"Objective {objective_task_id} is not in the plan's objectives_set"
+        })
+
+    # Check if the objective task is closed — cannot remove closed objectives
+    try:
+        obj_proj, obj_type, obj_rid = _parse_record_id(objective_task_id)
+        obj_resp = _tracker_api_request("GET", f"/{obj_proj}/{obj_type}/{obj_rid}")
+        obj_record = obj_resp.get("record", obj_resp) if isinstance(obj_resp, dict) else obj_resp
+        obj_status = obj_record.get("status", "unknown") if isinstance(obj_record, dict) else "unknown"
+    except (ValueError, Exception):
+        obj_status = "unknown"
+
+    terminal_statuses = {"closed", "completed", "complete", "archived"}
+    if obj_status.lower().strip() in terminal_statuses:
+        return _result_text({
+            "error": f"Cannot remove closed objective {objective_task_id} from plan "
+                     f"\u2014 closed objectives are permanent evidence of completed work."
+        })
+
+    # Remove objective and write back
+    updated_objectives = [o for o in current_objectives if o != objective_task_id]
+    # Use tracker.set directly (not the append-only PATCH which blocks removals)
+    # The tracker_mutation Lambda allows removal when the plan status permits it
+    # via the objectives_set guard (status == 'incomplete' or via remove_objective action)
+    patch_payload: Dict[str, Any] = {
+        "field": "objectives_set",
+        "value": updated_objectives,
+        "governance_hash": args.get("governance_hash", ""),
+        "remove_objective": True,  # Signal to tracker_mutation that this is a governed removal
+    }
+    if args.get("provider"):
+        patch_payload["provider"] = args["provider"]
+
+    patch_resp = _tracker_api_request("PATCH", f"/{project_id}/plan/{rid}", payload=patch_payload)
+    if isinstance(patch_resp, dict) and patch_resp.get("error"):
+        return _result_text(patch_resp)
+
+    return _result_text({
+        "success": True,
+        "record_id": record_id,
+        "objective_task_id": objective_task_id,
+        "action": "removed",
+        "objectives_set": updated_objectives,
+    })
+
+
+# ENC-TSK-C09: plan.reorder_objectives — reorder objectives_set (permutation only)
+async def _plan_reorder_objectives(args: dict) -> list[TextContent]:
+    """Reorder a plan's objectives_set. Must be a permutation (same elements, different order)."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = str(args.get("record_id") or "").strip()
+    ordered_objective_ids = args.get("ordered_objective_ids")
+    if not record_id:
+        return _result_text({"error": "record_id is required (plan ID)"})
+    if not isinstance(ordered_objective_ids, list) or not ordered_objective_ids:
+        return _result_text({"error": "ordered_objective_ids is required (array of objective task IDs)"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "plan":
+        return _result_text({"error": f"plan.reorder_objectives requires a plan record_id, got {record_type}"})
+
+    # Read current plan
+    plan_resp = _tracker_api_request("GET", f"/{project_id}/plan/{rid}")
+    if isinstance(plan_resp, dict) and plan_resp.get("error"):
+        return _result_text(plan_resp)
+    plan = plan_resp.get("record", plan_resp) if isinstance(plan_resp, dict) else plan_resp
+
+    current_objectives = plan.get("objectives_set", []) or []
+    if not isinstance(current_objectives, list):
+        current_objectives = []
+
+    # Validate permutation: same elements, no additions or deletions
+    if set(ordered_objective_ids) != set(current_objectives) or len(ordered_objective_ids) != len(current_objectives):
+        return _result_text({
+            "error": "ordered_objective_ids must be a permutation of the current objectives_set "
+                     "(same elements, different order \u2014 no additions or deletions). "
+                     f"Current: {current_objectives}. Provided: {ordered_objective_ids}."
+        })
+
+    # Write back the reordered list (same set, tracker guard passes since no removals)
+    patch_payload: Dict[str, Any] = {
+        "field": "objectives_set",
+        "value": ordered_objective_ids,
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("provider"):
+        patch_payload["provider"] = args["provider"]
+
+    patch_resp = _tracker_api_request("PATCH", f"/{project_id}/plan/{rid}", payload=patch_payload)
+    if isinstance(patch_resp, dict) and patch_resp.get("error"):
+        return _result_text(patch_resp)
+
+    return _result_text({
+        "success": True,
+        "record_id": record_id,
+        "action": "reordered",
+        "objectives_set": ordered_objective_ids,
+    })
+
+
+# ENC-TSK-C09: plan.replace_objectives — bulk replace objectives_set (drafted-only)
+async def _plan_replace_objectives(args: dict) -> list[TextContent]:
+    """Replace a plan's entire objectives_set. Only permitted when plan status is 'drafted'."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    record_id = str(args.get("record_id") or "").strip()
+    objective_ids = args.get("objective_ids")
+    if not record_id:
+        return _result_text({"error": "record_id is required (plan ID)"})
+    if not isinstance(objective_ids, list):
+        return _result_text({"error": "objective_ids is required (array of objective task IDs)"})
+
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    if record_type != "plan":
+        return _result_text({"error": f"plan.replace_objectives requires a plan record_id, got {record_type}"})
+
+    # RISK-C08: Read plan status with ConsistentRead=True FIRST
+    # The tracker API GET uses ConsistentRead by default for single-record fetches
+    plan_resp = _tracker_api_request("GET", f"/{project_id}/plan/{rid}")
+    if isinstance(plan_resp, dict) and plan_resp.get("error"):
+        return _result_text(plan_resp)
+    plan = plan_resp.get("record", plan_resp) if isinstance(plan_resp, dict) else plan_resp
+
+    plan_status = str(plan.get("status", "")).lower().strip()
+    if plan_status != "drafted":
+        return _result_text({
+            "error": "Bulk replacement of objectives is only permitted in drafted status. "
+                     "Use plan.add_objective or plan.remove_objective to modify an active plan. "
+                     f"Current plan status: {plan_status}."
+        })
+
+    # Validate each objective ID format
+    for obj_id in objective_ids:
+        if not isinstance(obj_id, str) or not obj_id.strip():
+            return _result_text({"error": f"Each objective_id must be a non-empty string, got: {obj_id!r}"})
+        try:
+            _parse_record_id(obj_id.strip())
+        except ValueError as exc:
+            return _result_text({"error": f"Invalid objective_id '{obj_id}': {exc}"})
+
+    clean_ids = [obj_id.strip() for obj_id in objective_ids]
+
+    # Write the replacement set (bypass append-only guard via replace_objectives signal)
+    patch_payload: Dict[str, Any] = {
+        "field": "objectives_set",
+        "value": clean_ids,
+        "governance_hash": args.get("governance_hash", ""),
+        "replace_objectives": True,  # Signal to tracker_mutation for full replacement
+    }
+    if args.get("provider"):
+        patch_payload["provider"] = args["provider"]
+
+    patch_resp = _tracker_api_request("PATCH", f"/{project_id}/plan/{rid}", payload=patch_payload)
+    if isinstance(patch_resp, dict) and patch_resp.get("error"):
+        return _result_text(patch_resp)
+
+    return _result_text({
+        "success": True,
+        "record_id": record_id,
+        "action": "replaced",
+        "objectives_set": clean_ids,
+    })
+
+
 # -------------------------------------------------------------------
 # ENC-FTR-052: Governed Lesson Primitive handlers
 # -------------------------------------------------------------------
@@ -8611,9 +8890,14 @@ _TOOL_HANDLERS = {
     "tracker_create_lesson": _tracker_create_lesson,
     "tracker_extend_lesson": _tracker_extend_lesson,
     "tracker_list_lessons": _tracker_list_lessons,
-    # ENC-FTR-058 / ENC-TSK-A97: Plan tools
+    # ENC-FTR-058 / ENC-TSK-A97 / ENC-TSK-C09: Plan tools
     "plan_objectives_status": _plan_objectives_status,
+    "plan_checkout": _plan_checkout,
+    "plan_advance": _plan_advance,
     "plan_add_objective": _plan_add_objective,
+    "plan_remove_objective": _plan_remove_objective,
+    "plan_reorder_objectives": _plan_reorder_objectives,
+    "plan_replace_objectives": _plan_replace_objectives,
     # ENC-FTR-061: Governed Handoff Primitive
     "document_create_handoff": _document_create_handoff,
     "document_claim_handoff": _document_claim_handoff,
