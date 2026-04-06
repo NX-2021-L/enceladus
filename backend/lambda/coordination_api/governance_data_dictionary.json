@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-04.51",
-  "updated_at": "2026-04-04T18:50:00Z",
+  "version": "2026-04-06.52",
+  "updated_at": "2026-04-06T18:11:29Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -445,6 +445,10 @@
           },
           "definition": "IDs of related features. Cross-references for traceability.",
           "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+        },
+        "ogtm_required": {
+          "type": "boolean",
+          "definition": "Set to true for any feature introducing a new relational field or edge type. Feature may not advance past planned status until ogtm_compliance_evidence is populated."
         }
       }
     },
@@ -2970,8 +2974,8 @@
           "items": {
             "type": "string"
           },
-          "definition": "Array of record IDs (tasks, issues, features — not lessons) that this plan governs. Append-only when plan status is not 'incomplete'. Immutability enforced at DynamoDB level.",
-          "usage_guidance": "Set via tracker.set or plan.add_objective MCP action. Removal blocked unless plan is 'incomplete'."
+          "definition": "Array of record IDs (tasks, issues, features — not lessons) that this plan governs. Append-only when plan status is not 'incomplete' unless using governed plan.remove_objective or plan.replace_objectives actions. Immutability enforced at DynamoDB level.",
+          "usage_guidance": "Set via tracker.set or plan.add_objective MCP action. Removal via plan.remove_objective (blocked for closed objectives). Reorder via plan.reorder_objectives (permutation only). Bulk replace via plan.replace_objectives (drafted status only)."
         },
         "attached_documents": {
           "type": "array",
@@ -2997,6 +3001,50 @@
         "checkout_state": {
           "type": "string",
           "definition": "Plan checkout state. Empty when not checked out."
+        },
+        "plan.add_objective": {
+          "type": "execute_action",
+          "definition": "Append a single task ID to objectives_set. Idempotent — returns already_present if duplicate.",
+          "arguments": {
+            "record_id": "plan ID",
+            "objective_task_id": "task ID to add",
+            "governance_hash": "required"
+          },
+          "guard_conditions": "None beyond governance_hash. Append-only enforcement in tracker_mutation.",
+          "authority_envelope": "any governed session"
+        },
+        "plan.remove_objective": {
+          "type": "execute_action",
+          "definition": "Remove a single task ID from objectives_set. Blocked if the objective task status is closed/completed/archived.",
+          "arguments": {
+            "record_id": "plan ID",
+            "objective_task_id": "task ID to remove",
+            "governance_hash": "required"
+          },
+          "guard_conditions": "Cannot remove closed objectives — permanent evidence of completed work.",
+          "authority_envelope": "any governed session"
+        },
+        "plan.reorder_objectives": {
+          "type": "execute_action",
+          "definition": "Reorder objectives_set. Must be a permutation of the current set (same elements, different order — no additions or deletions).",
+          "arguments": {
+            "record_id": "plan ID",
+            "ordered_objective_ids": "array of all current objective IDs in new order",
+            "governance_hash": "required"
+          },
+          "guard_conditions": "Must be exact permutation. Returns 400 if elements differ.",
+          "authority_envelope": "any governed session"
+        },
+        "plan.replace_objectives": {
+          "type": "execute_action",
+          "definition": "Bulk replace entire objectives_set. Only permitted when plan status is 'drafted'. Returns 400 for any other status.",
+          "arguments": {
+            "record_id": "plan ID",
+            "objective_ids": "array of replacement objective task IDs",
+            "governance_hash": "required"
+          },
+          "guard_conditions": "Plan status must be 'drafted'. ConsistentRead=True used for status check (RISK-C08).",
+          "authority_envelope": "any governed session, drafted plans only"
         }
       }
     },
@@ -3131,6 +3179,46 @@
         "api_routes": {
           "type": "array",
           "definition": "API Gateway routes: POST/DELETE .../plan/{planId}/checkout, POST .../plan/{planId}/advance, POST .../plan/{planId}/log, GET .../plan/{planId}/status."
+        }
+      }
+    },
+    "governance.ogtm": {
+      "description": "Ontological Graph Traversability Metric gate (ENC-FTR-066). Every new record type, relational field, or edge type introduced to Enceladus must have a corresponding graph_sync projection handler and graph_query_api _ALLOWED_EDGE_TYPES registration before the feature may advance past planned status.",
+      "fields": {
+        "compliance_requirements": {
+          "type": "object",
+          "definition": "Four requirements: (1) graph_sync _reconcile_edges() handler addition, (2) RELATIONSHIP_TYPE_TO_EDGE_LABEL entry, (3) graph_query_api _ALLOWED_EDGE_TYPES registration, (4) E2E tracker.graphsearch validation."
+        },
+        "evidence_template": {
+          "type": "object",
+          "definition": "Canonical compliance evidence template: graph_sync handler line numbers, RELATIONSHIP_TYPE_TO_EDGE_LABEL entry, _ALLOWED_EDGE_TYPES registration, graphsearch validation result."
+        },
+        "authority_envelope": {
+          "type": "object",
+          "definition": "Design Gate = feature creation time. Deploy Gate = CI check. Operational Gate = CEE Compliance Entropy scan."
+        },
+        "governing_feature": {
+          "type": "string",
+          "definition": "ENC-FTR-066"
+        }
+      }
+    },
+    "docstore.document": {
+      "description": "Document store document record with GDMP maturity lifecycle (ENC-FTR-065). Documents track compliance and maturity state through a governed pipeline.",
+      "fields": {
+        "document_maturity_state": {
+          "type": "enum",
+          "enum": [
+            "raw",
+            "compliant",
+            "contextualized",
+            "mature"
+          ],
+          "default": "raw",
+          "definition": "GDMP pipeline maturity state. raw: initial state on creation. compliant: CEE compliance check passed. contextualized: HCE proposal + coordination lead approval. mature: CEE graph traversal confirmation.",
+          "write_authority": "Any governed session or CEE automation.",
+          "state_transitions": "raw → compliant (CEE), compliant → contextualized (HCE proposal + coordination lead), contextualized → mature (CEE graph traversal confirmation).",
+          "governing_feature": "ENC-FTR-065"
         }
       }
     }
