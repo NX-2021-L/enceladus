@@ -117,6 +117,12 @@
       "lambda_dir": "backend/lambda/neo4j_backup",
       "workflow_file": ".github/workflows/lambda-neo4j-backup-deploy.yml",
       "deploy_script": "backend/lambda/neo4j_backup/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-graph-health-metrics",
+      "lambda_dir": "backend/lambda/graph_health_metrics",
+      "workflow_file": ".github/workflows/lambda-graph-health-metrics-deploy.yml",
+      "deploy_script": "backend/lambda/graph_health_metrics/deploy.sh"
     }
   ]
 }
