@@ -479,6 +479,56 @@ Resources:
   # Keeping them out of this stack avoids route-key ownership conflicts when the
   # integration deploy script has already created those API Gateway routes.
 
+  # ---------------------------------------------------------------------------
+  # Checkout Service — Plan routes (ENC-ISS-166)
+  # Task routes remain in backend/lambda/checkout_service/deploy.sh.
+  # Plan routes are added here to close the API Gateway gap for /plan/* paths.
+  # ---------------------------------------------------------------------------
+
+  CheckoutServiceIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-checkout-service${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: "2.0"
+
+  RoutePlanCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/plan/{planId}/checkout
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  RoutePlanCheckoutRelease:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/checkout/{project}/plan/{planId}/checkout
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  RoutePlanAdvance:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/plan/{planId}/advance
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  RoutePlanLog:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/plan/{planId}/log
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  RoutePlanStatus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/checkout/{project}/plan/{planId}/status
+      Target: !Sub integrations/${CheckoutServiceIntegration}
+
 Outputs:
   ApiEndpoint:
     Value: !GetAtt HttpApi.ApiEndpoint
