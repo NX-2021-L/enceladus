@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-07.57",
-  "updated_at": "2026-04-07T03:20:00Z",
+  "version": "2026-04-07.58",
+  "updated_at": "2026-04-07T11:52:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -3134,7 +3134,7 @@
       }
     },
     "feed_query.history_inclusion": {
-      "description": "Feed query Lambda history array population behavior (ENC-TSK-C01). All 5 record-type transform functions (_transform_task_from_ddb, _transform_issue_from_ddb, _transform_feature_from_ddb, _transform_plan_from_ddb, _transform_lesson_from_ddb) now extract history entries from DynamoDB L-type attributes via _ddb_history(). Previously hardcoded as empty arrays, blocking PWA history display.",
+      "description": "Feed query Lambda history array population behavior (ENC-TSK-C01, hardened by ENC-TSK-C31). All 5 record-type transform functions (_transform_task_from_ddb, _transform_issue_from_ddb, _transform_feature_from_ddb, _transform_plan_from_ddb, _transform_lesson_from_ddb) extract history entries from DynamoDB L-type attributes via _ddb_history(). ENC-TSK-C31: _ddb_history is now fully defensive (coerces None attributes to {}, validates every nesting level, per-entry try/except, outer try/except returning [] on any uncaught failure) and _query_all_records / _query_incremental wrap each record's transform in try/except so a single malformed record cannot take down the entire feed response with HTTP 500.",
       "fields": {
         "max_history_entries": {
           "type": "integer",
@@ -3147,6 +3147,14 @@
         "extraction_source": {
           "type": "string",
           "definition": "History is extracted from the DynamoDB 'history' attribute (L type containing M entries). Missing or malformed entries are skipped gracefully."
+        },
+        "per_record_isolation": {
+          "type": "string",
+          "definition": "ENC-TSK-C31: _query_all_records and _query_incremental catch Python exceptions around _is_stale_closed and _TRANSFORM[record_type](raw_item, pid) on a per-record basis. A single malformed record is logged (record_type, item_id, project) and skipped; the rest of the response is unaffected. Prior behavior bubbled the exception to the handler's generic try/except and returned HTTP 500, which broke PWA plan+lesson rendering because those types have no S3 fallback in useFeed.ts."
+        },
+        "defensive_shape_coercion": {
+          "type": "string",
+          "definition": "ENC-TSK-C31: _ddb_history uses `item.get(key) or {}` (not `.get(key, {})`) so attributes stored as None are coerced to an empty dict before descent. Each nesting level (attr, L list, per-entry dict, M submap, inner field dict, S string) is validated with isinstance; any failure returns [] for the whole record and logs the item_id."
         }
       }
     },
