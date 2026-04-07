@@ -491,3 +491,96 @@ def test_governance_update_blocks_on_existing_read_failure():
     assert result["error"]["code"] == "UPSTREAM_ERROR"
     assert "archival safety" in result["error"]["message"]
     assert fake_s3.put_keys == []
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-C26 / ENC-ISS-175 — transition_type forwarding regression tests
+#
+# These tests pin the contract that _tracker_create() forwards transition_type
+# through to the tracker_mutation Lambda HTTP payload. Prior to the fix the
+# field was silently dropped from the allowlist, leaving no_code/code_only
+# tasks permanently bricked into the default github_pr_deploy arc.
+# ---------------------------------------------------------------------------
+
+
+def _capture_tracker_payload(result_payload):
+    """Build a (capture_list, side_effect) pair for patching _tracker_api_request.
+
+    Captures every (method, path, payload) tuple the MCP server hands to the
+    HTTP request helper. The patched function returns ``result_payload`` so the
+    upstream call appears successful.
+    """
+    captured = []
+
+    def _fake(method, path="", payload=None, query=None):
+        captured.append({"method": method, "path": path, "payload": payload, "query": query})
+        return result_payload
+
+    return captured, _fake
+
+
+def test_tracker_create_forwards_transition_type_no_code():
+    """transition_type=no_code must reach the tracker_mutation Lambda payload."""
+    captured, fake_request = _capture_tracker_payload(
+        {"success": True, "record_id": "ENC-TSK-TEST"}
+    )
+    with patch.object(server, "_require_governance_hash", return_value=None), \
+         patch.object(server, "_tracker_api_request", side_effect=fake_request):
+        result = _call_tracker_create(
+            {
+                "project_id": "enceladus",
+                "record_type": "task",
+                "title": "no_code repro task",
+                "governance_hash": "test-hash",
+                "acceptance_criteria": ["verify forwarding"],
+                "transition_type": "no_code",
+            }
+        )
+
+    assert result.get("success") is True
+    assert len(captured) == 1
+    payload = captured[0]["payload"]
+    assert payload is not None
+    assert payload.get("transition_type") == "no_code", (
+        f"transition_type was dropped from MCP payload: {payload!r}"
+    )
+
+
+def test_tracker_create_forwards_transition_type_code_only():
+    captured, fake_request = _capture_tracker_payload(
+        {"success": True, "record_id": "ENC-TSK-TEST"}
+    )
+    with patch.object(server, "_require_governance_hash", return_value=None), \
+         patch.object(server, "_tracker_api_request", side_effect=fake_request):
+        _call_tracker_create(
+            {
+                "project_id": "enceladus",
+                "record_type": "task",
+                "title": "code_only repro task",
+                "governance_hash": "test-hash",
+                "acceptance_criteria": ["verify forwarding"],
+                "transition_type": "code_only",
+            }
+        )
+
+    assert captured[0]["payload"].get("transition_type") == "code_only"
+
+
+def test_tracker_create_omits_transition_type_when_not_provided():
+    """When the caller does not pass transition_type, it must not appear in the payload."""
+    captured, fake_request = _capture_tracker_payload(
+        {"success": True, "record_id": "ENC-TSK-TEST"}
+    )
+    with patch.object(server, "_require_governance_hash", return_value=None), \
+         patch.object(server, "_tracker_api_request", side_effect=fake_request):
+        _call_tracker_create(
+            {
+                "project_id": "enceladus",
+                "record_type": "task",
+                "title": "default-arc task",
+                "governance_hash": "test-hash",
+                "acceptance_criteria": ["verify"],
+            }
+        )
+
+    assert "transition_type" not in captured[0]["payload"]

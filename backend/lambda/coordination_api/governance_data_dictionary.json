@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-07.56",
-  "updated_at": "2026-04-07T01:00:00Z",
+  "version": "2026-04-07.57",
+  "updated_at": "2026-04-07T03:20:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -75,8 +75,8 @@
             "no_code",
             "code_only"
           ],
-          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Must be set via tracker_set BEFORE checkout_task is called — treated as immutable after checkout begins. ENC-FTR-060 additionally seals no_code and code_only at task creation: if either the current or proposed value is in immutable_values, post-creation transition_type mutations must be rejected to preserve lifecycle integrity documented by ENC-ISS-145. lambda_deploy: PR+commit flow with Lambda update evidence at deploy-success (ENC-FTR-041).",
-          "usage_guidance": "Set with tracker_set before checkout. Default github_pr_deploy is backward compatible and identical to pre-ENC-ISS-092 behavior. no_code: for tasks with no GitHub repo or non-code work (e.g. infra config, CLI installs). code_only: code was committed/merged to main but no deployment is needed. Do not change a task to or from no_code or code_only after creation — those values are sealed by ENC-FTR-060 because changing them can bypass or corrupt gate semantics (ENC-ISS-145). web_deploy: static/CloudFront deployments that do not produce GitHub Actions job objects. See checkout_service.transition_type_matrix for full gate requirements per type."
+          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Should be set via tracker.create at record creation OR via tracker.set before checkout_task is called — treated as immutable after checkout begins. ENC-FTR-060 additionally seals no_code and code_only — once any task has a transition_type stamped, post-creation tracker.set transitions involving an immutable value (current or proposed) are rejected. Sealed values can ONLY be set at create time via tracker.create (ENC-TSK-C26 / ENC-ISS-175). lambda_deploy: PR+commit flow with Lambda update evidence at deploy-success (ENC-FTR-041).",
+          "usage_guidance": "Set at create time via tracker.create (preferred for no_code/code_only since those are sealed by ENC-FTR-060), or via tracker.set before checkout for the non-sealed values. Default github_pr_deploy is backward compatible and identical to pre-ENC-ISS-092 behavior. no_code: for tasks with no GitHub repo or non-code work (e.g. infra config, CLI installs, docstore-only documentation). code_only: code was committed/merged to main but no deployment is needed. Do not change a task to or from no_code or code_only after creation — those values are sealed by ENC-FTR-060 because changing them can bypass or corrupt gate semantics (ENC-ISS-145). web_deploy: static/CloudFront deployments that do not produce GitHub Actions job objects. See checkout_service.transition_type_matrix for full gate requirements per type. ENC-TSK-C26: tracker_mutation Lambda now reads transition_type from POST body in _handle_create_record() and persists it to the DynamoDB item; the MCP server forwards it through the _tracker_create() allowlist. Both fixes are required for create-time setting to take effect."
         },
         "transition_evidence": {
           "type": "object",
@@ -3268,7 +3268,9 @@
         },
         "code_mode_availability": {
           "type": "string",
-          "enum": ["unavailable"],
+          "enum": [
+            "unavailable"
+          ],
           "definition": "governance.update is NOT available in code-mode agent sessions. The MCP server exposes the tool in the execute action list, but the underlying coordination_api requires product-lead IAM scope (io-dev-admin) which code-mode sessions do not have. Attempting it returns a permission error.",
           "governing_issue": "ENC-ISS-171"
         }

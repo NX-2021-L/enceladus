@@ -535,5 +535,143 @@ class PlanRouteTests(unittest.TestCase):
         self.assertEqual(result["related_plan_ids"], ["ENC-PLN-001"])
 
 
+class TaskCreateTransitionTypeTests(unittest.TestCase):
+    """ENC-TSK-C26 / ENC-ISS-175: tracker.create must honor transition_type.
+
+    Prior to the fix the Lambda's _handle_create_record never read
+    transition_type from the POST body, so the persisted DynamoDB item had no
+    transition_type field and the checkout service stamped the default
+    github_pr_deploy. Combined with ENC-FTR-060 sealing this stranded any
+    no_code/code_only intent permanently. These tests pin both the persistence
+    contract and the validation contract for unknown values.
+    """
+
+    def _create_task_event(self, body, internal_key="valid-key"):
+        path = "/api/v1/tracker/enceladus/task"
+        return {
+            "requestContext": {"http": {"method": "POST", "path": path}},
+            "headers": {"x-coordination-internal-key": internal_key, "host": "example.com"},
+            "body": json.dumps(body),
+            "rawPath": path,
+        }
+
+    def _run(self, body):
+        with patch.object(tracker_mutation, "_validate_project_exists", return_value=None), \
+             patch.object(tracker_mutation, "_get_project_prefix", return_value="ENC"), \
+             patch.object(tracker_mutation, "_get_ddb") as mock_get_ddb, \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"), \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEYS", ("valid-key",)):
+            fake_ddb = MagicMock()
+            mock_get_ddb.return_value = fake_ddb
+            fake_ddb.query.return_value = {"Items": [], "Count": 0}
+            fake_ddb.put_item.return_value = {}
+            event = self._create_task_event(body)
+            resp = tracker_mutation.lambda_handler(event, None)
+            return resp, fake_ddb
+
+    def test_create_task_persists_no_code_transition_type(self):
+        resp, fake_ddb = self._run({
+            "title": "C26 repro: no_code task",
+            "category": "documentation",
+            "acceptance_criteria": ["verify no_code persists"],
+            "transition_type": "no_code",
+        })
+        self.assertEqual(resp["statusCode"], 201, resp.get("body"))
+        parsed = json.loads(resp["body"])
+        self.assertTrue(parsed.get("success"))
+        # Capture the put_item call and confirm the transition_type field made
+        # it onto the DynamoDB item.
+        self.assertTrue(fake_ddb.put_item.called)
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertIn("transition_type", item)
+        self.assertEqual(item["transition_type"], {"S": "no_code"})
+
+    def test_create_task_persists_code_only_transition_type(self):
+        resp, fake_ddb = self._run({
+            "title": "C26 repro: code_only task",
+            "category": "implementation",
+            "acceptance_criteria": ["verify code_only persists"],
+            "transition_type": "code_only",
+        })
+        self.assertEqual(resp["statusCode"], 201)
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["transition_type"], {"S": "code_only"})
+
+    def test_create_task_normalizes_transition_type_case(self):
+        """Mixed-case input must be normalized to lowercase before persistence."""
+        resp, fake_ddb = self._run({
+            "title": "C26 case-norm task",
+            "category": "implementation",
+            "acceptance_criteria": ["verify normalization"],
+            "transition_type": "  No_Code  ",
+        })
+        self.assertEqual(resp["statusCode"], 201)
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["transition_type"], {"S": "no_code"})
+
+    def test_create_task_omits_transition_type_when_not_provided(self):
+        """Omitting transition_type must NOT add the field to the item.
+
+        This preserves the read-side default behavior in the checkout service
+        and graph projection — they fall back to github_pr_deploy when the
+        field is absent.
+        """
+        resp, fake_ddb = self._run({
+            "title": "C26 default-arc task",
+            "category": "implementation",
+            "acceptance_criteria": ["verify omission"],
+        })
+        self.assertEqual(resp["statusCode"], 201)
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        self.assertNotIn("transition_type", item)
+
+    def test_create_task_rejects_invalid_transition_type(self):
+        with patch.object(tracker_mutation, "_validate_project_exists", return_value=None), \
+             patch.object(tracker_mutation, "_get_project_prefix", return_value="ENC"), \
+             patch.object(tracker_mutation, "_get_ddb") as mock_get_ddb, \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"), \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEYS", ("valid-key",)):
+            fake_ddb = MagicMock()
+            mock_get_ddb.return_value = fake_ddb
+            event = self._create_task_event({
+                "title": "C26 invalid arc",
+                "category": "implementation",
+                "acceptance_criteria": ["verify rejection"],
+                "transition_type": "bogus_arc",
+            })
+            resp = tracker_mutation.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 400)
+        body = json.loads(resp["body"])
+        self.assertIn("transition_type", body.get("error", "") or body.get("message", ""))
+        # Server must NOT have written anything for the rejected request.
+        fake_ddb.put_item.assert_not_called()
+
+    def test_create_non_task_rejects_transition_type(self):
+        """transition_type is meaningless on non-task records and must be rejected."""
+        with patch.object(tracker_mutation, "_validate_project_exists", return_value=None), \
+             patch.object(tracker_mutation, "_get_project_prefix", return_value="ENC"), \
+             patch.object(tracker_mutation, "_get_ddb") as mock_get_ddb, \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEY", "valid-key"), \
+             patch.object(tracker_mutation, "COORDINATION_INTERNAL_API_KEYS", ("valid-key",)):
+            fake_ddb = MagicMock()
+            mock_get_ddb.return_value = fake_ddb
+            path = "/api/v1/tracker/enceladus/feature"
+            event = {
+                "requestContext": {"http": {"method": "POST", "path": path}},
+                "headers": {"x-coordination-internal-key": "valid-key", "host": "example.com"},
+                "body": json.dumps({
+                    "title": "C26 feature with bogus transition_type",
+                    "category": "capability",
+                    "user_story": "As a tester I want to verify rejection so that the contract holds",
+                    "acceptance_criteria": ["verify rejection"],
+                    "transition_type": "no_code",
+                }),
+                "rawPath": path,
+            }
+            resp = tracker_mutation.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 400)
+        fake_ddb.put_item.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
