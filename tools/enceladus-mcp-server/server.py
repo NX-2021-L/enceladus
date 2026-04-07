@@ -3676,6 +3676,17 @@ async def list_tools() -> list[Tool]:
                             "Issues: bug|debt|risk|security|performance."
                         ),
                     },
+                    "transition_type": {
+                        "type": "string",
+                        "enum": ["github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code"],
+                        "description": (
+                            "Lifecycle arc for task records (ENC-ISS-092). "
+                            "Defaults to github_pr_deploy if omitted. "
+                            "no_code and code_only are sealed by ENC-FTR-060 and MUST be "
+                            "set at create time \u2014 they cannot be set or changed via tracker_set "
+                            "after creation. Only valid for record_type=task."
+                        ),
+                    },
                     "intent": {
                         "type": "string",
                         "description": "Free-text WHY this record exists.",
@@ -5422,6 +5433,9 @@ async def _tracker_create(args: dict) -> list[TextContent]:
                 "coordination", "coordination_request_id", "acceptance_criteria",
                 "user_story", "category", "intent", "evidence", "primary_task",
                 "provider", "is_child", "parent_task_id",
+                # ENC-TSK-C26 / ENC-ISS-175: forward transition_type so create-time-only
+                # arcs (no_code, code_only) can actually be set on agent-created tasks.
+                "transition_type",
                 # ENC-TSK-A97: Plan-specific fields
                 "objectives_set", "attached_documents", "related_feature_id"):
         if args.get(key) is not None:
