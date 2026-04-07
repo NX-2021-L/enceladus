@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-07.58",
-  "updated_at": "2026-04-07T11:52:00Z",
+  "version": "2026-04-07.59",
+  "updated_at": "2026-04-07T12:04:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -3154,7 +3154,7 @@
         },
         "defensive_shape_coercion": {
           "type": "string",
-          "definition": "ENC-TSK-C31: _ddb_history uses `item.get(key) or {}` (not `.get(key, {})`) so attributes stored as None are coerced to an empty dict before descent. Each nesting level (attr, L list, per-entry dict, M submap, inner field dict, S string) is validated with isinstance; any failure returns [] for the whole record and logs the item_id."
+          "definition": "ENC-TSK-C31 + ENC-TSK-C32: A shared _ddb_attr(item, key) helper coerces missing, None, or non-dict attributes to {} before any nested lookup. Every _ddb_* helper (_ddb_str, _ddb_int, _ddb_float, _ddb_bool, _ddb_str_set, _ddb_list_of_maps, _ddb_map, _ddb_history) routes through _ddb_attr so a DynamoDB attribute stored as Python None can never crash a transform with AttributeError. _ddb_str also validates the nested S value is actually a string; _ddb_bool guards S type before .lower(); _ddb_list_of_maps skips L entries where M is not a dict; _ddb_map validates M is a dict and wraps float() in try/except."
         }
       }
     },
