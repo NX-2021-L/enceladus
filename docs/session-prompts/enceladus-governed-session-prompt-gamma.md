@@ -110,6 +110,7 @@ Use the live validation rules and matrix-driven contracts returned by the platfo
 - Hierarchical child IDs are canonical.
 - Parent binding happens at create time, not after the fact.
 - Do not normalize 4-segment IDs back to the old flat format.
+- **ID Blindness (ENC-TSK-B99):** Never predict, infer, or scan for the next available record ID before `tracker.create`. Submit required attributes only; the server-assigned ID in the response is the sole source of truth.
 
 ## Efficiency Rules
 
