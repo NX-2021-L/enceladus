@@ -18,7 +18,7 @@
  */
 
 /** Current release version — update this on every deployment */
-export const APP_VERSION = '1.0.0'
+export const APP_VERSION = '1.0.1'
 
 /** Structured release history — newest first */
 export interface ReleaseNote {
@@ -39,6 +39,19 @@ export interface ReleaseNote {
  * Do not delete until backfill (ENC-TSK-687-690) is complete and validated.
  */
 export const RELEASE_NOTES: ReleaseNote[] = [
+  {
+    version: '1.0.1',
+    date: '2026-04-07',
+    type: 'patch',
+    summary: 'Ship plan record type and ENC-ISS-148 shallow-merge fix to live PWA (ENC-TSK-C29)',
+    changes: [
+      'Deploy plan primitive record type (ENC-FTR-058): Plan interface, LiveFeedContext state, PlanRow feed card with indigo border, PlanDetailPage with objectives list, /plans/:planId route',
+      'Deploy ENC-ISS-148 shallow-merge fix: LiveFeedContext.mergeById now uses shallowMergeRecord with isEmptySentinel check so sparse delta records do not overwrite richer detail fields',
+      'Deploy useTasks live+S3 merge to preserve task detail fields across live feed hydration',
+      'Deploy PWA handoff document rendering (ENC-FTR-061)',
+      'Root cause of missing-plans UAT report was deploy lag — plan code has been on main since 2026-04-03 but the last deploy (v0.0.5) was 2026-04-02, ~22 hours earlier. No feed merge layer code change required. Filed ENC-ISS-177 for a separate latent backend VALID_RECORD_TYPES gap discovered during investigation.',
+    ],
+  },
   {
     version: '0.17.0',
     date: '2026-02-23',
