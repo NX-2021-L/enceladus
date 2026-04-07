@@ -1500,70 +1500,91 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         }
 
     # --- Full query (existing behaviour, unchanged) ---
+    # ENC-TSK-C32 follow-up: wrap the ENTIRE full-refresh tail in a broad
+    # try/except so ANY unexpected exception (JSON serialization of Decimal,
+    # datetime, or other non-serializable values; post-query attachment
+    # crashes; anything else) returns a structured _error envelope with the
+    # exception class + message instead of escaping the handler and letting
+    # Lambda runtime return the opaque {"message":"Internal Server Error"}
+    # that made the live 500 impossible to diagnose from the client side.
     try:
-        tasks, issues, features, lessons, plans = _query_all_records()
-    except Exception as exc:
-        logger.error("feed query failed: %s", exc)
-        return _error(500, "Failed to query feed data. Please try again.")
-
-    # --- Attach typed relationship edges (ENC-ISS-137 / ENC-TSK-A57) ---
-    try:
-        project_ids = list({r.get("project_id", "") for r in tasks + issues + features + lessons + plans if r.get("project_id")})
-        if project_ids:
-            edges_by_source = _query_typed_relationships(project_ids)
-            _attach_typed_relationships(tasks, "task_id", edges_by_source)
-            _attach_typed_relationships(issues, "issue_id", edges_by_source)
-            _attach_typed_relationships(features, "feature_id", edges_by_source)
-            _attach_typed_relationships(lessons, "lesson_id", edges_by_source)
-            _attach_typed_relationships(plans, "plan_id", edges_by_source)
-    except Exception as exc:
-        logger.warning("Failed to attach typed relationships: %s", exc)
-
-    subscription_meta = {
-        "subscription_id": None,
-        "scope_applied": False,
-        "items_matched": len(tasks) + len(issues) + len(features) + len(lessons) + len(plans),
-    }
-
-    subscription_id = str(qs.get("subscription_id") or "").strip()
-    if subscription_id:
         try:
-            sub = _get_subscription(subscription_id)
-        except RuntimeError as exc:
-            return _error(500, str(exc))
+            tasks, issues, features, lessons, plans = _query_all_records()
+        except Exception as exc:
+            logger.error("feed query failed: %s", exc)
+            return _error(500, "Failed to query feed data. Please try again.")
 
-        if not sub:
-            return _error(404, f"Subscription '{subscription_id}' not found")
+        # --- Attach typed relationship edges (ENC-ISS-137 / ENC-TSK-A57) ---
+        try:
+            project_ids = list({r.get("project_id", "") for r in tasks + issues + features + lessons + plans if r.get("project_id")})
+            if project_ids:
+                edges_by_source = _query_typed_relationships(project_ids)
+                _attach_typed_relationships(tasks, "task_id", edges_by_source)
+                _attach_typed_relationships(issues, "issue_id", edges_by_source)
+                _attach_typed_relationships(features, "feature_id", edges_by_source)
+                _attach_typed_relationships(lessons, "lesson_id", edges_by_source)
+                _attach_typed_relationships(plans, "plan_id", edges_by_source)
+        except Exception as exc:
+            logger.warning("Failed to attach typed relationships: %s", exc)
 
-        state = str(sub.get("state") or "")
-        if state == "expired":
-            return _error(
-                410,
-                "Subscription has expired",
-                code="SUBSCRIPTION_EXPIRED",
-                retryable=False,
-                subscription_id=subscription_id,
-            )
-        if state != "active":
-            return _error(409, f"Subscription state '{state}' does not permit feed queries")
-
-        tasks, issues, features, matched = _apply_subscription_scope(tasks, issues, features, sub)
         subscription_meta = {
-            "subscription_id": subscription_id,
-            "scope_applied": True,
-            "items_matched": matched,
+            "subscription_id": None,
+            "scope_applied": False,
+            "items_matched": len(tasks) + len(issues) + len(features) + len(lessons) + len(plans),
         }
 
-    return _response(
-        200,
-        {
-            "generated_at": _now_z(),
-            "version": "1.0",
-            "tasks": tasks,
-            "issues": issues,
-            "features": features,
-            "lessons": lessons,
-            "plans": plans,
-            "subscription": subscription_meta,
-        },
-    )
+        subscription_id = str(qs.get("subscription_id") or "").strip()
+        if subscription_id:
+            try:
+                sub = _get_subscription(subscription_id)
+            except RuntimeError as exc:
+                return _error(500, str(exc))
+
+            if not sub:
+                return _error(404, f"Subscription '{subscription_id}' not found")
+
+            state = str(sub.get("state") or "")
+            if state == "expired":
+                return _error(
+                    410,
+                    "Subscription has expired",
+                    code="SUBSCRIPTION_EXPIRED",
+                    retryable=False,
+                    subscription_id=subscription_id,
+                )
+            if state != "active":
+                return _error(409, f"Subscription state '{state}' does not permit feed queries")
+
+            tasks, issues, features, matched = _apply_subscription_scope(tasks, issues, features, sub)
+            subscription_meta = {
+                "subscription_id": subscription_id,
+                "scope_applied": True,
+                "items_matched": matched,
+            }
+
+        return _response(
+            200,
+            {
+                "generated_at": _now_z(),
+                "version": "1.0",
+                "tasks": tasks,
+                "issues": issues,
+                "features": features,
+                "lessons": lessons,
+                "plans": plans,
+                "subscription": subscription_meta,
+            },
+        )
+    except Exception as outer_exc:  # noqa: BLE001
+        # Final safety net for the full-refresh path (ENC-TSK-C32 follow-up).
+        # Catches json.dumps serialization failures (e.g. boto3 Decimal,
+        # datetime), post-query attachment errors, and anything else that
+        # would otherwise escape the handler and surface as the opaque
+        # {"message":"Internal Server Error"} from Lambda runtime. Returns a
+        # structured _error envelope with the exception class and message so
+        # the PWA (and any diagnosing curl) gets actionable information.
+        logger.exception("feed full refresh failed in outer safety net")
+        return _error(
+            500,
+            f"Full refresh failed: {type(outer_exc).__name__}: {outer_exc}",
+        )
