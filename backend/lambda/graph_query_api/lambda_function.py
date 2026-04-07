@@ -192,6 +192,8 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "LEARNED_FROM", "TEACHES", "SUPERSEDES", "SUPERSEDED_BY",
     # ENC-FTR-061: Handoff edge types
     "HANDS_OFF", "HANDED_OFF_BY",
+    # ENC-TSK-960: Coordination dispatch edge types
+    "DISPATCHES", "DISPATCHED_BY",
 })
 
 
