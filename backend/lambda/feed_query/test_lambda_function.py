@@ -219,6 +219,10 @@ def test_ddb_history_normal_entry_extracted():
 
 
 def test_ddb_history_caps_at_max_entries():
+    # ENC-TSK-C34: MAX_HISTORY_ENTRIES reduced from 50 to 10 as a secondary
+    # guardrail against the Lambda 6 MB sync response limit. The primary
+    # guardrail is the per-type record cap in _query_all_records.
+    assert feed_query.MAX_HISTORY_ENTRIES == 10
     entries = [
         {
             "M": {
@@ -234,6 +238,79 @@ def test_ddb_history_caps_at_max_entries():
     assert len(result) == feed_query.MAX_HISTORY_ENTRIES
     # Keeps the most recent (tail-end) entries.
     assert result[-1]["description"] == f"entry {feed_query.MAX_HISTORY_ENTRIES + 9}"
+
+
+# ---------------------------------------------------------------------------
+# _cap_by_updated_at per-type response cap (ENC-TSK-C34)
+#
+# The full /api/v1/feed response is a single synchronous Lambda payload and
+# must fit under AWS Lambda's 6 MB sync response limit. With history arrays
+# populated per-record (ENC-TSK-C01), the pre-cap response exceeded that
+# limit and returned the opaque {"message":"Internal Server Error"} from
+# Lambda runtime, which broke PWA plan + lesson rendering (they have no S3
+# fallback in useFeed.ts). The fix is a per-type cap applied inside
+# _query_all_records: tasks=100, issues/features/lessons/plans=10 each.
+# ---------------------------------------------------------------------------
+
+
+def test_cap_by_updated_at_short_list_unchanged():
+    records = [{"task_id": f"T-{i}", "updated_at": f"2026-04-07T00:00:{i:02d}Z"} for i in range(3)]
+    result = feed_query._cap_by_updated_at(records, 100)
+    assert result == records
+    assert result is records  # Unchanged = same reference.
+
+
+def test_cap_by_updated_at_exactly_at_cap_unchanged():
+    records = [{"task_id": f"T-{i}", "updated_at": f"2026-04-07T00:00:{i:02d}Z"} for i in range(10)]
+    result = feed_query._cap_by_updated_at(records, 10)
+    assert result == records
+    assert result is records
+
+
+def test_cap_by_updated_at_truncates_to_most_recent():
+    records = [
+        {"task_id": f"T-{i}", "updated_at": f"2026-04-{(i % 28) + 1:02d}T00:00:00Z"}
+        for i in range(20)
+    ]
+    result = feed_query._cap_by_updated_at(records, 5)
+    assert len(result) == 5
+    # All kept records must have higher (more recent) updated_at than any
+    # dropped record.
+    kept_ts = {r["updated_at"] for r in result}
+    dropped_ts = {r["updated_at"] for r in records if r not in result}
+    assert min(kept_ts) >= max(dropped_ts)
+
+
+def test_cap_by_updated_at_none_updated_at_sorts_last():
+    # Records with missing / None / empty updated_at are the first to be
+    # dropped when the cap is exceeded.
+    records = [
+        {"task_id": "T-old-1", "updated_at": None},
+        {"task_id": "T-fresh-a", "updated_at": "2026-04-07T10:00:00Z"},
+        {"task_id": "T-old-2", "updated_at": ""},
+        {"task_id": "T-fresh-b", "updated_at": "2026-04-06T10:00:00Z"},
+        {"task_id": "T-old-3"},  # missing key entirely
+    ]
+    result = feed_query._cap_by_updated_at(records, 2)
+    kept_ids = {r["task_id"] for r in result}
+    assert kept_ids == {"T-fresh-a", "T-fresh-b"}
+
+
+def test_cap_by_updated_at_zero_cap_returns_unchanged():
+    # Defensive: cap=0 is treated as "no cap" so the caller does not
+    # accidentally wipe the list by passing an uninitialized constant.
+    records = [{"task_id": "T-1", "updated_at": "2026-04-07T00:00:00Z"}]
+    assert feed_query._cap_by_updated_at(records, 0) == records
+
+
+def test_max_full_refresh_caps_configured():
+    # ENC-TSK-C34: Lock in the per-type cap contract with the PWA
+    # (FeedPage.tsx useInfiniteList(items, 20, 100)).
+    assert feed_query.MAX_TASKS_FULL_REFRESH == 100
+    assert feed_query.MAX_ISSUES_FULL_REFRESH == 10
+    assert feed_query.MAX_FEATURES_FULL_REFRESH == 10
+    assert feed_query.MAX_LESSONS_FULL_REFRESH == 10
+    assert feed_query.MAX_PLANS_FULL_REFRESH == 10
 
 
 def test_ddb_history_mixed_good_and_bad_entries():

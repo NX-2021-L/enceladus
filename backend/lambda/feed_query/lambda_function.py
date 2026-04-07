@@ -370,7 +370,41 @@ def _ddb_str_set(item: Dict[str, Any], key: str) -> List[str]:
     return []
 
 
-MAX_HISTORY_ENTRIES = 50
+MAX_HISTORY_ENTRIES = 10
+
+# Per-type caps on full-refresh response (ENC-TSK-C34). The full /api/v1/feed
+# response is a single synchronous Lambda payload and must fit under the AWS
+# Lambda 6 MB sync response limit. With history entries populated per-record
+# (ENC-TSK-C01), the pre-cap response exceeded that limit and produced the
+# opaque {"message":"Internal Server Error"} that broke PWA plan + lesson
+# rendering. These caps hold the total to at most 140 records: 100 tasks +
+# 10 each of issues/features/lessons/plans. The frontend already caps the
+# visible feed list at 100 items (FeedPage.tsx useInfiniteList(items, 20, 100))
+# so these backend caps align with the existing UI contract.
+MAX_TASKS_FULL_REFRESH = 100
+MAX_ISSUES_FULL_REFRESH = 10
+MAX_FEATURES_FULL_REFRESH = 10
+MAX_LESSONS_FULL_REFRESH = 10
+MAX_PLANS_FULL_REFRESH = 10
+
+
+def _cap_by_updated_at(records: List[Dict[str, Any]], cap: int) -> List[Dict[str, Any]]:
+    """Return the ``cap`` most-recently-updated records.
+
+    Sort key is the ``updated_at`` ISO-8601 string descending; records with a
+    missing or empty ``updated_at`` sort last so they are the first to be
+    dropped when the cap is exceeded. If ``records`` is already at or below
+    ``cap`` it is returned unchanged.
+    """
+    if cap <= 0 or len(records) <= cap:
+        return records
+    # Pair records with a sort key that naturally places empties at the end.
+    def _sort_key(r: Dict[str, Any]) -> str:
+        v = r.get("updated_at")
+        return v if isinstance(v, str) and v else ""
+    # Sort descending; Python's sort is stable so ties preserve original order.
+    ordered = sorted(records, key=_sort_key, reverse=True)
+    return ordered[:cap]
 
 
 def _ddb_history(item: Dict[str, Any], key: str = "history") -> List[Dict[str, str]]:
@@ -1137,6 +1171,16 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
         except (BotoCoreError, ClientError) as exc:
             logger.error("DynamoDB query failed for project %s: %s", pid, exc)
             continue
+
+    # Per-type caps (ENC-TSK-C34): keep only the most-recently-updated
+    # N records of each type so the total sync response stays under the
+    # Lambda 6 MB limit. Apply the cap BEFORE the deterministic id sort
+    # so the truncation window is chosen by recency, not alphabetically.
+    all_tasks = _cap_by_updated_at(all_tasks, MAX_TASKS_FULL_REFRESH)
+    all_issues = _cap_by_updated_at(all_issues, MAX_ISSUES_FULL_REFRESH)
+    all_features = _cap_by_updated_at(all_features, MAX_FEATURES_FULL_REFRESH)
+    all_lessons = _cap_by_updated_at(all_lessons, MAX_LESSONS_FULL_REFRESH)
+    all_plans = _cap_by_updated_at(all_plans, MAX_PLANS_FULL_REFRESH)
 
     all_tasks.sort(key=lambda x: x.get("task_id", ""))
     all_issues.sort(key=lambda x: x.get("issue_id", ""))
