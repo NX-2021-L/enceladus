@@ -766,7 +766,9 @@ def _upsert_synced_document(
                 "SET title = :title, description = :desc, file_name = :fn, "
                 "s3_bucket = :sb, s3_key = :sk, content_type = :ct, "
                 "content_hash = :hash, size_bytes = :size, keywords = :kw, "
-                "updated_at = :ts, #status = :status, #ver = if_not_exists(#ver, :zero) + :one"
+                "updated_at = :ts, #status = :status, "
+                "record_type = if_not_exists(record_type, :rtype), "
+                "#ver = if_not_exists(#ver, :zero) + :one"
             ),
             ExpressionAttributeNames={
                 "#status": "status",
@@ -786,6 +788,8 @@ def _upsert_synced_document(
                 ":status": {"S": "active"},
                 ":zero": {"N": "0"},
                 ":one": {"N": "1"},
+                # ENC-PLN-014 / ENC-FTR-065: backfill record_type on existing sync docs
+                ":rtype": {"S": "document"},
             },
         )
         return
@@ -808,6 +812,9 @@ def _upsert_synced_document(
         "updated_at": {"S": now},
         "status": {"S": "active"},
         "version": {"N": "1"},
+        # ENC-PLN-014 / ENC-FTR-065: stamp record_type so graph_sync can route
+        # document mutations through _process_record / _reconcile_edges.
+        "record_type": {"S": "document"},
     }
     try:
         ddb.put_item(
@@ -1116,6 +1123,10 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         "compliance_warnings": _serialize_list(compliance["compliance_warnings"]),
         "compliance_checked_at": {"S": now},
         "document_maturity_state": {"S": document_maturity_state},
+        # ENC-PLN-014 / ENC-FTR-065: stamp record_type so graph_sync can route
+        # document mutations through _process_record / _reconcile_edges and
+        # project Document nodes to Neo4j.
+        "record_type": {"S": "document"},
     }
 
     # Add handoff-specific fields to DynamoDB item
@@ -1295,12 +1306,20 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     now = _now_z()
 
     # Build update expression
-    expr_parts = ["updated_at = :ts", "#ver = #ver + :one"]
+    # ENC-PLN-014 / ENC-FTR-065: idempotently backfill record_type on every patch
+    # so existing documents created before the stamping fix become routable by
+    # graph_sync once their next mutation flows through DynamoDB Streams.
+    expr_parts = [
+        "updated_at = :ts",
+        "record_type = if_not_exists(record_type, :rtype)",
+        "#ver = #ver + :one",
+    ]
     attr_names: Dict[str, str] = {"#ver": "version"}
     attr_values: Dict[str, Dict] = {
         ":ts": {"S": now},
         ":one": {"N": "1"},
         ":expected": {"N": str(current_version)},
+        ":rtype": {"S": "document"},
     }
     compliance: Optional[Dict[str, Any]] = None
 
