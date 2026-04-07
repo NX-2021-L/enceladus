@@ -308,7 +308,11 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
 RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "blocks": "BLOCKS", "blocked-by": "BLOCKED_BY",
     "duplicates": "DUPLICATES", "duplicated-by": "DUPLICATED_BY",
-    "relates-to": "RELATES_TO",
+    # ENC-ISS-178: typed 'relates-to' projects to RELATED_TO so it converges with the
+    # legacy related_*_ids projection and is visible via tracker.graphsearch
+    # edge_types=['RELATED_TO']. Previously emitted 'RELATES_TO' which silently
+    # diverged from the legacy label and broke OGTM end-to-end traversability.
+    "relates-to": "RELATED_TO",
     "parent-of": "PARENT_OF", "child-of": "CHILD_OF_TYPED",
     "depends-on": "DEPENDS_ON", "depended-on-by": "DEPENDED_ON_BY",
     "clones": "CLONES", "cloned-by": "CLONED_BY",
@@ -324,6 +328,8 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "supersedes": "SUPERSEDES", "superseded-by": "SUPERSEDED_BY",
     # ENC-FTR-061: Handoff edge types
     "hands-off": "HANDS_OFF", "handed-off-by": "HANDED_OFF_BY",
+    # ENC-TSK-960: Coordination dispatch edge types
+    "dispatches": "DISPATCHES", "dispatched-by": "DISPATCHED_BY",
 }
 
 

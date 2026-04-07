@@ -3998,6 +3998,13 @@ _RELATIONSHIP_TYPES = frozenset({
     "plan-contains", "contained-by-plan",
     "plan-attached-doc", "doc-attached-to-plan",
     "plan-implements", "implemented-by-plan",
+    # ENC-FTR-052 / ENC-TSK-C36: Lesson typed relationships
+    "learned-from", "teaches",
+    "supersedes", "superseded-by",
+    # ENC-FTR-061 / ENC-TSK-C36: Handoff typed relationships
+    "hands-off", "handed-off-by",
+    # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships
+    "dispatches", "dispatched-by",
 })
 
 _INVERSE_PAIRS: Dict[str, str] = {
@@ -4014,6 +4021,13 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "plan-contains": "contained-by-plan", "contained-by-plan": "plan-contains",
     "plan-attached-doc": "doc-attached-to-plan", "doc-attached-to-plan": "plan-attached-doc",
     "plan-implements": "implemented-by-plan", "implemented-by-plan": "plan-implements",
+    # ENC-FTR-052 / ENC-TSK-C36: Lesson typed relationships
+    "learned-from": "teaches", "teaches": "learned-from",
+    "supersedes": "superseded-by", "superseded-by": "supersedes",
+    # ENC-FTR-061 / ENC-TSK-C36: Handoff typed relationships
+    "hands-off": "handed-off-by", "handed-off-by": "hands-off",
+    # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships
+    "dispatches": "dispatched-by", "dispatched-by": "dispatches",
 }
 
 _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
@@ -4041,6 +4055,17 @@ _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
     "doc-attached-to-plan": {"asymmetric": True, "irreflexive": True, "transitive": False},
     "plan-implements":    {"asymmetric": True, "irreflexive": True, "transitive": False},
     "implemented-by-plan": {"asymmetric": True, "irreflexive": True, "transitive": False},
+    # ENC-FTR-052 / ENC-TSK-C36: Lesson typed relationships
+    "learned-from":       {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "teaches":            {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "supersedes":         {"asymmetric": True, "irreflexive": True, "transitive": True},
+    "superseded-by":      {"asymmetric": True, "irreflexive": True, "transitive": True},
+    # ENC-FTR-061 / ENC-TSK-C36: Handoff typed relationships
+    "hands-off":          {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "handed-off-by":      {"asymmetric": True, "irreflexive": True, "transitive": False},
+    # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships
+    "dispatches":         {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "dispatched-by":      {"asymmetric": True, "irreflexive": True, "transitive": False},
 }
 
 # Domain/range constraints: {relationship_type: {source_types, target_types}}
@@ -4070,6 +4095,20 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     "doc-attached-to-plan": {"source": None, "target": frozenset({"plan"})},
     "plan-implements":    {"source": frozenset({"plan"}), "target": frozenset({"feature"})},
     "implemented-by-plan": {"source": frozenset({"feature"}), "target": frozenset({"plan"})},
+    # ENC-FTR-052 / ENC-TSK-C36: Lesson typed relationships.
+    # learned-from: lesson -> any record type (cross-project allowed; target unconstrained).
+    # teaches: any record type -> lesson (inverse).
+    "learned-from":       {"source": frozenset({"lesson"}), "target": None},
+    "teaches":            {"source": None, "target": frozenset({"lesson"})},
+    "supersedes":         {"source": frozenset({"lesson"}), "target": frozenset({"lesson"})},
+    "superseded-by":      {"source": frozenset({"lesson"}), "target": frozenset({"lesson"})},
+    # ENC-FTR-061 / ENC-TSK-C36: Handoff typed relationships. Targets are document IDs
+    # in practice; documents are not a tracker record type so target is unconstrained.
+    "hands-off":          {"source": None, "target": None},
+    "handed-off-by":      {"source": None, "target": None},
+    # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships.
+    "dispatches":         {"source": None, "target": frozenset({"task"})},
+    "dispatched-by":      {"source": frozenset({"task"}), "target": None},
 }
 
 _TRANSITIVE_TYPES = frozenset(
