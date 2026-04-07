@@ -358,24 +358,58 @@ def _ddb_history(item: Dict[str, Any], key: str = "history") -> List[Dict[str, s
     Returns a list of {timestamp, status, description} dicts matching the
     HistoryEntry TypeScript interface consumed by the PWA HistoryFeed component.
     Only the most recent entries are returned when the list exceeds the cap.
+
+    Hardened against any unexpected input shape: attribute stored as None,
+    malformed L list, non-dict or M=None entries, and nested values that are
+    not the expected {'S': ...} wire format. Any single bad entry is skipped;
+    any uncaught failure returns [] rather than crashing the caller.
     """
-    attr = item.get(key, {})
-    raw_list = attr.get("L")
-    if not isinstance(raw_list, list):
+    try:
+        # Coerce None-valued attribute to empty dict so .get("L") is safe.
+        attr = item.get(key) or {}
+        if not isinstance(attr, dict):
+            return []
+        raw_list = attr.get("L")
+        if not isinstance(raw_list, list):
+            return []
+        entries: List[Dict[str, str]] = []
+        for entry in raw_list:
+            try:
+                if not isinstance(entry, dict):
+                    continue
+                m = entry.get("M")
+                if not isinstance(m, dict):
+                    continue
+
+                def _s(field: str) -> str:
+                    node = m.get(field)
+                    if not isinstance(node, dict):
+                        return ""
+                    v = node.get("S", "")
+                    return v if isinstance(v, str) else ""
+
+                entries.append({
+                    "timestamp": _s("timestamp"),
+                    "status": _s("status"),
+                    "description": _s("description"),
+                })
+            except Exception as entry_exc:  # noqa: BLE001
+                logger.warning(
+                    "_ddb_history: skipping malformed entry in item_id=%s: %s",
+                    _ddb_str(item, "item_id") or "?",
+                    entry_exc,
+                )
+                continue
+        if len(entries) > MAX_HISTORY_ENTRIES:
+            entries = entries[-MAX_HISTORY_ENTRIES:]
+        return entries
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "_ddb_history: unexpected failure for item_id=%s: %s",
+            _ddb_str(item, "item_id") or "?",
+            exc,
+        )
         return []
-    entries: List[Dict[str, str]] = []
-    for entry in raw_list:
-        if not isinstance(entry, dict) or "M" not in entry:
-            continue
-        m = entry["M"]
-        entries.append({
-            "timestamp": m.get("timestamp", {}).get("S", ""),
-            "status": m.get("status", {}).get("S", ""),
-            "description": m.get("description", {}).get("S", ""),
-        })
-    if len(entries) > MAX_HISTORY_ENTRIES:
-        entries = entries[-MAX_HISTORY_ENTRIES:]
-    return entries
 
 
 def _ddb_list_of_maps(item: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
@@ -1047,10 +1081,21 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
                     record_type = _ddb_str(raw_item, "record_type")
                     if record_type not in _TRANSFORM:
                         continue
-                    if _is_stale_closed(raw_item, cutoff):
+                    # Per-record isolation: a single malformed record must not
+                    # take down the entire feed response (ENC-TSK-C31).
+                    try:
+                        if _is_stale_closed(raw_item, cutoff):
+                            continue
+                        transformed = _TRANSFORM[record_type](raw_item, pid)
+                    except Exception as rec_exc:  # noqa: BLE001
+                        logger.error(
+                            "feed_query: skipping record_type=%s item_id=%s project=%s: %s",
+                            record_type,
+                            _ddb_str(raw_item, "item_id") or "?",
+                            pid,
+                            rec_exc,
+                        )
                         continue
-
-                    transformed = _TRANSFORM[record_type](raw_item, pid)
                     if record_type == "task":
                         all_tasks.append(transformed)
                     elif record_type == "issue":
@@ -1232,12 +1277,23 @@ def _query_incremental(
                     continue
 
                 item_id = _ddb_str(raw_item, "item_id")
-                if _is_stale_closed(raw_item, cutoff):
-                    if item_id:
-                        closed_ids.append(item_id)
+                # Per-record isolation: a single malformed record must not
+                # take down the entire delta response (ENC-TSK-C31).
+                try:
+                    if _is_stale_closed(raw_item, cutoff):
+                        if item_id:
+                            closed_ids.append(item_id)
+                        continue
+                    transformed = _TRANSFORM[record_type](raw_item, pid)
+                except Exception as rec_exc:  # noqa: BLE001
+                    logger.error(
+                        "feed_query incremental: skipping record_type=%s item_id=%s project=%s: %s",
+                        record_type,
+                        item_id or "?",
+                        pid,
+                        rec_exc,
+                    )
                     continue
-
-                transformed = _TRANSFORM[record_type](raw_item, pid)
                 if record_type == "task":
                     all_tasks.append(transformed)
                 elif record_type == "issue":
