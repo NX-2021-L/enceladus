@@ -304,36 +304,57 @@ def _error(status_code: int, message: str, **extra: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _ddb_attr(item: Dict[str, Any], key: str) -> Dict[str, Any]:
+    """Safely extract a DynamoDB attribute wrapper dict from ``item[key]``.
+
+    DynamoDB attributes are normally stored as type-tagged dicts like
+    ``{"S": "foo"}``. This helper handles three edge cases that broke
+    feed_query on 2026-04-07 (ENC-TSK-C31):
+
+    * the attribute is missing: returns ``{}``
+    * the attribute is stored as Python ``None``: returns ``{}`` (prior code
+      did ``item.get(key, {})`` which returns ``None`` when the key exists
+      with value ``None``, then crashed on ``.get("S", ...)``)
+    * the attribute is stored as something that is not a dict: returns ``{}``
+    """
+    attr = item.get(key)
+    if isinstance(attr, dict):
+        return attr
+    return {}
+
+
 def _ddb_str(item: Dict[str, Any], key: str, default: str = "") -> str:
-    return item.get(key, {}).get("S", default)
+    v = _ddb_attr(item, key).get("S", default)
+    return v if isinstance(v, str) else default
 
 
 def _ddb_int(item: Dict[str, Any], key: str, default: int = 0) -> int:
     try:
-        return int(item.get(key, {}).get("N", str(default)))
+        return int(_ddb_attr(item, key).get("N", str(default)))
     except (ValueError, TypeError):
         return default
 
 
 def _ddb_float(item: Dict[str, Any], key: str, default: float = 0.0) -> float:
     try:
-        return float(item.get(key, {}).get("N", str(default)))
+        return float(_ddb_attr(item, key).get("N", str(default)))
     except (ValueError, TypeError):
         return default
 
 
 def _ddb_bool(item: Dict[str, Any], key: str, default: bool = False) -> bool:
     """Extract a boolean from a DynamoDB item, handling both BOOL and string types."""
-    attr = item.get(key, {})
+    attr = _ddb_attr(item, key)
     if "BOOL" in attr:
         return bool(attr["BOOL"])
     if "S" in attr:
-        return attr["S"].lower() in ("true", "1", "yes", "on")
+        s = attr["S"]
+        return isinstance(s, str) and s.lower() in ("true", "1", "yes", "on")
     return default
 
 
 def _ddb_str_set(item: Dict[str, Any], key: str) -> List[str]:
-    attr = item.get(key, {})
+    attr = _ddb_attr(item, key)
     ss = attr.get("SS")
     if isinstance(ss, list):
         return sorted(str(v) for v in ss if str(v).strip())
@@ -365,10 +386,8 @@ def _ddb_history(item: Dict[str, Any], key: str = "history") -> List[Dict[str, s
     any uncaught failure returns [] rather than crashing the caller.
     """
     try:
-        # Coerce None-valued attribute to empty dict so .get("L") is safe.
-        attr = item.get(key) or {}
-        if not isinstance(attr, dict):
-            return []
+        # _ddb_attr coerces missing / None / non-dict attribute to {}.
+        attr = _ddb_attr(item, key)
         raw_list = attr.get("L")
         if not isinstance(raw_list, list):
             return []
@@ -418,7 +437,7 @@ def _ddb_list_of_maps(item: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
     Handles nested S, N, BOOL, and L-of-S values within each map entry.
     Used for structured attributes like acceptance_criteria and evidence.
     """
-    attr = item.get(key, {})
+    attr = _ddb_attr(item, key)
     raw_list = attr.get("L")
     if not isinstance(raw_list, list):
         return []
@@ -427,6 +446,8 @@ def _ddb_list_of_maps(item: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
         if not isinstance(entry, dict) or "M" not in entry:
             continue
         m = entry["M"]
+        if not isinstance(m, dict):
+            continue
         obj: Dict[str, Any] = {}
         for k, v in m.items():
             if "S" in v:
@@ -1005,12 +1026,19 @@ def _transform_plan_from_ddb(item: Dict[str, Any], project_id: str) -> Dict[str,
 
 def _ddb_map(item: Dict[str, Any], key: str) -> Dict[str, Any]:
     """Extract a DynamoDB Map attribute as a plain dict with N values as floats."""
-    attr = item.get(key, {})
+    attr = _ddb_attr(item, key)
     m = attr.get("M", {})
+    if not isinstance(m, dict):
+        return {}
     result = {}
     for k, v in m.items():
+        if not isinstance(v, dict):
+            continue
         if "N" in v:
-            result[k] = float(v["N"])
+            try:
+                result[k] = float(v["N"])
+            except (ValueError, TypeError):
+                continue
         elif "S" in v:
             result[k] = v["S"]
         elif "BOOL" in v:
