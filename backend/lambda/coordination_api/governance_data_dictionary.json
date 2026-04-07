@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-07.60",
-  "updated_at": "2026-04-07T12:12:00Z",
+  "version": "2026-04-07.61",
+  "updated_at": "2026-04-07T12:21:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -3138,7 +3138,11 @@
       "fields": {
         "max_history_entries": {
           "type": "integer",
-          "definition": "Maximum number of history entries returned per record in the feed API response. When a record has more entries, only the most recent N are included. Current value: 50."
+          "definition": "Maximum number of history entries returned per record in the feed API response. When a record has more entries, only the most recent N are included. Current value: 10 (ENC-TSK-C34; reduced from 50 as a secondary guardrail against the Lambda 6 MB sync response limit)."
+        },
+        "per_type_record_cap": {
+          "type": "object",
+          "definition": "ENC-TSK-C34: Per-record-type caps applied inside _query_all_records to keep the full /api/v1/feed synchronous response under AWS Lambda's 6 MB payload limit. With history arrays populated (ENC-TSK-C01), the pre-cap response exceeded the limit and returned the opaque {\"message\":\"Internal Server Error\"} envelope from Lambda runtime, which broke PWA plan and lesson rendering (lessons and plans have no S3 fallback in useFeed.ts). The cap keeps only the N most-recently-updated records of each type: MAX_TASKS_FULL_REFRESH=100, MAX_ISSUES_FULL_REFRESH=10, MAX_FEATURES_FULL_REFRESH=10, MAX_LESSONS_FULL_REFRESH=10, MAX_PLANS_FULL_REFRESH=10. Aligned with the PWA's frontend/ui/src/pages/FeedPage.tsx useInfiniteList(items, 20, 100) which already caps visible feed rows at 100. The cap is applied BEFORE the deterministic id sort so the truncation window is chosen by recency, not alphabetically."
         },
         "entry_shape": {
           "type": "object",
