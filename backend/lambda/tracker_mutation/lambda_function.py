@@ -1482,6 +1482,11 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
     dispatch_id = str(body.get("dispatch_id") or "").strip()
     is_child = bool(body.get("is_child", False))
     parent_task_id = str(body.get("parent_task_id") or "").strip()
+    # ENC-TSK-C26 / ENC-ISS-175: read transition_type at create time so the
+    # create-time-only sealed values (no_code, code_only per ENC-FTR-060) can
+    # actually be applied. Field-level immutability is enforced separately by
+    # the tracker.set handler at the field == "transition_type" branch.
+    transition_type = str(body.get("transition_type") or "").strip().lower()
 
     # ENC-FTR-056: Validate is_child / parent_task_id pairing
     if is_child and not parent_task_id:
@@ -1691,6 +1696,22 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
             record_type=record_type,
             governed_rules=["category must match the governed enum set for the record type."],
         )
+    # ENC-TSK-C26 / ENC-ISS-175: validate transition_type at create time.
+    # Only valid for tasks; reject unknown values with a clear 400 instead of
+    # silently dropping (which previously stranded no_code/code_only intent).
+    if transition_type:
+        if record_type != "task":
+            return _tracker_create_validation_error(
+                f"transition_type is only valid for task records, not {record_type}.",
+                record_type=record_type,
+                governed_rules=["transition_type selects a task lifecycle arc and is only meaningful on tasks."],
+            )
+        if transition_type not in _VALID_TRANSITION_TYPES:
+            return _tracker_create_validation_error(
+                f"Invalid transition_type '{transition_type}'. Allowed: {list(_VALID_TRANSITION_TYPES)}",
+                record_type=record_type,
+                governed_rules=["transition_type must be one of the governed enum values."],
+            )
 
     category_warning = ""
 
@@ -1772,6 +1793,10 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         item["active_agent_session"] = {"BOOL": False}
         item["active_agent_session_id"] = _ser_s("")
         item["active_agent_session_parent"] = {"BOOL": False}
+        # ENC-TSK-C26 / ENC-ISS-175: persist transition_type at create time so the
+        # sealed values (no_code, code_only) can actually take effect.
+        if transition_type:
+            item["transition_type"] = _ser_s(transition_type)
     # ENC-FTR-052: Lesson-specific fields
     if record_type == "lesson":
         item["observation"] = _ser_s(observation)
