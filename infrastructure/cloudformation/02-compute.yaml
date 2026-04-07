@@ -922,6 +922,35 @@ Resources:
           MessageGroupId: $.dynamodb.NewImage.project_id.S
           MessageDeduplicationId: $.dynamodb.Keys.record_id.S
 
+  # ENC-PLN-014 / ENC-FTR-065: Document node graph projection.
+  # Second EventBridge Pipe modeled on TrackerToGraphPipe, sourcing from the
+  # DocumentsTable DynamoDB Stream and targeting the same GraphSyncQueue. The
+  # graph_sync Lambda consumes both pipes' output transparently via its
+  # existing SQS event source. The MessageGroupId is the literal string
+  # "document" to keep document mutations in a distinct FIFO group from the
+  # tracker stream's project-scoped groups.
+  DocumentsToGraphPipe:
+    Type: AWS::Pipes::Pipe
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-documents-to-graph-sync-queue${EnvironmentSuffix}"
+      RoleArn: !GetAtt GraphPipeRole.Arn
+      Source: !ImportValue
+        Fn::Sub: ${DataStackName}-DocumentsStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+      Target: !ImportValue
+        Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+      TargetParameters:
+        SqsQueueParameters:
+          MessageGroupId: document
+          MessageDeduplicationId: $.dynamodb.Keys.document_id.S
+
   # ---------------------------------------------------------------------------
   # IAM Roles (placeholder — full policies in each Lambda's deploy.sh)
   # ---------------------------------------------------------------------------
@@ -1423,6 +1452,16 @@ Resources:
                   - dynamodb:ListStreams
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-TrackerStreamArn
+              # ENC-PLN-014 / ENC-FTR-065: DocumentsToGraphPipe source perms
+              - Sid: ReadDocumentsStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-DocumentsStreamArn
         - PolicyName: PipeTargetSqs
           PolicyDocument:
             Version: '2012-10-17'

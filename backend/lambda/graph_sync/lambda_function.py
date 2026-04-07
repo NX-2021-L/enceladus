@@ -121,6 +121,7 @@ RECORD_TYPE_TO_LABEL = {
     "feature": "Feature",
     "plan": "Plan",  # ENC-FTR-058
     "lesson": "Lesson",  # ENC-FTR-052 / ENC-TSK-983
+    "document": "Document",  # ENC-FTR-065 / ENC-PLN-014
 }
 
 def _bare_id(record_id: str) -> str:
@@ -289,6 +290,15 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 "MERGE (p)-[:PLAN_ATTACHED_DOC]->(d)",
                 pid=record_id, did=doc_id,
             )
+            # ENC-PLN-014 / ENC-FTR-065: inverse DOC_ATTACHED_TO_PLAN
+            # Requires a :Document node to exist; harmless no-op until backfill
+            # projects the documents (see ENC-TSK-C45).
+            tx.run(
+                "MATCH (p:Plan), (d:Document) "
+                "WHERE p.record_id = $pid AND d.record_id = $did "
+                "MERGE (d)-[:DOC_ATTACHED_TO_PLAN]->(p)",
+                pid=record_id, did=doc_id,
+            )
 
         # PLAN_IMPLEMENTS -> related feature
         feat_id = _bare_id(record.get("related_feature_id", "") or "")
@@ -298,6 +308,42 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 "WHERE p.record_id = $pid AND f.record_id = $fid "
                 "MERGE (p)-[:PLAN_IMPLEMENTS]->(f)",
                 pid=record_id, fid=feat_id,
+            )
+
+    # ENC-FTR-065 / ENC-PLN-014: Document edge projections
+    if record_type == "document":
+        doc_id = record_id  # already _bare_id-stripped at the top of the function
+
+        # Note: BELONGS_TO -> Project is emitted by the record_type-agnostic
+        # block above at lines 198-205 and fires automatically for documents
+        # once RECORD_TYPE_TO_LABEL contains the "document" entry. The
+        # outgoing-edge delete prelude at lines 183-194 also strips the
+        # Document node's outgoing relationships before the new MERGEs run,
+        # so re-running graph_sync on a backfill is idempotent.
+
+        # RELATED_TO -> each related_items target (any node label)
+        for related_id in record.get("related_items", []) or []:
+            related_id = _bare_id(related_id) if related_id else ""
+            if not related_id:
+                continue
+            tx.run(
+                "MATCH (d:Document), (t {record_id: $tid}) "
+                "WHERE d.record_id = $did "
+                "MERGE (d)-[:RELATED_TO]->(t)",
+                did=doc_id, tid=related_id,
+            )
+
+        # INFORMED_BY -> source document; INFORMS inverse from source -> this doc
+        for informed_id in record.get("informed_by", []) or []:
+            informed_id = _bare_id(informed_id) if informed_id else ""
+            if not informed_id:
+                continue
+            tx.run(
+                "MATCH (d:Document), (s:Document) "
+                "WHERE d.record_id = $did AND s.record_id = $sid "
+                "MERGE (d)-[:INFORMED_BY]->(s) "
+                "MERGE (s)-[:INFORMS]->(d)",
+                did=doc_id, sid=informed_id,
             )
 
 
@@ -330,6 +376,10 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "hands-off": "HANDS_OFF", "handed-off-by": "HANDED_OFF_BY",
     # ENC-TSK-960: Coordination dispatch edge types
     "dispatches": "DISPATCHES", "dispatched-by": "DISPATCHED_BY",
+    # ENC-PLN-014 / ENC-FTR-065: Document edge types
+    "doc-attached-to-plan": "DOC_ATTACHED_TO_PLAN",  # Document -> Plan (inverse of plan-attached-doc)
+    "informed-by": "INFORMED_BY",                      # Document -> Document (GDMP provenance)
+    "informs": "INFORMS",                              # Document -> Document (inverse provenance)
 }
 
 
