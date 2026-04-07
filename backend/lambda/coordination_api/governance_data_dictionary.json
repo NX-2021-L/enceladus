@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-07.61",
-  "updated_at": "2026-04-07T12:21:00Z",
+  "version": "2026-04-07.62",
+  "updated_at": "2026-04-07T13:05:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2272,9 +2272,19 @@
             "dispatches",
             "dispatched-by",
             "hands-off",
-            "handed-off-by"
+            "handed-off-by",
+            "learned-from",
+            "teaches",
+            "supersedes",
+            "superseded-by",
+            "plan-contains",
+            "contained-by-plan",
+            "plan-attached-doc",
+            "doc-attached-to-plan",
+            "plan-implements",
+            "implemented-by-plan"
           ],
-          "usage_guidance": "11 canonical types with inverse pairs. 'relates-to' is self-inverse (symmetric). All others are asymmetric with distinct inverse types. 'dispatches/dispatched-by' links coordination requests to dispatched tasks (ENC-TSK-960). 'hands-off/handed-off-by' links source records to handoff documents (ENC-FTR-061)."
+          "usage_guidance": "Canonical typed relationship enum (ENC-TSK-C36). Includes 17 base canonical types with inverse pairs ('relates-to' is self-inverse / symmetric); ENC-FTR-052 lesson edges (learned-from/teaches, supersedes/superseded-by); ENC-FTR-061 handoff edges (hands-off/handed-off-by); ENC-TSK-960 coordination dispatch edges (dispatches/dispatched-by); and ENC-FTR-058 plan-* edges (plan-contains/contained-by-plan, plan-attached-doc/doc-attached-to-plan, plan-implements/implemented-by-plan). Lambda allowlist in tracker_mutation enforces this set; graph_sync RELATIONSHIP_TYPE_TO_EDGE_LABEL projects all to Neo4j; graph_query_api _ALLOWED_EDGE_TYPES exposes all for tracker.graphsearch. ENC-ISS-178 fix: typed 'relates-to' projects to RELATED_TO so it converges with the legacy related_*_ids projection."
         },
         "source_id": {
           "type": "string",
@@ -2409,7 +2419,13 @@
         "affects": "affected-by",
         "tests": "tested-by",
         "consumes-from": "produces-for",
-        "dispatches": "dispatched-by"
+        "dispatches": "dispatched-by",
+        "hands-off": "handed-off-by",
+        "learned-from": "teaches",
+        "supersedes": "superseded-by",
+        "plan-contains": "contained-by-plan",
+        "plan-attached-doc": "doc-attached-to-plan",
+        "plan-implements": "implemented-by-plan"
       },
       "domain_range_constraints": {
         "blocks": {
