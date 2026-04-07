@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-07.63",
-  "updated_at": "2026-04-07T17:45:00Z",
+  "version": "2026-04-07.64",
+  "updated_at": "2026-04-07T18:35:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -3305,7 +3305,7 @@
       }
     },
     "docstore.document": {
-      "description": "Document store document record with GDMP maturity lifecycle (ENC-FTR-065). Documents track compliance and maturity state through a governed pipeline. document_maturity_state is forwarded through MCP server documents.patch handler (ENC-ISS-167).",
+      "description": "Document store document record with GDMP maturity lifecycle (ENC-FTR-065). Documents track compliance and maturity state through a governed pipeline. document_maturity_state is forwarded through MCP server documents.patch handler (ENC-ISS-167). graph_projection: Document nodes are projected to Neo4j via the DocumentsToGraphPipe → GraphSyncQueue → graph_sync pipeline (ENC-PLN-014) with BELONGS_TO, RELATED_TO, INFORMED_BY, INFORMS, and DOC_ATTACHED_TO_PLAN edges. record_type is stamped to the literal value 'document' on all put_item and update_item paths in document_api so graph_sync record-type routing fires for every document mutation.",
       "fields": {
         "document_maturity_state": {
           "type": "enum",
@@ -3322,6 +3322,38 @@
           "governing_feature": "ENC-FTR-065"
         }
       }
+    },
+    "document.graph_edges": {
+      "description": "Neo4j edge types projected from Document nodes via the DocumentsToGraphPipe → GraphSyncQueue → graph_sync handler (ENC-PLN-014). Document nodes carry BELONGS_TO (project), RELATED_TO (any related_items target), INFORMED_BY (source document, GDMP provenance), INFORMS (inverse provenance), and DOC_ATTACHED_TO_PLAN (inverse of plan PLAN_ATTACHED_DOC). Edge emission is implemented in backend/lambda/graph_sync/lambda_function.py inside the document branch of _reconcile_edges(), and the edge labels are registered in backend/lambda/graph_query_api/lambda_function.py _ALLOWED_EDGE_TYPES so they are queryable via tracker.graphsearch.",
+      "fields": {
+        "BELONGS_TO": {
+          "type": "edge",
+          "target_label": "Project",
+          "source_field": "project_id"
+        },
+        "RELATED_TO": {
+          "type": "edge",
+          "target_label": "any",
+          "source_field": "related_items"
+        },
+        "INFORMED_BY": {
+          "type": "edge",
+          "target_label": "Document",
+          "source_field": "informed_by"
+        },
+        "INFORMS": {
+          "type": "edge",
+          "target_label": "Document",
+          "source_field": "informed_by (inverse)"
+        },
+        "DOC_ATTACHED_TO_PLAN": {
+          "type": "edge",
+          "target_label": "Plan",
+          "source_field": "plan.attached_documents (inverse)"
+        }
+      },
+      "governing_feature": "ENC-FTR-065",
+      "governing_plan": "ENC-PLN-014"
     }
   }
 }
