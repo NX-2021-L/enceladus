@@ -350,16 +350,7 @@ ensure_api_routes() {
     "OPTIONS /api/v1/checkout/{project}/task/{taskId}/log"
     "OPTIONS /api/v1/checkout/{project}/task/{taskId}/status"
     "OPTIONS /api/v1/checkout/validate/commit-complete/{cciId}"
-    # Plan routes (ENC-FTR-058 Phase 2)
-    "POST /api/v1/checkout/{project}/plan/{planId}/checkout"
-    "DELETE /api/v1/checkout/{project}/plan/{planId}/checkout"
-    "POST /api/v1/checkout/{project}/plan/{planId}/advance"
-    "POST /api/v1/checkout/{project}/plan/{planId}/log"
-    "GET /api/v1/checkout/{project}/plan/{planId}/status"
-    "OPTIONS /api/v1/checkout/{project}/plan/{planId}/checkout"
-    "OPTIONS /api/v1/checkout/{project}/plan/{planId}/advance"
-    "OPTIONS /api/v1/checkout/{project}/plan/{planId}/log"
-    "OPTIONS /api/v1/checkout/{project}/plan/{planId}/status"
+    # Plan routes managed by CloudFormation 03-api.yaml (ENC-ISS-169)
   )
 
   local existing_route_keys
