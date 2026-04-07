@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-06.55",
-  "updated_at": "2026-04-06T23:06:00Z",
+  "version": "2026-04-07.56",
+  "updated_at": "2026-04-07T01:00:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -2908,6 +2908,11 @@
             "PLN"
           ],
           "definition": "Type segment codes: TSK=task, ISS=issue, FTR=feature, LSN=lesson, PLN=plan."
+        },
+        "agent_boundary": {
+          "type": "constraint",
+          "definition": "Record IDs are exclusively server-assigned. Agents must not predict, infer, scan for, or reason about the next available ID before submitting tracker.create. The ID returned in the create response is the only authoritative source. Agents that anticipate IDs violate the system's single-source-of-truth principle and introduce brittle sequence dependencies (ENC-TSK-B99).",
+          "usage_guidance": "Submit tracker.create with required attributes only. Do not inspect existing records to determine what the next ID will be. Read the returned record_id from the success response. Use it in all subsequent operations."
         }
       }
     },
