@@ -69,7 +69,7 @@ MAX_SCOPE_RECORD_IDS = 500
 MAX_SCOPE_STATUSES = 20
 MAX_DURATION_MINUTES = 10080
 DEFAULT_DURATION_MINUTES = 60
-VALID_RECORD_TYPES = {"task", "issue", "feature"}
+VALID_RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan"}
 VALID_DELIVERY_MODES = {"poll", "push"}
 
 _CLOSED_STATUSES = {"closed", "complete", "completed"}
@@ -838,8 +838,17 @@ def _apply_subscription_scope(
     tasks: List[Dict[str, Any]],
     issues: List[Dict[str, Any]],
     features: List[Dict[str, Any]],
+    lessons: List[Dict[str, Any]],
+    plans: List[Dict[str, Any]],
     subscription: Dict[str, Any],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], int]:
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    int,
+]:
     scope = subscription.get("scope") or {}
     scope_project_id = str(scope.get("project_id") or "").strip()
 
@@ -890,9 +899,24 @@ def _apply_subscription_scope(
     scoped_tasks = [t for t in tasks if keep_item(t, "task_id", "task")]
     scoped_issues = [i for i in issues if keep_item(i, "issue_id", "issue")]
     scoped_features = [f for f in features if keep_item(f, "feature_id", "feature")]
+    scoped_lessons = [l for l in lessons if keep_item(l, "lesson_id", "lesson")]
+    scoped_plans = [p for p in plans if keep_item(p, "plan_id", "plan")]
 
-    matched = len(scoped_tasks) + len(scoped_issues) + len(scoped_features)
-    return scoped_tasks, scoped_issues, scoped_features, matched
+    matched = (
+        len(scoped_tasks)
+        + len(scoped_issues)
+        + len(scoped_features)
+        + len(scoped_lessons)
+        + len(scoped_plans)
+    )
+    return (
+        scoped_tasks,
+        scoped_issues,
+        scoped_features,
+        scoped_lessons,
+        scoped_plans,
+        matched,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1599,7 +1623,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             if state != "active":
                 return _error(409, f"Subscription state '{state}' does not permit feed queries")
 
-            tasks, issues, features, matched = _apply_subscription_scope(tasks, issues, features, sub)
+            (
+                tasks,
+                issues,
+                features,
+                lessons,
+                plans,
+                matched,
+            ) = _apply_subscription_scope(tasks, issues, features, lessons, plans, sub)
             subscription_meta = {
                 "subscription_id": subscription_id,
                 "scope_applied": True,

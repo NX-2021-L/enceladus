@@ -313,6 +313,185 @@ def test_max_full_refresh_caps_configured():
     assert feed_query.MAX_PLANS_FULL_REFRESH == 10
 
 
+# ---------------------------------------------------------------------------
+# VALID_RECORD_TYPES whitelist (ENC-TSK-C40 / ENC-ISS-177)
+#
+# Before the fix, VALID_RECORD_TYPES = {"task", "issue", "feature"} silently
+# dropped 'lesson' and 'plan' from subscription-scoped feeds. The feed
+# pipeline already transforms lessons and plans via _TRANSFORM, so the
+# whitelist was stale relative to the real record-type surface. These
+# regression tests lock in the corrected whitelist and assert that plan
+# and lesson records survive _normalize_scope and _apply_subscription_scope
+# filtering.
+# ---------------------------------------------------------------------------
+
+
+def test_valid_record_types_includes_lesson_and_plan():
+    # Whitelist must match the actual _TRANSFORM record-type surface.
+    assert "lesson" in feed_query.VALID_RECORD_TYPES
+    assert "plan" in feed_query.VALID_RECORD_TYPES
+    assert feed_query.VALID_RECORD_TYPES == {"task", "issue", "feature", "lesson", "plan"}
+
+
+def test_normalize_scope_preserves_plan_record_type():
+    scope = {"record_types": ["plan"]}
+    normalized = feed_query._normalize_scope(scope, None)
+    assert normalized["record_types"] == ["plan"]
+
+
+def test_normalize_scope_preserves_lesson_record_type():
+    scope = {"record_types": ["lesson"]}
+    normalized = feed_query._normalize_scope(scope, None)
+    assert normalized["record_types"] == ["lesson"]
+
+
+def test_normalize_scope_preserves_all_five_record_types():
+    scope = {"record_types": ["task", "issue", "feature", "lesson", "plan"]}
+    normalized = feed_query._normalize_scope(scope, None)
+    assert set(normalized["record_types"]) == {
+        "task",
+        "issue",
+        "feature",
+        "lesson",
+        "plan",
+    }
+
+
+def test_normalize_scope_drops_unknown_record_type():
+    # Defensive: anything outside the whitelist is still filtered out.
+    scope = {"record_types": ["plan", "bogus", "LESSON", "worklog"]}
+    normalized = feed_query._normalize_scope(scope, None)
+    # Case-folded; bogus and worklog dropped.
+    assert set(normalized["record_types"]) == {"plan", "lesson"}
+
+
+def _mock_records():
+    return {
+        "tasks": [
+            {"task_id": "ENC-TSK-900", "project_id": "enceladus", "status": "open", "updated_at": "2026-04-07T10:00:00Z"},
+        ],
+        "issues": [
+            {"issue_id": "ENC-ISS-900", "project_id": "enceladus", "status": "open", "updated_at": "2026-04-07T10:00:00Z"},
+        ],
+        "features": [
+            {"feature_id": "ENC-FTR-900", "project_id": "enceladus", "status": "planned", "updated_at": "2026-04-07T10:00:00Z"},
+        ],
+        "lessons": [
+            {"lesson_id": "ENC-LSN-900", "project_id": "enceladus", "status": "active", "updated_at": "2026-04-07T10:00:00Z"},
+        ],
+        "plans": [
+            {"plan_id": "ENC-PLN-900", "project_id": "enceladus", "status": "started", "updated_at": "2026-04-07T10:00:00Z"},
+        ],
+    }
+
+
+def test_apply_subscription_scope_plan_only_keeps_plans():
+    records = _mock_records()
+    subscription = {"scope": {"record_types": ["plan"]}}
+    (
+        scoped_tasks,
+        scoped_issues,
+        scoped_features,
+        scoped_lessons,
+        scoped_plans,
+        matched,
+    ) = feed_query._apply_subscription_scope(
+        records["tasks"],
+        records["issues"],
+        records["features"],
+        records["lessons"],
+        records["plans"],
+        subscription,
+    )
+    assert scoped_tasks == []
+    assert scoped_issues == []
+    assert scoped_features == []
+    assert scoped_lessons == []
+    assert len(scoped_plans) == 1
+    assert scoped_plans[0]["plan_id"] == "ENC-PLN-900"
+    assert matched == 1
+
+
+def test_apply_subscription_scope_lesson_only_keeps_lessons():
+    records = _mock_records()
+    subscription = {"scope": {"record_types": ["lesson"]}}
+    (
+        scoped_tasks,
+        scoped_issues,
+        scoped_features,
+        scoped_lessons,
+        scoped_plans,
+        matched,
+    ) = feed_query._apply_subscription_scope(
+        records["tasks"],
+        records["issues"],
+        records["features"],
+        records["lessons"],
+        records["plans"],
+        subscription,
+    )
+    assert scoped_tasks == []
+    assert scoped_issues == []
+    assert scoped_features == []
+    assert scoped_plans == []
+    assert len(scoped_lessons) == 1
+    assert scoped_lessons[0]["lesson_id"] == "ENC-LSN-900"
+    assert matched == 1
+
+
+def test_apply_subscription_scope_empty_record_types_keeps_everything():
+    # An empty/unspecified record_types list must NOT filter anything out.
+    records = _mock_records()
+    subscription = {"scope": {"record_types": []}}
+    (
+        scoped_tasks,
+        scoped_issues,
+        scoped_features,
+        scoped_lessons,
+        scoped_plans,
+        matched,
+    ) = feed_query._apply_subscription_scope(
+        records["tasks"],
+        records["issues"],
+        records["features"],
+        records["lessons"],
+        records["plans"],
+        subscription,
+    )
+    assert len(scoped_tasks) == 1
+    assert len(scoped_issues) == 1
+    assert len(scoped_features) == 1
+    assert len(scoped_lessons) == 1
+    assert len(scoped_plans) == 1
+    assert matched == 5
+
+
+def test_apply_subscription_scope_mixed_types_keeps_selected():
+    records = _mock_records()
+    subscription = {"scope": {"record_types": ["task", "plan"]}}
+    (
+        scoped_tasks,
+        scoped_issues,
+        scoped_features,
+        scoped_lessons,
+        scoped_plans,
+        matched,
+    ) = feed_query._apply_subscription_scope(
+        records["tasks"],
+        records["issues"],
+        records["features"],
+        records["lessons"],
+        records["plans"],
+        subscription,
+    )
+    assert len(scoped_tasks) == 1
+    assert scoped_issues == []
+    assert scoped_features == []
+    assert scoped_lessons == []
+    assert len(scoped_plans) == 1
+    assert matched == 2
+
+
 def test_ddb_history_mixed_good_and_bad_entries():
     # A single bad entry must not poison the whole history array.
     item = {
