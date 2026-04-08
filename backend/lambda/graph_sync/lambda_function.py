@@ -469,6 +469,16 @@ def _process_record(driver, stream_record: Dict) -> None:
         record = _deser_image(new_image)
         record_type = record.get("record_type", "")
 
+        # ENC-TSK-C49: Documents use 'document_id' as their DynamoDB primary
+        # key, not 'record_id'. Normalize here so downstream _upsert_node and
+        # _reconcile_edges (which both extract via record.get("record_id"))
+        # project Document nodes and edges correctly. Without this fix every
+        # document stream event silently bails out at `if not record_id: return`
+        # in _upsert_node, leaving Neo4j with zero Document nodes even though
+        # the DocumentsToGraphPipe is delivering events.
+        if record_type == "document" and not record.get("record_id"):
+            record["record_id"] = record.get("document_id", "")
+
         # ENC-FTR-049: Handle typed relationship records
         if record_type == "relationship":
             rel_status = record.get("status", "")
