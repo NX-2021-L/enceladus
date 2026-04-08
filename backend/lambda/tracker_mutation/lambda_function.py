@@ -1525,15 +1525,24 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
             governed_rules=["coordination=true requires coordination_request_id."],
         )
 
-    # Acceptance criteria normalization
+    # Acceptance criteria normalization.
+    # ENC-ISS-181 / ENC-TSK-C50: Delegate to _normalize_acceptance_criteria_value()
+    # so the CREATE path handles the same input shapes as PATCH — plain strings,
+    # list-of-dicts with description/evidence/evidence_acceptance, and JSON-stringified
+    # arrays. The previous `[str(x).strip() for x in raw_ac]` collapsed dict entries
+    # to their Python repr() form and wrote that garbage into the description field.
     raw_ac = body.get("acceptance_criteria")
-    acceptance_criteria: List[str] = []
-    if isinstance(raw_ac, str):
-        stripped = raw_ac.strip()
-        if stripped:
-            acceptance_criteria = [stripped]
-    elif isinstance(raw_ac, list):
-        acceptance_criteria = [str(x).strip() for x in raw_ac if str(x).strip()]
+    acceptance_criteria: List[Any] = []
+    if raw_ac not in (None, ""):
+        normalized_ac, ac_err = _normalize_acceptance_criteria_value(record_type, raw_ac)
+        if ac_err:
+            return _tracker_create_validation_error(
+                ac_err,
+                record_type=record_type,
+                missing_required_fields=["acceptance_criteria"],
+                governed_rules=[ac_err],
+            )
+        acceptance_criteria = normalized_ac or []
 
     # Validation per record type
     if record_type == "task" and not acceptance_criteria:
@@ -1764,10 +1773,16 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
     # Acceptance criteria
     if acceptance_criteria:
         if record_type in ("feature", "task"):
-            # ENC-FTR-048: features and tasks both use structured AC with evidence tracking
+            # ENC-FTR-048: features and tasks both use structured AC with evidence tracking.
+            # ENC-ISS-181 / ENC-TSK-C50: acceptance_criteria has already been normalized
+            # above into a list of dicts {description, evidence, evidence_acceptance} by
+            # _normalize_acceptance_criteria_value(). Consume the structured form directly
+            # instead of stringifying — the previous `_ser_s(ac)` path wrote repr(dict) into
+            # the description column whenever callers passed dict-shaped AC entries.
             ac_items = [{"M": {
-                "description": _ser_s(ac), "evidence": _ser_s(""),
-                "evidence_acceptance": {"BOOL": False},
+                "description": _ser_s(ac["description"]),
+                "evidence": _ser_s(ac.get("evidence", "") or ""),
+                "evidence_acceptance": {"BOOL": bool(ac.get("evidence_acceptance", False))},
             }} for ac in acceptance_criteria]
             item["acceptance_criteria"] = {"L": ac_items}
         else:
