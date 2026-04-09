@@ -199,6 +199,15 @@ _PRIVATE_KEY_TTL: float = 3600.0  # re-fetch private key from SM every hour
 _installation_token_cache: Optional[str] = None
 _installation_token_expires_at: float = 0.0
 
+# ENC-TSK-C68 / ENC-ISS-183: cached set of 'owner/repo' full names accessible to
+# the GitHub App installation. Used by _validate_commit to self-diagnose
+# installation-scope 404s (repo missing from installation scope vs. commit
+# genuinely not found). Short TTL so a grant via the org admin UI is picked up
+# without a Lambda cold restart.
+_installation_repos_cache: Optional[set] = None
+_installation_repos_expires_at: float = 0.0
+_INSTALLATION_REPOS_TTL: float = 300.0
+
 
 def _get_secretsmanager():
     global _sm_client
@@ -598,12 +607,104 @@ def _github_request(path: str) -> Tuple[int, dict]:
         return 503, {"error": str(exc)}
 
 
+def _list_installation_repos() -> set:
+    """Return a cached set of 'owner/repo' full names accessible to the
+    installation, or an empty set on any error.
+
+    ENC-TSK-C68 / ENC-ISS-183: used by _validate_commit to distinguish an
+    installation-scope 404 from a missing-commit 404. Paginates through
+    /installation/repositories up to 20 pages (2000 repos). Cached for
+    _INSTALLATION_REPOS_TTL seconds so we do not hammer GitHub on every
+    failing commit validation. Cache is populated lazily on first call after
+    expiry; a probe failure returns an empty set so the caller falls back to
+    the generic 'commit not found' error rather than masking a real problem
+    with a misleading installation-scope message.
+    """
+    global _installation_repos_cache, _installation_repos_expires_at
+    now = time.time()
+    if _installation_repos_cache is not None and now < _installation_repos_expires_at:
+        return _installation_repos_cache
+
+    try:
+        token = _get_installation_token()
+    except Exception as exc:
+        logger.warning(
+            "[ENC-ISS-183] Could not mint installation token for repo scope probe: %s", exc
+        )
+        return set()
+
+    accessible: set = set()
+    page = 1
+    while page <= 20:
+        url = f"{GITHUB_API_BASE}/installation/repositories?per_page=100&page={page}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "checkout-service/1.0",
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception as exc:
+            logger.warning(
+                "[ENC-ISS-183] Failed to list installation repos at page=%d: %s", page, exc
+            )
+            return set()
+
+        repos = data.get("repositories") or []
+        for r in repos:
+            full = r.get("full_name")
+            if full:
+                accessible.add(full)
+        total = int(data.get("total_count") or 0)
+        if not repos or len(accessible) >= total:
+            break
+        page += 1
+
+    _installation_repos_cache = accessible
+    _installation_repos_expires_at = now + _INSTALLATION_REPOS_TTL
+    return accessible
+
+
 def _validate_commit(owner: str, repo: str, commit_sha: str) -> Tuple[bool, str]:
-    """Verify commit SHA exists on GitHub. Returns (valid, reason)."""
+    """Verify commit SHA exists on GitHub. Returns (valid, reason).
+
+    ENC-TSK-C68 / ENC-ISS-183: on a 404 response, probe the GitHub App
+    installation's accessible-repositories list to distinguish between:
+
+      1. the commit genuinely not existing in the repo, and
+      2. the installation not having access to the repo at all (which GitHub
+         surfaces as a bare 404 on /repos/{owner}/{repo}/commits/{sha}).
+
+    When the repo is not in the installation scope, return a descriptive
+    self-correcting error pointing at the installation management URL so
+    operators do not re-live the original Blocker A confusion where every
+    devops-project task stalled at coding-complete with the ambiguous
+    "Commit <sha> not found in NX-2021-L/devops" message.
+    """
     status, body = _github_request(f"/repos/{owner}/{repo}/commits/{commit_sha}")
     if status == 200:
         return True, ""
     if status == 404:
+        full_name = f"{owner}/{repo}"
+        accessible = _list_installation_repos()
+        if accessible and full_name not in accessible:
+            installation_id = GITHUB_INSTALLATION_ID or "<unset>"
+            manage_url = (
+                f"https://github.com/organizations/{owner}/settings/installations/{installation_id}"
+                if installation_id and installation_id != "<unset>"
+                else f"https://github.com/organizations/{owner}/settings/installations"
+            )
+            return False, (
+                f"GitHub App 'enceladus-integration' (installation {installation_id}) does not "
+                f"have access to {full_name}. The commit {commit_sha} may exist but is not "
+                f"visible to the App. Grant access at {manage_url} (Organization Owner required), "
+                f"then retry. Currently accessible: {sorted(accessible)}."
+            )
         return False, f"Commit {commit_sha} not found in {owner}/{repo}"
     return False, f"GitHub API returned {status}: {body.get('message', 'unknown error')}"
 
