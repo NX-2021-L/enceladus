@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-07.66",
-  "updated_at": "2026-04-08T10:20:00Z",
+  "version": "2026-04-08.67",
+  "updated_at": "2026-04-09T00:55:00Z",
   "owners": [
     "enceladus-platform"
   ],
@@ -1599,6 +1599,32 @@
           ],
           "definition": "Missing location context fields (hypothesis, technical_notes, location_hint) produce warnings in the response but do not block issue creation.",
           "usage_guidance": "Ontology scoring already penalizes missing fields. Hard 400 enforcement was removed in ENC-ISS-105 because MCP client bindings did not expose these parameters, causing a self-inflicted regression."
+        }
+      }
+    },
+    "checkout_service.install_scope_diagnostic": {
+      "description": "Self-correcting 404 diagnostic for GitHub commit validation (ENC-TSK-C68, ENC-ISS-183). When _validate_commit() receives a 404 from /repos/{owner}/{repo}/commits/{sha}, the checkout service now probes /installation/repositories via the cached App installation token and, if the target repo is not in the installation's accessible-repo list, returns a descriptive error that names the installation id, links to the installation management URL, lists currently accessible repos, and explicitly calls out Organization Owner as the required role. Prevents repeats of the devops-project stall where the ambiguous 'Commit not found' error masked an App installation scope gap for weeks. Probe result cached for 300s to avoid hammering GitHub; probe failures return the generic 'commit not found' error so real 404s are not masked by a misleading installation-scope message.",
+      "fields": {
+        "probe_ttl_seconds": {
+          "type": "integer",
+          "definition": "Seconds the installation-repo probe result is cached before re-probing. Controls how quickly a newly-granted repo becomes visible to the checkout service after the org admin updates the installation scope.",
+          "usage_guidance": "Default: 300. Do not set lower than ~60 to avoid probe-on-every-404 hammering."
+        },
+        "probe_pagination_cap": {
+          "type": "integer",
+          "definition": "Maximum number of pages (at 100 repos/page) the probe will fetch from /installation/repositories. Protects against runaway pagination if an installation ever exceeds 2000 repos.",
+          "usage_guidance": "Default: 20. Raise only if legitimately needed."
+        },
+        "generic_fallback_trigger": {
+          "type": "string",
+          "definition": "Conditions under which _validate_commit falls back to the pre-ENC-TSK-C68 generic 'Commit <sha> not found in {owner}/{repo}' error instead of the new installation-scope error. Triggers: (a) installation token mint failure, (b) /installation/repositories returns empty set, (c) any exception during pagination, (d) repo IS in the accessible list (meaning the 404 is a real missing-commit).",
+          "usage_guidance": "This fail-safe path ensures the new diagnostic never masks a real 404. Operators can distinguish the two error classes by whether the message mentions 'enceladus-integration' (new path) or just 'Commit ... not found' (legacy/fallback path)."
+        },
+        "unit_test_coverage": {
+          "type": "array",
+          "items": {"type": "string"},
+          "definition": "Test file path(s) covering the install-scope diagnostic.",
+          "usage_guidance": "Currently: backend/lambda/checkout_service/test_validate_commit_installation_scope.py with 5 tests covering installation-scope 404 -> descriptive error, in-scope 404 -> generic fallback, probe failure -> generic fallback, 200 fast path (probe never called), and non-404 errors (probe never called)."
         }
       }
     },
