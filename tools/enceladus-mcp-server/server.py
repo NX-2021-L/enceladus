@@ -5437,7 +5437,14 @@ async def _tracker_create(args: dict) -> list[TextContent]:
                 # arcs (no_code, code_only) can actually be set on agent-created tasks.
                 "transition_type",
                 # ENC-TSK-A97: Plan-specific fields
-                "objectives_set", "attached_documents", "related_feature_id"):
+                "objectives_set", "attached_documents", "related_feature_id",
+                # ENC-TSK-C70 / ENC-ISS-192: forward lesson-specific fields so the
+                # generic execute(tracker.create) action properly routes lesson payloads
+                # to tracker_mutation. Without these, lesson creates fail with
+                # "Lesson creation requires observation" because the field is dropped
+                # before the downstream Lambda sees it.
+                "observation", "insight", "confidence", "evidence_chain",
+                "provenance", "pillar_scores", "analysis_reference"):
         if args.get(key) is not None:
             payload[key] = args[key]
 
