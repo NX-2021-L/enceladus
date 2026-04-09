@@ -130,6 +130,54 @@
       }
     },
     {
+      "Sid": "AthenaQuery",
+      "Effect": "Allow",
+      "Action": [
+        "athena:StartQueryExecution",
+        "athena:GetQueryExecution",
+        "athena:GetQueryResults",
+        "athena:StopQueryExecution",
+        "athena:ListWorkGroups",
+        "athena:GetWorkGroup"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "GlueCatalogRead",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetDatabase",
+        "glue:GetDatabases",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:GetPartitions"
+      ],
+      "Resource": [
+        "arn:aws:glue:us-west-2:356364570033:catalog",
+        "arn:aws:glue:us-west-2:356364570033:database/devops_agentcli_db",
+        "arn:aws:glue:us-west-2:356364570033:table/devops_agentcli_db/*"
+      ]
+    },
+    {
+      "Sid": "AthenaResultBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::devops-agentcli-compute",
+        "arn:aws:s3:::devops-agentcli-compute/athena-results/*"
+      ]
+    },
+    {
       "Sid": "SqsInspect",
       "Effect": "Allow",
       "Action": [
