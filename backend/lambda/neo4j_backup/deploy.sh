@@ -59,16 +59,23 @@ ensure_role() {
 }
 
 package_lambda() {
-  local build_dir zip_path
+  local build_dir zip_path pip_platform pip_pyver pip_abi
   build_dir="$(mktemp -d /tmp/deploy-${FUNCTION_NAME}-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
+
+  # Environment-conditional: prod=x86_64/py3.11, gamma=arm64/py3.12
+  if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+    pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"
+  else
+    pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"
+  fi
 
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
   python3 -m pip install \
     --quiet --upgrade \
-    --platform manylinux2014_aarch64 \
-    --implementation cp --python-version 3.12 --abi cp312 \
+    --platform "${pip_platform}" \
+    --implementation cp --python-version "${pip_pyver}" --abi "${pip_abi}" \
     --only-binary=:all: \
     -r "${SCRIPT_DIR}/requirements.txt" \
     -t "${build_dir}" >/dev/null
@@ -84,14 +91,16 @@ deploy_lambda() {
 
   if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION}" >/dev/null 2>&1; then
     log "[INFO] Updating existing function ${FUNCTION_NAME}"
+    local arch_flag="x86_64" runtime_flag="python3.11"
+    [ -n "${ENVIRONMENT_SUFFIX:-}" ] && arch_flag="arm64" && runtime_flag="python3.12"
     aws lambda update-function-code \
       --function-name "${FUNCTION_NAME}" \
       --zip-file "fileb://${zip_path}" \
-      --region "${REGION}" --architectures arm64 >/dev/null
+      --region "${REGION}" --architectures "${arch_flag}" >/dev/null
     aws lambda wait function-updated-v2 --function-name "${FUNCTION_NAME}" --region "${REGION}"
     aws lambda update-function-configuration \
       --function-name "${FUNCTION_NAME}" \
-      --runtime python3.12 \
+      --runtime "${runtime_flag}" \
       --handler lambda_function.lambda_handler \
       --role "${role_arn}" \
       --timeout 300 \
@@ -102,8 +111,8 @@ deploy_lambda() {
     log "[INFO] Creating new function ${FUNCTION_NAME}"
     aws lambda create-function \
       --function-name "${FUNCTION_NAME}" \
-      --runtime python3.12 \
-      --architectures arm64 \
+      --runtime "${runtime_flag}" \
+      --architectures "${arch_flag}" \
       --handler lambda_function.lambda_handler \
       --role "${role_arn}" \
       --zip-file "fileb://${zip_path}" \

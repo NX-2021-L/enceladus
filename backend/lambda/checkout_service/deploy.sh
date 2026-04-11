@@ -268,19 +268,26 @@ deploy_lambda() {
   local env_json="$5"
   local layer_arn="$6"
 
+  # Env-conditional: gamma=arm64/py3.12, prod=x86_64/py3.11
+  local arch_flag="x86_64" runtime_flag="python3.11"
+  if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+    arch_flag="arm64"; runtime_flag="python3.12"
+  fi
+
   if aws lambda get-function --function-name "${fn_name}" --region "${REGION}" >/dev/null 2>&1; then
     log "[INFO] Updating code: ${fn_name}"
     aws lambda update-function-code \
       --function-name "${fn_name}" \
       --region "${REGION}" \
-      --zip-file "fileb://${zip_path}" >/dev/null
+      --zip-file "fileb://${zip_path}" \
+      --architectures "${arch_flag}" >/dev/null
     aws lambda wait function-updated-v2 --function-name "${fn_name}" --region "${REGION}"
 
     aws lambda update-function-configuration \
       --function-name "${fn_name}" \
       --region "${REGION}" \
       --handler "${handler}" \
-      --runtime python3.12 \
+      --runtime "${runtime_flag}" \
       --timeout 30 \
       --memory-size 256 \
       --environment "${env_json}" \
@@ -291,8 +298,8 @@ deploy_lambda() {
     aws lambda create-function \
       --function-name "${fn_name}" \
       --region "${REGION}" \
-      --runtime python3.12 \
-      --architectures arm64 \
+      --runtime "${runtime_flag}" \
+      --architectures "${arch_flag}" \
       --role "${role_arn}" \
       --handler "${handler}" \
       --zip-file "fileb://${zip_path}" \
