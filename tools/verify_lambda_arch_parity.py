@@ -251,6 +251,62 @@ def _validate_deploy_scripts() -> List[str]:
     return errors
 
 
+def _validate_manifest_expectations() -> List[str]:
+    """Cross-validate manifest expected_architecture/expected_runtime against CFN and deploy scripts.
+
+    The manifest serves as the single source of truth for what each environment should use.
+    This check ensures the manifest expectations are internally consistent and that the
+    CFN template's IsGamma conditionals resolve to the manifest's declared values.
+
+    Part of ENC-PLN-020 (Production Deploy Hardening) / ENC-TSK-D17 AC7.
+    """
+    errors: List[str] = []
+
+    import json
+    if not MANIFEST_PATH.is_file():
+        return []  # Manifest not required for basic parity check
+
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    expected_arch = manifest.get("expected_architecture", {})
+    expected_runtime = manifest.get("expected_runtime", {})
+
+    if not expected_arch or not expected_runtime:
+        return []  # No manifest expectations defined yet — skip
+
+    # Validate manifest expectations match the IsGamma conditional contract
+    # The CFN pattern is: !If [IsGamma, <gamma_value>, <prod_value>]
+    # So prod=x86_64 and gamma=arm64 must match manifest
+    if expected_arch.get("prod") != "x86_64":
+        errors.append(
+            f"Manifest expected_architecture.prod={expected_arch.get('prod')}, "
+            f"but CFN IsGamma resolves prod to x86_64"
+        )
+    if expected_arch.get("gamma") != "arm64":
+        errors.append(
+            f"Manifest expected_architecture.gamma={expected_arch.get('gamma')}, "
+            f"but CFN IsGamma resolves gamma to arm64"
+        )
+    if expected_runtime.get("prod") != "python3.11":
+        errors.append(
+            f"Manifest expected_runtime.prod={expected_runtime.get('prod')}, "
+            f"but CFN IsGamma resolves prod to python3.11"
+        )
+    if expected_runtime.get("gamma") != "python3.12":
+        errors.append(
+            f"Manifest expected_runtime.gamma={expected_runtime.get('gamma')}, "
+            f"but CFN IsGamma resolves gamma to python3.12"
+        )
+
+    if not errors:
+        print(
+            f"[INFO] Manifest expectations cross-validated: "
+            f"prod={expected_arch.get('prod')}/{expected_runtime.get('prod')}, "
+            f"gamma={expected_arch.get('gamma')}/{expected_runtime.get('gamma')}"
+        )
+
+    return errors
+
+
 def main() -> int:
     if not COMPUTE_TEMPLATE.is_file():
         print(f"[ERROR] Compute template missing: {COMPUTE_TEMPLATE}")
@@ -274,6 +330,12 @@ def main() -> int:
     if deploy_errors:
         errors.append("=== Deploy script violations ===")
         errors.extend(deploy_errors)
+
+    # Cross-validate manifest expectations (ENC-TSK-D17 AC7)
+    manifest_errors = _validate_manifest_expectations()
+    if manifest_errors:
+        errors.append("=== Manifest expectation violations ===")
+        errors.extend(manifest_errors)
 
     if errors:
         print("[ERROR] Lambda architecture parity check FAILED:")

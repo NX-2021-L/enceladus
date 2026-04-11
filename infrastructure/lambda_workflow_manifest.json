@@ -1,5 +1,13 @@
 {
   "source_of_truth": "infrastructure/cloudformation/02-compute.yaml",
+  "expected_architecture": {
+    "prod": "x86_64",
+    "gamma": "arm64"
+  },
+  "expected_runtime": {
+    "prod": "python3.11",
+    "gamma": "python3.12"
+  },
   "functions": [
     {
       "function_name": "auth-refresh",
