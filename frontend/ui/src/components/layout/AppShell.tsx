@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
-import { Outlet } from 'react-router-dom'
+import { Outlet, useNavigate } from 'react-router-dom'
 import { Header } from './Header'
 import { BottomNav } from './BottomNav'
+import { DeployApprovalBanner } from '../shared/DeployApprovalBanner'
 import { LiveFeedProvider } from '../../contexts/LiveFeedContext'
 import { useSessionLifecycle } from '../../hooks/useSessionLifecycle'
 import { useSessionTimer } from '../../hooks/useSessionTimer'
@@ -35,6 +36,7 @@ export function AppShell() {
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
       <Header />
+      <DeployApprovalBanner />
       <LiveFeedProvider>
         <main className="relative z-0 flex-1 pb-16 overflow-y-auto">
           <Outlet />
