@@ -1,11 +1,14 @@
 import { useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useParams, Link } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { useFeatures } from '../hooks/useFeatures'
 import { useTasks } from '../hooks/useTasks'
 import { useIssues } from '../hooks/useIssues'
+import { useProjects } from '../hooks/useProjects'
 import { useRecordMutation } from '../hooks/useRecordMutation'
 import { isMutationRetryExhaustedError } from '../api/mutations'
+import { fetchFeatureById, resolveProjectFromRecordId, trackerKeys } from '../api/tracker'
 import { StatusChip } from '../components/shared/StatusChip'
 import { GitHubLinkBadge } from '../components/shared/GitHubLinkBadge'
 import { GitHubOverlay } from '../components/shared/GitHubOverlay'
@@ -26,9 +29,10 @@ import { filterRelatedItems, getChildrenIds } from '../lib/relationshipFilters'
 
 export function FeatureDetailPage() {
   const { featureId } = useParams<{ featureId: string }>()
-  const { allFeatures, isPending, isError } = useFeatures()
+  const { allFeatures, isPending: feedPending, isError: feedError } = useFeatures()
   const { allTasks } = useTasks()
   const { allIssues } = useIssues()
+  const { projects } = useProjects()
   const { mutate, isPending: isMutating } = useRecordMutation()
 
   const [showNote, setShowNote] = useState(false)
@@ -37,7 +41,22 @@ export function FeatureDetailPage() {
   const [mutationError, setMutationError] = useState<string | null>(null)
   const [mutationSuccess, setMutationSuccess] = useState<string | null>(null)
 
-  const feature = allFeatures.find((f) => f.feature_id === featureId)
+  // ENC-ISS-200: feed_query caps features at 10 per project; direct-URL loads
+  // of older features need a tracker API fallback.
+  const cachedFeature = allFeatures.find((f) => f.feature_id === featureId)
+  const fallbackProjectId = !cachedFeature && featureId
+    ? resolveProjectFromRecordId(featureId, projects)
+    : null
+  const fallbackEnabled = !feedPending && !cachedFeature && !!featureId && !!fallbackProjectId
+
+  const fallbackQuery = useQuery({
+    queryKey: trackerKeys.feature(featureId ?? ''),
+    queryFn: () => fetchFeatureById(fallbackProjectId!, featureId!),
+    enabled: fallbackEnabled,
+    retry: 1,
+  })
+
+  const feature = cachedFeature ?? fallbackQuery.data
 
   const relatedTaskIds = useMemo(() => {
     if (!feature) return []
@@ -98,9 +117,9 @@ export function FeatureDetailPage() {
     return map
   }, [allTasks, allIssues, allFeatures])
 
-  if (isPending) return <LoadingState />
-  if (isError) return <ErrorState />
-  if (!feature) return <ErrorState message="Feature not found" />
+  if (feedPending || (fallbackEnabled && fallbackQuery.isPending)) return <LoadingState />
+  if (feedError && !feature) return <ErrorState />
+  if (!feature) return <ErrorState message={`Feature not found: ${featureId ?? 'unknown'}`} />
 
   function handleSubmitNote() {
     if (!note.trim()) return
