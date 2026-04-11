@@ -71,9 +71,9 @@ deploy_function() {
   env_json=$(python3 -c "
 import json, sys
 fn = json.loads(sys.argv[1])
-env = {'Variables': {'FUNCTION_NAMES': json.dumps(fn), 'AWS_REGION': sys.argv[2]}}
+env = {'Variables': {'FUNCTION_NAMES': json.dumps(fn)}}
 print(json.dumps(env))
-" "${fn_names}" "${REGION}")
+" "${fn_names}")
 
   if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION}" >/dev/null 2>&1; then
     log "[INFO] Updating existing function ${FUNCTION_NAME}"
