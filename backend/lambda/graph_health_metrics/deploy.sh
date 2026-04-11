@@ -36,7 +36,10 @@ build_package() {
 
   # Install neo4j driver for Linux Lambda runtime
   pip install \
-    --platform manylinux2014_x86_64 \
+    --platform manylinux2014_aarch64 \
+    --implementation cp \
+    --python-version 3.12 \
+    --abi cp312 \
     --only-binary=:all: \
     neo4j -t "${build_dir}" --quiet 2>/dev/null || true
 
