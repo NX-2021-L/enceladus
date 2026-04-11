@@ -15,7 +15,8 @@
 | Architecture | x86_64 | CFN `!If [IsGamma, arm64, x86_64]`, CI guard, deploy.sh env guards |
 | Runtime | python3.11 | CFN `!If [IsGamma, python3.12, python3.11]`, CI guard |
 | Lambda count | 20 (CFN-managed) + checkout-service (standalone) | Lambda workflow manifest |
-| Shared layer | x86_64 | `backend/lambda/shared_layer/deploy.sh` hardcodes x86_64 |
+| Shared layer | `enceladus-shared:8` (python3.11 / x86_64) | `backend/lambda/shared_layer/deploy.sh` ENVIRONMENT_SUFFIX-conditional pip flags + CI guard |
+| Layer ABI parity | cp311 .so wheels only on prod | `tools/verify_lambda_arch_parity.py` shared-layer guard (ENC-ISS-198) |
 
 ### Production Rules
 
@@ -24,6 +25,9 @@
 3. All CFN Lambda declarations MUST use `!If [IsGamma, <gamma_val>, <prod_val>]` conditionals.
 4. Deploy scripts with binary dependencies MUST use `ENVIRONMENT_SUFFIX` conditional gating.
 5. The CI guard (`tools/verify_lambda_arch_parity.py`) blocks PRs that violate rules 3-4.
+6. **Shared layer build scripts MUST pass all three pip flags** — `--platform`, `--python-version`, and `--abi` — to override the consumer ABI on every dimension. Single-flag fixes are insufficient (ENC-ISS-198). Enforced by `_validate_shared_layer_deploy_script()` in the CI guard.
+7. **Lifeboat layer versions MUST be preserved.** `enceladus-shared:6` (the last clean python3.11/x86_64 build before the ENC-ISS-198 regression) is retained as a documented rollback target. Do not delete published layer versions that are referenced as lifeboats.
+8. **Recovery validation MUST include an authenticated probe.** Synthetic `aws lambda invoke` probes with no `Authorization` header land in the no-token path of `auth.py:_authenticate()` and return HTTP 401 *before* `_verify_token()` is ever called — this is structurally indistinguishable from the 401 a real Cognito request produces when JWT init has silently failed. Use `tools/probe_cognito_auth.sh` (or equivalent) to bootstrap a real Cognito IdToken and probe with `Authorization: Bearer`.
 
 ---
 
@@ -84,9 +88,61 @@ Script: `workspace/v3-recovery/02-cfn-rollback-to-x86.sh`
 
 ---
 
+## Layer ABI Parity Invariant (ENC-ISS-198 / ENC-TSK-D22)
+
+The original V3 production lock validated the CFN template's `Architectures` and `Runtime` declarations but did **not** validate that attached shared layers carry the matching ABI. ENC-ISS-198 was a 3-hour-latent bug caused by exactly that gap: `enceladus-shared:7` was published 2026-04-03 by ENC-TSK-B42 with a `cpython-312-x86_64-linux-gnu` cffi backend, the V3 lock recovery rolled prod Lambdas back to python3.11/x86_64 without rolling back the layer, and every Cognito-authenticated PWA write returned a misleading HTTP 401 *"JWT library not available in Lambda package"* — until the user surfaced it via a manual worklog write attempt against DVP-TSK-481 at `2026-04-11T09:17Z`.
+
+### Three-flag rule
+
+Lambda layer build scripts must override every dimension of the consumer ABI explicitly:
+
+| Dimension | pip flag | Prod value | Gamma value |
+|---|---|---|---|
+| OS / arch | `--platform` | `manylinux2014_x86_64` | `manylinux2014_aarch64` |
+| Python version | `--python-version` | `3.11` | `3.12` |
+| Python ABI tag | `--abi` | `cp311` | `cp312` |
+
+If any flag is omitted, pip falls back to the **builder's** Python ABI and produces wheels that may not load on the consumer runtime. The failure is always silent (`import jwt` raises ImportError, the surrounding `except` swallows it, `_JWT_AVAILABLE = False`, every Cognito request returns HTTP 401).
+
+`backend/lambda/shared_layer/deploy.sh` is now ENVIRONMENT_SUFFIX-aware: prod targets `python3.11 / cp311 / x86_64`, gamma targets `python3.12 / cp312 / aarch64`. The publish call also passes `--compatible-architectures` so the published layer metadata is honest and auditable.
+
+### CI guard extension
+
+`tools/verify_lambda_arch_parity.py` now includes `_validate_shared_layer_deploy_script()` which enforces:
+
+1. All three pip flags (`--platform`, `--python-version`, `--abi`) are present in the script.
+2. The prod build target (`manylinux2014_x86_64` / `3.11` / `cp311`) is fully pinned.
+3. `aws lambda publish-layer-version` is invoked with `--compatible-architectures` so the layer metadata is honest.
+4. The script's documentation comment references `ENC-ISS-198` so the historical precedent chain (ENC-ISS-041, ENC-ISS-044, ENC-ISS-198) is preserved for the next maintainer.
+
+Test fixtures in `tools/test_verify_lambda_arch_parity.py` cover both a known-bad case (the pre-fix script that produced ENC-ISS-198) and a known-good case (the post-fix script).
+
+### Lifeboat layer policy
+
+`enceladus-shared:6` (created `2026-02-24T19:09Z`, descriptor *"rebuilt for Linux x86_64 Python 3.11 (ENC-ISS-044)"*, `CompatibleRuntimes=[python3.11]`, `CompatibleArchitectures=[x86_64]`) is the documented rollback target for prod. **Do not delete it.** If a future layer publish breaks prod, re-attach v6 via `aws lambda update-function-configuration --layers arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:6 …` per function. v6's contents have been validated against the V3 lock.
+
+### Authenticated-probe requirement
+
+DOC-2CACF0D1E7E6 §3 Phase R3 used `aws lambda invoke` with no `Authorization` header for empirical validation. That probe lands in the no-token path of `auth.py:_authenticate()` and returns HTTP 401 *before* `_verify_token()` is ever called — structurally indistinguishable from the 401 a real Cognito request produces when JWT init has silently failed. The COE Lesson 4 ("empirical validation beats inference") is correct in spirit but the specific implementation was structurally blind to ENC-ISS-198.
+
+`tools/probe_cognito_auth.sh` is the new authenticated-probe primitive. It bootstraps a Cognito IdToken via the terminal-agent path (`devops/coordination/cognito/terminal-agent` Secrets Manager record → `cognito-idp:initiate-auth` → IdToken), then probes a configurable list of Cognito-protected routes with `Authorization: Bearer <IdToken>`. The probe FAILs on any response containing the canonical `"JWT library not available in Lambda package"` string, regardless of HTTP status.
+
+**All future v3 lock validation runs MUST include an authenticated probe.** Add it to `workspace/v3-recovery/03-validate-prod-health.sh` (or its successor).
+
+### Open follow-up
+
+Adding a runtime check to `verify_lambda_arch_parity.py` that fetches each Lambda's attached layer artifacts via `aws lambda get-layer-version` and inspects `.so` ABI tags directly is left as a future enhancement. It would close the remaining gap between source-of-truth validation (current static check) and live-attachment validation. The static check catches the regression at PR time; the runtime check would catch it at deploy time. Both layers of defense are valuable but the static check is sufficient to prevent the ENC-ISS-198 class of bug from reoccurring.
+
+---
+
 ## Related Documents
 
-- **COE:** DOC-2CACF0D1E7E6 (Sev1 MCP/PWA Outage 2026-04-11)
+- **COE (operational):** DOC-2CACF0D1E7E6 (Sev1 MCP/PWA Outage 2026-04-11)
+- **COE (strategic):** DOC-E9B160563B1C v6 §Addendum (ENC-ISS-198 — Shared Layer Build ABI Drift)
 - **Plan:** ENC-PLN-019 (DOC-191E709E43C5)
 - **CI Guard:** `tools/verify_lambda_arch_parity.py`
+- **CI Guard tests:** `tools/test_verify_lambda_arch_parity.py`
+- **Authenticated probe:** `tools/probe_cognito_auth.sh`
 - **Manifest:** `infrastructure/lambda_workflow_manifest.json`
+- **Issue:** ENC-ISS-198 (P1 — PWA Cognito writes broken by layer ABI mismatch)
+- **Fix task:** ENC-TSK-D22

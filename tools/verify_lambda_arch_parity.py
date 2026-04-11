@@ -23,6 +23,7 @@ from typing import List, NamedTuple
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
 MANIFEST_PATH = REPO_ROOT / "infrastructure/lambda_workflow_manifest.json"
+SHARED_LAYER_DEPLOY = REPO_ROOT / "backend/lambda/shared_layer/deploy.sh"
 
 # Expected CFN conditional patterns for prod safety
 EXPECTED_ARCH_PATTERN = re.compile(
@@ -251,6 +252,94 @@ def _validate_deploy_scripts() -> List[str]:
     return errors
 
 
+def _validate_shared_layer_deploy_script() -> List[str]:
+    """Validate that shared_layer/deploy.sh targets the consumer's full ABI.
+
+    ENC-ISS-198 / ENC-TSK-D22: enceladus-shared:7 was published 2026-04-03 by
+    ENC-TSK-B42 with a python3.12-tagged cffi backend that prod (python3.11)
+    cannot load. The build script had only ``--platform`` to override OS/arch
+    but not ``--python-version``/``--abi`` to override the Python ABI tag.
+    Result: pip downloaded cp312 wheels on the python3.12 builder host and the
+    layer was silently broken on every prod Lambda using ``import jwt``.
+
+    This check enforces that shared_layer/deploy.sh has all three pip flags
+    AND that the prod and gamma paths target the right combinations.
+
+    Required prod targeting (ENVIRONMENT_SUFFIX empty):
+        --platform manylinux2014_x86_64
+        --python-version 3.11
+        --abi cp311
+
+    Required gamma targeting (ENVIRONMENT_SUFFIX=-gamma):
+        --platform manylinux2014_aarch64
+        --python-version 3.12
+        --abi cp312
+
+    The script must also pass --compatible-architectures explicitly to
+    aws lambda publish-layer-version so the published layer's compatibility
+    metadata is honest and the V3 production lock can audit it.
+    """
+    errors: List[str] = []
+
+    if not SHARED_LAYER_DEPLOY.is_file():
+        return [f"Shared layer deploy script missing: {SHARED_LAYER_DEPLOY}"]
+
+    content = SHARED_LAYER_DEPLOY.read_text(encoding="utf-8")
+
+    # Must pass all three pip flags (prefix with -- so substring match isn't fooled by comments)
+    required_flags = (
+        "--platform",
+        "--python-version",
+        "--abi",
+    )
+    for flag in required_flags:
+        if flag not in content:
+            errors.append(
+                f"shared_layer/deploy.sh: missing required pip flag '{flag}'. "
+                f"All three of --platform, --python-version, --abi must be present "
+                f"to override the consumer ABI (ENC-ISS-198 / ENC-TSK-D22)."
+            )
+
+    # Prod-path targeting must be present (either via conditional or hardcoded)
+    has_prod_platform = "manylinux2014_x86_64" in content
+    has_prod_pyver = '"3.11"' in content or "'3.11'" in content
+    has_prod_abi = "cp311" in content
+    if not (has_prod_platform and has_prod_pyver and has_prod_abi):
+        errors.append(
+            "shared_layer/deploy.sh: prod build target incomplete. Required values "
+            "manylinux2014_x86_64 / 3.11 / cp311 must all be present "
+            "(found platform=%s, pyver=%s, abi=%s)"
+            % (has_prod_platform, has_prod_pyver, has_prod_abi)
+        )
+
+    # publish-layer-version must declare --compatible-architectures explicitly
+    # so the V3 production lock can audit the metadata
+    if "--compatible-architectures" not in content:
+        errors.append(
+            "shared_layer/deploy.sh: aws lambda publish-layer-version must pass "
+            "--compatible-architectures so the layer metadata is honest and the "
+            "V3 production lock can audit it (ENC-ISS-198)."
+        )
+
+    # The legacy comment block referencing only ENC-ISS-041 is insufficient.
+    # The new comment must reference ENC-ISS-198 to surface the third recurrence.
+    if "ENC-ISS-198" not in content:
+        errors.append(
+            "shared_layer/deploy.sh: must reference ENC-ISS-198 in the build "
+            "script's documentation comment to surface the three-flags requirement "
+            "(historical precedents: ENC-ISS-041, ENC-ISS-044, ENC-ISS-198)."
+        )
+
+    if not errors:
+        print(
+            "[INFO] shared_layer/deploy.sh validated: all three pip flags "
+            "present (--platform, --python-version, --abi), prod build target "
+            "manylinux2014_x86_64/3.11/cp311 confirmed"
+        )
+
+    return errors
+
+
 def _validate_manifest_expectations() -> List[str]:
     """Cross-validate manifest expected_architecture/expected_runtime against CFN and deploy scripts.
 
@@ -330,6 +419,12 @@ def main() -> int:
     if deploy_errors:
         errors.append("=== Deploy script violations ===")
         errors.extend(deploy_errors)
+
+    # Validate shared layer build script (ENC-ISS-198 / ENC-TSK-D22)
+    shared_layer_errors = _validate_shared_layer_deploy_script()
+    if shared_layer_errors:
+        errors.append("=== Shared layer build script violations ===")
+        errors.extend(shared_layer_errors)
 
     # Cross-validate manifest expectations (ENC-TSK-D17 AC7)
     manifest_errors = _validate_manifest_expectations()

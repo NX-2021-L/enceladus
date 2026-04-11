@@ -41,9 +41,19 @@ try:
     from jwt.algorithms import RSAAlgorithm
 
     _JWT_AVAILABLE = True
-except Exception as _jwt_import_err:
+except Exception:  # noqa: BLE001 — also catches RuntimeError/OSError from cffi backend ABI mismatch
+    # ENC-ISS-198 / ENC-TSK-D22: log the import failure so operators can
+    # diagnose PyJWT/cryptography ABI mismatches in CloudWatch instead of
+    # chasing the downstream HTTP 401 "JWT library not available in Lambda
+    # package" message. Historical incidents in this failure class:
+    # ENC-ISS-041, ENC-ISS-044, ENC-ISS-198. logger is not yet defined at
+    # module-load time, so use logging.getLogger(__name__) directly.
+    import logging as _enc_iss_198_logging
+    _enc_iss_198_logging.getLogger(__name__).exception(
+        "PyJWT import failed at module load — Cognito auth will be disabled "
+        "(ENC-ISS-198: usually a shared-layer .so ABI mismatch with the function runtime)"
+    )
     _JWT_AVAILABLE = False
-    logging.getLogger().error("jwt import failed: %s", _jwt_import_err)
 
 # ---------------------------------------------------------------------------
 # Configuration
