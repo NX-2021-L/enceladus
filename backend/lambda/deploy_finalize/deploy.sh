@@ -5,8 +5,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 REGION="${REGION:-us-west-2}"
 FUNCTION_NAME="${FUNCTION_NAME:-devops-deploy-finalize${ENVIRONMENT_SUFFIX}}"
-RUNTIME="${RUNTIME:-python3.12}"
-ARCHITECTURE="${ARCHITECTURE:-arm64}"
+# Env-conditional: gamma=arm64/py3.12, prod=x86_64/py3.11
+if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+  RUNTIME="${RUNTIME:-python3.12}"
+  ARCHITECTURE="${ARCHITECTURE:-arm64}"
+else
+  RUNTIME="${RUNTIME:-python3.11}"
+  ARCHITECTURE="${ARCHITECTURE:-x86_64}"
+fi
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
