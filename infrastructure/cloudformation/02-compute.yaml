@@ -432,6 +432,42 @@ Resources:
         - Key: Component
           Value: deployment
 
+  # GMF: Deploy Decide Lambda (DOC-63420302EF65 §6.2)
+  # Cognito-only auth — human governance decisions for production deployments
+  DeployDecideFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-deploy-decide${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 30
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt DeployDecideRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
+          DEPLOY_REGION: !Ref AWS::Region
+          CORS_ORIGIN: !Ref CorsOrigin
+          GITHUB_APP_ID: !Ref GitHubAppId
+          GITHUB_INSTALLATION_ID: !Ref GitHubInstallationId
+          GITHUB_PRIVATE_KEY_SECRET: devops/github-app/private-key
+          ALLOWED_REPOS: NX-2021-L/enceladus
+          GAMMA_INTEGRATION_BRANCH: v4/main
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: deployment
+
   FeedPublisherFunction:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
@@ -460,6 +496,7 @@ Resources:
           FEED_BUCKET: !Ref S3Bucket
           FEED_PREFIX: !Sub "${S3EnvPrefix}mobile/v1"
           EVENT_BUS: default
+          DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1131,6 +1168,48 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+
+  # GMF: Deploy Decide IAM Role (DOC-63420302EF65)
+  DeployDecideRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-deploy-decide-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DeployDecideInline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DynamoDBAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+              - Sid: SecretsManagerAccess
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/github-app/*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
 
   ReferenceSearchRole:
     Type: AWS::IAM::Role
