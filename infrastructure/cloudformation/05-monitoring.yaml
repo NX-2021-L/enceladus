@@ -74,7 +74,6 @@ Resources:
       Environment:
         Variables:
           FUNCTION_NAMES: "[]"
-          AWS_REGION_OVERRIDE: !Ref "AWS::Region"
 
   ProdHealthMonitorInvokePermission:
     Type: AWS::Lambda::Permission
