@@ -592,7 +592,7 @@ Resources:
       Role: !GetAtt GraphSyncRole.Arn
       Environment:
         Variables:
-          NEO4J_SECRET_NAME: enceladus/neo4j/auradb-credentials
+          NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
           SECRETS_REGION: !Ref AWS::Region
       Tags:
         - Key: Project
@@ -619,7 +619,7 @@ Resources:
       Role: !GetAtt GraphQueryApiRole.Arn
       Environment:
         Variables:
-          NEO4J_SECRET_NAME: enceladus/neo4j/auradb-credentials
+          NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
           SECRETS_REGION: !Ref AWS::Region
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
@@ -653,7 +653,7 @@ Resources:
       Role: !GetAtt Neo4jBackupRole.Arn
       Environment:
         Variables:
-          NEO4J_SECRET_NAME: enceladus/neo4j/auradb-credentials
+          NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
           S3_BUCKET: !Ref S3Bucket
           S3_PREFIX: !Sub "${S3EnvPrefix}neo4j-backups/"
           SECRETS_REGION: !Ref "AWS::Region"
@@ -681,7 +681,7 @@ Resources:
       Role: !GetAtt GraphHealthMetricsRole.Arn
       Environment:
         Variables:
-          NEO4J_SECRET_NAME: enceladus/neo4j/auradb-credentials
+          NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
           CLOUDWATCH_NAMESPACE: Enceladus/GraphHealth
           PROJECT_ID: enceladus
           SECRETS_REGION: !Ref "AWS::Region"
@@ -1378,7 +1378,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials*"
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
               - Sid: S3BackupWrite
                 Effect: Allow
                 Action:
@@ -1421,7 +1421,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials*"
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
       Tags:
         - Key: Project
           Value: enceladus
