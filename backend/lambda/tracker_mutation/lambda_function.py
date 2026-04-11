@@ -140,11 +140,11 @@ MAX_NOTE_LENGTH = 2000
 ENABLE_LESSON_PRIMITIVE = os.environ.get("ENABLE_LESSON_PRIMITIVE", "false").lower() == "true"
 
 # Valid record types and their closed/default statuses
-_RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan"}
-_CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived", "plan": "complete"}
-_DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted"}
-_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN"}
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
+_RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "generation"}
+_CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived", "plan": "complete", "generation": "archived"}
+_DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted", "generation": "drafted"}
+_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN", "generation": "GEN"}
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan", "GEN": "generation"}
 
 # Category validation per record type
 _VALID_CATEGORIES = {
@@ -153,6 +153,7 @@ _VALID_CATEGORIES = {
     "issue": {"bug", "debt", "risk", "security", "performance"},
     "lesson": {"pattern", "failure_mode", "resolution_pathway", "opportunity", "principle", "intention"},
     "plan": {"strategic", "tactical", "operational", "remediation"},
+    "generation": {"platform"},
 }
 _VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
 # ENC-ISS-145: Use canonical matrix as sole source of truth for transition types and strictness.
@@ -4526,13 +4527,13 @@ _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/relationship$"
 )
 _RE_RECORD_SUB = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
 )
 _RE_RECORD = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan)/(?P<id>[A-Za-z0-9_-]+)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)$"
 )
 _RE_TYPE_COLLECTION = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)$"
 )
 _RE_PROJECT = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)$"

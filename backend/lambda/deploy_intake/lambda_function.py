@@ -1061,6 +1061,63 @@ def _handle_get_pending(project_id: str, limit: int = 50) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Route: GET /api/v1/deploy/queue
+# Returns deployment_decision records in pending_approval status.
+# Part of the Generational Metabolism Framework (DOC-63420302EF65 §6).
+# ---------------------------------------------------------------------------
+
+
+def _handle_get_queue(project_id: str, limit: int = 50) -> Dict:
+    """Return deployment_decision records awaiting approval, ordered by created_at."""
+    ddb = _get_ddb()
+    results: List[Dict[str, Any]] = []
+    limit = _parse_limit(limit, default=50, min_value=1, max_value=200)
+    kwargs: Dict[str, Any] = {
+        "TableName": DEPLOY_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
+        "FilterExpression": "#st = :pending",
+        "ExpressionAttributeNames": {"#st": "status"},
+        "ExpressionAttributeValues": {
+            ":pid": {"S": project_id},
+            ":prefix": {"S": "decision#"},
+            ":pending": {"S": "pending_approval"},
+        },
+        "ScanIndexForward": True,
+    }
+    while True:
+        resp = ddb.query(**kwargs)
+        for item in resp.get("Items", []):
+            data = _ddb_deser(item)
+            results.append({
+                "record_id": data.get("record_id", ""),
+                "status": data.get("status", ""),
+                "github_pr_number": data.get("github_pr_number"),
+                "github_pr_url": data.get("github_pr_url", ""),
+                "pr_title": data.get("pr_title", ""),
+                "pr_author": data.get("pr_author", ""),
+                "head_branch": data.get("head_branch", ""),
+                "head_sha": data.get("head_sha", ""),
+                "original_target": data.get("original_target", ""),
+                "generation_id": data.get("generation_id", ""),
+                "related_enceladus_task_ids": data.get("related_enceladus_task_ids", []),
+                "related_enceladus_feature_ids": data.get("related_enceladus_feature_ids", []),
+                "created_at": data.get("created_at", ""),
+            })
+            if len(results) >= limit:
+                break
+        if len(results) >= limit or "LastEvaluatedKey" not in resp:
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+    results.sort(key=lambda r: r.get("created_at") or "")
+    return _ok({
+        "project_id": project_id,
+        "count": len(results),
+        "decisions": results,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Route: POST /api/v1/deploy/trigger/{projectId}
 # ---------------------------------------------------------------------------
 
@@ -1121,6 +1178,7 @@ _STATE_PATTERN = re.compile(r"(?:/api/v1/deploy)?/state/(?P<projectId>[a-z0-9_-]
 _STATUS_PATTERN = re.compile(r"(?:/api/v1/deploy)?/status/(?P<specId>[A-Z0-9_-]+)$")
 _HISTORY_PATTERN = re.compile(r"(?:/api/v1/deploy)?/history/(?P<projectId>[a-z0-9_-]+)$")
 _PENDING_PATTERN = re.compile(r"(?:/api/v1/deploy)?/pending/(?P<projectId>[a-z0-9_-]+)$")
+_QUEUE_PATTERN = re.compile(r"(?:/api/v1/deploy)?/queue$")
 _TRIGGER_PATTERN = re.compile(r"(?:/api/v1/deploy)?/trigger/(?P<projectId>[a-z0-9_-]+)$")
 _OPTIONS_PATTERN = re.compile(r"(?:/api/v1/deploy)?/")
 
@@ -1198,6 +1256,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
                 qs = event.get("queryStringParameters") or {}
                 limit = _parse_limit(qs.get("limit"), default=50, min_value=1, max_value=200)
                 return _handle_get_pending(project_id, limit)
+
+        # GET /queue — deployment_decision records pending approval
+        if method == "GET":
+            m = _QUEUE_PATTERN.search(path)
+            if m:
+                qs = event.get("queryStringParameters") or {}
+                project_id = qs.get("project_id", "enceladus")
+                limit = _parse_limit(qs.get("limit"), default=50, min_value=1, max_value=200)
+                return _handle_get_queue(project_id, limit)
 
         # POST /trigger/{projectId}
         if method == "POST":

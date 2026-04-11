@@ -16,6 +16,7 @@ const TITLES: Record<string, string> = {
   '/coordination': 'Coordination',
   '/coordination/auth': 'Access Tokens',
   '/components': 'Component Registry',
+  '/deployments': 'Deployment Manager',
 }
 
 function resolveTitle(pathname: string): string {
@@ -125,7 +126,17 @@ export function Header() {
           </button>
 
           {menuOpen && (
-            <div className="absolute right-0 top-full mt-2 w-44 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-1 z-50">
+            <div className="absolute right-0 top-full mt-2 w-52 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-1 z-50">
+              <button
+                onClick={() => {
+                  setMenuOpen(false)
+                  navigate('/deployments')
+                }}
+                className="w-full text-left px-4 py-3 text-sm text-amber-300 hover:bg-slate-700 active:bg-slate-600 transition-colors font-medium"
+              >
+                Deployment Manager
+              </button>
+              <div className="border-t border-slate-700/50 my-1" />
               <button
                 onClick={() => {
                   setMenuOpen(false)
