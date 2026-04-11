@@ -137,6 +137,16 @@ Resources:
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
+  # GMF: Deploy Decide Integration (DOC-63420302EF65)
+  DeployDecideIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-decide${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
   ReferenceSearchIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
@@ -448,6 +458,21 @@ Resources:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/deploy/trigger/{projectId}
       Target: !Sub integrations/${DeployIntakeIntegration}
+
+  # GMF routes (DOC-63420302EF65)
+  RouteDeployQueue:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/queue
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteDeployDecide:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/deploy/decide
+      Target: !Sub integrations/${DeployDecideIntegration}
 
   RouteReferenceSearch:
     Type: AWS::ApiGatewayV2::Route

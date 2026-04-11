@@ -199,6 +199,14 @@ Resources:
           AttributeType: S
         - AttributeName: record_type
           AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+        - AttributeName: generation_id
+          AttributeType: S
+        - AttributeName: final_target
+          AttributeType: S
       KeySchema:
         - AttributeName: project_id
           KeyType: HASH
@@ -210,6 +218,31 @@ Resources:
             - AttributeName: project_id
               KeyType: HASH
             - AttributeName: record_type
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # GMF GSIs (DOC-63420302EF65 §4.2)
+        - IndexName: status-created-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: generation-created-index
+          KeySchema:
+            - AttributeName: generation_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: target-created-index
+          KeySchema:
+            - AttributeName: final_target
+              KeyType: HASH
+            - AttributeName: created_at
               KeyType: RANGE
           Projection:
             ProjectionType: ALL

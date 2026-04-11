@@ -122,6 +122,7 @@ RECORD_TYPE_TO_LABEL = {
     "plan": "Plan",  # ENC-FTR-058
     "lesson": "Lesson",  # ENC-FTR-052 / ENC-TSK-983
     "document": "Document",  # ENC-FTR-065 / ENC-PLN-014
+    "generation": "Generation",  # GMF DOC-63420302EF65
 }
 
 def _bare_id(record_id: str) -> str:
@@ -346,6 +347,39 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 did=doc_id, sid=informed_id,
             )
 
+    # GMF: Generation edge projections (DOC-63420302EF65 §8.2)
+    if record_type == "generation":
+        gen_id = record_id
+        # SUCCEEDS -> parent generation (lineage chain)
+        parent_gen = record.get("parent_generation_id", "")
+        if parent_gen:
+            parent_gen = _bare_id(parent_gen)
+            tx.run(
+                "MATCH (g:Generation), (p:Generation) "
+                "WHERE g.record_id = $gid AND p.record_id = $pid "
+                "MERGE (g)-[:SUCCEEDS]->(p)",
+                gid=gen_id, pid=parent_gen,
+            )
+
+    # GMF: target_generation edges on existing types
+    if record_type in ("task", "feature", "plan", "lesson"):
+        target_gen = record.get("target_generation", "")
+        if target_gen:
+            target_gen = _bare_id(target_gen)
+            edge_type = {
+                "task": "TARGETS_GENERATION",
+                "feature": "BELONGS_TO_GENERATION",
+                "plan": "EXECUTES_WITHIN",
+                "lesson": "TARGETS_GENERATION",
+            }.get(record_type, "TARGETS_GENERATION")
+            label = RECORD_TYPE_TO_LABEL.get(record_type, "Task")
+            tx.run(
+                f"MATCH (n:{label}), (g:Generation) "
+                "WHERE n.record_id = $nid AND g.record_id = $gid "
+                f"MERGE (n)-[:{edge_type}]->(g)",
+                nid=record_id, gid=target_gen,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Typed Relationship Edge Projection (ENC-FTR-049)
@@ -380,6 +414,14 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "doc-attached-to-plan": "DOC_ATTACHED_TO_PLAN",  # Document -> Plan (inverse of plan-attached-doc)
     "informed-by": "INFORMED_BY",                      # Document -> Document (GDMP provenance)
     "informs": "INFORMS",                              # Document -> Document (inverse provenance)
+    # GMF: Generational Metabolism Framework (DOC-63420302EF65 §8.2)
+    "succeeds": "SUCCEEDS",                            # Generation -> Generation (lineage)
+    "belongs-to-generation": "BELONGS_TO_GENERATION",  # Feature -> Generation
+    "synthesized-in": "SYNTHESIZED_IN",                # Lesson -> Chapter document
+    "seeds-thesis-of": "SEEDS_THESIS_OF",              # Chapter document -> Generation
+    "advances-generation": "ADVANCES_GENERATION",      # DeploymentDecision -> Generation
+    "targets-generation": "TARGETS_GENERATION",        # Task -> Generation
+    "executes-within": "EXECUTES_WITHIN",              # Plan -> Generation
 }
 
 

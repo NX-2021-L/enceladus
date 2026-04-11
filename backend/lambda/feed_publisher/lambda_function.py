@@ -275,6 +275,75 @@ def _batch_failure_response(message_ids: List[str]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GMF: deploy-pending feed (DOC-63420302EF65 §6.1)
+# ---------------------------------------------------------------------------
+
+DEPLOY_TABLE = os.environ.get("DEPLOY_TABLE", "devops-deployment-manager")
+
+
+def _generate_deploy_pending_feed(
+    generated_at: str, output_dir: Path, ddb,
+) -> Path:
+    """Generate deploy-pending.json with count of pending deployment decisions.
+
+    This lightweight feed powers the DeployApprovalBanner in the PWA.
+    It is polled by the banner component to determine whether to render.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Query for pending_approval deployment_decision records
+    pending_count = 0
+    oldest_created = ""
+    oldest_title = ""
+    try:
+        kwargs = {
+            "TableName": DEPLOY_TABLE,
+            "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
+            "FilterExpression": "#st = :pending",
+            "ExpressionAttributeNames": {"#st": "status"},
+            "ExpressionAttributeValues": {
+                ":pid": {"S": "enceladus"},
+                ":prefix": {"S": "decision#"},
+                ":pending": {"S": "pending_approval"},
+            },
+            "Select": "COUNT",
+        }
+        resp = ddb.query(**kwargs)
+        pending_count = resp.get("Count", 0)
+
+        # If there are pending items, get the oldest for the banner summary
+        if pending_count > 0:
+            kwargs["Select"] = "ALL_ATTRIBUTES"
+            kwargs["Limit"] = 1
+            kwargs["ScanIndexForward"] = True
+            detail_resp = ddb.query(**kwargs)
+            items = detail_resp.get("Items", [])
+            if items:
+                item = items[0]
+                oldest_created = item.get("created_at", {}).get("S", "")
+                oldest_title = item.get("pr_title", {}).get("S", "")
+    except Exception as exc:
+        logger.warning("deploy-pending feed: DynamoDB query failed: %s", exc)
+
+    payload = {
+        "generated_at": generated_at,
+        "version": "1.0",
+        "pending_count": pending_count,
+        "oldest_created_at": oldest_created,
+        "oldest_pr_title": oldest_title,
+    }
+
+    out_path = output_dir / "deploy-pending.json"
+    import json as _json
+    out_path.write_text(_json.dumps(payload, separators=(",", ":")))
+    logger.info(
+        "feed_publisher: deploy-pending.json (pending_count=%d) -> %s",
+        pending_count, out_path,
+    )
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
 
@@ -347,7 +416,14 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             logger.error("feed_publisher: generate_documents_feed failed: %s", exc)
             # Non-fatal: tracker feeds are already generated
 
-        # 3b. Freshness SLA check — warns if feeds lag behind source data
+        # 3b. Generate deploy-pending feed (GMF notification banner — DOC-63420302EF65 §6.1)
+        try:
+            _generate_deploy_pending_feed(generated_at, feed_dir, ddb)
+        except Exception as exc:
+            logger.error("feed_publisher: generate_deploy_pending_feed failed: %s", exc)
+            # Non-fatal: approval banner falls back to direct API polling
+
+        # 3c. Freshness SLA check — warns if feeds lag behind source data
         check_freshness_sla(generated_at, all_project_data)
 
         # 4. Fetch reference docs from S3 (via DynamoDB metadata) and stage in /tmp/reference/
