@@ -131,6 +131,12 @@
       "lambda_dir": "backend/lambda/graph_health_metrics",
       "workflow_file": ".github/workflows/lambda-graph-health-metrics-deploy.yml",
       "deploy_script": "backend/lambda/graph_health_metrics/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-prod-health-monitor",
+      "lambda_dir": "backend/lambda/prod_health_monitor",
+      "workflow_file": ".github/workflows/lambda-prod-health-monitor-deploy.yml",
+      "deploy_script": "backend/lambda/prod_health_monitor/deploy.sh"
     }
   ]
 }

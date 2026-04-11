@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus Monitoring Stack — Production health probes, CodeSize sentinel,
+  error rate alarms, and SNS alerting. ENC-TSK-D20 / ENC-PLN-020 Phase 4.
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+
+Conditions:
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # SNS Topic for deploy alerts
+  # ---------------------------------------------------------------------------
+  DeployAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "enceladus-deploy-alerts${EnvironmentSuffix}"
+      DisplayName: Enceladus Deploy Alerts
+
+  # ---------------------------------------------------------------------------
+  # Health Probe Lambda — reads CodeSize for all prod Lambdas
+  # ---------------------------------------------------------------------------
+  ProdHealthMonitorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "enceladus-prod-health-monitor-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ProdHealthMonitorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListFunctions
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  ProdHealthMonitorFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation — deployed by deploy.sh"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 120
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt ProdHealthMonitorRole.Arn
+      Environment:
+        Variables:
+          FUNCTION_NAMES: "[]"
+          AWS_REGION_OVERRIDE: !Ref "AWS::Region"
+
+  ProdHealthMonitorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProdHealthMonitorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HealthProbeScheduleRule.Arn
+
+  # ---------------------------------------------------------------------------
+  # EventBridge rule — every 15 minutes
+  # ---------------------------------------------------------------------------
+  HealthProbeScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-health-probe-schedule${EnvironmentSuffix}"
+      Description: Triggers production health monitor Lambda every 15 minutes
+      ScheduleExpression: "rate(15 minutes)"
+      State: ENABLED
+      Targets:
+        - Id: ProdHealthMonitorTarget
+          Arn: !GetAtt ProdHealthMonitorFunction.Arn
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Alarms
+  # ---------------------------------------------------------------------------
+
+  # CodeSize stomp sentinel — any Lambda < 1024 bytes
+  # Uses Math expression over per-function metrics
+  CodeSizeMinimumAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-codesize-minimum${EnvironmentSuffix}"
+      AlarmDescription: >
+        Triggers when any monitored Lambda has CodeSize < 1024 bytes,
+        indicating a likely CFN ZipFile stub overwrite. Zero false positives —
+        production Lambdas are always > 1024 bytes.
+      Namespace: Enceladus/Prod
+      MetricName: LambdaCodeSize
+      Statistic: Minimum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1024
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref DeployAlertsTopic
+
+  # Lambda error rate alarm — Errors > 5 in 5 minutes across all functions
+  LambdaErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-lambda-error-rate${EnvironmentSuffix}"
+      AlarmDescription: >
+        Triggers when total Lambda errors across all Enceladus functions
+        exceed 5 in a 5-minute window.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref DeployAlertsTopic
+
+Outputs:
+  DeployAlertsTopicArn:
+    Description: ARN of the deploy alerts SNS topic
+    Value: !Ref DeployAlertsTopic
+    Export:
+      Name: !Sub "enceladus-deploy-alerts-arn${EnvironmentSuffix}"
+
+  ProdHealthMonitorFunctionArn:
+    Description: ARN of the production health monitor Lambda
+    Value: !GetAtt ProdHealthMonitorFunction.Arn
+
+  HealthProbeScheduleRuleArn:
+    Description: ARN of the EventBridge health probe schedule
+    Value: !GetAtt HealthProbeScheduleRule.Arn
