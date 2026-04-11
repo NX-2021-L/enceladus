@@ -66,6 +66,15 @@ deploy_function() {
   local fn_names
   fn_names="$(read_function_names)"
 
+  # Build JSON environment block — fn_names is a JSON array that must be stored as string env var
+  local env_json
+  env_json=$(python3 -c "
+import json, sys
+fn = json.loads(sys.argv[1])
+env = {'Variables': {'FUNCTION_NAMES': json.dumps(fn), 'AWS_REGION': sys.argv[2]}}
+print(json.dumps(env))
+" "${fn_names}" "${REGION}")
+
   if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION}" >/dev/null 2>&1; then
     log "[INFO] Updating existing function ${FUNCTION_NAME}"
     local arch_flag="x86_64"
@@ -87,7 +96,7 @@ deploy_function() {
     aws lambda update-function-configuration \
       --function-name "${FUNCTION_NAME}" \
       --runtime "${runtime}" \
-      --environment "Variables={FUNCTION_NAMES=${fn_names},AWS_REGION=${REGION}}" \
+      --environment "${env_json}" \
       --region "${REGION}" >/dev/null
 
     aws lambda wait function-updated-v2 \
@@ -106,7 +115,7 @@ deploy_function() {
       --timeout 120 \
       --memory-size 256 \
       --architectures "${arch}" \
-      --environment "Variables={FUNCTION_NAMES=${fn_names},AWS_REGION=${REGION}}" \
+      --environment "${env_json}" \
       --region "${REGION}" >/dev/null
   fi
   log "[SUCCESS] Function ${FUNCTION_NAME} deployed"
