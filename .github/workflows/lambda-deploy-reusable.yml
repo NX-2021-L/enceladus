@@ -180,6 +180,22 @@ jobs:
             --region "us-west-2" \
             --function-name "${function_name}"
 
+          # Env-conditional runtime: gamma=python3.12, prod=python3.11
+          if [ -n "${{ inputs.environment_suffix }}" ]; then
+            runtime="python3.12"
+          else
+            runtime="python3.11"
+          fi
+
+          aws lambda update-function-configuration \
+            --region "us-west-2" \
+            --function-name "${function_name}" \
+            --runtime "${runtime}" >/dev/null
+
+          aws lambda wait function-updated-v2 \
+            --region "us-west-2" \
+            --function-name "${function_name}"
+
           rm -rf "${build_dir}" "${zip_file}"
 
       - name: Validate deployed Lambda state
