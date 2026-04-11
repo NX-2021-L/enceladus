@@ -60,6 +60,26 @@ jobs:
           stack_name="${{ github.event.inputs.stack_name || env.DEFAULT_STACK_NAME }}${ENVIRONMENT_SUFFIX}"
           echo "stack_name=${stack_name}" >> "${GITHUB_OUTPUT}"
 
+      - name: Clean up ROLLBACK_COMPLETE stack if present
+        run: |
+          set -euo pipefail
+          stack_name="${{ steps.params.outputs.stack_name }}"
+          status=$(aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${stack_name}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          if [ "${status}" = "ROLLBACK_COMPLETE" ]; then
+            echo "Stack ${stack_name} is in ROLLBACK_COMPLETE — deleting before redeploy"
+            aws cloudformation delete-stack \
+              --region "${AWS_REGION}" \
+              --stack-name "${stack_name}"
+            aws cloudformation wait stack-delete-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${stack_name}"
+            echo "Stack deleted successfully"
+          fi
+
       - name: Deploy Monitoring stack (05-monitoring)
         run: |
           set -euo pipefail
