@@ -41,3 +41,8 @@ jobs:
           print(f'  version: {d[\"version\"]}')
           print(f'  entities: {list(d[\"entities\"].keys())}')
           "
+
+      - name: Verify Lambda architecture parity
+        run: |
+          set -euo pipefail
+          python3 tools/verify_lambda_arch_parity.py
