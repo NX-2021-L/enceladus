@@ -30,16 +30,23 @@ ensure_role() {
 
 build_package() {
   log "[INFO] Building deployment package"
-  local build_dir
+  local build_dir pip_platform pip_pyver pip_abi
   build_dir="$(mktemp -d)"
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
+  # Environment-conditional: prod=x86_64/py3.11, gamma=arm64/py3.12
+  if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+    pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"
+  else
+    pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"
+  fi
+
   # Install neo4j driver for Linux Lambda runtime
   pip install \
-    --platform manylinux2014_aarch64 \
+    --platform "${pip_platform}" \
     --implementation cp \
-    --python-version 3.12 \
-    --abi cp312 \
+    --python-version "${pip_pyver}" \
+    --abi "${pip_abi}" \
     --only-binary=:all: \
     neo4j -t "${build_dir}" --quiet 2>/dev/null || true
 
@@ -54,21 +61,26 @@ deploy_function() {
 
   if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION}" >/dev/null 2>&1; then
     log "[INFO] Updating existing function ${FUNCTION_NAME}"
+    local arch_flag="x86_64"
+    [ -n "${ENVIRONMENT_SUFFIX:-}" ] && arch_flag="arm64"
     aws lambda update-function-code \
       --function-name "${FUNCTION_NAME}" \
       --zip-file "fileb://${zip_path}" \
+      --architectures "${arch_flag}" \
       --region "${REGION}" >/dev/null
   else
+    local runtime="python3.11" arch="x86_64"
+    [ -n "${ENVIRONMENT_SUFFIX:-}" ] && runtime="python3.12" && arch="arm64"
     log "[INFO] Creating new function ${FUNCTION_NAME}"
     aws lambda create-function \
       --function-name "${FUNCTION_NAME}" \
-      --runtime python3.12 \
+      --runtime "${runtime}" \
       --handler lambda_function.handler \
       --role "${role_arn}" \
       --zip-file "fileb://${zip_path}" \
       --timeout 120 \
       --memory-size 256 \
-      --architectures arm64 \
+      --architectures "${arch}" \
       --environment "Variables={NEO4J_SECRET_NAME=${NEO4J_SECRET_NAME},CLOUDWATCH_NAMESPACE=${CLOUDWATCH_NAMESPACE},PROJECT_ID=enceladus,SECRETS_REGION=${REGION}}" \
       --region "${REGION}" >/dev/null
   fi

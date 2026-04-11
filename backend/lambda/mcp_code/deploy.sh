@@ -150,13 +150,21 @@ package_lambda() {
   # ENC-FTR-050: Context Node scoring engine (imported dynamically by server.py)
   cp "${REPO_ROOT}/backend/lambda/coordination_api/context_node_scoring.py" "${build_dir}/context_node_scoring.py"
 
+  # Env-conditional: gamma=arm64/py3.12, prod=x86_64/py3.11
+  local pip_platform pip_pyver pip_abi
+  if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+    pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"
+  else
+    pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"
+  fi
+
   python3 -m pip install \
     --quiet \
     --upgrade \
     -r "${SCRIPT_DIR}/requirements.txt" \
-    --platform manylinux2014_aarch64 \
+    --platform "${pip_platform}" \
     --implementation cp \
-    --python-version 3.12 \
+    --python-version "${pip_pyver}" \
     --only-binary=:all: \
     -t "${build_dir}" >/dev/null
 
@@ -365,12 +373,19 @@ deploy_lambda() {
   CUSTOM_DOMAIN="${CUSTOM_DOMAIN}" \
   build_environment_payload "${env_file}"
 
+  # Env-conditional: gamma=arm64/py3.12, prod=x86_64/py3.11
+  local arch_flag="x86_64" runtime_flag="python3.11"
+  if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+    arch_flag="arm64"; runtime_flag="python3.12"
+  fi
+
   if function_exists; then
     log "[START] updating Lambda code: ${FUNCTION_NAME}"
     aws lambda update-function-code \
       --function-name "${FUNCTION_NAME}" \
       --region "${REGION}" \
-      --zip-file "fileb://${ZIP_FILE}" >/dev/null
+      --zip-file "fileb://${ZIP_FILE}" \
+      --architectures "${arch_flag}" >/dev/null
     aws lambda wait function-updated-v2 \
       --function-name "${FUNCTION_NAME}" \
       --region "${REGION}"
@@ -381,7 +396,7 @@ deploy_lambda() {
       --function-name "${FUNCTION_NAME}" \
       --role "${role_arn}" \
       --handler "server.lambda_handler" \
-      --runtime "python3.12" \
+      --runtime "${runtime_flag}" \
       --timeout 30 \
       --memory-size 512 \
       --environment "file://${env_file}" >/dev/null
@@ -390,8 +405,8 @@ deploy_lambda() {
     aws lambda create-function \
       --region "${REGION}" \
       --function-name "${FUNCTION_NAME}" \
-      --runtime "python3.12" \
-      --architectures arm64 \
+      --runtime "${runtime_flag}" \
+      --architectures "${arch_flag}" \
       --handler "server.lambda_handler" \
       --role "${role_arn}" \
       --timeout 30 \
