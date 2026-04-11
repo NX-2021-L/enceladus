@@ -1,0 +1,82 @@
+name: CloudFormation Monitoring Stack Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - 'v4/**'
+    paths:
+      - "infrastructure/cloudformation/05-monitoring.yaml"
+      - ".github/workflows/cloudformation-monitoring-stack-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: "CloudFormation stack name for 05-monitoring template"
+        type: string
+        required: false
+        default: "enceladus-monitoring"
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual monitoring stack deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  TEMPLATE_FILE: infrastructure/cloudformation/05-monitoring.yaml
+  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  DEFAULT_STACK_NAME: enceladus-monitoring
+
+jobs:
+  deploy:
+    name: Deploy Monitoring CloudFormation stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: cloudformation-monitoring-stack-deploy-${{ github.ref_name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC CloudFormation role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment parameters
+        id: params
+        run: |
+          set -euo pipefail
+          stack_name="${{ github.event.inputs.stack_name || env.DEFAULT_STACK_NAME }}${ENVIRONMENT_SUFFIX}"
+          echo "stack_name=${stack_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Deploy Monitoring stack (05-monitoring)
+        run: |
+          set -euo pipefail
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --template-file "${TEMPLATE_FILE}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              EnvironmentSuffix="${ENVIRONMENT_SUFFIX}"
+
+      - name: Verify deployed stack state
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
+            --output table
