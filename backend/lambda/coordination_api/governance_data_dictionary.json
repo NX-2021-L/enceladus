@@ -1,6 +1,7 @@
 {
-  "version": "2026-04-09.1",
-  "updated_at": "2026-04-09T01:56:30Z",
+  "version": "2026-04-11.1",
+  "updated_at": "2026-04-11T10:21:00Z",
+  "last_change_summary": "ENC-TSK-D22: H8 silent-failure import pattern fix added logger.exception() calls in 13 Lambda modules and shared_layer/auth.py; no schema/enum/field/evidence changes. Dictionary version bumped to satisfy the governance-dictionary-guard for trigger-file diffs (lambda_function.py modifications were observability-only). See ENC-ISS-198 / DOC-E9B160563B1C v6 §Addendum.",
   "owners": [
     "enceladus-platform"
   ],
