@@ -54,10 +54,10 @@ package_lambda() {
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
   if [[ -f "${SCRIPT_DIR}/requirements.txt" ]]; then
-    # v3 production lock: x86_64 / py3.11 unless ENVIRONMENT_SUFFIX is gamma
+    # v3 production lock: x86_64 / py3.11 unless targeting gamma (ENC-PLN-019)
     local pip_platform="manylinux2014_x86_64"
     local pip_pyver="3.11"
-    if [[ "${ENVIRONMENT_SUFFIX}" == "-gamma" ]]; then
+    if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
       pip_platform="manylinux2014_aarch64"
       pip_pyver="3.12"
     fi
