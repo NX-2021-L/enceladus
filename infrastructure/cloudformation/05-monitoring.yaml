@@ -8,20 +8,19 @@ Parameters:
     Type: String
     Default: ""
     AllowedValues: ["", "-gamma"]
+  SnsTopicArn:
+    Type: String
+    Default: ""
+    Description: >
+      Optional ARN of an existing SNS topic for alarm actions.
+      If empty, alarms are created without notification actions.
+      Create the topic manually: aws sns create-topic --name enceladus-deploy-alerts
 
 Conditions:
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  HasSnsTopic: !Not [!Equals [!Ref SnsTopicArn, ""]]
 
 Resources:
-
-  # ---------------------------------------------------------------------------
-  # SNS Topic for deploy alerts
-  # ---------------------------------------------------------------------------
-  DeployAlertsTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub "enceladus-deploy-alerts${EnvironmentSuffix}"
-      DisplayName: Enceladus Deploy Alerts
 
   # ---------------------------------------------------------------------------
   # Health Probe Lambda — reads CodeSize for all prod Lambdas
@@ -100,7 +99,6 @@ Resources:
   # ---------------------------------------------------------------------------
 
   # CodeSize stomp sentinel — any Lambda < 1024 bytes
-  # Uses Math expression over per-function metrics
   CodeSizeMinimumAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -117,8 +115,10 @@ Resources:
       Threshold: 1024
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
-      AlarmActions:
-        - !Ref DeployAlertsTopic
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
 
   # Lambda error rate alarm — Errors > 5 in 5 minutes across all functions
   LambdaErrorRateAlarm:
@@ -136,16 +136,12 @@ Resources:
       Threshold: 5
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
-      AlarmActions:
-        - !Ref DeployAlertsTopic
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
 
 Outputs:
-  DeployAlertsTopicArn:
-    Description: ARN of the deploy alerts SNS topic
-    Value: !Ref DeployAlertsTopic
-    Export:
-      Name: !Sub "enceladus-deploy-alerts-arn${EnvironmentSuffix}"
-
   ProdHealthMonitorFunctionArn:
     Description: ARN of the production health monitor Lambda
     Value: !GetAtt ProdHealthMonitorFunction.Arn
