@@ -114,6 +114,32 @@ Resources:
                   - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-*"
                   - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:auth-refresh*"
 
+              # Read-only validation permissions required by CloudFormation
+              # pre-deployment validation when new rules, pipes, and alarms are
+              # introduced in stack updates.
+              - Sid: EventBridgeValidationReadOnly
+                Effect: Allow
+                Action:
+                  - events:DescribeRule
+                Resource:
+                  - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/devops-*"
+                  - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/enceladus-*"
+                  - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/on-project-json-sync*"
+
+              - Sid: PipesValidationReadOnly
+                Effect: Allow
+                Action:
+                  - pipes:DescribePipe
+                Resource:
+                  - !Sub "arn:aws:pipes:us-west-2:${AWS::AccountId}:pipe/devops-*"
+                  - !Sub "arn:aws:pipes:us-west-2:${AWS::AccountId}:pipe/enceladus-*"
+
+              - Sid: CloudWatchValidationReadOnly
+                Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                Resource: "*"
+
               # CloudWatch Logs (for error reporting in workflow)
               - Sid: LogsReadOnly
                 Effect: Allow
