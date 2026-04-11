@@ -125,3 +125,29 @@ jobs:
             --stack-name "${{ steps.params.outputs.stack_name }}" \
             --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
             --output table
+
+      - name: Validate Lambda CodeSize (detect CFN stub stomp)
+        run: |
+          set -euo pipefail
+          # Read function names from the manifest (source of truth for CFN-managed Lambdas)
+          suffix="${ENVIRONMENT_SUFFIX}"
+          failed=0
+          while IFS= read -r fn_name; do
+            effective_name="${fn_name}${suffix}"
+            code_size=$(aws lambda get-function-configuration \
+              --function-name "${effective_name}" \
+              --region "${AWS_REGION}" \
+              --query 'CodeSize' \
+              --output text 2>/dev/null || echo "0")
+            if [ "${code_size}" -lt 1024 ]; then
+              echo "::error::Lambda ${effective_name} has CodeSize=${code_size} (< 1024) — likely CFN ZipFile stub. Deploy workflows must re-deploy this function."
+              failed=1
+            else
+              echo "✓ ${effective_name}: CodeSize=${code_size}"
+            fi
+          done < <(jq -r '.functions[].function_name' infrastructure/lambda_workflow_manifest.json)
+          if [ "${failed}" -eq 1 ]; then
+            echo "::error::One or more Lambda functions have stub-sized code packages after CFN stack update. This indicates a CFN ZipFile stomp — trigger per-Lambda deploy workflows to restore."
+            exit 1
+          fi
+          echo "All Lambda functions have valid CodeSize (>= 1024)."
