@@ -281,7 +281,6 @@ deploy_lambda() {
       --region "${REGION}" \
       --handler "${handler}" \
       --runtime python3.12 \
-      --architectures arm64 \
       --timeout 30 \
       --memory-size 256 \
       --environment "${env_json}" \
