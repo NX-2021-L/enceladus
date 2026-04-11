@@ -79,19 +79,26 @@ resolve_internal_api_key() {
 }
 
 package_lambda() {
-  local build_dir zip_path
+  local build_dir zip_path pip_platform pip_pyver pip_abi
   build_dir="$(mktemp -d /tmp/graph-query-api-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
+
+  # Environment-conditional: prod=x86_64/py3.11, gamma=arm64/py3.12
+  if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+    pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"
+  else
+    pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"
+  fi
 
   cp "${ROOT_DIR}/lambda_function.py" "${build_dir}/"
 
   python3 -m pip install \
     --quiet \
     --upgrade \
-    --platform manylinux2014_aarch64 \
+    --platform "${pip_platform}" \
     --implementation cp \
-    --python-version 3.12 \
-    --abi cp312 \
+    --python-version "${pip_pyver}" \
+    --abi "${pip_abi}" \
     --only-binary=:all: \
     -r "${ROOT_DIR}/requirements.txt" \
     -t "${build_dir}" >/dev/null
@@ -112,17 +119,22 @@ ensure_lambda() {
 
   if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION}" >/dev/null 2>&1; then
     log "[START] updating Lambda code: ${FUNCTION_NAME}"
+    local arch_flag="x86_64"
+    [ -n "${ENVIRONMENT_SUFFIX:-}" ] && arch_flag="arm64"
     aws lambda update-function-code \
       --function-name "${FUNCTION_NAME}" \
       --region "${REGION}" \
+      --architectures "${arch_flag}" \
       --zip-file "fileb://${zip_path}" >/dev/null
   else
+    local runtime="python3.11" arch="x86_64"
+    [ -n "${ENVIRONMENT_SUFFIX:-}" ] && runtime="python3.12" && arch="arm64"
     log "[START] creating Lambda function: ${FUNCTION_NAME}"
     aws lambda create-function \
       --region "${REGION}" \
       --function-name "${FUNCTION_NAME}" \
-      --runtime python3.12 \
-      --architectures arm64 \
+      --runtime "${runtime}" \
+      --architectures "${arch}" \
       --handler lambda_function.lambda_handler \
       --role "${role_arn}" \
       --timeout 10 \

@@ -48,6 +48,7 @@ Parameters:
 
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -61,11 +62,12 @@ Resources:
       FunctionName: !Sub "devops-coordination-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 120
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -100,11 +102,12 @@ Resources:
       FunctionName: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -132,11 +135,12 @@ Resources:
       FunctionName: !Sub "devops-document-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -169,11 +173,12 @@ Resources:
       FunctionName: !Sub "devops-project-service${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -203,11 +208,12 @@ Resources:
       FunctionName: !Sub "devops-feed-query-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 60  # ENC-TSK-797: increased from 15 for synchronous feed_publisher invoke
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -236,11 +242,12 @@ Resources:
       FunctionName: !Sub "devops-coordination-monitor-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -267,11 +274,12 @@ Resources:
       FunctionName: !Sub "devops-deploy-intake${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 120
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -302,11 +310,12 @@ Resources:
       FunctionName: !Sub "devops-reference-search${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -333,11 +342,12 @@ Resources:
       FunctionName: !Sub "auth-refresh${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 128
       Timeout: 10
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -365,11 +375,12 @@ Resources:
       FunctionName: !Sub "devops-deploy-orchestrator${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -396,11 +407,12 @@ Resources:
       FunctionName: !Sub "devops-deploy-finalize${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -427,11 +439,12 @@ Resources:
       FunctionName: !Sub "devops-feed-publisher${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 512
       Timeout: 600
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -460,11 +473,12 @@ Resources:
       FunctionName: !Sub "enceladus-governance-audit${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 128
       Timeout: 30
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -483,11 +497,12 @@ Resources:
       FunctionName: !Sub "devops-doc-prep${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -513,11 +528,12 @@ Resources:
       FunctionName: !Sub "enceladus-bedrock-agent-actions${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -546,11 +562,12 @@ Resources:
       FunctionName: !Sub "devops-changelog-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -580,11 +597,12 @@ Resources:
       FunctionName: !Sub "devops-graph-sync${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 60
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -607,11 +625,12 @@ Resources:
       FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 10
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -641,11 +660,12 @@ Resources:
       FunctionName: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 300
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
         - IsProduction
         - !Ref AWS::NoValue
@@ -674,11 +694,12 @@ Resources:
       FunctionName: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 120
-      Architectures: [arm64]
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
       Role: !GetAtt GraphHealthMetricsRole.Arn
       Environment:
         Variables:
