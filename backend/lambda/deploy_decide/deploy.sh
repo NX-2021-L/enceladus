@@ -55,11 +55,11 @@ package_lambda() {
 
   if [[ -f "${SCRIPT_DIR}/requirements.txt" ]]; then
     # v3 production lock: x86_64 / py3.11 unless targeting gamma (ENC-PLN-019)
-    local pip_platform="manylinux2014_x86_64"
-    local pip_pyver="3.11"
+    local pip_platform pip_pyver pip_abi
     if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
-      pip_platform="manylinux2014_aarch64"
-      pip_pyver="3.12"
+      pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"
+    else
+      pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"
     fi
     python3 -m pip install \
       --quiet --upgrade \
@@ -67,7 +67,7 @@ package_lambda() {
       --platform "${pip_platform}" \
       --implementation cp \
       --python-version "${pip_pyver}" \
-      --abi "cp${pip_pyver//./}" \
+      --abi "${pip_abi}" \
       --only-binary=:all: \
       -t "${build_dir}" >/dev/null
   fi
