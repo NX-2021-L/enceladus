@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""Verify Lambda architecture parity between CFN and deploy scripts.
+
+CI guard preventing arm64 architecture from reaching production.
+Validates that:
+  1. Every Lambda in 02-compute.yaml uses !If [IsGamma, arm64, x86_64]
+     for Architectures (prod must resolve to x86_64).
+  2. Every Lambda uses !If [IsGamma, python3.12, python3.11] for Runtime
+     (prod must resolve to python3.11).
+  3. Deploy scripts with pip --platform use ENVIRONMENT_SUFFIX conditionals
+     that default to x86_64/py3.11 for production (empty suffix).
+
+Part of ENC-PLN-019 (V3 Full Restoration & Production Lockdown).
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+from typing import List, NamedTuple
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
+MANIFEST_PATH = REPO_ROOT / "infrastructure/lambda_workflow_manifest.json"
+
+# Expected CFN conditional patterns for prod safety
+EXPECTED_ARCH_PATTERN = re.compile(
+    r"^\s*-\s*!If\s+\[IsGamma,\s*arm64,\s*x86_64\]\s*$"
+)
+EXPECTED_RUNTIME_PATTERN = re.compile(
+    r"^\s*Runtime:\s*!If\s+\[IsGamma,\s*python3\.12,\s*python3\.11\]\s*$"
+)
+
+# Patterns that indicate a hardcoded (non-conditional) architecture or runtime
+# Handles both inline [arm64] and YAML list "- arm64" forms
+HARDCODED_ARCH_INLINE = re.compile(r"^\s*Architectures:\s*\[(arm64|x86_64)\]\s*$")
+HARDCODED_ARCH_LIST = re.compile(r"^\s*-\s*(arm64|x86_64)\s*$")
+HARDCODED_RUNTIME = re.compile(r"^\s*Runtime:\s*(python3\.\d+)\s*$")
+
+# Deploy script patterns
+DEPLOY_PROD_X86 = re.compile(
+    r'pip_platform="manylinux2014_x86_64".*pip_pyver="3\.11"'
+)
+DEPLOY_GAMMA_ARM = re.compile(
+    r'pip_platform="manylinux2014_aarch64".*pip_pyver="3\.12"'
+)
+DEPLOY_ENV_CONDITIONAL = re.compile(
+    r'if\s+\[\s+-n\s+"\$\{ENVIRONMENT_SUFFIX:-\}"\s+\]'
+)
+
+
+class LambdaBlock(NamedTuple):
+    """A Lambda function block parsed from the CFN template."""
+    resource_name: str
+    function_name: str
+    line_number: int
+    runtime_line: str
+    runtime_lineno: int
+    arch_line: str
+    arch_lineno: int
+
+
+def _parse_lambda_blocks(template_path: Path) -> List[LambdaBlock]:
+    """Parse Lambda function blocks from the CFN template."""
+    lines = template_path.read_text(encoding="utf-8").splitlines()
+    blocks: List[LambdaBlock] = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+
+        # Find resource blocks that are Lambda functions
+        if line.strip().startswith("Type:") and "AWS::Lambda::Function" in line:
+            # Walk back to find the resource name
+            resource_name = ""
+            for j in range(i - 1, max(i - 10, -1), -1):
+                candidate = lines[j].rstrip()
+                if candidate and not candidate.startswith(" ") and not candidate.startswith("#"):
+                    break
+                if re.match(r"^  \w+.*:$", candidate):
+                    resource_name = candidate.strip().rstrip(":")
+                    break
+
+            # Find FunctionName, Runtime, and Architectures within this block
+            function_name = ""
+            runtime_line = ""
+            runtime_lineno = 0
+            arch_line = ""
+            arch_lineno = 0
+
+            for k in range(i + 1, min(i + 40, len(lines))):
+                l = lines[k].rstrip()
+
+                if l.strip().startswith("FunctionName:"):
+                    fn_val = l.split("FunctionName:", 1)[1].strip()
+                    # Handle !Sub patterns
+                    sub_match = re.match(r"""!Sub\s+['"]([^'"]+)['"]""", fn_val)
+                    if sub_match:
+                        function_name = sub_match.group(1).replace(
+                            "${EnvironmentSuffix}", ""
+                        )
+                    else:
+                        function_name = fn_val.strip("'\"")
+
+                if l.strip().startswith("Runtime:"):
+                    runtime_line = l
+                    runtime_lineno = k + 1  # 1-based
+
+                if l.strip().startswith("Architectures:"):
+                    # The value might be on the same line or the next line
+                    if "[" in l:
+                        arch_line = l
+                        arch_lineno = k + 1
+                    elif k + 1 < len(lines):
+                        arch_line = lines[k + 1]
+                        arch_lineno = k + 2
+
+                # Stop at the next resource block
+                if k > i + 2 and re.match(r"^  \w+.*:", l) and not l.startswith("    "):
+                    break
+
+            if function_name and runtime_line:
+                blocks.append(LambdaBlock(
+                    resource_name=resource_name,
+                    function_name=function_name,
+                    line_number=i + 1,
+                    runtime_line=runtime_line,
+                    runtime_lineno=runtime_lineno,
+                    arch_line=arch_line,
+                    arch_lineno=arch_lineno,
+                ))
+        i += 1
+
+    return blocks
+
+
+def _validate_cfn(blocks: List[LambdaBlock]) -> List[str]:
+    """Validate that all CFN Lambda declarations use IsGamma conditionals."""
+    errors: List[str] = []
+
+    for block in blocks:
+        # Check Runtime
+        if not EXPECTED_RUNTIME_PATTERN.match(block.runtime_line):
+            match = HARDCODED_RUNTIME.match(block.runtime_line.strip())
+            if match:
+                runtime_val = match.group(1)
+                errors.append(
+                    f"{block.function_name} (line {block.runtime_lineno}): "
+                    f"hardcoded Runtime={runtime_val}, expected "
+                    f"!If [IsGamma, python3.12, python3.11]"
+                )
+            else:
+                errors.append(
+                    f"{block.function_name} (line {block.runtime_lineno}): "
+                    f"unexpected Runtime pattern: {block.runtime_line.strip()}"
+                )
+
+        # Check Architectures
+        if not EXPECTED_ARCH_PATTERN.match(block.arch_line):
+            inline_match = HARDCODED_ARCH_INLINE.match(block.arch_line.strip())
+            list_match = HARDCODED_ARCH_LIST.match(block.arch_line)
+            if inline_match:
+                arch_val = inline_match.group(1)
+                errors.append(
+                    f"{block.function_name} (line {block.arch_lineno}): "
+                    f"hardcoded Architectures=[{arch_val}], expected "
+                    f"!If [IsGamma, arm64, x86_64]"
+                )
+            elif list_match:
+                arch_val = list_match.group(1)
+                errors.append(
+                    f"{block.function_name} (line {block.arch_lineno}): "
+                    f"hardcoded Architectures=[{arch_val}], expected "
+                    f"!If [IsGamma, arm64, x86_64]"
+                )
+            else:
+                errors.append(
+                    f"{block.function_name} (line {block.arch_lineno}): "
+                    f"unexpected Architectures pattern: {block.arch_line.strip()}"
+                )
+
+    return errors
+
+
+def _validate_deploy_scripts() -> List[str]:
+    """Validate deploy scripts don't produce arm64 builds for production.
+
+    Three valid patterns:
+    1. Hardcoded x86_64 only — always safe (most API Lambdas)
+    2. ENVIRONMENT_SUFFIX conditional — x86_64 for prod, arm64 for gamma
+    3. No --platform flag — no binary deps, safe
+    """
+    errors: List[str] = []
+
+    import json
+    if not MANIFEST_PATH.is_file():
+        return ["Lambda workflow manifest not found"]
+
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    for entry in manifest.get("functions", []):
+        deploy_script = entry.get("deploy_script")
+        if not deploy_script:
+            continue
+
+        script_path = REPO_ROOT / deploy_script
+        if not script_path.is_file():
+            continue
+
+        content = script_path.read_text(encoding="utf-8")
+        fn_name = entry.get("function_name", deploy_script)
+
+        # Scripts without --platform are safe (no binary deps)
+        if "--platform" not in content:
+            continue
+
+        has_aarch64 = "aarch64" in content or "arm64" in content
+        has_x86 = "x86_64" in content
+
+        # If script references arm64/aarch64, it MUST use conditional gating
+        if has_aarch64:
+            if not DEPLOY_ENV_CONDITIONAL.search(content):
+                errors.append(
+                    f"{fn_name} ({deploy_script}): references arm64/aarch64 "
+                    f"without ENVIRONMENT_SUFFIX conditional guard"
+                )
+                continue
+
+            # Prod path must use x86_64/py3.11
+            if not DEPLOY_PROD_X86.search(content):
+                errors.append(
+                    f"{fn_name} ({deploy_script}): production path must use "
+                    f"manylinux2014_x86_64 with py3.11"
+                )
+
+            # Gamma path must use arm64/py3.12
+            if not DEPLOY_GAMMA_ARM.search(content):
+                errors.append(
+                    f"{fn_name} ({deploy_script}): gamma path must use "
+                    f"manylinux2014_aarch64 with py3.12"
+                )
+        elif has_x86:
+            # Hardcoded x86_64 only — safe for production
+            pass
+        else:
+            errors.append(
+                f"{fn_name} ({deploy_script}): uses --platform but "
+                f"platform target is unrecognized"
+            )
+
+    return errors
+
+
+def main() -> int:
+    if not COMPUTE_TEMPLATE.is_file():
+        print(f"[ERROR] Compute template missing: {COMPUTE_TEMPLATE}")
+        return 1
+
+    blocks = _parse_lambda_blocks(COMPUTE_TEMPLATE)
+    if not blocks:
+        print("[ERROR] No Lambda functions found in compute template")
+        return 1
+
+    errors: List[str] = []
+
+    # Validate CFN declarations
+    cfn_errors = _validate_cfn(blocks)
+    if cfn_errors:
+        errors.append("=== CFN Architecture/Runtime violations ===")
+        errors.extend(cfn_errors)
+
+    # Validate deploy scripts
+    deploy_errors = _validate_deploy_scripts()
+    if deploy_errors:
+        errors.append("=== Deploy script violations ===")
+        errors.extend(deploy_errors)
+
+    if errors:
+        print("[ERROR] Lambda architecture parity check FAILED:")
+        for err in errors:
+            print(f"  {err}")
+        return 1
+
+    print(
+        f"[SUCCESS] Lambda architecture parity valid: "
+        f"{len(blocks)} CFN Lambdas use IsGamma conditionals "
+        f"(prod=x86_64/py3.11, gamma=arm64/py3.12)"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
