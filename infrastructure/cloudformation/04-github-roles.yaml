@@ -31,8 +31,10 @@ Parameters:
 
 Resources:
   # ---------------------------------------------------------------------------
-  # CloudFormation API Stack Deploy Role
-  # Used by: .github/workflows/cloudformation-api-stack-deploy.yml
+  # CloudFormation Stack Deploy Role
+  # Used by:
+  #   - .github/workflows/cloudformation-api-stack-deploy.yml
+  #   - .github/workflows/cloudformation-compute-stack-deploy.yml
   # Secret:  AWS_CLOUDFORMATION_ROLE_TO_ASSUME
   # ---------------------------------------------------------------------------
   CloudFormationDeployRole:
@@ -40,8 +42,9 @@ Resources:
     Properties:
       RoleName: enceladus-cloudformation-deploy-github-role
       Description: >
-        GitHub Actions OIDC role for deploying the enceladus-api
-        CloudFormation stack (03-api.yaml).
+        GitHub Actions OIDC role for deploying the Enceladus
+        CloudFormation stacks, including API (03-api.yaml) and
+        compute (02-compute.yaml).
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -94,25 +97,92 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:apigateway:us-west-2::/*"
 
-              # IAM PassRole for CAPABILITY_NAMED_IAM
-              - Sid: IAMPassRole
+              # IAM role management required for compute-stack role
+              # reconciliation after the 2026-03-15 import and for future
+              # Lambda / Pipes / EventBridge role updates.
+              - Sid: IAMRoleManagement
                 Effect: Allow
                 Action:
                   - iam:PassRole
                   - iam:GetRole
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
                 Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/devops-*"
                   - !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-*"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/auth-refresh*"
 
-              # Lambda read-only (for integration URI references)
-              - Sid: LambdaReadOnly
+              # Lambda compute-stack mutations cover functions, permissions,
+              # event-source mappings, and layer validation.
+              - Sid: LambdaComputeOps
                 Effect: Allow
                 Action:
+                  - lambda:AddPermission
+                  - lambda:CreateEventSourceMapping
+                  - lambda:CreateFunction
+                  - lambda:DeleteEventSourceMapping
+                  - lambda:DeleteFunction
+                  - lambda:GetEventSourceMapping
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
+                  - lambda:GetLayerVersion
+                  - lambda:PublishVersion
+                  - lambda:RemovePermission
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:UpdateEventSourceMapping
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                Resource: "*"
+
+              - Sid: EventBridgeRuleOps
+                Effect: Allow
+                Action:
+                  - events:DeleteRule
+                  - events:DescribeRule
+                  - events:ListTargetsByRule
+                  - events:PutRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                  - events:TagResource
+                  - events:UntagResource
                 Resource:
-                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:devops-*"
-                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-*"
-                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:auth-refresh*"
+                  - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/devops-*"
+                  - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/enceladus-*"
+                  - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/on-project-json-sync*"
+
+              - Sid: PipesOps
+                Effect: Allow
+                Action:
+                  - pipes:CreatePipe
+                  - pipes:DeletePipe
+                  - pipes:DescribePipe
+                  - pipes:StartPipe
+                  - pipes:StopPipe
+                  - pipes:TagResource
+                  - pipes:UntagResource
+                  - pipes:UpdatePipe
+                Resource:
+                  - !Sub "arn:aws:pipes:us-west-2:${AWS::AccountId}:pipe/devops-*"
+                  - !Sub "arn:aws:pipes:us-west-2:${AWS::AccountId}:pipe/enceladus-*"
+
+              - Sid: CloudWatchAlarmOps
+                Effect: Allow
+                Action:
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
+                Resource: "*"
 
               # Read-only validation permissions required by CloudFormation
               # pre-deployment validation when new rules, pipes, and alarms are
@@ -133,12 +203,6 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:pipes:us-west-2:${AWS::AccountId}:pipe/devops-*"
                   - !Sub "arn:aws:pipes:us-west-2:${AWS::AccountId}:pipe/enceladus-*"
-
-              - Sid: CloudWatchValidationReadOnly
-                Effect: Allow
-                Action:
-                  - cloudwatch:DescribeAlarms
-                Resource: "*"
 
               # CloudWatch Logs (for error reporting in workflow)
               - Sid: LogsReadOnly
