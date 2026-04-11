@@ -92,7 +92,6 @@ deploy_lambda() {
     aws lambda update-function-configuration \
       --function-name "${FUNCTION_NAME}" \
       --runtime python3.12 \
-      --architectures arm64 \
       --handler lambda_function.lambda_handler \
       --role "${role_arn}" \
       --timeout 300 \

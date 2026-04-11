@@ -45,8 +45,7 @@ deploy_lambda() {
   aws lambda update-function-configuration \
     --function-name "${FUNCTION_NAME}" \
     --region "${REGION}" \
-    --runtime "${RUNTIME}" \
-    --architectures "${ARCHITECTURE}" >/dev/null
+    --runtime "${RUNTIME}" >/dev/null
 
   aws lambda wait function-updated-v2 \
     --function-name "${FUNCTION_NAME}" \
