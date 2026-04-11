@@ -355,7 +355,9 @@ Resources:
       QueueName: !Sub "devops-feed-publish-queue${EnvironmentSuffix}.fifo"
       FifoQueue: true
       ContentBasedDeduplication: true
-      VisibilityTimeout: 60
+      # Must be >= devops-feed-publisher Timeout (600) or Lambda rejects the
+      # event source mapping update during compute-stack deploys.
+      VisibilityTimeout: 600
       MessageRetentionPeriod: 86400
       ReceiveMessageWaitTimeSeconds: 20
       SqsManagedSseEnabled: true
