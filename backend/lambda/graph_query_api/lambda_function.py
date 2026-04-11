@@ -198,6 +198,14 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "DOC_ATTACHED_TO_PLAN",  # inverse of PLAN_ATTACHED_DOC
     "INFORMED_BY",            # GDMP provenance (Document -> Document)
     "INFORMS",                # inverse GDMP provenance
+    # GMF: Generational Metabolism Framework (DOC-63420302EF65 §8.2)
+    "SUCCEEDS",               # Generation -> Generation (lineage)
+    "BELONGS_TO_GENERATION",  # Feature -> Generation
+    "SYNTHESIZED_IN",         # Lesson -> Chapter document
+    "SEEDS_THESIS_OF",        # Chapter document -> Generation
+    "ADVANCES_GENERATION",    # DeploymentDecision -> Generation
+    "TARGETS_GENERATION",     # Task/Lesson -> Generation
+    "EXECUTES_WITHIN",        # Plan -> Generation
 })
 
 

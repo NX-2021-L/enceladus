@@ -34,6 +34,12 @@
       "deploy_script": "backend/lambda/changelog_api/deploy.sh"
     },
     {
+      "function_name": "devops-deploy-decide",
+      "lambda_dir": "backend/lambda/deploy_decide",
+      "workflow_file": ".github/workflows/lambda-deploy-decide-deploy.yml",
+      "deploy_script": "backend/lambda/deploy_decide/deploy.sh"
+    },
+    {
       "function_name": "devops-deploy-finalize",
       "lambda_dir": "backend/lambda/deploy_finalize",
       "workflow_file": ".github/workflows/lambda-deploy-finalize-deploy.yml",

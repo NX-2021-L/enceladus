@@ -40,6 +40,7 @@ import re
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
@@ -114,6 +115,11 @@ TRACKER_API_BASE = os.environ.get(
     "TRACKER_API_BASE",
     "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker",
 )
+
+# GMF (Generational Metabolism Framework) feature flag — DOC-63420302EF65
+ENABLE_GMF_GATE = os.environ.get("ENABLE_GMF_GATE", "false").lower() == "true"
+DEPLOY_TABLE = os.environ.get("DEPLOY_TABLE", "devops-deployment-manager")
+GAMMA_INTEGRATION_BRANCH = os.environ.get("GAMMA_INTEGRATION_BRANCH", "v4/main")
 
 # Record ID parsing: prefix → project, type suffix → record type
 _PREFIX_TO_PROJECT = {"ENC": "enceladus", "DVP": "devops"}
@@ -772,12 +778,24 @@ def _handle_webhook(event: Dict) -> Dict:
         gh_event, action, delivery_id,
     )
 
+    # -----------------------------------------------------------------------
+    # GMF: pull_request / workflow_run handlers (DOC-63420302EF65 §7)
+    # These fire before the issue-based handlers since PR events don't carry
+    # issue data or linked Enceladus records.
+    # -----------------------------------------------------------------------
+    repo_full = body.get("repository", {}).get("full_name", "")
+
+    if gh_event == "pull_request":
+        return _webhook_pull_request(body, action, repo_full, delivery_id)
+
+    if gh_event == "workflow_run":
+        return _webhook_workflow_run(body, action, repo_full, delivery_id)
+
     # Extract issue data and linked record
     issue = body.get("issue") or {}
     issue_body_text = issue.get("body") or ""
     issue_number = issue.get("number", 0)
     issue_url = issue.get("html_url", "")
-    repo_full = body.get("repository", {}).get("full_name", "")
 
     record_id = _extract_record_id(issue_body_text)
     if not record_id:
@@ -832,6 +850,311 @@ def _handle_webhook(event: Dict) -> Dict:
             "action": action,
             "record_id": record_id,
         })
+
+
+# ---------------------------------------------------------------------------
+# GMF Webhook handlers — Generational Metabolism Framework (DOC-63420302EF65 §7)
+# ---------------------------------------------------------------------------
+
+
+def _webhook_pull_request(
+    payload: Dict, action: str, repo_full: str, delivery_id: str,
+) -> Dict:
+    """Handle pull_request webhook events for the GMF deploy gate.
+
+    When ENABLE_GMF_GATE is true and a PR targets main:
+    - opened/reopened: Create ENC-DPL record in pending_approval
+    - labeled (target:gamma): Update ENC-DPL to diverted
+    - closed+merged: Update ENC-DPL to deploying
+    - closed+not merged: Update ENC-DPL to reverted (external close)
+
+    When ENABLE_GMF_GATE is false: log and return (dormant).
+    """
+    pr = payload.get("pull_request", {})
+    pr_number = pr.get("number", 0)
+    base_ref = pr.get("base", {}).get("ref", "")
+
+    if not ENABLE_GMF_GATE:
+        logger.info(
+            "GMF dormant: pull_request/%s on %s#%d (base=%s) delivery=%s",
+            action, repo_full, pr_number, base_ref, delivery_id,
+        )
+        return _response(200, {
+            "processed": False,
+            "reason": "gmf_gate_disabled",
+            "event": "pull_request",
+            "action": action,
+            "pr_number": pr_number,
+        })
+
+    # Only intercept PRs targeting main
+    if base_ref != "main":
+        logger.info(
+            "GMF: pull_request/%s on %s#%d targets '%s' (not main), skipping",
+            action, repo_full, pr_number, base_ref,
+        )
+        return _response(200, {
+            "processed": False,
+            "reason": "not_targeting_main",
+            "base_ref": base_ref,
+        })
+
+    # Check labels for gamma routing
+    labels = [lbl.get("name", "") for lbl in pr.get("labels", [])]
+
+    if action in ("opened", "reopened"):
+        # Skip if already labeled target:gamma
+        if "target:gamma" in labels:
+            logger.info("GMF: PR #%d has target:gamma label, skipping DPL creation", pr_number)
+            return _response(200, {"processed": False, "reason": "gamma_labeled"})
+
+        return _gmf_create_decision(pr, repo_full, delivery_id)
+
+    elif action == "labeled":
+        label_name = payload.get("label", {}).get("name", "")
+        if label_name == "target:gamma":
+            return _gmf_divert_on_label(pr, repo_full, delivery_id)
+        return _response(200, {"processed": False, "reason": "irrelevant_label"})
+
+    elif action == "closed":
+        merged = pr.get("merged", False)
+        if merged:
+            return _gmf_mark_deploying(pr, repo_full, delivery_id)
+        else:
+            return _gmf_mark_reverted(pr, repo_full, delivery_id)
+
+    logger.info("GMF: pull_request/%s not handled", action)
+    return _response(200, {"processed": False, "reason": "action_not_handled"})
+
+
+def _webhook_workflow_run(
+    payload: Dict, action: str, repo_full: str, delivery_id: str,
+) -> Dict:
+    """Handle workflow_run webhook events for deploy outcome tracking.
+
+    On completed: look up ENC-DPL by head_sha, update deployment_outcome.
+    """
+    if not ENABLE_GMF_GATE:
+        logger.info("GMF dormant: workflow_run/%s delivery=%s", action, delivery_id)
+        return _response(200, {
+            "processed": False,
+            "reason": "gmf_gate_disabled",
+            "event": "workflow_run",
+            "action": action,
+        })
+
+    if action != "completed":
+        return _response(200, {"processed": False, "reason": "not_completed"})
+
+    run = payload.get("workflow_run", {})
+    head_sha = run.get("head_sha", "")
+    conclusion = run.get("conclusion", "")
+
+    if not head_sha:
+        return _response(200, {"processed": False, "reason": "no_head_sha"})
+
+    # Look up ENC-DPL by head_sha (scan is acceptable — low volume)
+    outcome = "success" if conclusion == "success" else "failure"
+    try:
+        ddb = boto3.client("dynamodb", region_name=DYNAMODB_REGION)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Query for decisions in deploying status with matching head_sha
+        # Using a scan since we expect very few records in deploying state
+        resp = ddb.scan(
+            TableName=DEPLOY_TABLE,
+            FilterExpression="#s = :deploying AND head_sha = :sha",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":deploying": {"S": "deploying"},
+                ":sha": {"S": head_sha},
+            },
+            Limit=10,
+        )
+        items = resp.get("Items", [])
+        if not items:
+            logger.info("GMF: No deploying DPL record for SHA %s", head_sha[:12])
+            return _response(200, {"processed": False, "reason": "no_matching_dpl"})
+
+        # Update the first matching record
+        item = items[0]
+        pk = item["project_id"]["S"]
+        sk = item["record_id"]["S"]
+        final_status = "deployed" if outcome == "success" else "failed"
+
+        ddb.update_item(
+            TableName=DEPLOY_TABLE,
+            Key={"project_id": {"S": pk}, "record_id": {"S": sk}},
+            UpdateExpression="SET #s = :st, deployment_outcome = :out, deployed_at = :da, updated_at = :ua",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":st": {"S": final_status},
+                ":out": {"S": outcome},
+                ":da": {"S": now},
+                ":ua": {"S": now},
+            },
+        )
+        logger.info("GMF: DPL %s updated to %s (SHA=%s)", sk, final_status, head_sha[:12])
+        return _response(200, {
+            "processed": True,
+            "record_id": sk,
+            "deployment_outcome": outcome,
+        })
+    except Exception as e:
+        logger.error("GMF workflow_run handler error: %s", e, exc_info=True)
+        return _response(200, {"processed": False, "reason": "internal_error"})
+
+
+def _gmf_create_decision(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
+    """Create a deployment_decision record for a PR targeting main."""
+    pr_number = pr.get("number", 0)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    labels = [lbl.get("name", "") for lbl in pr.get("labels", [])]
+
+    original_target = "prod"
+    if "target:gamma" in labels:
+        original_target = "gamma"
+    elif "target:undeclared" in labels or not any(l.startswith("target:") for l in labels):
+        original_target = "undeclared"
+
+    record_id = f"decision#ENC-DPL-{pr_number}"
+    item = {
+        "project_id": {"S": "enceladus"},
+        "record_id": {"S": record_id},
+        "record_type": {"S": "deployment_decision"},
+        "status": {"S": "pending_approval"},
+        "github_pr_number": {"N": str(pr_number)},
+        "github_pr_id": {"N": str(pr.get("id", 0))},
+        "github_pr_url": {"S": pr.get("html_url", "")},
+        "github_repo": {"S": repo_full},
+        "pr_title": {"S": pr.get("title", "")},
+        "pr_author": {"S": pr.get("user", {}).get("login", "")},
+        "head_branch": {"S": pr.get("head", {}).get("ref", "")},
+        "head_sha": {"S": pr.get("head", {}).get("sha", "")},
+        "original_target": {"S": original_target},
+        "final_target": {"S": ""},
+        "generation_id": {"S": ""},
+        "decided_by": {"S": ""},
+        "decided_at": {"S": ""},
+        "decision_reason": {"S": ""},
+        "deployment_outcome": {"S": ""},
+        "deployed_at": {"S": ""},
+        "created_at": {"S": now},
+        "updated_at": {"S": now},
+        "write_source": {"S": "github_webhook"},
+        "delivery_id": {"S": delivery_id},
+    }
+
+    try:
+        ddb = boto3.client("dynamodb", region_name=DYNAMODB_REGION)
+        ddb.put_item(
+            TableName=DEPLOY_TABLE,
+            Item=item,
+            ConditionExpression="attribute_not_exists(project_id)",
+        )
+        logger.info(
+            "GMF: Created DPL record %s for PR #%d (%s → main)",
+            record_id, pr_number, pr.get("head", {}).get("ref", "?"),
+        )
+        return _response(200, {
+            "processed": True,
+            "action": "dpl_created",
+            "record_id": record_id,
+            "pr_number": pr_number,
+            "original_target": original_target,
+        })
+    except ddb.exceptions.ConditionalCheckFailedException:
+        logger.info("GMF: DPL record %s already exists (idempotent)", record_id)
+        return _response(200, {"processed": True, "action": "dpl_already_exists"})
+    except Exception as e:
+        logger.error("GMF: Failed to create DPL record: %s", e, exc_info=True)
+        return _response(200, {"processed": False, "reason": "dpl_create_failed"})
+
+
+def _gmf_divert_on_label(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
+    """When target:gamma label is added, update existing DPL to diverted."""
+    pr_number = pr.get("number", 0)
+    record_id = f"decision#ENC-DPL-{pr_number}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        ddb = boto3.client("dynamodb", region_name=DYNAMODB_REGION)
+        ddb.update_item(
+            TableName=DEPLOY_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
+            UpdateExpression="SET #s = :st, final_target = :ft, updated_at = :ua",
+            ConditionExpression="#s = :pending",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":st": {"S": "diverted"},
+                ":ft": {"S": "gamma"},
+                ":ua": {"S": now},
+                ":pending": {"S": "pending_approval"},
+            },
+        )
+        logger.info("GMF: DPL %s diverted via label on PR #%d", record_id, pr_number)
+        return _response(200, {"processed": True, "action": "dpl_diverted_by_label"})
+    except Exception as e:
+        logger.info("GMF: Divert-on-label skipped for PR #%d: %s", pr_number, e)
+        return _response(200, {"processed": False, "reason": "divert_skipped"})
+
+
+def _gmf_mark_deploying(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
+    """When PR is merged, update DPL to deploying status."""
+    pr_number = pr.get("number", 0)
+    record_id = f"decision#ENC-DPL-{pr_number}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    merge_sha = pr.get("merge_commit_sha", "")
+
+    try:
+        ddb = boto3.client("dynamodb", region_name=DYNAMODB_REGION)
+        ddb.update_item(
+            TableName=DEPLOY_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
+            UpdateExpression="SET #s = :st, merge_commit_sha = :msha, updated_at = :ua",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":st": {"S": "deploying"},
+                ":msha": {"S": merge_sha},
+                ":ua": {"S": now},
+            },
+        )
+        logger.info("GMF: DPL %s → deploying (merged SHA=%s)", record_id, merge_sha[:12])
+        return _response(200, {"processed": True, "action": "dpl_deploying"})
+    except Exception as e:
+        logger.error("GMF: Mark deploying failed for PR #%d: %s", pr_number, e)
+        return _response(200, {"processed": False, "reason": "mark_deploying_failed"})
+
+
+def _gmf_mark_reverted(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
+    """When PR is closed without merge, update DPL to reverted."""
+    pr_number = pr.get("number", 0)
+    record_id = f"decision#ENC-DPL-{pr_number}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        ddb = boto3.client("dynamodb", region_name=DYNAMODB_REGION)
+        ddb.update_item(
+            TableName=DEPLOY_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
+            UpdateExpression="SET #s = :st, final_target = :ft, updated_at = :ua",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":st": {"S": "reverted"},
+                ":ft": {"S": "blocked"},
+                ":ua": {"S": now},
+            },
+        )
+        logger.info("GMF: DPL %s → reverted (PR #%d closed without merge)", record_id, pr_number)
+        return _response(200, {"processed": True, "action": "dpl_reverted"})
+    except Exception as e:
+        logger.info("GMF: Mark reverted skipped for PR #%d: %s", pr_number, e)
+        return _response(200, {"processed": False, "reason": "mark_reverted_skipped"})
+
+
+# ---------------------------------------------------------------------------
+# Existing webhook handlers — issues and comments
+# ---------------------------------------------------------------------------
 
 
 def _webhook_issue_closed(
