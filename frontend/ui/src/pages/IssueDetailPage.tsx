@@ -1,11 +1,14 @@
 import { useState, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useParams, Link } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { useTasks } from '../hooks/useTasks'
 import { useIssues } from '../hooks/useIssues'
 import { useFeatures } from '../hooks/useFeatures'
+import { useProjects } from '../hooks/useProjects'
 import { useRecordMutation } from '../hooks/useRecordMutation'
 import { isMutationRetryExhaustedError } from '../api/mutations'
+import { fetchIssueById, resolveProjectFromRecordId, trackerKeys } from '../api/tracker'
 import { StatusChip } from '../components/shared/StatusChip'
 import { PriorityBadge } from '../components/shared/PriorityBadge'
 import { GitHubLinkBadge } from '../components/shared/GitHubLinkBadge'
@@ -29,8 +32,9 @@ import { filterRelatedItems, getChildrenIds } from '../lib/relationshipFilters'
 export function IssueDetailPage() {
   const { issueId } = useParams<{ issueId: string }>()
   const { allTasks } = useTasks()
-  const { allIssues, isPending, isError } = useIssues()
+  const { allIssues, isPending: feedPending, isError: feedError } = useIssues()
   const { allFeatures } = useFeatures()
+  const { projects } = useProjects()
   const { mutate, isPending: isMutating } = useRecordMutation()
 
   const [showNote, setShowNote] = useState(false)
@@ -39,7 +43,22 @@ export function IssueDetailPage() {
   const [mutationError, setMutationError] = useState<string | null>(null)
   const [mutationSuccess, setMutationSuccess] = useState<string | null>(null)
 
-  const issue = allIssues.find((i) => i.issue_id === issueId)
+  // ENC-ISS-200: feed_query caps issues at 10 per type; older records require
+  // a direct tracker API fetch when the URL is loaded cold.
+  const cachedIssue = allIssues.find((i) => i.issue_id === issueId)
+  const fallbackProjectId = !cachedIssue && issueId
+    ? resolveProjectFromRecordId(issueId, projects)
+    : null
+  const fallbackEnabled = !feedPending && !cachedIssue && !!issueId && !!fallbackProjectId
+
+  const fallbackQuery = useQuery({
+    queryKey: trackerKeys.issue(issueId ?? ''),
+    queryFn: () => fetchIssueById(fallbackProjectId!, issueId!),
+    enabled: fallbackEnabled,
+    retry: 1,
+  })
+
+  const issue = cachedIssue ?? fallbackQuery.data
 
   const recordMap = useMemo<Record<string, RecordInfo>>(() => {
     const map: Record<string, RecordInfo> = {}
@@ -61,9 +80,9 @@ export function IssueDetailPage() {
     return { features, tasks, issues, hasRelated: features.length > 0 || tasks.length > 0 || issues.length > 0 }
   }, [issue, allTasks, allIssues, allFeatures])
 
-  if (isPending) return <LoadingState />
-  if (isError) return <ErrorState />
-  if (!issue) return <ErrorState message="Issue not found" />
+  if (feedPending || (fallbackEnabled && fallbackQuery.isPending)) return <LoadingState />
+  if (feedError && !issue) return <ErrorState />
+  if (!issue) return <ErrorState message={`Issue not found: ${issueId ?? 'unknown'}`} />
 
   function handleSubmitNote() {
     if (!note.trim()) return
