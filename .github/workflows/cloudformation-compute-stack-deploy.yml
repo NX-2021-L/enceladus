@@ -127,6 +127,8 @@ jobs:
             --output table
 
       - name: Validate Lambda CodeSize (detect CFN stub stomp)
+        # Informational only — full-stack orchestration below handles restoration
+        continue-on-error: true
         run: |
           set -euo pipefail
           # Read function names from the manifest (source of truth for CFN-managed Lambdas)
@@ -140,14 +142,23 @@ jobs:
               --query 'CodeSize' \
               --output text 2>/dev/null || echo "0")
             if [ "${code_size}" -lt 1024 ]; then
-              echo "::error::Lambda ${effective_name} has CodeSize=${code_size} (< 1024) — likely CFN ZipFile stub. Deploy workflows must re-deploy this function."
+              echo "::warning::Lambda ${effective_name} has CodeSize=${code_size} (< 1024) — likely CFN ZipFile stub. Full-stack orchestration will restore."
               failed=1
             else
               echo "✓ ${effective_name}: CodeSize=${code_size}"
             fi
           done < <(jq -r '.functions[].function_name' infrastructure/lambda_workflow_manifest.json)
           if [ "${failed}" -eq 1 ]; then
-            echo "::error::One or more Lambda functions have stub-sized code packages after CFN stack update. This indicates a CFN ZipFile stomp — trigger per-Lambda deploy workflows to restore."
-            exit 1
+            echo "::warning::One or more Lambda functions have stub-sized code packages after CFN stack update. Full-stack deploy orchestration will restore all Lambdas."
           fi
-          echo "All Lambda functions have valid CodeSize (>= 1024)."
+          echo "CodeSize validation complete. Full-stack orchestration follows."
+
+  # After CFN stack update, run full-stack deploy orchestration to restore
+  # any Lambdas that may have been overwritten with CFN ZipFile stubs.
+  # This closes the path-filter coverage gap from the Sev1 incident (ENC-TSK-1292).
+  full-stack-restore:
+    needs: deploy
+    uses: ./.github/workflows/deploy-orchestration.yml
+    with:
+      deploy_mode: "full-stack"
+    secrets: inherit
