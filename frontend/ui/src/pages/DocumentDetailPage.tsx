@@ -47,7 +47,10 @@ export function DocumentDetailPage() {
     return <ProjectPrimaryDocumentsPage projectId={normalizedId} />
   }
   if (isPending) return <LoadingState />
-  if (isError || !doc) return <ErrorState message="Document not found" />
+  // ENC-ISS-200: fetchDocument() is the direct tracker API path and already
+  // resolves documents that fall outside the feed cap. Surface the record ID
+  // when it fails so users can diagnose a genuine 404.
+  if (isError || !doc) return <ErrorState message={`Document not found: ${normalizedId}`} />
 
   const expectedSlug = documentSlugFromFileName(doc.file_name, doc.document_id)
   const currentSlug = decodeSlug(documentSlug)

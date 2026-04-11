@@ -1,11 +1,14 @@
 import { useState, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useParams, Link } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { useTasks } from '../hooks/useTasks'
 import { useIssues } from '../hooks/useIssues'
 import { useFeatures } from '../hooks/useFeatures'
+import { useProjects } from '../hooks/useProjects'
 import { useRecordMutation } from '../hooks/useRecordMutation'
 import { isMutationRetryExhaustedError } from '../api/mutations'
+import { fetchTaskById, resolveProjectFromRecordId, trackerKeys } from '../api/tracker'
 import { StatusChip } from '../components/shared/StatusChip'
 import { PriorityBadge } from '../components/shared/PriorityBadge'
 import { ActiveSessionBadge } from '../components/shared/ActiveSessionBadge'
@@ -30,9 +33,10 @@ import { filterRelatedItems, getChildrenIds } from '../lib/relationshipFilters'
 
 export function TaskDetailPage() {
   const { taskId } = useParams<{ taskId: string }>()
-  const { allTasks, isPending, isError } = useTasks()
+  const { allTasks, isPending: feedPending, isError: feedError } = useTasks()
   const { allIssues } = useIssues()
   const { allFeatures } = useFeatures()
+  const { projects } = useProjects()
   const { mutate, isPending: isMutating } = useRecordMutation()
 
   const [showNote, setShowNote] = useState(false)
@@ -41,7 +45,22 @@ export function TaskDetailPage() {
   const [mutationError, setMutationError] = useState<string | null>(null)
   const [mutationSuccess, setMutationSuccess] = useState<string | null>(null)
 
-  const task = allTasks.find((t) => t.task_id === taskId)
+  // ENC-ISS-200: feed_query caps responses at 100 tasks; records outside the
+  // window must be fetched directly from the tracker API.
+  const cachedTask = allTasks.find((t) => t.task_id === taskId)
+  const fallbackProjectId = !cachedTask && taskId
+    ? resolveProjectFromRecordId(taskId, projects)
+    : null
+  const fallbackEnabled = !feedPending && !cachedTask && !!taskId && !!fallbackProjectId
+
+  const fallbackQuery = useQuery({
+    queryKey: trackerKeys.task(taskId ?? ''),
+    queryFn: () => fetchTaskById(fallbackProjectId!, taskId!),
+    enabled: fallbackEnabled,
+    retry: 1,
+  })
+
+  const task = cachedTask ?? fallbackQuery.data
 
   const recordMap = useMemo<Record<string, RecordInfo>>(() => {
     const map: Record<string, RecordInfo> = {}
@@ -63,9 +82,9 @@ export function TaskDetailPage() {
     return { features, tasks, issues, hasRelated: features.length > 0 || tasks.length > 0 || issues.length > 0 }
   }, [task, allTasks, allIssues, allFeatures])
 
-  if (isPending) return <LoadingState />
-  if (isError) return <ErrorState />
-  if (!task) return <ErrorState message="Task not found" />
+  if (feedPending || (fallbackEnabled && fallbackQuery.isPending)) return <LoadingState />
+  if (feedError && !task) return <ErrorState />
+  if (!task) return <ErrorState message={`Task not found: ${taskId ?? 'unknown'}`} />
 
   function handleSubmitNote() {
     if (!note.trim()) return
