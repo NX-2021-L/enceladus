@@ -44,7 +44,7 @@ Parameters:
     Default: https://jreese.net
   SharedLayerArn:
     Type: String
-    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:2
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:7
 
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
@@ -669,6 +669,7 @@ Resources:
 
   GraphHealthMetricsFunction:
     Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"
       Code:
@@ -1391,6 +1392,7 @@ Resources:
   # ENC-TSK-C10: Graph Health Metrics Lambda IAM Role
   GraphHealthMetricsRole:
     Type: AWS::IAM::Role
+    DeletionPolicy: Retain
     Properties:
       RoleName: !Sub "enceladus-graph-health-metrics-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
