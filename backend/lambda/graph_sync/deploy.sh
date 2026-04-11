@@ -75,10 +75,10 @@ package_lambda() {
   python3 -m pip install \
     --quiet \
     --upgrade \
-    --platform manylinux2014_x86_64 \
+    --platform manylinux2014_aarch64 \
     --implementation cp \
-    --python-version 3.11 \
-    --abi cp311 \
+    --python-version 3.12 \
+    --abi cp312 \
     --only-binary=:all: \
     -r "${ROOT_DIR}/requirements.txt" \
     -t "${build_dir}" >/dev/null
@@ -108,7 +108,8 @@ ensure_lambda() {
     aws lambda create-function \
       --region "${REGION}" \
       --function-name "${FUNCTION_NAME}" \
-      --runtime python3.11 \
+      --runtime python3.12 \
+      --architectures arm64 \
       --handler lambda_function.handler \
       --role "${role_arn}" \
       --timeout 60 \
