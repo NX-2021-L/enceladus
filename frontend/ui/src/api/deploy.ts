@@ -25,7 +25,16 @@ export async function fetchDeployQueue(
     `/api/v1/deploy/queue?project_id=${encodeURIComponent(projectId)}&limit=50`,
   )
   if (!res.ok) throw new Error(`Failed to fetch deploy queue: ${res.status}`)
-  return res.json()
+  const data: DeployQueueResponse = await res.json()
+  // ENC-ISS-208: Strip DynamoDB composite key prefix from record_id.
+  // The "decision#" prefix contains a # that breaks native browser
+  // input validation (url/email types reject it). The backend
+  // reconstructs the full key from pr_number, so the UI never needs it.
+  data.decisions = data.decisions.map((d) => ({
+    ...d,
+    record_id: d.record_id.replace(/^decision#/, ''),
+  }))
+  return data
 }
 
 export async function submitDeployDecision(
