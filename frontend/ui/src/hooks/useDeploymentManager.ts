@@ -7,7 +7,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { deployKeys, fetchDeployQueue, submitDeployDecision } from '../api/deploy'
-import type { DeployDecideRequest, DeploymentDecision } from '../types/deployments'
+import type { DeployDecideRequest } from '../types/deployments'
 import { isSessionExpiredError } from '../lib/authSession'
 
 const POLL_INTERVAL = 5_000
