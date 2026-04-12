@@ -938,12 +938,10 @@ def _write_spec(project_id: str, spec_id: str, status: str = "building", **kwarg
 
 def _latest_source_archive_key(source_bucket: str, source_prefix: str) -> str:
     """Return latest source zip key under the prefix."""
-    s3 = _get_s3()
-    resp = s3.list_objects_v2(Bucket=source_bucket, Prefix=f"{source_prefix}/", MaxKeys=100)
-    zips = [o for o in resp.get("Contents", []) if o["Key"].endswith(".zip")]
-    if not zips:
+    keys = _list_source_archive_keys(source_bucket, source_prefix)
+    if not keys:
         raise RuntimeError(f"No source archives found at s3://{source_bucket}/{source_prefix}/")
-    return sorted(zips, key=lambda o: o["Key"], reverse=True)[0]["Key"]
+    return keys[0]
 
 
 def _normalize_source_prefix(prefix: str) -> str:
@@ -979,9 +977,20 @@ def _candidate_source_locations(
 
 
 def _list_source_archive_keys(source_bucket: str, source_prefix: str) -> List[str]:
+    """List all .zip keys under prefix with full S3 pagination (ENC-ISS-212)."""
     s3 = _get_s3()
-    resp = s3.list_objects_v2(Bucket=source_bucket, Prefix=f"{source_prefix}/", MaxKeys=100)
-    zips = [str(obj.get("Key", "")) for obj in resp.get("Contents", []) if str(obj.get("Key", "")).endswith(".zip")]
+    zips: List[str] = []
+    kwargs: Dict[str, Any] = {"Bucket": source_bucket, "Prefix": f"{source_prefix}/"}
+    while True:
+        resp = s3.list_objects_v2(**kwargs)
+        for obj in resp.get("Contents", []):
+            key = str(obj.get("Key", ""))
+            if key.endswith(".zip"):
+                zips.append(key)
+        if resp.get("IsTruncated"):
+            kwargs["ContinuationToken"] = resp["NextContinuationToken"]
+        else:
+            break
     return sorted(zips, reverse=True)
 
 
