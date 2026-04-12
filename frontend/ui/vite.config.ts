@@ -1,7 +1,36 @@
+import { readdirSync } from 'fs'
+import { resolve } from 'path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import type { Plugin } from 'vite'
+
+// ---------------------------------------------------------------------------
+// ENC-ISS-211: Force-emit page chunks to prevent non-deterministic code
+// splitting across Node versions. CodeBuild (Node 20) silently dropped the
+// DeploymentManagerPage chunk after a module graph shift in PR #293.
+// Rollup's emitFile API guarantees chunk inclusion regardless of tree-shaking
+// or module graph analysis.
+// ---------------------------------------------------------------------------
+function forcePageChunks(): Plugin {
+  return {
+    name: 'force-page-chunks',
+    buildStart() {
+      const pagesDir = resolve(__dirname, 'src/pages')
+      const pages = readdirSync(pagesDir).filter((f) =>
+        /^[A-Z].*Page\.tsx$/.test(f),
+      )
+      for (const page of pages) {
+        this.emitFile({
+          type: 'chunk',
+          id: resolve(pagesDir, page),
+          name: page.replace(/\.tsx$/, ''),
+        })
+      }
+    },
+  }
+}
 
 export default defineConfig({
   base: '/enceladus/',
@@ -67,6 +96,7 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
+      plugins: [forcePageChunks()],
       output: {
         manualChunks(id) {
           if (id.includes('node_modules')) {
@@ -87,9 +117,7 @@ export default defineConfig({
           }
 
           // Pages get explicit chunks to prevent non-deterministic code
-          // splitting across Node versions (ENC-ISS-211: CodeBuild Node 20
-          // vs local Node 24 caused DeploymentManagerPage chunk to be
-          // silently dropped when the module graph shifted).
+          // splitting across Node versions (ENC-ISS-211).
           const pageMatch = id.match(/\/src\/pages\/([A-Z][^/]+?)\.tsx$/)
           if (pageMatch) return pageMatch[1]
 
