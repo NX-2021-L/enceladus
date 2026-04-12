@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-12.1",
-  "updated_at": "2026-04-12T09:30:00Z",
-  "last_change_summary": "ENC-TSK-D46: Bug fix — _gmf_create_decision omits generation_id and final_target from initial PutItem when empty (GSI key constraint). Fields still populated via UpdateItem on subsequent status transitions. IAM policy for devops-deployment-manager added to github-integration Lambda role.",
+  "version": "2026-04-12.2",
+  "updated_at": "2026-04-12T21:05:00Z",
+  "last_change_summary": "ENC-TSK-D37: GMF Phase 0 — Register docstore.evolution_chapter entity, add missing fields to tracker.stack_generation (title, production_stack, gamma_stack, promoted_at, chapter_promotion_id) and tracker.deployment_decision (generation_id, head_sha, head_branch, pr_author, github_pr_url, decision_reason, created_at). Field extensions: tracker.lesson (generation_scope, lesson_class), tracker.feature (target_generation, promoted_at, chapter_promotion_id), tracker.plan (target_generation), tracker.task (deploy_target).",
   "owners": [
     "enceladus-platform"
   ],
@@ -290,6 +290,15 @@
           "definition": "IDs of related features. Cross-references for traceability.",
           "usage_guidance": "tracker_set(field='related_feature_ids', value=['ENC-FTR-NNN', ...]). Accepts list or JSON-stringified list.",
           "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+        },
+        "deploy_target": {
+          "type": "enum",
+          "enum": [
+            "prod",
+            "gamma",
+            "undeclared"
+          ],
+          "definition": "Deploy target for this task. 'prod' targets v3/main, 'gamma' targets v4/gamma stack, 'undeclared' (default) awaits labeling."
         }
       }
     },
@@ -450,6 +459,18 @@
         "ogtm_required": {
           "type": "boolean",
           "definition": "Set to true for any feature introducing a new relational field or edge type. Feature may not advance past planned status until ogtm_compliance_evidence is populated."
+        },
+        "target_generation": {
+          "type": "string",
+          "definition": "ENC-GEN-NNN generation this feature targets for delivery."
+        },
+        "promoted_at": {
+          "type": "string",
+          "definition": "ISO 8601 timestamp when this feature was promoted to production via generation cutover."
+        },
+        "chapter_promotion_id": {
+          "type": "string",
+          "definition": "Record ID of the promotion event that promoted this feature."
         }
       }
     },
@@ -2790,6 +2811,20 @@
           },
           "definition": "Monotonically increasing version counter. Incremented on each extension append or metadata recomputation.",
           "usage_guidance": "Used for optimistic concurrency. Do not set manually."
+        },
+        "generation_scope": {
+          "type": "string",
+          "definition": "ENC-GEN-NNN generation scope for this lesson. Links institutional knowledge to the generation era it was learned in."
+        },
+        "lesson_class": {
+          "type": "enum",
+          "enum": [
+            "pattern",
+            "anti-pattern",
+            "incident",
+            "principle"
+          ],
+          "definition": "Classification of the lesson's origin and nature."
         }
       },
       "dynamodb_key_schema": {
@@ -3100,6 +3135,10 @@
           },
           "guard_conditions": "Plan status must be 'drafted'. ConsistentRead=True used for status check (RISK-C08).",
           "authority_envelope": "any governed session, drafted plans only"
+        },
+        "target_generation": {
+          "type": "string",
+          "definition": "ENC-GEN-NNN generation this plan targets. Controls branch prefix convention."
         }
       }
     },
@@ -3454,6 +3493,26 @@
             "platform"
           ],
           "definition": "Generation category. Currently only 'platform' for Enceladus stack generations."
+        },
+        "title": {
+          "type": "string",
+          "definition": "Human-readable generation title (e.g. 'v3 — Production Generation')."
+        },
+        "production_stack": {
+          "type": "string",
+          "definition": "Production architecture and runtime (e.g. 'x86_64 / python3.11'). Null if generation has no production deployment."
+        },
+        "gamma_stack": {
+          "type": "string",
+          "definition": "Gamma architecture and runtime (e.g. 'arm64 / python3.12'). Null if generation has no gamma deployment."
+        },
+        "promoted_at": {
+          "type": "string",
+          "definition": "ISO 8601 timestamp when this generation was promoted to production."
+        },
+        "chapter_promotion_id": {
+          "type": "string",
+          "definition": "Record ID of the promotion event that elevated this generation."
         }
       }
     },
@@ -3509,6 +3568,34 @@
             ""
           ],
           "definition": "Outcome after deploy workflow completes. Set by workflow_run webhook handler."
+        },
+        "generation_id": {
+          "type": "string",
+          "definition": "ENC-GEN-NNN generation that this deployment decision targets."
+        },
+        "head_sha": {
+          "type": "string",
+          "definition": "40-character hex commit SHA from the PR head at decision time."
+        },
+        "head_branch": {
+          "type": "string",
+          "definition": "Source branch of the PR (e.g. 'agent/enc-tsk-xxx-slug')."
+        },
+        "pr_author": {
+          "type": "string",
+          "definition": "GitHub username of the PR author."
+        },
+        "github_pr_url": {
+          "type": "string",
+          "definition": "Full GitHub PR URL for audit trail."
+        },
+        "decision_reason": {
+          "type": "string",
+          "definition": "Human-provided reason for the deploy decision (approve, divert, revert)."
+        },
+        "created_at": {
+          "type": "string",
+          "definition": "ISO 8601 timestamp when the decision record was created (typically on PR open)."
         }
       }
     },
@@ -3542,6 +3629,35 @@
         "EXECUTES_WITHIN": {
           "type": "edge",
           "definition": "Plan -> Generation development arc."
+        }
+      }
+    },
+    "docstore.evolution_chapter": {
+      "description": "Evolution chapter document subtype (DOC-63420302EF65 §4.3). Living document tracking a generation's evolution from incubation through promotion. Contains pending notes appended by agent sessions via documents.patch. One chapter per generation.",
+      "fields": {
+        "document_subtype": {
+          "type": "enum",
+          "enum": [
+            "evolution_chapter"
+          ],
+          "definition": "Document subtype discriminator. Must be 'evolution_chapter'."
+        },
+        "generation_id": {
+          "type": "string",
+          "definition": "ENC-GEN-NNN generation this chapter tracks."
+        },
+        "pending_notes": {
+          "type": "array",
+          "definition": "Append-only array of timestamped notes contributed by agent sessions. Each entry: {timestamp, session_id, note}."
+        },
+        "chapter_status": {
+          "type": "enum",
+          "enum": [
+            "drafting",
+            "active",
+            "closed"
+          ],
+          "definition": "Chapter lifecycle status. 'drafting' during incubation, 'active' when generation is active, 'closed' when generation chapter is closed."
         }
       }
     }
