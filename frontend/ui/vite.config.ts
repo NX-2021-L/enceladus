@@ -4,7 +4,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
-import type { Plugin } from 'vite'
+import type { Plugin, ResolvedConfig } from 'vite'
 
 // ---------------------------------------------------------------------------
 // ENC-ISS-211: Force-emit page chunks to prevent non-deterministic code
@@ -12,12 +12,19 @@ import type { Plugin } from 'vite'
 // DeploymentManagerPage chunk after a module graph shift in PR #293.
 // Rollup's emitFile API guarantees chunk inclusion regardless of tree-shaking
 // or module graph analysis.
+//
+// Uses config.root (not __dirname) to resolve paths — __dirname is unreliable
+// in Vite ESM config loading across Node versions (ENC-TSK-D54).
 // ---------------------------------------------------------------------------
 function forcePageChunks(): Plugin {
+  let root: string
   return {
     name: 'force-page-chunks',
+    configResolved(config: ResolvedConfig) {
+      root = config.root
+    },
     buildStart() {
-      const pagesDir = resolve(__dirname, 'src/pages')
+      const pagesDir = resolve(root, 'src/pages')
       const pages = readdirSync(pagesDir).filter((f) =>
         /^[A-Z].*Page\.tsx$/.test(f),
       )
@@ -37,6 +44,7 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    forcePageChunks(),
     VitePWA({
       registerType: 'autoUpdate',
       // Disable auto-generated registerSW.js — we register the SW manually
@@ -96,7 +104,6 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
-      plugins: [forcePageChunks()],
       output: {
         manualChunks(id) {
           if (id.includes('node_modules')) {
