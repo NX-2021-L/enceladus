@@ -332,7 +332,7 @@ def _generate_app_jwt() -> str:
     payload = {
         "iat": now - 60,
         "exp": now + (9 * 60),
-        "iss": int(GITHUB_APP_ID),
+        "iss": str(GITHUB_APP_ID),
     }
     private_key = _get_github_private_key()
     return jwt.encode(payload, private_key, algorithm="RS256")
