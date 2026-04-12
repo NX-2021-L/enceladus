@@ -54,6 +54,12 @@ ensure_role() {
       "Effect": "Allow",
       "Action": ["secretsmanager:GetSecretValue"],
       "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:devops/github-app/*"
+    },
+    {
+      "Sid": "GMFDeploymentManagerAccess",
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Scan"],
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/devops-deployment-manager"
     }
   ]
 }
