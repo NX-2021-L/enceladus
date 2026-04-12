@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-11.3",
-  "updated_at": "2026-04-11T22:55:00Z",
-  "last_change_summary": "ENC-TSK-D38: Added tracker.stack_generation (ENC-GEN), tracker.deployment_decision (ENC-DPL), and gmf.graph_edges entities for the Generational Metabolism Framework (DOC-63420302EF65). Part of ENC-PLN-012 Gate 5.",
+  "version": "2026-04-12.1",
+  "updated_at": "2026-04-12T09:30:00Z",
+  "last_change_summary": "ENC-TSK-D46: Bug fix — _gmf_create_decision omits generation_id and final_target from initial PutItem when empty (GSI key constraint). Fields still populated via UpdateItem on subsequent status transitions. IAM policy for devops-deployment-manager added to github-integration Lambda role.",
   "owners": [
     "enceladus-platform"
   ],
