@@ -5,8 +5,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 REGION="${REGION:-us-west-2}"
 FUNCTION_NAME="${FUNCTION_NAME:-auth-refresh${ENVIRONMENT_SUFFIX}}"
-RUNTIME="${RUNTIME:-python3.12}"
-ARCHITECTURE="${ARCHITECTURE:-arm64}"
+# ENC-ISS-202 / ENC-PLN-019: v3 production lock — conditional runtime/arch
+if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+  RUNTIME="${RUNTIME:-python3.12}"; ARCHITECTURE="${ARCHITECTURE:-arm64}"
+else
+  RUNTIME="${RUNTIME:-python3.11}"; ARCHITECTURE="${ARCHITECTURE:-x86_64}"
+fi
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"

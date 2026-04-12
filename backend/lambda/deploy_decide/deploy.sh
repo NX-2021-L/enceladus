@@ -26,6 +26,21 @@ log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 # Resolve GitHub App config from coordination-api if not set
 # ---------------------------------------------------------------------------
 resolve_github_config() {
+  # ENC-ISS-204: Read existing Lambda env vars first to avoid clearing CFN-set values.
+  # Priority: shell env > existing Lambda config > coordination-api fallback
+  if [[ -z "${GITHUB_APP_ID}" ]]; then
+    GITHUB_APP_ID="$(aws lambda get-function-configuration \
+      --function-name "${FUNCTION_NAME}" --region "${REGION}" \
+      --query 'Environment.Variables.GITHUB_APP_ID' --output text 2>/dev/null || true)"
+    [[ "${GITHUB_APP_ID}" == "None" ]] && GITHUB_APP_ID=""
+  fi
+  if [[ -z "${GITHUB_INSTALLATION_ID}" ]]; then
+    GITHUB_INSTALLATION_ID="$(aws lambda get-function-configuration \
+      --function-name "${FUNCTION_NAME}" --region "${REGION}" \
+      --query 'Environment.Variables.GITHUB_INSTALLATION_ID' --output text 2>/dev/null || true)"
+    [[ "${GITHUB_INSTALLATION_ID}" == "None" ]] && GITHUB_INSTALLATION_ID=""
+  fi
+  # Fallback to coordination-api if still empty (first deploy before CFN sets values)
   local coord_fn="devops-coordination-api${ENVIRONMENT_SUFFIX}"
   if [[ -z "${GITHUB_APP_ID}" ]]; then
     GITHUB_APP_ID="$(aws lambda get-function-configuration \
