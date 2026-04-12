@@ -1032,8 +1032,6 @@ def _gmf_create_decision(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
         "head_branch": {"S": pr.get("head", {}).get("ref", "")},
         "head_sha": {"S": pr.get("head", {}).get("sha", "")},
         "original_target": {"S": original_target},
-        "final_target": {"S": ""},
-        "generation_id": {"S": ""},
         "decided_by": {"S": ""},
         "decided_at": {"S": ""},
         "decision_reason": {"S": ""},
