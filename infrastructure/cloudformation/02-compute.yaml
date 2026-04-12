@@ -45,6 +45,15 @@ Parameters:
   SharedLayerArn:
     Type: String
     Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:7
+  # ENC-ISS-197: Referenced by deploy_decide Lambda env vars but were missing from Parameters
+  GitHubAppId:
+    Type: String
+    Default: "2946766"
+    Description: GitHub App numeric ID for deploy_decide Lambda.
+  GitHubInstallationId:
+    Type: String
+    Default: "112392089"
+    Description: GitHub App installation ID for NX-2021-L org.
 
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
