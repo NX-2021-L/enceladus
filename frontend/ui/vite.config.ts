@@ -86,6 +86,13 @@ export default defineConfig({
             return undefined
           }
 
+          // Pages get explicit chunks to prevent non-deterministic code
+          // splitting across Node versions (ENC-ISS-211: CodeBuild Node 20
+          // vs local Node 24 caused DeploymentManagerPage chunk to be
+          // silently dropped when the module graph shifted).
+          const pageMatch = id.match(/\/src\/pages\/([A-Z][^/]+?)\.tsx$/)
+          if (pageMatch) return pageMatch[1]
+
           if (id.includes('/src/lib/routes.tsx')) return 'routes'
           if (
             id.includes('/src/components/layout/AppShell.tsx') ||
