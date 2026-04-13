@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-13.2",
-  "updated_at": "2026-04-13T03:48:00Z",
-  "last_change_summary": "ENC-TSK-D63: Defensive fix only \u2014 isinstance guard for transition_evidence in tracker_mutation. No new fields, no schema changes.",
+  "version": "2026-04-13.3",
+  "updated_at": "2026-04-13T05:37:00Z",
+  "last_change_summary": "ENC-LSN-026 integration: Added compliance_score, compliance_warnings, and format_convention fields to docstore.document. Compliance checker now fence-aware (skips fenced code block content). MCP server injects YAML format guidance on pipe-table warnings.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3388,6 +3388,23 @@
           "write_authority": "Any governed session or CEE automation.",
           "state_transitions": "raw \u2192 compliant (CEE), compliant \u2192 contextualized (HCE proposal + coordination lead), contextualized \u2192 mature (CEE graph traversal confirmation).",
           "governing_feature": "ENC-FTR-065"
+        },
+        "compliance_score": {
+          "type": "integer",
+          "definition": "0-100 score computed by _evaluate_markdown_compliance in document_api. Deducts 10 points per warning. Stored on every PUT and PATCH. Returned in API response to agents.",
+          "write_authority": "document_api Lambda (computed, not agent-settable)."
+        },
+        "compliance_warnings": {
+          "type": "array",
+          "items": "string",
+          "definition": "List of compliance warnings from _evaluate_markdown_compliance. Common warnings: missing metadata fields, pipe-table false positives, unclosed fences, heading hierarchy violations.",
+          "write_authority": "document_api Lambda (computed, not agent-settable)."
+        },
+        "format_convention": {
+          "type": "rule",
+          "definition": "Structured agent-session output in docstore .md documents MUST use comment-free YAML code blocks (```yaml ... ```) instead of GFM pipe tables. Pipe tables are permitted only for purely presentational content where renderer-dependence is explicitly acknowledged. YAML hash-comments (# ...) must be omitted inside fenced blocks to avoid compliance checker heading false positives. MCP server injects format_guidance in document.put/patch responses when pipe-table warnings are detected.",
+          "governing_lesson": "ENC-LSN-026",
+          "enforcement": "Advisory via MCP format_guidance response field. Compliance checker fence-awareness prevents false positives on conforming documents."
         }
       }
     },
