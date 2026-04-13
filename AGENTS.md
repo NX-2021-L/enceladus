@@ -34,9 +34,28 @@ Before modifying any files for a task:
 1. Sync main: `git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/main`
 2. Create task-scoped worktree: `bash tools/agent-worktree-init.sh <TRACKER-ID>-<slug>`
    - Creates branch `agent/<TRACKER-ID>-<slug>` automatically
+   - For v4 (ENC-PLN-006) work: `agent-worktree-init.sh` creates branches with `v4/` prefix
+     (e.g. `v4/agent/enc-tsk-xyz-slug`) instead of `agent/` prefix. The v4/main integration
+     branch is the base for all v4 work.
 3. Query component registry: `mcp: get_code_map(project_id, domain?)` for file paths
 4. Check out task: `mcp: checkout_task(record_id, active_agent_session_id, governance_hash)`
 5. Work only inside the printed worktree path — never modify files in the main checkout.
 
 Always assume other agent sessions are running concurrently on this machine.
 See `governance://agents.md` section 3.10 for full multi-agent safety rules.
+
+## Generation-Scoped Deploy Target Convention (ENC-TSK-D37)
+
+Tasks declare a `deploy_target` field:
+- `prod` — targets v3/main (ENC-GEN-001). PR merges to `main`.
+- `gamma` — targets v4/gamma stack (ENC-GEN-002). PR merges to `v4/main`.
+- `undeclared` — default, awaiting label assignment.
+
+PR label convention: `target:prod`, `target:gamma`, `target:undeclared`.
+
+### Evolution Chapter Contribution
+
+Agent sessions contribute to the active generation's evolution chapter document via
+`documents.patch` with pending notes appended to the chapter's `pending_notes` array.
+Each note: `{timestamp, session_id, note}`. The chapter doc for ENC-GEN-002 is
+DOC-684A5EBDABB6.
