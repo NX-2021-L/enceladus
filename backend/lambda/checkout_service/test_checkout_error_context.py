@@ -71,6 +71,70 @@ class CheckoutServiceErrorContextTests(unittest.TestCase):
         )
 
 
+    def test_plan_checkout_missing_session_id_includes_plan_context(self):
+        """Plan checkout with missing active_agent_session_id returns plan context."""
+        response = checkout_service._handle_plan_checkout(
+            "enceladus", "ENC-PLN-TEST", {},
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body["error"], "active_agent_session_id is required in request body")
+        details = body["error_envelope"]["details"]
+        self.assertEqual(details["required_fields"], ["active_agent_session_id"])
+        self.assertEqual(details["plan_id"], "ENC-PLN-TEST")
+        self.assertIn("allowed_plan_transitions", details)
+        self.assertEqual(
+            details["allowed_plan_transitions"],
+            dict(checkout_service.PLAN_ALLOWED_TRANSITIONS),
+        )
+        self.assertIn("plan_terminal_statuses", details)
+        fix = details["example_fix"]
+        self.assertEqual(fix["tool"], "plan.checkout")
+        self.assertEqual(fix["arguments"]["record_id"], "ENC-PLN-TEST")
+
+    def test_plan_advance_missing_target_status_includes_allowed_transitions(self):
+        """Plan advance with missing target_status returns allowed_plan_transitions."""
+        response = checkout_service._handle_plan_advance(
+            "enceladus", "ENC-PLN-TEST", {},
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body["error"], "target_status is required")
+        details = body["error_envelope"]["details"]
+        self.assertIn("allowed_plan_transitions", details)
+        self.assertEqual(
+            details["allowed_plan_transitions"],
+            dict(checkout_service.PLAN_ALLOWED_TRANSITIONS),
+        )
+        self.assertEqual(details["required_fields"], ["target_status"])
+        fix = details["example_fix"]
+        self.assertEqual(fix["tool"], "plan.advance")
+        self.assertEqual(fix["arguments"]["record_id"], "ENC-PLN-TEST")
+
+    @patch.object(checkout_service, "_get_plan")
+    def test_plan_log_missing_description_includes_example_fix(self, mock_get_plan):
+        """Plan log with missing description returns example plan.log call."""
+        mock_get_plan.return_value = (
+            200,
+            {"status": "started", "active_agent_session": True},
+        )
+        response = checkout_service._handle_plan_log(
+            "enceladus", "ENC-PLN-TEST", {},
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body["error"], "description is required")
+        details = body["error_envelope"]["details"]
+        self.assertEqual(details["required_fields"], ["description"])
+        self.assertEqual(details["plan_id"], "ENC-PLN-TEST")
+        fix = details["example_fix"]
+        self.assertEqual(fix["tool"], "plan.log")
+        self.assertEqual(fix["arguments"]["record_id"], "ENC-PLN-TEST")
+
+
 class TestCodeOnMainEvidenceValidator(unittest.TestCase):
     """ENC-ISS-161: code_only close gate must accept any valid main ancestor SHA."""
 
