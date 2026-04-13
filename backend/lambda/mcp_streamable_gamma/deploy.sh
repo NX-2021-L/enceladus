@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+# Deploy the enceladus-mcp-streamable-gamma Lambda function.
+#
+# Gamma-specific deploy script modeled on backend/lambda/mcp_streamable/deploy.sh.
+# Key differences from production:
+#   - FUNCTION_NAME defaults to enceladus-mcp-streamable-gamma
+#   - SOURCE_FUNCTION_NAME defaults to devops-coordination-api-gamma
+#   - Always uses arm64 / python3.12 (gamma architecture)
+#   - ENVIRONMENT_SUFFIX is always "-gamma"
+
+set -euo pipefail
+
+FUNCTION_NAME="${FUNCTION_NAME:-enceladus-mcp-streamable-gamma}"
+SOURCE_FUNCTION_NAME="${SOURCE_FUNCTION_NAME:-devops-coordination-api-gamma}"
+REGION="${AWS_REGION:-us-west-2}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+ZIP_FILE="/tmp/${FUNCTION_NAME}.zip"
+ENVIRONMENT_SUFFIX="-gamma"
+
+MCP_TRANSPORT="${ENCELADUS_MCP_TRANSPORT:-streamable_http}"
+MCP_API_KEY="${ENCELADUS_MCP_API_KEY:-${COORDINATION_INTERNAL_API_KEY:-}}"
+MCP_API_KEY_PREVIOUS="${ENCELADUS_MCP_API_KEY_PREVIOUS:-${COORDINATION_INTERNAL_API_KEY_PREVIOUS:-}}"
+OAUTH_CLIENT_ID="${ENCELADUS_OAUTH_CLIENT_ID:-}"
+OAUTH_CLIENT_SECRET="${ENCELADUS_OAUTH_CLIENT_SECRET:-}"
+ROLE_ARN="${LAMBDA_ROLE_ARN:-}"
+
+log() {
+  printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+function_exists() {
+  aws lambda get-function \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}" >/dev/null 2>&1
+}
+
+resolve_role_arn() {
+  if [[ -n "${ROLE_ARN}" ]]; then
+    printf '%s' "${ROLE_ARN}"
+    return
+  fi
+
+  local source_role
+  source_role="$(aws lambda get-function-configuration \
+    --function-name "${SOURCE_FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Role' \
+    --output text 2>/dev/null || true)"
+  if [[ -z "${source_role}" || "${source_role}" == "None" ]]; then
+    echo ""
+    return
+  fi
+
+  printf '%s' "${source_role}"
+}
+
+build_environment_payload() {
+  local out_file="$1"
+  local source_json='{}'
+  local existing_json='{}'
+
+  source_json="$(aws lambda get-function-configuration \
+    --function-name "${SOURCE_FUNCTION_NAME}" \
+    --region "${REGION}" \
+    --query 'Environment.Variables' \
+    --output json 2>/dev/null || echo '{}')"
+  [[ "${source_json}" == "None" ]] && source_json='{}'
+
+  if function_exists; then
+    existing_json="$(aws lambda get-function-configuration \
+      --function-name "${FUNCTION_NAME}" \
+      --region "${REGION}" \
+      --query 'Environment.Variables' \
+      --output json 2>/dev/null || echo '{}')"
+    [[ "${existing_json}" == "None" ]] && existing_json='{}'
+  fi
+
+  SOURCE_ENV_JSON="${source_json}" \
+  EXISTING_ENV_JSON="${existing_json}" \
+  MCP_TRANSPORT="${MCP_TRANSPORT}" \
+  MCP_API_KEY="${MCP_API_KEY}" \
+  MCP_API_KEY_PREVIOUS="${MCP_API_KEY_PREVIOUS}" \
+  OAUTH_CLIENT_ID="${OAUTH_CLIENT_ID}" \
+  OAUTH_CLIENT_SECRET="${OAUTH_CLIENT_SECRET}" \
+  python3 - <<'PY' > "${out_file}"
+import json
+import os
+
+source_env = json.loads(os.environ.get("SOURCE_ENV_JSON", "{}"))
+existing_env = json.loads(os.environ.get("EXISTING_ENV_JSON", "{}"))
+
+ALLOWED_PREFIXES = (
+    "ENCELADUS_",
+    "COORDINATION_",
+    "ENABLE_",
+    "DYNAMODB_REGION",
+    "TRACKER_TABLE",
+    "PROJECTS_TABLE",
+    "DOCUMENTS_TABLE",
+    "S3_BUCKET",
+    "S3_GOVERNANCE",
+    "GOVERNANCE_",
+    "CORS_ORIGIN",
+    "SECRETS_REGION",
+    "MCP_AUDIT_",
+    "MCP_SERVER_",
+)
+
+merged = {}
+for env in [existing_env, source_env]:
+    if not isinstance(env, dict):
+        continue
+    for k, v in env.items():
+        if any(k.startswith(p) or k == p for p in ALLOWED_PREFIXES):
+            merged[k] = v
+merged["ENCELADUS_MCP_TRANSPORT"] = os.environ["MCP_TRANSPORT"]
+
+mcp_api_key = os.environ.get("MCP_API_KEY", "")
+if mcp_api_key:
+    merged["ENCELADUS_MCP_API_KEY"] = mcp_api_key
+mcp_api_key_previous = os.environ.get("MCP_API_KEY_PREVIOUS", "")
+if mcp_api_key_previous:
+    merged["ENCELADUS_MCP_API_KEY_PREVIOUS"] = mcp_api_key_previous
+oauth_client_id = os.environ.get("OAUTH_CLIENT_ID", "")
+if oauth_client_id:
+    merged["ENCELADUS_OAUTH_CLIENT_ID"] = oauth_client_id
+oauth_client_secret = os.environ.get("OAUTH_CLIENT_SECRET", "")
+if oauth_client_secret:
+    merged["ENCELADUS_OAUTH_CLIENT_SECRET"] = oauth_client_secret
+
+print(json.dumps({"Variables": merged}, separators=(",", ":")))
+PY
+}
+
+package_lambda() {
+  local build_dir
+  build_dir="$(mktemp -d /tmp/deploy-${FUNCTION_NAME}-build-XXXXXX)"
+
+  cp "${REPO_ROOT}/tools/enceladus-mcp-server/server.py" "${build_dir}/server.py"
+  cp "${REPO_ROOT}/backend/lambda/coordination_api/context_node_scoring.py" "${build_dir}/context_node_scoring.py"
+
+  # Gamma always uses arm64 / python3.12
+  python3 -m pip install \
+    --quiet \
+    --upgrade \
+    -r "${SCRIPT_DIR}/requirements.txt" \
+    --platform manylinux2014_aarch64 \
+    --implementation cp \
+    --python-version 3.12 \
+    --only-binary=:all: \
+    -t "${build_dir}" >/dev/null
+
+  (
+    cd "${build_dir}"
+    zip -qr "${ZIP_FILE}" .
+  )
+
+  rm -rf "${build_dir}"
+}
+
+ensure_function_url() {
+  if aws lambda get-function-url-config \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}" >/dev/null 2>&1; then
+    log "[OK] Function URL exists for ${FUNCTION_NAME}"
+  else
+    log "[START] creating Function URL (NONE auth): ${FUNCTION_NAME}"
+    if ! aws lambda create-function-url-config \
+      --function-name "${FUNCTION_NAME}" \
+      --auth-type NONE \
+      --region "${REGION}" >/dev/null; then
+      log "[WARNING] unable to create Function URL (missing lambda:CreateFunctionUrlConfig?)."
+      log "[WARNING] Lambda code/config deployment succeeded; configure Function URL separately."
+      return 0
+    fi
+    log "[END] created Function URL: ${FUNCTION_NAME}"
+  fi
+
+  if aws lambda add-permission \
+    --function-name "${FUNCTION_NAME}" \
+    --statement-id FunctionURLAllowPublicAccess \
+    --action lambda:InvokeFunctionUrl \
+    --principal "*" \
+    --function-url-auth-type NONE \
+    --region "${REGION}" >/dev/null 2>&1; then
+    log "[OK] Function URL invoke permission added"
+  else
+    log "[WARNING] could not add Function URL invoke permission (or it already exists)."
+  fi
+
+  # Lambda Function URLs require both InvokeFunctionUrl AND InvokeFunction permissions
+  if aws lambda add-permission \
+    --function-name "${FUNCTION_NAME}" \
+    --statement-id FunctionURLAllowPublicInvoke \
+    --action lambda:InvokeFunction \
+    --principal "*" \
+    --region "${REGION}" >/dev/null 2>&1; then
+    log "[OK] Function invoke permission added"
+  else
+    log "[WARNING] could not add Function invoke permission (or it already exists)."
+  fi
+}
+
+deploy_lambda() {
+  local role_arn env_file
+  role_arn="$(resolve_role_arn)"
+  if [[ -z "${role_arn}" ]]; then
+    echo "Unable to resolve Lambda role. Set LAMBDA_ROLE_ARN or ensure ${SOURCE_FUNCTION_NAME} exists." >&2
+    exit 1
+  fi
+
+  env_file="$(mktemp /tmp/${FUNCTION_NAME}-env-XXXXXX.json)"
+  if [[ -z "${MCP_API_KEY}" && -z "${MCP_API_KEY_PREVIOUS}" ]]; then
+    echo "Refusing deploy with empty MCP internal API key set for ${FUNCTION_NAME}." >&2
+    exit 1
+  fi
+  build_environment_payload "${env_file}"
+
+  # Gamma always uses arm64 / python3.12
+  local arch_flag="arm64" runtime_flag="python3.12"
+
+  if function_exists; then
+    log "[START] updating Lambda code: ${FUNCTION_NAME}"
+    aws lambda update-function-code \
+      --function-name "${FUNCTION_NAME}" \
+      --region "${REGION}" \
+      --zip-file "fileb://${ZIP_FILE}" \
+      --architectures "${arch_flag}" >/dev/null
+    aws lambda wait function-updated-v2 \
+      --function-name "${FUNCTION_NAME}" \
+      --region "${REGION}"
+
+    log "[START] updating Lambda configuration: ${FUNCTION_NAME}"
+    aws lambda update-function-configuration \
+      --region "${REGION}" \
+      --function-name "${FUNCTION_NAME}" \
+      --role "${role_arn}" \
+      --handler "server.lambda_handler" \
+      --runtime "${runtime_flag}" \
+      --timeout 30 \
+      --memory-size 512 \
+      --environment "file://${env_file}" >/dev/null
+  else
+    log "[START] creating Lambda function: ${FUNCTION_NAME}"
+    aws lambda create-function \
+      --region "${REGION}" \
+      --function-name "${FUNCTION_NAME}" \
+      --runtime "${runtime_flag}" \
+      --architectures "${arch_flag}" \
+      --handler "server.lambda_handler" \
+      --role "${role_arn}" \
+      --timeout 30 \
+      --memory-size 512 \
+      --zip-file "fileb://${ZIP_FILE}" \
+      --environment "file://${env_file}" >/dev/null
+  fi
+
+  aws lambda wait function-active-v2 \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}"
+  aws lambda wait function-updated-v2 \
+    --function-name "${FUNCTION_NAME}" \
+    --region "${REGION}"
+
+  ensure_function_url
+  rm -f "${env_file}"
+
+  # Register OAuth client with gamma coordination API for dashboard visibility
+  if [[ -n "${OAUTH_CLIENT_ID}" && -n "${MCP_API_KEY}" ]]; then
+    log "[START] Registering OAuth client: ${OAUTH_CLIENT_ID}"
+    curl -sf -X POST "${COORDINATION_API_BASE:-https://enceladus-gamma.jreese.net}/api/v1/coordination/auth/oauth-clients" \
+      -H "Content-Type: application/json" \
+      -H "x-coordination-internal-key: ${MCP_API_KEY}" \
+      -d "{\"client_id\":\"${OAUTH_CLIENT_ID}\",\"service_name\":\"Claude Connector (Gamma)\",\"grant_types\":[\"authorization_code\"],\"redirect_uris\":[\"https://claude.ai/api/mcp/auth_callback\"]}" \
+      && log "[OK] OAuth client registered" \
+      || log "[WARNING] OAuth client registration failed (non-critical)"
+  fi
+
+  log "[END] Lambda ready: ${FUNCTION_NAME}"
+}
+
+main() {
+  log "[START] Deploying ${FUNCTION_NAME}"
+  package_lambda
+  deploy_lambda
+  rm -f "${ZIP_FILE}"
+  log "[SUCCESS] ${FUNCTION_NAME} deployed"
+}
+
+main "$@"
