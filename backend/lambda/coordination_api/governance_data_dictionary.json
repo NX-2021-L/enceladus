@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-13.2",
-  "updated_at": "2026-04-13T03:48:00Z",
-  "last_change_summary": "ENC-TSK-D63: Defensive fix only \u2014 isinstance guard for transition_evidence in tracker_mutation. No new fields, no schema changes.",
+  "version": "2026-04-13.3",
+  "updated_at": "2026-04-13T05:37:00Z",
+  "last_change_summary": "ENC-TSK-D81: Updated api.error_envelope entity to reflect D56 enrichment scope (6 Lambdas + MCP normalization). Expanded details definition with post-D56 standard keys.",
   "owners": [
     "enceladus-platform"
   ],
@@ -25,8 +25,8 @@
             "closed",
             "deployed"
           ],
-          "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc. ENC-FTR-037 renamed 'pushed' to 'pr' \u2014 backward compat read supported; new tasks must use 'pr'.",
-          "usage_guidance": "Task transitions MUST use advance_task_status MCP tool (checkout service) \u2014 direct tracker_set for task status is rejected with 403 (ENC-FTR-037). Full arc: open -> in-progress -> coding-complete -> committed -> pr -> merged-main -> deploy-init -> deploy-success -> closed. Re-entry: coding-updates -> coding-complete -> committed -> pr -> merged-main. The exact allowed statuses and evidence requirements per gate depend on task.transition_type (ENC-ISS-092) \u2014 see checkout_service.transition_type_matrix. Human override: user_initiated=true in transition_evidence (Cognito JWT required; internal API key returns 403)."
+          "definition": "Task lifecycle status. ENC-FTR-035 replaced 'deployed' with the deploy-init / deploy-success / coding-updates arcs. 'deployed' is a legacy value retained for backward compatibility during the TSK-704 migration window; new tasks must use the updated arc. ENC-FTR-037 renamed 'pushed' to 'pr' — backward compat read supported; new tasks must use 'pr'.",
+          "usage_guidance": "Task transitions MUST use advance_task_status MCP tool (checkout service) — direct tracker_set for task status is rejected with 403 (ENC-FTR-037). Full arc: open -> in-progress -> coding-complete -> committed -> pr -> merged-main -> deploy-init -> deploy-success -> closed. Re-entry: coding-updates -> coding-complete -> committed -> pr -> merged-main. The exact allowed statuses and evidence requirements per gate depend on task.transition_type (ENC-ISS-092) — see checkout_service.transition_type_matrix. Human override: user_initiated=true in transition_evidence (Cognito JWT required; internal API key returns 403)."
         },
         "priority": {
           "type": "enum",
@@ -76,8 +76,8 @@
             "no_code",
             "code_only"
           ],
-          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Should be set via tracker.create at record creation OR via tracker.set before checkout_task is called \u2014 treated as immutable after checkout begins. ENC-FTR-060 additionally seals no_code and code_only \u2014 once any task has a transition_type stamped, post-creation tracker.set transitions involving an immutable value (current or proposed) are rejected. Sealed values can ONLY be set at create time via tracker.create (ENC-TSK-C26 / ENC-ISS-175). lambda_deploy: PR+commit flow with Lambda update evidence at deploy-success (ENC-FTR-041).",
-          "usage_guidance": "Set at create time via tracker.create (preferred for no_code/code_only since those are sealed by ENC-FTR-060), or via tracker.set before checkout for the non-sealed values. Default github_pr_deploy is backward compatible and identical to pre-ENC-ISS-092 behavior. no_code: for tasks with no GitHub repo or non-code work (e.g. infra config, CLI installs, docstore-only documentation). code_only: code was committed/merged to main but no deployment is needed. Do not change a task to or from no_code or code_only after creation \u2014 those values are sealed by ENC-FTR-060 because changing them can bypass or corrupt gate semantics (ENC-ISS-145). web_deploy: static/CloudFront deployments that do not produce GitHub Actions job objects. See checkout_service.transition_type_matrix for full gate requirements per type. ENC-TSK-C26: tracker_mutation Lambda now reads transition_type from POST body in _handle_create_record() and persists it to the DynamoDB item; the MCP server forwards it through the _tracker_create() allowlist. Both fixes are required for create-time setting to take effect."
+          "definition": "Selects the lifecycle arc for this task (ENC-ISS-092). Determines which target_status values are allowed and what evidence each gate requires. Should be set via tracker.create at record creation OR via tracker.set before checkout_task is called — treated as immutable after checkout begins. ENC-FTR-060 additionally seals no_code and code_only — once any task has a transition_type stamped, post-creation tracker.set transitions involving an immutable value (current or proposed) are rejected. Sealed values can ONLY be set at create time via tracker.create (ENC-TSK-C26 / ENC-ISS-175). lambda_deploy: PR+commit flow with Lambda update evidence at deploy-success (ENC-FTR-041).",
+          "usage_guidance": "Set at create time via tracker.create (preferred for no_code/code_only since those are sealed by ENC-FTR-060), or via tracker.set before checkout for the non-sealed values. Default github_pr_deploy is backward compatible and identical to pre-ENC-ISS-092 behavior. no_code: for tasks with no GitHub repo or non-code work (e.g. infra config, CLI installs, docstore-only documentation). code_only: code was committed/merged to main but no deployment is needed. Do not change a task to or from no_code or code_only after creation — those values are sealed by ENC-FTR-060 because changing them can bypass or corrupt gate semantics (ENC-ISS-145). web_deploy: static/CloudFront deployments that do not produce GitHub Actions job objects. See checkout_service.transition_type_matrix for full gate requirements per type. ENC-TSK-C26: tracker_mutation Lambda now reads transition_type from POST body in _handle_create_record() and persists it to the DynamoDB item; the MCP server forwards it through the _tracker_create() allowlist. Both fixes are required for create-time setting to take effect."
         },
         "transition_evidence": {
           "type": "object",
@@ -86,7 +86,7 @@
           "properties": {
             "deploy_evidence": {
               "type": "object",
-              "definition": "Structured GitHub Actions Jobs API response object. Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}. Must be provided verbatim from the API response \u2014 do not construct manually.",
+              "definition": "Structured GitHub Actions Jobs API response object. Source: GET /repos/{owner}/{repo}/actions/jobs/{job_id}. Must be provided verbatim from the API response — do not construct manually.",
               "required_fields": {
                 "id": {
                   "type": "integer",
@@ -112,14 +112,14 @@
                   "enum": [
                     "completed"
                   ],
-                  "definition": "GitHub Actions job status. Must be 'completed' \u2014 in-progress or queued jobs are rejected."
+                  "definition": "GitHub Actions job status. Must be 'completed' — in-progress or queued jobs are rejected."
                 },
                 "conclusion": {
                   "type": "enum",
                   "enum": [
                     "success"
                   ],
-                  "definition": "GitHub Actions job conclusion. Must be 'success' \u2014 failure, cancelled, skipped, and timed_out are all rejected."
+                  "definition": "GitHub Actions job conclusion. Must be 'success' — failure, cancelled, skipped, and timed_out are all rejected."
                 },
                 "started_at": {
                   "type": "string",
@@ -210,7 +210,7 @@
                 },
                 "github_verified": {
                   "type": "boolean",
-                  "definition": "Set to true by the checkout service after GitHub compare API confirms the commit is on main. Do not set manually \u2014 the service stamps this field."
+                  "definition": "Set to true by the checkout service after GitHub compare API confirms the commit is on main. Do not set manually — the service stamps this field."
                 }
               },
               "usage_guidance": "Provide as transition_evidence.code_on_main_evidence when calling advance_task_status(target_status=closed) for a code_only task. Only commit_sha is required as input; github_verified is stamped by the service. The commit must already be merged to the main branch before calling this gate."
@@ -220,12 +220,12 @@
               "constraints": {
                 "min_length": 1
               },
-              "definition": "Human-readable verification note for no_code tasks (ENC-ISS-092). Used at the closed gate. No GitHub API validation performed \u2014 the string is stored as-is for audit traceability.",
+              "definition": "Human-readable verification note for no_code tasks (ENC-ISS-092). Used at the closed gate. No GitHub API validation performed — the string is stored as-is for audit traceability.",
               "usage_guidance": "Provide as transition_evidence.no_code_evidence when calling advance_task_status(target_status=closed) for a no_code task. Describe what was done and how it was verified. Example: 'Claude Code CLI installed on jreesewebops EC2 instance i-03aa86d6ce037e5aa. Verified via SSH: claude --version working.'"
             },
             "user_initiated": {
               "type": "boolean",
-              "definition": "When true, indicates a human operator is performing this transition via the UI (ENC-ISS-092). Bypasses all agent checkout gates (ENC-FTR-037), CAI/CCI token requirements, and GitHub validation. Requires Cognito session authentication \u2014 rejected with HTTP 403 if internal API key is used.",
+              "definition": "When true, indicates a human operator is performing this transition via the UI (ENC-ISS-092). Bypasses all agent checkout gates (ENC-FTR-037), CAI/CCI token requirements, and GitHub validation. Requires Cognito session authentication — rejected with HTTP 403 if internal API key is used.",
               "usage_guidance": "Set by the UI only (Submit or Submit + Close button in LifecycleActions). Must be paired with user_note. The tracker_mutation Lambda stamps initiated_by (Cognito username) and initiated_at onto the stored evidence for audit traceability. Borrow-and-restore: if the task is checked out by an agent, the human override temporarily takes ownership, makes the change, then restores the agent's checkout (or releases on close). Cannot be used via MCP/agent paths."
             },
             "user_note": {
@@ -239,7 +239,7 @@
             "merge_evidence": {
               "type": "string_or_object",
               "definition": "Evidence of PR merge for merged-main transitions. May be a free-text string (direct PATCH from UI/legacy) or a structured dict when provided by the checkout service (keys typically include pr_id, merged_at, owner, repo). The Lambda serializes dict values as JSON before storing. ENC-ISS-097.",
-              "usage_guidance": "For checkout-service-routed transitions (advance_task_status), pr_id and merged_at are passed as top-level body fields \u2014 merge_evidence is not required and may be omitted. For legacy direct PATCH callers, provide a non-empty string describing merge confirmation. Dict-type values are accepted and stored as a JSON string."
+              "usage_guidance": "For checkout-service-routed transitions (advance_task_status), pr_id and merged_at are passed as top-level body fields — merge_evidence is not required and may be omitted. For legacy direct PATCH callers, provide a non-empty string describing merge confirmation. Dict-type values are accepted and stored as a JSON string."
             }
           }
         },
@@ -253,7 +253,7 @@
         },
         "parent": {
           "type": "string",
-          "definition": "Task ID of the parent task in a plan-derived task hierarchy (ENC-FTR-040). Set via tracker_set immediately after child task creation during plan capture. Format: PROJECT-TSK-NNN. Not enforced by the tracker API \u2014 any string is accepted; interpretation is by convention.",
+          "definition": "Task ID of the parent task in a plan-derived task hierarchy (ENC-FTR-040). Set via tracker_set immediately after child task creation during plan capture. Format: PROJECT-TSK-NNN. Not enforced by the tracker API — any string is accepted; interpretation is by convention.",
           "usage_guidance": "tracker_set(field='parent', value='ENC-TSK-NNN'). Set on phase tasks (parent = plan parent) and step tasks (parent = phase task). Provides upward navigation in the task tree. See agents/plan-capture.md for the full plan capture protocol."
         },
         "subtask_ids": {
@@ -261,8 +261,8 @@
           "items": {
             "type": "string"
           },
-          "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children. ENC-ISS-106: The checkout service enforces that parent tasks cannot advance lifecycle stages (coding-complete onward) unless all direct children listed here have reached at least that stage. Children at 'closed' satisfy any stage check. ENC-ISS-140: append-only once task leaves open status or has been checked out \u2014 tracker mutation rejects removal attempts to prevent subtask gate bypass.",
-          "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. ENC-ISS-106: if subtask_ids is non-empty, the checkout service blocks advancement to coding-complete or beyond until every listed child is at or past that status. Not-found children also block advancement. ENC-ISS-140: once set on a non-open task (or one that has been checked out), entries cannot be removed \u2014 only appended. To bypass: use the PWA user_initiated path."
+          "definition": "Child task IDs for plan parent tasks (ENC-FTR-040). Set on the parent task after all child tasks are created during plan capture. Provides forward navigation from parent to children. ENC-ISS-106: The checkout service enforces that parent tasks cannot advance lifecycle stages (coding-complete onward) unless all direct children listed here have reached at least that stage. Children at 'closed' satisfy any stage check. ENC-ISS-140: append-only once task leaves open status or has been checked out — tracker mutation rejects removal attempts to prevent subtask gate bypass.",
+          "usage_guidance": "tracker_set(field='subtask_ids', value=['ENC-TSK-NNN', ...]) on the parent task. ENC-ISS-106: if subtask_ids is non-empty, the checkout service blocks advancement to coding-complete or beyond until every listed child is at or past that status. Not-found children also block advancement. ENC-ISS-140: once set on a non-open task (or one that has been checked out), entries cannot be removed — only appended. To bypass: use the PWA user_initiated path."
         },
         "related_task_ids": {
           "type": "array",
@@ -377,7 +377,7 @@
         "technical_notes": {
           "type": "string",
           "definition": "Technical context for investigation. Required at creation if hypothesis not provided (ENC-TSK-805).",
-          "usage_guidance": "Include investigation context \u2014 what was tried, what was observed, relevant stack traces or log lines."
+          "usage_guidance": "Include investigation context — what was tried, what was observed, relevant stack traces or log lines."
         },
         "location_hint": {
           "type": "string",
@@ -475,7 +475,7 @@
       }
     },
     "api.error_envelope": {
-      "description": "Common error response contract emitted by checkout_service, tracker_mutation, coordination_api, and preserved by the MCP server normalization layer (ENC-TSK-840). The top-level legacy error string remains for backward compatibility while self-correcting guidance lives in error_envelope.details.",
+      "description": "Common error response contract emitted by checkout_service, tracker_mutation, coordination_api, github_integration, deploy_decide, and deploy_orchestrator, and preserved by the MCP server normalization layer (ENC-TSK-840, extended by ENC-TSK-D56). The top-level legacy error string remains for backward compatibility while self-correcting guidance lives in error_envelope.details. Post-D56: every error must embed enough context for an agent to self-correct on the next attempt without additional tool calls.",
       "fields": {
         "code": {
           "type": "string",
@@ -491,7 +491,7 @@
         },
         "details": {
           "type": "object",
-          "definition": "Self-correcting context for the next attempt: required fields, allowed enum values, evidence schema, strictness rank tables, and example fix payloads."
+          "definition": "Self-correcting context for the next attempt. Standard keys: required_fields (list), allowed_values (dict), evidence_schema (dict), strictness_rank (list), example_fix (dict with tool+arguments). Post-D56 additions: allowed_plan_transitions (dict), plan_terminal_statuses (list), token_type/token_purpose/prerequisite_call (CAI/CCI), lesson_gate_requirements (dict), ogtm_compliance_template (dict with 4 requirements + evidence template), dpl_record_id_format/dpl_ddb_key_schema/dpl_label_conventions (GMF/DPL), governed_rules (list of rule strings)."
         }
       }
     },
@@ -599,7 +599,7 @@
             "format": "ISO 8601 datetime"
           },
           "definition": "Optional expiry timestamp. After this time, handoff should be considered stale.",
-          "usage_guidance": "Set at creation or via PATCH. No server-side enforcement yet \u2014 consuming agents should check."
+          "usage_guidance": "Set at creation or via PATCH. No server-side enforcement yet — consuming agents should check."
         },
         "claimed_by": {
           "type": "string",
@@ -633,7 +633,7 @@
         },
         "file_name": {
           "type": "string",
-          "definition": "Governance file name that was updated (e.g. 'agents.md', 'agents/lifecycle-primer.md'). Informational \u2014 sync always runs _sync_governance_documents() for all governance files to ensure consistency.",
+          "definition": "Governance file name that was updated (e.g. 'agents.md', 'agents/lifecycle-primer.md'). Informational — sync always runs _sync_governance_documents() for all governance files to ensure consistency.",
           "context": "direct Lambda invocation payload"
         },
         "content_hash": {
@@ -760,7 +760,7 @@
       }
     },
     "deploy.spec": {
-      "description": "Deployment spec records produced by deploy_orchestrator in devops-deployment-manager. Supports record-only mode (ENC-ISS-102) for projects that deploy via their own CI/CD \u2014 orchestrator skips CodeBuild and finalizes inline.",
+      "description": "Deployment spec records produced by deploy_orchestrator in devops-deployment-manager. Supports record-only mode (ENC-ISS-102) for projects that deploy via their own CI/CD — orchestrator skips CodeBuild and finalizes inline.",
       "fields": {
         "status": {
           "type": "enum",
@@ -786,7 +786,7 @@
             "standard",
             "record_only"
           ],
-          "definition": "Execution mode for the spec. 'standard' (default) runs full CodeBuild pipeline. 'record_only' skips CodeBuild and finalizes inline \u2014 used for externally-deployed projects (ENC-ISS-102, ENC-ISS-103).",
+          "definition": "Execution mode for the spec. 'standard' (default) runs full CodeBuild pipeline. 'record_only' skips CodeBuild and finalizes inline — used for externally-deployed projects (ENC-ISS-102, ENC-ISS-103).",
           "usage_guidance": "Set on the spec by _finalize_record_only() when the project's deploy_mode is 'record_only'. The deploy_mode is read from the projects DDB table via _get_project_deploy_mode(). To enable record-only mode for a project, set deploy_mode='record_only' on its projects table record."
         },
         "non_ui_targets": {
@@ -1583,7 +1583,7 @@
         },
         "freshness": {
           "type": "behavior",
-          "definition": "Architecture excerpts include freshness field: 'live' for direct file reads (always fresh, no cache needed per DOC-CA6AFFD18E98 \u00a74.1). S3 cached reads reserved for future cross-platform agent support."
+          "definition": "Architecture excerpts include freshness field: 'live' for direct file reads (always fresh, no cache needed per DOC-CA6AFFD18E98 §4.1). S3 cached reads reserved for future cross-platform agent support."
         }
       }
     },
@@ -1731,7 +1731,7 @@
       }
     },
     "checkout_service.advance_request": {
-      "description": "Request schema for POST /api/v1/checkout/{project}/task/{task_id}/advance (ENC-FTR-037, ENC-FTR-059). Checkout service validates evidence via canonical transition_type_matrix (v1) and advances task status. Response includes matrix_version. B08: checkout_transition_type is stamped at checkout.task and integrity-checked at every advance \u2014 mismatch returns 409.",
+      "description": "Request schema for POST /api/v1/checkout/{project}/task/{task_id}/advance (ENC-FTR-037, ENC-FTR-059). Checkout service validates evidence via canonical transition_type_matrix (v1) and advances task status. Response includes matrix_version. B08: checkout_transition_type is stamped at checkout.task and integrity-checked at every advance — mismatch returns 409.",
       "fields": {
         "target_status": {
           "type": "enum",
@@ -1757,7 +1757,7 @@
         },
         "gate_matrix": {
           "type": "object",
-          "definition": "Per-status evidence requirements enforced by checkout service. Requirements vary by task.transition_type (ENC-ISS-092) \u2014 see checkout_service.transition_type_matrix for full per-type specs. Matrix below documents github_pr_deploy (default arc, unchanged from pre-ENC-ISS-092 behavior).",
+          "definition": "Per-status evidence requirements enforced by checkout service. Requirements vary by task.transition_type (ENC-ISS-092) — see checkout_service.transition_type_matrix for full per-type specs. Matrix below documents github_pr_deploy (default arc, unchanged from pre-ENC-ISS-092 behavior).",
           "usage_guidance": "in-progress: active_agent_session_id required (also sets checkout). coding-complete: no evidence required; issues CAI (skipped for no_code type). committed: commit_sha (40-char hex) required; validated via GitHub API; issues CCI. pr: no evidence required. merged-main: pr_id (int) + merged_at (ISO 8601) required; validated via GitHub API. deploy-init: no evidence required. deploy-success: deploy_evidence (GitHub Actions Jobs API object -- 8 required fields: id, name, run_id, head_sha, status, conclusion, started_at, completed_at) required for github_pr_deploy; web_deploy_evidence {url, http_status, checked_at} for web_deploy type; clears CAI+CCI. closed: live_validation_evidence (non-empty string) for github_pr_deploy/web_deploy; code_on_main_evidence {commit_sha} for code_only; no_code_evidence (non-empty string) for no_code; releases checkout. DVP-ISS-082: committed and merged-main now resolve GitHub owner/repo dynamically from the projects table instead of hardcoding NX-2021-L/enceladus. Resolution order: transition_evidence.owner/repo > project.repo field > parent project.repo > child project.repo. Optional owner/repo in transition_evidence override automatic resolution.",
           "properties": {
             "committed": {
@@ -1813,7 +1813,7 @@
       }
     },
     "checkout_service.transition_type_matrix": {
-      "description": "Per-type lifecycle arc definitions for task.transition_type (ENC-ISS-092, ENC-FTR-059). v1 canonical matrix embedded as Python constant in both checkout_service and tracker_mutation Lambdas (transition_type_matrix.py). Gate contracts loaded at runtime via matrix lookup \u2014 no hardcoded transition_type conditionals remain in either Lambda. MATRIX_VERSION=1, source document DOC-B5B807D7C2CE. B07: no_code and code_only transition_types are immutable once set. B08: transition_type stamped at checkout and integrity-checked at every advance.",
+      "description": "Per-type lifecycle arc definitions for task.transition_type (ENC-ISS-092, ENC-FTR-059). v1 canonical matrix embedded as Python constant in both checkout_service and tracker_mutation Lambdas (transition_type_matrix.py). Gate contracts loaded at runtime via matrix lookup — no hardcoded transition_type conditionals remain in either Lambda. MATRIX_VERSION=1, source document DOC-B5B807D7C2CE. B07: no_code and code_only transition_types are immutable once set. B08: transition_type stamped at checkout and integrity-checked at every advance.",
       "fields": {
         "github_pr_deploy": {
           "type": "arc_spec",
@@ -1874,7 +1874,7 @@
             "committed": "commit_sha (40-char hex; GitHub API validated); CAI required on record; issues CCI token",
             "pr": "CCI required on task record",
             "merged-main": "pr_id (int) + merged_at (ISO 8601; GitHub API validated)",
-            "closed": "code_on_main_evidence {commit_sha (40-char hex)} \u2014 GitHub compare API verifies commit is ancestor of main (ENC-ISS-161: compare {sha}...main status: ahead or identical); releases checkout"
+            "closed": "code_on_main_evidence {commit_sha (40-char hex)} — GitHub compare API verifies commit is ancestor of main (ENC-ISS-161: compare {sha}...main status: ahead or identical); releases checkout"
           },
           "skipped_statuses": [
             "deploy-init",
@@ -1916,14 +1916,14 @@
             "coding-updates",
             "closed"
           ],
-          "auth_requirement": "Cognito session cookie (enceladus_id_token) only \u2014 internal API key rejected with HTTP 403",
+          "auth_requirement": "Cognito session cookie (enceladus_id_token) only — internal API key rejected with HTTP 403",
           "gate_requirements": {
             "any_status": "user_note (non-empty string) required; no checkout required; no GitHub API validation; no CAI/CCI token checks",
             "closed (Submit + Close)": "user_note required; target_status=closed regardless of current status; checkout always released; note posted as worklog history entry (action=worklog, ENC-TSK-841) instead of pending update"
           },
-          "checkout_behavior": "borrow-and-restore \u2014 tracker_mutation temporarily takes checkout ownership as Cognito username; on completion restores previous agent checkout if task was checked out (except on close, which always releases); worklog provider=cognito_username",
+          "checkout_behavior": "borrow-and-restore — tracker_mutation temporarily takes checkout ownership as Cognito username; on completion restores previous agent checkout if task was checked out (except on close, which always releases); worklog provider=cognito_username",
           "audit": "initiated_by (Cognito username) and initiated_at stamped on transition_evidence as permanent audit record; [USER-INITIATED] worklog entry appended",
-          "handled_by": "tracker_mutation Lambda (_apply_user_initiated_advance) \u2014 NOT routed through checkout service gate matrix",
+          "handled_by": "tracker_mutation Lambda (_apply_user_initiated_advance) — NOT routed through checkout service gate matrix",
           "note": "This is not a stored field value. user-initiated is a request-time flag (transition_evidence.user_initiated=true) handled at the API layer. The four agent-path types above (github_pr_deploy, web_deploy, code_only, no_code) are stored on the task record as task.transition_type."
         },
         "lambda_deploy": {
@@ -2130,12 +2130,12 @@
         },
         "child_source": {
           "type": "string",
-          "definition": "Children are read from the parent task's subtask_ids field (array of task IDs). Only direct children are checked \u2014 no recursive descent to grandchildren. Each level gates its own children, creating cascading enforcement naturally.",
+          "definition": "Children are read from the parent task's subtask_ids field (array of task IDs). Only direct children are checked — no recursive descent to grandchildren. Each level gates its own children, creating cascading enforcement naturally.",
           "value": "task.subtask_ids"
         },
         "not_found_behavior": {
           "type": "string",
-          "definition": "If a child task ID in subtask_ids cannot be fetched (HTTP != 200), the child is treated as blocking with status 'not_found'. This is the safe default \u2014 the parent cannot advance if we cannot verify child status.",
+          "definition": "If a child task ID in subtask_ids cannot be fetched (HTTP != 200), the child is treated as blocking with status 'not_found'. This is the safe default — the parent cannot advance if we cannot verify child status.",
           "value": "block"
         },
         "shortened_arc_handling": {
@@ -2158,7 +2158,7 @@
       "fields": {
         "endpoint": {
           "type": "string",
-          "definition": "POST /api/v1/feed/refresh \u2014 triggers synchronous feed regeneration via Lambda invoke of devops-feed-publisher."
+          "definition": "POST /api/v1/feed/refresh — triggers synchronous feed regeneration via Lambda invoke of devops-feed-publisher."
         },
         "response_success": {
           "type": "object",
@@ -2606,7 +2606,7 @@
             "min": 0.0,
             "max": 1.0
           },
-          "definition": "Query-dependent relevance, range [0.0, 1.0]. Computed at assembly time via Reciprocal Rank Fusion (RRF) combining keyword match and semantic similarity. Not persisted \u2014 ephemeral per-query.",
+          "definition": "Query-dependent relevance, range [0.0, 1.0]. Computed at assembly time via Reciprocal Rank Fusion (RRF) combining keyword match and semantic similarity. Not persisted — ephemeral per-query.",
           "usage_guidance": "Computed at assembly time only. Not stored on the DynamoDB record. Feeds into the multi-signal scoring function as the w1-weighted primary signal."
         },
         "structural_importance": {
@@ -2634,7 +2634,7 @@
             "opus"
           ],
           "definition": "Suggested model tier for processing this node content. Derived from source record complexity (field count, history length) and priority. haiku=simple/reference, sonnet=standard, opus=complex/critical.",
-          "usage_guidance": "Advisory field for future MVC (Model-View-Controller) context routing. Currently informational only \u2014 does not affect assembly behavior. Populated by context-node-sync Lambda."
+          "usage_guidance": "Advisory field for future MVC (Model-View-Controller) context routing. Currently informational only — does not affect assembly behavior. Populated by context-node-sync Lambda."
         }
       }
     },
@@ -2647,7 +2647,7 @@
             "required": true,
             "min_length": 1
           },
-          "definition": "Concise lesson statement. Mutable \u2014 can be refined for clarity.",
+          "definition": "Concise lesson statement. Mutable — can be refined for clarity.",
           "usage_guidance": "Keep titles actionable and specific. E.g., 'Lambda cold-start cross-AZ DNS adds 200ms' not 'DNS is slow'."
         },
         "observation": {
@@ -2678,7 +2678,7 @@
             "item_format": "tracker_id",
             "append_only": true
           },
-          "definition": "Array of tracker record IDs that support this lesson. Required, minimum 1. Each ID must resolve to an existing record in the same project. Append-only \u2014 new evidence can be added, existing entries cannot be removed.",
+          "definition": "Array of tracker record IDs that support this lesson. Required, minimum 1. Each ID must resolve to an existing record in the same project. Append-only — new evidence can be added, existing entries cannot be removed.",
           "usage_guidance": "Cite the specific records from which the lesson was extracted. E.g., ['ENC-ISS-088', 'ENC-TSK-803']. On extend_lesson, new evidence IDs are appended."
         },
         "analysis_reference": {
@@ -2801,7 +2801,7 @@
               "rejection_reason": "string (nullable)"
             }
           },
-          "definition": "Optional governance amendment proposal. Can only be attached when lesson is 'active' with confidence>=0.8, resonance>=0.7, human_protection>=0.5, evidence>=3. Requires human approval \u2014 no automatic approvals ever.",
+          "definition": "Optional governance amendment proposal. Can only be attached when lesson is 'active' with confidence>=0.8, resonance>=0.7, human_protection>=0.5, evidence>=3. Requires human approval — no automatic approvals ever.",
           "usage_guidance": "Self-governance gate. pending->approved requires human confirmation via MCP. pending->rejected stores reason. Approved proposals trigger coordination API amendment execution."
         },
         "lesson_version": {
@@ -3064,7 +3064,7 @@
           "items": {
             "type": "string"
           },
-          "definition": "Array of record IDs (tasks, issues, features \u2014 not lessons) that this plan governs. Append-only when plan status is not 'incomplete' unless using governed plan.remove_objective or plan.replace_objectives actions. Immutability enforced at DynamoDB level.",
+          "definition": "Array of record IDs (tasks, issues, features — not lessons) that this plan governs. Append-only when plan status is not 'incomplete' unless using governed plan.remove_objective or plan.replace_objectives actions. Immutability enforced at DynamoDB level.",
           "usage_guidance": "Set via tracker.set or plan.add_objective MCP action. Removal via plan.remove_objective (blocked for closed objectives). Reorder via plan.reorder_objectives (permutation only). Bulk replace via plan.replace_objectives (drafted status only)."
         },
         "attached_documents": {
@@ -3094,7 +3094,7 @@
         },
         "plan.add_objective": {
           "type": "execute_action",
-          "definition": "Append a single task ID to objectives_set. Idempotent \u2014 returns already_present if duplicate.",
+          "definition": "Append a single task ID to objectives_set. Idempotent — returns already_present if duplicate.",
           "arguments": {
             "record_id": "plan ID",
             "objective_task_id": "task ID to add",
@@ -3111,12 +3111,12 @@
             "objective_task_id": "task ID to remove",
             "governance_hash": "required"
           },
-          "guard_conditions": "Cannot remove closed objectives \u2014 permanent evidence of completed work.",
+          "guard_conditions": "Cannot remove closed objectives — permanent evidence of completed work.",
           "authority_envelope": "any governed session"
         },
         "plan.reorder_objectives": {
           "type": "execute_action",
-          "definition": "Reorder objectives_set. Must be a permutation of the current set (same elements, different order \u2014 no additions or deletions).",
+          "definition": "Reorder objectives_set. Must be a permutation of the current set (same elements, different order — no additions or deletions).",
           "arguments": {
             "record_id": "plan ID",
             "ordered_objective_ids": "array of all current objective IDs in new order",
@@ -3147,17 +3147,17 @@
       "fields": {
         "plan-contains": {
           "type": "relationship",
-          "definition": "Plan \u2192 task/issue/feature. Indicates the target record is an objective of this plan.",
+          "definition": "Plan → task/issue/feature. Indicates the target record is an objective of this plan.",
           "inverse": "contained-by-plan"
         },
         "plan-attached-doc": {
           "type": "relationship",
-          "definition": "Plan \u2192 document. Attaches a document as reference material for the plan.",
+          "definition": "Plan → document. Attaches a document as reference material for the plan.",
           "inverse": "doc-attached-to-plan"
         },
         "plan-implements": {
           "type": "relationship",
-          "definition": "Plan \u2192 feature. The plan is the implementation vehicle for this feature.",
+          "definition": "Plan → feature. The plan is the implementation vehicle for this feature.",
           "inverse": "implemented-by-plan"
         }
       }
@@ -3310,7 +3310,7 @@
       }
     },
     "governance.authority": {
-      "description": "Governance file mutation authority envelope (ENC-TSK-C13, ENC-ISS-171). Defines the write-authority constraint for governance files stored in the S3 governance store. governance.update is architecturally unavailable in code-mode agent sessions \u2014 all governance file mutations require execution by a privileged terminal agent under product-lead IAM via direct S3 archive+put.",
+      "description": "Governance file mutation authority envelope (ENC-TSK-C13, ENC-ISS-171). Defines the write-authority constraint for governance files stored in the S3 governance store. governance.update is architecturally unavailable in code-mode agent sessions — all governance file mutations require execution by a privileged terminal agent under product-lead IAM via direct S3 archive+put.",
       "fields": {
         "governed_files": {
           "type": "array",
@@ -3329,12 +3329,12 @@
         "mutation_execution_path": {
           "type": "string",
           "definition": "The only authorized execution path for governance file mutations: product-lead IAM (io-dev-admin) via direct S3 archive+put, dispatched by the coordination lead to a Codex terminal agent. Code-mode agent sessions (enceladus-agent-cli IAM) have explicit deny on all S3 writes.",
-          "value": "coordination_lead \u2192 codex_terminal_agent \u2192 s3:PutObject (io-dev-admin IAM)"
+          "value": "coordination_lead → codex_terminal_agent → s3:PutObject (io-dev-admin IAM)"
         },
         "agent_delegation_protocol": {
           "type": "string",
           "definition": "When an agent session produces governance file content, it must NOT attempt governance.update. Instead: (1) prepare the full updated file content, (2) append a GOVERNANCE_SYNC_REQUIRED HANDOFF block to the task worklog with file_name, content_source, s3_target, archive_path, and change_summary, (3) advance to coding-complete and await coordination lead dispatch.",
-          "reference": "agents.md \u00a713 Governance File Authority"
+          "reference": "agents.md §13 Governance File Authority"
         },
         "handoff_block_fields": {
           "type": "object",
@@ -3346,7 +3346,7 @@
             },
             "content_source": {
               "type": "string",
-              "definition": "Where the updated content lives \u2014 repo file path + commit SHA, or a document ID from the document store."
+              "definition": "Where the updated content lives — repo file path + commit SHA, or a document ID from the document store."
             },
             "s3_target": {
               "type": "string",
@@ -3373,7 +3373,7 @@
       }
     },
     "docstore.document": {
-      "description": "Document store document record with GDMP maturity lifecycle (ENC-FTR-065). Documents track compliance and maturity state through a governed pipeline. document_maturity_state is forwarded through MCP server documents.patch handler (ENC-ISS-167). graph_projection: Document nodes are projected to Neo4j via the DocumentsToGraphPipe \u2192 GraphSyncQueue \u2192 graph_sync pipeline (ENC-PLN-014) with BELONGS_TO, RELATED_TO, INFORMED_BY, INFORMS, and DOC_ATTACHED_TO_PLAN edges. record_type is stamped to the literal value 'document' on all put_item and update_item paths in document_api so graph_sync record-type routing fires for every document mutation.",
+      "description": "Document store document record with GDMP maturity lifecycle (ENC-FTR-065). Documents track compliance and maturity state through a governed pipeline. document_maturity_state is forwarded through MCP server documents.patch handler (ENC-ISS-167). graph_projection: Document nodes are projected to Neo4j via the DocumentsToGraphPipe → GraphSyncQueue → graph_sync pipeline (ENC-PLN-014) with BELONGS_TO, RELATED_TO, INFORMED_BY, INFORMS, and DOC_ATTACHED_TO_PLAN edges. record_type is stamped to the literal value 'document' on all put_item and update_item paths in document_api so graph_sync record-type routing fires for every document mutation.",
       "fields": {
         "document_maturity_state": {
           "type": "enum",
@@ -3386,13 +3386,30 @@
           "default": "raw",
           "definition": "GDMP pipeline maturity state. raw: initial state on creation. compliant: CEE compliance check passed. contextualized: HCE proposal + coordination lead approval. mature: CEE graph traversal confirmation.",
           "write_authority": "Any governed session or CEE automation.",
-          "state_transitions": "raw \u2192 compliant (CEE), compliant \u2192 contextualized (HCE proposal + coordination lead), contextualized \u2192 mature (CEE graph traversal confirmation).",
+          "state_transitions": "raw → compliant (CEE), compliant → contextualized (HCE proposal + coordination lead), contextualized → mature (CEE graph traversal confirmation).",
           "governing_feature": "ENC-FTR-065"
+        },
+        "compliance_score": {
+          "type": "integer",
+          "definition": "0-100 score computed by _evaluate_markdown_compliance in document_api. Deducts 10 points per warning. Stored on every PUT and PATCH. Returned in API response to agents.",
+          "write_authority": "document_api Lambda (computed, not agent-settable)."
+        },
+        "compliance_warnings": {
+          "type": "array",
+          "items": "string",
+          "definition": "List of compliance warnings from _evaluate_markdown_compliance. Common warnings: missing metadata fields, pipe-table false positives, unclosed fences, heading hierarchy violations.",
+          "write_authority": "document_api Lambda (computed, not agent-settable)."
+        },
+        "format_convention": {
+          "type": "rule",
+          "definition": "Structured agent-session output in docstore .md documents MUST use comment-free YAML code blocks (```yaml ... ```) instead of GFM pipe tables. Pipe tables are permitted only for purely presentational content where renderer-dependence is explicitly acknowledged. YAML hash-comments (# ...) must be omitted inside fenced blocks to avoid compliance checker heading false positives. MCP server injects format_guidance in document.put/patch responses when pipe-table warnings are detected.",
+          "governing_lesson": "ENC-LSN-026",
+          "enforcement": "Advisory via MCP format_guidance response field. Compliance checker fence-awareness prevents false positives on conforming documents."
         }
       }
     },
     "document.graph_edges": {
-      "description": "Neo4j edge types projected from Document nodes via the DocumentsToGraphPipe \u2192 GraphSyncQueue \u2192 graph_sync handler (ENC-PLN-014). Document nodes carry BELONGS_TO (project), RELATED_TO (any related_items target), INFORMED_BY (source document, GDMP provenance), INFORMS (inverse provenance), and DOC_ATTACHED_TO_PLAN (inverse of plan PLAN_ATTACHED_DOC). Edge emission is implemented in backend/lambda/graph_sync/lambda_function.py inside the document branch of _reconcile_edges(), and the edge labels are registered in backend/lambda/graph_query_api/lambda_function.py _ALLOWED_EDGE_TYPES so they are queryable via tracker.graphsearch.",
+      "description": "Neo4j edge types projected from Document nodes via the DocumentsToGraphPipe → GraphSyncQueue → graph_sync handler (ENC-PLN-014). Document nodes carry BELONGS_TO (project), RELATED_TO (any related_items target), INFORMED_BY (source document, GDMP provenance), INFORMS (inverse provenance), and DOC_ATTACHED_TO_PLAN (inverse of plan PLAN_ATTACHED_DOC). Edge emission is implemented in backend/lambda/graph_sync/lambda_function.py inside the document branch of _reconcile_edges(), and the edge labels are registered in backend/lambda/graph_query_api/lambda_function.py _ALLOWED_EDGE_TYPES so they are queryable via tracker.graphsearch.",
       "fields": {
         "BELONGS_TO": {
           "type": "edge",
@@ -3447,7 +3464,7 @@
       }
     },
     "tracker.stack_generation": {
-      "description": "Stack generation record (ENC-GEN) representing a major platform version era in the Generational Metabolism Framework (DOC-63420302EF65 \u00a74.1). Tracks architectural thesis, acceptance criteria, branch pattern, and lifecycle from drafted through promoted to archived. Generation boundary is set when io submits UAT validation through PWA.",
+      "description": "Stack generation record (ENC-GEN) representing a major platform version era in the Generational Metabolism Framework (DOC-63420302EF65 §4.1). Tracks architectural thesis, acceptance criteria, branch pattern, and lifecycle from drafted through promoted to archived. Generation boundary is set when io submits UAT validation through PWA.",
       "fields": {
         "status": {
           "type": "enum",
@@ -3496,7 +3513,7 @@
         },
         "title": {
           "type": "string",
-          "definition": "Human-readable generation title (e.g. 'v3 \u2014 Production Generation')."
+          "definition": "Human-readable generation title (e.g. 'v3 — Production Generation')."
         },
         "production_stack": {
           "type": "string",
@@ -3517,7 +3534,7 @@
       }
     },
     "tracker.deployment_decision": {
-      "description": "Deployment decision record (ENC-DPL) mapping 1:1 with a GitHub PR targeting production (DOC-63420302EF65 \u00a74.2). Created by github_integration webhook on PR open, decided by io via Deployment Manager PWA. Stored in devops-deployment-manager DynamoDB table. Status lifecycle: pending_approval -> approved/diverted/reverted -> deploying -> deployed/failed.",
+      "description": "Deployment decision record (ENC-DPL) mapping 1:1 with a GitHub PR targeting production (DOC-63420302EF65 §4.2). Created by github_integration webhook on PR open, decided by io via Deployment Manager PWA. Stored in devops-deployment-manager DynamoDB table. Status lifecycle: pending_approval -> approved/diverted/reverted -> deploying -> deployed/failed.",
       "fields": {
         "status": {
           "type": "enum",
@@ -3600,7 +3617,7 @@
       }
     },
     "gmf.graph_edges": {
-      "description": "Seven new Neo4j edge types introduced by the Generational Metabolism Framework (DOC-63420302EF65 \u00a78.2). Projected by graph_sync _reconcile_edges() and queryable via tracker.graphsearch.",
+      "description": "Seven new Neo4j edge types introduced by the Generational Metabolism Framework (DOC-63420302EF65 §8.2). Projected by graph_sync _reconcile_edges() and queryable via tracker.graphsearch.",
       "fields": {
         "SUCCEEDS": {
           "type": "edge",
@@ -3633,7 +3650,7 @@
       }
     },
     "docstore.evolution_chapter": {
-      "description": "Evolution chapter document subtype (DOC-63420302EF65 \u00a74.3). Living document tracking a generation's evolution from incubation through promotion. Contains pending notes appended by agent sessions via documents.patch. One chapter per generation.",
+      "description": "Evolution chapter document subtype (DOC-63420302EF65 §4.3). Living document tracking a generation's evolution from incubation through promotion. Contains pending notes appended by agent sessions via documents.patch. One chapter per generation.",
       "fields": {
         "document_subtype": {
           "type": "enum",

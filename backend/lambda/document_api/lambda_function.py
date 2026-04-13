@@ -414,6 +414,39 @@ def _now_z() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _fenced_line_set(lines: List[str]) -> Tuple[set, List[str]]:
+    """Pre-scan to identify line indices inside fenced code blocks.
+
+    Returns (set of 0-based indices inside fences, list of fence warnings).
+    ENC-LSN-026: enables other compliance rules to skip fenced content,
+    preventing false-positive pipe-table and heading warnings on YAML blocks.
+    """
+    fenced: set = set()
+    warnings: List[str] = []
+    in_fence = False
+    fence_start = 0
+    for idx, line in enumerate(lines):
+        if not line.strip().startswith("```"):
+            if in_fence:
+                fenced.add(idx)
+            continue
+        if not in_fence:
+            in_fence = True
+            fence_start = idx
+            lang = line.strip()[3:].strip()
+            if not lang:
+                warnings.append(
+                    f"Code fence at line {idx + 1} should include a language identifier."
+                )
+            fenced.add(idx)  # opening fence line itself
+        else:
+            fenced.add(idx)  # closing fence line
+            in_fence = False
+    if in_fence:
+        warnings.append(f"Unclosed code fence opened at line {fence_start + 1}.")
+    return fenced, warnings
+
+
 def _is_heading(line: str) -> Optional[Tuple[int, str]]:
     m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
     if not m:
@@ -436,6 +469,12 @@ def _is_table_divider(line: str) -> bool:
 def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
     warnings: List[str] = []
     lines = content.splitlines()
+
+    # Pre-scan: identify fenced code block boundaries (ENC-LSN-026).
+    # Other rules skip lines inside fences to prevent false positives
+    # on YAML blocks, code samples, etc.
+    fenced_lines, fence_warnings = _fenced_line_set(lines)
+    warnings.extend(fence_warnings)
 
     # Rule 1 + 7: title and metadata block.
     first_non_empty_idx = None
@@ -462,10 +501,12 @@ def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
         if f"**{field}**:" not in metadata_window:
             warnings.append(f"Metadata block missing '**{field}**:' near top of document.")
 
-    # Rule 1: heading hierarchy.
+    # Rule 1: heading hierarchy (skip fenced lines — ENC-LSN-026).
     last_level = 0
     h1_count = 0
     for idx, line in enumerate(lines, start=1):
+        if (idx - 1) in fenced_lines:
+            continue
         parsed = _is_heading(line)
         if not parsed:
             continue
@@ -482,24 +523,7 @@ def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
     if h1_count > 1:
         warnings.append("Multiple level-1 headings found; use exactly one document title.")
 
-    # Rule 3: fenced code blocks should be closed and include language on opening fence.
-    in_fence = False
-    fence_line = 0
-    for idx, line in enumerate(lines, start=1):
-        if not line.strip().startswith("```"):
-            continue
-        fence = line.strip()
-        if not in_fence:
-            in_fence = True
-            fence_line = idx
-            lang = fence[3:].strip()
-            if not lang:
-                warnings.append(f"Code fence at line {idx} should include a language identifier.")
-        else:
-            in_fence = False
-            fence_line = 0
-    if in_fence:
-        warnings.append(f"Unclosed code fence opened at line {fence_line}.")
+    # Rule 3: fenced code block warnings (now handled by _fenced_line_set pre-scan above).
 
     # Rule 5: list marker consistency inside contiguous list blocks per indentation level.
     active_markers: Dict[int, str] = {}
@@ -517,8 +541,10 @@ def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
                 f"Inconsistent list marker at line {idx} for indent {indent} (expected '{existing}', found '{marker}')."
             )
 
-    # Rule 2: table header/divider structure when a table block starts.
+    # Rule 2: table header/divider structure (skip fenced lines — ENC-LSN-026).
     for idx in range(len(lines) - 1):
+        if idx in fenced_lines:
+            continue
         current = lines[idx]
         nxt = lines[idx + 1]
         if "|" not in current:
@@ -531,8 +557,10 @@ def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
                 f"Possible table header at line {idx + 1} missing valid divider row at line {idx + 2}."
             )
 
-    # Rule 4 (alerts): warn-only heuristic if uppercase callout markers are malformed.
+    # Rule 4 (alerts): warn-only heuristic (skip fenced lines — ENC-LSN-026).
     for idx, line in enumerate(lines, start=1):
+        if (idx - 1) in fenced_lines:
+            continue
         if "[!" in line and not re.search(r"^\s*>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$", line):
             warnings.append(f"Malformed alert syntax at line {idx}.")
 
