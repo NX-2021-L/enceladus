@@ -2120,6 +2120,20 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 target_status=target_status,
                 transition_type=transition_type,
                 provider=provider or session_id,
+                extra_details={
+                    "token_type": "CAI (Commit Approval ID)",
+                    "token_purpose": "Proves coding-complete gate was reached. Generated automatically when advancing to coding-complete.",
+                    "prerequisite_status": "coding-complete",
+                    "prerequisite_call": {
+                        "tool": "checkout.advance",
+                        "arguments": {
+                            "record_id": task_id,
+                            "target_status": "coding-complete",
+                            "provider": "<provider>",
+                            "governance_hash": "<governance_hash>",
+                        },
+                    },
+                },
             )
 
         # Generate + store Commit Complete ID
@@ -2156,6 +2170,21 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 target_status=target_status,
                 transition_type=transition_type,
                 provider=provider or session_id,
+                extra_details={
+                    "token_type": "CCI (Commit Complete ID)",
+                    "token_purpose": "Proves committed gate was reached with a valid commit SHA. Generated automatically when advancing to committed.",
+                    "prerequisite_status": "committed",
+                    "prerequisite_call": {
+                        "tool": "checkout.advance",
+                        "arguments": {
+                            "record_id": task_id,
+                            "target_status": "committed",
+                            "provider": "<provider>",
+                            "governance_hash": "<governance_hash>",
+                            "transition_evidence": {"commit_sha": "<40-char-hex>"},
+                        },
+                    },
+                },
             )
 
     elif target_status == "merged-main":
@@ -2475,7 +2504,15 @@ def _handle_status(project_id: str, task_id: str) -> dict:
 def _handle_validate_cci(cci_id: str) -> dict:
     """GET /validate/commit-complete/{cci_id} — Validate a CCI token (GitHub Actions gate)."""
     if not re.match(r'^CCI-[0-9a-f]{32}$', cci_id):
-        return _error(400, f"Invalid commit-complete-id format: {cci_id}")
+        return _error(
+            400,
+            f"Invalid commit-complete-id format: {cci_id}",
+            details={
+                "expected_format": "CCI-{32 hex chars}",
+                "pattern": "^CCI-[0-9a-f]{32}$",
+                "provided_value": cci_id,
+            },
+        )
 
     token_record = _lookup_token(cci_id)
     if not token_record:
