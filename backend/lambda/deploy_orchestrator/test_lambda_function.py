@@ -304,5 +304,49 @@ class DeployOrchestratorSourceArchiveFallbackTests(unittest.TestCase):
         self.assertEqual(s3.get_object.call_count, 2)
 
 
+class DeployOrchestratorStructuredErrorTests(unittest.TestCase):
+    """Tests for structured JSON error_message in DDB (ENC-TSK-D79)."""
+
+    def _base_request(self) -> dict:
+        return {
+            "request_id": "REQ-1",
+            "change_type": "patch",
+            "changes": ["update lambda"],
+            "related_record_ids": ["ENC-TSK-001"],
+        }
+
+    def test_error_message_is_structured_json(self) -> None:
+        """Error message stored in DDB is structured JSON with service, failure_type, message, retryable."""
+        ddb = MagicMock()
+        with patch.object(deploy_orchestrator, "NON_UI_INLINE_LAMBDA_UPDATE", True), patch.object(
+            deploy_orchestrator, "_validate_non_ui_requests", return_value=(True, [{"request_id": "REQ-1", "target_arn": "arn:aws:lambda:us-west-2:123456789012:function:devops-feed-publisher"}], [])
+        ), patch.object(
+            deploy_orchestrator, "_write_spec"
+        ), patch.object(
+            deploy_orchestrator, "_mark_requests"
+        ), patch.object(
+            deploy_orchestrator, "_execute_lambda_update_targets", side_effect=RuntimeError("function not found")
+        ), patch.object(
+            deploy_orchestrator, "_get_ddb", return_value=ddb
+        ):
+            with self.assertRaises(RuntimeError):
+                deploy_orchestrator._orchestrate_typed_batch(
+                    "enceladus",
+                    "lambda_update",
+                    [self._base_request()],
+                )
+
+        ddb.update_item.assert_called_once()
+        expr_values = ddb.update_item.call_args.kwargs["ExpressionAttributeValues"]
+        err_raw = expr_values[":err"]["S"]
+        err = json.loads(err_raw)
+        self.assertEqual(err["service"], "deploy_orchestrator")
+        self.assertEqual(err["failure_type"], "inline_lambda_update")
+        self.assertIn("function not found", err["message"])
+        self.assertIsInstance(err["retryable"], bool)
+        self.assertIsInstance(err["next_steps"], list)
+        self.assertIn("spec_id", err)
+
+
 if __name__ == "__main__":
     unittest.main()
