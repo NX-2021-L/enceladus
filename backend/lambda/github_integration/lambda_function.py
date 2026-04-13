@@ -536,10 +536,46 @@ def _response(status_code: int, body: Any) -> Dict[str, Any]:
     }
 
 
-def _error(status_code: int, message: str, **extra: Any) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"success": False, "error": message}
+_ERROR_CODE_MAP = {
+    400: "INVALID_INPUT",
+    401: "PERMISSION_DENIED",
+    403: "PERMISSION_DENIED",
+    404: "NOT_FOUND",
+    409: "CONFLICT",
+}
+
+
+def _error(
+    status_code: int,
+    message: str,
+    *,
+    code: Optional[str] = None,
+    retryable: Optional[bool] = None,
+    details: Optional[Dict[str, Any]] = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Return an error response with canonical error_envelope structure.
+
+    Backward compatible: success/error at root level preserved.
+    Details keys bubbled to root for legacy consumers.
+    """
+    resolved_code = code or _ERROR_CODE_MAP.get(status_code, "INTERNAL_ERROR")
+    resolved_retryable = retryable if retryable is not None else (status_code >= 500)
+    resolved_details = dict(details or {})
     if extra:
-        payload.update(extra)
+        resolved_details.update(extra)
+    payload: Dict[str, Any] = {
+        "success": False,
+        "error": message,
+        "error_envelope": {
+            "code": resolved_code,
+            "message": message,
+            "retryable": resolved_retryable,
+            "details": resolved_details,
+        },
+    }
+    # Bubble details to root for backward compat
+    payload.update(resolved_details)
     return _response(status_code, payload)
 
 
@@ -583,9 +619,37 @@ def _handle_create_issue(event: Dict, claims: Dict) -> Dict:
     title = str(body.get("title", "")).strip()
 
     if not owner or not repo:
-        return _error(400, "Fields 'owner' and 'repo' are required.")
+        return _error(
+            400,
+            "Fields 'owner' and 'repo' are required.",
+            details={
+                "required_fields": ["owner", "repo"],
+                "example_fix": {
+                    "tool": "github.create_issue",
+                    "arguments": {
+                        "owner": "<github-org-or-user>",
+                        "repo": "<repository-name>",
+                        "title": "<issue-title>",
+                    },
+                },
+            },
+        )
     if not title:
-        return _error(400, "Field 'title' is required.")
+        return _error(
+            400,
+            "Field 'title' is required.",
+            details={
+                "required_fields": ["title"],
+                "example_fix": {
+                    "tool": "github.create_issue",
+                    "arguments": {
+                        "owner": owner,
+                        "repo": repo,
+                        "title": "<issue-title>",
+                    },
+                },
+            },
+        )
 
     # Safety: only allow configured repos
     full_repo = f"{owner}/{repo}"
@@ -1082,7 +1146,23 @@ def _gmf_create_decision(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
         return _response(200, {"processed": True, "action": "dpl_already_exists"})
     except Exception as e:
         logger.error("GMF: Failed to create DPL record: %s", e, exc_info=True)
-        return _response(200, {"processed": False, "reason": "dpl_create_failed"})
+        return _response(200, {
+            "processed": False,
+            "reason": "dpl_create_failed",
+            "error_envelope": {
+                "code": "DPL_CREATE_FAILED",
+                "message": f"Failed to create deployment decision record: {e}",
+                "retryable": True,
+                "details": {
+                    "dpl_record_id_format": "ENC-DPL-{3-char base-36 sequence}",
+                    "dpl_ddb_key_schema": "PK=enceladus, SK=dpl#ENC-DPL-{seq}",
+                    "dpl_label_conventions": [
+                        "target:prod — marks PR as production deployment candidate",
+                        "target:staging — marks PR for staging deployment",
+                    ],
+                },
+            },
+        })
 
 
 def _gmf_divert_on_label(pr: Dict, repo_full: str, delivery_id: str) -> Dict:

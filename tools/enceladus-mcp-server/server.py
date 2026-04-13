@@ -5530,6 +5530,31 @@ async def _documents_list(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
+def _enrich_document_compliance_response(result: dict) -> dict:
+    """Inject YAML format guidance when compliance warnings contain pipe-table patterns.
+
+    ENC-LSN-026: agents should use comment-free YAML code blocks for structured
+    output instead of GFM pipe tables. When the compliance checker flags pipe-table
+    issues, this guidance helps agents self-correct.
+    """
+    if not isinstance(result, dict):
+        return result
+    warnings = result.get("compliance_warnings")
+    if not warnings or not isinstance(warnings, list):
+        return result
+    pipe_patterns = ("Possible table header", "missing valid divider row")
+    has_pipe_warnings = any(
+        any(p in w for p in pipe_patterns) for w in warnings if isinstance(w, str)
+    )
+    if has_pipe_warnings:
+        result["format_guidance"] = {
+            "reference": "ENC-LSN-026",
+            "convention": "Use comment-free YAML code blocks (```yaml ... ```) for structured session output instead of GFM pipe tables.",
+            "remediation": "Replace pipe-table formatted data with a fenced YAML block. Omit YAML hash-comments (# ...) inside the block to avoid compliance false positives.",
+        }
+    return result
+
+
 async def _documents_put(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash_envelope(args)
     if governance_error:
@@ -5559,6 +5584,7 @@ async def _documents_put(args: dict) -> list[TextContent]:
             "Direct datastore fallback is disabled (agent IAM denies all DynamoDB/S3 writes).",
             body.get("project_id"),
         )
+    result = _enrich_document_compliance_response(result)
     return _result_text(result)
 
 
@@ -5601,6 +5627,7 @@ async def _documents_patch(args: dict) -> list[TextContent]:
             "Direct datastore fallback is disabled (agent IAM denies all DynamoDB/S3 writes).",
             document_id,
         )
+    result = _enrich_document_compliance_response(result)
     return _result_text(result)
 
 
