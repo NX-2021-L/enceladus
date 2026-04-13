@@ -1352,7 +1352,18 @@ def _orchestrate_typed_batch(
                     ExpressionAttributeNames={"#st": "status"},
                     ExpressionAttributeValues={
                         ":failed": {"S": "failed"},
-                        ":err": {"S": error_message[:500]},
+                        ":err": {"S": json.dumps({
+                            "service": "deploy_orchestrator",
+                            "failure_type": "inline_lambda_update",
+                            "message": str(error_message)[:300],
+                            "retryable": retryable,
+                            "next_steps": [
+                                "Check Lambda function existence and permissions",
+                                "Verify deploy spec references correct function name",
+                                "Review CloudWatch logs for deploy_orchestrator",
+                            ],
+                            "spec_id": spec_id,
+                        })[:500]},
                     },
                 )
                 raise
@@ -1467,7 +1478,18 @@ def _orchestrate_typed_batch(
             ExpressionAttributeNames={"#st": "status"},
             ExpressionAttributeValues={
                 ":failed": {"S": "failed"},
-                ":err": {"S": str(e)[:500]},
+                ":err": {"S": json.dumps({
+                    "service": "deploy_orchestrator",
+                    "failure_type": "codebuild_start",
+                    "message": str(e)[:300],
+                    "retryable": True,
+                    "next_steps": [
+                        "Check CodeBuild project exists and is configured",
+                        "Verify IAM role has codebuild:StartBuild permission",
+                        "Review deploy spec for correct build configuration",
+                    ],
+                    "spec_id": spec_id,
+                })[:500]},
             },
         )
         raise

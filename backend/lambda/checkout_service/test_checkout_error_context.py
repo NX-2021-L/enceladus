@@ -71,6 +71,164 @@ class CheckoutServiceErrorContextTests(unittest.TestCase):
         )
 
 
+    def test_plan_checkout_missing_session_id_includes_plan_context(self):
+        """Plan checkout with missing active_agent_session_id returns plan context."""
+        response = checkout_service._handle_plan_checkout(
+            "enceladus", "ENC-PLN-TEST", {},
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body["error"], "active_agent_session_id is required in request body")
+        details = body["error_envelope"]["details"]
+        self.assertEqual(details["required_fields"], ["active_agent_session_id"])
+        self.assertEqual(details["plan_id"], "ENC-PLN-TEST")
+        self.assertIn("allowed_plan_transitions", details)
+        self.assertEqual(
+            details["allowed_plan_transitions"],
+            dict(checkout_service.PLAN_ALLOWED_TRANSITIONS),
+        )
+        self.assertIn("plan_terminal_statuses", details)
+        fix = details["example_fix"]
+        self.assertEqual(fix["tool"], "plan.checkout")
+        self.assertEqual(fix["arguments"]["record_id"], "ENC-PLN-TEST")
+
+    def test_plan_advance_missing_target_status_includes_allowed_transitions(self):
+        """Plan advance with missing target_status returns allowed_plan_transitions."""
+        response = checkout_service._handle_plan_advance(
+            "enceladus", "ENC-PLN-TEST", {},
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body["error"], "target_status is required")
+        details = body["error_envelope"]["details"]
+        self.assertIn("allowed_plan_transitions", details)
+        self.assertEqual(
+            details["allowed_plan_transitions"],
+            dict(checkout_service.PLAN_ALLOWED_TRANSITIONS),
+        )
+        self.assertEqual(details["required_fields"], ["target_status"])
+        fix = details["example_fix"]
+        self.assertEqual(fix["tool"], "plan.advance")
+        self.assertEqual(fix["arguments"]["record_id"], "ENC-PLN-TEST")
+
+    @patch.object(checkout_service, "_get_plan")
+    def test_plan_log_missing_description_includes_example_fix(self, mock_get_plan):
+        """Plan log with missing description returns example plan.log call."""
+        mock_get_plan.return_value = (
+            200,
+            {"status": "started", "active_agent_session": True},
+        )
+        response = checkout_service._handle_plan_log(
+            "enceladus", "ENC-PLN-TEST", {},
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body["error"], "description is required")
+        details = body["error_envelope"]["details"]
+        self.assertEqual(details["required_fields"], ["description"])
+        self.assertEqual(details["plan_id"], "ENC-PLN-TEST")
+        fix = details["example_fix"]
+        self.assertEqual(fix["tool"], "plan.log")
+        self.assertEqual(fix["arguments"]["record_id"], "ENC-PLN-TEST")
+
+
+    @patch.object(checkout_service, "_validate_commit", return_value=(True, ""))
+    @patch.object(checkout_service, "_resolve_github_repo", return_value=("NX-2021-L", "enceladus"))
+    @patch.object(checkout_service, "_get_required_transition_type", return_value="github_pr_deploy")
+    @patch.object(checkout_service, "_get_task")
+    def test_cai_missing_includes_token_semantics(
+        self, mock_get_task, _mock_required_type, _mock_resolve, _mock_validate,
+    ):
+        """CAI gate error includes token_type, token_purpose, prerequisite_call."""
+        mock_get_task.return_value = (
+            200,
+            {
+                "status": "coding-complete",
+                "transition_type": "github_pr_deploy",
+                "active_agent_session": True,
+                "active_agent_session_id": "codex-agent",
+                "components": ["comp-checkout-service"],
+                # No commit_approval_id — triggers CAI gate
+            },
+        )
+
+        response = checkout_service._handle_advance(
+            "enceladus",
+            "ENC-TSK-840",
+            {
+                "target_status": "committed",
+                "provider": "codex-agent",
+                "governance_hash": "hash",
+                "transition_evidence": {
+                    "commit_sha": "0e608c0d4079570dd970e9696e2b7b3fdfaa79ac",
+                },
+            },
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 409)
+        details = body["error_envelope"]["details"]
+        self.assertEqual(details["token_type"], "CAI (Commit Approval ID)")
+        self.assertIn("coding-complete", details["token_purpose"])
+        self.assertEqual(details["prerequisite_status"], "coding-complete")
+        prereq = details["prerequisite_call"]
+        self.assertEqual(prereq["tool"], "checkout.advance")
+        self.assertEqual(prereq["arguments"]["record_id"], "ENC-TSK-840")
+        self.assertEqual(prereq["arguments"]["target_status"], "coding-complete")
+
+    @patch.object(checkout_service, "_get_required_transition_type", return_value="github_pr_deploy")
+    @patch.object(checkout_service, "_get_task")
+    def test_cci_missing_includes_token_semantics(self, mock_get_task, _mock_required_type):
+        """CCI gate error includes token_type, token_purpose, prerequisite_call."""
+        mock_get_task.return_value = (
+            200,
+            {
+                "status": "committed",
+                "transition_type": "github_pr_deploy",
+                "active_agent_session": True,
+                "active_agent_session_id": "codex-agent",
+                "components": ["comp-checkout-service"],
+                # No commit_complete_id — triggers CCI gate
+            },
+        )
+
+        response = checkout_service._handle_advance(
+            "enceladus",
+            "ENC-TSK-840",
+            {
+                "target_status": "pr",
+                "provider": "codex-agent",
+                "governance_hash": "hash",
+            },
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 409)
+        details = body["error_envelope"]["details"]
+        self.assertEqual(details["token_type"], "CCI (Commit Complete ID)")
+        self.assertIn("committed", details["token_purpose"])
+        self.assertEqual(details["prerequisite_status"], "committed")
+        prereq = details["prerequisite_call"]
+        self.assertEqual(prereq["tool"], "checkout.advance")
+        self.assertEqual(prereq["arguments"]["record_id"], "ENC-TSK-840")
+        self.assertEqual(prereq["arguments"]["target_status"], "committed")
+        self.assertIn("commit_sha", prereq["arguments"]["transition_evidence"])
+
+    def test_cci_invalid_format_includes_pattern(self):
+        """CCI format validation error includes expected_format and pattern."""
+        response = checkout_service._handle_validate_cci("CCI-INVALID")
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        details = body["error_envelope"]["details"]
+        self.assertEqual(details["expected_format"], "CCI-{32 hex chars}")
+        self.assertEqual(details["pattern"], "^CCI-[0-9a-f]{32}$")
+        self.assertEqual(details["provided_value"], "CCI-INVALID")
+
+
 class TestCodeOnMainEvidenceValidator(unittest.TestCase):
     """ENC-ISS-161: code_only close gate must accept any valid main ancestor SHA."""
 

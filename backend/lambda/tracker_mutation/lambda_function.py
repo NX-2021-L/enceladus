@@ -254,6 +254,19 @@ _VIBE_BOARD_ANCHORS = {
 
 _REQUIRED_PILLARS = {"efficiency", "human_protection", "intention", "alignment"}
 
+# ENC-TSK-D77: Gate thresholds for lesson status transitions.
+# Each target status specifies minimum metric values a lesson must meet.
+_LESSON_TRANSITION_GATES = {
+    "proposed": {"min_evidence_chain": 1},
+    "accepted": {"min_pillar_composite": 0.4, "min_resonance": 0.3},
+    "active": {
+        "min_pillar_composite": 0.6,
+        "min_resonance": 0.5,
+        "min_confidence": 0.6,
+        "min_evidence_chain": 2,
+    },
+}
+
 
 def _compute_lesson_pillar_composite(pillar_scores):
     """Weighted pillar composite: 0.25*eff + 0.30*hp + 0.20*int + 0.25*aln."""
@@ -303,14 +316,22 @@ def _validate_pillar_scores(raw_pillar_scores, record_type="lesson"):
             "Lesson creation requires 'pillar_scores' (object with efficiency, human_protection, intention, alignment, each in [0.0, 1.0]).",
             record_type=record_type,
             missing_required_fields=["pillar_scores"],
-            governed_rules=["pillar_scores is required on lesson creation (ENC-FTR-054)."],
+            governed_rules=[
+                f"Pillar scores must be float in [0.0, 1.0]. Required pillars: {sorted(_LESSON_PILLAR_WEIGHTS.keys())}.",
+                f"Gate thresholds: {json.dumps(_LESSON_TRANSITION_GATES, indent=None)}",
+                "pillar_scores is required on lesson creation (ENC-FTR-054).",
+            ],
         )
     missing = _REQUIRED_PILLARS - set(raw_pillar_scores.keys())
     if missing:
         return None, _tracker_create_validation_error(
             f"pillar_scores missing required keys: {sorted(missing)}. All four pillars are required.",
             record_type=record_type,
-            governed_rules=["pillar_scores must include: efficiency, human_protection, intention, alignment."],
+            governed_rules=[
+                f"Pillar scores must be float in [0.0, 1.0]. Required pillars: {sorted(_LESSON_PILLAR_WEIGHTS.keys())}.",
+                f"Gate thresholds: {json.dumps(_LESSON_TRANSITION_GATES, indent=None)}",
+                "pillar_scores must include: efficiency, human_protection, intention, alignment.",
+            ],
         )
     parsed = {}
     for pillar in _REQUIRED_PILLARS:
@@ -320,20 +341,32 @@ def _validate_pillar_scores(raw_pillar_scores, record_type="lesson"):
             return None, _tracker_create_validation_error(
                 f"pillar_scores.{pillar} must be a number in [0.0, 1.0]. Got: {raw_pillar_scores[pillar]!r}",
                 record_type=record_type,
-                governed_rules=[f"pillar_scores.{pillar} must be numeric in [0.0, 1.0]."],
+                governed_rules=[
+                    f"Pillar scores must be float in [0.0, 1.0]. Required pillars: {sorted(_LESSON_PILLAR_WEIGHTS.keys())}.",
+                    f"Gate thresholds: {json.dumps(_LESSON_TRANSITION_GATES, indent=None)}",
+                    f"pillar_scores.{pillar} must be numeric in [0.0, 1.0].",
+                ],
             )
         if val < 0.0 or val > 1.0:
             return None, _tracker_create_validation_error(
                 f"pillar_scores.{pillar} = {val} is out of range [0.0, 1.0].",
                 record_type=record_type,
-                governed_rules=[f"pillar_scores.{pillar} must be in [0.0, 1.0]."],
+                governed_rules=[
+                    f"Pillar scores must be float in [0.0, 1.0]. Required pillars: {sorted(_LESSON_PILLAR_WEIGHTS.keys())}.",
+                    f"Gate thresholds: {json.dumps(_LESSON_TRANSITION_GATES, indent=None)}",
+                    f"pillar_scores.{pillar} must be in [0.0, 1.0].",
+                ],
             )
         parsed[pillar] = val
     if all(v == 0.0 for v in parsed.values()):
         return None, _tracker_create_validation_error(
             "All pillar_scores are zero. At least one pillar must be > 0 for constitutional evaluation.",
             record_type=record_type,
-            governed_rules=["At least one pillar score must be > 0 (ENC-FTR-054 AC1)."],
+            governed_rules=[
+                f"Pillar scores must be float in [0.0, 1.0]. Required pillars: {sorted(_LESSON_PILLAR_WEIGHTS.keys())}.",
+                f"Gate thresholds: {json.dumps(_LESSON_TRANSITION_GATES, indent=None)}",
+                "At least one pillar score must be > 0 (ENC-FTR-054 AC1).",
+            ],
         )
     return parsed, None
 
@@ -1651,7 +1684,10 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
                 "Lesson creation requires 'evidence_chain' (array of tracker record IDs, min 1).",
                 record_type=record_type,
                 missing_required_fields=["evidence_chain"],
-                governed_rules=["evidence_chain must contain at least one tracker record ID."],
+                governed_rules=[
+                    "Lesson records require evidence_chain (min 1 entry for 'proposed' status).",
+                    f"Gate thresholds by target status: {json.dumps(_LESSON_TRANSITION_GATES, indent=None)}",
+                ],
             )
         for i, eid in enumerate(evidence_chain):
             if not isinstance(eid, str) or not eid.strip():
@@ -3076,6 +3112,17 @@ def _handle_update_field(
                         f"requires transition_evidence.revert_reason")
                 is_revert = True
             elif valid_next or revert_targets:
+                transition_governed_rules = [
+                    f"valid revert targets require transition_evidence.revert_reason: {sorted(revert_targets)}",
+                ]
+                # ENC-TSK-D77: Enrich lesson transition errors with gate requirements
+                if record_type == "lesson":
+                    target = new_lower
+                    gate = _LESSON_TRANSITION_GATES.get(target)
+                    if gate:
+                        transition_governed_rules.append(
+                            f"Gate requirements for '{target}': {json.dumps(gate, indent=None)}"
+                        )
                 return _tracker_field_validation_error(
                     (
                         f"Invalid status transition for {record_type}: "
@@ -3088,9 +3135,7 @@ def _handle_update_field(
                     record_type=record_type,
                     expected_type="enum",
                     allowed_values=sorted(valid_next),
-                    governed_rules=[
-                        f"valid revert targets require transition_evidence.revert_reason: {sorted(revert_targets)}",
-                    ],
+                    governed_rules=transition_governed_rules,
                 )
 
         # --- ENC-ISS-155: Plan completion gate ---
