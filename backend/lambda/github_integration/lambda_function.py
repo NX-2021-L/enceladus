@@ -104,8 +104,12 @@ DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 CORS_ORIGIN = "https://jreese.net"
 GITHUB_API_BASE = "https://api.github.com"
 
-# Allowed owner/repo pairs for issue creation (safety guardrail)
-ALLOWED_REPOS = os.environ.get("ALLOWED_REPOS", "NX-2021-L/enceladus").split(",")
+# Allowed owner/repo pairs (safety guardrail — gates issue creation AND webhook DPL creation)
+ALLOWED_REPOS = [
+    r.strip()
+    for r in os.environ.get("ALLOWED_REPOS", "NX-2021-L/enceladus").split(",")
+    if r.strip()
+]
 
 # Webhook configuration (Phase 3)
 GITHUB_WEBHOOK_SECRET_NAME = os.environ.get(
@@ -784,6 +788,18 @@ def _handle_webhook(event: Dict) -> Dict:
     # issue data or linked Enceladus records.
     # -----------------------------------------------------------------------
     repo_full = body.get("repository", {}).get("full_name", "")
+
+    # ENC-ISS-222: filter webhook events to ALLOWED_REPOS before creating DPL records
+    if repo_full and repo_full not in ALLOWED_REPOS:
+        logger.info(
+            "Webhook %s/%s from unauthorized repo %s (allowed: %s)",
+            gh_event, action, repo_full, ALLOWED_REPOS,
+        )
+        return _response(200, {
+            "processed": False,
+            "reason": "repo_not_allowed",
+            "repo": repo_full,
+        })
 
     if gh_event == "pull_request":
         return _webhook_pull_request(body, action, repo_full, delivery_id)
