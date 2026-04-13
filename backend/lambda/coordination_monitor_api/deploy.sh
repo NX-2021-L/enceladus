@@ -13,6 +13,13 @@ set -euo pipefail
 
 ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 
+# ENC-ISS-224 / ENC-FTR-072: architecture bifurcation for gamma (arm64/py3.12) vs prod (x86_64/py3.11)
+if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+  pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; DEPLOY_RUNTIME="python3.12"
+else
+  pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; DEPLOY_RUNTIME="python3.11"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
@@ -95,7 +102,7 @@ deploy_lambda() {
     --quiet \
     --upgrade \
     "PyJWT[crypto]>=2.8.0" \
-    --platform manylinux2014_x86_64 \
+    --platform "${pip_platform}" \
     --implementation cp \
     --python-version 3.11 \
     --only-binary=:all: \
@@ -131,7 +138,7 @@ deploy_lambda() {
     aws lambda create-function \
       --region "${REGION}" \
       --function-name "${FUNCTION_NAME}" \
-      --runtime python3.11 \
+      --runtime "${DEPLOY_RUNTIME}" \
       --handler "lambda_function.lambda_handler" \
       --role "${role_arn}" \
       --timeout 30 \
