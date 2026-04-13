@@ -73,5 +73,73 @@ class TrackerMutationErrorContextTests(unittest.TestCase):
         self.assertEqual(rank_table["no_code"], 3)
 
 
+    @patch.object(tracker_mutation, "ENABLE_LESSON_PRIMITIVE", True)
+    def test_lesson_creation_missing_evidence_chain_includes_gate_thresholds(self):
+        """Lesson creation error includes gate thresholds when evidence_chain is missing."""
+        response = tracker_mutation._handle_create_record(
+            "enceladus",
+            "lesson",
+            {
+                "title": "Test lesson",
+                "observation": "Observed pattern X",
+                "insight": "Pattern X implies Y",
+                "pillar_scores": {
+                    "efficiency": 0.5,
+                    "human_protection": 0.6,
+                    "intention": 0.4,
+                    "alignment": 0.5,
+                },
+                # evidence_chain intentionally omitted
+            },
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        details = body["error_envelope"]["details"]
+        self.assertEqual(details["missing_required_fields"], ["evidence_chain"])
+        self.assertEqual(details["record_type"], "lesson")
+        # Verify gate thresholds are present in governed_rules
+        rules_text = " ".join(details["governed_rules"])
+        self.assertIn("min_evidence_chain", rules_text)
+        self.assertIn("proposed", rules_text)
+        self.assertIn("Gate thresholds by target status", details["governed_rules"][1])
+
+    @patch.object(tracker_mutation, "ENABLE_LESSON_PRIMITIVE", True)
+    @patch.object(tracker_mutation, "_get_record_raw")
+    @patch.object(tracker_mutation, "_get_ddb")
+    def test_lesson_status_transition_includes_gate_requirements(
+        self,
+        mock_get_ddb,
+        mock_get_record_raw,
+    ):
+        """Lesson status transition error includes gate requirements for the target status."""
+        mock_get_ddb.return_value = MagicMock()
+        mock_get_record_raw.return_value = _mock_ddb_item(
+            status="draft",
+            record_type="lesson",
+            item_id="ENC-LSN-001",
+        )
+
+        # Attempt an invalid transition: draft -> active (must go draft -> proposed first)
+        response = tracker_mutation._handle_update_field(
+            "enceladus",
+            "lesson",
+            "ENC-LSN-001",
+            {"field": "status", "value": "active"},
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        details = body["error_envelope"]["details"]
+        self.assertEqual(details["field"], "status")
+        self.assertEqual(details["record_type"], "lesson")
+        # The target "active" has gate requirements — verify they appear
+        rules_text = " ".join(details["governed_rules"])
+        self.assertIn("Gate requirements for 'active'", rules_text)
+        self.assertIn("min_pillar_composite", rules_text)
+        self.assertIn("min_resonance", rules_text)
+        self.assertIn("min_confidence", rules_text)
+
+
 if __name__ == "__main__":
     unittest.main()
