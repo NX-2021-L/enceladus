@@ -3016,6 +3016,8 @@ def _handle_update_field(
         new_lower = value.strip().lower()
         closing = new_lower in ("closed", "completed", "complete")
         transition_evidence = body.get("transition_evidence", {})
+        if not isinstance(transition_evidence, dict):
+            transition_evidence = {}
 
         if record_type == "task" and current_status != new_lower:
             ws = _normalize_write_source(body)
