@@ -613,7 +613,20 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
 
     pr_number = body.get("pr_number")
     if not pr_number:
-        return _error(400, "pr_number is required")
+        return _error(
+            400,
+            "pr_number is required",
+            required_fields=["pr_number", "action"],
+            allowed_actions=["approve", "divert", "revert"],
+            dpl_record_id_format="ENC-DPL-{3-char base-36 sequence}",
+            example_fix={
+                "tool": "deploy.decide",
+                "arguments": {
+                    "pr_number": "<github-pr-number>",
+                    "action": "approve",
+                },
+            },
+        )
 
     project_id = body.get("project_id", "enceladus")
     reason = body.get("decision_reason", "")
@@ -630,6 +643,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
             f"No deployment decision found for PR #{pr_number}",
             pr_number=pr_number,
             record_id=record_id,
+            dpl_ddb_key_schema="PK=enceladus, SK=dpl#ENC-DPL-{seq}",
         )
 
     current_status = decision.get("status", "")
@@ -638,7 +652,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
             409,
             f"Decision for PR #{pr_number} is in status '{current_status}', not 'pending_approval'",
             current_status=current_status,
+            required_status="pending_approval",
             pr_number=pr_number,
+            dpl_ddb_key_schema="PK=enceladus, SK=dpl#ENC-DPL-{seq}",
         )
 
     # -----------------------------------------------------------------------
