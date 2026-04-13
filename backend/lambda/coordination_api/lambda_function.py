@@ -7321,10 +7321,19 @@ def _validate_lesson_transition_gate(
     resonance_score: float,
     confidence: float,
     evidence_chain_length: int,
-) -> Optional[str]:
+    *,
+    lesson_id: str = "",
+) -> Optional[Dict[str, Any]]:
     """Validate whether a lesson meets the gate requirements for a status transition.
 
-    Returns None if gate passes, or an error message string if it fails.
+    Returns None if gate passes, or a dict with enriched context if it fails:
+    - message: human-readable error description
+    - gate_status: "blocked"
+    - gate_requirements: the threshold dict for target_status
+    - current_values: actual values from the lesson record
+    - deficit: list of dicts describing which requirements are not met
+    - example_fix: how to fix the lesson to meet the gate
+    - ogtm_compliance_template: OGTM four-requirement template for graph traversability
     """
     gate = _LESSON_TRANSITION_GATES.get(target_status)
     if not gate:
@@ -7332,29 +7341,127 @@ def _validate_lesson_transition_gate(
 
     composite = _compute_lesson_pillar_composite(pillar_scores)
 
+    current_values: Dict[str, Any] = {
+        "pillar_composite": composite,
+        "resonance_score": resonance_score,
+        "confidence": confidence,
+        "evidence_chain_length": evidence_chain_length,
+        "pillar_scores": dict(pillar_scores),
+    }
+
+    deficit: list[Dict[str, Any]] = []
+
     if "min_evidence_chain" in gate and evidence_chain_length < gate["min_evidence_chain"]:
-        return f"Gate requires at least {gate['min_evidence_chain']} evidence chain entries, got {evidence_chain_length}."
+        deficit.append({
+            "field": "evidence_chain",
+            "requirement": f"min_evidence_chain >= {gate['min_evidence_chain']}",
+            "current": evidence_chain_length,
+            "threshold": gate["min_evidence_chain"],
+        })
 
     if "min_pillar_composite" in gate and composite < gate["min_pillar_composite"]:
-        return f"Pillar composite {composite:.2f} below minimum {gate['min_pillar_composite']}."
+        deficit.append({
+            "field": "pillar_composite",
+            "requirement": f"min_pillar_composite >= {gate['min_pillar_composite']}",
+            "current": composite,
+            "threshold": gate["min_pillar_composite"],
+        })
 
     if "min_resonance" in gate and resonance_score < gate["min_resonance"]:
-        return f"Resonance score {resonance_score:.2f} below minimum {gate['min_resonance']}."
+        deficit.append({
+            "field": "resonance_score",
+            "requirement": f"min_resonance >= {gate['min_resonance']}",
+            "current": resonance_score,
+            "threshold": gate["min_resonance"],
+        })
 
     if "min_confidence" in gate and confidence < gate["min_confidence"]:
-        return f"Confidence {confidence:.2f} below minimum {gate['min_confidence']}."
+        deficit.append({
+            "field": "confidence",
+            "requirement": f"min_confidence >= {gate['min_confidence']}",
+            "current": confidence,
+            "threshold": gate["min_confidence"],
+        })
 
     if "min_human_protection" in gate:
         hp = float(pillar_scores.get("human_protection", 0.0))
         if hp < gate["min_human_protection"]:
-            return f"human_protection pillar {hp:.2f} below non-negotiable minimum {gate['min_human_protection']}."
+            deficit.append({
+                "field": "pillar_scores.human_protection",
+                "requirement": f"min_human_protection >= {gate['min_human_protection']}",
+                "current": hp,
+                "threshold": gate["min_human_protection"],
+            })
 
     if "min_all_pillars" in gate:
         for p_name, p_val in pillar_scores.items():
             if float(p_val) < gate["min_all_pillars"]:
-                return f"Pillar '{p_name}' is {float(p_val):.2f} — all pillars must be > {gate['min_all_pillars']}."
+                deficit.append({
+                    "field": f"pillar_scores.{p_name}",
+                    "requirement": f"min_all_pillars >= {gate['min_all_pillars']}",
+                    "current": float(p_val),
+                    "threshold": gate["min_all_pillars"],
+                })
 
-    return None
+    if not deficit:
+        return None
+
+    deficit_descriptions = [
+        f"{d['field']} ({d['current']}) < {d['threshold']}" for d in deficit
+    ]
+
+    # Determine which field is the most impactful to fix first
+    first_deficit = deficit[0]
+    example_field = first_deficit["field"]
+    example_value = first_deficit["threshold"]
+    if example_field == "evidence_chain":
+        example_fix_args: Dict[str, Any] = {
+            "record_id": lesson_id,
+            "field": "evidence_chain",
+            "value": "[append additional evidence entries]",
+        }
+    elif example_field.startswith("pillar_scores."):
+        pillar_name = example_field.split(".", 1)[1]
+        example_fix_args = {
+            "record_id": lesson_id,
+            "field": "pillar_scores",
+            "value": {pillar_name: example_value},
+        }
+    else:
+        example_fix_args = {
+            "record_id": lesson_id,
+            "field": example_field,
+            "value": example_value,
+        }
+
+    return {
+        "message": (
+            f"Lesson does not meet gate requirements for '{target_status}': "
+            f"{', '.join(deficit_descriptions)}"
+        ),
+        "gate_status": "blocked",
+        "gate_requirements": dict(gate),
+        "current_values": current_values,
+        "deficit": deficit,
+        "example_fix": {
+            "tool": "tracker.set",
+            "arguments": example_fix_args,
+        },
+        "ogtm_compliance_template": {
+            "ogtm_requirements": [
+                "1. _reconcile_edges() handler in backend/lambda/graph_sync/lambda_function.py",
+                "2. RELATIONSHIP_TYPE_TO_EDGE_LABEL entry in graph_sync",
+                "3. _ALLOWED_EDGE_TYPES entry in graph_query_api",
+                "4. Live E2E validation via tracker.graphsearch confirming traversability",
+            ],
+            "evidence_template": {
+                "ogtm_criteria_1": "graph_sync handler added for <edge_type>",
+                "ogtm_criteria_2": "RELATIONSHIP_TYPE_TO_EDGE_LABEL mapping added",
+                "ogtm_criteria_3": "_ALLOWED_EDGE_TYPES registration confirmed",
+                "ogtm_criteria_4": "tracker.graphsearch returns nonzero edges",
+            },
+        },
+    }
 
 
 def _validate_self_governance_gate(

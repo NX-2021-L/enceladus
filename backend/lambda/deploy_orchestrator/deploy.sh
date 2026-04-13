@@ -3,6 +3,13 @@ set -euo pipefail
 
 ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 
+# ENC-ISS-224 / ENC-FTR-072: architecture bifurcation for gamma (arm64/py3.12) vs prod (x86_64/py3.11)
+if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+  pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; DEPLOY_RUNTIME="python3.12"
+else
+  pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; DEPLOY_RUNTIME="python3.11"
+fi
+
 # ---------------------------------------------------------------------------
 # deploy.sh — Deploy deploy_orchestrator Lambda (ENC-ISS-102)
 # ---------------------------------------------------------------------------
@@ -124,7 +131,7 @@ package_lambda() {
       --quiet \
       --upgrade \
       -r "${SCRIPT_DIR}/requirements.txt" \
-      --platform manylinux2014_x86_64 \
+      --platform "${pip_platform}" \
       --implementation cp \
       --python-version 3.11 \
       --only-binary=:all: \
@@ -158,7 +165,7 @@ deploy_lambda() {
       --function-name "${FUNCTION_NAME}" \
       --role "${role_arn}" \
       --handler "lambda_function.handler" \
-      --runtime "python3.11" \
+      --runtime "${DEPLOY_RUNTIME}" \
       --timeout 120 \
       --memory-size 256 \
       --environment "Variables=${env_vars}" >/dev/null
@@ -167,7 +174,7 @@ deploy_lambda() {
     aws lambda create-function \
       --region "${REGION}" \
       --function-name "${FUNCTION_NAME}" \
-      --runtime "python3.11" \
+      --runtime "${DEPLOY_RUNTIME}" \
       --handler "lambda_function.handler" \
       --role "${role_arn}" \
       --timeout 120 \

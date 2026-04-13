@@ -2120,6 +2120,20 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 target_status=target_status,
                 transition_type=transition_type,
                 provider=provider or session_id,
+                extra_details={
+                    "token_type": "CAI (Commit Approval ID)",
+                    "token_purpose": "Proves coding-complete gate was reached. Generated automatically when advancing to coding-complete.",
+                    "prerequisite_status": "coding-complete",
+                    "prerequisite_call": {
+                        "tool": "checkout.advance",
+                        "arguments": {
+                            "record_id": task_id,
+                            "target_status": "coding-complete",
+                            "provider": "<provider>",
+                            "governance_hash": "<governance_hash>",
+                        },
+                    },
+                },
             )
 
         # Generate + store Commit Complete ID
@@ -2156,6 +2170,21 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 target_status=target_status,
                 transition_type=transition_type,
                 provider=provider or session_id,
+                extra_details={
+                    "token_type": "CCI (Commit Complete ID)",
+                    "token_purpose": "Proves committed gate was reached with a valid commit SHA. Generated automatically when advancing to committed.",
+                    "prerequisite_status": "committed",
+                    "prerequisite_call": {
+                        "tool": "checkout.advance",
+                        "arguments": {
+                            "record_id": task_id,
+                            "target_status": "committed",
+                            "provider": "<provider>",
+                            "governance_hash": "<governance_hash>",
+                            "transition_evidence": {"commit_sha": "<40-char-hex>"},
+                        },
+                    },
+                },
             )
 
     elif target_status == "merged-main":
@@ -2475,7 +2504,15 @@ def _handle_status(project_id: str, task_id: str) -> dict:
 def _handle_validate_cci(cci_id: str) -> dict:
     """GET /validate/commit-complete/{cci_id} — Validate a CCI token (GitHub Actions gate)."""
     if not re.match(r'^CCI-[0-9a-f]{32}$', cci_id):
-        return _error(400, f"Invalid commit-complete-id format: {cci_id}")
+        return _error(
+            400,
+            f"Invalid commit-complete-id format: {cci_id}",
+            details={
+                "expected_format": "CCI-{32 hex chars}",
+                "pattern": "^CCI-[0-9a-f]{32}$",
+                "provided_value": cci_id,
+            },
+        )
 
     token_record = _lookup_token(cci_id)
     if not token_record:
@@ -2500,11 +2537,86 @@ def _handle_validate_cci(cci_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _example_plan_checkout_fix(plan_id: str) -> Dict[str, Any]:
+    """Return an example MCP tool call for plan.checkout."""
+    return {
+        "tool": "plan.checkout",
+        "arguments": {
+            "record_id": plan_id,
+            "active_agent_session_id": "<agent-session-id>",
+        },
+    }
+
+
+def _example_plan_advance_fix(plan_id: str, target_status: str) -> Dict[str, Any]:
+    """Return an example MCP tool call for plan.advance."""
+    return {
+        "tool": "plan.advance",
+        "arguments": {
+            "record_id": plan_id,
+            "target_status": target_status,
+            "provider": "<agent-session-id>",
+            "governance_hash": "<governance_hash>",
+        },
+    }
+
+
+def _example_plan_log_fix(plan_id: str) -> Dict[str, Any]:
+    """Return an example MCP tool call for plan.log."""
+    return {
+        "tool": "plan.log",
+        "arguments": {
+            "record_id": plan_id,
+            "description": "<worklog entry>",
+            "provider": "<agent-session-id>",
+            "governance_hash": "<governance_hash>",
+        },
+    }
+
+
+def _plan_validation_error(
+    status: int,
+    message: str,
+    *,
+    plan_id: str = "",
+    current_status: str = "",
+    target_status: str = "",
+    checkout_required: bool = False,
+    required_fields: Optional[list] = None,
+    example_fix: Optional[Any] = None,
+) -> dict:
+    """Return a plan-scoped error with self-correcting context."""
+    details: Dict[str, Any] = {}
+    if plan_id:
+        details["plan_id"] = plan_id
+    if current_status:
+        details["current_status"] = current_status
+    if target_status:
+        details["target_status"] = target_status
+    details["allowed_plan_transitions"] = dict(PLAN_ALLOWED_TRANSITIONS)
+    details["plan_terminal_statuses"] = sorted(PLAN_TERMINAL_STATUSES)
+    if checkout_required:
+        details["checkout_required"] = True
+    if required_fields:
+        details["required_fields"] = required_fields
+    if example_fix is not None:
+        details["example_fix"] = example_fix
+    # Filter empty values
+    details = {k: v for k, v in details.items() if v not in (None, "", [], {})}
+    return _error(status, message, details=details)
+
+
 def _handle_plan_checkout(project_id: str, plan_id: str, body: dict) -> dict:
     """POST .../checkout — Check out a plan and advance drafted→started."""
     provider = (body.get("active_agent_session_id") or "").strip()
     if not provider:
-        return _error(400, "active_agent_session_id is required in request body")
+        return _plan_validation_error(
+            400,
+            "active_agent_session_id is required in request body",
+            plan_id=plan_id,
+            required_fields=["active_agent_session_id"],
+            example_fix=_example_plan_checkout_fix(plan_id),
+        )
 
     status, result = _checkout_plan(project_id, plan_id, provider)
     if status not in (200, 201):
@@ -2628,9 +2740,21 @@ def _handle_plan_advance(project_id: str, plan_id: str, body: dict) -> dict:
     governance_hash = body.get("governance_hash")
 
     if not target_status:
-        return _error(400, "target_status is required")
+        return _plan_validation_error(
+            400,
+            "target_status is required",
+            plan_id=plan_id,
+            required_fields=["target_status"],
+            example_fix=_example_plan_advance_fix(plan_id, "<target_status>"),
+        )
     if not provider:
-        return _error(400, "provider is required for plan advance requests")
+        return _plan_validation_error(
+            400,
+            "provider is required for plan advance requests",
+            plan_id=plan_id,
+            required_fields=["provider"],
+            example_fix=_example_plan_advance_fix(plan_id, target_status),
+        )
 
     status, plan = _get_plan(project_id, plan_id)
     if status != 200:
@@ -2639,10 +2763,15 @@ def _handle_plan_advance(project_id: str, plan_id: str, body: dict) -> dict:
     current_status = (plan.get("status") or "").strip().lower()
 
     if not plan.get("active_agent_session", False):
-        return _error(
+        return _plan_validation_error(
             409,
             f"Plan {plan_id} must be checked out before advancing. "
             "Call POST .../checkout first.",
+            plan_id=plan_id,
+            current_status=current_status,
+            target_status=target_status,
+            checkout_required=True,
+            example_fix=_example_plan_checkout_fix(plan_id),
         )
 
     allowed = PLAN_ALLOWED_TRANSITIONS.get(current_status, [])
@@ -2700,7 +2829,13 @@ def _handle_plan_log(project_id: str, plan_id: str, body: dict) -> dict:
     """POST .../log — Append worklog to a checked-out plan."""
     description = (body.get("description") or "").strip()
     if not description:
-        return _error(400, "description is required")
+        return _plan_validation_error(
+            400,
+            "description is required",
+            plan_id=plan_id,
+            required_fields=["description"],
+            example_fix=_example_plan_log_fix(plan_id),
+        )
     provider = body.get("provider")
     governance_hash = body.get("governance_hash")
 
@@ -2709,10 +2844,15 @@ def _handle_plan_log(project_id: str, plan_id: str, body: dict) -> dict:
         return _error(status, plan.get("error", f"Plan not found: {plan_id}"))
 
     if not plan.get("active_agent_session", False):
-        return _error(409, (
+        return _plan_validation_error(
+            409,
             "Plan must be checked out to append worklog. "
-            "Call POST .../checkout first."
-        ))
+            "Call POST .../checkout first.",
+            plan_id=plan_id,
+            current_status=plan.get("status", ""),
+            checkout_required=True,
+            example_fix=_example_plan_checkout_fix(plan_id),
+        )
 
     log_status, log_result = _log_plan(project_id, plan_id, description, provider, governance_hash)
     if log_status not in (200, 201):
