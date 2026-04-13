@@ -17,6 +17,7 @@ on:
     types: [opened, synchronize, reopened]
     branches:
       - main
+      - 'v[0-9]*/main'
 
 jobs:
   commit-gate:
