@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-12.2",
-  "updated_at": "2026-04-12T21:05:00Z",
-  "last_change_summary": "ENC-TSK-D37: GMF Phase 0 — Register docstore.evolution_chapter entity, add missing fields to tracker.stack_generation (title, production_stack, gamma_stack, promoted_at, chapter_promotion_id) and tracker.deployment_decision (generation_id, head_sha, head_branch, pr_author, github_pr_url, decision_reason, created_at). Field extensions: tracker.lesson (generation_scope, lesson_class), tracker.feature (target_generation, promoted_at, chapter_promotion_id), tracker.plan (target_generation), tracker.task (deploy_target).",
+  "version": "2026-04-13.1",
+  "updated_at": "2026-04-13T02:00:00Z",
+  "last_change_summary": "ENC-TSK-D63: Defensive fix only — isinstance guard for transition_evidence in tracker_mutation. No new fields, no schema changes.",
   "owners": [
     "enceladus-platform"
   ],
