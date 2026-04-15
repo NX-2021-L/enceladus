@@ -105,11 +105,12 @@ package_lambda() {
   fi
 
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
-  # Bundle the canonical embedding helper from shared_layer so the Lambda
-  # is self-contained while B94 can still import the same module if the
-  # shared layer is attached in the future. See lambda_function.py import
-  # block for the layer-aware fallback.
-  cp "${REPO_ROOT}/backend/lambda/shared_layer/python/enceladus_shared/embedding.py" \
+  # Bundle the CANONICAL embedding helper from graph_sync (ENC-TSK-B94).
+  # Copying it into this build dir guarantees the batch backfill and the
+  # incremental graph_sync stream path share the same text-extraction,
+  # hashing, and Bedrock invoke contracts. Any contract change must
+  # happen upstream in backend/lambda/graph_sync/embedding.py.
+  cp "${REPO_ROOT}/backend/lambda/graph_sync/embedding.py" \
      "${build_dir}/embedding.py"
 
   python3 -m pip install \

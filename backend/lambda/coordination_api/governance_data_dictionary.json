@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-15.3",
-  "updated_at": "2026-04-15T08:30:00Z",
-  "last_change_summary": "ENC-TSK-B91: Added embedding.titan_v2_backfill entity documenting the devops-titan-embedding-backfill Lambda and the shared enceladus_shared.embedding module. Lambda performs one-shot batch embedding of the governed corpus (Task/Issue/Feature/Plan/Lesson/Document) via amazon.titan-embed-text-v2:0 at 256 dimensions with normalize=true and writes vectors to the Neo4j node .embedding property. Feeds the per-label HNSW indexes created by ENC-TSK-B90 migration 001 (governed_*_embedding, 256 dim, cosine). Shared module is the canonical helper reused by ENC-TSK-B94 for incremental mutation-path embedding. Phase 1 Hybrid Retrieval gate (ENC-TSK-B62) AC-1 coverage target >=95%.",
+  "version": "2026-04-15.4",
+  "updated_at": "2026-04-15T08:35:00Z",
+  "last_change_summary": "ENC-TSK-B91: Added embedding.titan_v2_backfill entity documenting the devops-titan-embedding-backfill Lambda (one-shot full-corpus embedding). Backfill imports build_embedding_text/hash_embedding_text/invoke_titan_v2 from backend/lambda/graph_sync/embedding.py (the canonical module introduced by ENC-TSK-B94) so incremental and batch paths produce identical vectors for identical text. Lambda scans the governed DynamoDB corpus (tracker + documents), invokes amazon.titan-embed-text-v2:0 per record at 256 dim / normalize=true, and writes {embedding, embedding_text_hash} to the per-label Neo4j node. Feeds the HNSW indexes created by ENC-TSK-B90 migration 001. skip_existing flag enables resume-after-throttle via hash comparison. Response payload includes per-label coverage with meets_ac1_threshold (>=95%) for live validation.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3268,6 +3268,39 @@
         }
       }
     },
+    "neo4j.incremental_embedding": {
+      "description": "Incremental Titan V2 embedding contract for graph_sync (ENC-TSK-B94). Every INSERT/MODIFY DDB stream event for Task/Issue/Feature/Plan/Lesson/Document record types produces a 256-dim Titan V2 embedding that is written to the node's `embedding` property in Neo4j alongside an `embedding_text_hash` used to short-circuit re-embedding on no-op MODIFY events (e.g. status transitions). The embedding is invoked inline on the graph_sync SQS consumer after the node upsert and edge reconciliation steps, wrapped in try/except so Bedrock, IAM, or network failures never break the primary projection. Pairs with ENC-TSK-B90 vector indexes and ENC-TSK-B91 batch backfill; all three must share the text-extraction contract implemented in backend/lambda/graph_sync/embedding.py.",
+      "fields": {
+        "model_contract": {
+          "type": "object",
+          "definition": "Bedrock model invocation parameters: modelId=amazon.titan-embed-text-v2:0, request body {inputText, dimensions: 256, normalize: true}, contentType=application/json. Response body carries 'embedding' as a list of 256 floats. Mandated by ENC-TSK-B62 AC-2 and matched by ENC-TSK-B90 vector index config (256 dims, cosine)."
+        },
+        "text_extraction_contract": {
+          "type": "string",
+          "definition": "embedding.build_embedding_text(record) concatenates title + intent + description + user_story with double-newline separators, stripping blanks and deduping lines, capped at 24,000 chars. Same function used by both the incremental (B94) and batch (B91) paths so vectors from the two sources are comparable. Contract is deliberately narrow (four well-known fields) so it works uniformly across all six embeddable record types without branching."
+        },
+        "embedding_property": {
+          "type": "string",
+          "definition": "Neo4j node property name carrying the 256-float vector. Matches the target property declared by ENC-TSK-B90 migration 001. Constant EMBEDDING_PROPERTY='embedding' in backend/lambda/graph_sync/embedding.py."
+        },
+        "embedding_hash_property": {
+          "type": "string",
+          "definition": "Neo4j node property carrying a 16-char sha256 hex prefix of the embedding input text. Used by graph_sync to skip re-invoking Bedrock when a MODIFY event's title/intent/description/user_story are unchanged from the last embedding. Constant EMBEDDING_HASH_PROPERTY='embedding_text_hash' in backend/lambda/graph_sync/embedding.py."
+        },
+        "iam_contract": {
+          "type": "string",
+          "definition": "Role devops-graph-sync-lambda-role gained bedrock:InvokeModel on Resource arn:aws:bedrock:${REGION}::foundation-model/amazon.titan-embed-text-v2:0 via deploy.sh:ensure_role() put-role-policy Sid=BedrockTitanV2InvokeModel. Same statement applied to gamma role devops-graph-sync-lambda-role-gamma when ENVIRONMENT_SUFFIX is set."
+        },
+        "failure_mode": {
+          "type": "string",
+          "definition": "Any Bedrock, IAM, or parser failure is caught by the try/except wrapper in _process_record() and logged with [ERROR] prefix. The primary node upsert and edge reconciliation steps complete regardless. A future MODIFY event on the same record re-attempts the embedding; eventual consistency is acceptable because the vector index simply ignores nodes without embeddings until they are written."
+        },
+        "no_op_skip": {
+          "type": "string",
+          "definition": "Before invoking Bedrock, graph_sync reads the node's existing embedding_text_hash and compares against a hash of the newly-built input text. If they match, compute_embedding_for_record() returns None and the Bedrock call is skipped. This keeps spend on status-transition heavy workloads (e.g. checkout.advance cycles) bounded to one invocation per record per title/intent/description/user_story change."
+        }
+      }
+    },
     "checkout_service.plan_checkout": {
       "description": "Plan checkout contract in the checkout service Lambda (ENC-FTR-058 Phase 2). Plans use a simplified lifecycle (drafted/started/complete/incomplete) with objectives-based completion gates and mandatory check-in on release. No CAI/CCI tokens.",
       "fields": {
@@ -3684,36 +3717,36 @@
       }
     },
     "embedding.titan_v2_backfill": {
-      "description": "One-shot Titan V2 embedding backfill service (ENC-TSK-B91). Scans the governed DynamoDB corpus (devops-project-tracker + documents), invokes amazon.titan-embed-text-v2:0 at the ENC-TSK-B62 Phase 1 contract (dimensions=256, normalize=true), and writes the resulting 256-dim vector to the matching Neo4j node's `embedding` property. Feeds the per-label HNSW indexes created by ENC-TSK-B90 migration 001 (governed_task_embedding, governed_issue_embedding, governed_feature_embedding, governed_plan_embedding, governed_lesson_embedding, governed_document_embedding). The reusable helper module at backend/lambda/shared_layer/python/enceladus_shared/embedding.py is imported by both this backfill Lambda and the ENC-TSK-B94 incremental mutation-path consumer.",
+      "description": "One-shot Titan V2 embedding backfill service (ENC-TSK-B91). Scans the governed DynamoDB corpus (devops-project-tracker + documents), invokes amazon.titan-embed-text-v2:0 at the ENC-TSK-B62 Phase 1 contract (dimensions=256, normalize=true), and writes {embedding, embedding_text_hash} to the matching Neo4j node. Feeds the per-label HNSW indexes created by ENC-TSK-B90 migration 001 (governed_task_embedding, governed_issue_embedding, governed_feature_embedding, governed_plan_embedding, governed_lesson_embedding, governed_document_embedding). Imports build_embedding_text, hash_embedding_text, and invoke_titan_v2 from backend/lambda/graph_sync/embedding.py (the canonical helper module introduced by ENC-TSK-B94) so the batch backfill and the incremental graph_sync stream path produce identical vectors for identical text. Skipping logic: skip_existing (default true) compares existing node's embedding_text_hash against the newly computed hash, matching B94's no-op MODIFY semantics. Backfill execution requires io-dev-admin or product-lead terminal credentials; agent-CLI IAM denies the required Bedrock + Secrets Manager + DynamoDB scopes.",
       "fields": {
         "function_name": {
           "type": "string",
-          "definition": "AWS Lambda function name. Current contract: devops-titan-embedding-backfill (prod x86_64/python3.11) or devops-titan-embedding-backfill-gamma (gamma arm64/python3.12)."
+          "definition": "AWS Lambda function name. Current contract: devops-titan-embedding-backfill (prod x86_64/python3.11) or devops-titan-embedding-backfill-gamma (gamma arm64/python3.12). Mirrors the deploy conventions of devops-graph-sync and enceladus-neo4j-backup."
         },
-        "model_contract": {
+        "helper_contract": {
+          "type": "string",
+          "definition": "The backfill Lambda imports backend/lambda/graph_sync/embedding.py via deploy.sh package_lambda (copies graph_sync/embedding.py into the backfill build dir). Functions consumed: build_embedding_text, hash_embedding_text, invoke_titan_v2, EMBEDDING_PROPERTY, EMBEDDING_HASH_PROPERTY, EMBEDDABLE_RECORD_TYPES, EMBEDDING_DIMENSIONS. Backfill does NOT fork the helper; any contract change must happen in graph_sync/embedding.py and trickle here through deploy.sh."
+        },
+        "event_schema": {
           "type": "object",
-          "definition": "Bedrock invoke contract. Model: amazon.titan-embed-text-v2:0. Body: {inputText, dimensions: 256, normalize: true}. Response: {embedding: list[float] of length 256}. Any mismatch with the HNSW index dimensions (256) / similarity_function (cosine) leaves vectors unqueryable."
+          "definition": "Event shape for manual/EventBridge invocations: {limit?: int, labels?: [str], dry_run?: bool, skip_existing?: bool}. limit caps total records scanned. labels restricts to a subset of {Task, Issue, Feature, Plan, Lesson, Document}. dry_run skips Neo4j writes. skip_existing (default true) uses embedding_text_hash to skip re-embedding unchanged records."
         },
-        "embeddable_text_contract": {
-          "type": "string",
-          "definition": "Canonical text extracted by enceladus_shared.embedding.extract_embeddable_text: concat of 'Title: <title>', 'Intent: <intent>', and 'Description: <description>' (or 'Summary: <summary>' when no description), joined by blank lines. Fallback when all text fields are missing: '<record_type>: <record_id>'. Capped at 20000 chars well below Titan V2's 8000-token input limit."
-        },
-        "write_contract": {
-          "type": "string",
-          "definition": "Cypher write: MATCH (n:<Label> {record_id: $rid [, project_id: $pid]}) SET n.embedding = $vec RETURN count(n) as updated. MERGE is deliberately not used — graph_sync is the sole node projector; missing nodes are logged as projection gaps and surfaced in the response missing_node counter. Label is validated against the GOVERNED_VECTOR_INDEXES allow-list before Cypher substitution (prevents injection)."
+        "response_schema": {
+          "type": "object",
+          "definition": "{status, processed, skipped, errors, missing_node, per_label_processed, coverage: {<Label>: {total, with_embedding, pct, meets_ac1_threshold}}, dry_run, elapsed_seconds, model_id, dimensions}. meets_ac1_threshold flips true when pct >= 0.95 (ENC-TSK-B62 AC-1) or total == 0."
         },
         "ac1_coverage_threshold": {
           "type": "number",
-          "definition": "Per-label embedding coverage target mandated by ENC-TSK-B62 AC-1: with_embedding / total >= 0.95. count_embedding_coverage helper and Lambda response payload both stamp this threshold so callers can assert AC-1 without a second query."
+          "definition": "Per-label embedding coverage target mandated by ENC-TSK-B62 AC-1: with_embedding / total >= 0.95. Computed via the count_embedding_coverage helper in the backfill Lambda (MATCH (n:<Label>) RETURN count(n), count(n.embedding))."
         },
         "iam_contract": {
           "type": "array",
           "item_type": "string",
-          "definition": "Lambda execution role scopes: bedrock:InvokeModel on arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0, secretsmanager:GetSecretValue on enceladus/neo4j/auradb-credentials*, dynamodb:Scan/Query on devops-project-tracker and documents tables. Agent-CLI IAM cannot invoke this Lambda directly; backfill execution requires io-dev-admin or product-lead terminal credentials."
+          "definition": "Lambda execution role scopes: bedrock:InvokeModel on arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0, secretsmanager:GetSecretValue on enceladus/neo4j/auradb-credentials*, dynamodb:Scan/Query/GetItem/BatchGetItem on devops-project-tracker and documents tables. Same bedrock scope as graph_sync (ENC-TSK-B94) but wider DynamoDB read surface."
         },
-        "resume_contract": {
-          "type": "boolean",
-          "definition": "skip_existing event flag (default: true). When true, the Lambda probes each node for an existing .embedding property and skips it, enabling safe resume after Bedrock throttling or Lambda timeout on large corpora. Set to false to force a full re-embed (e.g. after changing the embeddable-text contract)."
+        "invocation_contract": {
+          "type": "string",
+          "definition": "Agent-CLI IAM denies all required scopes; the backfill Lambda must be invoked manually by a product-lead terminal session (io-dev-admin) via `aws lambda invoke --function-name devops-titan-embedding-backfill-gamma --payload '{}' out.json` or EventBridge rule. Follow-on B91 live validation is routed via HANDOFF document pattern identical to ENC-TSK-B90 (DOC-BEFDB681C218)."
         }
       }
     }

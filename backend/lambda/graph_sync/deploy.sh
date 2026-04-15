@@ -53,6 +53,14 @@ ensure_role() {
       "Effect": "Allow",
       "Action": ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
       "Resource": "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:${SQS_QUEUE_NAME}"
+    },
+    {
+      "Sid": "BedrockTitanV2InvokeModel",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel"],
+      "Resource": [
+        "arn:aws:bedrock:${REGION}::foundation-model/amazon.titan-embed-text-v2:0"
+      ]
     }
   ]
 }
@@ -78,6 +86,9 @@ package_lambda() {
   fi
 
   cp "${ROOT_DIR}/lambda_function.py" "${build_dir}/"
+  # ENC-TSK-B94: colocated Titan V2 embedding helpers imported by
+  # lambda_function.py. Must be packaged alongside the handler module.
+  cp "${ROOT_DIR}/embedding.py" "${build_dir}/"
 
   python3 -m pip install \
     --quiet \

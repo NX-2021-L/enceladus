@@ -2,55 +2,66 @@
 
 One-shot Lambda that scans the governed corpus, invokes Amazon Titan Text
 Embeddings V2 per record, and writes the resulting 256-dim vectors to the
-corresponding Neo4j node's `embedding` property. Feeds the HNSW vector
-indexes created by ENC-TSK-B90 migration 001, which together unlock the
-Phase 1 Hybrid Retrieval gate defined by ENC-TSK-B62 under ENC-PLN-006.
+corresponding Neo4j node's `embedding` property (plus `embedding_text_hash`
+for resume semantics). Feeds the HNSW vector indexes created by ENC-TSK-B90
+migration 001, which together unlock the Phase 1 Hybrid Retrieval gate
+defined by ENC-TSK-B62 under ENC-PLN-006.
+
+Parity with ENC-TSK-B94
+-----------------------
+This Lambda imports `build_embedding_text`, `hash_embedding_text`, and
+`invoke_titan_v2` from the CANONICAL helper module at
+`backend/lambda/graph_sync/embedding.py` (introduced by ENC-TSK-B94 when
+wiring the incremental mutation-path embedding). The module is copied into
+this Lambda's build by deploy.sh so both paths produce identical vectors
+for identical text. Any contract change must happen upstream in
+graph_sync/embedding.py; this Lambda does not fork the helper.
 
 Architecture
 ------------
     DynamoDB scan (devops-project-tracker + documents)
-        -> extract_embeddable_text() per record
-        -> invoke_titan_v2_embedding()       (amazon.titan-embed-text-v2:0, 256 dim)
-        -> write_embedding_to_neo4j()        (per-label SET n.embedding = $vec)
-        -> count_embedding_coverage()        (per-label AC-1 verification)
+      -> build_embedding_text()      (from graph_sync/embedding.py)
+      -> hash_embedding_text()       (resume-friendly cache key)
+      -> skip if node already has matching embedding_text_hash
+      -> invoke_titan_v2()           (amazon.titan-embed-text-v2:0, 256 dim)
+      -> write_embedding_to_neo4j()  (local Cypher MERGE helper)
+      -> count_embedding_coverage()  (per-label AC-1 verification)
 
 Invocation
 ----------
-- Trigger: manual (AWS CLI `aws lambda invoke`) or EventBridge rule.
-- Input event (all optional):
+Agent-CLI IAM denies the required scopes; this Lambda must be invoked by a
+product-lead terminal session (io-dev-admin) via
+`aws lambda invoke --function-name devops-titan-embedding-backfill-gamma ...`
+Live validation routing follows the ENC-TSK-B90 HANDOFF document pattern.
+
+Event schema (all optional):
     {
-      "limit":   <int>   # Safety cap on records processed; default: unlimited.
-      "labels":  [<str>] # Restrict to specific labels; default: all six.
-      "dry_run": <bool>  # Scan + embed but skip Neo4j write; default: false.
-      "skip_existing": <bool>  # Skip records that already have .embedding
-                                 # set in Neo4j; default: true. Enables
-                                 # resume-after-throttle semantics.
+      "limit":         <int>   — safety cap on records processed.
+      "labels":        [<str>] — restrict to a label subset; default all six.
+      "dry_run":       <bool>  — skip Neo4j writes; default false.
+      "skip_existing": <bool>  — skip records whose embedding_text_hash matches;
+                                 default true (enables resume after throttling).
     }
-- Output: coverage report per label plus a `done` flag:
+
+Response schema:
     {
-      "status": "ok",
+      "status": "ok" | "partial",
+      "processed": int,
+      "skipped":   int,
+      "errors":    int,
+      "missing_node": int,
+      "per_label_processed": {<Label>: int},
       "coverage": {
-        "Task":    {"total": N, "with_embedding": M, "pct": 0.xx},
-        "Issue":   ...,
+        <Label>: {total, with_embedding, pct, meets_ac1_threshold},
         ...
       },
-      "processed": <int>,
-      "skipped":   <int>,
-      "errors":    <int>,
-      "elapsed_seconds": <float>
+      "dry_run": bool,
+      "elapsed_seconds": float,
+      "model_id": "amazon.titan-embed-text-v2:0",
+      "dimensions": 256
     }
 
-Governance
-----------
-- Component: comp-neo4j-backup (Neo4j-schema steward per B90 README).
-- Transition type: github_pr_deploy (enforced by component registry).
-- Lambda runtime: python3.11 (prod x86_64) / python3.12 (gamma arm64), mirroring
-  the graph_sync + neo4j_backup Lambdas.
-- IAM role grants: bedrock:InvokeModel on amazon.titan-embed-text-v2:0,
-  dynamodb:Scan/Query on devops-project-tracker + documents,
-  secretsmanager:GetSecretValue on enceladus/neo4j/auradb-credentials*.
-
-Related: ENC-TSK-B62, ENC-TSK-B90, ENC-TSK-B94 (incremental counterpart).
+Related: ENC-TSK-B62, ENC-TSK-B90, ENC-TSK-B94, ENC-FTR-062, ENC-PLN-006.
 """
 
 from __future__ import annotations
@@ -65,37 +76,22 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
-# Import embedding helpers. During Lambda packaging, deploy.sh copies
-# backend/lambda/shared_layer/python/enceladus_shared/embedding.py into this
-# directory as `embedding.py` (see deploy.sh::package_lambda). When the
-# shared_layer becomes a proper Lambda layer attachment, this import can
-# switch to `from enceladus_shared.embedding import ...` without any other
-# changes to the Lambda body. B94 (sister task) reuses the same module.
+# Import the ENC-TSK-B94 canonical helper module. deploy.sh copies
+# backend/lambda/graph_sync/embedding.py into this Lambda's build dir as
+# `embedding.py`, so a plain `from embedding import ...` resolves at runtime.
+# We intentionally reuse invoke_titan_v2 directly rather than re-implementing
+# it, to preserve vector parity with the incremental stream path.
 # ---------------------------------------------------------------------------
-try:
-    # Preferred path: shared layer attached as /opt/python.
-    from enceladus_shared.embedding import (  # type: ignore
-        GOVERNED_VECTOR_INDEXES,
-        RECORD_TYPE_TO_LABEL,
-        EMBEDDING_PROPERTY,
-        TITAN_V2_DIMENSIONS,
-        count_embedding_coverage,
-        extract_embeddable_text,
-        invoke_titan_v2_embedding,
-        write_embedding_to_neo4j,
-    )
-except ImportError:
-    # Fallback path: local copy bundled by deploy.sh.
-    from embedding import (  # type: ignore
-        GOVERNED_VECTOR_INDEXES,
-        RECORD_TYPE_TO_LABEL,
-        EMBEDDING_PROPERTY,
-        TITAN_V2_DIMENSIONS,
-        count_embedding_coverage,
-        extract_embeddable_text,
-        invoke_titan_v2_embedding,
-        write_embedding_to_neo4j,
-    )
+from embedding import (  # type: ignore
+    EMBEDDABLE_RECORD_TYPES,
+    EMBEDDING_DIMENSIONS,
+    EMBEDDING_HASH_PROPERTY,
+    EMBEDDING_PROPERTY,
+    TITAN_MODEL_ID,
+    build_embedding_text,
+    hash_embedding_text,
+    invoke_titan_v2,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -106,7 +102,22 @@ DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 NEO4J_SECRET_NAME = os.environ.get("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
 SECRETS_REGION = os.environ.get("SECRETS_REGION", "us-west-2")
 DDB_REGION = os.environ.get("DDB_REGION", "us-west-2")
-BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-west-2")
+
+# Record-type -> Neo4j node label mapping. Mirrors
+# graph_sync.RECORD_TYPE_TO_LABEL so embeddings land on the same nodes the
+# graph projection uses. The six labels indexed by B90 migration 001.
+RECORD_TYPE_TO_LABEL: Dict[str, str] = {
+    "task": "Task",
+    "issue": "Issue",
+    "feature": "Feature",
+    "plan": "Plan",
+    "lesson": "Lesson",
+    "document": "Document",
+}
+
+# Allow-list used for label validation before Cypher substitution.
+ALLOWED_LABELS = set(RECORD_TYPE_TO_LABEL.values())
+
 
 # ---------------------------------------------------------------------------
 # Lazy singletons (cold-start cached)
@@ -114,7 +125,6 @@ BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-west-2")
 
 _ddb = None
 _secretsmanager = None
-_bedrock_runtime = None
 _neo4j_driver = None
 
 
@@ -144,26 +154,6 @@ def _get_secretsmanager():
     return _secretsmanager
 
 
-def _get_bedrock_runtime():
-    global _bedrock_runtime
-    if _bedrock_runtime is None:
-        import boto3
-        from botocore.config import Config
-        _bedrock_runtime = boto3.client(
-            "bedrock-runtime",
-            region_name=BEDROCK_REGION,
-            # Bedrock throttles aggressively on full-corpus backfills. Let
-            # botocore retry transient failures in addition to the explicit
-            # backoff inside invoke_titan_v2_embedding.
-            config=Config(
-                retries={"max_attempts": 5, "mode": "adaptive"},
-                read_timeout=30,
-                connect_timeout=10,
-            ),
-        )
-    return _bedrock_runtime
-
-
 def _get_neo4j_credentials() -> Dict[str, str]:
     sm = _get_secretsmanager()
     resp = sm.get_secret_value(SecretId=NEO4J_SECRET_NAME)
@@ -183,22 +173,28 @@ def _get_neo4j_driver():
 
 
 # ---------------------------------------------------------------------------
-# Corpus iteration
+# ID helpers
 # ---------------------------------------------------------------------------
 
 
 def _bare_id(record_id: str) -> str:
+    """Strip a `type#` prefix from a DynamoDB composite record_id."""
     if not record_id:
         return ""
     return record_id.split("#", 1)[-1] if "#" in record_id else record_id
 
 
-def _iter_tracker_records() -> Iterable[Tuple[str, str, Dict[str, Any]]]:
-    """Yield (record_id, label, item) tuples from the tracker table.
+# ---------------------------------------------------------------------------
+# Corpus iteration
+# ---------------------------------------------------------------------------
 
-    Filters out COUNTER-* placeholders and relationship tombstones.
-    Labels are resolved via RECORD_TYPE_TO_LABEL so the caller does not
-    need to know the mapping.
+
+def _iter_tracker_records() -> Iterable[Tuple[str, str, Dict[str, Any]]]:
+    """Yield (bare_record_id, label, item) tuples from the tracker table.
+
+    Filters out COUNTER-* placeholders and rel# typed-relationship tombstones.
+    Unknown record types (e.g. generation, deployment_decision) are skipped
+    because they are not part of the Phase 1 retrieval corpus.
     """
     table = _get_ddb().Table(TRACKER_TABLE)
     kwargs: Dict[str, Any] = {}
@@ -208,14 +204,13 @@ def _iter_tracker_records() -> Iterable[Tuple[str, str, Dict[str, Any]]]:
             record_id = str(item.get("record_id") or "")
             if not record_id or record_id.startswith("COUNTER-"):
                 continue
-            # Skip typed-relationship edge tombstones (rel# SK prefix).
             if record_id.startswith("rel#"):
                 continue
             record_type = str(item.get("record_type") or "").lower()
+            if record_type not in EMBEDDABLE_RECORD_TYPES:
+                continue
             label = RECORD_TYPE_TO_LABEL.get(record_type)
             if not label:
-                # Unknown record types (e.g. generation, deployment_decision)
-                # aren't part of the Phase 1 corpus.
                 continue
             yield _bare_id(record_id), label, item
         last_key = resp.get("LastEvaluatedKey")
@@ -235,8 +230,12 @@ def _iter_document_records() -> Iterable[Tuple[str, str, Dict[str, Any]]]:
             if not document_id:
                 continue
             if str(item.get("status") or "active") != "active":
-                # Skip tombstoned / archived documents.
                 continue
+            # Stamp record_type so build_embedding_text's
+            # EMBEDDABLE_RECORD_TYPES gate passes (documents sometimes omit it
+            # in older DynamoDB rows).
+            if not item.get("record_type"):
+                item["record_type"] = "document"
             yield document_id, "Document", item
         last_key = resp.get("LastEvaluatedKey")
         if not last_key:
@@ -248,7 +247,7 @@ def _iter_corpus(
     allowed_labels: Optional[List[str]] = None,
 ) -> Iterable[Tuple[str, str, Dict[str, Any]]]:
     """Yield the full Phase 1 corpus, optionally filtered to a label subset."""
-    allowed = set(allowed_labels) if allowed_labels else set(GOVERNED_VECTOR_INDEXES.keys())
+    allowed = set(allowed_labels) if allowed_labels else set(ALLOWED_LABELS)
     for record_id, label, item in _iter_tracker_records():
         if label in allowed:
             yield record_id, label, item
@@ -258,29 +257,108 @@ def _iter_corpus(
 
 
 # ---------------------------------------------------------------------------
-# Skip-existing helper (resume after throttling)
+# Neo4j helpers
 # ---------------------------------------------------------------------------
 
 
-def _already_embedded(driver, record_id: str, label: str, project_id: Optional[str]) -> bool:
-    """Return True when the Neo4j node already has an `embedding` property."""
-    if label not in GOVERNED_VECTOR_INDEXES:
-        return False
+def _probe_existing_hash(
+    driver, record_id: str, label: str, project_id: Optional[str]
+) -> Optional[str]:
+    """Return the node's current `embedding_text_hash`, or None when absent.
+
+    Returns None when:
+      - label is unknown (rejected up front);
+      - the node does not yet exist (projection lag);
+      - the node exists but has no embedding_text_hash property.
+
+    Callers use the returned hash to short-circuit re-embedding when the
+    newly computed text hashes to the same value (matches B94 semantics).
+    """
+    if label not in ALLOWED_LABELS:
+        return None
     if project_id:
         cypher = (
             f"MATCH (n:{label} {{record_id: $record_id, project_id: $project_id}}) "
-            f"RETURN n.{EMBEDDING_PROPERTY} IS NOT NULL AS has_embedding"
+            f"RETURN n.{EMBEDDING_HASH_PROPERTY} AS hash LIMIT 1"
         )
         params = {"record_id": record_id, "project_id": project_id}
     else:
         cypher = (
             f"MATCH (n:{label} {{record_id: $record_id}}) "
-            f"RETURN n.{EMBEDDING_PROPERTY} IS NOT NULL AS has_embedding"
+            f"RETURN n.{EMBEDDING_HASH_PROPERTY} AS hash LIMIT 1"
         )
         params = {"record_id": record_id}
     with driver.session() as session:
         row = session.run(cypher, **params).single()
-        return bool(row and row["has_embedding"])
+        if row is None:
+            return None
+        value = row["hash"]
+        return str(value) if value else None
+
+
+def _write_embedding(
+    driver,
+    *,
+    record_id: str,
+    label: str,
+    embedding: List[float],
+    embedding_hash: str,
+    project_id: Optional[str],
+) -> bool:
+    """MATCH + SET both embedding + embedding_text_hash on the Neo4j node.
+
+    Returns True when a node was matched and updated; False when no node
+    matches (the caller logs this as a projection gap — graph_sync is the
+    sole node projector, so missing nodes indicate an ordering issue to
+    surface, not an error to escalate).
+    """
+    if label not in ALLOWED_LABELS:
+        raise ValueError(
+            f"Refusing to write embedding to unknown label '{label}'. "
+            f"Allowed: {sorted(ALLOWED_LABELS)}"
+        )
+    if project_id:
+        cypher = (
+            f"MATCH (n:{label} {{record_id: $record_id, project_id: $project_id}}) "
+            f"SET n.{EMBEDDING_PROPERTY} = $vec, "
+            f"    n.{EMBEDDING_HASH_PROPERTY} = $h "
+            "RETURN count(n) AS updated"
+        )
+        params = {
+            "record_id": record_id,
+            "project_id": project_id,
+            "vec": embedding,
+            "h": embedding_hash,
+        }
+    else:
+        cypher = (
+            f"MATCH (n:{label} {{record_id: $record_id}}) "
+            f"SET n.{EMBEDDING_PROPERTY} = $vec, "
+            f"    n.{EMBEDDING_HASH_PROPERTY} = $h "
+            "RETURN count(n) AS updated"
+        )
+        params = {"record_id": record_id, "vec": embedding, "h": embedding_hash}
+    with driver.session() as session:
+        row = session.run(cypher, **params).single()
+        return bool(row and int(row["updated"]) > 0)
+
+
+def _coverage_for_label(driver, label: str) -> Dict[str, int]:
+    """Return {'total': N, 'with_embedding': M} for `label`."""
+    if label not in ALLOWED_LABELS:
+        raise ValueError(f"Unknown label '{label}'")
+    cypher = (
+        f"MATCH (n:{label}) "
+        f"RETURN count(n) AS total, count(n.{EMBEDDING_PROPERTY}) AS with_embedding"
+    )
+    with driver.session() as session:
+        row = session.run(cypher).single()
+        if row is None:
+            return {"total": 0, "with_embedding": 0}
+        return {
+            "total": int(row["total"]),
+            "with_embedding": int(row["with_embedding"]),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -289,21 +367,17 @@ def _already_embedded(driver, record_id: str, label: str, project_id: Optional[s
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """One-shot backfill entrypoint.
-
-    See module docstring for event schema. Returns a coverage report and
-    aggregate counters that the caller (CI smoke test or manual invocation)
-    can feed into live_validation_evidence.
-    """
-    logger.info("[START] Titan V2 backfill Lambda invoked event=%s", json.dumps(event or {}))
+    """One-shot backfill entrypoint. See module docstring for event / response."""
+    logger.info("[START] Titan V2 backfill invoked event=%s", json.dumps(event or {}))
 
     started_at = time.time()
-    limit = int(event.get("limit") or 0) if event else 0
-    dry_run = bool(event.get("dry_run")) if event else False
-    skip_existing = bool(event.get("skip_existing", True)) if event else True
-    requested_labels = event.get("labels") if event else None
+    event = event or {}
+    limit = int(event.get("limit") or 0)
+    dry_run = bool(event.get("dry_run"))
+    skip_existing = bool(event.get("skip_existing", True))
+    requested_labels = event.get("labels")
 
-    # Defensive: validate label allow-list up front so a typo fails fast.
+    # Defensive: validate label allow-list up front.
     allowed_labels: Optional[List[str]] = None
     if requested_labels:
         if not isinstance(requested_labels, list) or not all(
@@ -311,20 +385,19 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         ):
             raise ValueError("event.labels must be a list of strings")
         for label in requested_labels:
-            if label not in GOVERNED_VECTOR_INDEXES:
+            if label not in ALLOWED_LABELS:
                 raise ValueError(
-                    f"Unknown label '{label}'. Allowed: {sorted(GOVERNED_VECTOR_INDEXES.keys())}"
+                    f"Unknown label '{label}'. Allowed: {sorted(ALLOWED_LABELS)}"
                 )
         allowed_labels = requested_labels
 
-    bedrock_rt = _get_bedrock_runtime()
     driver = _get_neo4j_driver() if not dry_run else None
 
     processed = 0
     skipped = 0
     errors = 0
     missing_node = 0
-    per_label_processed: Dict[str, int] = {lbl: 0 for lbl in GOVERNED_VECTOR_INDEXES}
+    per_label_processed: Dict[str, int] = {lbl: 0 for lbl in ALLOWED_LABELS}
 
     for record_id, label, item in _iter_corpus(allowed_labels):
         if limit and processed + skipped + errors >= limit:
@@ -333,36 +406,38 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         project_id = str(item.get("project_id") or "") or None
 
-        # Skip records that already have an embedding (resume-friendly).
-        if skip_existing and not dry_run and driver is not None:
-            try:
-                if _already_embedded(driver, record_id, label, project_id):
-                    skipped += 1
-                    continue
-            except Exception as exc:  # noqa: BLE001 — defensive
-                logger.warning(
-                    "[WARN] skip-existing probe failed for %s:%s — %s",
-                    label,
-                    record_id,
-                    exc,
-                )
-
-        text = extract_embeddable_text(item)
+        # Build the canonical text using B94's extractor (parity contract).
+        text = build_embedding_text(item)
         if not text:
             logger.warning("[WARN] empty embeddable text for %s:%s — skipping", label, record_id)
             skipped += 1
             continue
 
-        try:
-            vector = invoke_titan_v2_embedding(bedrock_rt, text, dimensions=TITAN_V2_DIMENSIONS)
-        except Exception as exc:  # noqa: BLE001 — defensive
+        text_hash = hash_embedding_text(text)
+
+        # Resume path: skip records whose hash already matches. Matches B94
+        # incremental semantics (no-op MODIFY skip).
+        if skip_existing and not dry_run and driver is not None:
+            try:
+                existing_hash = _probe_existing_hash(driver, record_id, label, project_id)
+                if existing_hash and existing_hash == text_hash:
+                    skipped += 1
+                    continue
+            except Exception as exc:  # noqa: BLE001 — defensive
+                logger.warning(
+                    "[WARN] hash-probe failed for %s:%s — %s",
+                    label,
+                    record_id,
+                    exc,
+                )
+
+        vector = invoke_titan_v2(text)
+        if vector is None:
             errors += 1
             logger.error(
-                "[ERROR] Titan V2 invoke failed for %s:%s — %s: %s",
+                "[ERROR] invoke_titan_v2 returned None for %s:%s",
                 label,
                 record_id,
-                type(exc).__name__,
-                exc,
             )
             continue
 
@@ -372,11 +447,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             continue
 
         try:
-            wrote = write_embedding_to_neo4j(
+            wrote = _write_embedding(
                 driver,
                 record_id=record_id,
                 label=label,
                 embedding=vector,
+                embedding_hash=text_hash,
                 project_id=project_id,
             )
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -393,7 +469,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if not wrote:
             missing_node += 1
             logger.warning(
-                "[WARN] Neo4j node not found for %s:%s project_id=%s — graph_sync projection gap",
+                "[WARN] Neo4j node not found for %s:%s project_id=%s — projection gap",
                 label,
                 record_id,
                 project_id,
@@ -411,16 +487,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 missing_node,
             )
 
-    # ------------------------------------------------------------------
-    # Coverage report (AC-1 verification)
-    # ------------------------------------------------------------------
+    # ---------------- Coverage report (AC-1) ----------------
     coverage: Dict[str, Dict[str, Any]] = {}
     if not dry_run and driver is not None:
-        for label in GOVERNED_VECTOR_INDEXES:
+        for label in ALLOWED_LABELS:
             if allowed_labels and label not in allowed_labels:
                 continue
             try:
-                counts = count_embedding_coverage(driver, label)
+                counts = _coverage_for_label(driver, label)
                 total = counts["total"]
                 with_emb = counts["with_embedding"]
                 pct = (with_emb / total) if total else 0.0
@@ -430,7 +504,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     "pct": round(pct, 4),
                     "meets_ac1_threshold": total == 0 or pct >= 0.95,
                 }
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 — defensive
                 coverage[label] = {"error": f"{type(exc).__name__}: {exc}"}
 
     elapsed = time.time() - started_at
@@ -444,8 +518,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "coverage": coverage,
         "dry_run": dry_run,
         "elapsed_seconds": round(elapsed, 2),
-        "model_id": "amazon.titan-embed-text-v2:0",
-        "dimensions": TITAN_V2_DIMENSIONS,
+        "model_id": TITAN_MODEL_ID,
+        "dimensions": EMBEDDING_DIMENSIONS,
     }
     logger.info("[END] Titan V2 backfill complete: %s", json.dumps(result, default=str))
     return result

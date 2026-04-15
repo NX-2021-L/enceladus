@@ -1,157 +1,117 @@
-"""Unit tests for devops-titan-embedding-backfill Lambda and shared helpers.
+"""Unit tests for devops-titan-embedding-backfill Lambda.
 
 Exercises the pure-function surface without real Bedrock or Neo4j — network
-clients are stubbed. Run locally with:
+clients are stubbed. Runtime parity with ENC-TSK-B94 is preserved by
+importing `embedding.py` from the canonical graph_sync location (at test
+time we copy it to the test dir via sys.path manipulation, matching what
+deploy.sh does at build time).
+
+Run locally with:
 
     cd backend/lambda/titan_embedding_backfill
     python3 -m pytest test_lambda_function.py -v
-
-Or via repo-wide pytest from the root.
 """
 
 from __future__ import annotations
 
 import importlib
 import json
-import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-# Make both the shared helper and the local Lambda importable.
-SHARED_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "shared_layer"
-    / "python"
-)
-LAMBDA_PATH = Path(__file__).resolve().parent
-for p in (str(SHARED_PATH), str(LAMBDA_PATH)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+# Ensure the graph_sync/embedding.py module is importable as `embedding`
+# before lambda_function.py loads (it imports `from embedding import ...`).
+# We copy the file into a tempdir on first import and prepend it to sys.path.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+GRAPH_SYNC_EMBEDDING = REPO_ROOT / "backend" / "lambda" / "graph_sync" / "embedding.py"
+LAMBDA_DIR = Path(__file__).resolve().parent
 
-from enceladus_shared import embedding as shared_embedding  # noqa: E402
+
+@pytest.fixture(autouse=True, scope="session")
+def _stage_embedding_module(tmp_path_factory):
+    """Copy graph_sync/embedding.py next to the Lambda so `from embedding import ...` resolves."""
+    stage_dir = tmp_path_factory.mktemp("titan-embed-test-stage")
+    dest = stage_dir / "embedding.py"
+    shutil.copy(str(GRAPH_SYNC_EMBEDDING), str(dest))
+    # Also make lambda_function.py importable from the same stage dir so
+    # the tests exercise the real packaged shape.
+    shutil.copy(str(LAMBDA_DIR / "lambda_function.py"), str(stage_dir / "lambda_function.py"))
+    sys.path.insert(0, str(stage_dir))
+    yield stage_dir
+    # Cleanup: drop from sys.path and evict modules we imported.
+    for mod in ("embedding", "lambda_function"):
+        sys.modules.pop(mod, None)
+    try:
+        sys.path.remove(str(stage_dir))
+    except ValueError:
+        pass
 
 
 # ---------------------------------------------------------------------------
-# extract_embeddable_text
+# Upstream helper sanity — confirms the ENC-TSK-B94 module still exposes
+# the expected surface. A failure here means graph_sync/embedding.py diverged
+# in a breaking way and the backfill Lambda must be updated in lockstep.
 # ---------------------------------------------------------------------------
 
 
-def test_extract_text_prefers_title_intent_description():
-    record = {
-        "title": "Add HNSW index",
-        "intent": "Phase 1 gate requires vector indexes",
-        "description": "Creates six per-label indexes",
-        "summary": "should not appear when description present",
+def test_upstream_helper_exposes_expected_symbols():
+    import embedding  # noqa: E402
+
+    expected = {
+        "TITAN_MODEL_ID",
+        "EMBEDDING_DIMENSIONS",
+        "EMBEDDING_PROPERTY",
+        "EMBEDDING_HASH_PROPERTY",
+        "EMBEDDABLE_RECORD_TYPES",
+        "build_embedding_text",
+        "hash_embedding_text",
+        "invoke_titan_v2",
     }
-    text = shared_embedding.extract_embeddable_text(record)
-    assert "Title: Add HNSW index" in text
-    assert "Intent: Phase 1 gate" in text
-    assert "Description: Creates six" in text
-    assert "should not appear" not in text
+    missing = expected - set(dir(embedding))
+    assert not missing, f"graph_sync/embedding.py missing expected symbols: {missing}"
+    assert embedding.EMBEDDING_DIMENSIONS == 256
+    assert embedding.TITAN_MODEL_ID == "amazon.titan-embed-text-v2:0"
 
 
-def test_extract_text_falls_through_to_summary_when_no_description():
-    record = {"title": "Doc title", "summary": "Doc summary body"}
-    text = shared_embedding.extract_embeddable_text(record)
-    assert "Title: Doc title" in text
-    assert "Summary: Doc summary body" in text
+def test_upstream_build_text_respects_title_intent_description():
+    import embedding  # noqa: E402
+
+    record = {
+        "title": "Backfill Titan V2",
+        "intent": "Phase 1 corpus embedding",
+        "description": "Batch-embed all governed records",
+    }
+    text = embedding.build_embedding_text(record)
+    assert "Backfill Titan V2" in text
+    assert "Phase 1 corpus embedding" in text
+    assert "Batch-embed all governed records" in text
 
 
-def test_extract_text_fallback_when_all_text_missing():
-    record = {"record_id": "task#ENC-TSK-B91", "record_type": "task"}
-    text = shared_embedding.extract_embeddable_text(record)
-    assert "task" in text
-    assert "ENC-TSK-B91" in text
+def test_upstream_hash_is_stable():
+    import embedding  # noqa: E402
 
-
-def test_extract_text_truncates_over_cap(monkeypatch):
-    monkeypatch.setattr(shared_embedding, "MAX_EMBEDDABLE_TEXT_CHARS", 50)
-    record = {"title": "A" * 200}
-    text = shared_embedding.extract_embeddable_text(record)
-    assert len(text) == 50
-
-
-# ---------------------------------------------------------------------------
-# invoke_titan_v2_embedding
-# ---------------------------------------------------------------------------
-
-
-def _mock_bedrock_response(vector):
-    body = MagicMock()
-    body.read.return_value = json.dumps({"embedding": vector}).encode("utf-8")
-    return {"body": body}
-
-
-def test_invoke_titan_happy_path():
-    client = MagicMock()
-    client.invoke_model.return_value = _mock_bedrock_response([0.1] * 256)
-    vec = shared_embedding.invoke_titan_v2_embedding(client, "hello world", max_retries=1)
-    assert len(vec) == 256
-    assert all(isinstance(x, float) for x in vec)
-    # Request body must pin dimensions and normalize per Phase 1 contract.
-    kwargs = client.invoke_model.call_args.kwargs
-    body = json.loads(kwargs["body"])
-    assert body == {"inputText": "hello world", "dimensions": 256, "normalize": True}
-    assert kwargs["modelId"] == "amazon.titan-embed-text-v2:0"
-
-
-def test_invoke_titan_raises_on_empty_text():
-    with pytest.raises(ValueError):
-        shared_embedding.invoke_titan_v2_embedding(MagicMock(), "   ")
-
-
-def test_invoke_titan_retries_on_throttling(monkeypatch):
-    monkeypatch.setattr(shared_embedding.time, "sleep", lambda *_: None)
-    client = MagicMock()
-
-    class ThrottlingException(Exception):
-        pass
-
-    # First two calls raise, third succeeds.
-    client.invoke_model.side_effect = [
-        ThrottlingException("Rate exceeded"),
-        ThrottlingException("Rate exceeded"),
-        _mock_bedrock_response([0.2] * 256),
-    ]
-    vec = shared_embedding.invoke_titan_v2_embedding(
-        client,
-        "retryable",
-        max_retries=5,
-        initial_backoff_seconds=0.01,
-    )
-    assert len(vec) == 256
-    assert client.invoke_model.call_count == 3
-
-
-def test_invoke_titan_propagates_non_retryable_error():
-    client = MagicMock()
-
-    class AccessDeniedException(Exception):
-        pass
-
-    client.invoke_model.side_effect = AccessDeniedException("Not authorized")
-    with pytest.raises(AccessDeniedException):
-        shared_embedding.invoke_titan_v2_embedding(client, "boom", max_retries=3)
-
-
-def test_invoke_titan_rejects_bad_response_shape():
-    client = MagicMock()
-    client.invoke_model.return_value = _mock_bedrock_response([0.1] * 512)  # wrong dim
-    with pytest.raises(RuntimeError):
-        shared_embedding.invoke_titan_v2_embedding(client, "x", dimensions=256, max_retries=1)
+    a = embedding.hash_embedding_text("hello world")
+    b = embedding.hash_embedding_text("hello world")
+    c = embedding.hash_embedding_text("hello worlds")
+    assert a == b
+    assert a != c
+    assert len(a) == 16  # sha256 truncated to 16 chars
 
 
 # ---------------------------------------------------------------------------
-# write_embedding_to_neo4j
+# Lambda write helper — label allow-list enforcement and Cypher shape.
 # ---------------------------------------------------------------------------
 
 
 class _FakeSession:
-    def __init__(self, returned_count):
+    def __init__(self, returned_count=1, returned_hash=None):
         self._count = returned_count
+        self._hash = returned_hash
         self.last_cypher = None
         self.last_params = None
 
@@ -165,83 +125,122 @@ class _FakeSession:
         self.last_cypher = cypher
         self.last_params = params
         result = MagicMock()
-        result.single.return_value = {"updated": self._count}
+        if "RETURN n.embedding_text_hash" in cypher:
+            result.single.return_value = {"hash": self._hash}
+        elif "count(n)" in cypher and "with_embedding" in cypher:
+            result.single.return_value = {"total": 10, "with_embedding": 10}
+        else:
+            result.single.return_value = {"updated": self._count}
         return result
 
 
 class _FakeDriver:
-    def __init__(self, returned_count=1):
-        self.session_obj = _FakeSession(returned_count)
+    def __init__(self, returned_count=1, returned_hash=None):
+        self.session_obj = _FakeSession(returned_count, returned_hash)
 
     def session(self):
         return self.session_obj
 
 
-def test_write_embedding_success():
-    driver = _FakeDriver(returned_count=1)
-    wrote = shared_embedding.write_embedding_to_neo4j(
-        driver,
-        record_id="task#ENC-TSK-B91",
-        label="Task",
-        embedding=[0.0] * 256,
-        project_id="enceladus",
-    )
-    assert wrote is True
-    assert "MATCH (n:Task" in driver.session_obj.last_cypher
-    # Record ID must be stripped of the `task#` prefix.
-    assert driver.session_obj.last_params["record_id"] == "ENC-TSK-B91"
-    assert driver.session_obj.last_params["project_id"] == "enceladus"
-
-
-def test_write_embedding_returns_false_when_node_missing():
-    driver = _FakeDriver(returned_count=0)
-    wrote = shared_embedding.write_embedding_to_neo4j(
-        driver,
-        record_id="ENC-TSK-B91",
-        label="Task",
-        embedding=[0.1] * 256,
-    )
-    assert wrote is False
-
-
 def test_write_embedding_rejects_unknown_label():
+    import lambda_function  # noqa: E402
+
     driver = _FakeDriver()
     with pytest.raises(ValueError):
-        shared_embedding.write_embedding_to_neo4j(
+        lambda_function._write_embedding(
             driver,
             record_id="x",
             label="Project",  # valid Neo4j label but not a governed retrieval target
             embedding=[0.0] * 256,
+            embedding_hash="h",
+            project_id="enceladus",
         )
 
 
-def test_write_embedding_rejects_empty_record_id():
+def test_write_embedding_sets_both_vector_and_hash():
+    import lambda_function  # noqa: E402
+
+    driver = _FakeDriver(returned_count=1)
+    wrote = lambda_function._write_embedding(
+        driver,
+        record_id="ENC-TSK-B91",
+        label="Task",
+        embedding=[0.1] * 256,
+        embedding_hash="abc123",
+        project_id="enceladus",
+    )
+    assert wrote is True
+    cypher = driver.session_obj.last_cypher
+    assert "MATCH (n:Task" in cypher
+    assert "SET n.embedding = $vec" in cypher
+    assert "n.embedding_text_hash = $h" in cypher
+    assert driver.session_obj.last_params["record_id"] == "ENC-TSK-B91"
+    assert driver.session_obj.last_params["h"] == "abc123"
+
+
+def test_write_embedding_returns_false_when_node_missing():
+    import lambda_function  # noqa: E402
+
+    driver = _FakeDriver(returned_count=0)
+    wrote = lambda_function._write_embedding(
+        driver,
+        record_id="ENC-TSK-MISSING",
+        label="Task",
+        embedding=[0.0] * 256,
+        embedding_hash="h",
+        project_id=None,
+    )
+    assert wrote is False
+
+
+def test_probe_existing_hash_returns_value_when_present():
+    import lambda_function  # noqa: E402
+
+    driver = _FakeDriver(returned_hash="deadbeefdeadbeef")
+    h = lambda_function._probe_existing_hash(driver, "ENC-TSK-B91", "Task", "enceladus")
+    assert h == "deadbeefdeadbeef"
+
+
+def test_probe_existing_hash_returns_none_when_absent():
+    import lambda_function  # noqa: E402
+
+    driver = _FakeDriver(returned_hash=None)
+    h = lambda_function._probe_existing_hash(driver, "X", "Task", None)
+    assert h is None
+
+
+def test_probe_existing_hash_rejects_unknown_label():
+    import lambda_function  # noqa: E402
+
     driver = _FakeDriver()
-    with pytest.raises(ValueError):
-        shared_embedding.write_embedding_to_neo4j(
-            driver,
-            record_id="",
-            label="Task",
-            embedding=[0.0] * 256,
-        )
+    assert lambda_function._probe_existing_hash(driver, "x", "Project", None) is None
+
+
+def test_bare_id_strips_type_prefix():
+    import lambda_function  # noqa: E402
+
+    assert lambda_function._bare_id("task#ENC-TSK-B91") == "ENC-TSK-B91"
+    assert lambda_function._bare_id("ENC-ISS-180") == "ENC-ISS-180"
+    assert lambda_function._bare_id("") == ""
 
 
 # ---------------------------------------------------------------------------
-# Lambda handler smoke test (dry_run, stubbed iteration)
+# Handler smoke tests (dry_run + label validation)
 # ---------------------------------------------------------------------------
 
 
-def test_lambda_dry_run_emits_coverage_skeleton(monkeypatch):
-    # Import the Lambda module via its local path (embedding.py is resolved
-    # via the shared_layer sys.path hack at the top of this file).
-    os.environ.setdefault("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
+def _mock_bedrock_response(vector):
+    body = MagicMock()
+    body.read.return_value = json.dumps({"embedding": vector}).encode("utf-8")
+    return {"body": body}
 
-    # Ensure a clean module load — reload if previously imported.
-    if "lambda_function" in sys.modules:
-        importlib.reload(sys.modules["lambda_function"])
-    import lambda_function  # type: ignore
 
-    # Stub corpus iteration so the test does not hit DynamoDB.
+def test_handler_dry_run_emits_expected_response(monkeypatch):
+    import embedding  # noqa: E402
+    import lambda_function  # noqa: E402
+
+    # Stub corpus iteration — one task, one issue — so the test is
+    # deterministic and does not hit DynamoDB.
     def _stub_iter(allowed_labels=None):
         yield "ENC-TSK-B91", "Task", {
             "record_id": "task#ENC-TSK-B91",
@@ -250,19 +249,76 @@ def test_lambda_dry_run_emits_coverage_skeleton(monkeypatch):
             "intent": "unit test",
             "project_id": "enceladus",
         }
+        yield "ENC-ISS-180", "Issue", {
+            "record_id": "issue#ENC-ISS-180",
+            "record_type": "issue",
+            "title": "Stubbed issue",
+            "description": "unit test issue",
+            "project_id": "enceladus",
+        }
 
     monkeypatch.setattr(lambda_function, "_iter_corpus", _stub_iter)
 
-    # Stub Bedrock.
+    # Stub Bedrock at the upstream module level since lambda_function.py
+    # imports invoke_titan_v2 directly.
     client = MagicMock()
     client.invoke_model.return_value = _mock_bedrock_response([0.3] * 256)
-    monkeypatch.setattr(lambda_function, "_get_bedrock_runtime", lambda: client)
+    monkeypatch.setattr(embedding, "_bedrock_runtime", client)
 
     result = lambda_function.lambda_handler({"dry_run": True}, None)
+
     assert result["status"] == "ok"
-    assert result["processed"] == 1
+    assert result["processed"] == 2
     assert result["dry_run"] is True
     assert result["dimensions"] == 256
     assert result["model_id"] == "amazon.titan-embed-text-v2:0"
-    # Coverage is skipped in dry_run.
+    # Coverage skipped in dry_run.
     assert result["coverage"] == {}
+    assert result["per_label_processed"]["Task"] == 1
+    assert result["per_label_processed"]["Issue"] == 1
+
+
+def test_handler_rejects_unknown_label_in_event():
+    import lambda_function  # noqa: E402
+
+    with pytest.raises(ValueError):
+        lambda_function.lambda_handler({"labels": ["Nonexistent"]}, None)
+
+
+def test_handler_rejects_non_list_labels():
+    import lambda_function  # noqa: E402
+
+    with pytest.raises(ValueError):
+        lambda_function.lambda_handler({"labels": "Task"}, None)
+
+
+def test_handler_skips_records_with_matching_hash(monkeypatch):
+    import embedding  # noqa: E402
+    import lambda_function  # noqa: E402
+
+    stub_record = {
+        "record_id": "task#ENC-TSK-B91",
+        "record_type": "task",
+        "title": "Already embedded",
+        "intent": "no change",
+        "project_id": "enceladus",
+    }
+
+    def _stub_iter(allowed_labels=None):
+        yield "ENC-TSK-B91", "Task", stub_record
+
+    monkeypatch.setattr(lambda_function, "_iter_corpus", _stub_iter)
+
+    # Stub the Neo4j driver so _probe_existing_hash returns the matching hash.
+    matching_hash = embedding.hash_embedding_text(embedding.build_embedding_text(stub_record))
+    driver = _FakeDriver(returned_hash=matching_hash)
+    monkeypatch.setattr(lambda_function, "_get_neo4j_driver", lambda: driver)
+
+    # Stub Bedrock (should not be called because the hash matches).
+    client = MagicMock()
+    monkeypatch.setattr(embedding, "_bedrock_runtime", client)
+
+    result = lambda_function.lambda_handler({"skip_existing": True}, None)
+    assert result["skipped"] == 1
+    assert result["processed"] == 0
+    client.invoke_model.assert_not_called()

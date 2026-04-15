@@ -7,7 +7,7 @@ on:
       - 'v4/**'
     paths:
       - "backend/lambda/titan_embedding_backfill/**"
-      - "backend/lambda/shared_layer/python/enceladus_shared/embedding.py"
+      - "backend/lambda/graph_sync/embedding.py"
       - ".github/workflows/lambda-titan-embedding-backfill-deploy.yml"
       - ".github/workflows/deploy-orchestration.yml"
       - ".github/workflows/lambda-deploy-reusable.yml"
