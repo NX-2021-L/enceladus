@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-15.2",
-  "updated_at": "2026-04-15T07:45:00Z",
-  "last_change_summary": "ENC-TSK-B89: Added lesson record-body edge projection to graph_sync. tracker.lesson entity description now references the graph_projection contract; evidence_chain and extensions fields annotated with graph_projection stanzas documenting the LEARNED_FROM edge emission via _infer_label_from_id + placeholder MERGE pattern (same as ENC-TSK-E01 plan/document branch). Prior to B89, lesson records produced zero LEARNED_FROM edges from record-body (only rel# typed-relationship items projected via _upsert_relationship_edge), leaving every lesson with exactly one graph edge (BELONGS_TO->Project) and zero relationship neighbors. See ENC-ISS-189 for the canonical legacy-ID manifestation.",
+  "version": "2026-04-15.3",
+  "updated_at": "2026-04-15T08:30:00Z",
+  "last_change_summary": "ENC-TSK-B91: Added embedding.titan_v2_backfill entity documenting the devops-titan-embedding-backfill Lambda and the shared enceladus_shared.embedding module. Lambda performs one-shot batch embedding of the governed corpus (Task/Issue/Feature/Plan/Lesson/Document) via amazon.titan-embed-text-v2:0 at 256 dimensions with normalize=true and writes vectors to the Neo4j node .embedding property. Feeds the per-label HNSW indexes created by ENC-TSK-B90 migration 001 (governed_*_embedding, 256 dim, cosine). Shared module is the canonical helper reused by ENC-TSK-B94 for incremental mutation-path embedding. Phase 1 Hybrid Retrieval gate (ENC-TSK-B62) AC-1 coverage target >=95%.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3680,6 +3680,40 @@
             "closed"
           ],
           "definition": "Chapter lifecycle status. 'drafting' during incubation, 'active' when generation is active, 'closed' when generation chapter is closed."
+        }
+      }
+    },
+    "embedding.titan_v2_backfill": {
+      "description": "One-shot Titan V2 embedding backfill service (ENC-TSK-B91). Scans the governed DynamoDB corpus (devops-project-tracker + documents), invokes amazon.titan-embed-text-v2:0 at the ENC-TSK-B62 Phase 1 contract (dimensions=256, normalize=true), and writes the resulting 256-dim vector to the matching Neo4j node's `embedding` property. Feeds the per-label HNSW indexes created by ENC-TSK-B90 migration 001 (governed_task_embedding, governed_issue_embedding, governed_feature_embedding, governed_plan_embedding, governed_lesson_embedding, governed_document_embedding). The reusable helper module at backend/lambda/shared_layer/python/enceladus_shared/embedding.py is imported by both this backfill Lambda and the ENC-TSK-B94 incremental mutation-path consumer.",
+      "fields": {
+        "function_name": {
+          "type": "string",
+          "definition": "AWS Lambda function name. Current contract: devops-titan-embedding-backfill (prod x86_64/python3.11) or devops-titan-embedding-backfill-gamma (gamma arm64/python3.12)."
+        },
+        "model_contract": {
+          "type": "object",
+          "definition": "Bedrock invoke contract. Model: amazon.titan-embed-text-v2:0. Body: {inputText, dimensions: 256, normalize: true}. Response: {embedding: list[float] of length 256}. Any mismatch with the HNSW index dimensions (256) / similarity_function (cosine) leaves vectors unqueryable."
+        },
+        "embeddable_text_contract": {
+          "type": "string",
+          "definition": "Canonical text extracted by enceladus_shared.embedding.extract_embeddable_text: concat of 'Title: <title>', 'Intent: <intent>', and 'Description: <description>' (or 'Summary: <summary>' when no description), joined by blank lines. Fallback when all text fields are missing: '<record_type>: <record_id>'. Capped at 20000 chars well below Titan V2's 8000-token input limit."
+        },
+        "write_contract": {
+          "type": "string",
+          "definition": "Cypher write: MATCH (n:<Label> {record_id: $rid [, project_id: $pid]}) SET n.embedding = $vec RETURN count(n) as updated. MERGE is deliberately not used — graph_sync is the sole node projector; missing nodes are logged as projection gaps and surfaced in the response missing_node counter. Label is validated against the GOVERNED_VECTOR_INDEXES allow-list before Cypher substitution (prevents injection)."
+        },
+        "ac1_coverage_threshold": {
+          "type": "number",
+          "definition": "Per-label embedding coverage target mandated by ENC-TSK-B62 AC-1: with_embedding / total >= 0.95. count_embedding_coverage helper and Lambda response payload both stamp this threshold so callers can assert AC-1 without a second query."
+        },
+        "iam_contract": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Lambda execution role scopes: bedrock:InvokeModel on arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0, secretsmanager:GetSecretValue on enceladus/neo4j/auradb-credentials*, dynamodb:Scan/Query on devops-project-tracker and documents tables. Agent-CLI IAM cannot invoke this Lambda directly; backfill execution requires io-dev-admin or product-lead terminal credentials."
+        },
+        "resume_contract": {
+          "type": "boolean",
+          "definition": "skip_existing event flag (default: true). When true, the Lambda probes each node for an existing .embedding property and skips it, enabling safe resume after Bedrock throttling or Lambda timeout on large corpora. Set to false to force a full re-embed (e.g. after changing the embeddable-text contract)."
         }
       }
     }
