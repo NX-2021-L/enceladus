@@ -276,6 +276,13 @@ deploy_lambda() {
 
   if aws lambda get-function --function-name "${fn_name}" --region "${REGION}" >/dev/null 2>&1; then
     log "[INFO] Updating code: ${fn_name}"
+    # ENC-TSK-E19: verify package arch matches Lambda runtime before upload
+    E19_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+    E19_EXPECTED_ARCH="x86_64"
+    [ -n "${ENVIRONMENT_SUFFIX:-}" ] && E19_EXPECTED_ARCH="arm64"
+    python3 "${E19_REPO_ROOT}/tools/verify_lambda_package_arch.py" \
+      --package "${zip_path}" \
+      --expected-arch "${E19_EXPECTED_ARCH}"
     aws lambda update-function-code \
       --function-name "${fn_name}" \
       --region "${REGION}" \

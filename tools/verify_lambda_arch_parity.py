@@ -50,6 +50,18 @@ DEPLOY_ENV_CONDITIONAL = re.compile(
     r'if\s+\[\s+-n\s+"\$\{ENVIRONMENT_SUFFIX:-\}"\s+\]'
 )
 
+# ENC-TSK-E19: block inserted into every deploy.sh to invoke
+# tools/verify_lambda_package_arch.py. The block necessarily mentions both
+# "arm64" and "x86_64" (one is selected by ENVIRONMENT_SUFFIX at runtime).
+# Stripped from deploy-script content before the arch-literal scans below so
+# the verifier injection does not cause has_aarch64 to fire on x86_64-only
+# scripts (e.g. project_service/deploy.sh, github_integration/deploy.sh).
+_ENC_TSK_E19_BLOCK_RE = re.compile(
+    r'^[ \t]*# ENC-TSK-E19:.*?'
+    r'^[ \t]*--expected-arch "\$\{E19_EXPECTED_ARCH\}"\s*$',
+    re.MULTILINE | re.DOTALL,
+)
+
 
 class LambdaBlock(NamedTuple):
     """A Lambda function block parsed from the CFN template."""
@@ -215,12 +227,19 @@ def _validate_deploy_scripts() -> List[str]:
         if "--platform" not in content:
             continue
 
-        has_aarch64 = "aarch64" in content or "arm64" in content
-        has_x86 = "x86_64" in content
+        # ENC-TSK-E19: strip the package-arch verifier injection before running
+        # the arch-literal scan. The injection necessarily mentions both "arm64"
+        # and "x86_64" (it chooses one via ENVIRONMENT_SUFFIX at runtime), which
+        # would otherwise trip the has_aarch64 / DEPLOY_PROD_X86 rules on scripts
+        # that are otherwise x86_64-only in their build logic.
+        scan_content = _ENC_TSK_E19_BLOCK_RE.sub("", content)
+
+        has_aarch64 = "aarch64" in scan_content or "arm64" in scan_content
+        has_x86 = "x86_64" in scan_content
 
         # If script references arm64/aarch64, it MUST use conditional gating
         if has_aarch64:
-            if not DEPLOY_ENV_CONDITIONAL.search(content):
+            if not DEPLOY_ENV_CONDITIONAL.search(scan_content):
                 errors.append(
                     f"{fn_name} ({deploy_script}): references arm64/aarch64 "
                     f"without ENVIRONMENT_SUFFIX conditional guard"
@@ -228,14 +247,14 @@ def _validate_deploy_scripts() -> List[str]:
                 continue
 
             # Prod path must use x86_64/py3.11
-            if not DEPLOY_PROD_X86.search(content):
+            if not DEPLOY_PROD_X86.search(scan_content):
                 errors.append(
                     f"{fn_name} ({deploy_script}): production path must use "
                     f"manylinux2014_x86_64 with py3.11"
                 )
 
             # Gamma path must use arm64/py3.12
-            if not DEPLOY_GAMMA_ARM.search(content):
+            if not DEPLOY_GAMMA_ARM.search(scan_content):
                 errors.append(
                     f"{fn_name} ({deploy_script}): gamma path must use "
                     f"manylinux2014_aarch64 with py3.12"
