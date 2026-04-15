@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-15.5",
-  "updated_at": "2026-04-15T08:40:00Z",
-  "last_change_summary": "ENC-TSK-B91 hotfix: Added uat_probe_handler field to embedding.titan_v2_backfill documenting the {rawPath: '/__uat_probe__'} short-circuit added to devops-titan-embedding-backfill.lambda_handler. The first deploy run failed the Gamma Health Gate UAT probe with a 30-second timeout because the Lambda treated the probe as a real invocation. Short-circuit returns a lightweight {status: ok, probe: uat, model_id, dimensions} payload before any DynamoDB scan / Neo4j connect / Bedrock invoke. Pattern is reusable for any scanner-style Lambda that must satisfy tools/gamma_uat_suite.py:check_lambda_invoke without producing side effects. No upstream embedding contract change.",
+  "version": "2026-04-15.6",
+  "updated_at": "2026-04-15T09:05:00Z",
+  "last_change_summary": "ENC-TSK-B92 Phase 1 hybrid retrieval: Added retrieval.hybrid_pipeline entity documenting the three-signal (vector + graph + keyword) Reciprocal Rank Fusion contract delivered by the new `hybrid` search_type in graph_query_api. Extended mcp_server.context_assembly.get_compact_context to note the optional hybrid_retrieval section that fires when `query` or `anchor_record_id` is passed. Backward compatibility: callers not supplying those parameters continue to receive the legacy context shape unchanged. RRF k=60 per ENC-TSK-B62 description; per-relationship-type weight projection per ENC-LSN-029 (IMPLEMENTS > ADDRESSES > RELATED_TO > LEARNED_FROM > CHILD_OF > PLAN_CONTAINS > BELONGS_TO); GDS Personalized PageRank with Cypher fallback when GDS unavailable; FSRS-6 T3 threshold at 0.7 suppresses below-threshold Lessons unless include_below_threshold=true. Query-side embedding uses the same backend/lambda/graph_sync/embedding.py module as incremental (ENC-TSK-B94) and batch (ENC-TSK-B91) index-side embedding to guarantee vector parity.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1556,8 +1556,8 @@
       "fields": {
         "get_compact_context": {
           "type": "tool",
-          "definition": "Code-mode composite context tool that reuses get_issue_context, get_code_map, get_architecture_excerpts, documents_search/list, governance_dictionary, and projects_get under one compact envelope.",
-          "usage_guidance": "Supports record|issue|task|feature|project|document|topic modes. In record/project/topic modes, code_map should use the existing get_code_map logic and payloads unchanged."
+          "definition": "Code-mode composite context tool that reuses get_issue_context, get_code_map, get_architecture_excerpts, documents_search/list, governance_dictionary, and projects_get under one compact envelope. ENC-TSK-B92: extended with optional three-signal hybrid retrieval — when `query` and/or `anchor_record_id` is supplied, the response includes a `hybrid_retrieval` section containing records ranked by Reciprocal Rank Fusion (k=60) over vector (HNSW cosine via graph_query_api), graph (Personalized PageRank via GDS or Cypher fallback), and keyword (title/intent/description contains) signals. Backward-compat: callers not passing `query`/`anchor_record_id` receive the legacy context shape unchanged.",
+          "usage_guidance": "Supports record|issue|task|feature|project|document|topic modes. In record/project/topic modes, code_map should use the existing get_code_map logic and payloads unchanged. Hybrid retrieval opt-in: pass `query` (text) or `anchor_record_id` (graph anchor) to enable. Auto-anchors to `record_id` for record modes when `anchor_record_id` is not supplied. Use `top_n` (default 20, max 50), `record_type` filter (task/issue/feature/plan/lesson/document), and `include_below_threshold` (default false) to tune results. Set `include_hybrid_retrieval=false` to force-disable even when query/anchor supplied."
         },
         "get_issue_context": {
           "type": "tool",
@@ -3751,6 +3751,52 @@
         "uat_probe_handler": {
           "type": "object",
           "definition": "Gamma UAT probe short-circuit (ENC-PLN-020 / ENC-TSK-D19 contract). tools/gamma_uat_suite.py:check_lambda_invoke invokes every Lambda with {rawPath: '/__uat_probe__', requestContext: {http: {method: GET}}, headers: {}} and asserts no FunctionError within a 30-second timeout. The backfill Lambda detects this event shape via _is_uat_probe(event) at the top of lambda_handler and returns {status: ok, probe: uat, handler: lambda_function.lambda_handler, model_id, dimensions, helper_module: 'embedding'} before any DynamoDB scan, Neo4j connection, or Bedrock invoke. Required because a real backfill scan + per-record invoke far exceeds the UAT 30s budget. Pattern is reusable for any scanner-style Lambda that must coexist with the automated UAT health gate."
+        }
+      }
+    },
+    "retrieval.hybrid_pipeline": {
+      "description": "Three-signal hybrid retrieval pipeline for the governed corpus (ENC-TSK-B92, headline ENC-TSK-B62 Phase 1 deliverable). Combines vector cosine similarity (HNSW per-label indexes from ENC-TSK-B90), graph topology (Personalized PageRank via Neo4j GDS with native-Cypher edge-walk fallback), and keyword title/intent/description match — fused via Reciprocal Rank Fusion (k=60). Implemented as a new `hybrid` search_type in backend/lambda/graph_query_api/lambda_function.py and surfaced through the MCP server's get_compact_context tool. Backward-compatible: when target nodes lack embeddings the vector signal is empty and RRF degrades to graph + keyword only; when GDS is not installed on AuraDB the graph signal degrades to a per-relationship-type weighted edge-walk in native Cypher.",
+      "fields": {
+        "rrf_k": {
+          "type": "integer",
+          "definition": "Reciprocal Rank Fusion exponent offset. score = sum(1 / (k + rank_i)) over signals where the record appears in top-N. Locked at 60 per ENC-TSK-B62 description. Rank-based, not score-based — signals do not need score normalization.",
+          "usage_guidance": "Do not change without coordinating with PLN-006 Phase 1 gate owner — k=60 was selected as the Phase 1 retrieval contract baseline."
+        },
+        "signals": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Three signals contributing ranks to the RRF fusion: 'vector' (Neo4j db.index.vector.queryNodes per-label HNSW indexes from B90, query embedding via the same backend/lambda/graph_sync/embedding.py invoke_titan_v2 helper used by index-side embedding to guarantee vector parity), 'graph' (Personalized PageRank via gds.pageRank.stream with sourceNodes=[anchor], dampingFactor=0.85, maxIterations=25; Cypher fallback when GDS is unavailable), 'keyword' (case-insensitive title/intent/description CONTAINS with weighted scoring 3/2/1)."
+        },
+        "graph_edge_weights": {
+          "type": "object",
+          "definition": "Per-relationship-type weights used by both the GDS PPR projection and the Cypher fallback path. Order per ENC-LSN-029 implementation contract: IMPLEMENTS=1.00 > ADDRESSES=0.90 > RELATED_TO=0.75 > LEARNED_FROM=0.70 > CHILD_OF=0.60 > PLAN_CONTAINS=0.55 > BELONGS_TO=0.30. Unknown edge types fall back to 0.40.",
+          "usage_guidance": "Tunable. Adjust in graph_query_api/lambda_function.py:GRAPH_EDGE_WEIGHTS. The order is grounded in retrieval semantics — 'task IMPLEMENTS feature' is a stronger relevance signal than 'record BELONGS_TO project'."
+        },
+        "fallback_modes": {
+          "type": "object",
+          "definition": "Resilience contract. (a) Vector signal is skipped when query text is missing or embedding helper returns None — RRF still works with graph + keyword. (b) Graph signal first attempts gds.pageRank.stream; on GDS unavailable or empty result, falls back to a per-relationship-type weighted Cypher hop-sum within depth 3 with damping^distance decay. (c) Keyword signal degrades gracefully when no records match. (d) When all three signals are empty, the response includes a 'No signals returned candidates' summary instead of a 500. (e) embedding_coverage_sample.{covered,total_ranked} reports observed embedding density per query so callers can detect sparse-coverage degradation."
+        },
+        "fsrs_t3_threshold": {
+          "type": "number",
+          "definition": "FSRS-6 retrieval-invisible stability threshold for Lesson records (ENC-TSK-B62 scope item #4). Default 0.7. Lessons with stability < T3 (or, when stability is absent, resonance_score < T3 per the ENC-LSN-029 pre-FSRS-6 convention) are suppressed from the fused result unless include_below_threshold=true is passed.",
+          "usage_guidance": "Override per-query via include_below_threshold=true on get_compact_context or the hybrid graphsearch query. Lesson rehydration / direct lookup paths are unaffected — T3 only filters retrieval surfaces."
+        },
+        "gds_availability_probe": {
+          "type": "object",
+          "definition": "graph_query_api caches the result of a CALL gds.list() probe for 300 seconds (_gds_probe_state). On first hybrid query the probe runs; subsequent queries within the TTL skip the probe and use the cached availability flag. A False result triggers the Cypher fallback for the graph signal; subsequent queries respect the cached flag without re-probing. Probe failures are logged at INFO and never raise."
+        },
+        "iam_contract": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "graph_query_api Lambda role gains bedrock:InvokeModel on arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0 (Sid=BedrockTitanV2InvokeModel) in addition to the existing CloudWatchLogs and SecretsManagerNeo4j scopes. Required for query-side Titan V2 embedding. Same scope graph_sync (ENC-TSK-B94) and titan_embedding_backfill (ENC-TSK-B91) already hold."
+        },
+        "response_envelope": {
+          "type": "object",
+          "definition": "GET /api/v1/tracker/graphsearch?search_type=hybrid response includes the existing nodes/edges/paths/summary/query_cypher/duration_ms fields plus: signal_availability {vector,graph,keyword: bool}, graph_algorithm ('ppr_gds'|'cypher_fallback'|'unavailable'), rrf_k, embedding_coverage_sample {covered, total_ranked}, per_node_fusion {record_id: {fused_rank, fused_score, per_signal_ranks}}, fsrs_t3_threshold, include_below_threshold. The MCP server propagates these into get_compact_context.result.hybrid_retrieval verbatim."
+        },
+        "context_assembly_integration": {
+          "type": "string",
+          "definition": "get_compact_context auto-invokes hybrid retrieval when callers pass `query` and/or `anchor_record_id`. For record-oriented modes the anchor defaults to the record_id. project_id is inferred from args, then the assembled record_context, then by parsing the anchor record_id prefix. Result lives at context['hybrid_retrieval']. Set include_hybrid_retrieval=false to force-disable. Failures append a warning and never break the legacy context payload."
         }
       }
     }
