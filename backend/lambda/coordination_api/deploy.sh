@@ -562,9 +562,13 @@ package_lambda() {
     exit 1
   fi
 
-  log "[OK] Resolved MCP runtime sources for packaging:"
-  log "[OK]   server.py                  -> ${mcp_server_src}"
-  log "[OK]   dispatch_plan_generator.py -> ${mcp_dispatch_src}"
+  # ENC-TSK-E02 hotfix: redirect log/echo to stderr because package_lambda()
+  # returns the zip path on stdout (consumed via $(package_lambda) by the caller
+  # at ensure_lambda()). Any stdout pollution corrupts the captured zip path and
+  # crashes `aws lambda update-function-code` with "No such file or directory".
+  log "[OK] Resolved MCP runtime sources for packaging:" >&2
+  log "[OK]   server.py                  -> ${mcp_server_src}" >&2
+  log "[OK]   dispatch_plan_generator.py -> ${mcp_dispatch_src}" >&2
 
   find "${ROOT_DIR}" -maxdepth 1 -type f -name '*.py' ! -name 'test_*' -exec cp {} "${build_dir}/" \;
   if [[ -f "${ROOT_DIR}/governance_data_dictionary.json" ]]; then
@@ -575,14 +579,15 @@ package_lambda() {
 
   # ENC-TSK-E02: post-copy verification that the dispatch_plan_generator
   # module is in the build artifact root before zipping. Catches future
-  # regressions where copy logic silently no-ops.
+  # regressions where copy logic silently no-ops. Errors and the success
+  # log line MUST go to stderr (see header comment above).
   if [[ ! -f "${build_dir}/dispatch_plan_generator.py" ]]; then
     echo "[ERROR] dispatch_plan_generator.py missing from build dir after copy step." >&2
     echo "[ERROR]   build_dir=${build_dir}" >&2
     echo "[ERROR]   src=${mcp_dispatch_src}" >&2
     exit 1
   fi
-  log "[OK] dispatch_plan_generator.py present in build_dir ($(wc -c < "${build_dir}/dispatch_plan_generator.py") bytes)"
+  log "[OK] dispatch_plan_generator.py present in build_dir ($(wc -c < "${build_dir}/dispatch_plan_generator.py") bytes)" >&2
 
   # Include architecture docs for get_architecture_excerpts Lambda fallback (ENC-ISS-111)
   local arch_dir
