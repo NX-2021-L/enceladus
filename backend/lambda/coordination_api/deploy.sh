@@ -533,11 +533,12 @@ package_lambda() {
   zip_path="/tmp/${FUNCTION_NAME}.zip"
   local mcp_server_src="" mcp_dispatch_src=""
 
+  # ENC-TSK-E02 / ENC-ISS-185: canonical relative paths only. Stale hardcoded
+  # /Users/jreese/agents-dev/... fallbacks were removed because they never
+  # match in CI runners and silently masked workspace-layout drift.
   for candidate in \
     "${ROOT_DIR}/../../../tools/enceladus-mcp-server/server.py" \
-    "${ROOT_DIR}/../../../../tools/enceladus-mcp-server/server.py" \
-    "/Users/jreese/agents-dev/projects/enceladus/repo/tools/enceladus-mcp-server/server.py" \
-    "/Users/jreese/agents-dev/tools/enceladus-mcp-server/server.py"; do
+    "${ROOT_DIR}/../../../../tools/enceladus-mcp-server/server.py"; do
     if [[ -f "${candidate}" ]]; then
       mcp_server_src="${candidate}"
       break
@@ -546,9 +547,7 @@ package_lambda() {
 
   for candidate in \
     "${ROOT_DIR}/../../../tools/enceladus-mcp-server/dispatch_plan_generator.py" \
-    "${ROOT_DIR}/../../../../tools/enceladus-mcp-server/dispatch_plan_generator.py" \
-    "/Users/jreese/agents-dev/projects/enceladus/repo/tools/enceladus-mcp-server/dispatch_plan_generator.py" \
-    "/Users/jreese/agents-dev/tools/enceladus-mcp-server/dispatch_plan_generator.py"; do
+    "${ROOT_DIR}/../../../../tools/enceladus-mcp-server/dispatch_plan_generator.py"; do
     if [[ -f "${candidate}" ]]; then
       mcp_dispatch_src="${candidate}"
       break
@@ -557,8 +556,15 @@ package_lambda() {
 
   if [[ -z "${mcp_server_src}" || -z "${mcp_dispatch_src}" ]]; then
     echo "[ERROR] Unable to locate canonical Enceladus MCP runtime sources for packaging." >&2
+    echo "[ERROR]   ROOT_DIR=${ROOT_DIR}" >&2
+    echo "[ERROR]   server.py search root: ${ROOT_DIR}/../../../tools/enceladus-mcp-server/" >&2
+    echo "[ERROR]   dispatch_plan_generator.py search root: same as above" >&2
     exit 1
   fi
+
+  log "[OK] Resolved MCP runtime sources for packaging:"
+  log "[OK]   server.py                  -> ${mcp_server_src}"
+  log "[OK]   dispatch_plan_generator.py -> ${mcp_dispatch_src}"
 
   find "${ROOT_DIR}" -maxdepth 1 -type f -name '*.py' ! -name 'test_*' -exec cp {} "${build_dir}/" \;
   if [[ -f "${ROOT_DIR}/governance_data_dictionary.json" ]]; then
@@ -566,6 +572,17 @@ package_lambda() {
   fi
   cp "${mcp_server_src}" "${build_dir}/server.py"
   cp "${mcp_dispatch_src}" "${build_dir}/dispatch_plan_generator.py"
+
+  # ENC-TSK-E02: post-copy verification that the dispatch_plan_generator
+  # module is in the build artifact root before zipping. Catches future
+  # regressions where copy logic silently no-ops.
+  if [[ ! -f "${build_dir}/dispatch_plan_generator.py" ]]; then
+    echo "[ERROR] dispatch_plan_generator.py missing from build dir after copy step." >&2
+    echo "[ERROR]   build_dir=${build_dir}" >&2
+    echo "[ERROR]   src=${mcp_dispatch_src}" >&2
+    exit 1
+  fi
+  log "[OK] dispatch_plan_generator.py present in build_dir ($(wc -c < "${build_dir}/dispatch_plan_generator.py") bytes)"
 
   # Include architecture docs for get_architecture_excerpts Lambda fallback (ENC-ISS-111)
   local arch_dir
