@@ -20,8 +20,18 @@ export async function fetchDocumentsByProject(projectId: string): Promise<Docume
   return data.documents ?? []
 }
 
-export async function fetchDocument(documentId: string): Promise<Document> {
-  const res = await fetchWithAuth(`${API_BASE}/${encodeURIComponent(documentId)}`)
+export async function fetchDocument(
+  documentId: string,
+  init?: { signal?: AbortSignal },
+): Promise<Document> {
+  const res = await fetchWithAuth(`${API_BASE}/${encodeURIComponent(documentId)}`, init)
+  if (res.status === 404) {
+    // ENC-FTR-073: align document fetch with the NotFoundError contract used
+    // by the tracker-API fetchers so useRecordFallback can distinguish 404
+    // from generic transport failures.
+    const { NotFoundError } = await import('./tracker')
+    throw new NotFoundError(`document ${documentId} not found`)
+  }
   if (!res.ok) throw new Error(`Failed to fetch document: ${res.status}`)
   const data = await res.json()
   return data.document ?? data
