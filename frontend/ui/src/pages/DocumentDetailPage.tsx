@@ -1,10 +1,11 @@
 import { useParams, Link, Navigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { documentKeys, fetchDocument } from '../api/documents'
+import { useRecordFallback } from '../hooks/useRecordFallback'
 import { StatusChip } from '../components/shared/StatusChip'
 import { MarkdownRenderer } from '../components/shared/MarkdownRenderer'
 import { CodeBlock, detectLanguageFromFilename } from '../components/shared/CodeBlock'
-import { LoadingState } from '../components/shared/LoadingState'
+import { RecordFallbackLoading } from '../components/shared/RecordFallbackLoading'
+import { RecordNotFound } from '../components/shared/RecordNotFound'
+import { RecordFallbackError } from '../components/shared/RecordFallbackError'
 import { ErrorState } from '../components/shared/ErrorState'
 import { CopyButton } from '../components/shared/CopyButton'
 import { formatDate, timeAgo } from '../lib/formatters'
@@ -34,10 +35,24 @@ export function DocumentDetailPage() {
   const normalizedId = (documentId ?? '').trim()
   const isDocumentId = isDocId(normalizedId)
 
-  const { data: doc, isPending, isError } = useQuery({
-    queryKey: documentKeys.detail(normalizedId),
-    queryFn: () => fetchDocument(normalizedId),
-    enabled: normalizedId.length > 0 && isDocumentId,
+  // ENC-FTR-073: Documents have never been in the feed payload; the direct
+  // GET /api/v1/documents/{id} path always runs. We use useRecordFallback
+  // here for contract symmetry with the other five detail pages — the hook
+  // dispatches to fetchDocument and renders the shared Loading/NotFound/
+  // Error primitives on failure. The `cached` slot is intentionally
+  // undefined because there is no feed cache layer for documents.
+  const {
+    data: doc,
+    isLoading: fallbackLoading,
+    isError: fallbackIsError,
+    isNotFound,
+    refetch,
+  } = useRecordFallback({
+    recordType: 'document',
+    recordId: isDocumentId ? normalizedId : undefined,
+    cached: undefined,
+    feedPending: false,
+    feedError: false,
   })
 
   if (normalizedId.length === 0) return <ErrorState message="Document not found" />
@@ -46,11 +61,9 @@ export function DocumentDetailPage() {
     if (documentSlug) return <Navigate to={`/documents/${encodeURIComponent(normalizedId)}`} replace />
     return <ProjectPrimaryDocumentsPage projectId={normalizedId} />
   }
-  if (isPending) return <LoadingState />
-  // ENC-ISS-200: fetchDocument() is the direct tracker API path and already
-  // resolves documents that fall outside the feed cap. Surface the record ID
-  // when it fails so users can diagnose a genuine 404.
-  if (isError || !doc) return <ErrorState message={`Document not found: ${normalizedId}`} />
+  if (fallbackLoading) return <RecordFallbackLoading />
+  if (isNotFound) return <RecordNotFound recordType="document" recordId={normalizedId} />
+  if (fallbackIsError || !doc) return <RecordFallbackError onRetry={refetch} />
 
   const expectedSlug = documentSlugFromFileName(doc.file_name, doc.document_id)
   const currentSlug = decodeSlug(documentSlug)
