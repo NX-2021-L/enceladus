@@ -230,6 +230,10 @@ ENABLE_LESSON_PRIMITIVE = os.environ.get(
 ENABLE_HANDOFF_PRIMITIVE = os.environ.get(
     "ENABLE_HANDOFF_PRIMITIVE", "false"
 ).lower() == "true"
+# ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry feature flag
+ENABLE_COMPONENT_PROPOSAL = os.environ.get(
+    "ENABLE_COMPONENT_PROPOSAL", "false"
+).lower() == "true"
 
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
@@ -6686,6 +6690,12 @@ if ENABLE_HANDOFF_PRIMITIVE:
         "tool": "document_complete_handoff", "requires_governance_hash": True,
     }
 
+# ENC-FTR-076 / ENC-TSK-E08: Conditionally register component.propose behind feature flag
+if ENABLE_COMPONENT_PROPOSAL:
+    _EXECUTE_ACTIONS["component.propose"] = {
+        "tool": "component_propose", "requires_governance_hash": True,
+    }
+
 # ENC-FTR-058 / ENC-TSK-A97 / ENC-TSK-C09: Plan action aliases in code-mode surface
 _SEARCH_ACTIONS["plan.objectives_status"] = {"tool": "plan_objectives_status"}
 _EXECUTE_ACTIONS["plan.create"] = {"tool": "tracker_create", "requires_governance_hash": True}
@@ -8981,6 +8991,39 @@ async def _tracker_extend_lesson(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+async def _component_propose(args: dict) -> list[TextContent]:
+    """Propose a new component record (ENC-FTR-076 / ENC-TSK-E08).
+
+    Forwards to coordination_api POST /api/v1/coordination/components/propose.
+    Gated by ENABLE_COMPONENT_PROPOSAL. The coordination_api writes the
+    component record with lifecycle_status=proposed and atomically emits a
+    COMPONENT_PROPOSED_BY typed relationship edge from the component to the
+    proposing_agent_session_id.
+    """
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    payload: Dict[str, Any] = {
+        "component_id": args.get("component_id", ""),
+        "display_name": args.get("display_name", ""),
+        "project_id": args.get("project_id", ""),
+        "source_paths": args.get("source_paths", []),
+        "description": args.get("description", ""),
+        "requested_minimum_transition_type": args.get("requested_minimum_transition_type", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("proposing_agent_session_id"):
+        payload["proposing_agent_session_id"] = args["proposing_agent_session_id"]
+    if args.get("category"):
+        payload["category"] = args["category"]
+
+    resp = _coordination_api_request(
+        "POST", "/api/v1/coordination/components/propose", payload=payload,
+    )
+    return _result_text(resp)
+
+
 async def _tracker_list_lessons(args: dict) -> list[TextContent]:
     """List lesson records for a project with optional filters."""
     project_id = args.get("project_id", "")
@@ -9078,6 +9121,8 @@ _TOOL_HANDLERS = {
     "document_create_handoff": _document_create_handoff,
     "document_claim_handoff": _document_claim_handoff,
     "document_complete_handoff": _document_complete_handoff,
+    # ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry
+    "component_propose": _component_propose,
 }
 
 
