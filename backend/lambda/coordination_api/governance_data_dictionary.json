@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-15.8",
-  "updated_at": "2026-04-15T10:45:00Z",
-  "last_change_summary": "ENC-TSK-E06 / ENC-ISS-230: Added neo4j.placeholder_node entity documenting the is_placeholder boolean property contract on Neo4j nodes. graph_sync._reconcile_edges() placeholder MERGE sites (PLAN_CONTAINS, PLAN_ATTACHED_DOC, PLAN_IMPLEMENTS, LEARNED_FROM, RELATED_TO, INFORMED_BY source) now set `is_placeholder=true` via ON CREATE SET so downstream consumers can distinguish edge-target stub nodes from real DynamoDB-backed records. _upsert_node clears is_placeholder to false on the real record's projection. embedding.titan_v2_backfill._coverage_for_label adds WHERE n.is_placeholder IS NULL OR n.is_placeholder = false so coverage metrics reflect the active corpus only — closes the B91 denominator inflation (229 orphan stubs pulled Task to 93.72% and Issue to 90.69% despite 100% active-corpus coverage).",
+  "version": "2026-04-15.9",
+  "updated_at": "2026-04-15T10:55:00Z",
+  "last_change_summary": "ENC-FTR-076 / ENC-TSK-E08: Added component_registry.propose_contract entity documenting the agent-proposable component registry surface. New lifecycle_status field on component records (proposed/approved/active/rejected/deprecated/archived); new POST /api/v1/coordination/components/propose route + ENABLE_COMPONENT_PROPOSAL feature flag on coordination_api; new `component.propose` MCP action with requires_governance_hash=True; new component-proposed-by/proposes-component typed-relationship pair registered in tracker_mutation._RELATIONSHIP_TYPES + _INVERSE_PAIRS, graph_sync.RELATIONSHIP_TYPE_TO_EDGE_LABEL, and graph_query_api._ALLOWED_EDGE_TYPES so the COMPONENT_PROPOSED_BY edge is queryable via tracker.graphsearch. Atomic write via TransactWriteItems across component-registry + devops-project-tracker. Prior ENC-TSK-E06 / ENC-ISS-230: Added neo4j.placeholder_node entity documenting the is_placeholder boolean property contract on Neo4j nodes. graph_sync._reconcile_edges() placeholder MERGE sites (PLAN_CONTAINS, PLAN_ATTACHED_DOC, PLAN_IMPLEMENTS, LEARNED_FROM, RELATED_TO, INFORMED_BY source) now set `is_placeholder=true` via ON CREATE SET so downstream consumers can distinguish edge-target stub nodes from real DynamoDB-backed records. _upsert_node clears is_placeholder to false on the real record's projection. embedding.titan_v2_backfill._coverage_for_label adds WHERE n.is_placeholder IS NULL OR n.is_placeholder = false so coverage metrics reflect the active corpus only — closes the B91 denominator inflation (229 orphan stubs pulled Task to 93.72% and Issue to 90.69% despite 100% active-corpus coverage).",
   "owners": [
     "enceladus-platform"
   ],
@@ -3298,6 +3298,40 @@
         "no_op_skip": {
           "type": "string",
           "definition": "Before invoking Bedrock, graph_sync reads the node's existing embedding_text_hash and compares against a hash of the newly-built input text. If they match, compute_embedding_for_record() returns None and the Bedrock call is skipped. This keeps spend on status-transition heavy workloads (e.g. checkout.advance cycles) bounded to one invocation per record per title/intent/description/user_story change."
+        }
+      }
+    },
+    "component_registry.propose_contract": {
+      "description": "Agent-proposable component registry contract (ENC-FTR-076 / ENC-TSK-E08). Introduces lifecycle_status (proposed, approved, active, rejected, deprecated, archived) on component records plus an atomic COMPONENT_PROPOSED_BY typed-relationship edge from the component to the proposing_agent_session_id. Gated by ENABLE_COMPONENT_PROPOSAL feature flag (default off in prod, on in gamma). Downstream phases add approve/reject handlers (E09), checkout gate on proposed/rejected (E10), SNS notification (E11), backfill script setting existing records to lifecycle_status=active (E12), and PWA pending-approval UI (E13).",
+      "fields": {
+        "lifecycle_status_enum": {
+          "type": "enum",
+          "enum": ["proposed", "approved", "active", "rejected", "deprecated", "archived"],
+          "definition": "Component lifecycle state machine. proposed is the initial state after component.propose. approved is a transient state after PWA approval before becoming active. active is the terminal-ready state that allows task checkout against the component. rejected terminates the proposal with a reason. deprecated and archived are end-of-life states. Forward transitions: proposed->{approved,rejected}; approved->{active,archived}; active->{deprecated,archived}; deprecated->{archived}. Revert transitions: approved->proposed; active->approved; deprecated->active. Enforced by coordination_api for writes and by checkout_service for task-to-component gating (E10)."
+        },
+        "propose_route": {
+          "type": "string",
+          "definition": "POST /api/v1/coordination/components/propose. Registered above the generic /components/{id} matcher so 'propose' is not mis-routed to _handle_components_get. Body: {component_id (comp- prefix), display_name, project_id, source_paths[], description, requested_minimum_transition_type, proposing_agent_session_id?, category?, governance_hash}. Returns 201 with {component_id, lifecycle_status: 'proposed', proposing_agent_session_id, requested_minimum_transition_type, component}."
+        },
+        "atomic_edge_write": {
+          "type": "string",
+          "definition": "_handle_components_propose writes the component record (component-registry table) and the rel# forward+inverse pair (devops-project-tracker table) in a single DynamoDB TransactWriteItems across both tables. The rel# schema mirrors tracker_mutation/_handle_create_relationship so graph_sync projects (Component)-[:COMPONENT_PROPOSED_BY]->(target) uniformly via RELATIONSHIP_TYPE_TO_EDGE_LABEL. ConditionExpression=attribute_not_exists(component_id) on the component Put returns 409 on duplicate. ConditionExpression=attribute_not_exists(record_id) on both rel# Puts returns 409 if the proposal edge is already present."
+        },
+        "ogtm_registrations": {
+          "type": "object",
+          "definition": "ENC-FTR-066 OGTM compliance: 'component-proposed-by' and 'proposes-component' added to tracker_mutation._RELATIONSHIP_TYPES + _INVERSE_PAIRS. 'component-proposed-by': 'COMPONENT_PROPOSED_BY' and 'proposes-component': 'PROPOSES_COMPONENT' added to graph_sync.RELATIONSHIP_TYPE_TO_EDGE_LABEL. 'COMPONENT_PROPOSED_BY' + 'PROPOSES_COMPONENT' added to graph_query_api._ALLOWED_EDGE_TYPES so the edge is queryable via tracker.graphsearch with edge_types=['COMPONENT_PROPOSED_BY']."
+        },
+        "mcp_action": {
+          "type": "string",
+          "definition": "tools/enceladus-mcp-server/server.py: component.propose registered in _EXECUTE_ACTIONS under ENABLE_COMPONENT_PROPOSAL guard with requires_governance_hash=True. Proxy function _component_propose forwards to coordination_api via _coordination_api_request. Full arg set: component_id, display_name, project_id, source_paths[], description, requested_minimum_transition_type, proposing_agent_session_id?, category?, governance_hash."
+        },
+        "feature_flag": {
+          "type": "string",
+          "definition": "ENABLE_COMPONENT_PROPOSAL env var on coordination_api + mcp-server Lambdas. Default 'false' so the behavior is opt-in. Gamma deploy script sets it to 'true' for early validation; prod stays off until E08-E14 all ship and io approves v3 cutover. When off: POST /components/propose returns 503; the MCP action is not registered in _EXECUTE_ACTIONS."
+        },
+        "lifecycle_transition_maps": {
+          "type": "object",
+          "definition": "tracker_mutation/lambda_function.py adds _VALID_COMPONENT_LIFECYCLE_TRANSITIONS + _REVERT_COMPONENT_LIFECYCLE_TRANSITIONS dicts near the existing record-type lifecycle maps. Enforced by coordination_api for approve/reject advance (E09) and by checkout_service for task gating (E10)."
         }
       }
     },
