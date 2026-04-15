@@ -219,6 +219,77 @@ def report_counts(driver):
     return node_count, edge_count
 
 
+def _split_cypher_statements(text: str) -> List[str]:
+    """Split a .cypher file into individual statements.
+
+    Strips `//` line comments before splitting on `;`. Ignores trailing
+    whitespace-only fragments. Does not attempt to honor semicolons inside
+    string literals -- the migration files under tools/neo4j-migrations/ do
+    not use them, and this helper is not a general-purpose Cypher parser.
+    """
+    scrubbed_lines = []
+    for line in text.splitlines():
+        comment_at = line.find("//")
+        if comment_at >= 0:
+            line = line[:comment_at]
+        scrubbed_lines.append(line)
+    blob = "\n".join(scrubbed_lines)
+    statements = []
+    for chunk in blob.split(";"):
+        chunk = chunk.strip()
+        if chunk:
+            statements.append(chunk)
+    return statements
+
+
+def run_migration_file(driver, path: str) -> int:
+    """Run each Cypher statement in `path` against the Neo4j driver.
+
+    Returns the count of statements executed. Each statement runs in its own
+    auto-commit transaction (migrations are expected to use `IF NOT EXISTS`
+    for idempotency, not transactional rollback).
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    statements = _split_cypher_statements(text)
+    if not statements:
+        logger.warning("[WARN] No executable statements in %s", path)
+        return 0
+    logger.info("[START] Running migration %s (%d statements)", path, len(statements))
+    with driver.session() as session:
+        for i, stmt in enumerate(statements, 1):
+            preview = " ".join(stmt.split())[:80]
+            logger.info("[INFO] [%d/%d] %s", i, len(statements), preview)
+            session.run(stmt).consume()
+    logger.info("[END] Migration complete: %d statements applied", len(statements))
+    return len(statements)
+
+
+def show_vector_indexes(driver) -> List[Dict[str, Any]]:
+    """Return all vector indexes currently defined on the Neo4j instance."""
+    with driver.session() as session:
+        result = session.run(
+            "SHOW VECTOR INDEXES "
+            "YIELD name, state, labelsOrTypes, properties, options"
+        )
+        rows = [dict(record) for record in result]
+    logger.info("[INFO] %d vector index(es) found", len(rows))
+    for row in rows:
+        index_config = (row.get("options") or {}).get("indexConfig") or {}
+        dim = index_config.get("vector.dimensions")
+        sim = index_config.get("vector.similarity_function")
+        logger.info(
+            "[INFO]   - %s state=%s labels=%s props=%s dim=%s sim=%s",
+            row.get("name"),
+            row.get("state"),
+            row.get("labelsOrTypes"),
+            row.get("properties"),
+            dim,
+            sim,
+        )
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser(description="Backfill Neo4j graph from DynamoDB tracker table")
     parser.add_argument("--region", default="us-west-2")
@@ -226,11 +297,35 @@ def main():
     parser.add_argument("--secret-name", default=None,
                         help="Secrets Manager secret name (default: env NEO4J_SECRET_NAME)")
     parser.add_argument("--dry-run", action="store_true", help="Scan only, no graph writes")
+    parser.add_argument("--run-migration", default=None,
+                        help="Path to a .cypher migration file; when set, runs only the migration "
+                             "and exits (no DynamoDB scan, no backfill). See "
+                             "tools/neo4j-migrations/ for managed migrations.")
+    parser.add_argument("--verify-vector-indexes", action="store_true",
+                        help="Run SHOW VECTOR INDEXES and print each index's name, state, "
+                             "labels, properties, and (dimensions, similarity_function). "
+                             "Implies skip-backfill; exits after printing.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
     secret_name = args.secret_name or os.environ.get("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
+
+    # Migration / verification fast paths -- run before the DynamoDB scan and
+    # exit without touching the tracker table or backfilling any records.
+    if args.run_migration or args.verify_vector_indexes:
+        logger.info("[INFO] Connecting to Neo4j (secret=%s, region=%s)...",
+                    secret_name, args.region)
+        creds = get_neo4j_credentials(secret_name, args.region)
+        driver = get_neo4j_driver(creds)
+        try:
+            if args.run_migration:
+                run_migration_file(driver, args.run_migration)
+            if args.verify_vector_indexes:
+                show_vector_indexes(driver)
+        finally:
+            driver.close()
+        return
 
     logger.info("[START] Backfill graph from %s (region=%s)", args.table, args.region)
 
