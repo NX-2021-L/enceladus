@@ -3269,7 +3269,12 @@ def _code_mode_tool_catalog() -> list[Tool]:
             name="get_compact_context",
             description=(
                 "Budgeted composite context assembly that reuses existing issue-context, codemap, "
-                "architecture, document, governance, and project helpers while preserving raw codemap payloads."
+                "architecture, document, governance, and project helpers while preserving raw codemap payloads. "
+                "ENC-TSK-B92: when `query` or `anchor_record_id` is supplied the response additionally "
+                "includes a `hybrid_retrieval` section containing records ranked by Reciprocal Rank Fusion "
+                "over three signals (vector cosine via HNSW, graph Personalized PageRank / Cypher fallback, "
+                "keyword title/intent/description match). Backward-compatible: callers who do not pass "
+                "`query`/`anchor_record_id` receive the legacy context shape unchanged."
             ),
             inputSchema={
                 "type": "object",
@@ -3309,7 +3314,23 @@ def _code_mode_tool_catalog() -> list[Tool]:
                     },
                     "query": {
                         "type": "string",
-                        "description": "Topic or reference search query.",
+                        "description": "Topic or reference search query. When supplied, enables the hybrid retrieval vector + keyword signals (ENC-TSK-B92).",
+                    },
+                    "anchor_record_id": {
+                        "type": "string",
+                        "description": "Optional record_id used as the graph anchor for Personalized PageRank / fallback edge-walk scoring in hybrid retrieval. Defaults to `record_id` for record modes. (ENC-TSK-B92)",
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Hybrid retrieval top-N result count (default 20, max 50). Applied after RRF fusion and FSRS-6 T3 Lesson filtering. (ENC-TSK-B92)",
+                    },
+                    "include_below_threshold": {
+                        "type": "boolean",
+                        "description": "If true, includes Lessons with FSRS-6 stability < T3 (0.7) in hybrid retrieval results. Default false suppresses below-threshold Lessons per B62 scope item #4. (ENC-TSK-B92)",
+                    },
+                    "record_type": {
+                        "type": "string",
+                        "description": "Optional record-type filter (task/issue/feature/plan/lesson/document) applied to hybrid retrieval. (ENC-TSK-B92)",
                     },
                     "include_code_map": {
                         "type": "boolean",
@@ -3322,6 +3343,10 @@ def _code_mode_tool_catalog() -> list[Tool]:
                     "include_related_documents": {
                         "type": "boolean",
                         "description": "If true, include related document summaries when available.",
+                    },
+                    "include_hybrid_retrieval": {
+                        "type": "boolean",
+                        "description": "If true (default when query/anchor_record_id is set), include three-signal hybrid retrieval results under hybrid_retrieval. Set false to disable. (ENC-TSK-B92)",
                     },
                 },
             },
@@ -7237,6 +7262,74 @@ async def _get_compact_context_meta(args: dict) -> list[TextContent]:
             mode=mode,
         )
 
+    # ENC-TSK-B92 Phase 1: three-signal hybrid retrieval.
+    # Opt-in by passing `query` and/or `anchor_record_id`. Backward-compat:
+    # callers who do not pass either receive exactly the legacy context shape.
+    include_hybrid_retrieval = args.get("include_hybrid_retrieval")
+    query_text = str(args.get("query") or "").strip()
+    anchor_id = str(args.get("anchor_record_id") or "").strip()
+    # Default anchor for record-oriented modes: use the primary record_id.
+    if not anchor_id and mode in _RECORD_CONTEXT_MODES:
+        anchor_id = str(args.get("record_id") or "").strip()
+    # Infer project_id from args first, then from the assembled context.
+    hybrid_project_id = str(args.get("project_id") or "").strip()
+    if not hybrid_project_id and isinstance(context.get("record_context"), dict):
+        rc = context["record_context"]
+        hybrid_project_id = str((rc or {}).get("project_id") or "").strip()
+    if not hybrid_project_id and anchor_id:
+        try:
+            hybrid_project_id, _rt, _rid = _parse_record_id(anchor_id)
+        except Exception:
+            hybrid_project_id = ""
+
+    # Auto-enable when the caller provided a query or anchor and did not
+    # explicitly opt out. Explicit True is honored regardless.
+    should_invoke_hybrid = (
+        include_hybrid_retrieval is True
+        or (include_hybrid_retrieval is not False and (query_text or anchor_id))
+    )
+    if should_invoke_hybrid and hybrid_project_id and (query_text or anchor_id):
+        try:
+            hybrid_resp = _invoke_hybrid_retrieval(
+                project_id=hybrid_project_id,
+                query_text=query_text or None,
+                anchor_record_id=anchor_id or None,
+                record_type_filter=args.get("record_type"),
+                top_n=args.get("top_n"),
+                include_below_threshold=bool(args.get("include_below_threshold", False)),
+            )
+            underlying_calls.append({
+                "tool": "graph_query_api.hybrid",
+                "status": "success" if hybrid_resp.get("success") else "error",
+                "arguments": {
+                    "project_id": hybrid_project_id,
+                    "query": query_text,
+                    "anchor_record_id": anchor_id,
+                    "record_type": args.get("record_type"),
+                    "top_n": args.get("top_n"),
+                    "include_below_threshold": bool(args.get("include_below_threshold", False)),
+                },
+            })
+            if hybrid_resp.get("error"):
+                warnings.append(
+                    "hybrid retrieval unavailable: " + str(hybrid_resp.get("error"))
+                )
+            else:
+                context["hybrid_retrieval"] = {
+                    "nodes": hybrid_resp.get("nodes", []),
+                    "summary": hybrid_resp.get("summary", ""),
+                    "signal_availability": hybrid_resp.get("signal_availability", {}),
+                    "graph_algorithm": hybrid_resp.get("graph_algorithm"),
+                    "rrf_k": hybrid_resp.get("rrf_k"),
+                    "embedding_coverage_sample": hybrid_resp.get("embedding_coverage_sample", {}),
+                    "per_node_fusion": hybrid_resp.get("per_node_fusion", {}),
+                    "fsrs_t3_threshold": hybrid_resp.get("fsrs_t3_threshold"),
+                    "include_below_threshold": hybrid_resp.get("include_below_threshold"),
+                    "duration_ms": hybrid_resp.get("duration_ms"),
+                }
+        except Exception as exc:
+            warnings.append(f"hybrid retrieval failed: {exc}")
+
     # ENC-FTR-050: Context Node assembly manifest (flagged off by default)
     if ENABLE_CONTEXT_NODES and args.get("max_tokens"):
         try:
@@ -7936,11 +8029,46 @@ async def _tracker_graphsearch(args: dict) -> list[TextContent]:
     for key in ("edge_types", "edge_type", "min_weight"):
         if args.get(key) is not None:
             query_params[key] = args[key]
+    # ENC-TSK-B92: hybrid-specific knobs (forwarded when search_type=hybrid)
+    for key in ("anchor_record_id", "top_n", "include_below_threshold"):
+        if args.get(key) is not None:
+            query_params[key] = args[key]
 
     resp = _graph_query_api_request(query=query_params)
     if resp.get("error"):
         return _result_text(resp)
     return _result_text(resp)
+
+
+def _invoke_hybrid_retrieval(
+    project_id: str,
+    query_text: Optional[str],
+    anchor_record_id: Optional[str],
+    record_type_filter: Optional[str] = None,
+    top_n: Optional[int] = None,
+    include_below_threshold: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Call the graph_query_api `hybrid` search_type via HTTP (ENC-TSK-B92).
+
+    Returns the raw response dict; callers inspect `error` / `success` keys.
+    """
+    params: Dict[str, Any] = {
+        "search_type": "hybrid",
+        "project_id": project_id,
+    }
+    q = (query_text or "").strip()
+    if q:
+        params["query"] = q
+    a = (anchor_record_id or "").strip()
+    if a:
+        params["anchor_record_id"] = a
+    if record_type_filter:
+        params["record_type"] = record_type_filter
+    if top_n is not None:
+        params["top_n"] = str(int(top_n))
+    if include_below_threshold:
+        params["include_below_threshold"] = "true"
+    return _graph_query_api_request(query=params)
 
 
 # --- ENC-FTR-049: Typed Relationship Edge Tools ---

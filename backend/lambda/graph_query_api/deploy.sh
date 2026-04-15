@@ -49,6 +49,12 @@ ensure_role() {
       "Effect": "Allow",
       "Action": ["secretsmanager:GetSecretValue"],
       "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:enceladus/neo4j/auradb-credentials*"
+    },
+    {
+      "Sid": "BedrockTitanV2InvokeModel",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel"],
+      "Resource": "arn:aws:bedrock:${REGION}::foundation-model/amazon.titan-embed-text-v2:0"
     }
   ]
 }
@@ -91,6 +97,11 @@ package_lambda() {
   fi
 
   cp "${ROOT_DIR}/lambda_function.py" "${build_dir}/"
+  # ENC-TSK-B92: include the canonical embedding helper from graph_sync so
+  # query-side embeddings share the exact text/model contract (dimensions=256,
+  # normalize=true, title+intent+description extraction) used by the indexed
+  # node embeddings (ENC-TSK-B94 / ENC-TSK-B91).
+  cp "${ROOT_DIR}/../graph_sync/embedding.py" "${build_dir}/embedding.py"
 
   python3 -m pip install \
     --quiet \
