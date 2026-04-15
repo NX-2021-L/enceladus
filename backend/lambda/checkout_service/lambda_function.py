@@ -1717,6 +1717,43 @@ def _get_required_transition_type(component_ids: list) -> Optional[str]:
     return required
 
 
+def _get_components_lifecycle(component_ids: list) -> Dict[str, Dict[str, str]]:
+    """Fetch per-component lifecycle metadata for the FTR-076 / E10 gate.
+
+    Returns a dict keyed by component_id with sub-dicts containing
+    `lifecycle_status` and (when present) `rejection_reason`. Components
+    not found in the registry are omitted (matching the fail-open posture
+    of `_get_required_transition_type` for missing-component cases).
+    Components without a `lifecycle_status` attribute (pre-FTR-076 records
+    that escaped the E12 backfill) are reported as `lifecycle_status='active'`
+    so the gate treats them as the historical default.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    if not component_ids:
+        return out
+    for cid in component_ids:
+        try:
+            resp = _ddb.get_item(
+                TableName=COMPONENTS_TABLE,
+                Key={"component_id": {"S": str(cid)}},
+            )
+            item = resp.get("Item")
+            if not item:
+                logger.warning(
+                    "[FTR-076] Component '%s' not found in registry; skipping lifecycle gate", cid
+                )
+                continue
+            ls = item.get("lifecycle_status", {}).get("S", "active")
+            entry: Dict[str, str] = {"lifecycle_status": ls}
+            rr = item.get("rejection_reason", {}).get("S", "")
+            if rr:
+                entry["rejection_reason"] = rr
+            out[str(cid)] = entry
+        except Exception as exc:
+            logger.error("[FTR-076] Failed to fetch component '%s' lifecycle: %s", cid, exc)
+    return out
+
+
 def _get_component_transition_type(component_id: str) -> str:
     """Fetch current transition_type for a component from registry. Defaults to github_pr_deploy."""
     try:
@@ -1967,6 +2004,75 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
             required_fields=["components"],
             example_fix=_example_checkout_fix(task_id),
         )
+    # --- ENC-FTR-076 / ENC-TSK-E10: Component lifecycle_status gate ---
+    # Block agent-initiated advances when any task component is in
+    # `proposed` or `rejected` state. PWA users (user_initiated=true) bypass
+    # this gate so io can still close legacy tasks against unapproved
+    # components if needed. `approved` is a transient state that should not
+    # be observed at advance time (it flips to `active` atomically inside
+    # the same DynamoDB transaction in coordination_api E09); if observed,
+    # we treat it as `active` and log a warning for ops visibility.
+    if components and not is_user_initiated:
+        lifecycle_map = _get_components_lifecycle(components)
+        proposed_ids: list = []
+        rejected_entries: list = []
+        for cid in components:
+            entry = lifecycle_map.get(str(cid))
+            if not entry:
+                continue
+            ls = entry.get("lifecycle_status", "active")
+            if ls == "proposed":
+                proposed_ids.append(str(cid))
+            elif ls == "rejected":
+                rejected_entries.append({
+                    "component_id": str(cid),
+                    "rejection_reason": entry.get("rejection_reason", ""),
+                })
+            elif ls == "approved":
+                logger.warning(
+                    "[FTR-076] Component '%s' observed in lifecycle_status=approved at advance time; "
+                    "expected approved -> active to be atomic. Treating as active.", cid,
+                )
+
+        if proposed_ids:
+            return _validation_error(
+                400,
+                (
+                    f"Component(s) {proposed_ids} are pending coordination-lead approval "
+                    f"(lifecycle_status='proposed'). Wait for io to approve via the PWA "
+                    f"Components page, or escalate."
+                ),
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                extra_details={
+                    "code": "component_not_approved",
+                    "component_ids": proposed_ids,
+                    "guidance": "Pending coordination lead approval. Wait for io to approve via PWA or escalate.",
+                },
+            )
+        if rejected_entries:
+            primary = rejected_entries[0]
+            return _validation_error(
+                400,
+                (
+                    f"Component '{primary['component_id']}' has been rejected "
+                    f"(lifecycle_status='rejected'). Reason: {primary['rejection_reason'] or '(no reason recorded)'}. "
+                    "Choose a different component or escalate to coord lead."
+                ),
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                extra_details={
+                    "code": "component_rejected",
+                    "rejected_components": rejected_entries,
+                },
+            )
+
     if components:
         required_type = _get_required_transition_type(components)
         if required_type is not None:
