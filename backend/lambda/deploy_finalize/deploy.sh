@@ -39,7 +39,7 @@ deploy_lambda() {
 
   log "[START] updating Lambda code: ${FUNCTION_NAME}"
   # ENC-TSK-E19: verify package arch matches Lambda runtime before upload
-  E19_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+  E19_REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
   E19_EXPECTED_ARCH="x86_64"
   [ -n "${ENVIRONMENT_SUFFIX:-}" ] && E19_EXPECTED_ARCH="arm64"
   python3 "${E19_REPO_ROOT}/tools/verify_lambda_package_arch.py" \
