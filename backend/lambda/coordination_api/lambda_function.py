@@ -8250,6 +8250,13 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
         logger.exception("components_propose failed")
         return _error(500, f"Failed to propose component: {exc}")
 
+    _publish_component_proposed_event(
+        component_id=component_id,
+        project_id=project_id,
+        proposing_agent_session_id=proposing_agent_session_id,
+        requested_minimum_transition_type=requested_type,
+    )
+
     return _response(
         201,
         {
@@ -8261,6 +8268,50 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
             "component": component_item,
         },
     )
+
+
+COMPONENT_EVENTS_TOPIC_ARN = os.environ.get("COMPONENT_EVENTS_TOPIC_ARN", "")
+COMPONENT_PROPOSAL_PWA_DEEP_LINK = os.environ.get(
+    "COMPONENT_PROPOSAL_PWA_DEEP_LINK",
+    "https://jreese.net/components?filter=pending",
+)
+
+
+def _publish_component_proposed_event(
+    *,
+    component_id: str,
+    project_id: str,
+    proposing_agent_session_id: str,
+    requested_minimum_transition_type: str,
+) -> None:
+    """Publish a ComponentProposed SNS event after a successful component.propose write.
+
+    ENC-FTR-076 / ENC-TSK-E11. Failures are logged but never raised — the
+    DynamoDB write is the source of truth and SNS notification is best-effort.
+    """
+    if not COMPONENT_EVENTS_TOPIC_ARN:
+        logger.info("component.propose: COMPONENT_EVENTS_TOPIC_ARN not configured; skipping SNS publish")
+        return
+    payload = {
+        "event_type": "component.proposed",
+        "component_id": component_id,
+        "project_id": project_id,
+        "proposing_agent_session_id": proposing_agent_session_id,
+        "requested_minimum_transition_type": requested_minimum_transition_type,
+        "pwa_deep_link": COMPONENT_PROPOSAL_PWA_DEEP_LINK,
+    }
+    try:
+        sns = boto3.client(
+            "sns",
+            region_name=os.environ.get("DYNAMODB_REGION") or os.environ.get("AWS_REGION"),
+        )
+        sns.publish(
+            TopicArn=COMPONENT_EVENTS_TOPIC_ARN,
+            Subject=f"Component proposed: {component_id}",
+            Message=json.dumps(payload),
+        )
+    except Exception as exc:
+        logger.warning("component.propose SNS publish failed for %s: %s", component_id, exc)
 
 
 def _resolve_decider_identity(claims: Dict[str, Any]) -> str:
