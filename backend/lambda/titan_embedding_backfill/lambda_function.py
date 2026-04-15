@@ -344,11 +344,20 @@ def _write_embedding(
 
 
 def _coverage_for_label(driver, label: str) -> Dict[str, int]:
-    """Return {'total': N, 'with_embedding': M} for `label`."""
+    """Return {'total': N, 'with_embedding': M} for `label`.
+
+    ENC-TSK-E06: excludes placeholder stub nodes (is_placeholder=true) from
+    both numerator and denominator so coverage reflects the active corpus
+    only. Placeholders are labeled target nodes created by graph_sync
+    _reconcile_edges() placeholder MERGE when a typed-edge reference points
+    at an ID with no backing DynamoDB record; they carry zero properties
+    beyond record_id + is_placeholder.
+    """
     if label not in ALLOWED_LABELS:
         raise ValueError(f"Unknown label '{label}'")
     cypher = (
         f"MATCH (n:{label}) "
+        "WHERE n.is_placeholder IS NULL OR n.is_placeholder = false "
         f"RETURN count(n) AS total, count(n.{EMBEDDING_PROPERTY}) AS with_embedding"
     )
     with driver.session() as session:
