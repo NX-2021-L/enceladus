@@ -1,6 +1,11 @@
 /**
  * PlanDetailPage — detail view for plan records (ENC-FTR-058).
  * Shows objectives set with status, attached documents, and lifecycle actions.
+ *
+ * ENC-FTR-073: Plans are capped at 10 per project in the feed payload.
+ * Out-of-cap plans (e.g. ENC-PLN-006) are resolved via useRecordFallback,
+ * which fetches directly from the tracker API and normalizes the response
+ * into the Plan feed shape the renderer expects.
  */
 
 import { useMemo, useState } from 'react'
@@ -10,11 +15,13 @@ import { PriorityBadge } from '../components/shared/PriorityBadge'
 import { MarkdownRenderer } from '../components/shared/MarkdownRenderer'
 import { HistoryFeed } from '../components/shared/HistoryFeed'
 import { LifecycleActions } from '../components/shared/LifecycleActions'
-import { LoadingState } from '../components/shared/LoadingState'
-import { ErrorState } from '../components/shared/ErrorState'
+import { RecordFallbackLoading } from '../components/shared/RecordFallbackLoading'
+import { RecordNotFound } from '../components/shared/RecordNotFound'
+import { RecordFallbackError } from '../components/shared/RecordFallbackError'
 import { CopyButton } from '../components/shared/CopyButton'
 import { formatDate } from '../lib/formatters'
 import { useLiveFeed } from '../contexts/LiveFeedContext'
+import { useRecordFallback } from '../hooks/useRecordFallback'
 
 function getRecordPath(id: string): string {
   if (id.includes('-TSK-')) return `/tasks/${id}`
@@ -27,7 +34,20 @@ export function PlanDetailPage() {
   const { planId } = useParams<{ planId: string }>()
   const { plans, tasks: allTasks, issues: allIssues, features: allFeatures, isPending, isError } = useLiveFeed()
 
-  const plan = useMemo(() => plans.find((p) => p.plan_id === planId), [plans, planId])
+  const cachedPlan = useMemo(() => plans.find((p) => p.plan_id === planId), [plans, planId])
+  const {
+    data: plan,
+    isLoading: fallbackLoading,
+    isError: fallbackIsError,
+    isNotFound,
+    refetch,
+  } = useRecordFallback({
+    recordType: 'plan',
+    recordId: planId,
+    cached: cachedPlan,
+    feedPending: isPending,
+    feedError: isError,
+  })
 
   // Build a lookup for objective records
   const objectivesInfo = useMemo(() => {
@@ -48,9 +68,9 @@ export function PlanDetailPage() {
 
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
 
-  if (isPending) return <LoadingState />
-  if (isError) return <ErrorState message="Failed to load plan data" />
-  if (!plan) return <ErrorState message={`Plan ${planId} not found`} />
+  if (fallbackLoading) return <RecordFallbackLoading />
+  if (isNotFound) return <RecordNotFound recordType="plan" recordId={planId ?? 'unknown'} />
+  if (fallbackIsError || !plan) return <RecordFallbackError onRetry={refetch} />
 
   return (
     <div className="space-y-4 pb-24">
