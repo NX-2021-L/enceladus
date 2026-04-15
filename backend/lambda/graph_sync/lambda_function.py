@@ -673,6 +673,9 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "hands-off": "HANDS_OFF", "handed-off-by": "HANDED_OFF_BY",
     # ENC-TSK-960: Coordination dispatch edge types
     "dispatches": "DISPATCHES", "dispatched-by": "DISPATCHED_BY",
+    # ENC-FTR-076 / ENC-TSK-E08: Component proposal provenance
+    "component-proposed-by": "COMPONENT_PROPOSED_BY",
+    "proposes-component": "PROPOSES_COMPONENT",
     # ENC-PLN-014 / ENC-FTR-065: Document edge types
     "doc-attached-to-plan": "DOC_ATTACHED_TO_PLAN",  # Document -> Plan (inverse of plan-attached-doc)
     "informed-by": "INFORMED_BY",                      # Document -> Document (GDMP provenance)

@@ -250,6 +250,9 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "HANDS_OFF", "HANDED_OFF_BY",
     # ENC-TSK-960: Coordination dispatch edge types
     "DISPATCHES", "DISPATCHED_BY",
+    # ENC-FTR-076 / ENC-TSK-E08: Component proposal provenance
+    "COMPONENT_PROPOSED_BY",
+    "PROPOSES_COMPONENT",
     # ENC-PLN-014 / ENC-FTR-065: Document edge types
     "DOC_ATTACHED_TO_PLAN",  # inverse of PLAN_ATTACHED_DOC
     "INFORMED_BY",            # GDMP provenance (Document -> Document)
