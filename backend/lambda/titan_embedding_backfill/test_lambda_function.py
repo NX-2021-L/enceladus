@@ -278,6 +278,30 @@ def test_handler_dry_run_emits_expected_response(monkeypatch):
     assert result["per_label_processed"]["Issue"] == 1
 
 
+def test_handler_uat_probe_short_circuits(monkeypatch):
+    import lambda_function  # noqa: E402
+
+    # Set up a trap: if the handler doesn't short-circuit, _iter_corpus will
+    # be called and this test will fail with a deterministic message.
+    def _trap(*_args, **_kwargs):
+        raise AssertionError("_iter_corpus must NOT be called for UAT probe events")
+
+    monkeypatch.setattr(lambda_function, "_iter_corpus", _trap)
+
+    result = lambda_function.lambda_handler(
+        {
+            "rawPath": "/__uat_probe__",
+            "requestContext": {"http": {"method": "GET"}},
+            "headers": {},
+        },
+        None,
+    )
+    assert result["status"] == "ok"
+    assert result["probe"] == "uat"
+    assert result["model_id"] == "amazon.titan-embed-text-v2:0"
+    assert result["dimensions"] == 256
+
+
 def test_handler_rejects_unknown_label_in_event():
     import lambda_function  # noqa: E402
 

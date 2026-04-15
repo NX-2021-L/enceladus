@@ -366,9 +366,37 @@ def _coverage_for_label(driver, label: str) -> Dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
+def _is_uat_probe(event: Dict[str, Any]) -> bool:
+    """Return True when the invocation is the gamma UAT health probe.
+
+    The tools/gamma_uat_suite.py Lambda-invoke check (ENC-PLN-020 / ENC-TSK-D19)
+    sends `{"rawPath":"/__uat_probe__","requestContext":{"http":{"method":"GET"}},"headers":{}}`
+    to every deployed Lambda and asserts no FunctionError / ImportModuleError
+    with a 30-second timeout. For a scanner-style Lambda, running the real
+    workflow would always exceed that timeout. Recognise the probe shape and
+    return a lightweight health response so the deploy orchestration gates
+    can validate import + handler wiring without triggering a backfill.
+    """
+    if not isinstance(event, dict):
+        return False
+    return str(event.get("rawPath") or "") == "/__uat_probe__"
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """One-shot backfill entrypoint. See module docstring for event / response."""
     logger.info("[START] Titan V2 backfill invoked event=%s", json.dumps(event or {}))
+
+    # UAT health probe short-circuit (see _is_uat_probe docstring).
+    if _is_uat_probe(event or {}):
+        logger.info("[INFO] UAT probe detected; returning health response without scan")
+        return {
+            "status": "ok",
+            "probe": "uat",
+            "handler": "lambda_function.lambda_handler",
+            "model_id": TITAN_MODEL_ID,
+            "dimensions": EMBEDDING_DIMENSIONS,
+            "helper_module": "embedding",
+        }
 
     started_at = time.time()
     event = event or {}
