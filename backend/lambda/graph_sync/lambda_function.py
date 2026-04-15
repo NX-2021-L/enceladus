@@ -214,7 +214,8 @@ def _upsert_node(tx, record: Dict[str, Any]) -> None:
 
     cypher = (
         f"MERGE (n:{label} {{record_id: $record_id}}) "
-        "SET n += $props"
+        "SET n += $props "
+        "SET n.is_placeholder = false"
     )
     tx.run(cypher, record_id=record_id, props=props)
 
@@ -385,8 +386,12 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             if target_label:
                 # Ensure a label-correct target node exists. Placeholder is
                 # idempotent with the target's own _upsert_node MERGE.
+                # ENC-TSK-E06: tag new placeholders so downstream embedding +
+                # coverage pipelines can filter them out; _upsert_node clears
+                # the flag to false when the real record materializes.
                 tx.run(
-                    f"MERGE (t:{target_label} {{record_id: $tid}})",
+                    f"MERGE (t:{target_label} {{record_id: $tid}}) "
+                    "ON CREATE SET t.is_placeholder = true",
                     tid=obj_id,
                 )
                 tx.run(
@@ -417,8 +422,10 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             if not doc_id:
                 continue
             # Documents always project to the :Document label.
+            # ENC-TSK-E06: tag placeholder on create.
             tx.run(
-                "MERGE (d:Document {record_id: $did})",
+                "MERGE (d:Document {record_id: $did}) "
+                "ON CREATE SET d.is_placeholder = true",
                 did=doc_id,
             )
             tx.run(
@@ -440,8 +447,10 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         if feat_id:
             # Placeholder MERGE so the edge lands even if the Feature node
             # has not been projected yet (ENC-TSK-E01).
+            # ENC-TSK-E06: tag placeholder on create.
             tx.run(
-                "MERGE (f:Feature {record_id: $fid})",
+                "MERGE (f:Feature {record_id: $fid}) "
+                "ON CREATE SET f.is_placeholder = true",
                 fid=feat_id,
             )
             tx.run(
@@ -505,8 +514,10 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 # Placeholder MERGE on inferred label so the edge lands even
                 # when the target node has not been projected yet
                 # (ENC-TSK-E01 pattern).
+                # ENC-TSK-E06: tag placeholder on create.
                 tx.run(
-                    f"MERGE (t:{target_label} {{record_id: $tid}})",
+                    f"MERGE (t:{target_label} {{record_id: $tid}}) "
+                    "ON CREATE SET t.is_placeholder = true",
                     tid=ev_id,
                 )
                 tx.run(
@@ -553,8 +564,10 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 continue
             target_label = _infer_label_from_id(related_id)
             if target_label:
+                # ENC-TSK-E06: tag placeholder on create.
                 tx.run(
-                    f"MERGE (t:{target_label} {{record_id: $tid}})",
+                    f"MERGE (t:{target_label} {{record_id: $tid}}) "
+                    "ON CREATE SET t.is_placeholder = true",
                     tid=related_id,
                 )
                 tx.run(
@@ -583,8 +596,10 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             informed_id = _bare_id(informed_id) if informed_id else ""
             if not informed_id:
                 continue
+            # ENC-TSK-E06: tag placeholder on create.
             tx.run(
-                "MERGE (s:Document {record_id: $sid})",
+                "MERGE (s:Document {record_id: $sid}) "
+                "ON CREATE SET s.is_placeholder = true",
                 sid=informed_id,
             )
             tx.run(
