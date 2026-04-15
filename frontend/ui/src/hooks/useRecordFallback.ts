@@ -115,7 +115,15 @@ export function useRecordFallback<T extends RecordType>(
     return resolveProjectFromRecordId(recordId, projects)
   }, [recordId, cached, projects])
 
-  const fallbackEnabled = !feedPending && !cached && !!recordId && !!projectId
+  // ENC-FTR-073: Documents are routed through /api/v1/documents/{id} and do
+  // not need a project prefix (document IDs like `DOC-...` do not match any
+  // project prefix in the registry). Skip the projectId gate for documents.
+  const projectIdRequired = recordType !== 'document'
+  const fallbackEnabled =
+    !feedPending &&
+    !cached &&
+    !!recordId &&
+    (projectIdRequired ? !!projectId : true)
 
   const query = useQuery<unknown, Error>({
     queryKey: recordId ? queryKeyFor(recordType, recordId) : ['tracker', recordType, 'disabled'],
