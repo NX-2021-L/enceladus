@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-15.2",
-  "updated_at": "2026-04-15T07:45:00Z",
-  "last_change_summary": "ENC-TSK-B89: Added lesson record-body edge projection to graph_sync. tracker.lesson entity description now references the graph_projection contract; evidence_chain and extensions fields annotated with graph_projection stanzas documenting the LEARNED_FROM edge emission via _infer_label_from_id + placeholder MERGE pattern (same as ENC-TSK-E01 plan/document branch). Prior to B89, lesson records produced zero LEARNED_FROM edges from record-body (only rel# typed-relationship items projected via _upsert_relationship_edge), leaving every lesson with exactly one graph edge (BELONGS_TO->Project) and zero relationship neighbors. See ENC-ISS-189 for the canonical legacy-ID manifestation.",
+  "version": "2026-04-15.3",
+  "updated_at": "2026-04-15T08:20:00Z",
+  "last_change_summary": "ENC-TSK-B94: Added incremental Titan V2 embedding to graph_sync. New entity 'neo4j.incremental_embedding' documents the sync-inline embedding contract (model=amazon.titan-embed-text-v2:0, dimensions=256, normalize=true, property=embedding, hash property=embedding_text_hash) and the text-extraction contract shared with ENC-TSK-B91 backfill (title + intent + description + user_story, double-newline joined, deduped, 24KB cap). The graph_sync Lambda now invokes Bedrock inline after node upsert + edge reconciliation, wrapped in try/except so embedding failures never break the primary projection; no-op MODIFY events (status transitions that do not change embedding text) are skipped via hash comparison against the existing node. IAM role devops-graph-sync-lambda-role gained bedrock:InvokeModel on arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0 via deploy.sh put-role-policy. Embedding helpers live at backend/lambda/graph_sync/embedding.py and are colocated with lambda_function.py (packaged by deploy.sh:package_lambda). The ENC-TSK-B91 batch backfill worker MUST import build_embedding_text/hash_embedding_text/compute_embedding_for_record from the same module to guarantee vector parity across the incremental and batch paths.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3265,6 +3265,39 @@
         "restore_strategy": {
           "type": "string",
           "definition": "Primary restore path for Enceladus graph recovery. Backup artifacts serve as audit/reference snapshots; governed recovery uses DynamoDB re-projection via tools/backfill_graph.py with a target rebuild window of under 15 minutes for the current corpus."
+        }
+      }
+    },
+    "neo4j.incremental_embedding": {
+      "description": "Incremental Titan V2 embedding contract for graph_sync (ENC-TSK-B94). Every INSERT/MODIFY DDB stream event for Task/Issue/Feature/Plan/Lesson/Document record types produces a 256-dim Titan V2 embedding that is written to the node's `embedding` property in Neo4j alongside an `embedding_text_hash` used to short-circuit re-embedding on no-op MODIFY events (e.g. status transitions). The embedding is invoked inline on the graph_sync SQS consumer after the node upsert and edge reconciliation steps, wrapped in try/except so Bedrock, IAM, or network failures never break the primary projection. Pairs with ENC-TSK-B90 vector indexes and ENC-TSK-B91 batch backfill; all three must share the text-extraction contract implemented in backend/lambda/graph_sync/embedding.py.",
+      "fields": {
+        "model_contract": {
+          "type": "object",
+          "definition": "Bedrock model invocation parameters: modelId=amazon.titan-embed-text-v2:0, request body {inputText, dimensions: 256, normalize: true}, contentType=application/json. Response body carries 'embedding' as a list of 256 floats. Mandated by ENC-TSK-B62 AC-2 and matched by ENC-TSK-B90 vector index config (256 dims, cosine)."
+        },
+        "text_extraction_contract": {
+          "type": "string",
+          "definition": "embedding.build_embedding_text(record) concatenates title + intent + description + user_story with double-newline separators, stripping blanks and deduping lines, capped at 24,000 chars. Same function used by both the incremental (B94) and batch (B91) paths so vectors from the two sources are comparable. Contract is deliberately narrow (four well-known fields) so it works uniformly across all six embeddable record types without branching."
+        },
+        "embedding_property": {
+          "type": "string",
+          "definition": "Neo4j node property name carrying the 256-float vector. Matches the target property declared by ENC-TSK-B90 migration 001. Constant EMBEDDING_PROPERTY='embedding' in backend/lambda/graph_sync/embedding.py."
+        },
+        "embedding_hash_property": {
+          "type": "string",
+          "definition": "Neo4j node property carrying a 16-char sha256 hex prefix of the embedding input text. Used by graph_sync to skip re-invoking Bedrock when a MODIFY event's title/intent/description/user_story are unchanged from the last embedding. Constant EMBEDDING_HASH_PROPERTY='embedding_text_hash' in backend/lambda/graph_sync/embedding.py."
+        },
+        "iam_contract": {
+          "type": "string",
+          "definition": "Role devops-graph-sync-lambda-role gained bedrock:InvokeModel on Resource arn:aws:bedrock:${REGION}::foundation-model/amazon.titan-embed-text-v2:0 via deploy.sh:ensure_role() put-role-policy Sid=BedrockTitanV2InvokeModel. Same statement applied to gamma role devops-graph-sync-lambda-role-gamma when ENVIRONMENT_SUFFIX is set."
+        },
+        "failure_mode": {
+          "type": "string",
+          "definition": "Any Bedrock, IAM, or parser failure is caught by the try/except wrapper in _process_record() and logged with [ERROR] prefix. The primary node upsert and edge reconciliation steps complete regardless. A future MODIFY event on the same record re-attempts the embedding; eventual consistency is acceptable because the vector index simply ignores nodes without embeddings until they are written."
+        },
+        "no_op_skip": {
+          "type": "string",
+          "definition": "Before invoking Bedrock, graph_sync reads the node's existing embedding_text_hash and compares against a hash of the newly-built input text. If they match, compute_embedding_for_record() returns None and the Bedrock call is skipped. This keeps spend on status-transition heavy workloads (e.g. checkout.advance cycles) bounded to one invocation per record per title/intent/description/user_story change."
         }
       }
     },
