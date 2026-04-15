@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-15.4",
-  "updated_at": "2026-04-15T08:35:00Z",
-  "last_change_summary": "ENC-TSK-B91: Added embedding.titan_v2_backfill entity documenting the devops-titan-embedding-backfill Lambda (one-shot full-corpus embedding). Backfill imports build_embedding_text/hash_embedding_text/invoke_titan_v2 from backend/lambda/graph_sync/embedding.py (the canonical module introduced by ENC-TSK-B94) so incremental and batch paths produce identical vectors for identical text. Lambda scans the governed DynamoDB corpus (tracker + documents), invokes amazon.titan-embed-text-v2:0 per record at 256 dim / normalize=true, and writes {embedding, embedding_text_hash} to the per-label Neo4j node. Feeds the HNSW indexes created by ENC-TSK-B90 migration 001. skip_existing flag enables resume-after-throttle via hash comparison. Response payload includes per-label coverage with meets_ac1_threshold (>=95%) for live validation.",
+  "version": "2026-04-15.5",
+  "updated_at": "2026-04-15T08:40:00Z",
+  "last_change_summary": "ENC-TSK-B91 hotfix: Added uat_probe_handler field to embedding.titan_v2_backfill documenting the {rawPath: '/__uat_probe__'} short-circuit added to devops-titan-embedding-backfill.lambda_handler. The first deploy run failed the Gamma Health Gate UAT probe with a 30-second timeout because the Lambda treated the probe as a real invocation. Short-circuit returns a lightweight {status: ok, probe: uat, model_id, dimensions} payload before any DynamoDB scan / Neo4j connect / Bedrock invoke. Pattern is reusable for any scanner-style Lambda that must satisfy tools/gamma_uat_suite.py:check_lambda_invoke without producing side effects. No upstream embedding contract change.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3747,6 +3747,10 @@
         "invocation_contract": {
           "type": "string",
           "definition": "Agent-CLI IAM denies all required scopes; the backfill Lambda must be invoked manually by a product-lead terminal session (io-dev-admin) via `aws lambda invoke --function-name devops-titan-embedding-backfill-gamma --payload '{}' out.json` or EventBridge rule. Follow-on B91 live validation is routed via HANDOFF document pattern identical to ENC-TSK-B90 (DOC-BEFDB681C218)."
+        },
+        "uat_probe_handler": {
+          "type": "object",
+          "definition": "Gamma UAT probe short-circuit (ENC-PLN-020 / ENC-TSK-D19 contract). tools/gamma_uat_suite.py:check_lambda_invoke invokes every Lambda with {rawPath: '/__uat_probe__', requestContext: {http: {method: GET}}, headers: {}} and asserts no FunctionError within a 30-second timeout. The backfill Lambda detects this event shape via _is_uat_probe(event) at the top of lambda_handler and returns {status: ok, probe: uat, handler: lambda_function.lambda_handler, model_id, dimensions, helper_module: 'embedding'} before any DynamoDB scan, Neo4j connection, or Bedrock invoke. Required because a real backfill scan + per-record invoke far exceeds the UAT 30s budget. Pattern is reusable for any scanner-style Lambda that must coexist with the automated UAT health gate."
         }
       }
     }
