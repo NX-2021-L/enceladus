@@ -400,6 +400,88 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 pid=record_id, fid=feat_id,
             )
 
+    # ENC-FTR-052 / ENC-TSK-B89: Lesson edge projections.
+    # Lesson records carry evidence_chain (list of tracker/document record IDs)
+    # as their canonical LEARNED_FROM source plus extensions[].evidence_ids for
+    # append-only extensions. Prior to ENC-TSK-B89, _reconcile_edges() had no
+    # lesson branch at all, so every lesson node landed with exactly one edge
+    # (BELONGS_TO->Project) and zero relationship neighbors. LEARNED_FROM edges
+    # existed only for the subset of lessons whose evidence_chain entries were
+    # historically backfilled into rel# DynamoDB items by ENC-TSK-C38 Phase 2;
+    # any lesson created or updated after that backfill had zero LEARNED_FROM
+    # edges in the graph, breaking depth-1 traversal from lessons (see
+    # ENC-ISS-189 for the canonical legacy-ID manifestation).
+    #
+    # Fix: iterate both evidence_chain and every extension's evidence_ids,
+    # dedupe, then emit (Lesson)-[:LEARNED_FROM]->(target) via the E01
+    # placeholder MERGE pattern so the edge lands even when the target node is
+    # not yet projected. Unrecognised ID prefixes (e.g. legacy JAP-*, MJR-*
+    # records or pre-ENC-FTR-056 flat IDs) fall back to the legacy unlabelled
+    # MATCH with a WARNING log line so OGTM does not silently drop the edge.
+    if record_type == "lesson":
+        evidence_ids_ordered: List[str] = []
+        seen_ev: set = set()
+
+        def _collect_evidence(eid: Any) -> None:
+            if eid is None:
+                return
+            if isinstance(eid, dict):
+                return
+            val = _bare_id(str(eid).strip())
+            if val and val not in seen_ev:
+                seen_ev.add(val)
+                evidence_ids_ordered.append(val)
+
+        for ev in record.get("evidence_chain", []) or []:
+            _collect_evidence(ev)
+        # Extensions are append-only lesson_version increments; each carries
+        # its own evidence_ids bag. Project every extension's evidence IDs as
+        # additional LEARNED_FROM edges so the corpus-wide lesson graph
+        # reflects the full provenance, not just the bootstrap chain.
+        for ext in record.get("extensions", []) or []:
+            if isinstance(ext, dict):
+                for ev in ext.get("evidence_ids", []) or []:
+                    _collect_evidence(ev)
+
+        logger.info(
+            "[INFO] Lesson reconcile %s: evidence_ids=%d (deduped)",
+            record_id, len(evidence_ids_ordered),
+        )
+
+        for ev_id in evidence_ids_ordered:
+            target_label = _infer_label_from_id(ev_id)
+            if target_label:
+                # Placeholder MERGE on inferred label so the edge lands even
+                # when the target node has not been projected yet
+                # (ENC-TSK-E01 pattern).
+                tx.run(
+                    f"MERGE (t:{target_label} {{record_id: $tid}})",
+                    tid=ev_id,
+                )
+                tx.run(
+                    f"MATCH (l:Lesson), (t:{target_label}) "
+                    "WHERE l.record_id = $lid AND t.record_id = $tid "
+                    "MERGE (l)-[:LEARNED_FROM]->(t)",
+                    lid=record_id, tid=ev_id,
+                )
+            else:
+                # Unknown/legacy ID prefix: fall back to unlabelled MATCH so
+                # pre-ENC-FTR-056 legacy IDs (JAP-*, MJR-*, bare non-canonical
+                # strings) still produce an edge when the target happens to
+                # be present. ENC-ISS-189 documents why the warning is
+                # useful for future rationalization work.
+                logger.warning(
+                    "[WARNING] Lesson %s evidence_id %s has unrecognised ID prefix; "
+                    "falling back to unlabelled MATCH (edge may not land if target absent)",
+                    record_id, ev_id,
+                )
+                tx.run(
+                    "MATCH (l:Lesson), (t {record_id: $tid}) "
+                    "WHERE l.record_id = $lid "
+                    "MERGE (l)-[:LEARNED_FROM]->(t)",
+                    lid=record_id, tid=ev_id,
+                )
+
     # ENC-FTR-065 / ENC-PLN-014: Document edge projections
     if record_type == "document":
         doc_id = record_id  # already _bare_id-stripped at the top of the function
