@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-15.6",
-  "updated_at": "2026-04-15T09:05:00Z",
-  "last_change_summary": "ENC-TSK-B92 Phase 1 hybrid retrieval: Added retrieval.hybrid_pipeline entity documenting the three-signal (vector + graph + keyword) Reciprocal Rank Fusion contract delivered by the new `hybrid` search_type in graph_query_api. Extended mcp_server.context_assembly.get_compact_context to note the optional hybrid_retrieval section that fires when `query` or `anchor_record_id` is passed. Backward compatibility: callers not supplying those parameters continue to receive the legacy context shape unchanged. RRF k=60 per ENC-TSK-B62 description; per-relationship-type weight projection per ENC-LSN-029 (IMPLEMENTS > ADDRESSES > RELATED_TO > LEARNED_FROM > CHILD_OF > PLAN_CONTAINS > BELONGS_TO); GDS Personalized PageRank with Cypher fallback when GDS unavailable; FSRS-6 T3 threshold at 0.7 suppresses below-threshold Lessons unless include_below_threshold=true. Query-side embedding uses the same backend/lambda/graph_sync/embedding.py module as incremental (ENC-TSK-B94) and batch (ENC-TSK-B91) index-side embedding to guarantee vector parity.",
+  "version": "2026-04-15.7",
+  "updated_at": "2026-04-15T09:25:00Z",
+  "last_change_summary": "ENC-TSK-E06 / ENC-ISS-230: Added neo4j.placeholder_node entity documenting the is_placeholder boolean property contract on Neo4j nodes. graph_sync._reconcile_edges() placeholder MERGE sites (PLAN_CONTAINS, PLAN_ATTACHED_DOC, PLAN_IMPLEMENTS, LEARNED_FROM, RELATED_TO, INFORMED_BY source) now set `is_placeholder=true` via ON CREATE SET so downstream consumers can distinguish edge-target stub nodes from real DynamoDB-backed records. _upsert_node clears is_placeholder to false on the real record's projection. embedding.titan_v2_backfill._coverage_for_label adds WHERE n.is_placeholder IS NULL OR n.is_placeholder = false so coverage metrics reflect the active corpus only — closes the B91 denominator inflation (229 orphan stubs pulled Task to 93.72% and Issue to 90.69% despite 100% active-corpus coverage).",
   "owners": [
     "enceladus-platform"
   ],
@@ -3298,6 +3298,35 @@
         "no_op_skip": {
           "type": "string",
           "definition": "Before invoking Bedrock, graph_sync reads the node's existing embedding_text_hash and compares against a hash of the newly-built input text. If they match, compute_embedding_for_record() returns None and the Bedrock call is skipped. This keeps spend on status-transition heavy workloads (e.g. checkout.advance cycles) bounded to one invocation per record per title/intent/description/user_story change."
+        }
+      }
+    },
+    "neo4j.placeholder_node": {
+      "description": "Placeholder-node contract on Neo4j graph (ENC-TSK-E06 / ENC-ISS-230). graph_sync._reconcile_edges() uses the ENC-TSK-E01 _infer_label_from_id + placeholder MERGE pattern to create labeled target nodes when a typed-edge reference points at an ID whose DynamoDB record has not yet been projected. This eliminates the zero-edge race window but also produces orphan nodes when the reference targets an ID that has no backing record at all (cross-project legacy refs, malformed IDs like 'ENC-LSN-001#learned-from#ENC-TSK-803', unqualified shorthands like 'harrisonfamily'). ENC-TSK-E06 introduces the `is_placeholder` boolean property on every labeled node to distinguish edge-target stubs from real records, so downstream embedding, coverage, retrieval, and health pipelines can filter them out without re-deriving the distinction each time. The property is set by graph_sync at MERGE time; no migration is required for new records, and a one-time Cypher batch retroactively tags the 229 pre-E06 orphans on the shared prod+gamma AuraDB.",
+      "fields": {
+        "placeholder_on_create": {
+          "type": "string",
+          "definition": "Every placeholder MERGE in graph_sync._reconcile_edges() (Plan PLAN_CONTAINS, Plan PLAN_ATTACHED_DOC, Plan PLAN_IMPLEMENTS, Lesson LEARNED_FROM, Document RELATED_TO, Document INFORMED_BY source) uses the pattern `MERGE (x:{Label} {record_id: $id}) ON CREATE SET x.is_placeholder = true`. On existing-node match the ON CREATE clause is a no-op, preserving the is_placeholder=false flag that _upsert_node set when the real record was projected."
+        },
+        "placeholder_clear_on_upsert": {
+          "type": "string",
+          "definition": "graph_sync._upsert_node() MERGEs by (label, record_id) and applies `SET n += $props SET n.is_placeholder = false`. When the real DynamoDB record arrives after a placeholder was created by an earlier reconcile edge pass, the MERGE matches the placeholder node, SET += populates all properties, and the explicit SET clears is_placeholder to false. Idempotent: re-running on a node already is_placeholder=false is a no-op."
+        },
+        "coverage_filter": {
+          "type": "string",
+          "definition": "Coverage metric queries exclude placeholders from both numerator and denominator. embedding.titan_v2_backfill._coverage_for_label applies `MATCH (n:{Label}) WHERE n.is_placeholder IS NULL OR n.is_placeholder = false RETURN count(n) AS total, count(n.embedding) AS with_embedding`. The IS NULL branch keeps pre-E06 nodes that never got the flag stamped (currently zero after the one-time Cypher backfill; retained for forward compatibility if future migration paths ever re-emit nodes without the flag)."
+        },
+        "embedding_filter": {
+          "type": "string",
+          "definition": "Placeholders do not carry embeddable text (zero-property stubs), so they never appear in embedding.titan_v2_backfill._iter_corpus (which iterates DynamoDB, not Neo4j) and never flow through graph_sync's incremental Titan V2 path (no DDB stream event triggers a reconcile for a node that has no DDB record). Neo4j vector indexes (ENC-TSK-B90) only index nodes carrying the `embedding` property, so placeholders are never candidates for ANN queryNodes results. No explicit is_placeholder filter is needed on vector retrieval paths."
+        },
+        "one_time_backfill_query": {
+          "type": "string",
+          "definition": "Retroactive tagging of pre-E06 orphans: `MATCH (n) WHERE n.embedding IS NULL AND coalesce(size(n.title),0) + coalesce(size(n.description),0) = 0 AND n.is_placeholder IS NULL SET n.is_placeholder = true RETURN count(n)`. Executed once under product-lead io-dev-admin terminal against the shared prod+gamma AuraDB. Expected count on first run: 229 (182 :Task + 47 :Issue)."
+        },
+        "race_fix_invariant": {
+          "type": "string",
+          "definition": "ENC-TSK-E01 (ENC-ISS-184) race-fix invariant preserved: typed edges PLAN_CONTAINS / PLAN_ATTACHED_DOC / PLAN_IMPLEMENTS / LEARNED_FROM / RELATED_TO / INFORMED_BY still materialize via placeholder MERGE when the target node has not yet been projected. is_placeholder=true does not suppress the edge — it only distinguishes the stub so retrieval scoring and coverage accounting can treat it as a low-information anchor rather than a missing record."
         }
       }
     },
