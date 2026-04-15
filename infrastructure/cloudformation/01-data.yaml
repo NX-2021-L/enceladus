@@ -483,6 +483,20 @@ Resources:
         - Key: Component
           Value: feed
 
+  # ENC-FTR-076 / ENC-TSK-E11: Notification topic fired by coordination_api
+  # _handle_components_propose after a component is written with
+  # lifecycle_status=proposed. Coord-lead approval workflow subscribes here.
+  ComponentRegistryEventsTopic:
+    Type: AWS::SNS::Topic
+    DeletionPolicy: Retain
+    Properties:
+      TopicName: !Sub "enceladus-component-registry-events${EnvironmentSuffix}"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+
 Outputs:
   CoordinationTableName:
     Value: !Ref CoordinationRequestsTable
@@ -556,3 +570,7 @@ Outputs:
     Value: !GetAtt GraphSyncDLQ.Arn
     Export:
       Name: !Sub ${AWS::StackName}-GraphSyncDLQArn
+  ComponentRegistryEventsTopicArn:
+    Value: !Ref ComponentRegistryEventsTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-ComponentRegistryEventsTopicArn
