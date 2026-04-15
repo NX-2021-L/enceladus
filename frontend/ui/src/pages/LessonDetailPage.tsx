@@ -1,24 +1,48 @@
 import { useParams, Link } from 'react-router-dom'
 import { useLessons } from '../hooks/useLessons'
+import { useRecordFallback } from '../hooks/useRecordFallback'
 import { StatusChip } from '../components/shared/StatusChip'
 import { PillarScoreChart } from '../components/shared/PillarScoreChart'
 import { LinkedText } from '../components/shared/LinkedText'
 import { MarkdownRenderer } from '../components/shared/MarkdownRenderer'
 import { HistoryFeed } from '../components/shared/HistoryFeed'
+import { RecordFallbackLoading } from '../components/shared/RecordFallbackLoading'
+import { RecordNotFound } from '../components/shared/RecordNotFound'
+import { RecordFallbackError } from '../components/shared/RecordFallbackError'
 import { timeAgo } from '../lib/formatters'
 
+/**
+ * LessonDetailPage — detail view for lesson records.
+ *
+ * ENC-FTR-073: Lessons are capped at 10 per project in the feed payload.
+ * Out-of-cap lessons (e.g. ENC-LSN-001) are resolved via useRecordFallback,
+ * which fetches directly from the tracker API and normalizes the extensions
+ * field (API shape {author, content, evidence_ids, timestamp} →
+ * feed shape {description, timestamp, provider?}) so the existing render
+ * path continues to work unchanged.
+ */
 export default function LessonDetailPage() {
   const { lessonId } = useParams<{ lessonId: string }>()
-  const { lessons, isLoading } = useLessons()
+  const { lessons, isLoading: feedLoading } = useLessons()
 
-  const lesson = lessons.find((l) => l.lesson_id === lessonId)
+  const cachedLesson = lessons.find((l) => l.lesson_id === lessonId)
+  const {
+    data: lesson,
+    isLoading: fallbackLoading,
+    isError: fallbackIsError,
+    isNotFound,
+    refetch,
+  } = useRecordFallback({
+    recordType: 'lesson',
+    recordId: lessonId,
+    cached: cachedLesson,
+    feedPending: feedLoading,
+    feedError: false,
+  })
 
-  if (isLoading) {
-    return <div className="p-4 text-slate-400">Loading...</div>
-  }
-  if (!lesson) {
-    return <div className="p-4 text-slate-400">Lesson not found: {lessonId}</div>
-  }
+  if (fallbackLoading) return <RecordFallbackLoading />
+  if (isNotFound) return <RecordNotFound recordType="lesson" recordId={lessonId ?? 'unknown'} />
+  if (fallbackIsError || !lesson) return <RecordFallbackError onRetry={refetch} />
 
   return (
     <div className="p-4 max-w-3xl mx-auto space-y-6">
