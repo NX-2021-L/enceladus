@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-13.3",
-  "updated_at": "2026-04-13T05:37:00Z",
+  "version": "2026-04-15.1",
+  "updated_at": "2026-04-15T05:30:00Z",
   "last_change_summary": "ENC-TSK-D81: Updated api.error_envelope entity to reflect D56 enrichment scope (6 Lambdas + MCP normalization). Expanded details definition with post-D56 standard keys.",
   "owners": [
     "enceladus-platform"
@@ -3143,22 +3143,25 @@
       }
     },
     "tracker.plan.relationship_types": {
-      "description": "Typed relationship edge types introduced by ENC-FTR-058 for plan records.",
+      "description": "Typed relationship edge types introduced by ENC-FTR-058 for plan records. ENC-TSK-E01 / ENC-ISS-184: graph_sync now MERGEs a label-correct placeholder target node (using the ID-prefix → label inference helper _infer_label_from_id) before MERGEing the edge, so PLAN_CONTAINS / PLAN_ATTACHED_DOC / PLAN_IMPLEMENTS edges land even when the objective task or attached document has not yet been processed by graph_sync. The target record's own subsequent stream event MERGEs by the same (label, record_id) pair via _upsert_node and augments the placeholder with full properties without duplicating the node. This eliminates the silent zero-edge race window that previously occurred when plan.add_objective was called for a freshly-created task (e.g. ENC-PLN-016 had zero PLAN_CONTAINS edges to its 8 objectives despite a populated objectives_set).",
       "fields": {
         "plan-contains": {
           "type": "relationship",
           "definition": "Plan → task/issue/feature. Indicates the target record is an objective of this plan.",
-          "inverse": "contained-by-plan"
+          "inverse": "contained-by-plan",
+          "graph_projection": "graph_sync/_reconcile_edges() plan branch iterates objectives_set and MERGEs a placeholder target node with the inferred label (TSK→Task, ISS→Issue, FTR→Feature) before MERGEing the PLAN_CONTAINS edge. Unrecognised ID prefixes log a warning and fall back to the legacy unlabelled MATCH (edge may not land if target absent)."
         },
         "plan-attached-doc": {
           "type": "relationship",
           "definition": "Plan → document. Attaches a document as reference material for the plan.",
-          "inverse": "doc-attached-to-plan"
+          "inverse": "doc-attached-to-plan",
+          "graph_projection": "graph_sync/_reconcile_edges() plan branch iterates attached_documents and MERGEs a Document placeholder before MERGEing PLAN_ATTACHED_DOC and the inverse DOC_ATTACHED_TO_PLAN."
         },
         "plan-implements": {
           "type": "relationship",
           "definition": "Plan → feature. The plan is the implementation vehicle for this feature.",
-          "inverse": "implemented-by-plan"
+          "inverse": "implemented-by-plan",
+          "graph_projection": "graph_sync/_reconcile_edges() plan branch reads related_feature_id and MERGEs a Feature placeholder before MERGEing PLAN_IMPLEMENTS."
         }
       }
     },
@@ -3409,7 +3412,7 @@
       }
     },
     "document.graph_edges": {
-      "description": "Neo4j edge types projected from Document nodes via the DocumentsToGraphPipe → GraphSyncQueue → graph_sync handler (ENC-PLN-014). Document nodes carry BELONGS_TO (project), RELATED_TO (any related_items target), INFORMED_BY (source document, GDMP provenance), INFORMS (inverse provenance), and DOC_ATTACHED_TO_PLAN (inverse of plan PLAN_ATTACHED_DOC). Edge emission is implemented in backend/lambda/graph_sync/lambda_function.py inside the document branch of _reconcile_edges(), and the edge labels are registered in backend/lambda/graph_query_api/lambda_function.py _ALLOWED_EDGE_TYPES so they are queryable via tracker.graphsearch.",
+      "description": "Neo4j edge types projected from Document nodes via the DocumentsToGraphPipe → GraphSyncQueue → graph_sync handler (ENC-PLN-014). Document nodes carry BELONGS_TO (project), RELATED_TO (any related_items target), INFORMED_BY (source document, GDMP provenance), INFORMS (inverse provenance), and DOC_ATTACHED_TO_PLAN (inverse of plan PLAN_ATTACHED_DOC). Edge emission is implemented in backend/lambda/graph_sync/lambda_function.py inside the document branch of _reconcile_edges(), and the edge labels are registered in backend/lambda/graph_query_api/lambda_function.py _ALLOWED_EDGE_TYPES so they are queryable via tracker.graphsearch. ENC-TSK-E01: RELATED_TO and INFORMED_BY now MERGE label-correct placeholder target nodes (using _infer_label_from_id for related_items, hard-coded :Document for informed_by) before MERGEing the edge, eliminating the silent zero-edge race window when targets have not yet been projected.",
       "fields": {
         "BELONGS_TO": {
           "type": "edge",
