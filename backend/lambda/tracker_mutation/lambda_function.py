@@ -234,6 +234,28 @@ _REVERT_TRANSITIONS = {
     },
 }
 
+# ENC-FTR-076 / ENC-TSK-E08: Component lifecycle transitions.
+# Components are registered in the component-registry table (separate from
+# the tracker). These maps colocate the lifecycle rules with the other
+# record-type transition maps following the ENC-FTR-052 Lesson precedent so
+# future validators can share a single source of truth. The coordination_api
+# handler enforces these maps; tracker_mutation retains them for parity with
+# subsequent lifecycle-gating work.
+_VALID_COMPONENT_LIFECYCLE_TRANSITIONS = {
+    "proposed": {"approved", "rejected"},
+    "approved": {"active", "archived"},
+    "active": {"deprecated", "archived"},
+    "rejected": set(),          # terminal
+    "deprecated": {"archived"},
+    "archived": set(),          # terminal
+}
+
+_REVERT_COMPONENT_LIFECYCLE_TRANSITIONS = {
+    "approved": {"proposed"},
+    "active": {"approved"},
+    "deprecated": {"active"},
+}
+
 # ---------------------------------------------------------------------------
 # ENC-FTR-054: Constitutional scoring (canonical: coordination_api/lambda_function.py:7247-7350)
 # Pure functions copied here so every write path gets atomic scoring during PutItem.
@@ -4080,6 +4102,8 @@ _RELATIONSHIP_TYPES = frozenset({
     "hands-off", "handed-off-by",
     # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships
     "dispatches", "dispatched-by",
+    # ENC-FTR-076 / ENC-TSK-E08: Component proposal provenance
+    "component-proposed-by", "proposes-component",
 })
 
 _INVERSE_PAIRS: Dict[str, str] = {
@@ -4103,6 +4127,9 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "hands-off": "handed-off-by", "handed-off-by": "hands-off",
     # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships
     "dispatches": "dispatched-by", "dispatched-by": "dispatches",
+    # ENC-FTR-076 / ENC-TSK-E08: Component proposal provenance
+    "component-proposed-by": "proposes-component",
+    "proposes-component": "component-proposed-by",
 }
 
 _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {

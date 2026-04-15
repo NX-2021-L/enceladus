@@ -328,6 +328,11 @@ COORDINATION_MCP_HTTP_PATH = os.environ.get("COORDINATION_MCP_HTTP_PATH", "/api/
 ENABLE_MCP_GOVERNANCE_PROMPT = os.environ.get("ENABLE_MCP_GOVERNANCE_PROMPT", "true").lower() == "true"
 # ENC-FTR-052: Governed Lesson Primitive
 ENABLE_LESSON_PRIMITIVE = os.environ.get("ENABLE_LESSON_PRIMITIVE", "false").lower() == "true"
+# ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry. Default off
+# in prod; enabled in gamma via env var on the deploy. Gates POST
+# /api/v1/coordination/components/propose + the MCP component.propose action
+# + checkout-service lifecycle_status gate (delivered by E10).
+ENABLE_COMPONENT_PROPOSAL = os.environ.get("ENABLE_COMPONENT_PROPOSAL", "false").lower() == "true"
 GOVERNANCE_PROMPT_MAX_CHARS = int(os.environ.get("GOVERNANCE_PROMPT_MAX_CHARS", "120000"))
 GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK = (
     "governance://agents.md",
@@ -8066,6 +8071,198 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
         return _error(500, f"Failed to create component: {exc}")
 
 
+def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/propose — agent-initiated component proposal.
+
+    ENC-FTR-076 / ENC-TSK-E08. Writes a component record with lifecycle_status=proposed
+    plus an atomic COMPONENT_PROPOSED_BY typed-relationship edge from the component to
+    the proposing agent session. Gated by ENABLE_COMPONENT_PROPOSAL.
+
+    Body:
+      component_id: str (must start with 'comp-')
+      display_name: str
+      project_id: str
+      source_paths: list[str]
+      description: str
+      requested_minimum_transition_type: str (must be in STRICTNESS_RANK)
+      proposing_agent_session_id: str (optional; falls back to auth claims sub / write_source provider)
+    """
+    if not ENABLE_COMPONENT_PROPOSAL:
+        return _error(
+            503,
+            "component.propose is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _component_validation_error(400, "Invalid JSON body", expected_type="object")
+
+    component_id = (body.get("component_id") or "").strip()
+    if not component_id:
+        return _component_validation_error(
+            400, "component_id is required", field="component_id", expected_type="string",
+        )
+    if not component_id.startswith("comp-"):
+        return _component_validation_error(
+            400,
+            f"component_id must start with 'comp-' prefix (got {component_id!r})",
+            field="component_id", expected_type="string",
+            example_fix={"component_id": "comp-" + re.sub(r"[^a-z0-9]+", "-", component_id.lower()).strip("-")},
+        )
+
+    display_name = (body.get("display_name") or "").strip()
+    if not display_name:
+        return _component_validation_error(
+            400, "display_name is required", field="display_name", expected_type="string",
+        )
+
+    project_id = (body.get("project_id") or "").strip()
+    if not project_id:
+        return _component_validation_error(
+            400, "project_id is required", field="project_id", expected_type="string",
+        )
+
+    source_paths = body.get("source_paths") or []
+    if not isinstance(source_paths, list):
+        return _component_validation_error(
+            400, "source_paths must be a list of repo-relative path strings",
+            field="source_paths", expected_type="array",
+        )
+    source_paths = [str(p).strip() for p in source_paths if str(p).strip()]
+
+    description = (body.get("description") or "").strip()
+
+    requested_type = (body.get("requested_minimum_transition_type") or "").strip().lower()
+    if not requested_type:
+        return _component_validation_error(
+            400,
+            "requested_minimum_transition_type is required",
+            field="requested_minimum_transition_type", expected_type="enum",
+            allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+        )
+    if requested_type not in _COMPONENT_TRANSITION_TYPES:
+        return _component_validation_error(
+            400,
+            f"Invalid requested_minimum_transition_type '{requested_type}'. Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}",
+            field="requested_minimum_transition_type", expected_type="enum",
+            allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+        )
+
+    # Resolve proposing agent session id: explicit body field wins; then claims.sub;
+    # then write_source.provider; fall back to 'unknown'. The downstream graph edge
+    # target is placeholder-MERGEd by graph_sync (ENC-TSK-E06 tags is_placeholder=true).
+    proposing_agent_session_id = (body.get("proposing_agent_session_id") or "").strip()
+    if not proposing_agent_session_id and claims:
+        proposing_agent_session_id = str(claims.get("sub") or "").strip()
+    if not proposing_agent_session_id:
+        ws = body.get("write_source") or {}
+        proposing_agent_session_id = str(ws.get("provider") or "").strip()
+    if not proposing_agent_session_id:
+        return _component_validation_error(
+            400,
+            "proposing_agent_session_id is required (explicit body field, Cognito sub, or write_source.provider)",
+            field="proposing_agent_session_id", expected_type="string",
+        )
+
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    component_item: Dict[str, Any] = {
+        "component_id": component_id,
+        "component_name": display_name,
+        "project_id": project_id,
+        "category": (body.get("category") or "proposed").strip().lower() or "proposed",
+        "transition_type": requested_type,   # placeholder until approval adjusts it
+        "status": "active",                    # active per _COMPONENT_STATUSES; governance lives on lifecycle_status
+        "lifecycle_status": "proposed",
+        "proposing_agent_session_id": proposing_agent_session_id,
+        "requested_minimum_transition_type": requested_type,
+        "source_paths": source_paths,
+        "description": description,
+        "created_at": now,
+        "updated_at": now,
+        "proposed_at": now,
+    }
+
+    # Build an rel# pair for the COMPONENT_PROPOSED_BY typed edge. Schema mirrors
+    # tracker_mutation/_handle_create_relationship._rel_item so graph_sync projects
+    # it uniformly via RELATIONSHIP_TYPE_TO_EDGE_LABEL without a custom branch.
+    rel_type = "component-proposed-by"
+    inverse_type = "proposes-component"
+    forward_sk = f"rel#{component_id}#{rel_type}#{proposing_agent_session_id}"
+    inverse_sk = f"rel#{proposing_agent_session_id}#{inverse_type}#{component_id}"
+
+    def _rel_item(sk: str, rt: str, src: str, tgt: str, is_inv: bool, canon_sk: str) -> Dict[str, Any]:
+        return {
+            "project_id": {"S": project_id},
+            "record_id": {"S": sk},
+            "record_type": {"S": "relationship"},
+            "relationship_type": {"S": rt},
+            "source_id": {"S": src},
+            "target_id": {"S": tgt},
+            "weight": {"N": "1.0"},
+            "confidence": {"N": "1.0"},
+            "reason": {"S": f"component.propose auto-edge for {component_id}"},
+            "provenance": {"S": "system"},
+            "is_inverse": {"BOOL": is_inv},
+            "canonical_edge_id": {"S": canon_sk},
+            "created_at": {"S": now},
+            "updated_at": {"S": now},
+        }
+
+    forward_rel = _rel_item(forward_sk, rel_type, component_id, proposing_agent_session_id, False, forward_sk)
+    inverse_rel = _rel_item(inverse_sk, inverse_type, proposing_agent_session_id, component_id, True, forward_sk)
+
+    ddb = _get_ddb()
+    try:
+        ddb.transact_write_items(
+            TransactItems=[
+                {
+                    "Put": {
+                        "TableName": COMPONENTS_TABLE,
+                        "Item": _py_to_ddb(component_item),
+                        "ConditionExpression": "attribute_not_exists(component_id)",
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName": TRACKER_TABLE,
+                        "Item": forward_rel,
+                        "ConditionExpression": "attribute_not_exists(record_id)",
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName": TRACKER_TABLE,
+                        "Item": inverse_rel,
+                        "ConditionExpression": "attribute_not_exists(record_id)",
+                    }
+                },
+            ]
+        )
+    except ddb.exceptions.TransactionCanceledException as exc:
+        reasons = getattr(exc, "response", {}).get("CancellationReasons") or []
+        if any((r or {}).get("Code") == "ConditionalCheckFailed" for r in reasons):
+            return _error(409, f"Component '{component_id}' already exists or proposal edge already present")
+        logger.exception("components_propose transaction failed")
+        return _error(500, f"Failed to propose component: {exc}")
+    except Exception as exc:
+        logger.exception("components_propose failed")
+        return _error(500, f"Failed to propose component: {exc}")
+
+    return _response(
+        201,
+        {
+            "success": True,
+            "component_id": component_id,
+            "lifecycle_status": "proposed",
+            "proposing_agent_session_id": proposing_agent_session_id,
+            "requested_minimum_transition_type": requested_type,
+            "component": component_item,
+        },
+    )
+
+
 def _handle_components_update(
     component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -11476,6 +11673,12 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # POST /api/v1/coordination/components
     if method == "POST" and path == "/api/v1/coordination/components":
         return _handle_components_create(event, claims or {})
+
+    # POST /api/v1/coordination/components/propose (ENC-FTR-076 / ENC-TSK-E08)
+    # Registered BEFORE the generic /components/{id} matcher so 'propose' is not
+    # mis-routed to _handle_components_get.
+    if method == "POST" and path == "/api/v1/coordination/components/propose":
+        return _handle_components_propose(event, claims or {})
 
     # GET /api/v1/coordination/components/{componentId}
     match_comp = re.fullmatch(r"/api/v1/coordination/components/([A-Za-z0-9_\-]+)", path)
