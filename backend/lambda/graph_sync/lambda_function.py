@@ -21,6 +21,7 @@ Edge types: CHILD_OF, RELATED_TO, BELONGS_TO, ADDRESSES, IMPLEMENTS
 Environment variables:
   NEO4J_SECRET_NAME    Secrets Manager secret ID (default: enceladus/neo4j/auradb-credentials)
   SECRETS_REGION       AWS region for Secrets Manager (default: us-west-2)
+  BEDROCK_REGION       AWS region for Bedrock runtime (default: us-west-2)
 """
 
 from __future__ import annotations
@@ -29,6 +30,18 @@ import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
+
+# ENC-TSK-B94: Incremental Titan V2 embedding helpers. build_embedding_text,
+# hash_embedding_text, compute_embedding_for_record, and the model/property
+# constants are the shared contract between this incremental path and the
+# ENC-TSK-B91 backfill path. Keep imports colocated with lambda_function.py
+# so the helper module is packaged automatically by deploy.sh.
+from embedding import (
+    EMBEDDABLE_RECORD_TYPES,
+    EMBEDDING_HASH_PROPERTY,
+    EMBEDDING_PROPERTY,
+    compute_embedding_for_record,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -211,6 +224,44 @@ def _upsert_project_node(tx, project_id: str) -> None:
     tx.run(
         "MERGE (p:Project {project_id: $pid})",
         pid=project_id,
+    )
+
+
+def _read_existing_embedding_hash(tx, label: str, record_id: str) -> str:
+    """Return the current `embedding_text_hash` on the node, or '' if absent.
+
+    Used by the incremental embedding path to short-circuit no-op MODIFY
+    events (e.g. status transitions) without invoking Bedrock when the
+    embedding input text has not changed.
+    """
+    result = tx.run(
+        f"MATCH (n:{label} {{record_id: $rid}}) "
+        f"RETURN n.{EMBEDDING_HASH_PROPERTY} AS h",
+        rid=record_id,
+    )
+    record = result.single()
+    if record is None:
+        return ""
+    hash_val = record.get("h")
+    return str(hash_val) if hash_val is not None else ""
+
+
+def _write_embedding(tx, label: str, record_id: str, payload: Dict[str, Any]) -> None:
+    """Set `embedding` and `embedding_text_hash` on the node.
+
+    Payload is the dict returned by `compute_embedding_for_record`:
+    `{embedding: [256 floats], embedding_text_hash: str}`. The node is
+    assumed to already exist (upserted by `_upsert_node` earlier in the
+    same session); SET on a non-existent match is a no-op and that is
+    acceptable — the next stream event will retry.
+    """
+    tx.run(
+        f"MATCH (n:{label} {{record_id: $rid}}) "
+        f"SET n.{EMBEDDING_PROPERTY} = $embedding, "
+        f"    n.{EMBEDDING_HASH_PROPERTY} = $hash",
+        rid=record_id,
+        embedding=payload[EMBEDDING_PROPERTY],
+        hash=payload[EMBEDDING_HASH_PROPERTY],
     )
 
 
@@ -756,6 +807,44 @@ def _process_record(driver, stream_record: Dict) -> None:
 
             session.execute_write(lambda tx: _upsert_node(tx, record))
             session.execute_write(lambda tx: _reconcile_edges(tx, record))
+
+            # ENC-TSK-B94: Incremental Titan V2 embedding. Runs inline on the
+            # already-async SQS consumer so the user-visible mutation path is
+            # unaffected. Wrapped in try/except so Bedrock, IAM, or vector
+            # model failures NEVER break the primary node + edge projection.
+            # Skip non-embeddable record types (e.g. "generation") fast.
+            if record_type in EMBEDDABLE_RECORD_TYPES:
+                try:
+                    bare = _bare_id(record_id)
+                    label = RECORD_TYPE_TO_LABEL.get(record_type)
+                    existing_hash = session.execute_read(
+                        lambda tx: _read_existing_embedding_hash(tx, label, bare)
+                    )
+                    # Thread the existing hash into the record so the helper
+                    # can short-circuit no-op MODIFY events (e.g. status
+                    # transitions that do not change title/intent/description).
+                    record["_existing_embedding_hash"] = existing_hash
+                    payload = compute_embedding_for_record(record)
+                    if payload is not None:
+                        session.execute_write(
+                            lambda tx: _write_embedding(tx, label, bare, payload)
+                        )
+                        logger.info(
+                            "[INFO] Embedded %s %s (dims=%d, hash=%s)",
+                            record_type, bare, len(payload[EMBEDDING_PROPERTY]),
+                            payload[EMBEDDING_HASH_PROPERTY],
+                        )
+                    else:
+                        logger.info(
+                            "[INFO] Skipped embedding for %s %s (no-op or empty text or bedrock failure)",
+                            record_type, bare,
+                        )
+                except Exception:
+                    logger.exception(
+                        "[ERROR] Incremental embedding failed for %s %s; "
+                        "primary projection preserved",
+                        record_type, record_id,
+                    )
 
         logger.info(
             "[INFO] Synced %s %s (event=%s, project=%s)",
