@@ -8263,6 +8263,213 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
     )
 
 
+def _resolve_decider_identity(claims: Dict[str, Any]) -> str:
+    """Return a stable identifier for the human approver/rejecter from Cognito claims."""
+    return (
+        str(claims.get("email") or "").strip()
+        or str(claims.get("cognito:username") or "").strip()
+        or str(claims.get("sub") or "").strip()
+        or "unknown"
+    )
+
+
+def _handle_components_approve(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/{id}/approve — coord-lead approval.
+
+    ENC-FTR-076 / ENC-TSK-E09. Atomically transitions a component from
+    lifecycle_status='proposed' to 'active'. Cognito session required (no internal
+    API key may approve agent-proposed components). Optional body field
+    `transition_type` may override the proposal's requested minimum.
+    """
+    if not ENABLE_COMPONENT_PROPOSAL:
+        return _error(
+            503,
+            "component.approve is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
+        )
+    if not _is_cognito_session(claims):
+        return _error(
+            403,
+            "Approving components requires Cognito authentication (PWA session only).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _component_validation_error(
+            400, "Invalid JSON body", component_id=component_id, expected_type="object",
+        )
+
+    override_type = (body.get("transition_type") or "").strip().lower()
+    if override_type and override_type not in _COMPONENT_TRANSITION_TYPES:
+        return _component_validation_error(
+            400,
+            f"Invalid transition_type '{override_type}'. Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}",
+            field="transition_type",
+            component_id=component_id,
+            expected_type="enum",
+            allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+        )
+
+    approved_by = _resolve_decider_identity(claims)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    update_parts = [
+        "#ls = :active",
+        "#ua = :now",
+        "approved_at = :now",
+        "approved_by = :by",
+    ]
+    attr_names = {"#ls": "lifecycle_status", "#ua": "updated_at"}
+    attr_vals: Dict[str, Any] = {
+        ":active": {"S": "active"},
+        ":proposed": {"S": "proposed"},
+        ":now": {"S": now},
+        ":by": {"S": approved_by},
+    }
+    if override_type:
+        update_parts.append("transition_type = :tt")
+        attr_vals[":tt"] = {"S": override_type}
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.update_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+            UpdateExpression="SET " + ", ".join(update_parts),
+            ConditionExpression="attribute_exists(component_id) AND #ls = :proposed",
+            ExpressionAttributeNames=attr_names,
+            ExpressionAttributeValues=attr_vals,
+            ReturnValues="ALL_NEW",
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        # Distinguish missing component vs wrong lifecycle_status with a follow-up read.
+        existing = ddb.get_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+        ).get("Item")
+        if not existing:
+            return _error(404, f"Component '{component_id}' not found")
+        current = _ddb_to_py(existing).get("lifecycle_status") or "active"
+        return _error(
+            409,
+            f"Component '{component_id}' cannot be approved from lifecycle_status='{current}' (expected 'proposed')",
+            component_id=component_id,
+            current_lifecycle_status=current,
+        )
+    except Exception as exc:
+        logger.exception("components_approve failed")
+        return _error(500, f"Failed to approve component: {exc}")
+
+    updated = _ddb_to_py(resp.get("Attributes", {}))
+    return _response(
+        200,
+        {
+            "success": True,
+            "component_id": component_id,
+            "lifecycle_status": "active",
+            "approved_by": approved_by,
+            "approved_at": now,
+            "component": updated,
+        },
+    )
+
+
+def _handle_components_reject(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/{id}/reject — coord-lead rejection.
+
+    ENC-FTR-076 / ENC-TSK-E09. Atomically transitions a component from
+    lifecycle_status='proposed' to 'rejected'. Cognito session required. Body must
+    include `rejection_reason` (min 10 chars) so the agent author has actionable
+    feedback in the audit trail.
+    """
+    if not ENABLE_COMPONENT_PROPOSAL:
+        return _error(
+            503,
+            "component.reject is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
+        )
+    if not _is_cognito_session(claims):
+        return _error(
+            403,
+            "Rejecting components requires Cognito authentication (PWA session only).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _component_validation_error(
+            400, "Invalid JSON body", component_id=component_id, expected_type="object",
+        )
+
+    rejection_reason = (body.get("rejection_reason") or "").strip()
+    if len(rejection_reason) < 10:
+        return _component_validation_error(
+            400,
+            "rejection_reason is required and must be at least 10 characters",
+            field="rejection_reason",
+            component_id=component_id,
+            expected_type="string",
+        )
+
+    rejected_by = _resolve_decider_identity(claims)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.update_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+            UpdateExpression=(
+                "SET #ls = :rejected, #ua = :now, "
+                "rejected_at = :now, rejected_by = :by, rejection_reason = :reason"
+            ),
+            ConditionExpression="attribute_exists(component_id) AND #ls = :proposed",
+            ExpressionAttributeNames={"#ls": "lifecycle_status", "#ua": "updated_at"},
+            ExpressionAttributeValues={
+                ":rejected": {"S": "rejected"},
+                ":proposed": {"S": "proposed"},
+                ":now": {"S": now},
+                ":by": {"S": rejected_by},
+                ":reason": {"S": rejection_reason},
+            },
+            ReturnValues="ALL_NEW",
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        existing = ddb.get_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+        ).get("Item")
+        if not existing:
+            return _error(404, f"Component '{component_id}' not found")
+        current = _ddb_to_py(existing).get("lifecycle_status") or "active"
+        return _error(
+            409,
+            f"Component '{component_id}' cannot be rejected from lifecycle_status='{current}' (expected 'proposed')",
+            component_id=component_id,
+            current_lifecycle_status=current,
+        )
+    except Exception as exc:
+        logger.exception("components_reject failed")
+        return _error(500, f"Failed to reject component: {exc}")
+
+    updated = _ddb_to_py(resp.get("Attributes", {}))
+    return _response(
+        200,
+        {
+            "success": True,
+            "component_id": component_id,
+            "lifecycle_status": "rejected",
+            "rejected_by": rejected_by,
+            "rejected_at": now,
+            "rejection_reason": rejection_reason,
+            "component": updated,
+        },
+    )
+
+
 def _handle_components_update(
     component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -11679,6 +11886,18 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # mis-routed to _handle_components_get.
     if method == "POST" and path == "/api/v1/coordination/components/propose":
         return _handle_components_propose(event, claims or {})
+
+    # POST /api/v1/coordination/components/{componentId}/approve|reject (ENC-FTR-076 / ENC-TSK-E09)
+    # Registered BEFORE the generic /{componentId} matcher.
+    match_comp_decision = re.fullmatch(
+        r"/api/v1/coordination/components/([A-Za-z0-9_\-]+)/(approve|reject)", path
+    )
+    if method == "POST" and match_comp_decision:
+        comp_id = match_comp_decision.group(1)
+        decision = match_comp_decision.group(2)
+        if decision == "approve":
+            return _handle_components_approve(comp_id, event, claims or {})
+        return _handle_components_reject(comp_id, event, claims or {})
 
     # GET /api/v1/coordination/components/{componentId}
     match_comp = re.fullmatch(r"/api/v1/coordination/components/([A-Za-z0-9_\-]+)", path)
