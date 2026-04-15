@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-15.1",
-  "updated_at": "2026-04-15T05:30:00Z",
-  "last_change_summary": "ENC-TSK-D81: Updated api.error_envelope entity to reflect D56 enrichment scope (6 Lambdas + MCP normalization). Expanded details definition with post-D56 standard keys.",
+  "version": "2026-04-15.2",
+  "updated_at": "2026-04-15T07:45:00Z",
+  "last_change_summary": "ENC-TSK-B89: Added lesson record-body edge projection to graph_sync. tracker.lesson entity description now references the graph_projection contract; evidence_chain and extensions fields annotated with graph_projection stanzas documenting the LEARNED_FROM edge emission via _infer_label_from_id + placeholder MERGE pattern (same as ENC-TSK-E01 plan/document branch). Prior to B89, lesson records produced zero LEARNED_FROM edges from record-body (only rel# typed-relationship items projected via _upsert_relationship_edge), leaving every lesson with exactly one graph edge (BELONGS_TO->Project) and zero relationship neighbors. See ENC-ISS-189 for the canonical legacy-ID manifestation.",
   "owners": [
     "enceladus-platform"
   ],
@@ -2639,7 +2639,7 @@
       }
     },
     "tracker.lesson": {
-      "description": "Governed Lesson primitive capturing institutional wisdom as a first-class record type (ENC-FTR-052). Lessons are evidence-gated, append-only, constitutionally scored against four pillars and a vibe board, and can propose governance amendments through human-approval handshake. Stored in devops-project-tracker with lesson# SK prefix. Gated behind ENABLE_LESSON_PRIMITIVE feature flag.",
+      "description": "Governed Lesson primitive capturing institutional wisdom as a first-class record type (ENC-FTR-052). Lessons are evidence-gated, append-only, constitutionally scored against four pillars and a vibe board, and can propose governance amendments through human-approval handshake. Stored in devops-project-tracker with lesson# SK prefix. Gated behind ENABLE_LESSON_PRIMITIVE feature flag. ENC-TSK-B89: graph_sync._reconcile_edges() now includes a dedicated lesson branch that emits (Lesson)-[:LEARNED_FROM]->(target) edges from evidence_chain entries and every extensions[].evidence_ids bag, via the ENC-TSK-E01 _infer_label_from_id + placeholder MERGE pattern so edges land even when the target node has not yet been projected. Unknown ID prefixes (pre-ENC-FTR-056 legacy forms such as JAP-*, MJR-*) fall back to unlabelled MATCH with a WARNING log line; see ENC-ISS-189 for the ENC-LSN-013 legacy-ID manifestation.",
       "fields": {
         "title": {
           "type": "string",
@@ -2679,7 +2679,8 @@
             "append_only": true
           },
           "definition": "Array of tracker record IDs that support this lesson. Required, minimum 1. Each ID must resolve to an existing record in the same project. Append-only — new evidence can be added, existing entries cannot be removed.",
-          "usage_guidance": "Cite the specific records from which the lesson was extracted. E.g., ['ENC-ISS-088', 'ENC-TSK-803']. On extend_lesson, new evidence IDs are appended."
+          "usage_guidance": "Cite the specific records from which the lesson was extracted. E.g., ['ENC-ISS-088', 'ENC-TSK-803']. On extend_lesson, new evidence IDs are appended.",
+          "graph_projection": "ENC-TSK-B89: graph_sync/_reconcile_edges() lesson branch iterates evidence_chain, MERGEs a label-correct placeholder target node via _infer_label_from_id (TSK→Task, ISS→Issue, FTR→Feature, PLN→Plan, LSN→Lesson, DOC→Document, GEN→Generation, DPL→DeploymentDecision), then MERGEs (Lesson)-[:LEARNED_FROM]->(target). IDs are bare_id-stripped and deduped against the union with extensions[].evidence_ids before emission. Unknown ID prefixes (legacy JAP-*, MJR-*, or non-canonical strings) log a WARNING and fall back to the legacy unlabelled MATCH so the edge still lands when the target happens to be present. Registered label LEARNED_FROM is pre-existing in RELATIONSHIP_TYPE_TO_EDGE_LABEL (graph_sync) and _ALLOWED_EDGE_TYPES (graph_query_api) so no additional registry updates were required."
         },
         "analysis_reference": {
           "type": "string",
@@ -2786,7 +2787,8 @@
             "append_only": true
           },
           "definition": "Append-only contextualization entries. Each extension adds understanding without modifying the original observation. Ordered chronologically. Immutable once appended.",
-          "usage_guidance": "Use extend_lesson MCP action to add extensions. Each extension can optionally cite additional evidence_ids which are appended to the lesson's evidence_chain."
+          "usage_guidance": "Use extend_lesson MCP action to add extensions. Each extension can optionally cite additional evidence_ids which are appended to the lesson's evidence_chain.",
+          "graph_projection": "ENC-TSK-B89: every extension's evidence_ids contributes to the same LEARNED_FROM edge emission as evidence_chain. graph_sync/_reconcile_edges() lesson branch unions evidence_chain with each extensions[].evidence_ids bag, dedupes, and emits one (Lesson)-[:LEARNED_FROM]->(target) edge per unique target via the _infer_label_from_id + placeholder MERGE pattern. Extensions never remove edges — because evidence_chain is append-only, the union is monotonic across lesson_version increments, and the outgoing-edge delete prelude at the top of _reconcile_edges() safely re-creates the full union on every stream event."
         },
         "governance_proposal": {
           "type": "object",
