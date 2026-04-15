@@ -125,6 +125,26 @@ RECORD_TYPE_TO_LABEL = {
     "generation": "Generation",  # GMF DOC-63420302EF65
 }
 
+# ENC-TSK-E01 / ENC-ISS-184: ID-prefix to Neo4j label mapping for placeholder
+# node creation. When a plan emits a PLAN_CONTAINS edge to an objective task
+# that has not yet been projected (race window after plan.add_objective is
+# called before the target task's own DDB stream event reaches graph_sync),
+# we MERGE a placeholder node with the inferred label so the edge always
+# lands. The target's own stream event later MERGEs by the same label and
+# record_id, augmenting the placeholder with full properties without
+# creating a duplicate node.
+ID_PREFIX_TO_LABEL = {
+    "TSK": "Task",
+    "ISS": "Issue",
+    "FTR": "Feature",
+    "PLN": "Plan",
+    "LSN": "Lesson",
+    "DOC": "Document",
+    "GEN": "Generation",
+    "DPL": "DeploymentDecision",
+}
+
+
 def _bare_id(record_id: str) -> str:
     """Strip 'type#' prefix from composite DynamoDB record_id.
 
@@ -132,6 +152,26 @@ def _bare_id(record_id: str) -> str:
     Bare IDs pass through unchanged.
     """
     return record_id.split("#", 1)[-1] if "#" in record_id else record_id
+
+
+def _infer_label_from_id(record_id: str) -> str:
+    """Infer a Neo4j node label from a bare record_id like 'ENC-TSK-C59'.
+
+    Returns '' when the prefix is not recognised so callers can skip
+    placeholder creation rather than spawning unlabelled nodes.
+    Document IDs may be 'DOC-XXXX' (no project prefix); both single- and
+    triple-segment IDs are handled.
+    """
+    if not record_id:
+        return ""
+    parts = record_id.split("-")
+    # Document IDs: 'DOC-XXXX' (2 segments) or PROJECT-DOC-XXXX (3+)
+    if parts[0].upper() == "DOC":
+        return "Document"
+    if len(parts) < 2:
+        return ""
+    type_code = parts[1].upper()
+    return ID_PREFIX_TO_LABEL.get(type_code, "")
 
 
 # Properties to copy from DynamoDB record to Neo4j node
@@ -267,33 +307,76 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             )
 
     # ENC-ISS-150 / ENC-TSK-B14: Plan-specific edge projections
+    # ENC-TSK-E01 / ENC-ISS-184: emit edges via labelled-target MERGE so the
+    # PLAN_CONTAINS / PLAN_ATTACHED_DOC edges land even when the target node
+    # is not yet projected. The previous Cartesian MATCH pattern silently
+    # produced zero rows (and zero edges) when the objective task or
+    # attached document had not been processed yet by graph_sync, leaving
+    # plans like ENC-PLN-016 with zero PLAN_CONTAINS edges despite a
+    # populated objectives_set. Placeholder MERGE attaches a label-correct
+    # node by record_id; the target's own stream event later MERGEs by the
+    # same (label, record_id) pair and augments the placeholder with full
+    # properties without duplicating it.
     if record_type == "plan":
+        objectives_set = record.get("objectives_set", []) or []
+        attached_documents = record.get("attached_documents", []) or []
+        logger.info(
+            "[INFO] Plan reconcile %s: objectives_set=%d attached_documents=%d",
+            record_id, len(objectives_set), len(attached_documents),
+        )
+
         # PLAN_CONTAINS -> each objective (Task/Issue/Feature)
-        for obj_id in record.get("objectives_set", []) or []:
+        for obj_id in objectives_set:
             obj_id = _bare_id(obj_id) if obj_id else ""
             if not obj_id:
                 continue
-            tx.run(
-                "MATCH (p:Plan), (t {record_id: $tid}) "
-                "WHERE p.record_id = $pid "
-                "MERGE (p)-[:PLAN_CONTAINS]->(t)",
-                pid=record_id, tid=obj_id,
-            )
+            target_label = _infer_label_from_id(obj_id)
+            if target_label:
+                # Ensure a label-correct target node exists. Placeholder is
+                # idempotent with the target's own _upsert_node MERGE.
+                tx.run(
+                    f"MERGE (t:{target_label} {{record_id: $tid}})",
+                    tid=obj_id,
+                )
+                tx.run(
+                    f"MATCH (p:Plan), (t:{target_label}) "
+                    "WHERE p.record_id = $pid AND t.record_id = $tid "
+                    "MERGE (p)-[:PLAN_CONTAINS]->(t)",
+                    pid=record_id, tid=obj_id,
+                )
+            else:
+                # Unknown ID prefix: fall back to the legacy unlabelled
+                # MATCH so we do not silently lose the edge if the prefix
+                # registry is incomplete.
+                logger.warning(
+                    "[WARNING] Plan %s objective %s has unrecognised ID prefix; "
+                    "falling back to unlabelled MATCH (edge may not land if target absent)",
+                    record_id, obj_id,
+                )
+                tx.run(
+                    "MATCH (p:Plan), (t {record_id: $tid}) "
+                    "WHERE p.record_id = $pid "
+                    "MERGE (p)-[:PLAN_CONTAINS]->(t)",
+                    pid=record_id, tid=obj_id,
+                )
 
         # PLAN_ATTACHED_DOC -> each document
-        for doc_id in record.get("attached_documents", []) or []:
+        for doc_id in attached_documents:
             doc_id = str(doc_id).strip() if doc_id else ""
             if not doc_id:
                 continue
+            # Documents always project to the :Document label.
             tx.run(
-                "MATCH (p:Plan), (d {record_id: $did}) "
-                "WHERE p.record_id = $pid "
+                "MERGE (d:Document {record_id: $did})",
+                did=doc_id,
+            )
+            tx.run(
+                "MATCH (p:Plan), (d:Document) "
+                "WHERE p.record_id = $pid AND d.record_id = $did "
                 "MERGE (p)-[:PLAN_ATTACHED_DOC]->(d)",
                 pid=record_id, did=doc_id,
             )
             # ENC-PLN-014 / ENC-FTR-065: inverse DOC_ATTACHED_TO_PLAN
-            # Requires a :Document node to exist; harmless no-op until backfill
-            # projects the documents (see ENC-TSK-C45).
             tx.run(
                 "MATCH (p:Plan), (d:Document) "
                 "WHERE p.record_id = $pid AND d.record_id = $did "
@@ -304,6 +387,12 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         # PLAN_IMPLEMENTS -> related feature
         feat_id = _bare_id(record.get("related_feature_id", "") or "")
         if feat_id:
+            # Placeholder MERGE so the edge lands even if the Feature node
+            # has not been projected yet (ENC-TSK-E01).
+            tx.run(
+                "MERGE (f:Feature {record_id: $fid})",
+                fid=feat_id,
+            )
             tx.run(
                 "MATCH (p:Plan), (f:Feature) "
                 "WHERE p.record_id = $pid AND f.record_id = $fid "
@@ -323,22 +412,48 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
         # so re-running graph_sync on a backfill is idempotent.
 
         # RELATED_TO -> each related_items target (any node label)
+        # ENC-TSK-E01: placeholder MERGE on inferred label so the edge lands
+        # even when the target has not been projected yet.
         for related_id in record.get("related_items", []) or []:
             related_id = _bare_id(related_id) if related_id else ""
             if not related_id:
                 continue
-            tx.run(
-                "MATCH (d:Document), (t {record_id: $tid}) "
-                "WHERE d.record_id = $did "
-                "MERGE (d)-[:RELATED_TO]->(t)",
-                did=doc_id, tid=related_id,
-            )
+            target_label = _infer_label_from_id(related_id)
+            if target_label:
+                tx.run(
+                    f"MERGE (t:{target_label} {{record_id: $tid}})",
+                    tid=related_id,
+                )
+                tx.run(
+                    f"MATCH (d:Document), (t:{target_label}) "
+                    "WHERE d.record_id = $did AND t.record_id = $tid "
+                    "MERGE (d)-[:RELATED_TO]->(t)",
+                    did=doc_id, tid=related_id,
+                )
+            else:
+                logger.warning(
+                    "[WARNING] Document %s related_item %s has unrecognised ID prefix; "
+                    "falling back to unlabelled MATCH",
+                    doc_id, related_id,
+                )
+                tx.run(
+                    "MATCH (d:Document), (t {record_id: $tid}) "
+                    "WHERE d.record_id = $did "
+                    "MERGE (d)-[:RELATED_TO]->(t)",
+                    did=doc_id, tid=related_id,
+                )
 
         # INFORMED_BY -> source document; INFORMS inverse from source -> this doc
+        # ENC-TSK-E01: placeholder MERGE so edges land even if the source
+        # document has not been projected yet.
         for informed_id in record.get("informed_by", []) or []:
             informed_id = _bare_id(informed_id) if informed_id else ""
             if not informed_id:
                 continue
+            tx.run(
+                "MERGE (s:Document {record_id: $sid})",
+                sid=informed_id,
+            )
             tx.run(
                 "MATCH (d:Document), (s:Document) "
                 "WHERE d.record_id = $did AND s.record_id = $sid "
