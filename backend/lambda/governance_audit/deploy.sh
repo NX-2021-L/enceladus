@@ -18,6 +18,13 @@ zip -q -j "${ZIP_FILE}" lambda_function.py
 echo "[INFO] Package ready: ${ZIP_FILE} ($(du -h "${ZIP_FILE}" | cut -f1))"
 
 echo "[INFO] Updating Lambda function code"
+# ENC-TSK-E19: verify package arch matches Lambda runtime before upload
+E19_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+E19_EXPECTED_ARCH="x86_64"
+[ -n "${ENVIRONMENT_SUFFIX:-}" ] && E19_EXPECTED_ARCH="arm64"
+python3 "${E19_REPO_ROOT}/tools/verify_lambda_package_arch.py" \
+  --package "${ZIP_FILE}" \
+  --expected-arch "${E19_EXPECTED_ARCH}"
 aws lambda update-function-code \
   --function-name "${FUNCTION_NAME}" \
   --zip-file "fileb://${ZIP_FILE}" \

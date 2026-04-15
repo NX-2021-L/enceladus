@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-15.7",
-  "updated_at": "2026-04-15T09:25:00Z",
+  "version": "2026-04-15.8",
+  "updated_at": "2026-04-15T10:45:00Z",
   "last_change_summary": "ENC-TSK-E06 / ENC-ISS-230: Added neo4j.placeholder_node entity documenting the is_placeholder boolean property contract on Neo4j nodes. graph_sync._reconcile_edges() placeholder MERGE sites (PLAN_CONTAINS, PLAN_ATTACHED_DOC, PLAN_IMPLEMENTS, LEARNED_FROM, RELATED_TO, INFORMED_BY source) now set `is_placeholder=true` via ON CREATE SET so downstream consumers can distinguish edge-target stub nodes from real DynamoDB-backed records. _upsert_node clears is_placeholder to false on the real record's projection. embedding.titan_v2_backfill._coverage_for_label adds WHERE n.is_placeholder IS NULL OR n.is_placeholder = false so coverage metrics reflect the active corpus only — closes the B91 denominator inflation (229 orphan stubs pulled Task to 93.72% and Issue to 90.69% despite 100% active-corpus coverage).",
   "owners": [
     "enceladus-platform"
@@ -3826,6 +3826,45 @@
         "context_assembly_integration": {
           "type": "string",
           "definition": "get_compact_context auto-invokes hybrid retrieval when callers pass `query` and/or `anchor_record_id`. For record-oriented modes the anchor defaults to the record_id. project_id is inferred from args, then the assembled record_context, then by parsing the anchor record_id prefix. Result lives at context['hybrid_retrieval']. Set include_hybrid_retrieval=false to force-disable. Failures append a warning and never break the legacy context payload."
+        }
+      }
+    },
+    "deploy.package_arch_guard": {
+      "description": "CI + deploy-time guard that inspects Lambda deployment zip CONTENTS and rejects any package containing compiled shared objects (.so) for an architecture different from the target Lambda runtime. Implemented by tools/verify_lambda_package_arch.py and invoked from every backend/lambda/*/deploy.sh between zip creation and `aws lambda update-function-code`. Complements tools/verify_lambda_arch_parity.py (which checks CFN/deploy-script declarations) by verifying the actual artifact. Introduced by ENC-TSK-E19 as defense-in-depth for ENC-ISS-213.",
+      "fields": {
+        "expected_arch": {
+          "type": "enum",
+          "enum": [
+            "arm64",
+            "x86_64"
+          ],
+          "definition": "Target Lambda architecture. Derived from ENVIRONMENT_SUFFIX in each deploy.sh: empty suffix (prod) => x86_64; '-gamma' suffix => arm64. Must match the Architectures value resolved by the CFN !If [IsGamma, arm64, x86_64] conditional."
+        },
+        "enforcement_point": {
+          "type": "string",
+          "definition": "Where the check runs. Two invocation sites: (1) CI test suite in .github/workflows/ci.yml validates the verifier itself via `python3 -m unittest tools.test_verify_lambda_package_arch`; (2) every backend/lambda/*/deploy.sh invokes `python3 tools/verify_lambda_package_arch.py --package <zip> --expected-arch <arch>` immediately before `aws lambda update-function-code`, blocking upload on mismatch."
+        },
+        "rejection_conditions": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Conditions that cause the guard to exit non-zero and halt deployment.",
+          "enum": [
+            "Zip contains a .so file whose ELF e_machine header identifies a different architecture than --expected-arch (exit 1).",
+            "--package path does not exist, is not readable, or is not a valid zip archive (exit 2).",
+            "--expected-arch is not one of the supported values arm64, x86_64 (exit 2)."
+          ]
+        },
+        "trivial_pass_condition": {
+          "type": "string",
+          "definition": "Pure-Python packages (zero .so files) pass trivially. The guard is a no-op for Lambda functions that ship no compiled extensions."
+        },
+        "classification_method": {
+          "type": "string",
+          "definition": "Two-tier classification: (1) `file --brief` is invoked per .so when available (CodeBuild images, Amazon Linux, Ubuntu, macOS); (2) direct ELF magic-byte parsing (EM_X86_64=0x3E, EM_AARCH64=0xB7 at offset 0x12 of the ELF header) is used as a stdlib-only fallback. Either path alone is sufficient. Non-ELF .so files emit a WARN but do not fail the check."
+        },
+        "historical_precedent": {
+          "type": "string",
+          "definition": "ENC-ISS-213 (2026-04-12): devops-coordination-api-gamma Lambda shipped x86_64 pydantic_core wheels on an arm64 runtime despite the deploy.sh arch bifurcation from ENC-FTR-072 / ENC-ISS-224. Entire gamma MCP surface failed with 'No module named pydantic_core._pydantic_core'. Hot-fixed by ENC-TSK-D57; this guard is the structural prevention of recurrence."
         }
       }
     }
