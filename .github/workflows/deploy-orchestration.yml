@@ -189,24 +189,25 @@ jobs:
 
           echo "Response (HTTP $HTTP_CODE): $HTTP_BODY"
 
-          if [ "$HTTP_CODE" != "200" ]; then
+          if [ "$HTTP_CODE" = "200" ]; then
+            VALID=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(str(json.load(sys.stdin).get('valid',False)))" 2>/dev/null || echo "False")
+            if [ "$VALID" != "True" ]; then
+              REASON=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
+              echo "::error::Production deploy blocked: $REASON"
+              echo "::error::Approve this PR via the Enceladus Deployment Manager before deploying to production."
+              exit 1
+            fi
+            DECIDED_BY=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('decided_by_email','unknown'))" 2>/dev/null || echo "unknown")
+            TOKEN=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('approval_token',''))" 2>/dev/null || echo "")
+            echo "✅ Enceladus approval verified for PR #${PR_NUMBER}"
+            echo "   Approved by: ${DECIDED_BY}"
+            echo "   Token: ${TOKEN}"
+          elif [ "$HTTP_CODE" = "404" ]; then
+            echo "::warning::Validation endpoint not yet deployed (HTTP 404). Falling through to GitHub environment approval (bootstrap transition)."
+          else
             echo "::error::Enceladus approval API unreachable (HTTP $HTTP_CODE). Failing closed."
             exit 1
           fi
-
-          VALID=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(str(json.load(sys.stdin).get('valid',False)))" 2>/dev/null || echo "False")
-          if [ "$VALID" != "True" ]; then
-            REASON=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
-            echo "::error::Production deploy blocked: $REASON"
-            echo "::error::Approve this PR via the Enceladus Deployment Manager before deploying to production."
-            exit 1
-          fi
-
-          DECIDED_BY=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('decided_by_email','unknown'))" 2>/dev/null || echo "unknown")
-          TOKEN=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('approval_token',''))" 2>/dev/null || echo "")
-          echo "✅ Enceladus approval verified for PR #${PR_NUMBER}"
-          echo "   Approved by: ${DECIDED_BY}"
-          echo "   Token: ${TOKEN}"
 
   # ---- Prod deploy (per-lambda, main only) ----
   prod-deploy:
@@ -392,21 +393,22 @@ jobs:
           HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n -1)
           HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n 1)
 
-          if [ "$HTTP_CODE" != "200" ]; then
+          if [ "$HTTP_CODE" = "200" ]; then
+            VALID=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(str(json.load(sys.stdin).get('valid',False)))" 2>/dev/null || echo "False")
+            if [ "$VALID" != "True" ]; then
+              REASON=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
+              echo "::error::Full-stack production deploy blocked: $REASON"
+              echo "::error::Approve this PR via the Enceladus Deployment Manager before deploying to production."
+              exit 1
+            fi
+            DECIDED_BY=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('decided_by_email','unknown'))" 2>/dev/null || echo "unknown")
+            echo "✅ Full-stack Enceladus approval verified for PR #${PR_NUMBER} (approved by ${DECIDED_BY})"
+          elif [ "$HTTP_CODE" = "404" ]; then
+            echo "::warning::Validation endpoint not yet deployed (HTTP 404). Falling through to GitHub environment approval (bootstrap transition)."
+          else
             echo "::error::Enceladus approval API unreachable (HTTP $HTTP_CODE). Failing closed."
             exit 1
           fi
-
-          VALID=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(str(json.load(sys.stdin).get('valid',False)))" 2>/dev/null || echo "False")
-          if [ "$VALID" != "True" ]; then
-            REASON=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
-            echo "::error::Full-stack production deploy blocked: $REASON"
-            echo "::error::Approve this PR via the Enceladus Deployment Manager before deploying to production."
-            exit 1
-          fi
-
-          DECIDED_BY=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('decided_by_email','unknown'))" 2>/dev/null || echo "unknown")
-          echo "✅ Full-stack Enceladus approval verified for PR #${PR_NUMBER} (approved by ${DECIDED_BY})"
 
   # ---- Prod deploy (full-stack matrix, main only) ----
   prod-deploy-matrix:
