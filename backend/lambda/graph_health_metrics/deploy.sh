@@ -3,6 +3,8 @@ set -euo pipefail
 
 ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 FUNCTION_NAME="${FUNCTION_NAME:-enceladus-graph-health-metrics${ENVIRONMENT_SUFFIX}}"
@@ -29,6 +31,13 @@ ensure_role() {
 }
 
 build_package() {
+  # ENC-TSK-E27: try S3 artifact first
+  local resolved_zip
+  if resolved_zip="$(resolve_artifact "${FUNCTION_NAME}" "${SCRIPT_DIR}/deploy-package.zip")"; then
+    echo "${resolved_zip}"
+    return 0
+  fi
+
   log "[INFO] Building deployment package"
   local build_dir pip_platform pip_pyver pip_abi
   build_dir="$(mktemp -d)"

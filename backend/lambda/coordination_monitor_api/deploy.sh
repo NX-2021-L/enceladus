@@ -15,12 +15,14 @@ ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 
 # ENC-ISS-224 / ENC-FTR-072: architecture bifurcation for gamma (arm64/py3.12) vs prod (x86_64/py3.11)
 if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
-  pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; DEPLOY_RUNTIME="python3.12"
+  pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"; DEPLOY_RUNTIME="python3.12"
 else
-  pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; DEPLOY_RUNTIME="python3.11"
+  pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"; DEPLOY_RUNTIME="python3.11"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 API_ID="${API_ID:-8nkzqkmxqc}"
@@ -90,29 +92,36 @@ POLICY
 
 deploy_lambda() {
   local build_dir zip_path role_arn
-  build_dir="$(mktemp -d /tmp/deploy-${FUNCTION_NAME}-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
   role_arn="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
 
-  cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
+  # ENC-TSK-E27: try S3 artifact first
+  local resolved_zip
+  if resolved_zip="$(resolve_artifact "${FUNCTION_NAME}" "${zip_path}")"; then
+    zip_path="${resolved_zip}"
+  else
+    build_dir="$(mktemp -d /tmp/deploy-${FUNCTION_NAME}-build-XXXXXX)"
 
-  # PyJWT required for Cognito token validation
-  # Must target Linux x86_64 since Lambda runs Amazon Linux 2
-  python3 -m pip install \
-    --quiet \
-    --upgrade \
-    "PyJWT[crypto]>=2.8.0" \
-    --platform "${pip_platform}" \
-    --implementation cp \
-    --python-version 3.11 \
-    --only-binary=:all: \
-    -t "${build_dir}" >/dev/null
+    cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
-  (
-    cd "${build_dir}"
-    zip -qr "${zip_path}" .
-  )
-  rm -rf "${build_dir}"
+    # PyJWT required for Cognito token validation
+    python3 -m pip install \
+      --quiet \
+      --upgrade \
+      "PyJWT[crypto]>=2.8.0" \
+      --platform "${pip_platform}" \
+      --implementation cp \
+      --python-version "${pip_pyver}" \
+      --abi "${pip_abi}" \
+      --only-binary=:all: \
+      -t "${build_dir}" >/dev/null
+
+    (
+      cd "${build_dir}"
+      zip -qr "${zip_path}" .
+    )
+    rm -rf "${build_dir}"
+  fi
 
   local env_vars="{COORDINATION_TABLE=${COORDINATION_TABLE},DYNAMODB_REGION=${REGION},COGNITO_USER_POOL_ID=us-east-1_b2D0V3E1k,COGNITO_CLIENT_ID=6q607dk3liirhtecgps7hifmlk}"
 
