@@ -3920,6 +3920,69 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional output file name (.md/.markdown).",
                     },
+                    "document_subtype": {
+                        "type": "string",
+                        "enum": ["doc", "handoff", "coe", "wave", "general"],
+                        "description": "Document subtype classification (ENC-FTR-077). Default 'doc'. 'handoff' requires source_record_id; 'coe' requires source_incident_id; 'wave' requires plan_anchor_id.",
+                    },
+                    "confirm_subtype": {
+                        "type": "boolean",
+                        "description": "Override semantic guard when title/content match handoff patterns but subtype=doc is intentional.",
+                    },
+                    "source_record_id": {
+                        "type": "string",
+                        "description": "Tracker record ID the handoff targets (e.g. ENC-TSK-XXX). Required when document_subtype=handoff. (ref: document.handoff)",
+                    },
+                    "handoff_status": {
+                        "type": "string",
+                        "enum": ["pending", "claimed", "completed", "stale"],
+                        "description": "Handoff lifecycle state; defaults to 'pending' on creation. (ref: document.handoff)",
+                    },
+                    "prerequisite_state": {
+                        "type": "string",
+                        "description": "Plain-English description of state required before handoff executor begins. (ref: document.handoff)",
+                    },
+                    "verification_criteria": {
+                        "type": "string",
+                        "description": "Plain-English description of how handoff success is verified. (ref: document.handoff)",
+                    },
+                    "action_checklist": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ordered checklist the handoff executor should follow. (ref: document.handoff)",
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "description": "Optional handoff expiry in ISO 8601 format. (ref: document.handoff)",
+                    },
+                    "source_incident_id": {
+                        "type": "string",
+                        "description": "Tracker record ID of the incident a COE investigates. Required when document_subtype=coe. (ref: document.coe)",
+                    },
+                    "coe_status": {
+                        "type": "string",
+                        "enum": ["drafting", "investigating", "published", "superseded"],
+                        "description": "COE lifecycle status. (ref: document.coe)",
+                    },
+                    "plan_anchor_id": {
+                        "type": "string",
+                        "description": "Plan record ID this wave tracks (must contain '-PLN-', e.g. ENC-PLN-029). Required when document_subtype=wave. (ref: document.wave)",
+                    },
+                    "wave_status": {
+                        "type": "string",
+                        "enum": ["active", "complete", "archived"],
+                        "description": "Wave lifecycle status. (ref: document.wave)",
+                    },
+                    "informed_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Source documents that informed this one (GDMP provenance). Array of document IDs. (ref: document.graph_edges)",
+                    },
+                    "document_maturity_state": {
+                        "type": "string",
+                        "enum": ["raw", "compliant", "contextualized", "mature"],
+                        "description": "GDMP maturity lifecycle; 'raw' on creation, advances via documents.patch. (ref: docstore.document)",
+                    },
                     "governance_hash": {
                         "type": "string",
                         "description": "Current governance hash for write authorization.",
@@ -3970,11 +4033,70 @@ async def list_tools() -> list[Tool]:
                     "status": {
                         "type": "string",
                         "enum": ["active", "archived"],
-                        "description": "Optional status change.",
+                        "description": "Optional document-level status change. Subtype-specific lifecycle fields (handoff_status/coe_status/wave_status) are separate.",
                     },
                     "file_name": {
                         "type": "string",
                         "description": "Optional updated file name (.md/.markdown).",
+                    },
+                    "document_subtype": {
+                        "type": "string",
+                        "enum": ["doc", "handoff", "coe", "wave", "general"],
+                        "description": "Document subtype classification (ENC-FTR-077). Usually immutable after creation.",
+                    },
+                    "source_record_id": {
+                        "type": "string",
+                        "description": "Tracker record ID the handoff targets (e.g. ENC-TSK-XXX). (ref: document.handoff)",
+                    },
+                    "handoff_status": {
+                        "type": "string",
+                        "enum": ["pending", "claimed", "completed", "stale"],
+                        "description": "Handoff lifecycle state. Canonical path to advance handoff docs. (ref: document.handoff)",
+                    },
+                    "prerequisite_state": {
+                        "type": "string",
+                        "description": "Plain-English description of state required before handoff executor begins. (ref: document.handoff)",
+                    },
+                    "verification_criteria": {
+                        "type": "string",
+                        "description": "Plain-English description of how handoff success is verified. (ref: document.handoff)",
+                    },
+                    "action_checklist": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ordered checklist the handoff executor should follow. (ref: document.handoff)",
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "description": "Optional handoff expiry in ISO 8601 format. (ref: document.handoff)",
+                    },
+                    "source_incident_id": {
+                        "type": "string",
+                        "description": "Tracker record ID of the incident a COE investigates. (ref: document.coe)",
+                    },
+                    "coe_status": {
+                        "type": "string",
+                        "enum": ["drafting", "investigating", "published", "superseded"],
+                        "description": "COE lifecycle status. (ref: document.coe)",
+                    },
+                    "plan_anchor_id": {
+                        "type": "string",
+                        "description": "Plan record ID this wave tracks (must contain '-PLN-'). (ref: document.wave)",
+                    },
+                    "wave_status": {
+                        "type": "string",
+                        "enum": ["active", "complete", "archived"],
+                        "description": "Wave lifecycle status. (ref: document.wave)",
+                    },
+                    "informed_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Source documents that informed this one (GDMP provenance). (ref: document.graph_edges)",
+                    },
+                    "document_maturity_state": {
+                        "type": "string",
+                        "enum": ["raw", "compliant", "contextualized", "mature"],
+                        "description": "GDMP maturity lifecycle. Canonical path to advance maturity via patch. (ref: docstore.document)",
                     },
                     "governance_hash": {
                         "type": "string",
@@ -5598,6 +5720,14 @@ def _enrich_document_compliance_response(result: dict) -> dict:
     return result
 
 
+# ENC-TSK-E63 / ENC-TSK-C71: open-passthrough body construction for the
+# document_api bridge. Mirror _tracker_create's denylist-driven pattern so
+# new subtype fields land in document_api automatically instead of silently
+# dropping on an outdated whitelist (ENC-ISS-158).
+_DOCUMENTS_PUT_BODY_DENYLIST = frozenset({"governance_hash"})
+_DOCUMENTS_PATCH_BODY_DENYLIST = frozenset({"governance_hash", "document_id"})
+
+
 async def _documents_put(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash_envelope(args)
     if governance_error:
@@ -5615,13 +5745,12 @@ async def _documents_put(args: dict) -> list[TextContent]:
         "title": args["title"],
         "content": args["content"],
     }
-    for key in (
-        "description", "keywords", "related_items", "file_name",
-        "document_subtype", "confirm_subtype",
-        "source_incident_id", "plan_anchor_id",
-    ):
-        if key in args and args.get(key) is not None:
-            body[key] = args.get(key)
+    for key in args:
+        if key in _DOCUMENTS_PUT_BODY_DENYLIST:
+            continue
+        if args.get(key) is None:
+            continue
+        body[key] = args[key]
 
     result = _document_api_request("PUT", payload=body)
     if _is_authentication_required_error(result):
@@ -5654,13 +5783,12 @@ async def _documents_patch(args: dict) -> list[TextContent]:
         )
 
     body: Dict[str, Any] = {}
-    for key in (
-        "title", "content", "append_content", "description", "keywords", "related_items",
-        "status", "file_name", "document_maturity_state",
-        "handoff_status", "coe_status", "wave_status",
-    ):
-        if key in args and args.get(key) is not None:
-            body[key] = args.get(key)
+    for key in args:
+        if key in _DOCUMENTS_PATCH_BODY_DENYLIST:
+            continue
+        if args.get(key) is None:
+            continue
+        body[key] = args[key]
     if not body:
         return _result_text(
             _error_payload(
