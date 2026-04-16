@@ -161,6 +161,25 @@ function DecisionCard({
               &ldquo;{decision.decision_reason}&rdquo;
             </div>
           )}
+          {/* ENC-TSK-E57: Show approval token for approved decisions */}
+          {decision.approval_token && (
+            <div className="mt-1">
+              <span className="text-slate-500">Token: </span>
+              <code className="text-emerald-400 font-mono text-xs select-all">
+                {decision.approval_token}
+              </code>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ENC-TSK-E57: Bypass marker for pre-E57 deploys */}
+      {decision.bypass_reason && (
+        <div className="flex items-center gap-1 text-xs">
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-400 border border-amber-500/30">
+            bypass
+          </span>
+          <span className="text-slate-500">{decision.bypass_reason}</span>
         </div>
       )}
 
