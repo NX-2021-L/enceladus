@@ -6,12 +6,12 @@
 
 set -euo pipefail
 
-source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 FUNCTION_NAME="${FUNCTION_NAME:-enceladus-mcp-code}"
 SOURCE_FUNCTION_NAME="${SOURCE_FUNCTION_NAME:-devops-coordination-api}"
 REGION="${AWS_REGION:-us-west-2}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 ZIP_FILE="/tmp/${FUNCTION_NAME}.zip"
 
 MCP_TRANSPORT="${ENCELADUS_MCP_TRANSPORT:-streamable_http}"
