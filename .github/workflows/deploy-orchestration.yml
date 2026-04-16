@@ -143,20 +143,74 @@ jobs:
           path: /tmp/gamma-uat-report.json
           retention-days: 30
 
-  # ---- Manual approval (per-lambda, main only) ----
-  approval:
+  # ---- Enceladus approval gate (per-lambda, main only) ----
+  # ENC-TSK-E57: Replaces GitHub environment approval with Enceladus DAT
+  # token verification. Calls /api/v1/deploy/validate/approval/{prNumber}
+  # to confirm the PR was approved via the Deployment Manager PWA.
+  enceladus-approval-gate:
     needs: gamma-health-gate
     if: inputs.deploy_mode == 'per-lambda' && github.ref == 'refs/heads/main'
-    name: Production Approval (${{ inputs.function_name }})
+    name: Enceladus Approval Gate (${{ inputs.function_name }})
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Approved
-        run: echo "Production deployment approved for ${{ inputs.function_name }}"
+      - name: Resolve PR from merge commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+            --search "$GITHUB_SHA" --state merged \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::No merged PR found for commit $GITHUB_SHA. Cannot verify Enceladus approval."
+            exit 1
+          fi
+          echo "Resolved PR #${PR_NUMBER} for commit ${GITHUB_SHA}"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Enceladus approval token
+        env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          DEPLOY_API_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/deploy
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          set -euo pipefail
+          VALIDATE_URL="${DEPLOY_API_BASE}/validate/approval/${PR_NUMBER}"
+          echo "Validating: $VALIDATE_URL"
+
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Accept: application/json" \
+            "$VALIDATE_URL" || echo -e "\n000")
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n 1)
+
+          echo "Response (HTTP $HTTP_CODE): $HTTP_BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Enceladus approval API unreachable (HTTP $HTTP_CODE). Failing closed."
+            exit 1
+          fi
+
+          VALID=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(str(json.load(sys.stdin).get('valid',False)))" 2>/dev/null || echo "False")
+          if [ "$VALID" != "True" ]; then
+            REASON=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
+            echo "::error::Production deploy blocked: $REASON"
+            echo "::error::Approve this PR via the Enceladus Deployment Manager before deploying to production."
+            exit 1
+          fi
+
+          DECIDED_BY=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('decided_by_email','unknown'))" 2>/dev/null || echo "unknown")
+          TOKEN=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('approval_token',''))" 2>/dev/null || echo "")
+          echo "✅ Enceladus approval verified for PR #${PR_NUMBER}"
+          echo "   Approved by: ${DECIDED_BY}"
+          echo "   Token: ${TOKEN}"
 
   # ---- Prod deploy (per-lambda, main only) ----
   prod-deploy:
-    needs: [approval, build-artifacts]
+    needs: [enceladus-approval-gate, build-artifacts]
     if: inputs.deploy_mode == 'per-lambda' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/lambda-deploy-reusable.yml
     with:
@@ -296,20 +350,67 @@ jobs:
           path: /tmp/gamma-fullstack-uat-report.json
           retention-days: 30
 
-  # ---- Manual approval (full-stack, main only) ----
-  approval-fullstack:
+  # ---- Enceladus approval gate (full-stack, main only) ----
+  # ENC-TSK-E57: Same DAT verification as per-lambda gate.
+  enceladus-approval-gate-fullstack:
     needs: gamma-health-gate-fullstack
     if: inputs.deploy_mode == 'full-stack' && github.ref == 'refs/heads/main'
-    name: Production Approval (full-stack)
+    name: Enceladus Approval Gate (full-stack)
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Approved
-        run: echo "Full-stack production deployment approved"
+      - name: Resolve PR from merge commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+            --search "$GITHUB_SHA" --state merged \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::No merged PR found for commit $GITHUB_SHA. Cannot verify Enceladus approval."
+            exit 1
+          fi
+          echo "Resolved PR #${PR_NUMBER} for commit ${GITHUB_SHA}"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Enceladus approval token
+        env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          DEPLOY_API_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/deploy
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          set -euo pipefail
+          VALIDATE_URL="${DEPLOY_API_BASE}/validate/approval/${PR_NUMBER}"
+          echo "Validating: $VALIDATE_URL"
+
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Accept: application/json" \
+            "$VALIDATE_URL" || echo -e "\n000")
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n 1)
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Enceladus approval API unreachable (HTTP $HTTP_CODE). Failing closed."
+            exit 1
+          fi
+
+          VALID=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(str(json.load(sys.stdin).get('valid',False)))" 2>/dev/null || echo "False")
+          if [ "$VALID" != "True" ]; then
+            REASON=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
+            echo "::error::Full-stack production deploy blocked: $REASON"
+            echo "::error::Approve this PR via the Enceladus Deployment Manager before deploying to production."
+            exit 1
+          fi
+
+          DECIDED_BY=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('decided_by_email','unknown'))" 2>/dev/null || echo "unknown")
+          echo "✅ Full-stack Enceladus approval verified for PR #${PR_NUMBER} (approved by ${DECIDED_BY})"
 
   # ---- Prod deploy (full-stack matrix, main only) ----
   prod-deploy-matrix:
-    needs: [approval-fullstack, setup-matrix, build-artifacts]
+    needs: [enceladus-approval-gate-fullstack, setup-matrix, build-artifacts]
     if: inputs.deploy_mode == 'full-stack' && github.ref == 'refs/heads/main'
     strategy:
       matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
