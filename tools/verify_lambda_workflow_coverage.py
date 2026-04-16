@@ -91,7 +91,8 @@ def _validate(manifest: List[Dict[str, object]], production: List[str]) -> List[
         if function_name in seen:
             errors.append(f"Duplicate function_name in manifest: {function_name}")
         seen.add(function_name)
-        manifest_names.append(function_name)
+        if entry.get("cfn_managed") is not False:
+            manifest_names.append(function_name)
 
         if not isinstance(lambda_dir, str) or not lambda_dir:
             errors.append(f"{function_name}: lambda_dir must be a non-empty string")
