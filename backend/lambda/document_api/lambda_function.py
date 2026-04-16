@@ -1472,6 +1472,13 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             expr_parts.append("expires_at = :exp")
             attr_values[":exp"] = {"S": str(body["expires_at"]).strip()}
 
+    # Mutual exclusion: content vs append_content (ENC-ISS-239)
+    if "content" in body and "append_content" in body:
+        return _error(
+            400,
+            "Cannot specify both 'content' and 'append_content' — they are mutually exclusive.",
+        )
+
     # Content update — re-upload to S3
     if "content" in body:
         content = body["content"]
@@ -1507,6 +1514,36 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         except Exception as exc:
             logger.error("S3 upload (edit) failed: %s", exc)
             return _error(500, "Failed to update document content.")
+
+    # Append content — read-modify-write cycle (ENC-ISS-239)
+    if "append_content" in body:
+        append_text = body["append_content"]
+        if append_text is None or not isinstance(append_text, str) or not append_text:
+            return _error(400, "Field 'append_content' must be a non-empty string.")
+        try:
+            existing_content = _get_content(project_id, document_id)
+            if existing_content is None:
+                existing_content = ""
+            new_content = existing_content + "\n\n" + str(append_text)
+            if len(new_content.encode("utf-8")) > MAX_CONTENT_SIZE:
+                return _error(400, f"Appended content exceeds maximum size of {MAX_CONTENT_SIZE} bytes.")
+            compliance = _evaluate_markdown_compliance(new_content)
+            s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, new_content)
+            expr_parts.append("content_hash = :hash")
+            expr_parts.append("size_bytes = :size")
+            expr_parts.append("s3_key = :s3k")
+            expr_parts.append("compliance_score = :cscore")
+            expr_parts.append("compliance_warnings = :cwarnings")
+            expr_parts.append("compliance_checked_at = :cchecked")
+            attr_values[":hash"] = {"S": content_hash}
+            attr_values[":size"] = {"N": str(size_bytes)}
+            attr_values[":s3k"] = {"S": s3_key}
+            attr_values[":cscore"] = {"N": str(compliance["compliance_score"])}
+            attr_values[":cwarnings"] = _serialize_list(compliance["compliance_warnings"])
+            attr_values[":cchecked"] = {"S": now}
+        except Exception as exc:
+            logger.error("S3 append content failed: %s", exc)
+            return _error(500, "Failed to append document content.")
 
     update_expr = "SET " + ", ".join(expr_parts)
 
