@@ -3565,6 +3565,12 @@
           "definition": "List of compliance warnings from _evaluate_markdown_compliance. Common warnings: missing metadata fields, pipe-table false positives, unclosed fences, heading hierarchy violations.",
           "write_authority": "document_api Lambda (computed, not agent-settable)."
         },
+        "append_content": {
+          "type": "string",
+          "definition": "PATCH-only request field (ENC-ISS-239). When present, document_api performs a read-modify-write cycle: fetches existing S3 content, concatenates with double-newline separator, re-uploads merged content, and recomputes content_hash, size_bytes, and compliance_score. Mutually exclusive with 'content' — the API returns HTTP 400 if both are specified. Not stored in DynamoDB; the result is written to S3 and metadata fields are updated. MCP server documents.patch passthrough includes this key.",
+          "write_authority": "Agent sessions via MCP documents.patch or direct PATCH API.",
+          "governing_issue": "ENC-ISS-239"
+        },
         "format_convention": {
           "type": "rule",
           "definition": "Structured agent-session output in docstore .md documents MUST use comment-free YAML code blocks (```yaml ... ```) instead of GFM pipe tables. Pipe tables are permitted only for purely presentational content where renderer-dependence is explicitly acknowledged. YAML hash-comments (# ...) must be omitted inside fenced blocks to avoid compliance checker heading false positives. MCP server injects format_guidance in document.put/patch responses when pipe-table warnings are detected.",
