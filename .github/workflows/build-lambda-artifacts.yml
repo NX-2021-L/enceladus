@@ -91,7 +91,11 @@ jobs:
 
   upload-artifacts:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Upload on push to main (standalone) or when called via workflow_call (from deploy-orchestration)
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_call' ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       artifact_prefix: ${{ steps.upload.outputs.artifact_prefix }}
