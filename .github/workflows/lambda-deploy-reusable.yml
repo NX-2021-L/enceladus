@@ -137,14 +137,21 @@ jobs:
 
           cp "${lambda_dir}/lambda_function.py" "${build_dir}/"
 
+          # Env-conditional build: gamma=arm64/py3.12, prod=x86_64/py3.11
+          if [ -n "${{ inputs.environment_suffix }}" ]; then
+            pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"
+          else
+            pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"
+          fi
+
           if [[ -f "${lambda_dir}/requirements.txt" ]]; then
             python3 -m pip install \
               --quiet \
               --upgrade \
-              --platform manylinux2014_x86_64 \
+              --platform "${pip_platform}" \
               --implementation cp \
-              --python-version 3.11 \
-              --abi cp311 \
+              --python-version "${pip_pyver}" \
+              --abi "${pip_abi}" \
               --only-binary=:all: \
               -r "${lambda_dir}/requirements.txt" \
               -t "${build_dir}" >/dev/null
