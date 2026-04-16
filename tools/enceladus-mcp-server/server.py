@@ -5777,6 +5777,289 @@ async def _document_complete_handoff(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-077 / ENC-TSK-E53: COE + Wave docstore subtype MCP execute actions
+# ---------------------------------------------------------------------------
+
+
+async def _document_create_coe(args: dict) -> list[TextContent]:
+    """Create a COE document with required fields."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    project_id = str(args.get("project_id") or "").strip()
+    title = str(args.get("title") or "").strip()
+    content = str(args.get("content") or "").strip()
+    source_incident_id = str(args.get("source_incident_id") or "").strip()
+
+    if not project_id:
+        return _result_text(_error_payload("INVALID_INPUT", "project_id is required"))
+    if not title:
+        return _result_text(_error_payload("INVALID_INPUT", "title is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not source_incident_id:
+        return _result_text(_error_payload("INVALID_INPUT", "source_incident_id is required for COE documents"))
+
+    body: Dict[str, Any] = {
+        "project_id": project_id,
+        "title": title,
+        "content": content,
+        "document_subtype": "coe",
+        "source_incident_id": source_incident_id,
+    }
+    for key in ("description", "keywords", "related_items", "file_name", "informed_by"):
+        if key in args and args.get(key) is not None:
+            body[key] = args[key]
+
+    result = _document_api_request("PUT", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_create_coe: document API auth failed for project %s",
+            project_id,
+        )
+    return _result_text(result)
+
+
+async def _document_create_wave(args: dict) -> list[TextContent]:
+    """Create a wave coordination document anchored to a plan."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    project_id = str(args.get("project_id") or "").strip()
+    title = str(args.get("title") or "").strip()
+    content = str(args.get("content") or "").strip()
+    plan_anchor_id = str(args.get("plan_anchor_id") or "").strip()
+
+    if not project_id:
+        return _result_text(_error_payload("INVALID_INPUT", "project_id is required"))
+    if not title:
+        return _result_text(_error_payload("INVALID_INPUT", "title is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not plan_anchor_id:
+        return _result_text(_error_payload("INVALID_INPUT", "plan_anchor_id is required for wave documents"))
+
+    body: Dict[str, Any] = {
+        "project_id": project_id,
+        "title": title,
+        "content": content,
+        "document_subtype": "wave",
+        "plan_anchor_id": plan_anchor_id,
+    }
+    for key in ("description", "keywords", "related_items", "file_name"):
+        if key in args and args.get(key) is not None:
+            body[key] = args[key]
+
+    result = _document_api_request("PUT", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_create_wave: document API auth failed for project %s",
+            project_id,
+        )
+    return _result_text(result)
+
+
+async def _document_append_handoff_reply(args: dict) -> list[TextContent]:
+    """Append a structured reply block to a handoff document."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    content = str(args.get("content") or "").strip()
+    agent_layer = str(args.get("agent_layer") or "").strip()
+
+    if not document_id:
+        return _result_text(_error_payload("INVALID_INPUT", "document_id is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not agent_layer:
+        return _result_text(_error_payload("INVALID_INPUT", "agent_layer is required"))
+
+    valid_layers = {"supervisor", "coord-lead", "dispatched-agent", "product-lead-terminal"}
+    if agent_layer not in valid_layers:
+        return _result_text(_error_payload(
+            "INVALID_INPUT",
+            f"agent_layer must be one of: {', '.join(sorted(valid_layers))}",
+        ))
+
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc).isoformat()
+    author = str(args.get("author") or agent_layer).strip()
+    originating_ref = str(args.get("originating_handoff_ref") or document_id).strip()
+
+    reply_block = (
+        f"---\n"
+        f"reply_author: {author}\n"
+        f"reply_timestamp: {now}\n"
+        f"agent_layer: {agent_layer}\n"
+        f"originating_handoff_ref: {originating_ref}\n"
+        f"---\n\n"
+        f"{content}"
+    )
+
+    patch_body: Dict[str, Any] = {"append_content": reply_block}
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=patch_body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_append_handoff_reply: document API auth failed for document %s",
+            document_id,
+        )
+
+    # AC-5: Dual-append for product-lead-terminal
+    is_success = isinstance(result, dict) and (
+        result.get("success") or result.get("document_id")
+    )
+    if agent_layer == "product-lead-terminal" and is_success:
+        await _dual_append_to_wave(args, content, now, author, document_id)
+
+    return _result_text(result)
+
+
+async def _document_append_wave_entry(args: dict) -> list[TextContent]:
+    """Append a wave entry with agent-layer classification."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    content = str(args.get("content") or "").strip()
+    agent_layer = str(args.get("agent_layer") or "").strip()
+
+    if not document_id:
+        return _result_text(_error_payload("INVALID_INPUT", "document_id is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not agent_layer:
+        return _result_text(_error_payload("INVALID_INPUT", "agent_layer is required"))
+
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc).isoformat()
+    author = str(args.get("author") or agent_layer).strip()
+    originating_handoff_ref = str(args.get("originating_handoff_ref") or "").strip()
+
+    # Construct wave entry with frontmatter
+    frontmatter_lines = [
+        "---",
+        f"reply_author: {author}",
+        f"reply_timestamp: {now}",
+        f"agent_layer: {agent_layer}",
+    ]
+    if originating_handoff_ref:
+        frontmatter_lines.append(f"originating_handoff_ref: {originating_handoff_ref}")
+    frontmatter_lines.append("---")
+
+    entry_block = "\n".join(frontmatter_lines) + f"\n\n{content}"
+
+    patch_body: Dict[str, Any] = {"append_content": entry_block}
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=patch_body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_append_wave_entry: document API auth failed for document %s",
+            document_id,
+        )
+    return _result_text(result)
+
+
+async def _dual_append_to_wave(
+    args: dict,
+    content: str,
+    timestamp: str,
+    author: str,
+    handoff_doc_id: str,
+) -> None:
+    """Best-effort append to active wave doc when product-lead appends to handoff.
+
+    AC-5 (ENC-FTR-077): product-lead terminal sessions append to BOTH the
+    originating handoff doc AND the active wave doc. Handoff append always
+    succeeds even if wave append fails.
+    """
+    try:
+        # Fetch the handoff document to get project_id for wave search
+        encoded_id = urllib.parse.quote(handoff_doc_id, safe="")
+        doc_resp = _document_api_request(
+            "GET", f"/{encoded_id}", query={"include_content": "false"},
+        )
+        if not isinstance(doc_resp, dict):
+            logger.warning("Dual-append: could not fetch handoff %s", handoff_doc_id)
+            return
+
+        # Extract project_id from the document or its nested document key
+        doc = doc_resp.get("document", doc_resp)
+        project_id = doc.get("project_id", "")
+        if not project_id:
+            logger.warning("Dual-append: handoff %s has no project_id", handoff_doc_id)
+            return
+
+        # Search for wave docs in the same project
+        search_resp = _document_api_request(
+            "GET", "/search",
+            query={"project": project_id, "keyword": "wave"},
+        )
+        if not isinstance(search_resp, dict):
+            logger.warning("Dual-append: wave search failed for project %s", project_id)
+            return
+
+        wave_docs = (
+            search_resp.get("documents")
+            or search_resp.get("results")
+            or []
+        )
+
+        # Find an active wave doc (wave_status == "active" or status == "active")
+        active_wave = None
+        for wd in wave_docs:
+            subtype = wd.get("document_subtype", "")
+            if subtype != "wave":
+                continue
+            wave_status = wd.get("wave_status") or wd.get("status") or ""
+            if wave_status == "active":
+                active_wave = wd
+                break
+
+        if not active_wave:
+            logger.info("Dual-append: no active wave doc found for project %s, skipping", project_id)
+            return
+
+        wave_doc_id = active_wave.get("document_id") or active_wave.get("id")
+        if not wave_doc_id:
+            logger.warning("Dual-append: active wave doc has no document_id")
+            return
+
+        # Construct wave entry from the handoff reply
+        wave_entry = (
+            f"---\n"
+            f"reply_author: {author}\n"
+            f"reply_timestamp: {timestamp}\n"
+            f"agent_layer: product-lead-terminal\n"
+            f"originating_handoff_ref: {handoff_doc_id}\n"
+            f"---\n\n"
+            f"{content}"
+        )
+
+        wave_encoded_id = urllib.parse.quote(str(wave_doc_id), safe="")
+        wave_result = _document_api_request(
+            "PATCH", path=f"/{wave_encoded_id}",
+            payload={"append_content": wave_entry},
+        )
+
+        if isinstance(wave_result, dict) and (
+            wave_result.get("success") or wave_result.get("document_id")
+        ):
+            logger.info("Dual-append: successfully appended to wave %s", wave_doc_id)
+        else:
+            error_detail = wave_result.get("error", "unknown") if isinstance(wave_result, dict) else str(wave_result)
+            logger.warning("Dual-append: wave append failed: %s", error_detail)
+
+    except Exception as exc:
+        logger.warning("Dual-append: best-effort failed: %s", exc)
+
+
 async def _check_document_policy(args: dict) -> list[TextContent]:
     operation = str(args.get("operation") or "").strip()
     storage_target = str(args.get("storage_target") or "").strip()
@@ -6710,6 +6993,19 @@ if ENABLE_HANDOFF_PRIMITIVE:
     }
     _EXECUTE_ACTIONS["document.complete_handoff"] = {
         "tool": "document_complete_handoff", "requires_governance_hash": True,
+    }
+    # ENC-FTR-077 / ENC-TSK-E53: COE + Wave docstore subtype actions
+    _EXECUTE_ACTIONS["document.create_coe"] = {
+        "tool": "document_create_coe", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.create_wave"] = {
+        "tool": "document_create_wave", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.append_handoff_reply"] = {
+        "tool": "document_append_handoff_reply", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.append_wave_entry"] = {
+        "tool": "document_append_wave_entry", "requires_governance_hash": True,
     }
 
 # ENC-FTR-076 / ENC-TSK-E08: Conditionally register component.propose behind feature flag
@@ -9146,6 +9442,11 @@ _TOOL_HANDLERS = {
     "document_create_handoff": _document_create_handoff,
     "document_claim_handoff": _document_claim_handoff,
     "document_complete_handoff": _document_complete_handoff,
+    # ENC-FTR-077 / ENC-TSK-E53: COE + Wave docstore subtype tools
+    "document_create_coe": _document_create_coe,
+    "document_create_wave": _document_create_wave,
+    "document_append_handoff_reply": _document_append_handoff_reply,
+    "document_append_wave_entry": _document_append_wave_entry,
     # ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry
     "component_propose": _component_propose,
 }

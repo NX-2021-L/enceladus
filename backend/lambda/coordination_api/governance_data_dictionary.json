@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-16.6",
-  "updated_at": "2026-04-16T20:00:00Z",
-  "last_change_summary": "ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
+  "version": "2026-04-16.7",
+  "updated_at": "2026-04-16T21:00:00Z",
+  "last_change_summary": "ENC-FTR-077 / ENC-TSK-E53: Added mcp_server.docstore_subtype_tools entity documenting 4 new execute actions for COE and wave docstore subtypes. document.create_coe creates COE documents with source_incident_id. document.create_wave creates wave documents with plan_anchor_id. document.append_handoff_reply appends structured reply blocks with frontmatter to handoff docs; product-lead-terminal layer triggers AC-5 dual-append to active wave doc. document.append_wave_entry appends wave entries with agent-layer classification. All 4 actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag (same as handoff tools). Prior: ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1861,6 +1861,40 @@
         "feature_flag": {
           "type": "string",
           "definition": "ENABLE_HANDOFF_PRIMITIVE environment variable. When 'true', the 3 handoff actions are registered in the execute action registry. Default 'false'."
+        }
+      }
+    },
+    "mcp_server.docstore_subtype_tools": {
+      "description": "MCP execute actions for COE and wave docstore subtype lifecycle (ENC-FTR-077, ENC-TSK-E53). Four actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag. All route through document_api HTTP API. AC-5: product-lead-terminal append_handoff_reply dual-appends to both the handoff doc and the active wave doc (best-effort).",
+      "fields": {
+        "document.create_coe": {
+          "type": "execute_action",
+          "definition": "Creates a COE (Correction of Errors) document with document_subtype=coe. Requires project_id, title, content, source_incident_id. Optionally accepts description, keywords, related_items, file_name, informed_by. Validation of related_items composition (>= 1 FTR, >= 1 LSN, >= 1 ISS) is enforced by document_api. Returns document_id on success.",
+          "usage_guidance": "execute(steps=[{action: 'document.create_coe', arguments: {governance_hash, project_id, title, content, source_incident_id, ...}}])"
+        },
+        "document.create_wave": {
+          "type": "execute_action",
+          "definition": "Creates a wave coordination document with document_subtype=wave anchored to a plan. Requires project_id, title, content, plan_anchor_id. Optionally accepts description, keywords, related_items, file_name. Returns document_id on success.",
+          "usage_guidance": "execute(steps=[{action: 'document.create_wave', arguments: {governance_hash, project_id, title, content, plan_anchor_id, ...}}])"
+        },
+        "document.append_handoff_reply": {
+          "type": "execute_action",
+          "definition": "Appends a structured reply block with YAML frontmatter (reply_author, reply_timestamp, agent_layer, originating_handoff_ref) to a handoff document via append_content PATCH. Requires document_id, content, agent_layer (one of: supervisor, coord-lead, dispatched-agent, product-lead-terminal). Optionally accepts author, originating_handoff_ref. AC-5: when agent_layer is product-lead-terminal and the handoff append succeeds, a best-effort dual-append copies the reply to the active wave doc in the same project.",
+          "usage_guidance": "execute(steps=[{action: 'document.append_handoff_reply', arguments: {governance_hash, document_id, content, agent_layer, ...}}])"
+        },
+        "document.append_wave_entry": {
+          "type": "execute_action",
+          "definition": "Appends a wave entry with YAML frontmatter (reply_author, reply_timestamp, agent_layer, optional originating_handoff_ref) to a wave document via append_content PATCH. Requires document_id, content, agent_layer. Optionally accepts author, originating_handoff_ref for cross-document traceability.",
+          "usage_guidance": "execute(steps=[{action: 'document.append_wave_entry', arguments: {governance_hash, document_id, content, agent_layer, ...}}])"
+        },
+        "dual_append_behavior": {
+          "type": "rule",
+          "definition": "AC-5 dual-append: when product-lead-terminal calls document.append_handoff_reply and the handoff PATCH succeeds, the MCP server searches for an active wave doc (document_subtype=wave, wave_status=active) in the same project and appends a cross-referenced entry. The wave append is best-effort — handoff success is never blocked by wave append failure. If no active wave doc exists, the dual-append is silently skipped with an INFO log.",
+          "governing_feature": "ENC-FTR-077"
+        },
+        "feature_flag": {
+          "type": "string",
+          "definition": "ENABLE_HANDOFF_PRIMITIVE environment variable. When 'true', these 4 actions (plus the 3 handoff actions) are registered in the execute action registry. Default 'false'."
         }
       }
     },
