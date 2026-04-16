@@ -208,6 +208,12 @@ COE_REQUIRED_SECTIONS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Agent layer classification (ENC-TSK-E50 / ENC-TSK-E51)
+# ---------------------------------------------------------------------------
+
+AGENT_LAYERS = {"supervisor", "coord-lead", "dispatched-agent", "product-lead-terminal"}
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -631,6 +637,95 @@ def _evaluate_markdown_compliance(content: str, document_subtype: str = "") -> D
         "compliance_score": score,
         "compliance_warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Reply block / append frontmatter validation (ENC-TSK-E50 / ENC-TSK-E51)
+# ---------------------------------------------------------------------------
+
+
+def _parse_reply_frontmatter(text: str) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    """Parse YAML-like frontmatter from append_content text.
+
+    Expects the text to start with ``---`` followed by key: value lines and a
+    closing ``---``.  Returns (parsed_dict, None) on success or
+    (None, error_message) on failure.
+    """
+    stripped = text.lstrip("\n")
+    if not stripped.startswith("---"):
+        return None, "append_content must start with a '---' frontmatter block"
+
+    # Split on '---' markers: first element is empty (before first ---),
+    # second element is the frontmatter body, remainder is content.
+    parts = stripped.split("---", 2)
+    if len(parts) < 3:
+        return None, "frontmatter block is missing closing '---' delimiter"
+
+    fm_body = parts[1].strip()
+    if not fm_body:
+        return None, "frontmatter block is empty"
+
+    result: Dict[str, str] = {}
+    for line in fm_body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        colon_idx = line.find(":")
+        if colon_idx < 0:
+            return None, f"frontmatter line is not a valid key: value pair: '{line}'"
+        key = line[:colon_idx].strip()
+        value = line[colon_idx + 1:].strip()
+        result[key] = value
+
+    return result, None
+
+
+def _validate_reply_block(
+    frontmatter: Dict[str, str],
+    *,
+    require_handoff_ref: bool = False,
+) -> Optional[str]:
+    """Validate reply block frontmatter fields.
+
+    Returns None on success or an error message string on failure.
+    ``require_handoff_ref`` controls whether ``originating_handoff_ref`` is
+    mandatory (True for handoff documents, False for wave documents).
+    """
+    # reply_author
+    author = frontmatter.get("reply_author", "").strip()
+    if not author:
+        return "reply_author is required and must be non-empty"
+
+    # reply_timestamp — must be valid ISO 8601
+    ts = frontmatter.get("reply_timestamp", "").strip()
+    if not ts:
+        return "reply_timestamp is required"
+    try:
+        dt.datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return f"reply_timestamp is not a valid ISO 8601 timestamp: '{ts}'"
+
+    # agent_layer
+    layer = frontmatter.get("agent_layer", "").strip()
+    if not layer:
+        return "agent_layer is required"
+    if layer not in AGENT_LAYERS:
+        return (
+            f"agent_layer '{layer}' is not valid. "
+            f"Must be one of: {', '.join(sorted(AGENT_LAYERS))}"
+        )
+
+    # originating_handoff_ref — required only for handoff subtype
+    if require_handoff_ref:
+        ref = frontmatter.get("originating_handoff_ref", "").strip()
+        if not ref:
+            return "originating_handoff_ref is required for handoff reply blocks"
+        if not ref.startswith("DOC-"):
+            return (
+                f"originating_handoff_ref must start with 'DOC-', got: '{ref}'"
+            )
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1727,11 +1822,54 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             logger.error("S3 upload (edit) failed: %s", exc)
             return _error(500, "Failed to update document content.")
 
-    # Append content — read-modify-write cycle (ENC-ISS-239)
+    # Append content — read-modify-write cycle (ENC-ISS-239 / ENC-TSK-E50 / ENC-TSK-E51)
     if "append_content" in body:
         append_text = body["append_content"]
         if append_text is None or not isinstance(append_text, str) or not append_text:
             return _error(400, "Field 'append_content' must be a non-empty string.")
+
+        # --- Handoff reply block validation (ENC-TSK-E50) ---
+        if current_subtype == "handoff":
+            fm, fm_err = _parse_reply_frontmatter(append_text)
+            if fm_err:
+                return _error(
+                    400,
+                    f"Handoff reply block validation failed: {fm_err}",
+                )
+            validation_err = _validate_reply_block(fm, require_handoff_ref=True)
+            if validation_err:
+                return _error(
+                    400,
+                    f"Handoff reply block validation failed: {validation_err}",
+                )
+            # Track reply metadata on the handoff document
+            expr_parts.append("reply_count = if_not_exists(reply_count, :zero) + :one")
+            expr_parts.append("last_reply_at = :lra")
+            attr_values[":zero"] = {"N": "0"}
+            attr_values[":lra"] = {"S": now}
+
+        # --- Wave multi-author append validation (ENC-TSK-E51) ---
+        elif current_subtype == "wave":
+            fm, fm_err = _parse_reply_frontmatter(append_text)
+            if fm_err:
+                return _error(
+                    400,
+                    f"Wave append validation failed: {fm_err}",
+                )
+            validation_err = _validate_reply_block(fm, require_handoff_ref=False)
+            if validation_err:
+                return _error(
+                    400,
+                    f"Wave append validation failed: {validation_err}",
+                )
+            # Track append metadata on the wave document
+            expr_parts.append("append_count = if_not_exists(append_count, :zero) + :one")
+            expr_parts.append("last_append_at = :laa")
+            attr_values[":zero"] = {"N": "0"}
+            attr_values[":laa"] = {"S": now}
+
+        # Non-handoff/wave: format-agnostic general append (no validation)
+
         try:
             existing_content = _get_content(project_id, document_id)
             if existing_content is None:
