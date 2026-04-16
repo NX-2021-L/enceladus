@@ -1309,7 +1309,33 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     if document_subtype == "handoff":
         source_record_id = str(body.get("source_record_id", "")).strip()
         if not source_record_id:
-            return _error(400, "Field 'source_record_id' is required when document_subtype is 'handoff'.")
+            return _error(
+                400,
+                "Field 'source_record_id' is required when document_subtype is 'handoff'.",
+                required_fields=["source_record_id"],
+                optional_fields=[
+                    "prerequisite_state",
+                    "verification_criteria",
+                    "action_checklist",
+                    "expires_at",
+                ],
+                dictionary_entity="document.handoff",
+                document_subtype="handoff",
+                example_fix={
+                    "tool": "documents.put",
+                    "arguments": {
+                        "project_id": "<project_id>",
+                        "title": "HANDOFF \u2014 <brief description>",
+                        "content": "<full markdown body>",
+                        "document_subtype": "handoff",
+                        "source_record_id": "<ENC-TSK-XXX or similar>",
+                        "prerequisite_state": "<state required before executor begins>",
+                        "verification_criteria": "<how to verify success>",
+                        "action_checklist": ["step 1", "step 2"],
+                        "governance_hash": "<governance_hash>",
+                    },
+                },
+            )
         handoff_fields["source_record_id"] = source_record_id
         handoff_fields["handoff_status"] = "pending"
         handoff_fields["prerequisite_state"] = str(body.get("prerequisite_state", "")).strip()
@@ -1329,7 +1355,30 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     if document_subtype == "coe":
         source_incident_id = str(body.get("source_incident_id", "")).strip()
         if not source_incident_id:
-            return _error(400, "Field 'source_incident_id' is required when document_subtype is 'coe'.")
+            return _error(
+                400,
+                "Field 'source_incident_id' is required when document_subtype is 'coe'.",
+                required_fields=["source_incident_id"],
+                edge_density_requirements={
+                    "feature": "at least 1 ENC-FTR-* in related_items",
+                    "lesson": "at least 1 ENC-LSN-* in related_items",
+                    "issue": "at least 1 ENC-ISS-* in related_items",
+                },
+                dictionary_entity="document.coe",
+                document_subtype="coe",
+                example_fix={
+                    "tool": "documents.put",
+                    "arguments": {
+                        "project_id": "<project_id>",
+                        "title": "COE \u2014 <brief incident summary>",
+                        "content": "<full COE markdown>",
+                        "document_subtype": "coe",
+                        "source_incident_id": "<ENC-ISS-XXX>",
+                        "related_items": ["ENC-FTR-XXX", "ENC-LSN-XXX", "ENC-ISS-XXX"],
+                        "governance_hash": "<governance_hash>",
+                    },
+                },
+            )
         coe_fields["source_incident_id"] = source_incident_id
         coe_fields["coe_status"] = "drafting"
         # Edge density validation: require at least 1 FTR, 1 LSN, 1 ISS in related_items
@@ -1360,6 +1409,21 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
                 400,
                 "Field 'plan_anchor_id' is required when document_subtype is 'wave' "
                 "and must contain '-PLN-' (e.g. ENC-PLN-029).",
+                required_fields=["plan_anchor_id"],
+                format_constraint="plan_anchor_id must contain '-PLN-' substring",
+                dictionary_entity="document.wave",
+                document_subtype="wave",
+                example_fix={
+                    "tool": "documents.put",
+                    "arguments": {
+                        "project_id": "<project_id>",
+                        "title": "WAVE \u2014 <brief description>",
+                        "content": "<wave tracking content>",
+                        "document_subtype": "wave",
+                        "plan_anchor_id": "ENC-PLN-XXX",
+                        "governance_hash": "<governance_hash>",
+                    },
+                },
             )
         wave_fields["plan_anchor_id"] = plan_anchor_id
         wave_fields["wave_status"] = "active"
