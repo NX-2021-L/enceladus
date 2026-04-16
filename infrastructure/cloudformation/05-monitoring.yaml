@@ -98,6 +98,33 @@ Resources:
           Arn: !GetAtt ProdHealthMonitorFunction.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-E69 / ENC-PLN-031 Phase 4 — Deploy Capability Auditor schedule
+  # ---------------------------------------------------------------------------
+  # The Lambda function itself is created by backend/lambda/deploy_capability_auditor/deploy.sh
+  # (self-managed IAM + zip update). This block owns only the EventBridge rule
+  # so the schedule is IaC-managed and visible to the CFN drift audit
+  # (ENC-TSK-E67).
+
+  DeployCapabilityAuditorScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-deploy-capability-auditor-schedule${EnvironmentSuffix}"
+      Description: Triggers deploy capability auditor Lambda daily at 10:00 UTC
+      ScheduleExpression: "cron(0 10 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: DeployCapabilityAuditorTarget
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-deploy-capability-auditor${EnvironmentSuffix}"
+
+  DeployCapabilityAuditorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "enceladus-deploy-capability-auditor${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DeployCapabilityAuditorScheduleRule.Arn
+
+  # ---------------------------------------------------------------------------
   # CloudWatch Alarms
   # ---------------------------------------------------------------------------
 
