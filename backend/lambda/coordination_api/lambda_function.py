@@ -7775,6 +7775,17 @@ _COMPONENT_TRANSITION_TYPES = frozenset({
     "github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code"
 })
 _COMPONENT_STATUSES = frozenset({"active", "deprecated", "archived"})
+# ENC-TSK-E68 (ENC-PLN-031 Phase 3): capability-declaration fields accepted on
+# components_create / components_update / components_propose. All optional
+# List[str], empty-array default. Source-of-truth for the continuous deploy
+# capability auditor (ENC-TSK-E69) and pre-merge guard (ENC-TSK-E70).
+_COMPONENT_CAPABILITY_FIELDS = (
+    "required_iam_actions",
+    "required_env_secrets",
+    "required_apigw_routes",
+    "required_cfn_resources",
+    "required_lambda_env_vars",
+)
 _COMPONENT_STRICTNESS_RANK = {
     "github_pr_deploy": 0,
     "lambda_deploy": 1,
@@ -8056,6 +8067,22 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
     if body.get("source_paths") and isinstance(body["source_paths"], dict):
         item["source_paths"] = body["source_paths"]
 
+    # ENC-TSK-E68 (ENC-PLN-031 Phase 3): capability-declaration fields consumed
+    # by the continuous auditor (ENC-TSK-E69) and pre-merge guard (ENC-TSK-E70).
+    for field in _COMPONENT_CAPABILITY_FIELDS:
+        if field not in body:
+            continue
+        val = body[field]
+        if not isinstance(val, list) or any(not isinstance(v, str) for v in val):
+            return _component_validation_error(
+                400,
+                f"{field} must be a list of strings",
+                field=field,
+                component_id=component_id,
+                expected_type="array[string]",
+            )
+        item[field] = val
+
     ddb = _get_ddb()
     try:
         ddb.put_item(
@@ -8183,6 +8210,24 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
         "updated_at": now,
         "proposed_at": now,
     }
+
+    # ENC-TSK-E68 (ENC-PLN-031 Phase 3): capability declarations at proposal
+    # time. Optional; the continuous auditor and pre-merge guard use these
+    # to diff proposed capabilities against the deploy role / CFN / env
+    # secrets before approval.
+    for field in _COMPONENT_CAPABILITY_FIELDS:
+        if field not in body:
+            continue
+        val = body[field]
+        if not isinstance(val, list) or any(not isinstance(v, str) for v in val):
+            return _component_validation_error(
+                400,
+                f"{field} must be a list of strings",
+                field=field,
+                component_id=component_id,
+                expected_type="array[string]",
+            )
+        component_item[field] = val
 
     # Build an rel# pair for the COMPONENT_PROPOSED_BY typed edge. Schema mirrors
     # tracker_mutation/_handle_create_relationship._rel_item so graph_sync projects
@@ -8569,6 +8614,8 @@ def _handle_components_update(
     }
     # source_paths is a nested map — serialized via TypeSerializer, not as plain string
     updatable_map_fields = {"source_paths"}
+    # ENC-TSK-E68 (ENC-PLN-031 Phase 3): capability-declaration list fields.
+    updatable_list_fields = set(_COMPONENT_CAPABILITY_FIELDS)
     update_parts = []
     attr_names: Dict[str, str] = {}
     attr_vals: Dict[str, Any] = {}
@@ -8590,6 +8637,24 @@ def _handle_components_update(
                 field=field,
                 component_id=component_id,
                 expected_type="object",
+            )
+        safe_name = f"#f_{field}"
+        safe_val = f":v_{field}"
+        attr_names[safe_name] = field
+        attr_vals[safe_val] = ss.serialize(val)
+        update_parts.append(f"{safe_name} = {safe_val}")
+
+    for field in updatable_list_fields:
+        if field not in body:
+            continue
+        val = body[field]
+        if not isinstance(val, list) or any(not isinstance(v, str) for v in val):
+            return _component_validation_error(
+                400,
+                f"{field} must be a list of strings",
+                field=field,
+                component_id=component_id,
+                expected_type="array[string]",
             )
         safe_name = f"#f_{field}"
         safe_val = f":v_{field}"
