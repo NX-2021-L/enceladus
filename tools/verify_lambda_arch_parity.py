@@ -15,10 +15,11 @@ Part of ENC-PLN-019 (V3 Full Restoration & Production Lockdown).
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
-from typing import List, NamedTuple
+from typing import List, NamedTuple, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
@@ -415,7 +416,111 @@ def _validate_manifest_expectations() -> List[str]:
     return errors
 
 
+# ENC-TSK-E29: S3 artifact layout validation (E20 AC-5)
+ARTIFACT_ARCH_TAGS = {
+    "prod": "x86_64-py311",
+    "gamma": "arm64-py312",
+}
+ARTIFACT_BUCKET = "jreese-net"
+
+
+def _validate_artifact_s3_layout(
+    git_sha: str,
+    bucket: str = ARTIFACT_BUCKET,
+    environments: Optional[List[str]] = None,
+) -> List[str]:
+    """Check S3 bucket for correct arch-tagged artifact structure per manifest function.
+
+    For each function in the manifest, verifies that a zip artifact exists at
+    the expected S3 key for each target environment:
+      lambda-artifacts/{git_sha}/x86_64-py311/{function_name}.zip  (prod)
+      lambda-artifacts/{git_sha}/arm64-py312/{function_name}.zip   (gamma)
+
+    Returns a list of error strings for missing or misplaced artifacts.
+    Requires boto3 and AWS credentials with S3 read access.
+    """
+    import json
+
+    try:
+        import boto3
+    except ImportError:
+        return ["boto3 not available — cannot validate S3 artifact layout"]
+
+    if not MANIFEST_PATH.is_file():
+        return ["Lambda workflow manifest not found — cannot validate S3 artifacts"]
+
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    functions = manifest.get("functions", [])
+    if not functions:
+        return ["No functions in manifest — nothing to validate"]
+
+    if environments is None:
+        environments = ["prod", "gamma"]
+
+    errors: List[str] = []
+    s3 = boto3.client("s3", region_name="us-west-2")
+
+    for env in environments:
+        arch_tag = ARTIFACT_ARCH_TAGS.get(env)
+        if not arch_tag:
+            errors.append(f"Unknown environment '{env}' — expected 'prod' or 'gamma'")
+            continue
+
+        prefix = f"lambda-artifacts/{git_sha}/{arch_tag}/"
+
+        # List all objects under this prefix once
+        try:
+            resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        except Exception as exc:
+            errors.append(f"S3 list failed for {env} prefix {prefix}: {exc}")
+            continue
+
+        existing_keys = {
+            obj["Key"] for obj in resp.get("Contents", [])
+        }
+
+        for entry in functions:
+            fn_name = entry.get("function_name", "")
+            if not fn_name:
+                continue
+            expected_key = f"{prefix}{fn_name}.zip"
+            if expected_key not in existing_keys:
+                errors.append(
+                    f"{fn_name} ({env}): missing artifact at "
+                    f"s3://{bucket}/{expected_key}"
+                )
+
+    if not errors:
+        envs_str = ", ".join(environments)
+        print(
+            f"[INFO] S3 artifact layout validated for {git_sha}: "
+            f"{len(functions)} functions x [{envs_str}] — all present"
+        )
+
+    return errors
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify Lambda architecture parity between CFN, deploy scripts, and S3 artifacts."
+    )
+    parser.add_argument(
+        "--check-s3-artifacts",
+        metavar="GIT_SHA",
+        help="Validate S3 artifact layout for the given git SHA (requires boto3 + AWS creds).",
+    )
+    parser.add_argument(
+        "--s3-bucket",
+        default=ARTIFACT_BUCKET,
+        help=f"S3 bucket for artifact validation (default: {ARTIFACT_BUCKET}).",
+    )
+    parser.add_argument(
+        "--s3-environments",
+        default="prod,gamma",
+        help="Comma-separated environments to check (default: prod,gamma).",
+    )
+    args = parser.parse_args()
+
     if not COMPUTE_TEMPLATE.is_file():
         print(f"[ERROR] Compute template missing: {COMPUTE_TEMPLATE}")
         return 1
@@ -450,6 +555,18 @@ def main() -> int:
     if manifest_errors:
         errors.append("=== Manifest expectation violations ===")
         errors.extend(manifest_errors)
+
+    # ENC-TSK-E29: Validate S3 artifact layout when requested (E20 AC-5)
+    if args.check_s3_artifacts:
+        envs = [e.strip() for e in args.s3_environments.split(",") if e.strip()]
+        artifact_errors = _validate_artifact_s3_layout(
+            git_sha=args.check_s3_artifacts,
+            bucket=args.s3_bucket,
+            environments=envs,
+        )
+        if artifact_errors:
+            errors.append("=== S3 artifact layout violations ===")
+            errors.extend(artifact_errors)
 
     if errors:
         print("[ERROR] Lambda architecture parity check FAILED:")
