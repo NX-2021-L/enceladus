@@ -4111,6 +4111,9 @@ _RELATIONSHIP_TYPES = frozenset({
     "dispatches", "dispatched-by",
     # ENC-FTR-076 / ENC-TSK-E08: Component proposal provenance
     "component-proposed-by", "proposes-component",
+    # ENC-FTR-077: Docstore subtype edges
+    "investigates", "investigated-by",
+    "tracks-wave-of", "has-wave-doc",
 })
 
 _INVERSE_PAIRS: Dict[str, str] = {
@@ -4137,6 +4140,9 @@ _INVERSE_PAIRS: Dict[str, str] = {
     # ENC-FTR-076 / ENC-TSK-E08: Component proposal provenance
     "component-proposed-by": "proposes-component",
     "proposes-component": "component-proposed-by",
+    # ENC-FTR-077: Docstore subtype edges
+    "investigates": "investigated-by", "investigated-by": "investigates",
+    "tracks-wave-of": "has-wave-doc", "has-wave-doc": "tracks-wave-of",
 }
 
 _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
