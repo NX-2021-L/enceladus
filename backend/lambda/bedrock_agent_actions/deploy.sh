@@ -167,10 +167,13 @@ ensure_function() {
       --region "${REGION}"
   else
     log "[START] creating Lambda function: ${FUNCTION_NAME}"
+    # Env-conditional: gamma=arm64/py3.12, prod=x86_64/py3.11.
+    local runtime_flag="python3.11"
+    if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then runtime_flag="python3.12"; fi
     aws lambda create-function \
       --function-name "${FUNCTION_NAME}" \
       --region "${REGION}" \
-      --runtime python3.11 \
+      --runtime "${runtime_flag}" \
       --handler lambda_function.handler \
       --role "${role_arn}" \
       --timeout 30 \

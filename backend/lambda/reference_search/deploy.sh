@@ -88,10 +88,23 @@ package_lambda() {
 
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
+  # Env-conditional: gamma=arm64/py3.12, prod=x86_64/py3.11.
+  local pip_platform pip_pyver pip_abi
+  if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
+    pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"
+  else
+    pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"
+  fi
+
   # Install PyJWT with crypto support
   python3 -m pip install \
     --quiet \
     --upgrade \
+    --platform "${pip_platform}" \
+    --implementation cp \
+    --python-version "${pip_pyver}" \
+    --abi "${pip_abi}" \
+    --only-binary=:all: \
     "PyJWT[crypto]>=2.8.0" \
     -t "${build_dir}" >/dev/null
 
@@ -136,10 +149,13 @@ deploy_lambda() {
       --environment "Variables=${env_vars}" >/dev/null
   else
     log "[START] creating Lambda function: ${FUNCTION_NAME}"
+    # Env-conditional: gamma=arm64/py3.12, prod=x86_64/py3.11.
+    local runtime_flag="python3.11"
+    if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then runtime_flag="python3.12"; fi
     aws lambda create-function \
       --region "${REGION}" \
       --function-name "${FUNCTION_NAME}" \
-      --runtime python3.11 \
+      --runtime "${runtime_flag}" \
       --handler "lambda_function.lambda_handler" \
       --role "${role_arn}" \
       --timeout 10 \
