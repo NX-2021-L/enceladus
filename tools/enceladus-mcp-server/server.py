@@ -9032,7 +9032,7 @@ async def _component_propose(args: dict) -> list[TextContent]:
         payload["category"] = args["category"]
 
     resp = _coordination_api_request(
-        "POST", "/api/v1/coordination/components/propose", payload=payload,
+        "POST", "/components/propose", payload=payload,
     )
     return _result_text(resp)
 
