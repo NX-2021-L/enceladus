@@ -4298,6 +4298,16 @@ async def list_tools() -> list[Tool]:
                         "type": "object",
                         "description": "Non-UI deployment config for infrastructure deployment types.",
                     },
+                    "source_artifact_s3_key": {
+                        "type": "string",
+                        "description": (
+                            "Optional S3 key for a pre-built Lambda artifact zip. "
+                            "Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip "
+                            "where arch_tag is x86_64-py311 (prod) or arm64-py312 (gamma). "
+                            "When present, deploy_intake validates the arch tag matches "
+                            "the target environment."
+                        ),
+                    },
                     "governance_hash": {
                         "type": "string",
                         "description": "Current governance hash for write authorization.",
@@ -7608,6 +7618,7 @@ async def _deploy_submit(args: dict) -> list[TextContent]:
     merged_at = str(args.get("merged_at") or "")
     pr_owner = str(args.get("pr_owner") or "NX-2021-L")
     pr_repo = str(args.get("pr_repo") or "enceladus")
+    source_artifact_s3_key = str(args.get("source_artifact_s3_key") or "").strip()
 
     # Validate pr_id and merged_at
     if pr_id is None or not merged_at:
@@ -7703,6 +7714,8 @@ async def _deploy_submit(args: dict) -> list[TextContent]:
         body["github_config"] = github_config
     if isinstance(non_ui_config, dict):
         body["non_ui_config"] = non_ui_config
+    if source_artifact_s3_key:
+        body["source_artifact_s3_key"] = source_artifact_s3_key
 
     result = _deploy_api_request("POST", "/submit", payload=body)
     return _result_text(result)

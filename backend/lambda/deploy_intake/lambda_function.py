@@ -659,6 +659,46 @@ def _validate_pr_merged(
     return True, ""
 
 
+# ENC-TSK-E29: S3 artifact key validation (E20 AC-6)
+# Arch tags correspond to the split-artifact build pipeline output structure:
+#   lambda-artifacts/{git_sha}/x86_64-py311/{function_name}.zip  (prod)
+#   lambda-artifacts/{git_sha}/arm64-py312/{function_name}.zip   (gamma)
+ARTIFACT_ARCH_TAGS = {"prod": "x86_64-py311", "gamma": "arm64-py312"}
+VALID_ARTIFACT_ARCH_TAGS = frozenset(ARTIFACT_ARCH_TAGS.values())
+_ARTIFACT_S3_KEY_RE = re.compile(
+    r"^lambda-artifacts/[0-9a-f]{7,40}/([a-zA-Z0-9_-]+)/[a-zA-Z0-9_.-]+\.zip$"
+)
+
+
+def _validate_artifact_s3_key(key: str, project_id: str) -> Optional[str]:
+    """Validate source_artifact_s3_key format and arch tag vs target environment.
+
+    Returns an error string if invalid, None if valid.
+    """
+    m = _ARTIFACT_S3_KEY_RE.match(key)
+    if not m:
+        return (
+            f"source_artifact_s3_key format invalid: {key!r}. "
+            f"Expected: lambda-artifacts/{{git_sha}}/{{arch_tag}}/{{function_name}}.zip "
+            f"where arch_tag is one of: {', '.join(sorted(VALID_ARTIFACT_ARCH_TAGS))}"
+        )
+    arch_tag = m.group(1)
+    if arch_tag not in VALID_ARTIFACT_ARCH_TAGS:
+        return (
+            f"source_artifact_s3_key arch tag '{arch_tag}' is not recognized. "
+            f"Must be one of: {', '.join(sorted(VALID_ARTIFACT_ARCH_TAGS))}"
+        )
+    is_gamma = project_id.rstrip("/").endswith("-gamma")
+    expected_tag = ARTIFACT_ARCH_TAGS["gamma"] if is_gamma else ARTIFACT_ARCH_TAGS["prod"]
+    if arch_tag != expected_tag:
+        env_label = "gamma" if is_gamma else "prod"
+        return (
+            f"source_artifact_s3_key arch tag mismatch: key contains '{arch_tag}' "
+            f"but project '{project_id}' targets {env_label} (expected '{expected_tag}')"
+        )
+    return None
+
+
 def _project_next_version(current: str, change_type: str) -> Optional[str]:
     """Return projected next semver given current version and change_type."""
     m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", current.strip())
@@ -688,6 +728,8 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
     merged_at = (body.get("merged_at") or "").strip()
     pr_owner = body.get("pr_owner", "NX-2021-L")
     pr_repo = body.get("pr_repo", "enceladus")
+    # ENC-TSK-E29: Optional S3 artifact key for pre-built Lambda packages
+    source_artifact_s3_key = (body.get("source_artifact_s3_key") or "").strip()
 
     # Validation
     if not project_id:
@@ -714,6 +756,11 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
     pr_valid, pr_reason = _validate_pr_merged(pr_owner, pr_repo, pr_id_int, merged_at)
     if not pr_valid:
         return _error(400, f"PR merge validation failed: {pr_reason}")
+    # ENC-TSK-E29: Validate artifact S3 key arch tag when present (E20 AC-6)
+    if source_artifact_s3_key:
+        artifact_err = _validate_artifact_s3_key(source_artifact_s3_key, project_id)
+        if artifact_err:
+            return _error(400, artifact_err)
     if not isinstance(changes, list):
         return _error(400, "changes must be an array of strings")
     if len(changes) > MAX_CHANGES_COUNT:
@@ -808,6 +855,8 @@ def _handle_submit(event: Dict, body: Dict) -> Dict:
         item["pre_deploy_hooks"] = {"L": [{"S": hook} for hook in pre_deploy_hooks]}
     if pre_deploy_results:
         item["pre_deploy_results"] = {"S": json.dumps(pre_deploy_results)}
+    if source_artifact_s3_key:
+        item["source_artifact_s3_key"] = {"S": source_artifact_s3_key}
 
     ddb = _get_ddb()
     ddb.put_item(TableName=DEPLOY_TABLE, Item=item)
