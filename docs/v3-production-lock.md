@@ -135,6 +135,76 @@ Adding a runtime check to `verify_lambda_arch_parity.py` that fetches each Lambd
 
 ---
 
+## Split-Artifact Build Pipeline (ENC-TSK-E20)
+
+### Overview
+
+The split-artifact pipeline centralizes Lambda package building into a single GitHub Actions workflow (`build-lambda-artifacts.yml`) that produces architecture-tagged zip artifacts in S3. This replaces the previous model where each deploy workflow built its own package inline, eliminating architecture contamination risk at the source.
+
+### S3 naming convention
+
+All Lambda artifacts are stored in the `jreese-net` bucket under a deterministic key structure:
+
+```
+lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip
+```
+
+Where `arch_tag` is one of:
+- `x86_64-py311` — production (v3)
+- `arm64-py312` — gamma (v4)
+
+Example:
+```
+s3://jreese-net/lambda-artifacts/58a9128fc150.../x86_64-py311/devops-coordination-api.zip
+s3://jreese-net/lambda-artifacts/58a9128fc150.../arm64-py312/devops-coordination-api.zip
+```
+
+### Build workflow
+
+`.github/workflows/build-lambda-artifacts.yml` runs on every push to main:
+1. Reads function list from `infrastructure/lambda_workflow_manifest.json`
+2. Builds both `x86_64-py311` and `arm64-py312` variants for each function
+3. Uploads zips to S3 under the commit SHA prefix
+4. Outputs `artifact_prefix` for downstream consumption
+
+Build logic is implemented in `tools/package_lambda_artifact.sh`. Deploy-side resolution is handled by `tools/lambda_artifact_helper.sh` (sourced by all 31 `deploy.sh` scripts).
+
+### Arch-tag validation gate
+
+`.github/workflows/lambda-deploy-reusable.yml` includes an arch-tag validation step that verifies the artifact S3 key's arch tag matches the target environment before proceeding with `aws lambda update-function-code`. This prevents a gamma artifact from being deployed to production (or vice versa).
+
+### Deploy intake validation
+
+`deploy_intake` `_handle_submit()` validates `source_artifact_s3_key` when present:
+1. S3 key format must match `lambda-artifacts/{sha}/{arch_tag}/{fn}.zip`
+2. Arch tag must be a recognized value (`x86_64-py311` or `arm64-py312`)
+3. Arch tag must match the target environment derived from the project ID
+
+The MCP server `deploy_submit` tool accepts and forwards this parameter.
+
+### CI parity audit
+
+`tools/verify_lambda_arch_parity.py` includes `_validate_artifact_s3_layout()` (activated via `--check-s3-artifacts GIT_SHA`):
+- Reads the manifest to enumerate all functions
+- Lists S3 objects under each environment's arch-tag prefix
+- Reports any function missing its expected artifact zip
+
+### Known limitation
+
+**ENC-ISS-237 (P1):** The `enceladus-backend-deploy-github-role` IAM role currently lacks `s3:PutObject` permission on the `lambda-artifacts/` S3 prefix. The `build-lambda-artifacts.yml` upload step fails with AccessDenied until this IAM policy is updated. The pipeline architecture is complete and validated; only the IAM grant is missing.
+
+### Phased delivery
+
+| Phase | Task | PR | Summary |
+|-------|------|----|---------|
+| 1 | ENC-TSK-E26 | #339 | Build workflow + package script + manifest |
+| 2 | ENC-TSK-E27 | #340 | Deploy-side artifact helper + 31 deploy.sh scripts |
+| 3 | ENC-TSK-E28 | #341 | deploy-orchestration.yml wiring + arch-tag gate |
+| 4 | ENC-TSK-E29 | #342 | Deploy intake validation + parity audit |
+| 5 | ENC-TSK-E30 | — | Documentation + governance dictionary (this section) |
+
+---
+
 ## Related Documents
 
 - **COE (operational):** DOC-2CACF0D1E7E6 (Sev1 MCP/PWA Outage 2026-04-11)
@@ -146,3 +216,8 @@ Adding a runtime check to `verify_lambda_arch_parity.py` that fetches each Lambd
 - **Manifest:** `infrastructure/lambda_workflow_manifest.json`
 - **Issue:** ENC-ISS-198 (P1 — PWA Cognito writes broken by layer ABI mismatch)
 - **Fix task:** ENC-TSK-D22
+- **Split-artifact pipeline:** ENC-TSK-E20 (parent), ENC-TSK-E26–E30 (phases 1–5)
+- **Build workflow:** `.github/workflows/build-lambda-artifacts.yml`
+- **Package script:** `tools/package_lambda_artifact.sh`
+- **Artifact helper:** `tools/lambda_artifact_helper.sh`
+- **IAM gap:** ENC-ISS-237 (S3 PutObject on `lambda-artifacts/` prefix)
