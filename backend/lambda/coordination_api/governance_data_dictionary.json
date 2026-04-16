@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-16.4",
-  "updated_at": "2026-04-16T10:25:00Z",
-  "last_change_summary": "ENC-TSK-E47 / ENC-ISS-242: No schema change \u2014 fixed subtask_ids immutability validation to use deserialized Python list format instead of raw DynamoDB .get('L')/.get('S') accessors. Added defensive try-except. Prior: ENC-TSK-E33 / ENC-ISS-240: No schema change \u2014 fixed _component_propose URL path from full '/api/v1/coordination/components/propose' to relative '/components/propose' (doubled prefix bug). Prior: ENC-TSK-E30 / ENC-TSK-E20 AC-7: Added deploy.artifact_pipeline entity documenting the centralized Lambda build/deploy pipeline — S3 key format (lambda-artifacts/{sha}/{arch_tag}/{fn}.zip), arch tags (prod=x86_64-py311, gamma=arm64-py312), build workflow, deploy helper, and validation gate. Prior: ENC-TSK-E29 / ENC-TSK-E20 AC-6: Added source_artifact_s3_key field to deploy.request entity documenting the optional S3 artifact key validation in deploy_intake _handle_submit(). Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip. Arch tag validated against target environment (prod=x86_64-py311, gamma=arm64-py312). Also added to MCP server deploy_submit tool schema. Prior: ENC-FTR-076 / ENC-TSK-E11: Extended component_registry.propose_contract with sns_notification field documenting the ComponentRegistryEventsTopic SNS topic added to infrastructure/cloudformation/01-data.yaml + ComponentRegistryEventsTopicArn export. coordination_api inline IAM policy adds ComponentEventsTopicPublish Sid scoped to that topic ARN; deploy.sh plumbs COMPONENT_EVENTS_TOPIC_ARN env var. _handle_components_propose calls _publish_component_proposed_event after the DynamoDB TransactWrite succeeds; failure is logged and never raised so SNS is best-effort and the 201 response always reaches the caller. Payload schema: {event_type: 'component.proposed', component_id, project_id, proposing_agent_session_id, requested_minimum_transition_type, pwa_deep_link='https://jreese.net/components?filter=pending'}. Prior ENC-FTR-076 / ENC-TSK-E09: Extended component_registry.propose_contract with approve_route + reject_route fields documenting POST /api/v1/coordination/components/{id}/approve and /reject. Both Cognito-only (403 to internal-key callers), gated by ENABLE_COMPONENT_PROPOSAL, atomic UpdateItem with ConditionExpression `attribute_exists(component_id) AND lifecycle_status = 'proposed'` — non-proposed records return 409 with current_lifecycle_status echoed, missing returns 404. Approve writes lifecycle_status=active + approved_at + approved_by (Cognito email/username/sub) and accepts an optional transition_type override. Reject requires rejection_reason >= 10 chars and writes lifecycle_status=rejected + rejected_at + rejected_by + rejection_reason. Routes registered above the generic /components/{id} matcher. Prior ENC-FTR-076 / ENC-TSK-E10: Extended checkout_service.component_enforcement entity with the lifecycle_status pre-check inside _handle_advance(). New helper _get_components_lifecycle() returns per-component {lifecycle_status, rejection_reason}; advances are blocked when any component is `proposed` (HTTP 400 component_not_approved) or `rejected` (HTTP 400 component_rejected echoing rejection_reason). active is the happy path; approved is observed-then-treated-as-active with a [WARNING] log; user_initiated=true bypasses the gate. Prior ENC-FTR-076 / ENC-TSK-E08: Added component_registry.propose_contract entity documenting the agent-proposable component registry surface. New lifecycle_status field on component records (proposed/approved/active/rejected/deprecated/archived); new POST /api/v1/coordination/components/propose route + ENABLE_COMPONENT_PROPOSAL feature flag on coordination_api; new `component.propose` MCP action with requires_governance_hash=True; new component-proposed-by/proposes-component typed-relationship pair registered in tracker_mutation._RELATIONSHIP_TYPES + _INVERSE_PAIRS, graph_sync.RELATIONSHIP_TYPE_TO_EDGE_LABEL, and graph_query_api._ALLOWED_EDGE_TYPES so the COMPONENT_PROPOSED_BY edge is queryable via tracker.graphsearch. Atomic write via TransactWriteItems across component-registry + devops-project-tracker. Prior ENC-TSK-E06 / ENC-ISS-230: Added neo4j.placeholder_node entity documenting the is_placeholder boolean property contract on Neo4j nodes. graph_sync._reconcile_edges() placeholder MERGE sites (PLAN_CONTAINS, PLAN_ATTACHED_DOC, PLAN_IMPLEMENTS, LEARNED_FROM, RELATED_TO, INFORMED_BY source) now set `is_placeholder=true` via ON CREATE SET so downstream consumers can distinguish edge-target stub nodes from real DynamoDB-backed records. _upsert_node clears is_placeholder to false on the real record's projection. embedding.titan_v2_backfill._coverage_for_label adds WHERE n.is_placeholder IS NULL OR n.is_placeholder = false so coverage metrics reflect the active corpus only — closes the B91 denominator inflation (229 orphan stubs pulled Task to 93.72% and Issue to 90.69% despite 100% active-corpus coverage).",
+  "version": "2026-04-16.5",
+  "updated_at": "2026-04-16T18:00:00Z",
+  "last_change_summary": "ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave enumeration and validation. Made document_subtype required on PUT (no default), added 'doc' subtype replacing deprecated 'general' for new creates, added semantic handoff-detection guard for doc subtype (confirm_subtype bypass), added 'coe' subtype with source_incident_id + coe_status lifecycle (drafting/under-review/accepted/archived) + edge density enforcement (>= 1 FTR + 1 LSN + 1 ISS), added 'wave' subtype with required plan_anchor_id (must contain -PLN-, immutable after creation) + wave_status lifecycle (active/concluded/archived). PATCH handler extended with coe_status/wave_status transition validation, plan_anchor_id immutability guard, COE edge density re-validation on related_items change. Compliance checker adds COE-specific section warnings. MCP server passthrough updated for confirm_subtype, source_incident_id, plan_anchor_id, coe_status, wave_status. Added document.doc, document.coe, document.wave entities. Updated document.handoff document_subtype enum to full set. Prior: ENC-TSK-E47 / ENC-ISS-242: No schema change \u2014 fixed subtask_ids immutability validation to use deserialized Python list format instead of raw DynamoDB .get('L')/.get('S') accessors. Added defensive try-except. Prior: ENC-TSK-E33 / ENC-ISS-240: No schema change \u2014 fixed _component_propose URL path from full '/api/v1/coordination/components/propose' to relative '/components/propose' (doubled prefix bug). Prior: ENC-TSK-E30 / ENC-TSK-E20 AC-7: Added deploy.artifact_pipeline entity documenting the centralized Lambda build/deploy pipeline — S3 key format (lambda-artifacts/{sha}/{arch_tag}/{fn}.zip), arch tags (prod=x86_64-py311, gamma=arm64-py312), build workflow, deploy helper, and validation gate. Prior: ENC-TSK-E29 / ENC-TSK-E20 AC-6: Added source_artifact_s3_key field to deploy.request entity documenting the optional S3 artifact key validation in deploy_intake _handle_submit(). Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip. Arch tag validated against target environment (prod=x86_64-py311, gamma=arm64-py312). Also added to MCP server deploy_submit tool schema. Prior: ENC-FTR-076 / ENC-TSK-E11: Extended component_registry.propose_contract with sns_notification field documenting the ComponentRegistryEventsTopic SNS topic added to infrastructure/cloudformation/01-data.yaml + ComponentRegistryEventsTopicArn export. coordination_api inline IAM policy adds ComponentEventsTopicPublish Sid scoped to that topic ARN; deploy.sh plumbs COMPONENT_EVENTS_TOPIC_ARN env var. _handle_components_propose calls _publish_component_proposed_event after the DynamoDB TransactWrite succeeds; failure is logged and never raised so SNS is best-effort and the 201 response always reaches the caller. Payload schema: {event_type: 'component.proposed', component_id, project_id, proposing_agent_session_id, requested_minimum_transition_type, pwa_deep_link='https://jreese.net/components?filter=pending'}. Prior ENC-FTR-076 / ENC-TSK-E09: Extended component_registry.propose_contract with approve_route + reject_route fields documenting POST /api/v1/coordination/components/{id}/approve and /reject. Both Cognito-only (403 to internal-key callers), gated by ENABLE_COMPONENT_PROPOSAL, atomic UpdateItem with ConditionExpression `attribute_exists(component_id) AND lifecycle_status = 'proposed'` — non-proposed records return 409 with current_lifecycle_status echoed, missing returns 404. Approve writes lifecycle_status=active + approved_at + approved_by (Cognito email/username/sub) and accepts an optional transition_type override. Reject requires rejection_reason >= 10 chars and writes lifecycle_status=rejected + rejected_at + rejected_by + rejection_reason. Routes registered above the generic /components/{id} matcher. Prior ENC-FTR-076 / ENC-TSK-E10: Extended checkout_service.component_enforcement entity with the lifecycle_status pre-check inside _handle_advance(). New helper _get_components_lifecycle() returns per-component {lifecycle_status, rejection_reason}; advances are blocked when any component is `proposed` (HTTP 400 component_not_approved) or `rejected` (HTTP 400 component_rejected echoing rejection_reason). active is the happy path; approved is observed-then-treated-as-active with a [WARNING] log; user_initiated=true bypasses the gate. Prior ENC-FTR-076 / ENC-TSK-E08: Added component_registry.propose_contract entity documenting the agent-proposable component registry surface. New lifecycle_status field on component records (proposed/approved/active/rejected/deprecated/archived); new POST /api/v1/coordination/components/propose route + ENABLE_COMPONENT_PROPOSAL feature flag on coordination_api; new `component.propose` MCP action with requires_governance_hash=True; new component-proposed-by/proposes-component typed-relationship pair registered in tracker_mutation._RELATIONSHIP_TYPES + _INVERSE_PAIRS, graph_sync.RELATIONSHIP_TYPE_TO_EDGE_LABEL, and graph_query_api._ALLOWED_EDGE_TYPES so the COMPONENT_PROPOSED_BY edge is queryable via tracker.graphsearch. Atomic write via TransactWriteItems across component-registry + devops-project-tracker. Prior ENC-TSK-E06 / ENC-ISS-230: Added neo4j.placeholder_node entity documenting the is_placeholder boolean property contract on Neo4j nodes. graph_sync._reconcile_edges() placeholder MERGE sites (PLAN_CONTAINS, PLAN_ATTACHED_DOC, PLAN_IMPLEMENTS, LEARNED_FROM, RELATED_TO, INFORMED_BY source) now set `is_placeholder=true` via ON CREATE SET so downstream consumers can distinguish edge-target stub nodes from real DynamoDB-backed records. _upsert_node clears is_placeholder to false on the real record's projection. embedding.titan_v2_backfill._coverage_for_label adds WHERE n.is_placeholder IS NULL OR n.is_placeholder = false so coverage metrics reflect the active corpus only — closes the B91 denominator inflation (229 orphan stubs pulled Task to 93.72% and Issue to 90.69% despite 100% active-corpus coverage).",
   "owners": [
     "enceladus-platform"
   ],
@@ -549,14 +549,17 @@
         "document_subtype": {
           "type": "enum",
           "enum": [
-            "general",
+            "doc",
             "handoff",
+            "coe",
+            "wave",
             "blueprint",
             "narrative",
-            "session-log"
+            "session-log",
+            "general"
           ],
-          "definition": "Document subtype classification. Stored on all documents (defaults to 'general' for existing docs). When 'handoff', additional handoff-specific fields are required/available.",
-          "usage_guidance": "Set at creation via document_api PUT body. Cannot be changed after creation."
+          "definition": "Document subtype classification. Required on all new documents (ENC-FTR-077). 'general' is deprecated for new creates — use 'doc' for standard unstructured documents. 'coe' for correction-of-errors, 'wave' for coordination wave tracking. Existing documents may still have 'general'.",
+          "usage_guidance": "Set at creation via document_api PUT body. Cannot be changed after creation. ENC-FTR-077: document_subtype is now required (no default). 'general' returns 400 for new documents."
         },
         "source_record_id": {
           "type": "string",
@@ -620,6 +623,113 @@
           "type": "string",
           "definition": "ENC-ISS-158: When documents.patch receives a handoff lifecycle value (pending/claimed/completed/stale) in the status field for a handoff document, it routes the value to handoff_status instead of rejecting it. This enables MCP callers to use the standard status field for handoff lifecycle transitions without knowing about the separate handoff_status field.",
           "usage_guidance": "Callers can use either documents.patch(status='claimed') or documents.patch(handoff_status='claimed') on handoff documents. Both produce the same result. Non-handoff documents still enforce status in {active, archived}."
+        }
+      }
+    },
+    "document.doc": {
+      "description": "Standard document subtype (ENC-FTR-077). Default subtype for general-purpose documents. Includes a semantic handoff-detection guard that warns when title or content matches handoff patterns. Replaces deprecated 'general' subtype for new document creation.",
+      "fields": {
+        "document_subtype": {
+          "type": "enum",
+          "enum": [
+            "doc"
+          ],
+          "definition": "Fixed value 'doc' for standard documents. ENC-FTR-077 requires explicit document_subtype on all new creates; 'general' is rejected with 400.",
+          "usage_guidance": "Use 'doc' for standard unstructured documents that are not handoffs, COEs, or waves."
+        },
+        "confirm_subtype": {
+          "type": "boolean",
+          "definition": "Request-only flag to bypass the semantic handoff-detection guard. When a document with subtype 'doc' has a title or content matching handoff patterns (HANDOFF, Dispatch, GOVERNANCE_SYNC_REQUIRED, EXECUTION_REQUIRED, action_checklist, verification_criteria, prerequisite_state, etc.), the PUT returns HTTP 400 suggesting document_subtype='handoff'. Set confirm_subtype=true to override.",
+          "usage_guidance": "Only include in PUT request body when the semantic guard fires and 'doc' is intentionally correct. Not stored in DynamoDB — request-only flag. Also forwarded by MCP server _documents_put."
+        },
+        "semantic_guard_patterns": {
+          "type": "string",
+          "definition": "Informational: the semantic handoff-detection guard checks HANDOFF_TITLE_PATTERNS (HANDOFF, Dispatch [A-Z], GOVERNANCE_SYNC_REQUIRED, EXECUTION_REQUIRED, Coordination.*Handoff, Handoff.*dispatch) and HANDOFF_CONTENT_PATTERNS (action_checklist, verification_criteria, prerequisite_state, ## Scope Statement, ## Acceptance Criteria.*dispatch). Any match triggers the guard unless confirm_subtype=true.",
+          "usage_guidance": "Read-only reference. Patterns are defined as constants in document_api lambda_function.py."
+        }
+      }
+    },
+    "document.coe": {
+      "description": "Correction-of-errors document subtype (ENC-FTR-077). Structured COE documents tied to incident records with lifecycle status tracking and minimum edge density requirements. Created via document_api PUT with document_subtype=coe.",
+      "fields": {
+        "document_subtype": {
+          "type": "enum",
+          "enum": [
+            "coe"
+          ],
+          "definition": "Fixed value 'coe' for correction-of-errors documents."
+        },
+        "source_incident_id": {
+          "type": "string",
+          "constraints": {
+            "min_length": 1
+          },
+          "definition": "Tracker record ID of the incident that triggered this COE (e.g. ENC-ISS-242). Required when document_subtype=coe.",
+          "usage_guidance": "Set at creation. Stored as a DynamoDB attribute. Creates the incident anchor for the COE document."
+        },
+        "coe_status": {
+          "type": "enum",
+          "enum": [
+            "drafting",
+            "under-review",
+            "accepted",
+            "archived"
+          ],
+          "definition": "COE lifecycle status. drafting: initial creation/editing. under-review: submitted for peer review. accepted: COE findings accepted. archived: completed and archived.",
+          "usage_guidance": "Auto-set to 'drafting' on creation. Transition via PATCH with coe_status field. Valid transitions: drafting->{under-review}, under-review->{accepted, drafting}, accepted->{archived}. archived is terminal."
+        },
+        "edge_density_validation": {
+          "type": "string",
+          "definition": "COE documents enforce minimum edge density on related_items: at least 1 feature (*-FTR-*), 1 lesson (*-LSN-*), and 1 issue (*-ISS-*) must be present. Validated on both PUT (creation) and PATCH (when related_items is modified). Returns HTTP 400 listing which edge types are missing.",
+          "usage_guidance": "Ensure related_items includes references like ENC-FTR-077, ENC-LSN-026, ENC-ISS-242 before creating or updating a COE document."
+        },
+        "required_sections": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "COE documents are checked for recommended markdown sections during compliance evaluation: '## Root-Cause Analysis', '## Timeline', '## Remediation Status', '## Systemic Lessons', '## Outstanding Questions'. Missing sections generate compliance warnings (not hard blocks).",
+          "usage_guidance": "Include these sections in COE document content for best compliance scores. Warnings appear in compliance_warnings array."
+        }
+      }
+    },
+    "document.wave": {
+      "description": "Coordination wave tracking document subtype (ENC-FTR-077). Wave documents are anchored to a plan record and track coordination wave lifecycle. Created via document_api PUT with document_subtype=wave.",
+      "fields": {
+        "document_subtype": {
+          "type": "enum",
+          "enum": [
+            "wave"
+          ],
+          "definition": "Fixed value 'wave' for coordination wave documents."
+        },
+        "plan_anchor_id": {
+          "type": "string",
+          "constraints": {
+            "min_length": 1,
+            "pattern": ".*-PLN-.*"
+          },
+          "definition": "Plan record ID that this wave is anchored to (e.g. ENC-PLN-029). Required when document_subtype=wave. Must contain '-PLN-'. Immutable after creation.",
+          "usage_guidance": "Set at creation. Cannot be modified via PATCH (returns HTTP 400). Stored as a DynamoDB attribute."
+        },
+        "wave_status": {
+          "type": "enum",
+          "enum": [
+            "active",
+            "concluded",
+            "archived"
+          ],
+          "definition": "Wave lifecycle status. active: wave is in progress. concluded: wave coordination complete. archived: finalized and archived.",
+          "usage_guidance": "Auto-set to 'active' on creation. Transition via PATCH with wave_status field. Valid transitions: active->{concluded}, concluded->{archived}. archived is terminal."
+        },
+        "agent_layer_classification": {
+          "type": "enum",
+          "enum": [
+            "coordination",
+            "execution",
+            "review",
+            "monitoring"
+          ],
+          "definition": "Optional classification of the agent layer role within this wave. Informational — not enforced by document_api.",
+          "usage_guidance": "Set at creation or via PATCH to classify agent behavior mode."
         }
       }
     },
