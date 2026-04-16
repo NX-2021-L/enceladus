@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-16.5",
-  "updated_at": "2026-04-16T18:00:00Z",
-  "last_change_summary": "ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
+  "version": "2026-04-16.6",
+  "updated_at": "2026-04-16T20:00:00Z",
+  "last_change_summary": "ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
   "owners": [
     "enceladus-platform"
   ],
@@ -623,6 +623,101 @@
           "type": "string",
           "definition": "ENC-ISS-158: When documents.patch receives a handoff lifecycle value (pending/claimed/completed/stale) in the status field for a handoff document, it routes the value to handoff_status instead of rejecting it. This enables MCP callers to use the standard status field for handoff lifecycle transitions without knowing about the separate handoff_status field.",
           "usage_guidance": "Callers can use either documents.patch(status='claimed') or documents.patch(handoff_status='claimed') on handoff documents. Both produce the same result. Non-handoff documents still enforce status in {active, archived}."
+        },
+        "reply_author": {
+          "type": "string",
+          "definition": "ENC-TSK-E50: Author identifier in append_content reply block frontmatter. Required when appending to a handoff document. Parsed from the YAML-like frontmatter block that must start with '---'.",
+          "usage_guidance": "Included in the append_content body as frontmatter, not as a separate PATCH field. Validated server-side — must be non-empty."
+        },
+        "reply_timestamp": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "ENC-TSK-E50: Timestamp in append_content reply block frontmatter. Must be a valid ISO 8601 string. Required when appending to a handoff document.",
+          "usage_guidance": "Included in the append_content body as frontmatter. Validated via datetime.fromisoformat()."
+        },
+        "agent_layer": {
+          "type": "enum",
+          "enum": [
+            "supervisor",
+            "coord-lead",
+            "dispatched-agent",
+            "product-lead-terminal"
+          ],
+          "definition": "ENC-TSK-E50: Agent layer classification in append_content reply block frontmatter. Must be one of AGENT_LAYERS. Required when appending to a handoff document.",
+          "usage_guidance": "Included in the append_content body as frontmatter. Classifies the responding agent's role."
+        },
+        "originating_handoff_ref": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^DOC-.*"
+          },
+          "definition": "ENC-TSK-E50: Cross-reference to the originating handoff document in append_content reply block frontmatter. Must start with 'DOC-'. Required when appending to a handoff document.",
+          "usage_guidance": "Included in the append_content body as frontmatter. Creates traceability from reply back to source handoff."
+        },
+        "reply_count": {
+          "type": "number",
+          "definition": "ENC-TSK-E50: Running count of validated reply block appends on this handoff document. Incremented atomically on each successful append_content PATCH with valid reply block frontmatter. Uses if_not_exists(reply_count, 0) + 1 pattern.",
+          "write_authority": "document_api Lambda (computed, not agent-settable)."
+        },
+        "last_reply_at": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "ENC-TSK-E50: Timestamp of the most recent validated reply block append. Updated atomically with reply_count on each successful append_content PATCH.",
+          "write_authority": "document_api Lambda (computed, not agent-settable)."
+        }
+      }
+    },
+    "document.wave_append": {
+      "description": "Wave multi-author append validation schema (ENC-TSK-E51). When append_content targets a wave document, the appended text must include YAML-like frontmatter with reply_author, reply_timestamp, and agent_layer. originating_handoff_ref is optional (cross-doc traceability). Tracks append_count and last_append_at on the wave document.",
+      "fields": {
+        "reply_author": {
+          "type": "string",
+          "definition": "ENC-TSK-E51: Author identifier in wave append frontmatter. Required when appending to a wave document. Parsed from the YAML-like frontmatter block.",
+          "usage_guidance": "Included in the append_content body as frontmatter, not as a separate PATCH field."
+        },
+        "reply_timestamp": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "ENC-TSK-E51: Timestamp in wave append frontmatter. Must be valid ISO 8601.",
+          "usage_guidance": "Included in the append_content body as frontmatter."
+        },
+        "agent_layer": {
+          "type": "enum",
+          "enum": [
+            "supervisor",
+            "coord-lead",
+            "dispatched-agent",
+            "product-lead-terminal"
+          ],
+          "definition": "ENC-TSK-E51: Agent layer classification in wave append frontmatter. Must be one of AGENT_LAYERS.",
+          "usage_guidance": "Included in the append_content body as frontmatter."
+        },
+        "originating_handoff_ref": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^DOC-.*"
+          },
+          "definition": "ENC-TSK-E51: Optional cross-doc traceability reference in wave append frontmatter. Not required for wave appends, but allowed for linking back to a handoff.",
+          "usage_guidance": "Optional in wave append frontmatter. When present, must start with 'DOC-'."
+        },
+        "append_count": {
+          "type": "number",
+          "definition": "ENC-TSK-E51: Running count of validated wave appends on this wave document. Incremented atomically on each successful append_content PATCH with valid frontmatter. Uses if_not_exists(append_count, 0) + 1 pattern.",
+          "write_authority": "document_api Lambda (computed, not agent-settable)."
+        },
+        "last_append_at": {
+          "type": "string",
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "ENC-TSK-E51: Timestamp of the most recent validated wave append. Updated atomically with append_count on each successful append_content PATCH.",
+          "write_authority": "document_api Lambda (computed, not agent-settable)."
         }
       }
     },
@@ -3677,7 +3772,7 @@
         },
         "append_content": {
           "type": "string",
-          "definition": "PATCH-only request field (ENC-ISS-239). When present, document_api performs a read-modify-write cycle: fetches existing S3 content, concatenates with double-newline separator, re-uploads merged content, and recomputes content_hash, size_bytes, and compliance_score. Mutually exclusive with 'content' — the API returns HTTP 400 if both are specified. Not stored in DynamoDB; the result is written to S3 and metadata fields are updated. MCP server documents.patch passthrough includes this key.",
+          "definition": "PATCH-only request field (ENC-ISS-239 / ENC-TSK-E50 / ENC-TSK-E51). When present, document_api performs a read-modify-write cycle: fetches existing S3 content, concatenates with double-newline separator, re-uploads merged content, and recomputes content_hash, size_bytes, and compliance_score. Mutually exclusive with 'content' (400 if both present). For handoff documents, append_content must include a YAML-like frontmatter reply block (reply_author, reply_timestamp, agent_layer, originating_handoff_ref). For wave documents, same frontmatter minus originating_handoff_ref (optional). Non-handoff/wave documents accept format-agnostic appends. Not stored in DynamoDB; the result is written to S3.",
           "write_authority": "Agent sessions via MCP documents.patch or direct PATCH API.",
           "governing_issue": "ENC-ISS-239"
         },

@@ -3951,7 +3951,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "append_content": {
                         "type": "string",
-                        "description": "Optional content to append to existing document. Mutually exclusive with 'content'.",
+                        "description": "Optional content to append to existing document. Mutually exclusive with 'content'. For handoff docs, must include reply block frontmatter. For wave docs, must include agent-layer frontmatter.",
                     },
                     "description": {
                         "type": "string",
