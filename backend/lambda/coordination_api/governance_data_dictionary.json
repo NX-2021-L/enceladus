@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-16.9",
-  "updated_at": "2026-04-16T22:00:00Z",
-  "last_change_summary": "ENC-TSK-E64 / ENC-ISS-158 / ENC-PLN-030: Added document_api.error_envelope entity documenting the self-correcting error shape returned by document_api for subtype validation failures (handoff/coe/wave). Extends the ENC-TSK-D56 self-correcting-error pattern to the document surface: error_envelope.details now includes required_fields, optional_fields, dictionary_entity, document_subtype, example_fix, edge_density_requirements, format_constraint so agents can recover from missing subtype fields without additional calls. Prior: ENC-TSK-E57 / ENC-ISS-243: Added approval_token, decided_by_email, bypass_reason fields to tracker.deployment_decision for deploy approval enforcement mesh. DAT token issued by deploy_decide on approve, validated by deploy-orchestration.yml workflow. Prior: ENC-FTR-077 / ENC-TSK-E53: Added mcp_server.docstore_subtype_tools entity documenting 4 new execute actions for COE and wave docstore subtypes. document.create_coe creates COE documents with source_incident_id. document.create_wave creates wave documents with plan_anchor_id. document.append_handoff_reply appends structured reply blocks with frontmatter to handoff docs; product-lead-terminal layer triggers AC-5 dual-append to active wave doc. document.append_wave_entry appends wave entries with agent-layer classification. All 4 actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag (same as handoff tools). Prior: ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
+  "version": "2026-04-16.10",
+  "updated_at": "2026-04-16T22:30:00Z",
+  "last_change_summary": "ENC-TSK-C71 / ENC-TSK-E63 / ENC-ISS-158 / ENC-PLN-030: Added mcp_server.documents_passthrough entity documenting the denylist-based open-passthrough pattern now used by _documents_put and _documents_patch. Replaces the prior explicit field whitelist that silently dropped ENC-FTR-077 subtype fields. Tool schemas for documents.put and documents.patch now expose 14 FTR-077 subtype fields (document_subtype, source_record_id, handoff_status, prerequisite_state, verification_criteria, action_checklist, expires_at, source_incident_id, coe_status, plan_anchor_id, wave_status, informed_by, document_maturity_state, confirm_subtype) with dictionary-linked descriptions. Mirrors _tracker_create pattern so the MCP layer stays maintenance-free for future subtype additions. Prior: ENC-TSK-E64 / ENC-ISS-158 / ENC-PLN-030: Added document_api.error_envelope entity documenting the self-correcting error shape returned by document_api for subtype validation failures (handoff/coe/wave). Extends the ENC-TSK-D56 self-correcting-error pattern to the document surface: error_envelope.details now includes required_fields, optional_fields, dictionary_entity, document_subtype, example_fix, edge_density_requirements, format_constraint so agents can recover from missing subtype fields without additional calls. Prior: ENC-TSK-E57 / ENC-ISS-243: Added approval_token, decided_by_email, bypass_reason fields to tracker.deployment_decision for deploy approval enforcement mesh. DAT token issued by deploy_decide on approve, validated by deploy-orchestration.yml workflow. Prior: ENC-FTR-077 / ENC-TSK-E53: Added mcp_server.docstore_subtype_tools entity documenting 4 new execute actions for COE and wave docstore subtypes. document.create_coe creates COE documents with source_incident_id. document.create_wave creates wave documents with plan_anchor_id. document.append_handoff_reply appends structured reply blocks with frontmatter to handoff docs; product-lead-terminal layer triggers AC-5 dual-append to active wave doc. document.append_wave_entry appends wave entries with agent-layer classification. All 4 actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag (same as handoff tools). Prior: ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1935,6 +1935,34 @@
         "feature_flag": {
           "type": "string",
           "definition": "ENABLE_HANDOFF_PRIMITIVE environment variable. When 'true', these 4 actions (plus the 3 handoff actions) are registered in the execute action registry. Default 'false'."
+        }
+      }
+    },
+    "mcp_server.documents_passthrough": {
+      "description": "Open-passthrough body construction pattern for the MCP-to-document_api bridge (ENC-TSK-C71 / ENC-TSK-E63 / ENC-ISS-158 / ENC-PLN-030). Replaces the prior explicit whitelist in _documents_put and _documents_patch with a denylist-driven loop mirroring _tracker_create. Every FTR-077 subtype field (document_subtype, source_record_id, handoff_status, prerequisite_state, verification_criteria, action_checklist, expires_at, source_incident_id, coe_status, plan_anchor_id, wave_status, informed_by, document_maturity_state, confirm_subtype) now forwards automatically from execute args to the document_api HTTP body. Eliminates the recurring failure mode where new subtype fields landed in document_api but not the MCP layer (rediscovered four times: ENC-TSK-B82, ENC-PLN-016 dispatch wave 1, ENC-TSK-E57 deploy session, ENC-TSK-E62 handoff attempts).",
+      "fields": {
+        "put_body_denylist": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Keys NOT forwarded from execute args to document_api PUT body. Single entry: governance_hash (handled by the HTTP auth layer, never goes in body)."
+        },
+        "patch_body_denylist": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Keys NOT forwarded from execute args to document_api PATCH body. Two entries: governance_hash (HTTP auth layer) and document_id (URL path parameter, not body)."
+        },
+        "tool_schema_coverage": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "FTR-077 subtype fields newly declared in the documents_put and documents_patch tool schemas: document_subtype, confirm_subtype, source_record_id, handoff_status, prerequisite_state, verification_criteria, action_checklist, expires_at, source_incident_id, coe_status, plan_anchor_id, wave_status, informed_by, document_maturity_state. Each field's description references its dictionary entity (document.handoff / document.coe / document.wave / docstore.document)."
+        },
+        "reference_pattern": {
+          "type": "string",
+          "definition": "Mirrors _tracker_create's open-passthrough loop at tools/enceladus-mcp-server/server.py (currently lines 5458-5495). The invariant: MCP should forward anything the caller declares and let document_api be the single source of validation truth."
+        },
+        "governing_records": {
+          "type": "object",
+          "definition": "Plan: ENC-PLN-030. Issue: ENC-ISS-158. Tasks: ENC-TSK-C71 (lambda_deploy vehicle), ENC-TSK-E63 (code_only companion). Doc: DOC-8BB0D5531B47."
         }
       }
     },
