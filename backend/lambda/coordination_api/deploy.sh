@@ -5,12 +5,14 @@ ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 
 # ENC-ISS-224 / ENC-FTR-072: architecture bifurcation for gamma (arm64/py3.12) vs prod (x86_64/py3.11)
 if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
-  pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; DEPLOY_RUNTIME="python3.12"
+  pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"; DEPLOY_RUNTIME="python3.12"
 else
-  pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; DEPLOY_RUNTIME="python3.11"
+  pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"; DEPLOY_RUNTIME="python3.11"
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
 API_ID="${API_ID:-8nkzqkmxqc}"
@@ -536,8 +538,16 @@ print(json.dumps({
 
 package_lambda() {
   local build_dir zip_path
-  build_dir="$(mktemp -d /tmp/devops-coordination-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
+
+  # ENC-TSK-E27: try S3 artifact first
+  local resolved_zip
+  if resolved_zip="$(resolve_artifact "${FUNCTION_NAME}" "${zip_path}")"; then
+    echo "${resolved_zip}"
+    return 0
+  fi
+
+  build_dir="$(mktemp -d /tmp/devops-coordination-build-XXXXXX)"
   local mcp_server_src="" mcp_dispatch_src=""
 
   # ENC-TSK-E02 / ENC-ISS-185: canonical relative paths only. Stale hardcoded
@@ -609,8 +619,8 @@ package_lambda() {
     --upgrade \
     --platform "${pip_platform}" \
     --implementation cp \
-    --python-version 3.11 \
-    --abi cp311 \
+    --python-version "${pip_pyver}" \
+    --abi "${pip_abi}" \
     --only-binary=:all: \
     -r "${ROOT_DIR}/requirements.txt" \
     -t "${build_dir}" >/dev/null

@@ -5,10 +5,12 @@ ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 
 # ENC-ISS-224 / ENC-FTR-072: architecture bifurcation for gamma (arm64/py3.12) vs prod (x86_64/py3.11)
 if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then
-  pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; DEPLOY_RUNTIME="python3.12"
+  pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"; DEPLOY_RUNTIME="python3.12"
 else
-  pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; DEPLOY_RUNTIME="python3.11"
+  pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"; DEPLOY_RUNTIME="python3.11"
 fi
+REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 
 # ---------------------------------------------------------------------------
 # deploy.sh — Deploy deploy_orchestrator Lambda (ENC-ISS-102)
@@ -123,6 +125,13 @@ package_lambda() {
   local build_dir zip_path
   build_dir="$(mktemp -d /tmp/deploy-${FUNCTION_NAME}-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
+  # ENC-TSK-E27: try S3 artifact first
+  local resolved_zip
+  if resolved_zip="$(resolve_artifact "${FUNCTION_NAME}" "${zip_path}")"; then
+    echo "${resolved_zip}"
+    return 0
+  fi
+
 
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
@@ -133,7 +142,7 @@ package_lambda() {
       -r "${SCRIPT_DIR}/requirements.txt" \
       --platform "${pip_platform}" \
       --implementation cp \
-      --python-version 3.11 \
+      --python-version "${pip_pyver}" \
       --only-binary=:all: \
       -t "${build_dir}" >/dev/null
   fi
