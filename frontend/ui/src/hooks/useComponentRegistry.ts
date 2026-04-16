@@ -8,10 +8,14 @@ import {
   createComponent,
   updateComponent,
   deleteComponent,
+  approveComponent,
+  rejectComponent,
   componentKeys,
   type ComponentFilters,
   type CreateComponentInput,
   type UpdateComponentInput,
+  type ApproveComponentInput,
+  type RejectComponentInput,
 } from '../api/components'
 
 export function useComponentRegistry(filters: ComponentFilters = {}) {
@@ -48,6 +52,24 @@ export function useDeleteComponent() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (componentId: string) => deleteComponent(componentId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: componentKeys.all }),
+  })
+}
+
+// ENC-FTR-076 Phase 6: Approve/reject mutations
+
+export function useApproveComponent() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: ApproveComponentInput) => approveComponent(input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: componentKeys.all }),
+  })
+}
+
+export function useRejectComponent() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: RejectComponentInput) => rejectComponent(input),
     onSuccess: () => qc.invalidateQueries({ queryKey: componentKeys.all }),
   })
 }

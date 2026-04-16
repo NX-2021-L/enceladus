@@ -133,6 +133,54 @@ export async function deleteComponent(componentId: string): Promise<void> {
   })
 }
 
+// ENC-FTR-076 Phase 6: Component proposal types and approval/rejection API
+
+export interface ComponentProposal {
+  component_id: string
+  component_name: string
+  project_id: string
+  category: ComponentCategory
+  description: string
+  source_paths: string[]
+  proposing_agent_session_id: string
+  requested_minimum_transition_type: ComponentTransitionType
+  lifecycle_status: 'proposed'
+  created_at: string
+  updated_at: string
+}
+
+export interface ApproveComponentInput {
+  id: string
+  minimum_transition_type?: ComponentTransitionType
+}
+
+export interface RejectComponentInput {
+  id: string
+  rejection_reason: string
+}
+
+export async function approveComponent(
+  input: ApproveComponentInput,
+): Promise<{ success: boolean }> {
+  return apiFetch<{ success: boolean }>(`/components/${input.id}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({
+      ...(input.minimum_transition_type && {
+        transition_type: input.minimum_transition_type,
+      }),
+    }),
+  })
+}
+
+export async function rejectComponent(
+  input: RejectComponentInput,
+): Promise<{ success: boolean }> {
+  return apiFetch<{ success: boolean }>(`/components/${input.id}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ rejection_reason: input.rejection_reason }),
+  })
+}
+
 // React-Query key factory
 export const componentKeys = {
   all: ['components'] as const,

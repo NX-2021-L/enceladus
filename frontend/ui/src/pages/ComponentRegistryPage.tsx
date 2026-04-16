@@ -7,11 +7,14 @@
  */
 
 import { useState, useMemo, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import {
   useComponentRegistry,
   useCreateComponent,
   useUpdateComponent,
   useDeleteComponent,
+  useApproveComponent,
+  useRejectComponent,
 } from '../hooks/useComponentRegistry'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
@@ -34,6 +37,7 @@ import type {
   ComponentCategory,
   ComponentStatus,
   ComponentTransitionType,
+  ComponentProposal,
   CreateComponentInput,
   UpdateComponentInput,
 } from '../api/components'
@@ -467,6 +471,182 @@ function DeleteConfirmModal({ component, onConfirm, onCancel, isDeleting }: Dele
 }
 
 // ---------------------------------------------------------------------------
+// ENC-FTR-076 Phase 6: Pending Approval UI
+// ---------------------------------------------------------------------------
+
+function ProposalCard({
+  proposal,
+  canAct,
+  onApprove,
+  onReject,
+}: {
+  proposal: ComponentProposal
+  canAct: boolean
+  onApprove: (p: ComponentProposal) => void
+  onReject: (p: ComponentProposal) => void
+}) {
+  return (
+    <div className="bg-amber-900/20 border border-amber-500/30 rounded-lg p-4 space-y-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <h3 className="text-sm font-semibold text-amber-200 truncate">{proposal.component_id}</h3>
+          <p className="text-xs text-amber-300/60 mt-0.5 truncate">
+            proposed by <span className="font-mono">{proposal.proposing_agent_session_id}</span>
+          </p>
+        </div>
+        {canAct && (
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={() => onApprove(proposal)}
+              className="px-2.5 py-1 text-xs font-medium text-white bg-emerald-700 hover:bg-emerald-600 rounded transition-colors"
+            >
+              Approve
+            </button>
+            <button
+              onClick={() => onReject(proposal)}
+              className="px-2.5 py-1 text-xs font-medium text-white bg-rose-700 hover:bg-rose-600 rounded transition-colors"
+            >
+              Reject
+            </button>
+          </div>
+        )}
+      </div>
+
+      {proposal.description && (
+        <p className="text-xs text-amber-200/70 line-clamp-2">{proposal.description}</p>
+      )}
+
+      <div className="flex flex-wrap gap-1.5">
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-800/40 text-amber-300">
+          {COMPONENT_TRANSITION_TYPE_LABELS[proposal.requested_minimum_transition_type] ?? proposal.requested_minimum_transition_type}
+        </span>
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-800/40 text-amber-300/80 font-mono">
+          {proposal.project_id}
+        </span>
+      </div>
+
+      {proposal.source_paths && proposal.source_paths.length > 0 && (
+        <div className="text-xs text-amber-200/50 font-mono truncate">
+          {proposal.source_paths.join(', ')}
+        </div>
+      )}
+
+      <div className="text-xs text-amber-200/40">
+        {new Date(proposal.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+      </div>
+    </div>
+  )
+}
+
+function ApproveModal({
+  proposal,
+  onConfirm,
+  onCancel,
+  isSubmitting,
+}: {
+  proposal: ComponentProposal
+  onConfirm: (transitionType: ComponentTransitionType) => void
+  onCancel: () => void
+  isSubmitting: boolean
+}) {
+  const [transitionType, setTransitionType] = useState<ComponentTransitionType>(
+    proposal.requested_minimum_transition_type,
+  )
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="relative z-10 w-full max-w-sm bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
+        <h2 className="text-sm font-semibold text-slate-100 mb-2">Approve Component</h2>
+        <p className="text-xs text-slate-400 mb-3">
+          Approve <span className="text-slate-200 font-medium font-mono">{proposal.component_id}</span> and set its minimum transition type.
+        </p>
+        <label className="block text-xs text-slate-500 mb-1">Minimum Transition Type</label>
+        <select
+          value={transitionType}
+          onChange={(e) => setTransitionType(e.target.value as ComponentTransitionType)}
+          className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-slate-500 mb-4"
+        >
+          {COMPONENT_TRANSITION_TYPES.map((tt) => (
+            <option key={tt} value={tt}>
+              {COMPONENT_TRANSITION_TYPE_LABELS[tt] ?? tt}
+            </option>
+          ))}
+        </select>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 text-sm text-slate-300 hover:text-slate-100 hover:bg-slate-800 rounded-lg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onConfirm(transitionType)}
+            disabled={isSubmitting}
+            className="px-4 py-2 text-sm font-medium text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded-lg transition-colors"
+          >
+            {isSubmitting ? 'Approving...' : 'Approve'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function RejectModal({
+  proposal,
+  onConfirm,
+  onCancel,
+  isSubmitting,
+}: {
+  proposal: ComponentProposal
+  onConfirm: (reason: string) => void
+  onCancel: () => void
+  isSubmitting: boolean
+}) {
+  const [reason, setReason] = useState('')
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="relative z-10 w-full max-w-sm bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
+        <h2 className="text-sm font-semibold text-slate-100 mb-2">Reject Component</h2>
+        <p className="text-xs text-slate-400 mb-3">
+          Reject <span className="text-slate-200 font-medium font-mono">{proposal.component_id}</span>. Please provide a reason (min 10 characters).
+        </p>
+        <textarea
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Reason for rejection..."
+          rows={3}
+          className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-slate-500 mb-1 resize-none"
+        />
+        <p className="text-xs text-slate-600 mb-4">{reason.length}/10 characters minimum</p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 text-sm text-slate-300 hover:text-slate-100 hover:bg-slate-800 rounded-lg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onConfirm(reason)}
+            disabled={isSubmitting || reason.length < 10}
+            className="px-4 py-2 text-sm font-medium text-white bg-rose-700 hover:bg-rose-600 disabled:opacity-50 rounded-lg transition-colors"
+          >
+            {isSubmitting ? 'Rejecting...' : 'Reject'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main Page
 // ---------------------------------------------------------------------------
 
@@ -478,6 +658,8 @@ export function ComponentRegistryPage() {
   const [showModal, setShowModal] = useState(false)
   const [editingComponent, setEditingComponent] = useState<RegistryComponent | null>(null)
   const [deletingComponent, setDeletingComponent] = useState<RegistryComponent | null>(null)
+  const [approvingProposal, setApprovingProposal] = useState<ComponentProposal | null>(null)
+  const [rejectingProposal, setRejectingProposal] = useState<ComponentProposal | null>(null)
   const [projectSearch, setProjectSearch] = useState('')
 
   const { components, isPending, isError, dataUpdatedAt } = useComponentRegistry({
@@ -489,6 +671,8 @@ export function ComponentRegistryPage() {
   const createMutation = useCreateComponent()
   const updateMutation = useUpdateComponent()
   const deleteMutation = useDeleteComponent()
+  const approveMutation = useApproveComponent()
+  const rejectMutation = useRejectComponent()
 
   // Derive unique project IDs from the full (unfiltered) list for the filter dropdown
   const { components: allComponents } = useComponentRegistry()
@@ -496,6 +680,39 @@ export function ComponentRegistryPage() {
     () =>
       Array.from(new Set(allComponents.map((c) => c.project_id))).sort(),
     [allComponents],
+  )
+
+  // ENC-FTR-076: Pending proposals (lifecycle_status === 'proposed')
+  const pendingProposals = useMemo(
+    () =>
+      allComponents.filter(
+        (c) => (c as unknown as ComponentProposal).lifecycle_status === 'proposed',
+      ) as unknown as ComponentProposal[],
+    [allComponents],
+  )
+
+  const handleApproveConfirm = useCallback(
+    async (transitionType: ComponentTransitionType) => {
+      if (!approvingProposal) return
+      await approveMutation.mutateAsync({
+        id: approvingProposal.component_id,
+        minimum_transition_type: transitionType,
+      })
+      setApprovingProposal(null)
+    },
+    [approvingProposal, approveMutation],
+  )
+
+  const handleRejectConfirm = useCallback(
+    async (reason: string) => {
+      if (!rejectingProposal) return
+      await rejectMutation.mutateAsync({
+        id: rejectingProposal.component_id,
+        rejection_reason: reason,
+      })
+      setRejectingProposal(null)
+    },
+    [rejectingProposal, rejectMutation],
   )
 
   const handleOpenCreate = useCallback(() => {
@@ -635,6 +852,26 @@ export function ComponentRegistryPage() {
         </div>
       </div>
 
+      {/* Pending Approval — ENC-FTR-076 Phase 6 */}
+      {pendingProposals.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-xs font-semibold text-amber-200 uppercase tracking-wider">
+            Pending Approval ({pendingProposals.length})
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {pendingProposals.map((p) => (
+              <ProposalCard
+                key={p.component_id}
+                proposal={p}
+                canAct={canEdit}
+                onApprove={setApprovingProposal}
+                onReject={setRejectingProposal}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* Results */}
       {isPending ? (
         <LoadingState />
@@ -674,6 +911,26 @@ export function ComponentRegistryPage() {
           onConfirm={handleDeleteConfirm}
           onCancel={() => setDeletingComponent(null)}
           isDeleting={deleteMutation.isPending}
+        />
+      )}
+
+      {/* Approve modal — ENC-FTR-076 Phase 6 */}
+      {approvingProposal && (
+        <ApproveModal
+          proposal={approvingProposal}
+          onConfirm={handleApproveConfirm}
+          onCancel={() => setApprovingProposal(null)}
+          isSubmitting={approveMutation.isPending}
+        />
+      )}
+
+      {/* Reject modal — ENC-FTR-076 Phase 6 */}
+      {rejectingProposal && (
+        <RejectModal
+          proposal={rejectingProposal}
+          onConfirm={handleRejectConfirm}
+          onCancel={() => setRejectingProposal(null)}
+          isSubmitting={rejectMutation.isPending}
         />
       )}
     </div>
