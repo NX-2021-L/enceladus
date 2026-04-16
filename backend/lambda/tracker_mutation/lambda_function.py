@@ -2798,30 +2798,37 @@ def _handle_update_field(
     # entries cannot be removed — only appended. This prevents agents from clearing
     # subtask_ids to bypass the ENC-ISS-106 subtask completion gate.
     if record_type == "task" and field == "subtask_ids":
-        current_status = (item_data.get("status", "") or "").strip().lower()
-        has_been_checked_out = bool(item_data.get("checked_out_at"))
-        existing_subtask_ids = set()
-        for st in item_data.get("subtask_ids", {}).get("L", []):
-            existing_subtask_ids.add(st.get("S", ""))
-        existing_subtask_ids.discard("")
-        if existing_subtask_ids and (current_status != "open" or has_been_checked_out):
-            new_subtask_ids = set()
-            if isinstance(value, list):
-                new_subtask_ids = {str(v).strip() for v in value if str(v).strip()}
-            removed = existing_subtask_ids - new_subtask_ids
-            if removed:
-                return _tracker_field_validation_error(
-                    f"Cannot remove entries from subtask_ids on a task that is past 'open' "
-                    f"status or has been checked out (current status: '{current_status}'). "
-                    f"subtask_ids is append-only to preserve the ENC-ISS-106 subtask "
-                    f"completion gate. Attempted to remove: {', '.join(sorted(removed))}",
-                    field=field, record_id=record_id, record_type=record_type,
-                    expected_type="append_only",
-                    governed_rules=[
-                        "subtask_ids is append-only once task leaves 'open' or has been checked out (ENC-ISS-140).",
-                        "Use PWA user_initiated path to override if needed.",
-                    ],
-                )
+        try:
+            current_status = (item_data.get("status", "") or "").strip().lower()
+            has_been_checked_out = bool(item_data.get("checked_out_at"))
+            # ENC-ISS-242: item_data is deserialized (Python list), not raw DynamoDB format.
+            # Previous code used .get("L", [])/.get("S", "") which raised AttributeError on lists.
+            existing_subtask_ids = set()
+            raw_subtask_ids = item_data.get("subtask_ids") or []
+            if isinstance(raw_subtask_ids, list):
+                for st in raw_subtask_ids:
+                    existing_subtask_ids.add(str(st).strip())
+            existing_subtask_ids.discard("")
+            if existing_subtask_ids and (current_status != "open" or has_been_checked_out):
+                new_subtask_ids = set()
+                if isinstance(value, list):
+                    new_subtask_ids = {str(v).strip() for v in value if str(v).strip()}
+                removed = existing_subtask_ids - new_subtask_ids
+                if removed:
+                    return _tracker_field_validation_error(
+                        f"Cannot remove entries from subtask_ids on a task that is past 'open' "
+                        f"status or has been checked out (current status: '{current_status}'). "
+                        f"subtask_ids is append-only to preserve the ENC-ISS-106 subtask "
+                        f"completion gate. Attempted to remove: {', '.join(sorted(removed))}",
+                        field=field, record_id=record_id, record_type=record_type,
+                        expected_type="append_only",
+                        governed_rules=[
+                            "subtask_ids is append-only once task leaves 'open' or has been checked out (ENC-ISS-140).",
+                            "Use PWA user_initiated path to override if needed.",
+                        ],
+                    )
+        except Exception as e:
+            logger.warning("subtask_ids immutability check failed (non-blocking): %s", e)
 
     # ENC-FTR-058 / ENC-TSK-C09: Plan objectives_set immutability enforcement
     # Objectives are append-only unless: plan is 'incomplete', or a governed removal/replacement
