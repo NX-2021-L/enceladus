@@ -690,7 +690,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
         )
 
     current_status = decision.get("status", "")
-    if current_status != "pending_approval":
+    approval_token = decision.get("approval_token", "")
+    # ENC-ISS-248: Accept {pending_approval, deploying, failed} for 'approve'
+    # action when no approval_token has been issued yet. This is the recovery
+    # path for pre-deploy gate failures that left the DPL deployed-ish with no
+    # DAT, previously requiring IAM escalation to unstick. Other actions and
+    # other statuses still require pending_approval.
+    recoverable_for_approve = (
+        action == "approve"
+        and not approval_token
+        and current_status in ("pending_approval", "deploying", "failed")
+    )
+    if current_status != "pending_approval" and not recoverable_for_approve:
         return _error(
             409,
             f"Decision for PR #{pr_number} is in status '{current_status}', not 'pending_approval'",
