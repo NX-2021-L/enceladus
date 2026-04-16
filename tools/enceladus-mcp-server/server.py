@@ -3949,6 +3949,10 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional updated markdown content.",
                     },
+                    "append_content": {
+                        "type": "string",
+                        "description": "Optional content to append to existing document. Mutually exclusive with 'content'.",
+                    },
                     "description": {
                         "type": "string",
                         "description": "Optional updated description.",
@@ -5646,7 +5650,7 @@ async def _documents_patch(args: dict) -> list[TextContent]:
         )
 
     body: Dict[str, Any] = {}
-    for key in ("title", "content", "description", "keywords", "related_items", "status", "file_name", "document_maturity_state"):
+    for key in ("title", "content", "append_content", "description", "keywords", "related_items", "status", "file_name", "document_maturity_state"):
         if key in args and args.get(key) is not None:
             body[key] = args.get(key)
     if not body:
