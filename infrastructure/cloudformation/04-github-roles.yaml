@@ -256,61 +256,257 @@ Resources:
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/v4/*"
       Policies:
+        # Consolidated from 8 manually-created inline policies (ENC-TSK-E32).
+        # Source dump captured by product-lead terminal 2026-04-16 via
+        # iam:ListRolePolicies + iam:GetRolePolicy.
         - PolicyName: BackendDeployPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Lambda function deployment operations
-              - Sid: LambdaDeployOps
+              # --- from BackendDeployAllow ---
+              - Sid: LambdaCodeDeploy
                 Effect: Allow
                 Action:
                   - lambda:UpdateFunctionCode
                   - lambda:UpdateFunctionConfiguration
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
-                  - lambda:PublishLayerVersion
-                  - lambda:GetLayerVersion
+                  - lambda:CreateFunction
+                  - lambda:AddPermission
+                  - lambda:InvokeFunction
+                  - lambda:ListFunctions
+                  - lambda:GetPolicy
+                  - lambda:ListEventSourceMappings
+                  - lambda:CreateEventSourceMapping
+                  - lambda:UpdateEventSourceMapping
+                Resource:
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:devops-*"
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-*"
+              - Sid: LambdaWait
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
                 Resource: "*"
+              - Sid: LambdaExecutionRoles
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:CreateRole
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/devops-*-lambda-role"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-*-role"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-*-lambda-role"
+              - Sid: ApiGateway
+                Effect: Allow
+                Action: "apigateway:*"
+                Resource: !Sub "arn:aws:apigateway:us-west-2::/apis/8nkzqkmxqc/*"
+              - Sid: InfrastructureDynamoDB
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:UpdateTable
+                  - dynamodb:ListTables
+                Resource:
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/coordination-requests"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/deploy-deployment-manager"
+              - Sid: CloudWatchLogsManage
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:PutRetentionPolicy
+                Resource:
+                  - !Sub "arn:aws:logs:us-west-2:${AWS::AccountId}:log-group:/aws/lambda/devops-*"
+                  - !Sub "arn:aws:logs:us-west-2:${AWS::AccountId}:log-group:/aws/lambda/enceladus-*"
+                  - !Sub "arn:aws:logs:us-west-2:${AWS::AccountId}:log-group:/enceladus/*"
+              - Sid: CloudWatchLogsDescribe
+                Effect: Allow
+                Action: "logs:DescribeLogGroups"
+                Resource: "*"
+              - Sid: S3DeployArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: "arn:aws:s3:::jreese-net/deploy/*"
+              - Sid: SecretsRead
+                Effect: Allow
+                Action: "secretsmanager:GetSecretValue"
+                Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:devops/coordination/*"
+              - Sid: EC2Fleet
+                Effect: Allow
+                Action:
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - ec2:DescribeInstances
+                  - ec2:CreateTags
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeLaunchTemplates
+                  - ec2:DescribeLaunchTemplateVersions
+                Resource: "*"
+              - Sid: SSM
+                Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                Resource: "*"
+              - Sid: SNSPublish
+                Effect: Allow
+                Action: "sns:Publish"
+                Resource: !Sub "arn:aws:sns:us-west-2:${AWS::AccountId}:devops-*"
+              - Sid: GammaLambdaDeploy
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                Resource:
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:*-gamma"
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:*-gamma:*"
+              - Sid: GammaIAMRoleManagement
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/*-gamma"
+              - Sid: GammaDynamoDBBootstrap
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/*-gamma"
 
-              # S3 artifact read/write for split-artifact build pipeline
-              # (ENC-TSK-E20 / ENC-ISS-237)
-              - Sid: S3ArtifactReadWrite
+              # --- from allow-auth-refresh-updatecode ---
+              - Sid: AllowAuthRefreshCodeUpdate
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:GetFunctionConfiguration
+                  - lambda:GetFunction
+                Resource: !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:auth-refresh*"
+
+              # --- from BackendDeployPolicy-LambdaArtifacts ---
+              - Sid: S3LambdaArtifactAccess
                 Effect: Allow
                 Action:
                   - s3:PutObject
                   - s3:GetObject
-                Resource:
-                  - "arn:aws:s3:::jreese-net/lambda-artifacts/*"
-
-              # S3 read for deploy-config (deploy scripts read config)
-              - Sid: S3DeployConfigRead
+                Resource: "arn:aws:s3:::jreese-net/lambda-artifacts/*"
+              - Sid: S3LambdaArtifactListAccess
                 Effect: Allow
-                Action:
-                  - s3:GetObject
-                Resource:
-                  - "arn:aws:s3:::jreese-net/deploy-config/*"
-
-              # S3 list for artifact enumeration
-              - Sid: S3ArtifactList
-                Effect: Allow
-                Action:
-                  - s3:ListBucket
-                Resource:
-                  - "arn:aws:s3:::jreese-net"
+                Action: "s3:ListBucket"
+                Resource: "arn:aws:s3:::jreese-net"
                 Condition:
                   StringLike:
                     s3:prefix:
                       - "lambda-artifacts/*"
                       - "deploy-config/*"
 
-              # Secrets Manager for GitHub token (used by deploy scripts
-              # for PR validation and checkout service)
-              - Sid: SecretsManagerRead
+              # --- from enceladus-cloudformation-api-unblock-v1 ---
+              # (merged with EnceladusCloudFormationApiDeployAccess — superset kept)
+              - Sid: AllowCloudFormationApiStackLifecycle
                 Effect: Allow
                 Action:
-                  - secretsmanager:GetSecretValue
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:UpdateStack
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+              - Sid: AllowApiGatewayMutations
+                Effect: Allow
+                Action: "apigateway:*"
+                Resource: "*"
+              - Sid: AllowLambdaPermissionMutationsForApiIntegrations
+                Effect: Allow
+                Action:
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:GetPolicy
+                  - lambda:GetFunctionConfiguration
+                Resource: "*"
+
+              # --- from enceladus-cognito-terminal-provisioning-v1 ---
+              - Sid: CognitoTerminalAgentProvisioning
+                Effect: Allow
+                Action:
+                  - cognito-idp:DescribeUserPoolClient
+                  - cognito-idp:UpdateUserPoolClient
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminSetUserPassword
+                Resource: !Sub "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/us-east-1_b2D0V3E1k"
+              - Sid: SecretsManagerTerminalAgentProvisioning
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:PutSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:devops/coordination/*"
+
+              # --- from MpcStreamableFunctionUrlManagement ---
+              - Sid: AllowMcpStreamableFunctionUrl
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunctionUrlConfig
+                  - lambda:GetFunctionUrlConfig
+                  - lambda:UpdateFunctionUrlConfig
+                  - lambda:DeleteFunctionUrlConfig
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                Resource: !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-mcp-streamable"
+
+              # --- from BackendDeployPolicy (E31 template additions) ---
+              - Sid: LambdaLayerOps
+                Effect: Allow
+                Action:
+                  - lambda:PublishLayerVersion
+                  - lambda:GetLayerVersion
+                Resource: "*"
+              - Sid: S3DeployConfigRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+
+        # GovernedResourceDeny kept as separate policy for clarity — explicit
+        # Deny statements that prevent GH Actions from mutating governed data.
+        - PolicyName: GovernedResourceDeny
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DenyGovernedTableWrites
+                Effect: Deny
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
                 Resource:
-                  - !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:devops/*"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/devops-project-tracker"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/projects"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/documents"
+              - Sid: DenyGovernedS3Writes
+                Effect: Deny
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - "arn:aws:s3:::jreese-net/governance/*"
+                  - "arn:aws:s3:::jreese-net/agent-documents/*"
 
 Outputs:
   CloudFormationDeployRoleArn:
