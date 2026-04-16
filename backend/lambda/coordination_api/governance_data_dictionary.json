@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-16.8",
-  "updated_at": "2026-04-16T21:00:00Z",
-  "last_change_summary": "ENC-TSK-E57 / ENC-ISS-243: Added approval_token, decided_by_email, bypass_reason fields to tracker.deployment_decision for deploy approval enforcement mesh. DAT token issued by deploy_decide on approve, validated by deploy-orchestration.yml workflow. Prior: ENC-FTR-077 / ENC-TSK-E53: Added mcp_server.docstore_subtype_tools entity documenting 4 new execute actions for COE and wave docstore subtypes. document.create_coe creates COE documents with source_incident_id. document.create_wave creates wave documents with plan_anchor_id. document.append_handoff_reply appends structured reply blocks with frontmatter to handoff docs; product-lead-terminal layer triggers AC-5 dual-append to active wave doc. document.append_wave_entry appends wave entries with agent-layer classification. All 4 actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag (same as handoff tools). Prior: ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
+  "version": "2026-04-16.9",
+  "updated_at": "2026-04-16T22:00:00Z",
+  "last_change_summary": "ENC-TSK-E64 / ENC-ISS-158 / ENC-PLN-030: Added document_api.error_envelope entity documenting the self-correcting error shape returned by document_api for subtype validation failures (handoff/coe/wave). Extends the ENC-TSK-D56 self-correcting-error pattern to the document surface: error_envelope.details now includes required_fields, optional_fields, dictionary_entity, document_subtype, example_fix, edge_density_requirements, format_constraint so agents can recover from missing subtype fields without additional calls. Prior: ENC-TSK-E57 / ENC-ISS-243: Added approval_token, decided_by_email, bypass_reason fields to tracker.deployment_decision for deploy approval enforcement mesh. DAT token issued by deploy_decide on approve, validated by deploy-orchestration.yml workflow. Prior: ENC-FTR-077 / ENC-TSK-E53: Added mcp_server.docstore_subtype_tools entity documenting 4 new execute actions for COE and wave docstore subtypes. document.create_coe creates COE documents with source_incident_id. document.create_wave creates wave documents with plan_anchor_id. document.append_handoff_reply appends structured reply blocks with frontmatter to handoff docs; product-lead-terminal layer triggers AC-5 dual-append to active wave doc. document.append_wave_entry appends wave entries with agent-layer classification. All 4 actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag (same as handoff tools). Prior: ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
   "owners": [
     "enceladus-platform"
   ],
@@ -492,6 +492,46 @@
         "details": {
           "type": "object",
           "definition": "Self-correcting context for the next attempt. Standard keys: required_fields (list), allowed_values (dict), evidence_schema (dict), strictness_rank (list), example_fix (dict with tool+arguments). Post-D56 additions: allowed_plan_transitions (dict), plan_terminal_statuses (list), token_type/token_purpose/prerequisite_call (CAI/CCI), lesson_gate_requirements (dict), ogtm_compliance_template (dict with 4 requirements + evidence template), dpl_record_id_format/dpl_ddb_key_schema/dpl_label_conventions (GMF/DPL), governed_rules (list of rule strings)."
+        }
+      }
+    },
+    "document_api.error_envelope": {
+      "description": "Self-correcting error envelope emitted by document_api when documents.put rejects a request due to missing subtype-specific required fields (ENC-TSK-E64, ENC-ISS-158, ENC-PLN-030). Extends the ENC-TSK-D56 pattern to the document surface: every handoff/coe/wave validation failure packs enough context for an agent to self-correct on the next call without additional lookups. Returned as top-level error_envelope.details via the shared api.error_envelope contract.",
+      "fields": {
+        "required_fields": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Field names the caller must include to retry successfully. Example: [\"source_record_id\"] for handoff."
+        },
+        "optional_fields": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Field names that enrich but are not strictly required for the subtype. Example: [\"prerequisite_state\", \"verification_criteria\", \"action_checklist\", \"expires_at\"] for handoff."
+        },
+        "dictionary_entity": {
+          "type": "string",
+          "definition": "Reference to the governance dictionary entity defining the subtype schema. Expected values: document.handoff, document.coe, document.wave."
+        },
+        "document_subtype": {
+          "type": "enum",
+          "enum": [
+            "handoff",
+            "coe",
+            "wave"
+          ],
+          "definition": "The subtype that triggered the validation failure. Lets the agent select the correct self-correction strategy."
+        },
+        "example_fix": {
+          "type": "object",
+          "definition": "Fully-formed documents.put call showing the correct payload for this subtype. Shape: {tool: \"documents.put\", arguments: {...}} with project_id, title, content, document_subtype, and all subtype-required fields populated with placeholder values."
+        },
+        "edge_density_requirements": {
+          "type": "object",
+          "definition": "Only present for document_subtype=coe. Documents the minimum related_items composition: feature (ENC-FTR-*), lesson (ENC-LSN-*), issue (ENC-ISS-*) \u2014 each must have at least one entry."
+        },
+        "format_constraint": {
+          "type": "string",
+          "definition": "Only present for fields with pattern constraints. Plain-English rule describing what the value must contain. Example: 'plan_anchor_id must contain \\'-PLN-\\' substring' for wave docs."
         }
       }
     },
