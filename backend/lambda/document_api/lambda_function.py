@@ -144,7 +144,7 @@ ALLOWED_FILE_EXTENSIONS = {".md", ".markdown"}
 # Handoff document schema (ENC-FTR-061 / ENC-TSK-B52)
 # ---------------------------------------------------------------------------
 
-DOCUMENT_SUBTYPES = {"general", "handoff", "blueprint", "narrative", "session-log"}
+DOCUMENT_SUBTYPES = {"doc", "handoff", "coe", "wave", "blueprint", "narrative", "session-log", "general"}
 HANDOFF_STATUSES = {"pending", "claimed", "completed", "stale"}
 HANDOFF_STATUS_TRANSITIONS = {
     "pending": {"claimed", "stale"},
@@ -153,6 +153,59 @@ HANDOFF_STATUS_TRANSITIONS = {
     "stale": set(),
 }
 HANDOFF_REQUIRED_FIELDS = {"source_record_id"}  # required when subtype=handoff
+
+# ---------------------------------------------------------------------------
+# COE (correction-of-errors) document schema (ENC-FTR-077)
+# ---------------------------------------------------------------------------
+
+COE_STATUSES = {"drafting", "under-review", "accepted", "archived"}
+COE_STATUS_TRANSITIONS = {
+    "drafting": {"under-review"},
+    "under-review": {"accepted", "drafting"},
+    "accepted": {"archived"},
+    "archived": set(),
+}
+
+# ---------------------------------------------------------------------------
+# Wave (coordination wave tracking) document schema (ENC-FTR-077)
+# ---------------------------------------------------------------------------
+
+WAVE_STATUSES = {"active", "concluded", "archived"}
+WAVE_STATUS_TRANSITIONS = {
+    "active": {"concluded"},
+    "concluded": {"archived"},
+    "archived": set(),
+}
+
+# ---------------------------------------------------------------------------
+# Semantic handoff-detection patterns (ENC-FTR-077)
+# ---------------------------------------------------------------------------
+
+HANDOFF_TITLE_PATTERNS = [
+    r'(?i)\bHANDOFF\b',
+    r'(?i)\bDispatch\s+[A-Z]\b',
+    r'(?i)GOVERNANCE_SYNC_REQUIRED',
+    r'(?i)EXECUTION_REQUIRED',
+    r'(?i)Coordination.*Handoff',
+    r'(?i)Handoff.*dispatch',
+]
+
+HANDOFF_CONTENT_PATTERNS = [
+    r'(?i)\baction_checklist\b',
+    r'(?i)\bverification_criteria\b',
+    r'(?i)\bprerequisite_state\b',
+    r'(?i)##\s*Scope\s+Statement',
+    r'(?i)##\s*Acceptance\s+Criteria.*dispatch',
+]
+
+# Required COE sections (compliance warnings, not hard blocks)
+COE_REQUIRED_SECTIONS = [
+    "## Root-Cause Analysis",
+    "## Timeline",
+    "## Remediation Status",
+    "## Systemic Lessons",
+    "## Outstanding Questions",
+]
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -466,7 +519,7 @@ def _is_table_divider(line: str) -> bool:
     return bool(re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", line))
 
 
-def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
+def _evaluate_markdown_compliance(content: str, document_subtype: str = "") -> Dict[str, Any]:
     warnings: List[str] = []
     lines = content.splitlines()
 
@@ -563,6 +616,14 @@ def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
             continue
         if "[!" in line and not re.search(r"^\s*>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$", line):
             warnings.append(f"Malformed alert syntax at line {idx}.")
+
+    # COE-specific section warnings (ENC-FTR-077): warn when required sections
+    # are missing. These are advisory, not hard blocks.
+    if document_subtype == "coe":
+        content_lower = content.lower()
+        for section in COE_REQUIRED_SECTIONS:
+            if section.lower() not in content_lower:
+                warnings.append(f"COE document missing recommended section: '{section}'.")
 
     warnings = warnings[:MAX_COMPLIANCE_WARNINGS]
     score = max(0, 100 - (len(warnings) * 10))
@@ -1055,18 +1116,6 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     if len(content.encode("utf-8")) > MAX_CONTENT_SIZE:
         return _error(400, f"Content exceeds {MAX_CONTENT_SIZE} bytes.")
 
-    compliance = _evaluate_markdown_compliance(content)
-    if MIN_COMPLIANCE_SCORE > 0 and compliance["compliance_score"] < MIN_COMPLIANCE_SCORE:
-        return _error(
-            400,
-            (
-                f"Document compliance_score {compliance['compliance_score']} is below "
-                f"minimum required score {MIN_COMPLIANCE_SCORE}."
-            ),
-            compliance_score=compliance["compliance_score"],
-            compliance_warnings=compliance["compliance_warnings"],
-        )
-
     # Validate project
     project_err = _validate_project_exists(project_id)
     if project_err:
@@ -1090,10 +1139,43 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     related_items = [str(r).strip() for r in related_items[:MAX_RELATED_ITEMS] if str(r).strip()]
     keywords = [str(k).strip().lower() for k in keywords[:MAX_KEYWORDS] if str(k).strip()]
 
-    # Document subtype (ENC-FTR-061)
-    document_subtype = str(body.get("document_subtype", "general")).strip().lower()
+    # Document subtype (ENC-FTR-061 / ENC-FTR-077)
+    if "document_subtype" not in body:
+        return _error(
+            400,
+            "document_subtype is required. Use 'doc' for standard documents, "
+            "'handoff' for dispatch/report-back, 'coe' for correction-of-errors, "
+            "'wave' for coordination wave tracking.",
+        )
+    document_subtype = str(body.get("document_subtype", "")).strip().lower()
+    if not document_subtype:
+        return _error(
+            400,
+            "document_subtype is required. Use 'doc' for standard documents, "
+            "'handoff' for dispatch/report-back, 'coe' for correction-of-errors, "
+            "'wave' for coordination wave tracking.",
+        )
     if document_subtype not in DOCUMENT_SUBTYPES:
         return _error(400, f"Invalid document_subtype '{document_subtype}'. Must be one of: {', '.join(sorted(DOCUMENT_SUBTYPES))}")
+    if document_subtype == "general":
+        return _error(
+            400,
+            "document_subtype 'general' is deprecated for new documents. "
+            "Use 'doc' for standard unstructured documents.",
+        )
+
+    # Compliance check (pass subtype for COE section warnings — ENC-FTR-077)
+    compliance = _evaluate_markdown_compliance(content, document_subtype=document_subtype)
+    if MIN_COMPLIANCE_SCORE > 0 and compliance["compliance_score"] < MIN_COMPLIANCE_SCORE:
+        return _error(
+            400,
+            (
+                f"Document compliance_score {compliance['compliance_score']} is below "
+                f"minimum required score {MIN_COMPLIANCE_SCORE}."
+            ),
+            compliance_score=compliance["compliance_score"],
+            compliance_warnings=compliance["compliance_warnings"],
+        )
 
     # ENC-TSK-C10 / ENC-FTR-065: Document maturity state (GDMP pipeline)
     VALID_MATURITY_STATES = {"raw", "compliant", "contextualized", "mature"}
@@ -1105,7 +1187,29 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             f"Must be one of: {', '.join(sorted(VALID_MATURITY_STATES))}",
         )
 
-    # Handoff-specific fields
+    # --- Semantic handoff-detection guard (ENC-FTR-077) ---
+    # When subtype is 'doc', check for handoff-like patterns in title/content.
+    if document_subtype == "doc":
+        confirm_subtype = body.get("confirm_subtype")
+        if not confirm_subtype:
+            handoff_detected = False
+            for pattern in HANDOFF_TITLE_PATTERNS:
+                if re.search(pattern, title):
+                    handoff_detected = True
+                    break
+            if not handoff_detected:
+                for pattern in HANDOFF_CONTENT_PATTERNS:
+                    if re.search(pattern, content):
+                        handoff_detected = True
+                        break
+            if handoff_detected:
+                return _error(
+                    400,
+                    "Document title/structure suggests this should use document_subtype='handoff'. "
+                    "If 'doc' is intentionally correct, retry with confirm_subtype=true.",
+                )
+
+    # --- Handoff-specific fields (ENC-FTR-061) ---
     handoff_fields: Dict[str, Any] = {}
     if document_subtype == "handoff":
         source_record_id = str(body.get("source_record_id", "")).strip()
@@ -1124,6 +1228,46 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         expires_at = str(body.get("expires_at", "")).strip()
         if expires_at:
             handoff_fields["expires_at"] = expires_at
+
+    # --- COE-specific validation (ENC-FTR-077) ---
+    coe_fields: Dict[str, Any] = {}
+    if document_subtype == "coe":
+        source_incident_id = str(body.get("source_incident_id", "")).strip()
+        if not source_incident_id:
+            return _error(400, "Field 'source_incident_id' is required when document_subtype is 'coe'.")
+        coe_fields["source_incident_id"] = source_incident_id
+        coe_fields["coe_status"] = "drafting"
+        # Edge density validation: require at least 1 FTR, 1 LSN, 1 ISS in related_items
+        missing_edges = []
+        has_ftr = any("-FTR-" in item for item in related_items)
+        has_lsn = any("-LSN-" in item for item in related_items)
+        has_iss = any("-ISS-" in item for item in related_items)
+        if not has_ftr:
+            missing_edges.append("feature (*-FTR-*)")
+        if not has_lsn:
+            missing_edges.append("lesson (*-LSN-*)")
+        if not has_iss:
+            missing_edges.append("issue (*-ISS-*)")
+        if missing_edges:
+            return _error(
+                400,
+                "COE requires minimum edge density: related_items must include "
+                ">= 1 feature (*-FTR-*), >= 1 lesson (*-LSN-*), >= 1 issue (*-ISS-*). "
+                f"Missing: {', '.join(missing_edges)}",
+            )
+
+    # --- Wave-specific validation (ENC-FTR-077) ---
+    wave_fields: Dict[str, Any] = {}
+    if document_subtype == "wave":
+        plan_anchor_id = str(body.get("plan_anchor_id", "")).strip()
+        if not plan_anchor_id or "-PLN-" not in plan_anchor_id:
+            return _error(
+                400,
+                "Field 'plan_anchor_id' is required when document_subtype is 'wave' "
+                "and must contain '-PLN-' (e.g. ENC-PLN-029).",
+            )
+        wave_fields["plan_anchor_id"] = plan_anchor_id
+        wave_fields["wave_status"] = "active"
 
     # Generate document ID
     document_id = f"DOC-{uuid.uuid4().hex[:12].upper()}"
@@ -1181,6 +1325,16 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             item["action_checklist"] = _serialize_list(handoff_fields["action_checklist"])
         if handoff_fields.get("expires_at"):
             item["expires_at"] = {"S": handoff_fields["expires_at"]}
+
+    # Add COE-specific fields to DynamoDB item (ENC-FTR-077)
+    if coe_fields:
+        item["source_incident_id"] = {"S": coe_fields["source_incident_id"]}
+        item["coe_status"] = {"S": coe_fields["coe_status"]}
+
+    # Add wave-specific fields to DynamoDB item (ENC-FTR-077)
+    if wave_fields:
+        item["plan_anchor_id"] = {"S": wave_fields["plan_anchor_id"]}
+        item["wave_status"] = {"S": wave_fields["wave_status"]}
 
     try:
         ddb.put_item(TableName=DOCUMENTS_TABLE, Item=item)
@@ -1479,6 +1633,64 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             "Cannot specify both 'content' and 'append_content' — they are mutually exclusive.",
         )
 
+    # COE status transitions (ENC-FTR-077)
+    if "coe_status" in body:
+        if current_subtype != "coe":
+            return _error(400, "Cannot set coe_status on a non-COE document.")
+        new_coe_status = str(body["coe_status"]).strip().lower()
+        if new_coe_status not in COE_STATUSES:
+            return _error(400, f"Invalid coe_status '{new_coe_status}'. Must be one of: {', '.join(sorted(COE_STATUSES))}")
+        current_coe_status = existing.get("coe_status", {}).get("S", "drafting")
+        allowed_coe = COE_STATUS_TRANSITIONS.get(current_coe_status, set())
+        if new_coe_status != current_coe_status and new_coe_status not in allowed_coe:
+            return _error(
+                400,
+                f"Cannot transition coe_status from '{current_coe_status}' to '{new_coe_status}'. "
+                f"Allowed transitions: {', '.join(sorted(allowed_coe)) if allowed_coe else 'none (terminal state)'}",
+            )
+        expr_parts.append("coe_status = :cs")
+        attr_values[":cs"] = {"S": new_coe_status}
+
+    # Wave status transitions (ENC-FTR-077)
+    if "wave_status" in body:
+        if current_subtype != "wave":
+            return _error(400, "Cannot set wave_status on a non-wave document.")
+        new_wave_status = str(body["wave_status"]).strip().lower()
+        if new_wave_status not in WAVE_STATUSES:
+            return _error(400, f"Invalid wave_status '{new_wave_status}'. Must be one of: {', '.join(sorted(WAVE_STATUSES))}")
+        current_wave_status = existing.get("wave_status", {}).get("S", "active")
+        allowed_wave = WAVE_STATUS_TRANSITIONS.get(current_wave_status, set())
+        if new_wave_status != current_wave_status and new_wave_status not in allowed_wave:
+            return _error(
+                400,
+                f"Cannot transition wave_status from '{current_wave_status}' to '{new_wave_status}'. "
+                f"Allowed transitions: {', '.join(sorted(allowed_wave)) if allowed_wave else 'none (terminal state)'}",
+            )
+        expr_parts.append("wave_status = :ws")
+        attr_values[":ws"] = {"S": new_wave_status}
+
+    # plan_anchor_id immutability (ENC-FTR-077)
+    if "plan_anchor_id" in body:
+        return _error(400, "plan_anchor_id is immutable after wave document creation.")
+
+    # COE edge density re-validation on related_items change (ENC-FTR-077)
+    if "related_items" in body and current_subtype == "coe":
+        patched_items = [str(r).strip() for r in body["related_items"][:MAX_RELATED_ITEMS] if str(r).strip()]
+        missing_edges = []
+        if not any("-FTR-" in item for item in patched_items):
+            missing_edges.append("feature (*-FTR-*)")
+        if not any("-LSN-" in item for item in patched_items):
+            missing_edges.append("lesson (*-LSN-*)")
+        if not any("-ISS-" in item for item in patched_items):
+            missing_edges.append("issue (*-ISS-*)")
+        if missing_edges:
+            return _error(
+                400,
+                "COE requires minimum edge density: related_items must include "
+                ">= 1 feature (*-FTR-*), >= 1 lesson (*-LSN-*), >= 1 issue (*-ISS-*). "
+                f"Missing: {', '.join(missing_edges)}",
+            )
+
     # Content update — re-upload to S3
     if "content" in body:
         content = body["content"]
@@ -1487,7 +1699,7 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         if len(content.encode("utf-8")) > MAX_CONTENT_SIZE:
             return _error(400, f"Content must be 1-{MAX_CONTENT_SIZE} bytes.")
         try:
-            compliance = _evaluate_markdown_compliance(content)
+            compliance = _evaluate_markdown_compliance(content, document_subtype=current_subtype)
             if MIN_COMPLIANCE_SCORE > 0 and compliance["compliance_score"] < MIN_COMPLIANCE_SCORE:
                 return _error(
                     400,
