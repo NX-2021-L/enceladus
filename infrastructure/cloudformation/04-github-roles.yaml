@@ -256,14 +256,13 @@ Resources:
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/v4/*"
       Policies:
-        # Consolidated from 8 manually-created inline policies (ENC-TSK-E32).
-        # Source dump captured by product-lead terminal 2026-04-16 via
-        # iam:ListRolePolicies + iam:GetRolePolicy.
-        - PolicyName: BackendDeployPolicy
+        # Split into original named policies to stay under IAM 10KB
+        # per-policy limit (ENC-TSK-E32). Source: iam:GetRolePolicy dump
+        # captured by product-lead terminal 2026-04-16.
+        - PolicyName: BackendDeployAllow
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # --- from BackendDeployAllow ---
               - Sid: LambdaCodeDeploy
                 Effect: Allow
                 Action:
@@ -284,8 +283,7 @@ Resources:
                   - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-*"
               - Sid: LambdaWait
                 Effect: Allow
-                Action:
-                  - lambda:GetFunctionConfiguration
+                Action: lambda:GetFunctionConfiguration
                 Resource: "*"
               - Sid: LambdaExecutionRoles
                 Effect: Allow
@@ -324,7 +322,7 @@ Resources:
                   - !Sub "arn:aws:logs:us-west-2:${AWS::AccountId}:log-group:/enceladus/*"
               - Sid: CloudWatchLogsDescribe
                 Effect: Allow
-                Action: "logs:DescribeLogGroups"
+                Action: logs:DescribeLogGroups
                 Resource: "*"
               - Sid: S3DeployArtifacts
                 Effect: Allow
@@ -334,7 +332,7 @@ Resources:
                 Resource: "arn:aws:s3:::jreese-net/deploy/*"
               - Sid: SecretsRead
                 Effect: Allow
-                Action: "secretsmanager:GetSecretValue"
+                Action: secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:devops/coordination/*"
               - Sid: EC2Fleet
                 Effect: Allow
@@ -356,7 +354,7 @@ Resources:
                 Resource: "*"
               - Sid: SNSPublish
                 Effect: Allow
-                Action: "sns:Publish"
+                Action: sns:Publish
                 Resource: !Sub "arn:aws:sns:us-west-2:${AWS::AccountId}:devops-*"
               - Sid: GammaLambdaDeploy
                 Effect: Allow
@@ -385,16 +383,10 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/*-gamma"
 
-              # --- from allow-auth-refresh-updatecode ---
-              - Sid: AllowAuthRefreshCodeUpdate
-                Effect: Allow
-                Action:
-                  - lambda:UpdateFunctionCode
-                  - lambda:GetFunctionConfiguration
-                  - lambda:GetFunction
-                Resource: !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:auth-refresh*"
-
-              # --- from BackendDeployPolicy-LambdaArtifacts ---
+        - PolicyName: BackendDeployPolicy-LambdaArtifacts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
               - Sid: S3LambdaArtifactAccess
                 Effect: Allow
                 Action:
@@ -403,16 +395,41 @@ Resources:
                 Resource: "arn:aws:s3:::jreese-net/lambda-artifacts/*"
               - Sid: S3LambdaArtifactListAccess
                 Effect: Allow
-                Action: "s3:ListBucket"
+                Action: s3:ListBucket
                 Resource: "arn:aws:s3:::jreese-net"
                 Condition:
                   StringLike:
                     s3:prefix:
                       - "lambda-artifacts/*"
                       - "deploy-config/*"
+              - Sid: S3DeployConfigRead
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+              - Sid: LambdaLayerOps
+                Effect: Allow
+                Action:
+                  - lambda:PublishLayerVersion
+                  - lambda:GetLayerVersion
+                Resource: "*"
 
-              # --- from enceladus-cloudformation-api-unblock-v1 ---
-              # (merged with EnceladusCloudFormationApiDeployAccess — superset kept)
+        - PolicyName: allow-auth-refresh-updatecode
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowAuthRefreshCodeUpdate
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:GetFunctionConfiguration
+                  - lambda:GetFunction
+                Resource: !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:auth-refresh*"
+
+        # Superset of the former EnceladusCloudFormationApiDeployAccess
+        - PolicyName: enceladus-cloudformation-api-unblock-v1
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
               - Sid: AllowCloudFormationApiStackLifecycle
                 Effect: Allow
                 Action:
@@ -439,7 +456,10 @@ Resources:
                   - lambda:GetFunctionConfiguration
                 Resource: "*"
 
-              # --- from enceladus-cognito-terminal-provisioning-v1 ---
+        - PolicyName: enceladus-cognito-terminal-provisioning-v1
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
               - Sid: CognitoTerminalAgentProvisioning
                 Effect: Allow
                 Action:
@@ -457,7 +477,10 @@ Resources:
                   - secretsmanager:PutSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:devops/coordination/*"
 
-              # --- from MpcStreamableFunctionUrlManagement ---
+        - PolicyName: MpcStreamableFunctionUrlManagement
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
               - Sid: AllowMcpStreamableFunctionUrl
                 Effect: Allow
                 Action:
@@ -469,21 +492,6 @@ Resources:
                   - lambda:RemovePermission
                 Resource: !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-mcp-streamable"
 
-              # --- from BackendDeployPolicy (E31 template additions) ---
-              - Sid: LambdaLayerOps
-                Effect: Allow
-                Action:
-                  - lambda:PublishLayerVersion
-                  - lambda:GetLayerVersion
-                Resource: "*"
-              - Sid: S3DeployConfigRead
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
-
-        # GovernedResourceDeny kept as separate policy for clarity — explicit
-        # Deny statements that prevent GH Actions from mutating governed data.
         - PolicyName: GovernedResourceDeny
           PolicyDocument:
             Version: '2012-10-17'
