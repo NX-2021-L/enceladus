@@ -147,7 +147,8 @@ main() {
       GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID},
       GITHUB_PRIVATE_KEY_SECRET=devops/github-app/private-key,
       ALLOWED_REPOS=NX-2021-L/enceladus,
-      GAMMA_INTEGRATION_BRANCH=v4/main
+      GAMMA_INTEGRATION_BRANCH=v4/main,
+      ENFORCE_FOUR_EYES=false
     }" >/dev/null
 
   aws lambda wait function-updated \

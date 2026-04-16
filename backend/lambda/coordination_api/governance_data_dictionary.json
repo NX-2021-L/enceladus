@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-16.7",
+  "version": "2026-04-16.8",
   "updated_at": "2026-04-16T21:00:00Z",
-  "last_change_summary": "ENC-FTR-077 / ENC-TSK-E53: Added mcp_server.docstore_subtype_tools entity documenting 4 new execute actions for COE and wave docstore subtypes. document.create_coe creates COE documents with source_incident_id. document.create_wave creates wave documents with plan_anchor_id. document.append_handoff_reply appends structured reply blocks with frontmatter to handoff docs; product-lead-terminal layer triggers AC-5 dual-append to active wave doc. document.append_wave_entry appends wave entries with agent-layer classification. All 4 actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag (same as handoff tools). Prior: ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
+  "last_change_summary": "ENC-TSK-E57 / ENC-ISS-243: Added approval_token, decided_by_email, bypass_reason fields to tracker.deployment_decision for deploy approval enforcement mesh. DAT token issued by deploy_decide on approve, validated by deploy-orchestration.yml workflow. Prior: ENC-FTR-077 / ENC-TSK-E53: Added mcp_server.docstore_subtype_tools entity documenting 4 new execute actions for COE and wave docstore subtypes. document.create_coe creates COE documents with source_incident_id. document.create_wave creates wave documents with plan_anchor_id. document.append_handoff_reply appends structured reply blocks with frontmatter to handoff docs; product-lead-terminal layer triggers AC-5 dual-append to active wave doc. document.append_wave_entry appends wave entries with agent-layer classification. All 4 actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag (same as handoff tools). Prior: ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4071,6 +4071,18 @@
         "created_at": {
           "type": "string",
           "definition": "ISO 8601 timestamp when the decision record was created (typically on PR open)."
+        },
+        "approval_token": {
+          "type": "string",
+          "definition": "Deploy Approval Token (DAT-{uuid4_hex}) issued by deploy_decide on approve action (ENC-TSK-E57). Validated by deploy-orchestration.yml workflow before any production mutation. Empty until approved via Deployment Manager PWA."
+        },
+        "decided_by_email": {
+          "type": "string",
+          "definition": "Email address from the Cognito JWT of the person who made the decision (ENC-TSK-E57). Used for four-eyes audit comparison against pr_author."
+        },
+        "bypass_reason": {
+          "type": "string",
+          "definition": "If set, indicates this deployment bypassed the Enceladus approval gate (ENC-TSK-E57 AC8). Populated retroactively for pre-E57 deploys via backfill_dpl_bypass_markers.py."
         }
       }
     },

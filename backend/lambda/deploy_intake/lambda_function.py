@@ -1110,6 +1110,58 @@ def _handle_get_pending(project_id: str, limit: int = 50) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Route: GET /api/v1/deploy/validate/approval/{prNumber}
+# ENC-TSK-E57: Validates whether a PR has been approved via the Enceladus
+# Deployment Manager by checking for a DAT (Deploy Approval Token) on the
+# corresponding DPL record.  Called by deploy-orchestration.yml and
+# pr-commit-gate.yml workflows via internal API key auth.
+# ---------------------------------------------------------------------------
+
+
+def _handle_validate_approval(pr_number: int) -> Dict:
+    """Check whether a DPL record for a given PR carries an approval token."""
+    record_id = f"decision#ENC-DPL-{pr_number}"
+    ddb = _get_ddb()
+    resp = ddb.get_item(
+        TableName=DEPLOY_TABLE,
+        Key={
+            "project_id": {"S": "enceladus"},
+            "record_id": {"S": record_id},
+        },
+    )
+    item = resp.get("Item")
+    if not item:
+        return _ok({
+            "valid": False,
+            "reason": f"No deployment decision record found for PR #{pr_number}",
+            "pr_number": pr_number,
+        })
+
+    data = _ddb_deser(item)
+    approval_token = data.get("approval_token", "")
+    if not approval_token:
+        return _ok({
+            "valid": False,
+            "reason": "PR not approved via Enceladus Deployment Manager",
+            "pr_number": pr_number,
+            "status": data.get("status", ""),
+            "original_target": data.get("original_target", ""),
+        })
+
+    return _ok({
+        "valid": True,
+        "approval_token": approval_token,
+        "pr_number": pr_number,
+        "pr_author": data.get("pr_author", ""),
+        "decided_by": data.get("decided_by", ""),
+        "decided_by_email": data.get("decided_by_email", ""),
+        "decided_at": data.get("decided_at", ""),
+        "status": data.get("status", ""),
+        "original_target": data.get("original_target", ""),
+    })
+
+
+# ---------------------------------------------------------------------------
 # Route: GET /api/v1/deploy/queue
 # Returns deployment_decision records in pending_approval status.
 # Part of the Generational Metabolism Framework (DOC-63420302EF65 §6).
@@ -1229,6 +1281,10 @@ _HISTORY_PATTERN = re.compile(r"(?:/api/v1/deploy)?/history/(?P<projectId>[a-z0-
 _PENDING_PATTERN = re.compile(r"(?:/api/v1/deploy)?/pending/(?P<projectId>[a-z0-9_-]+)$")
 _QUEUE_PATTERN = re.compile(r"(?:/api/v1/deploy)?/queue$")
 _TRIGGER_PATTERN = re.compile(r"(?:/api/v1/deploy)?/trigger/(?P<projectId>[a-z0-9_-]+)$")
+# ENC-TSK-E57: Approval token validation for deploy-orchestration workflow
+_VALIDATE_APPROVAL_PATTERN = re.compile(
+    r"(?:/api/v1/deploy)?/validate/approval/(?P<prNumber>\d+)$"
+)
 _OPTIONS_PATTERN = re.compile(r"(?:/api/v1/deploy)?/")
 
 
@@ -1305,6 +1361,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
                 qs = event.get("queryStringParameters") or {}
                 limit = _parse_limit(qs.get("limit"), default=50, min_value=1, max_value=200)
                 return _handle_get_pending(project_id, limit)
+
+        # GET /validate/approval/{prNumber} — ENC-TSK-E57 approval token check
+        if method == "GET":
+            m = _VALIDATE_APPROVAL_PATTERN.search(path)
+            if m:
+                return _handle_validate_approval(int(m.group("prNumber")))
 
         # GET /queue — deployment_decision records pending approval
         if method == "GET":
