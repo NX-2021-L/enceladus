@@ -252,10 +252,26 @@ jobs:
           rm -f "${zip_file}"
 
       - name: Validate deployed Lambda state
+        # ENC-ISS-249: Tolerate ResourceNotFoundException for gamma-suffixed
+        # functions that have not been provisioned yet (e.g. prod-only
+        # functions awaiting v4 gamma stack parity). Prod validation (no
+        # suffix) still fails closed.
         run: |
           set -euo pipefail
-          aws lambda get-function-configuration \
-            --region "us-west-2" \
-            --function-name "${{ inputs.function_name }}${{ inputs.environment_suffix }}" \
-            --query '{FunctionName:FunctionName,LastModified:LastModified,Runtime:Runtime,State:State,LastUpdateStatus:LastUpdateStatus}' \
-            --output table
+          function_name="${{ inputs.function_name }}${{ inputs.environment_suffix }}"
+          suffix="${{ inputs.environment_suffix }}"
+          if aws lambda get-function-configuration \
+              --region "us-west-2" \
+              --function-name "${function_name}" \
+              --query '{FunctionName:FunctionName,LastModified:LastModified,Runtime:Runtime,State:State,LastUpdateStatus:LastUpdateStatus}' \
+              --output table 2>/tmp/lambda-validate-err; then
+            exit 0
+          fi
+          err_body="$(cat /tmp/lambda-validate-err || true)"
+          if [[ -n "${suffix}" && "${err_body}" == *"ResourceNotFoundException"* ]]; then
+            echo "::warning::Gamma function ${function_name} does not exist yet — non-fatal (ENC-ISS-249). The deploy step for the base function already succeeded."
+            exit 0
+          fi
+          echo "::error::Lambda validation failed for ${function_name}:"
+          echo "${err_body}"
+          exit 1
