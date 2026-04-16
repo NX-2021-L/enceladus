@@ -216,8 +216,28 @@ deploy_lambda() {
   if [[ -z "${effective_github_token}" ]]; then
     log "[WARNING] GITHUB_TOKEN resolved empty; PR merge validation will fail for private repos."
   fi
+  # ENC-TSK-E62 AC2: Build env_vars string from a key/value array so keys with
+  # empty values are omitted entirely. AWS CLI rejected prior `KEY=` trailing
+  # entries with "ParamValidation: Expected ',', received 'EOF'" when
+  # GITHUB_TOKEN resolved empty.
+  local -a env_entries=(
+    "DEPLOY_TABLE=${DEPLOY_TABLE}"
+    "DEPLOY_REGION=${REGION}"
+    "PROJECTS_TABLE=${PROJECTS_TABLE}"
+    "CONFIG_BUCKET=${CONFIG_BUCKET}"
+    "CONFIG_PREFIX=${CONFIG_PREFIX}"
+    "SQS_QUEUE_URL=${SQS_QUEUE_URL}"
+    "COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}"
+    "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}"
+    "COORDINATION_INTERNAL_API_KEY_PREVIOUS=${COORDINATION_INTERNAL_API_KEY_PREVIOUS}"
+    "COORDINATION_INTERNAL_API_KEY_SCOPES=${COORDINATION_INTERNAL_API_KEY_SCOPES}"
+    "DOC_PREP_LAMBDA_NAME=${DOC_PREP_LAMBDA_NAME}"
+    "CORS_ORIGIN=${CORS_ORIGIN}"
+  )
+  [[ -n "${effective_internal_key}" ]] && env_entries+=("COORDINATION_INTERNAL_API_KEY=${effective_internal_key}")
+  [[ -n "${effective_github_token}" ]] && env_entries+=("GITHUB_TOKEN=${effective_github_token}")
   local env_vars
-  env_vars="{DEPLOY_TABLE=${DEPLOY_TABLE},DEPLOY_REGION=${REGION},PROJECTS_TABLE=${PROJECTS_TABLE},CONFIG_BUCKET=${CONFIG_BUCKET},CONFIG_PREFIX=${CONFIG_PREFIX},SQS_QUEUE_URL=${SQS_QUEUE_URL},COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID},COORDINATION_INTERNAL_API_KEY=${effective_internal_key},COORDINATION_INTERNAL_API_KEY_PREVIOUS=${COORDINATION_INTERNAL_API_KEY_PREVIOUS},COORDINATION_INTERNAL_API_KEY_SCOPES=${COORDINATION_INTERNAL_API_KEY_SCOPES},DOC_PREP_LAMBDA_NAME=${DOC_PREP_LAMBDA_NAME},CORS_ORIGIN=${CORS_ORIGIN},GITHUB_TOKEN=${effective_github_token}}"
+  env_vars="{$(IFS=,; echo "${env_entries[*]}")}"
 
   if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${REGION}" >/dev/null 2>&1; then
     log "[START] updating Lambda code: ${FUNCTION_NAME}"
