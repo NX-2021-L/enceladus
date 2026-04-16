@@ -1,0 +1,103 @@
+name: Deploy Capability Guard
+
+# ENC-TSK-E70 / ENC-PLN-031 Phase 5.
+#
+# Pre-merge guard. Complements the Phase 4 scheduled auditor by catching
+# capability drift at PR time — before merge, not after.
+#
+# Checks performed:
+#   1. If the PR modifies any .github/workflows/*.yml: run
+#      tools/audit_gha_env_secrets.py --check-declaration (requires the
+#      env-production-secrets.json manifest from ENC-TSK-E66 to be present
+#      on main — falls back to a warning if not).
+#   2. If the PR adds a new `environment: production` job: warn (with
+#      self-correcting text) to re-run step 1 and ensure secret scoping.
+#   3. If the PR adds a new AWS::ApiGatewayV2::Route resource in CFN
+#      templates: warn that the route will need live verification and
+#      should be declared on the owning component's required_apigw_routes.
+#
+# Fails CI with self-correcting error text when any of the above flags a
+# missing declaration. Non-blocking warnings are printed when only
+# informational flags trip.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/**"
+      - "infrastructure/cloudformation/**"
+      - "backend/lambda/coordination_api/governance_data_dictionary.json"
+      - "tools/deploy-capability/**"
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Deploy capability guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Identify PR base
+        id: base
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "[INFO] base=${BASE_SHA} head=${HEAD_SHA}"
+
+      - name: Run env secret audit (declaration mode)
+        id: env_audit
+        run: |
+          set -euo pipefail
+          if [[ -x tools/audit_gha_env_secrets.py ]]; then
+            python3 tools/audit_gha_env_secrets.py --check-declaration || exit_code=$?
+            echo "exit_code=${exit_code:-0}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::tools/audit_gha_env_secrets.py not present on main yet (ENC-TSK-E66 not merged). Skipping env secret declaration audit."
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect new environment: production jobs
+        id: env_prod_detect
+        run: |
+          set -euo pipefail
+          base="${{ steps.base.outputs.base_sha }}"
+          head="${{ steps.base.outputs.head_sha }}"
+          diff_out=$(git diff "${base}" "${head}" -- '.github/workflows/*.yml' || true)
+          added_env_prod=$(echo "${diff_out}" | grep -E '^\+\s+environment:\s+production' || true)
+          if [[ -n "${added_env_prod}" ]]; then
+            echo "::warning::New 'environment: production' job(s) added. Ensure any referenced secrets are declared in tools/deploy-capability/env-production-secrets.json AND scoped via 'gh secret set --env production <NAME>' (ENC-LSN-032, ENC-ISS-244)."
+            echo "${added_env_prod}" | sed 's/^/  /'
+            echo "added_env_prod=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "added_env_prod=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect new AWS::ApiGatewayV2::Route resources
+        id: route_detect
+        run: |
+          set -euo pipefail
+          base="${{ steps.base.outputs.base_sha }}"
+          head="${{ steps.base.outputs.head_sha }}"
+          diff_out=$(git diff "${base}" "${head}" -- 'infrastructure/cloudformation/*.yaml' || true)
+          added_routes=$(echo "${diff_out}" | grep -E '^\+\s+RouteKey:' || true)
+          if [[ -n "${added_routes}" ]]; then
+            echo "::warning::New AWS::ApiGatewayV2::Route resources added. Post-merge: verify the routes exist live via 'aws apigatewayv2 get-routes'. Also declare them on the owning component's required_apigw_routes (ENC-TSK-E68 schema)."
+            echo "${added_routes}" | sed 's/^/  /'
+          fi
+
+      - name: Fail on undeclared env secret
+        if: steps.env_audit.outputs.exit_code != '0'
+        run: |
+          echo "::error::tools/audit_gha_env_secrets.py failed. A new 'environment: production' job references a secret NOT declared in tools/deploy-capability/env-production-secrets.json."
+          echo "::error::FIX: Append the secret to required_secrets[] in env-production-secrets.json AND request a repo admin to run 'gh secret set --env production <NAME> --body <value>' before merge. See ENC-LSN-032 / ENC-ISS-244 / ENC-TSK-E66 runbook."
+          exit 1
