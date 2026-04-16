@@ -137,6 +137,48 @@
       "lambda_dir": "backend/lambda/graph_health_metrics",
       "workflow_file": ".github/workflows/lambda-graph-health-metrics-deploy.yml",
       "deploy_script": "backend/lambda/graph_health_metrics/deploy.sh"
+    },
+    {
+      "function_name": "devops-github-integration",
+      "lambda_dir": "backend/lambda/github_integration",
+      "workflow_file": ".github/workflows/github-integration-deploy.yml",
+      "deploy_script": "backend/lambda/github_integration/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "enceladus-checkout-service",
+      "lambda_dir": "backend/lambda/checkout_service",
+      "workflow_file": ".github/workflows/lambda-checkout-service-deploy.yml",
+      "deploy_script": "backend/lambda/checkout_service/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "enceladus-mcp-code",
+      "lambda_dir": "backend/lambda/mcp_code",
+      "workflow_file": ".github/workflows/lambda-mcp-code-deploy.yml",
+      "deploy_script": "backend/lambda/mcp_code/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "enceladus-mcp-streamable",
+      "lambda_dir": "backend/lambda/mcp_streamable",
+      "workflow_file": ".github/workflows/lambda-mcp-streamable-deploy.yml",
+      "deploy_script": "backend/lambda/mcp_streamable/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "devops-titan-embedding-backfill",
+      "lambda_dir": "backend/lambda/titan_embedding_backfill",
+      "workflow_file": ".github/workflows/lambda-titan-embedding-backfill-deploy.yml",
+      "deploy_script": "backend/lambda/titan_embedding_backfill/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "enceladus-prod-health-monitor",
+      "lambda_dir": "backend/lambda/prod_health_monitor",
+      "workflow_file": ".github/workflows/lambda-prod-health-monitor-deploy.yml",
+      "deploy_script": "backend/lambda/prod_health_monitor/deploy.sh",
+      "cfn_managed": false
     }
   ]
 }
