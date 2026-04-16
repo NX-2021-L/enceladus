@@ -202,10 +202,10 @@ jobs:
             echo "✅ Enceladus approval verified for PR #${PR_NUMBER}"
             echo "   Approved by: ${DECIDED_BY}"
             echo "   Token: ${TOKEN}"
-          elif [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "401" ]; then
-            echo "::warning::Validation endpoint returned HTTP $HTTP_CODE. Falling through to GitHub environment approval (bootstrap transition)."
           else
-            echo "::error::Enceladus approval API unreachable (HTTP $HTTP_CODE). Failing closed."
+            # ENC-TSK-E62 AC3: Bootstrap transition over — no 401/404 passthrough.
+            # Enforce DAT-only authorization: any non-200 fails the deploy.
+            echo "::error::Enceladus approval API returned HTTP $HTTP_CODE. Failing closed (DAT-only enforcement, ENC-ISS-243)."
             exit 1
           fi
 
@@ -403,10 +403,10 @@ jobs:
             fi
             DECIDED_BY=$(echo "$HTTP_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('decided_by_email','unknown'))" 2>/dev/null || echo "unknown")
             echo "✅ Full-stack Enceladus approval verified for PR #${PR_NUMBER} (approved by ${DECIDED_BY})"
-          elif [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "401" ]; then
-            echo "::warning::Validation endpoint returned HTTP $HTTP_CODE. Falling through to GitHub environment approval (bootstrap transition)."
           else
-            echo "::error::Enceladus approval API unreachable (HTTP $HTTP_CODE). Failing closed."
+            # ENC-TSK-E62 AC3: Bootstrap transition over — no 401/404 passthrough.
+            # Enforce DAT-only authorization: any non-200 fails the deploy.
+            echo "::error::Enceladus approval API returned HTTP $HTTP_CODE. Failing closed (DAT-only enforcement, ENC-ISS-243)."
             exit 1
           fi
 
