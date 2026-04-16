@@ -610,6 +610,79 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 did=doc_id, sid=informed_id,
             )
 
+        # --- Subtype-specific document edges (ENC-FTR-077) ---
+        doc_subtype = record.get("document_subtype", "")
+
+        # COE: INVESTIGATES / INVESTIGATED_BY (source_incident_id -> Issue/Task)
+        if doc_subtype == "coe":
+            source_incident_id = record.get("source_incident_id", "")
+            if source_incident_id:
+                source_incident_id = _bare_id(source_incident_id)
+                target_label = _infer_label_from_id(source_incident_id)
+                if target_label:
+                    tx.run(
+                        f"MERGE (t:{target_label} {{record_id: $target_id}}) "
+                        "ON CREATE SET t.is_placeholder = true",
+                        target_id=source_incident_id,
+                    )
+                    tx.run(
+                        f"MATCH (d:Document), (t:{target_label}) "
+                        "WHERE d.record_id = $did AND t.record_id = $target_id "
+                        "MERGE (d)-[:INVESTIGATES]->(t) "
+                        "MERGE (t)-[:INVESTIGATED_BY]->(d)",
+                        did=doc_id, target_id=source_incident_id,
+                    )
+                else:
+                    logger.warning(
+                        "[WARNING] COE document %s source_incident_id %s has unrecognised "
+                        "ID prefix; skipping INVESTIGATES edge",
+                        doc_id, source_incident_id,
+                    )
+
+        # Wave: TRACKS_WAVE_OF / HAS_WAVE_DOC (plan_anchor_id -> Plan)
+        if doc_subtype == "wave":
+            plan_anchor_id = record.get("plan_anchor_id", "")
+            if plan_anchor_id:
+                plan_anchor_id = _bare_id(plan_anchor_id)
+                tx.run(
+                    "MERGE (p:Plan {record_id: $plan_id}) "
+                    "ON CREATE SET p.is_placeholder = true",
+                    plan_id=plan_anchor_id,
+                )
+                tx.run(
+                    "MATCH (d:Document), (p:Plan) "
+                    "WHERE d.record_id = $did AND p.record_id = $plan_id "
+                    "MERGE (d)-[:TRACKS_WAVE_OF]->(p) "
+                    "MERGE (p)-[:HAS_WAVE_DOC]->(d)",
+                    did=doc_id, plan_id=plan_anchor_id,
+                )
+
+        # Handoff: HANDS_OFF / HANDED_OFF_BY (source_record_id -> Task/Issue/Feature)
+        if doc_subtype == "handoff":
+            source_record_id = record.get("source_record_id", "")
+            if source_record_id:
+                source_record_id = _bare_id(source_record_id)
+                target_label = _infer_label_from_id(source_record_id)
+                if target_label:
+                    tx.run(
+                        f"MERGE (t:{target_label} {{record_id: $source_rec_id}}) "
+                        "ON CREATE SET t.is_placeholder = true",
+                        source_rec_id=source_record_id,
+                    )
+                    tx.run(
+                        f"MATCH (d:Document), (t:{target_label}) "
+                        "WHERE d.record_id = $did AND t.record_id = $source_rec_id "
+                        "MERGE (d)-[:HANDS_OFF]->(t) "
+                        "MERGE (t)-[:HANDED_OFF_BY]->(d)",
+                        did=doc_id, source_rec_id=source_record_id,
+                    )
+                else:
+                    logger.warning(
+                        "[WARNING] Handoff document %s source_record_id %s has unrecognised "
+                        "ID prefix; skipping HANDS_OFF edge",
+                        doc_id, source_record_id,
+                    )
+
     # GMF: Generation edge projections (DOC-63420302EF65 §8.2)
     if record_type == "generation":
         gen_id = record_id
@@ -680,6 +753,11 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "doc-attached-to-plan": "DOC_ATTACHED_TO_PLAN",  # Document -> Plan (inverse of plan-attached-doc)
     "informed-by": "INFORMED_BY",                      # Document -> Document (GDMP provenance)
     "informs": "INFORMS",                              # Document -> Document (inverse provenance)
+    # ENC-FTR-077: Docstore subtype edges
+    "investigates": "INVESTIGATES",                    # Document (coe) -> Issue/Task
+    "investigated-by": "INVESTIGATED_BY",              # Issue/Task -> Document (coe)
+    "tracks-wave-of": "TRACKS_WAVE_OF",                # Document (wave) -> Plan
+    "has-wave-doc": "HAS_WAVE_DOC",                    # Plan -> Document (wave)
     # GMF: Generational Metabolism Framework (DOC-63420302EF65 §8.2)
     "succeeds": "SUCCEEDS",                            # Generation -> Generation (lineage)
     "belongs-to-generation": "BELONGS_TO_GENERATION",  # Feature -> Generation

@@ -71,10 +71,15 @@ HYBRID_SIGNAL_TOP_N = 25
 GRAPH_EDGE_WEIGHTS: Dict[str, float] = {
     "IMPLEMENTS": 1.00,
     "ADDRESSES": 0.90,
+    "INVESTIGATES": 0.85,
+    "INVESTIGATED_BY": 0.85,
     "RELATED_TO": 0.75,
     "LEARNED_FROM": 0.70,
+    "HANDS_OFF": 0.65,
     "CHILD_OF": 0.60,
     "PLAN_CONTAINS": 0.55,
+    "TRACKS_WAVE_OF": 0.50,
+    "HAS_WAVE_DOC": 0.50,
     "BELONGS_TO": 0.30,
 }
 GRAPH_FALLBACK_DEFAULT_WEIGHT = 0.40
@@ -257,6 +262,11 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "DOC_ATTACHED_TO_PLAN",  # inverse of PLAN_ATTACHED_DOC
     "INFORMED_BY",            # GDMP provenance (Document -> Document)
     "INFORMS",                # inverse GDMP provenance
+    # ENC-FTR-077: Docstore subtype edges
+    "INVESTIGATES",           # Document (coe) -> Issue/Task
+    "INVESTIGATED_BY",        # Issue/Task -> Document (coe)
+    "TRACKS_WAVE_OF",         # Document (wave) -> Plan
+    "HAS_WAVE_DOC",           # Plan -> Document (wave)
     # GMF: Generational Metabolism Framework (DOC-63420302EF65 §8.2)
     "SUCCEEDS",               # Generation -> Generation (lineage)
     "BELONGS_TO_GENERATION",  # Feature -> Generation

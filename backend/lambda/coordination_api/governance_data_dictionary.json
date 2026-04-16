@@ -1,7 +1,7 @@
 {
   "version": "2026-04-16.5",
   "updated_at": "2026-04-16T18:00:00Z",
-  "last_change_summary": "ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave enumeration and validation. Made document_subtype required on PUT (no default), added 'doc' subtype replacing deprecated 'general' for new creates, added semantic handoff-detection guard for doc subtype (confirm_subtype bypass), added 'coe' subtype with source_incident_id + coe_status lifecycle (drafting/under-review/accepted/archived) + edge density enforcement (>= 1 FTR + 1 LSN + 1 ISS), added 'wave' subtype with required plan_anchor_id (must contain -PLN-, immutable after creation) + wave_status lifecycle (active/concluded/archived). PATCH handler extended with coe_status/wave_status transition validation, plan_anchor_id immutability guard, COE edge density re-validation on related_items change. Compliance checker adds COE-specific section warnings. MCP server passthrough updated for confirm_subtype, source_incident_id, plan_anchor_id, coe_status, wave_status. Added document.doc, document.coe, document.wave entities. Updated document.handoff document_subtype enum to full set. Prior: ENC-TSK-E47 / ENC-ISS-242: No schema change \u2014 fixed subtask_ids immutability validation to use deserialized Python list format instead of raw DynamoDB .get('L')/.get('S') accessors. Added defensive try-except. Prior: ENC-TSK-E33 / ENC-ISS-240: No schema change \u2014 fixed _component_propose URL path from full '/api/v1/coordination/components/propose' to relative '/components/propose' (doubled prefix bug). Prior: ENC-TSK-E30 / ENC-TSK-E20 AC-7: Added deploy.artifact_pipeline entity documenting the centralized Lambda build/deploy pipeline — S3 key format (lambda-artifacts/{sha}/{arch_tag}/{fn}.zip), arch tags (prod=x86_64-py311, gamma=arm64-py312), build workflow, deploy helper, and validation gate. Prior: ENC-TSK-E29 / ENC-TSK-E20 AC-6: Added source_artifact_s3_key field to deploy.request entity documenting the optional S3 artifact key validation in deploy_intake _handle_submit(). Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip. Arch tag validated against target environment (prod=x86_64-py311, gamma=arm64-py312). Also added to MCP server deploy_submit tool schema. Prior: ENC-FTR-076 / ENC-TSK-E11: Extended component_registry.propose_contract with sns_notification field documenting the ComponentRegistryEventsTopic SNS topic added to infrastructure/cloudformation/01-data.yaml + ComponentRegistryEventsTopicArn export. coordination_api inline IAM policy adds ComponentEventsTopicPublish Sid scoped to that topic ARN; deploy.sh plumbs COMPONENT_EVENTS_TOPIC_ARN env var. _handle_components_propose calls _publish_component_proposed_event after the DynamoDB TransactWrite succeeds; failure is logged and never raised so SNS is best-effort and the 201 response always reaches the caller. Payload schema: {event_type: 'component.proposed', component_id, project_id, proposing_agent_session_id, requested_minimum_transition_type, pwa_deep_link='https://jreese.net/components?filter=pending'}. Prior ENC-FTR-076 / ENC-TSK-E09: Extended component_registry.propose_contract with approve_route + reject_route fields documenting POST /api/v1/coordination/components/{id}/approve and /reject. Both Cognito-only (403 to internal-key callers), gated by ENABLE_COMPONENT_PROPOSAL, atomic UpdateItem with ConditionExpression `attribute_exists(component_id) AND lifecycle_status = 'proposed'` — non-proposed records return 409 with current_lifecycle_status echoed, missing returns 404. Approve writes lifecycle_status=active + approved_at + approved_by (Cognito email/username/sub) and accepts an optional transition_type override. Reject requires rejection_reason >= 10 chars and writes lifecycle_status=rejected + rejected_at + rejected_by + rejection_reason. Routes registered above the generic /components/{id} matcher. Prior ENC-FTR-076 / ENC-TSK-E10: Extended checkout_service.component_enforcement entity with the lifecycle_status pre-check inside _handle_advance(). New helper _get_components_lifecycle() returns per-component {lifecycle_status, rejection_reason}; advances are blocked when any component is `proposed` (HTTP 400 component_not_approved) or `rejected` (HTTP 400 component_rejected echoing rejection_reason). active is the happy path; approved is observed-then-treated-as-active with a [WARNING] log; user_initiated=true bypasses the gate. Prior ENC-FTR-076 / ENC-TSK-E08: Added component_registry.propose_contract entity documenting the agent-proposable component registry surface. New lifecycle_status field on component records (proposed/approved/active/rejected/deprecated/archived); new POST /api/v1/coordination/components/propose route + ENABLE_COMPONENT_PROPOSAL feature flag on coordination_api; new `component.propose` MCP action with requires_governance_hash=True; new component-proposed-by/proposes-component typed-relationship pair registered in tracker_mutation._RELATIONSHIP_TYPES + _INVERSE_PAIRS, graph_sync.RELATIONSHIP_TYPE_TO_EDGE_LABEL, and graph_query_api._ALLOWED_EDGE_TYPES so the COMPONENT_PROPOSED_BY edge is queryable via tracker.graphsearch. Atomic write via TransactWriteItems across component-registry + devops-project-tracker. Prior ENC-TSK-E06 / ENC-ISS-230: Added neo4j.placeholder_node entity documenting the is_placeholder boolean property contract on Neo4j nodes. graph_sync._reconcile_edges() placeholder MERGE sites (PLAN_CONTAINS, PLAN_ATTACHED_DOC, PLAN_IMPLEMENTS, LEARNED_FROM, RELATED_TO, INFORMED_BY source) now set `is_placeholder=true` via ON CREATE SET so downstream consumers can distinguish edge-target stub nodes from real DynamoDB-backed records. _upsert_node clears is_placeholder to false on the real record's projection. embedding.titan_v2_backfill._coverage_for_label adds WHERE n.is_placeholder IS NULL OR n.is_placeholder = false so coverage metrics reflect the active corpus only — closes the B91 denominator inflation (229 orphan stubs pulled Task to 93.72% and Issue to 90.69% despite 100% active-corpus coverage).",
+  "last_change_summary": "ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3690,7 +3690,7 @@
       }
     },
     "document.graph_edges": {
-      "description": "Neo4j edge types projected from Document nodes via the DocumentsToGraphPipe → GraphSyncQueue → graph_sync handler (ENC-PLN-014). Document nodes carry BELONGS_TO (project), RELATED_TO (any related_items target), INFORMED_BY (source document, GDMP provenance), INFORMS (inverse provenance), and DOC_ATTACHED_TO_PLAN (inverse of plan PLAN_ATTACHED_DOC). Edge emission is implemented in backend/lambda/graph_sync/lambda_function.py inside the document branch of _reconcile_edges(), and the edge labels are registered in backend/lambda/graph_query_api/lambda_function.py _ALLOWED_EDGE_TYPES so they are queryable via tracker.graphsearch. ENC-TSK-E01: RELATED_TO and INFORMED_BY now MERGE label-correct placeholder target nodes (using _infer_label_from_id for related_items, hard-coded :Document for informed_by) before MERGEing the edge, eliminating the silent zero-edge race window when targets have not yet been projected.",
+      "description": "Neo4j edge types projected from Document nodes via the DocumentsToGraphPipe → GraphSyncQueue → graph_sync handler (ENC-PLN-014). Document nodes carry BELONGS_TO (project), RELATED_TO (any related_items target), INFORMED_BY (source document, GDMP provenance), INFORMS (inverse provenance), and DOC_ATTACHED_TO_PLAN (inverse of plan PLAN_ATTACHED_DOC). ENC-FTR-077 adds subtype-specific edges: COE documents emit INVESTIGATES/INVESTIGATED_BY from source_incident_id, wave documents emit TRACKS_WAVE_OF/HAS_WAVE_DOC from plan_anchor_id, and handoff documents emit HANDS_OFF/HANDED_OFF_BY from source_record_id. Edge emission is implemented in backend/lambda/graph_sync/lambda_function.py inside the document branch of _reconcile_edges(), and the edge labels are registered in backend/lambda/graph_query_api/lambda_function.py _ALLOWED_EDGE_TYPES so they are queryable via tracker.graphsearch. ENC-TSK-E01: RELATED_TO and INFORMED_BY now MERGE label-correct placeholder target nodes (using _infer_label_from_id for related_items, hard-coded :Document for informed_by) before MERGEing the edge, eliminating the silent zero-edge race window when targets have not yet been projected.",
       "fields": {
         "BELONGS_TO": {
           "type": "edge",
@@ -3716,6 +3716,54 @@
           "type": "edge",
           "target_label": "Plan",
           "source_field": "plan.attached_documents (inverse)"
+        },
+        "INVESTIGATES": {
+          "type": "edge",
+          "target_label": "Issue/Task",
+          "source_field": "source_incident_id",
+          "source_subtype": "coe",
+          "definition": "Document (coe) -> Issue/Task. Links a Correction of Errors document to the incident it investigates.",
+          "edge_weight": 0.85
+        },
+        "INVESTIGATED_BY": {
+          "type": "edge",
+          "target_label": "Document (coe)",
+          "source_field": "source_incident_id (inverse)",
+          "source_subtype": "coe",
+          "definition": "Issue/Task -> Document (coe). Inverse of INVESTIGATES.",
+          "edge_weight": 0.85
+        },
+        "TRACKS_WAVE_OF": {
+          "type": "edge",
+          "target_label": "Plan",
+          "source_field": "plan_anchor_id",
+          "source_subtype": "wave",
+          "definition": "Document (wave) -> Plan. Links a wave progress document to the plan it tracks.",
+          "edge_weight": 0.50
+        },
+        "HAS_WAVE_DOC": {
+          "type": "edge",
+          "target_label": "Document (wave)",
+          "source_field": "plan_anchor_id (inverse)",
+          "source_subtype": "wave",
+          "definition": "Plan -> Document (wave). Inverse of TRACKS_WAVE_OF.",
+          "edge_weight": 0.50
+        },
+        "HANDS_OFF": {
+          "type": "edge",
+          "target_label": "Task/Issue/Feature",
+          "source_field": "source_record_id",
+          "source_subtype": "handoff",
+          "definition": "Document (handoff) -> Task/Issue/Feature. Links a handoff document to the record it hands off from. Document-specific handler added in ENC-FTR-077 (was only in typed-rel flow).",
+          "edge_weight": 0.65
+        },
+        "HANDED_OFF_BY": {
+          "type": "edge",
+          "target_label": "Document (handoff)",
+          "source_field": "source_record_id (inverse)",
+          "source_subtype": "handoff",
+          "definition": "Task/Issue/Feature -> Document (handoff). Inverse of HANDS_OFF.",
+          "edge_weight": 0.65
         }
       },
       "governing_feature": "ENC-FTR-065",
