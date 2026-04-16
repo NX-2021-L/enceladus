@@ -108,6 +108,29 @@ jobs:
       - name: Verify AWS identity
         run: aws sts get-caller-identity
 
+      # ENC-TSK-E28: Arch-tag validation gate — reject cross-arch S3 artifacts
+      - name: Validate artifact architecture tag
+        if: ${{ inputs.artifact_s3_key != '' }}
+        run: |
+          set -euo pipefail
+          key="${{ inputs.artifact_s3_key }}"
+          suffix="${{ inputs.environment_suffix }}"
+
+          if [[ -n "${suffix}" ]]; then
+            # Gamma deploy: artifact key must contain arm64-py312
+            if [[ "${key}" != *"arm64-py312"* ]]; then
+              echo "::error::Arch-tag mismatch: gamma deploy (suffix='${suffix}') requires arm64-py312 in artifact key, got: ${key}"
+              exit 1
+            fi
+          else
+            # Prod deploy: artifact key must contain x86_64-py311
+            if [[ "${key}" != *"x86_64-py311"* ]]; then
+              echo "::error::Arch-tag mismatch: prod deploy (no suffix) requires x86_64-py311 in artifact key, got: ${key}"
+              exit 1
+            fi
+          fi
+          echo "Artifact arch-tag validated: ${key}"
+
       - name: Deploy via explicit script
         if: ${{ inputs.deploy_script != '' }}
         env:

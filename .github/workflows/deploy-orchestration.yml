@@ -1,12 +1,16 @@
 name: Deploy Orchestration (Gamma-First)
 
-# ENC-TSK-D18 / ENC-PLN-020 Phase 2
+# ENC-TSK-D18 / ENC-PLN-020 Phase 2, wired by ENC-TSK-E28
 # Enforces gamma-first deploy sequencing:
-#   gamma deploy -> automated UAT gate -> manual approval -> prod deploy -> prod validation
+#   build artifacts -> gamma deploy -> UAT gate -> manual approval -> prod deploy -> prod validation
 #
 # Two modes:
 #   per-lambda:  Single function through the full sequence
 #   full-stack:  All manifest functions via matrix strategy
+#
+# S3 artifact keys (ENC-TSK-E20 split pipeline):
+#   lambda-artifacts/{git_sha}/arm64-py312/{fn}.zip  (gamma)
+#   lambda-artifacts/{git_sha}/x86_64-py311/{fn}.zip (prod)
 
 on:
   workflow_call:
@@ -71,13 +75,24 @@ permissions:
   id-token: write
 
 # ---------------------------------------------------------------------------
-# PER-LAMBDA MODE
+# BUILD ARTIFACTS (both architectures, all functions)
 # ---------------------------------------------------------------------------
 
 jobs:
 
+  # ENC-TSK-E28: Build all Lambda artifacts before any deploy job runs.
+  # Outputs artifact_prefix used to construct per-function S3 keys.
+  build-artifacts:
+    uses: ./.github/workflows/build-lambda-artifacts.yml
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # PER-LAMBDA MODE
+  # ---------------------------------------------------------------------------
+
   # ---- Gamma deploy (per-lambda) ----
   gamma-deploy:
+    needs: build-artifacts
     if: inputs.deploy_mode == 'per-lambda'
     uses: ./.github/workflows/lambda-deploy-reusable.yml
     with:
@@ -86,6 +101,8 @@ jobs:
       deploy_script: ${{ inputs.deploy_script }}
       package_extra_files: ${{ inputs.package_extra_files }}
       environment_suffix: "-gamma"
+      artifact_s3_bucket: jreese-net
+      artifact_s3_key: ${{ needs.build-artifacts.outputs.artifact_prefix }}/arm64-py312/${{ inputs.function_name }}.zip
     secrets: inherit
 
   # ---- Gamma health gate (per-lambda) ----
@@ -139,7 +156,7 @@ jobs:
 
   # ---- Prod deploy (per-lambda, main only) ----
   prod-deploy:
-    needs: approval
+    needs: [approval, build-artifacts]
     if: inputs.deploy_mode == 'per-lambda' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/lambda-deploy-reusable.yml
     with:
@@ -148,6 +165,8 @@ jobs:
       deploy_script: ${{ inputs.deploy_script }}
       package_extra_files: ${{ inputs.package_extra_files }}
       environment_suffix: ""
+      artifact_s3_bucket: jreese-net
+      artifact_s3_key: ${{ needs.build-artifacts.outputs.artifact_prefix }}/x86_64-py311/${{ inputs.function_name }}.zip
     secrets: inherit
 
   # ---- Prod validation (per-lambda, main only) ----
@@ -222,7 +241,7 @@ jobs:
 
   # ---- Gamma deploy (full-stack matrix) ----
   gamma-deploy-matrix:
-    needs: setup-matrix
+    needs: [build-artifacts, setup-matrix]
     if: inputs.deploy_mode == 'full-stack'
     strategy:
       matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
@@ -235,6 +254,8 @@ jobs:
       deploy_script: ${{ matrix.deploy_script }}
       package_extra_files: ${{ matrix.package_extra_files }}
       environment_suffix: "-gamma"
+      artifact_s3_bucket: jreese-net
+      artifact_s3_key: ${{ needs.build-artifacts.outputs.artifact_prefix }}/arm64-py312/${{ matrix.function_name }}.zip
     secrets: inherit
 
   # ---- Gamma health gate (full-stack) ----
@@ -288,7 +309,7 @@ jobs:
 
   # ---- Prod deploy (full-stack matrix, main only) ----
   prod-deploy-matrix:
-    needs: [approval-fullstack, setup-matrix]
+    needs: [approval-fullstack, setup-matrix, build-artifacts]
     if: inputs.deploy_mode == 'full-stack' && github.ref == 'refs/heads/main'
     strategy:
       matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
@@ -301,6 +322,8 @@ jobs:
       deploy_script: ${{ matrix.deploy_script }}
       package_extra_files: ${{ matrix.package_extra_files }}
       environment_suffix: ""
+      artifact_s3_bucket: jreese-net
+      artifact_s3_key: ${{ needs.build-artifacts.outputs.artifact_prefix }}/x86_64-py311/${{ matrix.function_name }}.zip
     secrets: inherit
 
   # ---- Prod validation (full-stack, main only) ----
