@@ -459,6 +459,15 @@ Resources:
       RouteKey: POST /api/v1/deploy/trigger/{projectId}
       Target: !Sub integrations/${DeployIntakeIntegration}
 
+  # ENC-TSK-E57/E62: Deploy approval validation route for enceladus-approval-gate
+  # Supersedes CLI-created route zmra44n; makes the route IaC-managed.
+  RouteDeployValidateApproval:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/validate/approval/{prNumber}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
   # GMF routes (DOC-63420302EF65)
   RouteDeployQueue:
     Type: AWS::ApiGatewayV2::Route
