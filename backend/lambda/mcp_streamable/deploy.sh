@@ -6,6 +6,7 @@
 
 set -euo pipefail
 
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 FUNCTION_NAME="${FUNCTION_NAME:-enceladus-mcp-streamable}"
 SOURCE_FUNCTION_NAME="${SOURCE_FUNCTION_NAME:-devops-coordination-api}"
 REGION="${AWS_REGION:-us-west-2}"
@@ -125,6 +126,13 @@ PY
 }
 
 package_lambda() {
+  # ENC-TSK-E27: try S3 artifact first
+  local resolved_zip
+  if resolved_zip="$(resolve_artifact "${FUNCTION_NAME}" "/tmp/${FUNCTION_NAME}.zip")"; then
+    echo "${resolved_zip}"
+    return 0
+  fi
+
   local build_dir
   build_dir="$(mktemp -d /tmp/deploy-${FUNCTION_NAME}-build-XXXXXX)"
 

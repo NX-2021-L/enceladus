@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 # ---------------------------------------------------------------------------
 # deploy.sh — Deploy feed_query Lambda (devops-feed-query-api)
 #
@@ -23,6 +25,13 @@ package_lambda() {
   local build_dir zip_path
   build_dir="$(mktemp -d /tmp/deploy-${FUNCTION_NAME}-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
+  # ENC-TSK-E27: try S3 artifact first
+  local resolved_zip
+  if resolved_zip="$(resolve_artifact "${FUNCTION_NAME}" "${zip_path}")"; then
+    echo "${resolved_zip}"
+    return 0
+  fi
+
 
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 

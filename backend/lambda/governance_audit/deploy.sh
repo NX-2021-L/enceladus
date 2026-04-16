@@ -6,15 +6,23 @@
 set -euo pipefail
 
 FUNCTION_NAME="${FUNCTION_NAME:-enceladus-governance-audit}"
+ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 REGION="${AWS_REGION:-us-west-2}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 ZIP_FILE="/tmp/${FUNCTION_NAME}.zip"
 
 echo "[START] Deploying ${FUNCTION_NAME}"
 
-echo "[INFO] Packaging Lambda from ${SCRIPT_DIR}/lambda_function.py"
-cd "${SCRIPT_DIR}"
-zip -q -j "${ZIP_FILE}" lambda_function.py
+# ENC-TSK-E27: try S3 artifact first
+if resolved_zip="$(resolve_artifact "${FUNCTION_NAME}" "${ZIP_FILE}")"; then
+  ZIP_FILE="${resolved_zip}"
+else
+  echo "[INFO] Packaging Lambda from ${SCRIPT_DIR}/lambda_function.py"
+  cd "${SCRIPT_DIR}"
+  zip -q -j "${ZIP_FILE}" lambda_function.py
+fi
 echo "[INFO] Package ready: ${ZIP_FILE} ($(du -h "${ZIP_FILE}" | cut -f1))"
 
 echo "[INFO] Updating Lambda function code"

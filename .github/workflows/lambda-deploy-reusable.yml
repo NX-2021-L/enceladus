@@ -26,6 +26,16 @@ on:
         required: false
         type: string
         default: ""
+      artifact_s3_bucket:
+        description: S3 bucket containing pre-built Lambda zip (set by build-lambda-artifacts)
+        required: false
+        type: string
+        default: ""
+      artifact_s3_key:
+        description: S3 key for the pre-built Lambda zip (set by build-lambda-artifacts)
+        required: false
+        type: string
+        default: ""
       force_static_credentials:
         description: Force static-key credential setup instead of OIDC role assume.
         required: false
@@ -113,6 +123,8 @@ jobs:
           ENCELADUS_COGNITO_CLIENT_SECRET: ${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}
           ENCELADUS_COGNITO_DOMAIN: ${{ secrets.ENCELADUS_COGNITO_DOMAIN }}
           ENVIRONMENT_SUFFIX: ${{ inputs.environment_suffix }}
+          LAMBDA_ARTIFACT_S3_BUCKET: ${{ inputs.artifact_s3_bucket }}
+          LAMBDA_ARTIFACT_S3_KEY: ${{ inputs.artifact_s3_key }}
         run: |
           set -euo pipefail
           chmod +x "${{ inputs.deploy_script }}"
@@ -120,63 +132,74 @@ jobs:
 
       - name: Deploy via generic code-only package update
         if: ${{ inputs.deploy_script == '' }}
+        env:
+          LAMBDA_ARTIFACT_S3_BUCKET: ${{ inputs.artifact_s3_bucket }}
+          LAMBDA_ARTIFACT_S3_KEY: ${{ inputs.artifact_s3_key }}
         run: |
           set -euo pipefail
+
+          source "${GITHUB_WORKSPACE}/tools/lambda_artifact_helper.sh"
 
           function_name="${{ inputs.function_name }}${{ inputs.environment_suffix }}"
           lambda_dir="${{ inputs.lambda_dir }}"
           extra_files="${{ inputs.package_extra_files }}"
-
-          if [[ ! -f "${lambda_dir}/lambda_function.py" ]]; then
-            echo "Expected ${lambda_dir}/lambda_function.py for generic package deployment" >&2
-            exit 1
-          fi
-
-          build_dir="$(mktemp -d /tmp/${function_name}-build-XXXXXX)"
           zip_file="/tmp/${function_name}.zip"
 
-          cp "${lambda_dir}/lambda_function.py" "${build_dir}/"
-
-          # Env-conditional build: gamma=arm64/py3.12, prod=x86_64/py3.11
-          if [ -n "${{ inputs.environment_suffix }}" ]; then
-            pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"
+          # ENC-TSK-E27: try S3 artifact first
+          if resolved_zip="$(resolve_artifact "${function_name}" "${zip_file}")"; then
+            zip_file="${resolved_zip}"
           else
-            pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"
-          fi
+            if [[ ! -f "${lambda_dir}/lambda_function.py" ]]; then
+              echo "Expected ${lambda_dir}/lambda_function.py for generic package deployment" >&2
+              exit 1
+            fi
 
-          if [[ -f "${lambda_dir}/requirements.txt" ]]; then
-            python3 -m pip install \
-              --quiet \
-              --upgrade \
-              --platform "${pip_platform}" \
-              --implementation cp \
-              --python-version "${pip_pyver}" \
-              --abi "${pip_abi}" \
-              --only-binary=:all: \
-              -r "${lambda_dir}/requirements.txt" \
-              -t "${build_dir}" >/dev/null
-          fi
+            build_dir="$(mktemp -d /tmp/${function_name}-build-XXXXXX)"
 
-          if [[ -n "${extra_files}" ]]; then
-            IFS=',' read -ra files <<< "${extra_files}"
-            for rel in "${files[@]}"; do
-              rel="$(echo "${rel}" | xargs)"
-              [[ -n "${rel}" ]] || continue
-              src="${lambda_dir}/${rel}"
-              dst="${build_dir}/${rel}"
-              if [[ ! -f "${src}" ]]; then
-                echo "Missing extra package file: ${src}" >&2
-                exit 1
-              fi
-              mkdir -p "$(dirname "${dst}")"
-              cp "${src}" "${dst}"
-            done
-          fi
+            cp "${lambda_dir}/lambda_function.py" "${build_dir}/"
 
-          (
-            cd "${build_dir}"
-            zip -qr "${zip_file}" .
-          )
+            # Env-conditional build: gamma=arm64/py3.12, prod=x86_64/py3.11
+            if [ -n "${{ inputs.environment_suffix }}" ]; then
+              pip_platform="manylinux2014_aarch64"; pip_pyver="3.12"; pip_abi="cp312"
+            else
+              pip_platform="manylinux2014_x86_64"; pip_pyver="3.11"; pip_abi="cp311"
+            fi
+
+            if [[ -f "${lambda_dir}/requirements.txt" ]]; then
+              python3 -m pip install \
+                --quiet \
+                --upgrade \
+                --platform "${pip_platform}" \
+                --implementation cp \
+                --python-version "${pip_pyver}" \
+                --abi "${pip_abi}" \
+                --only-binary=:all: \
+                -r "${lambda_dir}/requirements.txt" \
+                -t "${build_dir}" >/dev/null
+            fi
+
+            if [[ -n "${extra_files}" ]]; then
+              IFS=',' read -ra files <<< "${extra_files}"
+              for rel in "${files[@]}"; do
+                rel="$(echo "${rel}" | xargs)"
+                [[ -n "${rel}" ]] || continue
+                src="${lambda_dir}/${rel}"
+                dst="${build_dir}/${rel}"
+                if [[ ! -f "${src}" ]]; then
+                  echo "Missing extra package file: ${src}" >&2
+                  exit 1
+                fi
+                mkdir -p "$(dirname "${dst}")"
+                cp "${src}" "${dst}"
+              done
+            fi
+
+            (
+              cd "${build_dir}"
+              zip -qr "${zip_file}" .
+            )
+            rm -rf "${build_dir}"
+          fi
 
           aws lambda update-function-code \
             --region "us-west-2" \
@@ -203,7 +226,7 @@ jobs:
             --region "us-west-2" \
             --function-name "${function_name}"
 
-          rm -rf "${build_dir}" "${zip_file}"
+          rm -f "${zip_file}"
 
       - name: Validate deployed Lambda state
         run: |

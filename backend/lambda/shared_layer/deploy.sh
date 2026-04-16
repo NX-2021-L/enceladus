@@ -12,6 +12,8 @@ set -euo pipefail
 ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 REGION="${REGION:-us-west-2}"
 LAYER_NAME="${LAYER_NAME:-enceladus-shared${ENVIRONMENT_SUFFIX}}"
 

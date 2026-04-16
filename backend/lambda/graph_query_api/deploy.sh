@@ -3,6 +3,8 @@ set -euo pipefail
 
 ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
 
+REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${REGION:-us-west-2}"
 ACCOUNT_ID="${ACCOUNT_ID:-356364570033}"
@@ -88,6 +90,13 @@ package_lambda() {
   local build_dir zip_path pip_platform pip_pyver pip_abi
   build_dir="$(mktemp -d /tmp/graph-query-api-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
+  # ENC-TSK-E27: try S3 artifact first
+  local resolved_zip
+  if resolved_zip="$(resolve_artifact "${FUNCTION_NAME}" "${zip_path}")"; then
+    echo "${resolved_zip}"
+    return 0
+  fi
+
 
   # Environment-conditional: prod=x86_64/py3.11, gamma=arm64/py3.12
   if [ -n "${ENVIRONMENT_SUFFIX:-}" ]; then

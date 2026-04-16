@@ -13,6 +13,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENVIRONMENT_SUFFIX="${ENVIRONMENT_SUFFIX:-}"
+REPO_ROOT="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+source "${REPO_ROOT}/tools/lambda_artifact_helper.sh"
 REGION="${REGION:-us-west-2}"
 FUNCTION_NAME="${FUNCTION_NAME:-devops-project-service${ENVIRONMENT_SUFFIX}}"
 COORDINATION_API_FUNCTION_NAME="${COORDINATION_API_FUNCTION_NAME:-devops-coordination-api${ENVIRONMENT_SUFFIX}}"
@@ -28,6 +30,13 @@ package_lambda() {
   local build_dir zip_path
   build_dir="$(mktemp -d /tmp/deploy-${FUNCTION_NAME}-build-XXXXXX)"
   zip_path="/tmp/${FUNCTION_NAME}.zip"
+  # ENC-TSK-E27: try S3 artifact first
+  local resolved_zip
+  if resolved_zip="$(resolve_artifact "${FUNCTION_NAME}" "${zip_path}")"; then
+    echo "${resolved_zip}"
+    return 0
+  fi
+
 
   cp "${SCRIPT_DIR}/lambda_function.py" "${build_dir}/"
 
