@@ -5615,7 +5615,11 @@ async def _documents_put(args: dict) -> list[TextContent]:
         "title": args["title"],
         "content": args["content"],
     }
-    for key in ("description", "keywords", "related_items", "file_name"):
+    for key in (
+        "description", "keywords", "related_items", "file_name",
+        "document_subtype", "confirm_subtype",
+        "source_incident_id", "plan_anchor_id",
+    ):
         if key in args and args.get(key) is not None:
             body[key] = args.get(key)
 
@@ -5650,7 +5654,11 @@ async def _documents_patch(args: dict) -> list[TextContent]:
         )
 
     body: Dict[str, Any] = {}
-    for key in ("title", "content", "append_content", "description", "keywords", "related_items", "status", "file_name", "document_maturity_state"):
+    for key in (
+        "title", "content", "append_content", "description", "keywords", "related_items",
+        "status", "file_name", "document_maturity_state",
+        "handoff_status", "coe_status", "wave_status",
+    ):
         if key in args and args.get(key) is not None:
             body[key] = args.get(key)
     if not body:
