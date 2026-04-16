@@ -994,6 +994,10 @@ def _webhook_pull_request(
         label_name = payload.get("label", {}).get("name", "")
         if label_name == "target:gamma":
             return _gmf_divert_on_label(pr, repo_full, delivery_id)
+        if label_name == "target:prod":
+            return _gmf_redeclare_on_label(
+                pr, repo_full, delivery_id, target="prod"
+            )
         return _response(200, {"processed": False, "reason": "irrelevant_label"})
 
     elif action == "closed":
@@ -1060,7 +1064,26 @@ def _webhook_workflow_run(
         item = items[0]
         pk = item["project_id"]["S"]
         sk = item["record_id"]["S"]
-        final_status = "deployed" if outcome == "success" else "failed"
+        prior_outcome = item.get("deployment_outcome", {}).get("S", "")
+
+        # ENC-ISS-248: Pre-deploy failures (approval gate, etc.) left DPLs stuck
+        # at deploying/failed with no DAT, invisible in the PWA pending-approval
+        # view and un-approvable without IAM escalation. When the only observed
+        # outcome is a failure and nothing ever succeeded, reset to
+        # pending_approval so the PWA can re-surface the record for decision.
+        if outcome == "success":
+            final_status = "deployed"
+            new_deployment_outcome = "success"
+        elif prior_outcome != "success":
+            final_status = "pending_approval"
+            new_deployment_outcome = ""
+            logger.info(
+                "GMF: DPL %s pre-deploy failure — resetting to pending_approval (ENC-ISS-248)",
+                sk,
+            )
+        else:
+            final_status = "failed"
+            new_deployment_outcome = "failure"
 
         ddb.update_item(
             TableName=DEPLOY_TABLE,
@@ -1069,7 +1092,7 @@ def _webhook_workflow_run(
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":st": {"S": final_status},
-                ":out": {"S": outcome},
+                ":out": {"S": new_deployment_outcome},
                 ":da": {"S": now},
                 ":ua": {"S": now},
             },
@@ -1078,7 +1101,8 @@ def _webhook_workflow_run(
         return _response(200, {
             "processed": True,
             "record_id": sk,
-            "deployment_outcome": outcome,
+            "deployment_outcome": new_deployment_outcome,
+            "final_status": final_status,
         })
     except Exception as e:
         logger.error("GMF workflow_run handler error: %s", e, exc_info=True)
@@ -1191,6 +1215,53 @@ def _gmf_divert_on_label(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
     except Exception as e:
         logger.info("GMF: Divert-on-label skipped for PR #%d: %s", pr_number, e)
         return _response(200, {"processed": False, "reason": "divert_skipped"})
+
+
+def _gmf_redeclare_on_label(
+    pr: Dict, repo_full: str, delivery_id: str, target: str,
+) -> Dict:
+    """ENC-ISS-247: update DPL.original_target when target:prod label is added
+    post-open. Guarded to only overwrite 'undeclared' so human-set or
+    system-set values are preserved.
+    """
+    pr_number = pr.get("number", 0)
+    record_id = f"decision#ENC-DPL-{pr_number}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        ddb = boto3.client("dynamodb", region_name=DYNAMODB_REGION)
+        ddb.update_item(
+            TableName=DEPLOY_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
+            UpdateExpression="SET original_target = :new_target, updated_at = :ua",
+            ConditionExpression="original_target = :undeclared",
+            ExpressionAttributeValues={
+                ":new_target": {"S": target},
+                ":undeclared": {"S": "undeclared"},
+                ":ua": {"S": now},
+            },
+        )
+        logger.info(
+            "GMF: DPL %s original_target undeclared->%s via label on PR #%d",
+            record_id, target, pr_number,
+        )
+        return _response(200, {
+            "processed": True,
+            "action": "dpl_target_redeclared",
+            "new_target": target,
+        })
+    except ddb.exceptions.ConditionalCheckFailedException:
+        logger.info(
+            "GMF: Redeclare-on-label skipped for PR #%d (original_target already set)",
+            pr_number,
+        )
+        return _response(200, {
+            "processed": False,
+            "reason": "original_target_not_undeclared",
+        })
+    except Exception as e:
+        logger.info("GMF: Redeclare-on-label error for PR #%d: %s", pr_number, e)
+        return _response(200, {"processed": False, "reason": "redeclare_error"})
 
 
 def _gmf_mark_deploying(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
