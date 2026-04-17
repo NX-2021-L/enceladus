@@ -1195,6 +1195,53 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     except (ValueError, TypeError):
         return _error(400, "Invalid JSON body.")
 
+    # ENC-TSK-D36 / ENC-FTR-069: ID Boundary Rule (ENC-TSK-B99).
+    # Document IDs are generated server-side — reject any client-supplied identifier
+    # with a self-correcting envelope mirroring the tracker_mutation guard pattern.
+    for forbidden_field in ("document_id", "item_id", "record_id"):
+        if body.get(forbidden_field):
+            return _error(
+                400,
+                (
+                    f"Field '{forbidden_field}' must not be provided — "
+                    "document IDs are generated server-side (ENC-TSK-B99 ID Boundary Rule)."
+                ),
+                code="ID_BOUNDARY_VIOLATION",
+                offending_field=forbidden_field,
+                offending_value=body.get(forbidden_field),
+                record_id_schema={
+                    "format": "DOC-{12_hex_upper}",
+                    "example": "DOC-A1B2C3D4E5F6",
+                    "generator": "server-assigned via uuid4().hex[:12].upper()",
+                    "authority": "devops-document-api Lambda is the sole producer of document_id values.",
+                },
+                rule_citation={
+                    "rule_id": "ENC-TSK-B99",
+                    "text": (
+                        "Never predict, compute, infer, or scan for the next available record ID "
+                        "before submitting a create call. Submit only the minimum required "
+                        "attributes. Read the server-assigned identifier from the success response."
+                    ),
+                },
+                example_fix={
+                    "tool": "documents.put",
+                    "arguments": {
+                        "project_id": "<project_id>",
+                        "title": "<document title>",
+                        "content": "<markdown body>",
+                        "document_subtype": "doc",
+                        "governance_hash": "<governance_hash>",
+                    },
+                    "note": (
+                        "Omit document_id, item_id, and record_id entirely. "
+                        "The server assigns the identifier and returns it in the "
+                        "success response under the 'document_id' key."
+                    ),
+                },
+                agents_md_section="agents.md §6 Tracker Operations — ID Boundary Rule",
+                retryable=False,
+            )
+
     # Required fields
     project_id = body.get("project_id", "").strip()
     title = body.get("title", "").strip()
