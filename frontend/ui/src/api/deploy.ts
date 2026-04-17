@@ -26,7 +26,6 @@ export async function fetchDeployQueue(
   )
   if (!res.ok) throw new Error(`Failed to fetch deploy queue: ${res.status}`)
   const data: DeployQueueResponse = await res.json()
-  // ISS-208 AC3 validation — safe to remove
   // ENC-ISS-208: Strip DynamoDB composite key prefix from record_id.
   // The "decision#" prefix contains a # that breaks native browser
   // input validation (url/email types reject it). The backend
