@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fetchDeployQueue } from './deploy'
+import { fetchDeployQueue, submitDeployDecision } from './deploy'
 
 describe('fetchDeployQueue record_id normalization', () => {
   const fetchMock = vi.fn()
@@ -53,5 +53,44 @@ describe('fetchDeployQueue record_id normalization', () => {
     respondWith([{ record_id: 'decision#ENC-DPL-9#extra' }])
     const data = await fetchDeployQueue('enceladus')
     expect(data.decisions[0].record_id).toBe('ENC-DPL-9#extra')
+  })
+})
+
+describe('submitDeployDecision response normalization', () => {
+  const fetchMock = vi.fn()
+
+  beforeEach(() => {
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function respondWith(body: unknown): void {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+  }
+
+  it('strips decision# from an echoed decision.record_id on the mutation response', async () => {
+    respondWith({
+      success: true,
+      action: 'approve',
+      pr_number: 42,
+      decision: { record_id: 'decision#ENC-DPL-42', status: 'approved' },
+    })
+    const data = await submitDeployDecision({ action: 'approve', pr_number: 42 })
+    expect(data.decision?.record_id).toBe('ENC-DPL-42')
+  })
+
+  it('leaves a response with no decision field untouched', async () => {
+    respondWith({ success: true, action: 'approve', pr_number: 42 })
+    const data = await submitDeployDecision({ action: 'approve', pr_number: 42 })
+    expect(data.decision).toBeUndefined()
   })
 })
