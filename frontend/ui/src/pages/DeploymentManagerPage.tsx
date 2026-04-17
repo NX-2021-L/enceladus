@@ -6,12 +6,23 @@
  * and a deployment history timeline.
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useDeployQueue, useDeployDecision, timeInQueue } from '../hooks/useDeploymentManager'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
 import { EmptyState } from '../components/shared/EmptyState'
 import type { DeploymentDecision } from '../types/deployments'
+
+// ENC-TSK-E76 / ENC-ISS-208: Render-boundary strip for the DynamoDB
+// composite-key prefix on DPL record_id. D51 normalizes the fetchDeployQueue
+// response; this layer guarantees the `#` separator can never reach any
+// DOM-validated attribute (form input pattern/type, CSS selector, etc.)
+// even if a mutation response, React Query cache, or downstream component
+// delivers a raw `decision#ENC-DPL-N` value.
+function sanitizeDecision(d: DeploymentDecision): DeploymentDecision {
+  if (!d.record_id || !d.record_id.startsWith('decision#')) return d
+  return { ...d, record_id: d.record_id.replace(/^decision#/, '') }
+}
 
 // ---------------------------------------------------------------------------
 // Status badge colors
@@ -261,7 +272,10 @@ export function DeploymentManagerPage() {
   const decideMutation = useDeployDecision()
   const [actionError, setActionError] = useState<string | null>(null)
 
-  const pendingDecisions = decisions.filter((d) => d.status === 'pending_approval')
+  const pendingDecisions = useMemo(
+    () => decisions.filter((d) => d.status === 'pending_approval').map(sanitizeDecision),
+    [decisions],
+  )
 
   const handleAction = useCallback(
     async (action: 'approve' | 'divert' | 'revert', prNumber: number, reason?: string) => {
