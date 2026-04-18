@@ -1,3 +1,37 @@
+// ENC-ISS-255 Pass 1 probe — REMOVE AFTER DIAGNOSIS
+(() => {
+  if (typeof window === 'undefined') return;
+  const rootEl = document.getElementById('root');
+  if (!rootEl) return;
+  const mutLog: any[] = [];
+  const fiberLog: any[] = [];
+  (window as any).__iss255_mutlog = mutLog;
+  (window as any).__iss255_fiberLog = fiberLog;
+  const obs = new MutationObserver((records) => {
+    for (const r of records) {
+      const tgt = r.target as Element;
+      mutLog.push({
+        t: performance.now(),
+        type: r.type,
+        target: `${tgt.tagName}#${tgt.id || ''}.${String(tgt.className || '').slice(0, 40)}`,
+        added: r.addedNodes.length,
+        removed: r.removedNodes.length,
+        attr: r.attributeName || undefined,
+        stack: (new Error('iss255-mut')).stack?.slice(0, 2000) || '',
+      });
+      if (mutLog.length > 500) obs.disconnect();
+    }
+  });
+  obs.observe(rootEl, { childList: true, subtree: true, characterData: true, attributes: true });
+  const tick = () => {
+    const keys = Object.getOwnPropertyNames(rootEl).filter(k => /^(__react|_reactListening)/.test(k));
+    fiberLog.push({ t: performance.now(), keys });
+    if (fiberLog.length < 600) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  console.log('[ISS-255] Pass 1 probe armed');
+})();
+
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
