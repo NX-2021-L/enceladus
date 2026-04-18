@@ -1,35 +1,104 @@
-// ENC-ISS-255 Pass 1 probe — REMOVE AFTER DIAGNOSIS
+// ENC-ISS-255 Pass 2 probe — REMOVE AFTER DIAGNOSIS. Replaces Pass 1 probe.
 (() => {
   if (typeof window === 'undefined') return;
+  const SS_KEY = '__iss255p2_log';
+  const events: any[] = [];
+  const persist = () => { try { sessionStorage.setItem(SS_KEY, JSON.stringify(events)); } catch {} };
+  const log = (ev: any) => { events.push({ t: performance.now(), ...ev }); if (events.length % 5 === 0) persist(); };
+  (window as any).__iss255p2_events = events; // secondary (may be wiped)
+  sessionStorage.setItem(SS_KEY, '[]');
+
+  log({ type: 'probe.armed', marker: '__iss255p2' });
+
   const rootEl = document.getElementById('root');
-  if (!rootEl) return;
-  const mutLog: any[] = [];
-  const fiberLog: any[] = [];
-  (window as any).__iss255_mutlog = mutLog;
-  (window as any).__iss255_fiberLog = fiberLog;
-  const obs = new MutationObserver((records) => {
-    for (const r of records) {
-      const tgt = r.target as Element;
-      mutLog.push({
-        t: performance.now(),
-        type: r.type,
-        target: `${tgt.tagName}#${tgt.id || ''}.${String(tgt.className || '').slice(0, 40)}`,
-        added: r.addedNodes.length,
-        removed: r.removedNodes.length,
-        attr: r.attributeName || undefined,
-        stack: (new Error('iss255-mut')).stack?.slice(0, 2000) || '',
+  if (!rootEl) { log({ type: 'probe.no_root' }); persist(); return; }
+
+  // === Layer 1: Reflect.deleteProperty trap ===
+  const origReflectDelete = Reflect.deleteProperty;
+  Reflect.deleteProperty = function (target: any, key: any) {
+    const keyStr = String(key);
+    const isRoot = target === rootEl;
+    const isWindow = target === window;
+    const isIss = /^__iss255/.test(keyStr);
+    const isReact = /^__react|^_reactListening/.test(keyStr);
+    if (isRoot || isWindow || isIss || isReact) {
+      log({
+        type: 'reflect.delete',
+        target: isRoot ? '#root' : isWindow ? 'window' : target?.constructor?.name || typeof target,
+        key: keyStr,
+        stack: (new Error('iss255p2-reflect')).stack?.slice(0, 2500) || '',
       });
-      if (mutLog.length > 500) obs.disconnect();
+      persist();
     }
-  });
-  obs.observe(rootEl, { childList: true, subtree: true, characterData: true, attributes: true });
-  const tick = () => {
-    const keys = Object.getOwnPropertyNames(rootEl).filter(k => /^(__react|_reactListening)/.test(k));
-    fiberLog.push({ t: performance.now(), keys });
-    if (fiberLog.length < 600) requestAnimationFrame(tick);
+    return origReflectDelete.call(Reflect, target, key);
   };
-  requestAnimationFrame(tick);
-  console.log('[ISS-255] Pass 1 probe armed');
+
+  // === Layer 2: fiber-slot lock (runs on rAF until keys seen) ===
+  let locked = false;
+  const tryLock = () => {
+    const keys = Object.getOwnPropertyNames(rootEl).filter(k => /^(__react|_reactListening)/.test(k));
+    if (keys.length > 0 && !locked) {
+      for (const k of keys) {
+        try {
+          const desc = Object.getOwnPropertyDescriptor(rootEl, k);
+          if (desc && desc.configurable) {
+            Object.defineProperty(rootEl, k, { ...desc, configurable: false });
+            log({ type: 'fiber.locked', key: k });
+          }
+        } catch (e: any) {
+          log({ type: 'fiber.lock_error', key: k, error: String(e?.message || e) });
+        }
+      }
+      locked = true;
+      persist();
+    }
+    if (!locked) requestAnimationFrame(tryLock);
+  };
+  requestAnimationFrame(tryLock);
+
+  // === Layer 3: window-property delta sentinel (rAF diff) ===
+  const baselineWindow = new Set(Object.getOwnPropertyNames(window));
+  let tick = 0;
+  const seenRemoved = new Set<string>();
+  const sentinelTick = () => {
+    tick++;
+    const now = new Set(Object.getOwnPropertyNames(window));
+    for (const k of baselineWindow) {
+      if (!now.has(k) && !seenRemoved.has(k)) {
+        seenRemoved.add(k);
+        log({ type: 'window.removed', key: k, tick });
+      }
+    }
+    // Also check fiber keys post-lock
+    if (locked) {
+      const present = Object.getOwnPropertyNames(rootEl).filter(k => /^(__react|_reactListening)/.test(k));
+      if (present.length === 0) {
+        log({ type: 'fiber.missing_despite_lock', tick });
+        persist();
+      }
+    }
+    if (tick < 900) requestAnimationFrame(sentinelTick); else persist();
+  };
+  requestAnimationFrame(sentinelTick);
+
+  // === Layer 4: catch TypeErrors from delete-on-non-configurable (strict mode) ===
+  window.addEventListener('error', (e) => {
+    if (e.message && /configurable|cannot delete/i.test(e.message)) {
+      log({ type: 'delete_trapped_strict', message: e.message, filename: (e as any).filename, lineno: (e as any).lineno, colno: (e as any).colno, stack: e.error?.stack?.slice(0, 2500) || '' });
+      persist();
+    }
+  }, true);
+  window.addEventListener('unhandledrejection', (e) => {
+    const msg = String(e.reason?.message || e.reason || '');
+    if (/configurable|cannot delete/i.test(msg)) {
+      log({ type: 'delete_trapped_rejection', message: msg, stack: e.reason?.stack?.slice(0, 2500) || '' });
+      persist();
+    }
+  }, true);
+
+  // Final persist after 20s to capture the post-mount clobber window
+  setTimeout(persist, 20000);
+  console.log('[ISS-255] Pass 2 probe armed (sessionStorage key: __iss255p2_log)');
 })();
 
 import { StrictMode } from 'react'
