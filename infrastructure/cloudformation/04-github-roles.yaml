@@ -212,6 +212,19 @@ Resources:
                   - logs:DescribeLogStreams
                 Resource: "*"
 
+              # S3 staging for `aws cloudformation deploy --s3-bucket` path.
+              # Required since 02-compute.yaml crossed the 51,200-byte inline
+              # limit (ENC-ISS-257). The CLI uploads the template to
+              # s3://jreese-net/cfn-staging/<stack>/<hash>.template before
+              # creating the changeset. Used by all three CFN workflows:
+              # cloudformation-{compute,api,monitoring}-stack-deploy.yml.
+              - Sid: S3CfnStagingAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/cfn-staging/*"
+
   # ---------------------------------------------------------------------------
   # Backend Deploy Role (ENC-TSK-E31 / ENC-ISS-237)
   # Used by:
