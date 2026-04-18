@@ -228,8 +228,26 @@ def _handle_success(project_id: str, spec_id: str, build_id: str, build_duration
         )
         logger.info(f"[SUCCESS] current-version.json updated to v{version}")
     except Exception as e:
-        logger.error(f"[ERROR] Failed to write current-version.json: {e}")
-        # Non-fatal — deployment itself succeeded
+        # Fail loud: silent ERROR-level swallow here caused ENC-ISS-256 —
+        # the devops changelog.version cursor drifted stuck at 0.20.30 for
+        # 11 days (2026-04-07 → 2026-04-18) because CONFIG_PREFIX env drift
+        # plus an IAM denial on PutObject was logged at ERROR and went
+        # unnoticed through 10+ successive deploys. CRITICAL + structured
+        # payload is searchable by standard CloudWatch alerting so future
+        # drift surfaces within one deploy cycle.
+        logger.critical(
+            "[CRITICAL] current-version.json S3 write FAILED — version cursor "
+            "will NOT advance and the PWA header will continue serving the "
+            "stale version string. Deploy audit rows in DynamoDB will claim a "
+            "bump that is not reflected by changelog_api. Fix CONFIG_PREFIX / "
+            "IAM policy on this Lambda role before the next deploy. "
+            f"project_id={project_id} version={version} spec_id={spec_id} "
+            f"bucket={CONFIG_BUCKET} prefix={CONFIG_PREFIX} "
+            f"error={type(e).__name__}: {e}"
+        )
+        # Non-fatal for the deploy itself — the bundle artifact and
+        # CloudFront invalidation still succeed. Operationally this blocks
+        # version cursor advancement until the alert is resolved.
 
     # Write [DEPLOYMENT] worklog entries to all related tracker records
     if related_ids and isinstance(related_ids, list):
