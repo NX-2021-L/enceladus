@@ -1,104 +1,121 @@
-// ENC-ISS-255 Pass 2 probe — REMOVE AFTER DIAGNOSIS. Replaces Pass 1 probe.
+// ENC-ISS-255 Pass 3 probe — REMOVE AFTER DIAGNOSIS. Replaces Pass 2 probe.
 (() => {
   if (typeof window === 'undefined') return;
-  const SS_KEY = '__iss255p2_log';
+  const REALM_UUID = (crypto as any).randomUUID ? (crypto as any).randomUUID() : String(Math.random()).slice(2);
+  const TIME_ORIGIN = performance.timeOrigin;
+  const LS_KEY = '__iss255p3_log';
+  const LS_COUNTER_KEY = '__iss255p3_init_counter';
+  let initCount = 0;
+  try { initCount = parseInt(localStorage.getItem(LS_COUNTER_KEY) || '0', 10) + 1; localStorage.setItem(LS_COUNTER_KEY, String(initCount)); } catch {}
+
+  let bc: BroadcastChannel | null = null;
+  try { bc = new BroadcastChannel('iss255p3'); } catch {}
+
   const events: any[] = [];
-  const persist = () => { try { sessionStorage.setItem(SS_KEY, JSON.stringify(events)); } catch {} };
-  const log = (ev: any) => { events.push({ t: performance.now(), ...ev }); if (events.length % 5 === 0) persist(); };
-  (window as any).__iss255p2_events = events; // secondary (may be wiped)
-  sessionStorage.setItem(SS_KEY, '[]');
+  const persist = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(events.slice(-300))); } catch {} };
+  const log = (ev: any) => {
+    const full = { t: performance.now(), realmUuid: REALM_UUID, timeOrigin: TIME_ORIGIN, initCount, ...ev };
+    events.push(full);
+    try { bc?.postMessage(full); } catch {}
+    if (events.length % 3 === 0) persist();
+  };
+  (window as any).__iss255p3_events = events;
 
-  log({ type: 'probe.armed', marker: '__iss255p2' });
+  log({ type: 'probe.armed', url: location.href, visibility: document.visibilityState, readyState: document.readyState });
 
-  const rootEl = document.getElementById('root');
-  if (!rootEl) { log({ type: 'probe.no_root' }); persist(); return; }
-
-  // === Layer 1: Reflect.deleteProperty trap ===
-  const origReflectDelete = Reflect.deleteProperty;
-  Reflect.deleteProperty = function (target: any, key: any) {
-    const keyStr = String(key);
-    const isRoot = target === rootEl;
-    const isWindow = target === window;
-    const isIss = /^__iss255/.test(keyStr);
-    const isReact = /^__react|^_reactListening/.test(keyStr);
-    if (isRoot || isWindow || isIss || isReact) {
-      log({
-        type: 'reflect.delete',
-        target: isRoot ? '#root' : isWindow ? 'window' : target?.constructor?.name || typeof target,
-        key: keyStr,
-        stack: (new Error('iss255p2-reflect')).stack?.slice(0, 2500) || '',
-      });
-      persist();
-    }
-    return origReflectDelete.call(Reflect, target, key);
+  // === Layer A: document.open/write/close traps ===
+  const origDocOpen = Document.prototype.open;
+  Document.prototype.open = function (this: Document, ...args: any[]) {
+    log({ type: 'document.open', stack: (new Error('p3-docopen')).stack?.slice(0, 2500) });
+    persist();
+    return (origDocOpen as any).apply(this, args);
+  } as any;
+  const origDocWrite = Document.prototype.write;
+  Document.prototype.write = function (this: Document, ...args: any[]) {
+    log({ type: 'document.write', argsPreview: String(args[0] || '').slice(0, 300), stack: (new Error('p3-docwrite')).stack?.slice(0, 2500) });
+    persist();
+    return (origDocWrite as any).apply(this, args);
+  } as any;
+  const origDocWriteln = Document.prototype.writeln;
+  Document.prototype.writeln = function (this: Document, ...args: any[]) {
+    log({ type: 'document.writeln', argsPreview: String(args[0] || '').slice(0, 300), stack: (new Error('p3-docwriteln')).stack?.slice(0, 2500) });
+    persist();
+    return (origDocWriteln as any).apply(this, args);
+  } as any;
+  const origDocClose = Document.prototype.close;
+  Document.prototype.close = function (this: Document) {
+    log({ type: 'document.close', stack: (new Error('p3-docclose')).stack?.slice(0, 2500) });
+    persist();
+    return origDocClose.call(this);
   };
 
-  // === Layer 2: fiber-slot lock (runs on rAF until keys seen) ===
-  let locked = false;
-  const tryLock = () => {
-    const keys = Object.getOwnPropertyNames(rootEl).filter(k => /^(__react|_reactListening)/.test(k));
-    if (keys.length > 0 && !locked) {
-      for (const k of keys) {
-        try {
-          const desc = Object.getOwnPropertyDescriptor(rootEl, k);
-          if (desc && desc.configurable) {
-            Object.defineProperty(rootEl, k, { ...desc, configurable: false });
-            log({ type: 'fiber.locked', key: k });
-          }
-        } catch (e: any) {
-          log({ type: 'fiber.lock_error', key: k, error: String(e?.message || e) });
+  // === Layer B: innerHTML/outerHTML setters on documentElement/body/#root ===
+  const innerDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+  if (innerDesc?.set) {
+    const origSet = innerDesc.set;
+    Object.defineProperty(Element.prototype, 'innerHTML', {
+      ...innerDesc,
+      set(v: string) {
+        const el = this as Element;
+        if (el === document.documentElement || el === document.body || el.id === 'root' || el.id === 'root-live') {
+          log({ type: 'innerHTML.set', target: el === document.documentElement ? 'html' : el === document.body ? 'body' : '#' + el.id, len: String(v || '').length, preview: String(v || '').slice(0, 200), stack: (new Error('p3-innerhtml')).stack?.slice(0, 2500) });
+          persist();
         }
-      }
-      locked = true;
-      persist();
-    }
-    if (!locked) requestAnimationFrame(tryLock);
-  };
-  requestAnimationFrame(tryLock);
+        return origSet.call(el, v);
+      },
+    });
+  }
+  const outerDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'outerHTML');
+  if (outerDesc?.set) {
+    const origSet = outerDesc.set;
+    Object.defineProperty(Element.prototype, 'outerHTML', {
+      ...outerDesc,
+      set(v: string) {
+        const el = this as Element;
+        if (el === document.documentElement || el === document.body || el.id === 'root' || el.id === 'root-live') {
+          log({ type: 'outerHTML.set', target: el.nodeName, len: String(v || '').length, stack: (new Error('p3-outerhtml')).stack?.slice(0, 2500) });
+          persist();
+        }
+        return origSet.call(el, v);
+      },
+    });
+  }
 
-  // === Layer 3: window-property delta sentinel (rAF diff) ===
-  const baselineWindow = new Set(Object.getOwnPropertyNames(window));
+  // === Layer C: lifecycle event listeners ===
+  const lifecycleEvents = ['pagehide', 'pageshow', 'beforeunload', 'unload', 'freeze', 'resume', 'prerenderingchange', 'visibilitychange'];
+  for (const evName of lifecycleEvents) {
+    window.addEventListener(evName, (e: any) => {
+      log({ type: 'lifecycle.' + evName, persisted: (e as any).persisted, visibility: document.visibilityState });
+      persist();
+    }, true);
+  }
+
+  // === Layer D: fiber attach + vanish watcher ===
+  const rootEl = document.getElementById('root') || document.getElementById('root-live');
+  if (!rootEl) { log({ type: 'probe.no_root' }); persist(); }
+  let seenFiber = false;
   let tick = 0;
-  const seenRemoved = new Set<string>();
   const sentinelTick = () => {
     tick++;
-    const now = new Set(Object.getOwnPropertyNames(window));
-    for (const k of baselineWindow) {
-      if (!now.has(k) && !seenRemoved.has(k)) {
-        seenRemoved.add(k);
-        log({ type: 'window.removed', key: k, tick });
-      }
+    const el = document.getElementById('root') || document.getElementById('root-live');
+    if (el) {
+      const keys = Object.getOwnPropertyNames(el).filter(k => /^(__react|_reactListening)/.test(k));
+      if (keys.length > 0 && !seenFiber) { seenFiber = true; log({ type: 'fiber.attached', keys, elementId: el.id }); }
+      if (seenFiber && keys.length === 0) { log({ type: 'fiber.vanished', tick, elementStillInDom: document.contains(el), elementId: el.id }); persist(); seenFiber = false; }
     }
-    // Also check fiber keys post-lock
-    if (locked) {
-      const present = Object.getOwnPropertyNames(rootEl).filter(k => /^(__react|_reactListening)/.test(k));
-      if (present.length === 0) {
-        log({ type: 'fiber.missing_despite_lock', tick });
-        persist();
-      }
-    }
-    if (tick < 900) requestAnimationFrame(sentinelTick); else persist();
+    if (tick < 1800) requestAnimationFrame(sentinelTick); else persist();
   };
   requestAnimationFrame(sentinelTick);
 
-  // === Layer 4: catch TypeErrors from delete-on-non-configurable (strict mode) ===
-  window.addEventListener('error', (e) => {
-    if (e.message && /configurable|cannot delete/i.test(e.message)) {
-      log({ type: 'delete_trapped_strict', message: e.message, filename: (e as any).filename, lineno: (e as any).lineno, colno: (e as any).colno, stack: e.error?.stack?.slice(0, 2500) || '' });
-      persist();
-    }
-  }, true);
-  window.addEventListener('unhandledrejection', (e) => {
-    const msg = String(e.reason?.message || e.reason || '');
-    if (/configurable|cannot delete/i.test(msg)) {
-      log({ type: 'delete_trapped_rejection', message: msg, stack: e.reason?.stack?.slice(0, 2500) || '' });
-      persist();
-    }
-  }, true);
+  // Falsification gate — signal for createRoot target swap
+  if (new URLSearchParams(location.search).has('iss255_falsify')) {
+    (window as any).__iss255p3_falsify = true;
+    log({ type: 'falsification.engaged', mode: 'mount-target-swap' });
+    persist();
+  }
 
-  // Final persist after 20s to capture the post-mount clobber window
-  setTimeout(persist, 20000);
-  console.log('[ISS-255] Pass 2 probe armed (sessionStorage key: __iss255p2_log)');
+  setTimeout(persist, 25000);
+  console.log('[ISS-255-P3] probe armed. realm:', REALM_UUID, 'initCount:', initCount, 'falsify:', !!(window as any).__iss255p3_falsify);
 })();
 
 import { StrictMode } from 'react'
@@ -169,7 +186,11 @@ if ('serviceWorker' in navigator) {
 // React app mount
 // ---------------------------------------------------------------------------
 
-createRoot(document.getElementById('root')!).render(
+const mountTarget = (window as any).__iss255p3_falsify
+  ? (() => { const d = document.createElement('div'); d.id = 'root-live'; document.body.appendChild(d); return d; })()
+  : document.getElementById('root')!
+
+createRoot(mountTarget).render(
   <StrictMode>
     <AuthStateProvider>
       <QueryClientProvider client={queryClient}>
