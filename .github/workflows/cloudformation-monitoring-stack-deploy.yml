@@ -89,8 +89,8 @@ jobs:
             --template-file "${TEMPLATE_FILE}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
-            --s3-bucket jreese-net \
-            --s3-prefix cfn-staging/05-monitoring/ \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 05-monitoring/ \
             --parameter-overrides \
               EnvironmentSuffix="${ENVIRONMENT_SUFFIX}"
 

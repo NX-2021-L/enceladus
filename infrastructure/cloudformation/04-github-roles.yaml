@@ -215,15 +215,17 @@ Resources:
               # S3 staging for `aws cloudformation deploy --s3-bucket` path.
               # Required since 02-compute.yaml crossed the 51,200-byte inline
               # limit (ENC-ISS-257). The CLI uploads the template to
-              # s3://jreese-net/cfn-staging/<stack>/<hash>.template before
-              # creating the changeset. Used by all three CFN workflows:
+              # s3://enceladus-cfn-staging-us-west-2/<stack>/<hash>.template
+              # before creating the changeset. Used by all three CFN workflows:
               # cloudformation-{compute,api,monitoring}-stack-deploy.yml.
+              # Bucket must be in us-west-2 so CFN CreateChangeSet can fetch
+              # the template without cross-region redirect (ENC-TSK-E84).
               - Sid: S3CfnStagingAccess
                 Effect: Allow
                 Action:
                   - s3:PutObject
                   - s3:GetObject
-                Resource: "arn:aws:s3:::jreese-net/cfn-staging/*"
+                Resource: !Sub "arn:aws:s3:::${CfnStagingBucket}/*"
 
   # ---------------------------------------------------------------------------
   # Backend Deploy Role (ENC-TSK-E31 / ENC-ISS-237)
@@ -529,6 +531,43 @@ Resources:
                   - "arn:aws:s3:::jreese-net/governance/*"
                   - "arn:aws:s3:::jreese-net/agent-documents/*"
 
+  # ---------------------------------------------------------------------------
+  # CloudFormation Staging Bucket (ENC-TSK-E84 / ENC-ISS-257)
+  # Used by:
+  #   - .github/workflows/cloudformation-compute-stack-deploy.yml
+  #   - .github/workflows/cloudformation-api-stack-deploy.yml
+  #   - .github/workflows/cloudformation-monitoring-stack-deploy.yml
+  # Purpose: hosts the transient template bodies that `aws cloudformation
+  # deploy --s3-bucket` uploads before creating the changeset, so that CFN
+  # templates larger than the 51,200-byte inline limit can be applied.
+  # MUST live in us-west-2 so CreateChangeSet in the same region can fetch
+  # the object without a cross-region redirect.
+  # Objects are ephemeral; lifecycle rule expires them after 7 days.
+  # ---------------------------------------------------------------------------
+  CfnStagingBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: enceladus-cfn-staging-us-west-2
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireStagedTemplates
+            Status: Enabled
+            ExpirationInDays: 7
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Purpose
+          Value: cfn-template-staging
+
 Outputs:
   CloudFormationDeployRoleArn:
     Description: >
@@ -542,3 +581,10 @@ Outputs:
     Value: !GetAtt BackendDeployRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}-BackendDeployRoleArn"
+  CfnStagingBucketName:
+    Description: >
+      Name of the us-west-2 S3 bucket used by aws cloudformation deploy
+      --s3-bucket to stage templates that exceed the 51,200-byte inline limit.
+    Value: !Ref CfnStagingBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-CfnStagingBucketName"
