@@ -144,7 +144,8 @@ ALLOWED_FILE_EXTENSIONS = {".md", ".markdown"}
 # Handoff document schema (ENC-FTR-061 / ENC-TSK-B52)
 # ---------------------------------------------------------------------------
 
-DOCUMENT_SUBTYPES = {"doc", "handoff", "coe", "wave", "blueprint", "narrative", "session-log", "general"}
+DOCUMENT_SUBTYPES = {"doc", "handoff", "coe", "wave", "idea", "context-node", "skill"}
+DOCUMENT_SUBTYPES_LEGACY_READ_ONLY = {"blueprint", "narrative", "session-log", "general"}
 HANDOFF_STATUSES = {"pending", "claimed", "completed", "stale"}
 HANDOFF_STATUS_TRANSITIONS = {
     "pending": {"claimed", "stale"},
@@ -176,6 +177,133 @@ WAVE_STATUS_TRANSITIONS = {
     "concluded": {"archived"},
     "archived": set(),
 }
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-078: idea / context-node / skill subtypes + doc subtypepattern
+# Derivation: DOC-EDEFF7CD0BD5. Caps derived from DOC-TBD-01 (context-node)
+# and DOC-TBD-02 (skill). See governance_data_dictionary.json entries
+# document.idea / document.context-node / document.skill / document.doc.
+# ---------------------------------------------------------------------------
+
+CAP_CONTEXT_NODE = 2048  # readable-body characters (AC-5)
+N_MIN_CONTEXT_NODE = 5  # minimum related_items edges (AC-7)
+CAP_SKILL_FULL_DESC = 4096  # skill full_description characters (AC-8)
+CAP_SKILL_CLAUDE_DESC = 1024  # skill claude_description characters; matches Claude SKILL.md external spec (AC-9)
+N_MIN_SKILL = 2  # minimum related_items edges (AC-14)
+AGENTSKILLS_SPEC_VERSION_DEFAULT = "0.1.0"
+
+# Subtypepattern canonical format: lowercase alpha and dashes only.
+SUBTYPEPATTERN_REGEX = re.compile(r"^[a-z-]+$")
+
+# Doc title colon-prefix rejection (AC-15). Case-insensitive leading alpha-or-dash
+# word of length 2-31 followed by a colon. Match enforced on subtype=doc only.
+DOC_TITLE_COLON_PREFIX_REGEX = re.compile(r"^[A-Za-z][A-Za-z-]{1,30}:")
+
+# Metadata block lines to strip from content when measuring context-node readable body.
+# Mirrors the convention in other governed docs and matches the canonicalization in
+# _measure_context_node_readable_body below.
+CONTEXT_NODE_METADATA_KEYS = (
+    "**Project**",
+    "**Related**",
+    "**Created**",
+    "**Author**",
+)
+
+# Pedagogical error messages (AC-2, AC-15).
+_ENUM_REDIRECT_MSG = (
+    "If this value represents an emergent pattern, use document_subtype='doc' with "
+    "subtypepattern='<your-pattern>' (alpha characters and dashes only)."
+)
+_DOC_TITLE_COLON_PREFIX_MSG = (
+    "Title starts with a '<type>:' prefix. Titles should not encode subtype. "
+    "Remove the '<type>:' prefix and place '<type>' (lowercased, alpha and dashes only) "
+    "into the 'subtypepattern' field."
+)
+
+
+def _canonicalize_subtypepattern(value: Any) -> Optional[str]:
+    """Return the canonical (trim+lowercase) form of a subtypepattern input, or None if invalid type."""
+    if not isinstance(value, str):
+        return None
+    return value.strip().lower()
+
+
+def _measure_context_node_readable_body(content: str) -> int:
+    """
+    Compute the readable-body character count for a context-node document.
+
+    Readable body = markdown content with the following stripped:
+      (a) the H1 ID line (first line starting with '# ')
+      (b) the standard metadata block (lines starting with **Project**/**Related**/
+          **Created**/**Author**)
+      (c) inline related_items-equivalent edge blocks if present
+
+    The dictionary definition lives at document.context-node.fields.cap_readable_body.
+    """
+    if not isinstance(content, str):
+        return 0
+    readable_lines = []
+    saw_h1 = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not saw_h1 and stripped.startswith("# "):
+            saw_h1 = True
+            continue
+        if any(stripped.startswith(key) for key in CONTEXT_NODE_METADATA_KEYS):
+            continue
+        readable_lines.append(line)
+    return len("\n".join(readable_lines))
+
+
+def _validate_agentskills_manifest(
+    manifest: Any, spec_version: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Validate a skill's agentskills_manifest against the pinned agentskills.io/home spec.
+
+    ENC-FTR-078 Phase-1 implementation pins spec version '0.1.0' and enforces the core
+    invariants required by the agentskills.io common denominator: manifest must be a JSON
+    object containing non-empty 'name', 'description', and 'version' string fields. When
+    agentskills.io publishes a machine-readable schema for a given version, this function
+    should be upgraded to run that schema validator.
+
+    Returns:
+        None on success. A dict of {code, message, details} on failure.
+    """
+    if not isinstance(manifest, dict):
+        return {
+            "code": "skill_agentskills_manifest_invalid",
+            "message": "agentskills_manifest must be a JSON object",
+            "details": {"measured_type": type(manifest).__name__},
+        }
+    if spec_version != AGENTSKILLS_SPEC_VERSION_DEFAULT:
+        return {
+            "code": "skill_agentskills_manifest_invalid",
+            "message": (
+                f"agentskills_spec_version '{spec_version}' is not supported by this "
+                f"deploy. Supported versions: ['{AGENTSKILLS_SPEC_VERSION_DEFAULT}']."
+            ),
+            "details": {
+                "pinned_version": AGENTSKILLS_SPEC_VERSION_DEFAULT,
+                "requested_version": spec_version,
+            },
+        }
+    required_keys = ("name", "description", "version")
+    missing = [k for k in required_keys if not isinstance(manifest.get(k), str) or not manifest.get(k, "").strip()]
+    if missing:
+        return {
+            "code": "skill_agentskills_manifest_invalid",
+            "message": (
+                f"agentskills_manifest missing required non-empty string keys: {missing}. "
+                f"agentskills.io spec {AGENTSKILLS_SPEC_VERSION_DEFAULT} requires "
+                f"name + description + version."
+            ),
+            "details": {
+                "pinned_version": AGENTSKILLS_SPEC_VERSION_DEFAULT,
+                "missing_keys": missing,
+            },
+        }
+    return None
 
 # ---------------------------------------------------------------------------
 # Semantic handoff-detection patterns (ENC-FTR-077)
@@ -529,6 +657,15 @@ def _evaluate_markdown_compliance(content: str, document_subtype: str = "") -> D
     warnings: List[str] = []
     lines = content.splitlines()
 
+    # ENC-FTR-078 AC-20: subtype-aware compliance gates. Context-nodes are
+    # intentionally terse (cap 2048 chars); skills carry their canonical spec
+    # in full_description rather than the content body. For these two subtypes
+    # we skip the title-format and metadata-block warnings to avoid penalizing
+    # field-based structure. The remaining structural rules (fences, heading
+    # hierarchy, list markers, table dividers, alerts) still apply.
+    _FTR078_RELAXED_STRUCTURE = {"context-node", "skill"}
+    _relax_title_and_metadata = document_subtype in _FTR078_RELAXED_STRUCTURE
+
     # Pre-scan: identify fenced code block boundaries (ENC-LSN-026).
     # Other rules skip lines inside fences to prevent false positives
     # on YAML blocks, code samples, etc.
@@ -543,7 +680,7 @@ def _evaluate_markdown_compliance(content: str, document_subtype: str = "") -> D
             break
     if first_non_empty_idx is None:
         warnings.append("Document is empty.")
-    else:
+    elif not _relax_title_and_metadata:
         first_line = lines[first_non_empty_idx]
         if not re.match(r"^#\s+\S+", first_line):
             warnings.append("First non-empty line should be a level-1 title heading ('# ...').")
@@ -555,10 +692,11 @@ def _evaluate_markdown_compliance(content: str, document_subtype: str = "") -> D
                 "Title should follow '# {ITEM_ID} Title' (e.g., '# DVP-TSK-123 Name')."
             )
 
-    metadata_window = "\n".join(lines[: min(len(lines), 30)])
-    for field in ("Project", "Related", "Created", "Author"):
-        if f"**{field}**:" not in metadata_window:
-            warnings.append(f"Metadata block missing '**{field}**:' near top of document.")
+    if not _relax_title_and_metadata:
+        metadata_window = "\n".join(lines[: min(len(lines), 30)])
+        for field in ("Project", "Related", "Created", "Author"):
+            if f"**{field}**:" not in metadata_window:
+                warnings.append(f"Metadata block missing '**{field}**:' near top of document.")
 
     # Rule 1: heading hierarchy (skip fenced lines — ENC-LSN-026).
     last_level = 0
@@ -1295,15 +1433,36 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             400,
             "document_subtype is required. Use 'doc' for standard documents, "
             "'handoff' for dispatch/report-back, 'coe' for correction-of-errors, "
-            "'wave' for coordination wave tracking.",
+            "'wave' for coordination wave tracking, 'idea' for architect-lifecycle "
+            "ideas, 'context-node' for compressed graph anchors, or 'skill' for "
+            "portable skills.",
         )
+    # ENC-FTR-078 AC-2: strict allow-list on writes. Legacy values remain readable
+    # on GET but are rejected on PUT/PATCH. Pedagogical error redirects agents to
+    # document_subtype='doc' + subtypepattern for emergent patterns.
     if document_subtype not in DOCUMENT_SUBTYPES:
-        return _error(400, f"Invalid document_subtype '{document_subtype}'. Must be one of: {', '.join(sorted(DOCUMENT_SUBTYPES))}")
-    if document_subtype == "general":
+        if document_subtype in DOCUMENT_SUBTYPES_LEGACY_READ_ONLY:
+            return _error(
+                400,
+                (
+                    f"document_subtype '{document_subtype}' is legacy-readable-only and "
+                    f"cannot be used for new writes. Allowed values: "
+                    f"{sorted(DOCUMENT_SUBTYPES)}. {_ENUM_REDIRECT_MSG}"
+                ),
+                code="document_subtype_not_in_enum",
+                allowed_values=sorted(DOCUMENT_SUBTYPES),
+                legacy_readable_only=sorted(DOCUMENT_SUBTYPES_LEGACY_READ_ONLY),
+                subtypepattern_redirect=_ENUM_REDIRECT_MSG,
+            )
         return _error(
             400,
-            "document_subtype 'general' is deprecated for new documents. "
-            "Use 'doc' for standard unstructured documents.",
+            (
+                f"Invalid document_subtype '{document_subtype}'. Must be one of: "
+                f"{sorted(DOCUMENT_SUBTYPES)}. {_ENUM_REDIRECT_MSG}"
+            ),
+            code="document_subtype_not_in_enum",
+            allowed_values=sorted(DOCUMENT_SUBTYPES),
+            subtypepattern_redirect=_ENUM_REDIRECT_MSG,
         )
 
     # Compliance check (pass subtype for COE section warnings — ENC-FTR-077)
@@ -1327,6 +1486,52 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             400,
             f"Invalid document_maturity_state '{document_maturity_state}'. "
             f"Must be one of: {', '.join(sorted(VALID_MATURITY_STATES))}",
+        )
+
+    # --- ENC-FTR-078 AC-16: subtypepattern validation (doc-subtype only) ---
+    # Valid only when document_subtype='doc'; on any other subtype presence is an error.
+    # Canonicalize (trim + lowercase), then validate against ^[a-z-]+$.
+    subtypepattern_raw = body.get("subtypepattern")
+    subtypepattern_canonical: Optional[str] = None
+    if subtypepattern_raw is not None and subtypepattern_raw != "":
+        if document_subtype != "doc":
+            return _error(
+                400,
+                (
+                    f"Field 'subtypepattern' is valid only when document_subtype='doc'. "
+                    f"Received document_subtype='{document_subtype}'."
+                ),
+                code="subtypepattern_wrong_subtype",
+                document_subtype=document_subtype,
+                dictionary_entity="document.doc",
+            )
+        canonical = _canonicalize_subtypepattern(subtypepattern_raw)
+        if canonical is None or not SUBTYPEPATTERN_REGEX.match(canonical):
+            return _error(
+                400,
+                (
+                    f"Field 'subtypepattern' has invalid format. Canonical form must match "
+                    f"^[a-z-]+$ (lowercase alpha and dashes only, no digits, underscores, "
+                    f"spaces, or punctuation). Received: {subtypepattern_raw!r}"
+                    + (f" -> canonicalized to {canonical!r}" if canonical is not None else "")
+                ),
+                code="subtypepattern_invalid_format",
+                invalid_value=subtypepattern_raw,
+                canonical_attempt=canonical,
+                dictionary_entity="document.doc",
+            )
+        subtypepattern_canonical = canonical
+
+    # --- ENC-FTR-078 AC-15: doc title colon-prefix rejection ---
+    if document_subtype == "doc" and DOC_TITLE_COLON_PREFIX_REGEX.match(title):
+        return _error(
+            400,
+            _DOC_TITLE_COLON_PREFIX_MSG + f" Title received: {title!r}",
+            code="doc_title_colon_prefix_disallowed",
+            title=title,
+            rejected_regex=r"^[A-Za-z][A-Za-z-]{1,30}:",
+            remediation="Remove the prefix from title and populate subtypepattern with the lowercased prefix word.",
+            dictionary_entity="document.doc",
         )
 
     # --- Semantic handoff-detection guard (ENC-FTR-077) ---
@@ -1475,6 +1680,170 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         wave_fields["plan_anchor_id"] = plan_anchor_id
         wave_fields["wave_status"] = "active"
 
+    # --- ENC-FTR-078 idea subtype (AC-4): no additional required fields in Phase 1 ---
+    # idea docs pass through standard validation. The architect skill's workflow
+    # supplies structure; closing the silent-failure mode is the primary AC here.
+    idea_fields: Dict[str, Any] = {}
+    if document_subtype == "idea":
+        # Phase 1: no additional required fields. Placeholder for future idea-specific
+        # lifecycle fields (exploration_stage, concept_author) if introduced in a
+        # follow-on ENC-FTR.
+        pass
+
+    # --- ENC-FTR-078 context-node subtype (AC-5, AC-7) ---
+    context_node_fields: Dict[str, Any] = {}
+    if document_subtype == "context-node":
+        readable_body_length = _measure_context_node_readable_body(content)
+        if readable_body_length > CAP_CONTEXT_NODE:
+            return _error(
+                400,
+                (
+                    f"context-node readable body length {readable_body_length} exceeds "
+                    f"CAP_CONTEXT_NODE = {CAP_CONTEXT_NODE} characters. Reduce body "
+                    f"length or split into multiple context-nodes."
+                ),
+                code="context_node_cap_exceeded",
+                measured=readable_body_length,
+                cap=CAP_CONTEXT_NODE,
+                dictionary_entity="document.context-node",
+                derivation_doc="DOC-B5F1BC281F02",
+            )
+        if len(related_items) < N_MIN_CONTEXT_NODE:
+            return _error(
+                400,
+                (
+                    f"context-node requires at least {N_MIN_CONTEXT_NODE} related_items "
+                    f"for edge density. Received {len(related_items)}."
+                ),
+                code="context_node_edge_density_insufficient",
+                measured=len(related_items),
+                min=N_MIN_CONTEXT_NODE,
+                dictionary_entity="document.context-node",
+            )
+        context_node_fields["readable_body_length"] = readable_body_length
+
+    # --- ENC-FTR-078 skill subtype (AC-8..14) ---
+    skill_fields: Dict[str, Any] = {}
+    if document_subtype == "skill":
+        # Required: full_description (non-empty, len <= CAP_SKILL_FULL_DESC)
+        full_description = body.get("full_description")
+        if not isinstance(full_description, str) or not full_description.strip():
+            return _error(
+                400,
+                "Field 'full_description' is required and must be a non-empty string when document_subtype='skill'.",
+                code="skill_full_description_missing",
+                dictionary_entity="document.skill",
+                required_fields=[
+                    "full_description",
+                    "claude_description",
+                    "agentskills_manifest",
+                    "agentskills_spec_version",
+                ],
+            )
+        if len(full_description) > CAP_SKILL_FULL_DESC:
+            return _error(
+                400,
+                (
+                    f"skill full_description length {len(full_description)} exceeds "
+                    f"CAP_SKILL_FULL_DESC = {CAP_SKILL_FULL_DESC} characters."
+                ),
+                code="skill_full_description_invalid",
+                measured=len(full_description),
+                cap=CAP_SKILL_FULL_DESC,
+                dictionary_entity="document.skill",
+                derivation_doc="DOC-75425CD9786D",
+            )
+
+        # Required: claude_description (non-empty, len <= CAP_SKILL_CLAUDE_DESC)
+        claude_description = body.get("claude_description")
+        if not isinstance(claude_description, str) or not claude_description.strip():
+            return _error(
+                400,
+                "Field 'claude_description' is required and must be a non-empty string when document_subtype='skill'.",
+                code="skill_claude_description_missing",
+                dictionary_entity="document.skill",
+                spec_reference="Claude SKILL.md external spec: description field must be <=1024 chars",
+            )
+        if len(claude_description) > CAP_SKILL_CLAUDE_DESC:
+            return _error(
+                400,
+                (
+                    f"skill claude_description length {len(claude_description)} exceeds "
+                    f"Claude SKILL.md hard ceiling of {CAP_SKILL_CLAUDE_DESC} characters."
+                ),
+                code="skill_claude_description_too_long",
+                measured=len(claude_description),
+                cap=CAP_SKILL_CLAUDE_DESC,
+                dictionary_entity="document.skill",
+                spec_reference="Claude SKILL.md external spec",
+            )
+
+        # Required: agentskills_manifest (JSON object)
+        agentskills_manifest = body.get("agentskills_manifest")
+        if agentskills_manifest is None:
+            return _error(
+                400,
+                "Field 'agentskills_manifest' is required when document_subtype='skill'.",
+                code="skill_agentskills_manifest_missing",
+                dictionary_entity="document.skill",
+                spec_reference=f"agentskills.io/home spec v{AGENTSKILLS_SPEC_VERSION_DEFAULT}",
+            )
+
+        # Required: agentskills_spec_version (non-empty string)
+        agentskills_spec_version = body.get("agentskills_spec_version")
+        if not isinstance(agentskills_spec_version, str) or not agentskills_spec_version.strip():
+            return _error(
+                400,
+                "Field 'agentskills_spec_version' is required and must be a non-empty string when document_subtype='skill'.",
+                code="skill_agentskills_spec_version_missing",
+                dictionary_entity="document.skill",
+                pinned_default=AGENTSKILLS_SPEC_VERSION_DEFAULT,
+            )
+
+        # Validate manifest conformance at pinned spec version
+        manifest_err = _validate_agentskills_manifest(agentskills_manifest, agentskills_spec_version.strip())
+        if manifest_err is not None:
+            return _error(
+                400,
+                manifest_err["message"],
+                code=manifest_err["code"],
+                validator_output=manifest_err["details"],
+                dictionary_entity="document.skill",
+            )
+
+        # Optional: runtime_variants (JSON object, any keys permitted)
+        runtime_variants = body.get("runtime_variants")
+        if runtime_variants is None:
+            runtime_variants = {}
+        if not isinstance(runtime_variants, dict):
+            return _error(
+                400,
+                "Field 'runtime_variants' must be a JSON object when present (empty {} is valid).",
+                code="skill_runtime_variants_invalid",
+                measured_type=type(runtime_variants).__name__,
+                dictionary_entity="document.skill",
+            )
+
+        # Edge density: len(related_items) >= N_MIN_SKILL (soft: 2)
+        if len(related_items) < N_MIN_SKILL:
+            return _error(
+                400,
+                (
+                    f"skill requires at least {N_MIN_SKILL} related_items for edge density. "
+                    f"Received {len(related_items)}."
+                ),
+                code="skill_edge_density_insufficient",
+                measured=len(related_items),
+                min=N_MIN_SKILL,
+                dictionary_entity="document.skill",
+            )
+
+        skill_fields["full_description"] = full_description
+        skill_fields["claude_description"] = claude_description
+        skill_fields["agentskills_manifest"] = agentskills_manifest
+        skill_fields["agentskills_spec_version"] = agentskills_spec_version.strip()
+        skill_fields["runtime_variants"] = runtime_variants
+
     # Generate document ID
     document_id = f"DOC-{uuid.uuid4().hex[:12].upper()}"
     now = _now_z()
@@ -1541,6 +1910,22 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     if wave_fields:
         item["plan_anchor_id"] = {"S": wave_fields["plan_anchor_id"]}
         item["wave_status"] = {"S": wave_fields["wave_status"]}
+
+    # ENC-FTR-078: persist context-node readable_body_length audit field
+    if context_node_fields:
+        item["readable_body_length"] = {"N": str(context_node_fields["readable_body_length"])}
+
+    # ENC-FTR-078: persist skill-specific fields
+    if skill_fields:
+        item["full_description"] = {"S": skill_fields["full_description"]}
+        item["claude_description"] = {"S": skill_fields["claude_description"]}
+        item["agentskills_manifest"] = {"S": json.dumps(skill_fields["agentskills_manifest"])}
+        item["agentskills_spec_version"] = {"S": skill_fields["agentskills_spec_version"]}
+        item["runtime_variants"] = {"S": json.dumps(skill_fields["runtime_variants"])}
+
+    # ENC-FTR-078: persist subtypepattern (canonical) on doc subtype when present
+    if document_subtype == "doc" and subtypepattern_canonical:
+        item["subtypepattern"] = {"S": subtypepattern_canonical}
 
     try:
         ddb.put_item(TableName=DOCUMENTS_TABLE, Item=item)
@@ -1704,6 +2089,14 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     project_id = existing.get("project_id", {}).get("S", "")
     now = _now_z()
 
+    # ENC-FTR-078 AC-3 / AC-19: determine final_subtype for subsequent validations.
+    # existing_subtype is the pre-patch value (may be a legacy read-only value for
+    # grandfathered records). final_subtype is the post-patch target — either the
+    # existing value, or a newly-requested enum value that must pass the allow-list.
+    existing_subtype = existing.get("document_subtype", {}).get("S", "general")
+    final_subtype = existing_subtype
+    _subtype_change_staged = False
+
     # Build update expression
     # ENC-PLN-014 / ENC-FTR-065: idempotently backfill record_type on every patch
     # so existing documents created before the stamping fix become routable by
@@ -1722,11 +2115,58 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     }
     compliance: Optional[Dict[str, Any]] = None
 
+    # ENC-FTR-078 AC-3: document_subtype patch validation (strict allow-list).
+    # AC-19 backward compat: legacy values are readable but cannot be re-written.
+    if "document_subtype" in body:
+        requested_subtype = str(body["document_subtype"]).strip().lower()
+        if not requested_subtype:
+            return _error(400, "document_subtype, if present, must be a non-empty string.")
+        if requested_subtype not in DOCUMENT_SUBTYPES:
+            if requested_subtype in DOCUMENT_SUBTYPES_LEGACY_READ_ONLY:
+                return _error(
+                    400,
+                    (
+                        f"Cannot patch document_subtype to legacy-readable-only value "
+                        f"'{requested_subtype}'. Allowed values: {sorted(DOCUMENT_SUBTYPES)}. "
+                        f"{_ENUM_REDIRECT_MSG}"
+                    ),
+                    code="document_subtype_not_in_enum",
+                    allowed_values=sorted(DOCUMENT_SUBTYPES),
+                    legacy_readable_only=sorted(DOCUMENT_SUBTYPES_LEGACY_READ_ONLY),
+                    subtypepattern_redirect=_ENUM_REDIRECT_MSG,
+                )
+            return _error(
+                400,
+                (
+                    f"Invalid document_subtype '{requested_subtype}'. Must be one of: "
+                    f"{sorted(DOCUMENT_SUBTYPES)}. {_ENUM_REDIRECT_MSG}"
+                ),
+                code="document_subtype_not_in_enum",
+                allowed_values=sorted(DOCUMENT_SUBTYPES),
+                subtypepattern_redirect=_ENUM_REDIRECT_MSG,
+            )
+        final_subtype = requested_subtype
+        if requested_subtype != existing_subtype:
+            expr_parts.append("document_subtype = :ds_new")
+            attr_values[":ds_new"] = {"S": requested_subtype}
+            _subtype_change_staged = True
+
     # Updatable metadata fields
     if "title" in body:
         title = str(body["title"]).strip()
         if not title or len(title) > MAX_TITLE_LENGTH:
             return _error(400, f"Title must be 1-{MAX_TITLE_LENGTH} characters.")
+        # ENC-FTR-078 AC-15: apply title colon-prefix rule when post-patch subtype is 'doc'.
+        if final_subtype == "doc" and DOC_TITLE_COLON_PREFIX_REGEX.match(title):
+            return _error(
+                400,
+                _DOC_TITLE_COLON_PREFIX_MSG + f" Title received: {title!r}",
+                code="doc_title_colon_prefix_disallowed",
+                title=title,
+                rejected_regex=r"^[A-Za-z][A-Za-z-]{1,30}:",
+                remediation="Remove the prefix from title and populate subtypepattern with the lowercased prefix word in the same PATCH.",
+                dictionary_entity="document.doc",
+            )
         expr_parts.append("title = :title")
         attr_values[":title"] = {"S": title}
 
@@ -1739,6 +2179,32 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         if not isinstance(items, list):
             return _error(400, "'related_items' must be an array.")
         items = [str(r).strip() for r in items[:MAX_RELATED_ITEMS] if str(r).strip()]
+        # ENC-FTR-078 AC-7: context-node edge-density re-validation on PATCH when related_items touched.
+        if final_subtype == "context-node" and len(items) < N_MIN_CONTEXT_NODE:
+            return _error(
+                400,
+                (
+                    f"context-node requires at least {N_MIN_CONTEXT_NODE} related_items "
+                    f"for edge density. Received {len(items)}."
+                ),
+                code="context_node_edge_density_insufficient",
+                measured=len(items),
+                min=N_MIN_CONTEXT_NODE,
+                dictionary_entity="document.context-node",
+            )
+        # ENC-FTR-078 AC-14: skill edge-density re-validation on PATCH when related_items touched.
+        if final_subtype == "skill" and len(items) < N_MIN_SKILL:
+            return _error(
+                400,
+                (
+                    f"skill requires at least {N_MIN_SKILL} related_items for edge density. "
+                    f"Received {len(items)}."
+                ),
+                code="skill_edge_density_insufficient",
+                measured=len(items),
+                min=N_MIN_SKILL,
+                dictionary_entity="document.skill",
+            )
         expr_parts.append("related_items = :ri")
         attr_values[":ri"] = _serialize_list(items)
 
@@ -1749,6 +2215,43 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         kws = [str(k).strip().lower() for k in kws[:MAX_KEYWORDS] if str(k).strip()]
         expr_parts.append("keywords = :kw")
         attr_values[":kw"] = _serialize_list(kws)
+
+    # ENC-FTR-078 AC-16: subtypepattern PATCH.
+    # Valid only when final_subtype == 'doc'. Canonicalize + format validate.
+    if "subtypepattern" in body:
+        sp_value = body["subtypepattern"]
+        if sp_value is None or sp_value == "":
+            # Empty string / None clears the field (stores blank, logically absent).
+            expr_parts.append("subtypepattern = :sp")
+            attr_values[":sp"] = {"S": ""}
+        else:
+            if final_subtype != "doc":
+                return _error(
+                    400,
+                    (
+                        f"Field 'subtypepattern' is valid only when document_subtype='doc'. "
+                        f"Resulting subtype for this patch: '{final_subtype}'."
+                    ),
+                    code="subtypepattern_wrong_subtype",
+                    document_subtype=final_subtype,
+                    dictionary_entity="document.doc",
+                )
+            sp_canonical = _canonicalize_subtypepattern(sp_value)
+            if sp_canonical is None or not SUBTYPEPATTERN_REGEX.match(sp_canonical):
+                return _error(
+                    400,
+                    (
+                        f"Field 'subtypepattern' has invalid format. Canonical form must match "
+                        f"^[a-z-]+$. Received: {sp_value!r}"
+                        + (f" -> canonicalized to {sp_canonical!r}" if sp_canonical is not None else "")
+                    ),
+                    code="subtypepattern_invalid_format",
+                    invalid_value=sp_value,
+                    canonical_attempt=sp_canonical,
+                    dictionary_entity="document.doc",
+                )
+            expr_parts.append("subtypepattern = :sp")
+            attr_values[":sp"] = {"S": sp_canonical}
 
     if "status" in body:
         status = str(body["status"]).strip().lower()
@@ -1879,6 +2382,129 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     if "plan_anchor_id" in body:
         return _error(400, "plan_anchor_id is immutable after wave document creation.")
 
+    # ENC-FTR-078 AC-8, AC-9, AC-12, AC-13: skill subtype field patches.
+    # Only permitted when final_subtype == 'skill'. Re-run cap / spec validators.
+    skill_field_keys = ("full_description", "claude_description", "agentskills_manifest",
+                        "agentskills_spec_version", "runtime_variants")
+    if any(k in body for k in skill_field_keys):
+        if final_subtype != "skill":
+            return _error(
+                400,
+                (
+                    f"Fields {[k for k in skill_field_keys if k in body]} are valid only when "
+                    f"document_subtype='skill'. Resulting subtype for this patch: '{final_subtype}'."
+                ),
+                code="skill_fields_wrong_subtype",
+                document_subtype=final_subtype,
+                dictionary_entity="document.skill",
+            )
+
+        if "full_description" in body:
+            fd = body["full_description"]
+            if not isinstance(fd, str) or not fd.strip():
+                return _error(
+                    400,
+                    "full_description must be a non-empty string when patched.",
+                    code="skill_full_description_missing",
+                    dictionary_entity="document.skill",
+                )
+            if len(fd) > CAP_SKILL_FULL_DESC:
+                return _error(
+                    400,
+                    (
+                        f"skill full_description length {len(fd)} exceeds "
+                        f"CAP_SKILL_FULL_DESC = {CAP_SKILL_FULL_DESC} characters."
+                    ),
+                    code="skill_full_description_invalid",
+                    measured=len(fd),
+                    cap=CAP_SKILL_FULL_DESC,
+                    dictionary_entity="document.skill",
+                )
+            expr_parts.append("full_description = :fd")
+            attr_values[":fd"] = {"S": fd}
+
+        if "claude_description" in body:
+            cd = body["claude_description"]
+            if not isinstance(cd, str) or not cd.strip():
+                return _error(
+                    400,
+                    "claude_description must be a non-empty string when patched.",
+                    code="skill_claude_description_missing",
+                    dictionary_entity="document.skill",
+                )
+            if len(cd) > CAP_SKILL_CLAUDE_DESC:
+                return _error(
+                    400,
+                    (
+                        f"skill claude_description length {len(cd)} exceeds "
+                        f"Claude SKILL.md hard ceiling of {CAP_SKILL_CLAUDE_DESC} characters."
+                    ),
+                    code="skill_claude_description_too_long",
+                    measured=len(cd),
+                    cap=CAP_SKILL_CLAUDE_DESC,
+                    dictionary_entity="document.skill",
+                )
+            expr_parts.append("claude_description = :cd")
+            attr_values[":cd"] = {"S": cd}
+
+        if "agentskills_manifest" in body or "agentskills_spec_version" in body:
+            # If either field is touched, both must be valid together (validator runs against pinned version).
+            new_manifest = body.get("agentskills_manifest")
+            new_version = body.get("agentskills_spec_version")
+            # Fall back to existing values for whichever is not being patched.
+            if new_manifest is None:
+                existing_manifest_str = existing.get("agentskills_manifest", {}).get("S", "")
+                try:
+                    new_manifest = json.loads(existing_manifest_str) if existing_manifest_str else None
+                except Exception:
+                    new_manifest = None
+            if new_version is None:
+                new_version = existing.get("agentskills_spec_version", {}).get("S", "")
+            if new_manifest is None:
+                return _error(
+                    400,
+                    "agentskills_manifest is missing and cannot be inferred from existing record.",
+                    code="skill_agentskills_manifest_missing",
+                    dictionary_entity="document.skill",
+                )
+            if not isinstance(new_version, str) or not new_version.strip():
+                return _error(
+                    400,
+                    "agentskills_spec_version must be a non-empty string.",
+                    code="skill_agentskills_spec_version_missing",
+                    dictionary_entity="document.skill",
+                )
+            manifest_err = _validate_agentskills_manifest(new_manifest, new_version.strip())
+            if manifest_err is not None:
+                return _error(
+                    400,
+                    manifest_err["message"],
+                    code=manifest_err["code"],
+                    validator_output=manifest_err["details"],
+                    dictionary_entity="document.skill",
+                )
+            if "agentskills_manifest" in body:
+                expr_parts.append("agentskills_manifest = :am")
+                attr_values[":am"] = {"S": json.dumps(new_manifest)}
+            if "agentskills_spec_version" in body:
+                expr_parts.append("agentskills_spec_version = :asv")
+                attr_values[":asv"] = {"S": new_version.strip()}
+
+        if "runtime_variants" in body:
+            rv = body["runtime_variants"]
+            if rv is None:
+                rv = {}
+            if not isinstance(rv, dict):
+                return _error(
+                    400,
+                    "runtime_variants must be a JSON object (empty {} is valid).",
+                    code="skill_runtime_variants_invalid",
+                    measured_type=type(rv).__name__,
+                    dictionary_entity="document.skill",
+                )
+            expr_parts.append("runtime_variants = :rv")
+            attr_values[":rv"] = {"S": json.dumps(rv)}
+
     # COE edge density re-validation on related_items change (ENC-FTR-077)
     if "related_items" in body and current_subtype == "coe":
         patched_items = [str(r).strip() for r in body["related_items"][:MAX_RELATED_ITEMS] if str(r).strip()]
@@ -1904,8 +2530,26 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             return _error(400, "Field 'content' must be a non-empty string.")
         if len(content.encode("utf-8")) > MAX_CONTENT_SIZE:
             return _error(400, f"Content must be 1-{MAX_CONTENT_SIZE} bytes.")
+        # ENC-FTR-078 AC-5: context-node cap re-validation on PATCH when content touched.
+        if final_subtype == "context-node":
+            readable_body_length = _measure_context_node_readable_body(content)
+            if readable_body_length > CAP_CONTEXT_NODE:
+                return _error(
+                    400,
+                    (
+                        f"context-node readable body length {readable_body_length} exceeds "
+                        f"CAP_CONTEXT_NODE = {CAP_CONTEXT_NODE} characters."
+                    ),
+                    code="context_node_cap_exceeded",
+                    measured=readable_body_length,
+                    cap=CAP_CONTEXT_NODE,
+                    dictionary_entity="document.context-node",
+                    derivation_doc="DOC-B5F1BC281F02",
+                )
+            expr_parts.append("readable_body_length = :rbl")
+            attr_values[":rbl"] = {"N": str(readable_body_length)}
         try:
-            compliance = _evaluate_markdown_compliance(content, document_subtype=current_subtype)
+            compliance = _evaluate_markdown_compliance(content, document_subtype=final_subtype)
             if MIN_COMPLIANCE_SCORE > 0 and compliance["compliance_score"] < MIN_COMPLIANCE_SCORE:
                 return _error(
                     400,
@@ -2096,6 +2740,16 @@ def _handle_search(qs: Dict) -> Dict:
     subtype_filter = qs.get("document_subtype", "").strip().lower()
     if subtype_filter:
         docs = [d for d in docs if d.get("document_subtype", "general") == subtype_filter]
+
+    # ENC-FTR-078 AC-17: subtypepattern filter. Canonicalizes input (trim+lowercase).
+    # Returns only document_subtype='doc' records with matching canonical subtypepattern.
+    subtypepattern_filter = qs.get("subtypepattern", "").strip().lower()
+    if subtypepattern_filter:
+        docs = [
+            d for d in docs
+            if d.get("document_subtype", "general") == "doc"
+            and d.get("subtypepattern", "").strip().lower() == subtypepattern_filter
+        ]
 
     # Don't include content in search results
     for d in docs:
