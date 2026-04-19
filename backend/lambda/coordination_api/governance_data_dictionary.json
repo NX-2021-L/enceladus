@@ -4539,7 +4539,11 @@
         },
         "gds_availability_probe": {
           "type": "object",
-          "definition": "graph_query_api caches the result of a CALL gds.list() probe for 300 seconds (_gds_probe_state). On first hybrid query the probe runs; subsequent queries within the TTL skip the probe and use the cached availability flag. A False result triggers the Cypher fallback for the graph signal; subsequent queries respect the cached flag without re-probing. Probe failures are logged at INFO and never raise."
+          "definition": "graph_query_api caches the result of a CALL gds.list() probe for 300 seconds (_gds_probe_state). On first hybrid query the probe runs; subsequent queries within the TTL skip the probe and use the cached availability flag. A False result triggers the Cypher fallback for the graph signal; subsequent queries respect the cached flag without re-probing. Probe failures are logged at INFO and never raise. ENC-ISS-265: the probe returning True is necessary but not sufficient for a successful GDS PPR computation \u2014 see aga_sessions_contract for the second-order requirement."
+        },
+        "aga_sessions_contract": {
+          "type": "object",
+          "definition": "ENC-ISS-265: the live Neo4j instance is Aura Graph Analytics (AGA) \u2014 the Sessions-based GDS compute plane \u2014 not in-process AuraDB-Pro GDS. AGA requires every gds.graph.project call to pass either {memory: '<size>'} (auto-create session) or {sessionId: '<id>'} (use explicit session) as a 5th Cypher argument. graph_query_api passes {memory: '2GB'} at lambda_function.py:675-685; subsequent calls within the same query session (gds.graph.exists, gds.graph.drop, gds.pageRank.stream) inherit the session automatically. Additionally, gds.util.asNode is not supported under the AGA surface and the projection does not expose node properties \u2014 so nodeId\u2192record_id resolution is done via a follow-up MATCH (lambda_function.py:705-735) instead. The Cypher fallback path (_hybrid_graph_ranks_cypher_fallback) remains available for clusters without AGA."
         },
         "iam_contract": {
           "type": "array",
