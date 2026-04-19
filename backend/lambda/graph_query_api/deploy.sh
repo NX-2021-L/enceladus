@@ -164,7 +164,7 @@ ensure_lambda() {
       --architectures "${arch}" \
       --handler lambda_function.lambda_handler \
       --role "${role_arn}" \
-      --timeout 30 \
+      --timeout 180 \
       --memory-size 1024 \
       --zip-file "fileb://${zip_path}" >/dev/null
   fi
@@ -195,7 +195,7 @@ ENV_JSON
       --region "${REGION}" \
       --function-name "${FUNCTION_NAME}" \
       --role "${role_arn}" \
-      --timeout 30 \
+      --timeout 180 \
       --memory-size 1024 \
       --environment "file://${env_file}" >/dev/null; then
       break
