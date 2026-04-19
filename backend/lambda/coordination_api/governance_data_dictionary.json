@@ -627,13 +627,18 @@
             "handoff",
             "coe",
             "wave",
+            "idea",
+            "context-node",
+            "skill"
+          ],
+          "legacy_readable_only": [
+            "general",
             "blueprint",
             "narrative",
-            "session-log",
-            "general"
+            "session-log"
           ],
-          "definition": "Document subtype classification. Required on all new documents (ENC-FTR-077). 'general' is deprecated for new creates — use 'doc' for standard unstructured documents. 'coe' for correction-of-errors, 'wave' for coordination wave tracking. Existing documents may still have 'general'.",
-          "usage_guidance": "Set at creation via document_api PUT body. Cannot be changed after creation. ENC-FTR-077: document_subtype is now required (no default). 'general' returns 400 for new documents."
+          "definition": "Document subtype classification. Required on all new documents (ENC-FTR-077). ENC-FTR-078 promotes the enum to a strict allow-list on writes (new writes + patches that set document_subtype must use an enum value) while keeping all legacy_readable_only values readable for grandfathered documents. 'idea' formalizes the architect-skill lifecycle terminal artifact (ENC-FTR-078 AC-4). 'context-node' is a Yoneda-compressed graph anchor with cap 2048 chars and >=5 related_items (ENC-FTR-078 AC-5, AC-7). 'skill' is a cross-platform portable skill primitive with dual Claude-spec and agentskills.io-spec projections (ENC-FTR-078 AC-8..14).",
+          "usage_guidance": "Set at creation via document_api PUT body. Cannot be changed after creation EXCEPT by PATCH; patches that set document_subtype to a legacy_readable_only value are rejected (ENC-FTR-078 AC-3). For emergent patterns, use document_subtype='doc' with subtypepattern='<value>' (ENC-FTR-078 subtypepattern self-learning mechanism, see document.doc)."
         },
         "source_record_id": {
           "type": "string",
@@ -796,7 +801,7 @@
       }
     },
     "document.doc": {
-      "description": "Standard document subtype (ENC-FTR-077). Default subtype for general-purpose documents. Includes a semantic handoff-detection guard that warns when title or content matches handoff patterns. Replaces deprecated 'general' subtype for new document creation.",
+      "description": "Standard document subtype (ENC-FTR-077, hardened by ENC-FTR-078). Default subtype for general-purpose documents. Includes a semantic handoff-detection guard that warns when title or content matches handoff patterns. Replaces deprecated 'general' subtype for new document creation. ENC-FTR-078 adds the subtypepattern self-learning field, title colon-prefix hygiene rule, and a documented graduation_pathway by which frequently-used subtypepattern values can be promoted to first-class document_subtype enum values via follow-on ENC-FTRs.",
       "fields": {
         "document_subtype": {
           "type": "enum",
@@ -815,6 +820,25 @@
           "type": "string",
           "definition": "Informational: the semantic handoff-detection guard checks HANDOFF_TITLE_PATTERNS (HANDOFF, Dispatch [A-Z], GOVERNANCE_SYNC_REQUIRED, EXECUTION_REQUIRED, Coordination.*Handoff, Handoff.*dispatch) and HANDOFF_CONTENT_PATTERNS (action_checklist, verification_criteria, prerequisite_state, ## Scope Statement, ## Acceptance Criteria.*dispatch). Any match triggers the guard unless confirm_subtype=true.",
           "usage_guidance": "Read-only reference. Patterns are defined as constants in document_api lambda_function.py."
+        },
+        "subtypepattern": {
+          "type": "string",
+          "constraints": {
+            "format": "^[a-z-]+$ after canonicalization",
+            "max_length": 64
+          },
+          "definition": "ENC-FTR-078 self-learning field (AC-16). Optional string capturing an emergent type pattern for doc-subtype records. Valid only when document_subtype='doc'; presence on any other subtype is rejected with code 'subtypepattern_wrong_subtype'. Canonicalization: input is trimmed and lowercased at write time, then validated against ^[a-z-]+$; invalid formats rejected with code 'subtypepattern_invalid_format'. The canonical form is what the server stores and returns. Applied on both PUT and PATCH when the field is touched. Valid examples: blueprint, runbook, post-mortem, design-decision. Invalid examples: 'blueprint_2' (underscore), 'BLUE PRINT' (space), 'blueprint?' (punctuation), '2024-blueprint' (digit).",
+          "usage_guidance": "Use to replace colon-prefixed titles (rejected by title_hygiene_rule). Example migration: title 'Blueprint: API Auth Design' + subtype='doc' becomes title 'API Auth Design' + subtypepattern='blueprint'. Queryable via documents.search subtypepattern filter (ENC-FTR-078 AC-17)."
+        },
+        "title_hygiene_rule": {
+          "type": "rule",
+          "definition": "ENC-FTR-078 AC-15 title hygiene. document_subtype='doc' titles matching the regex ^[A-Za-z][A-Za-z-]{1,30}: (case-insensitive leading alpha-or-dash word of length 2-31 followed by a colon) are rejected at PUT and PATCH (when title is touched) with error code 'doc_title_colon_prefix_disallowed'. The pedagogical error message reads: 'Title starts with a <type>: prefix. Titles should not encode subtype. Remove the <type>: prefix and place <type> (lowercased, alpha and dashes only) into the subtypepattern field.' Titles without the colon-prefix pattern continue to pass.",
+          "usage_guidance": "Agents migrating legacy records with colon-prefixed titles can remove the prefix and set subtypepattern in the same PATCH operation. Titles like 'CI: failing' that legitimately use a colon as narrative punctuation are also rejected under the current rule; file a follow-on ENC-FTR for carve-outs if io confirms a real-world need."
+        },
+        "graduation_pathway": {
+          "type": "rule",
+          "definition": "ENC-FTR-078 AC-18 schema-layer Godel-amendment mechanism. Agents express emergent type patterns via subtypepattern on document_subtype='doc' records. (a) Each subtypepattern value is structured, queryable telemetry for an emergent type primitive. (b) Consistent, high-frequency, cross-project usage of a subtypepattern value is evidence that the value should graduate to a first-class document_subtype enum value. (c) Graduation is performed via a follow-on ENC-FTR that moves the value from subtypepattern land into the document_subtype enum (and adds the new document.<name> entity to this dictionary). (d) The graduation criteria (thresholds, diversity measures) are deliberately unpinned in ENC-FTR-078; the first graduation-candidate ENC-FTR will specify them. This IS the Godel-amendment mechanism (DOC-0CAD28643E2F) applied at the schema layer: the enum is acknowledged as inherently incomplete, and subtypepattern is the structured evidence stream by which the enum learns what to become.",
+          "usage_guidance": "Documentation-only. No runtime logic ships in ENC-FTR-078 for graduation. Observability queries to propose graduation candidates: documents.search with subtypepattern filter (exact match) + aggregate by value."
         }
       }
     },
@@ -899,6 +923,128 @@
           ],
           "definition": "Optional classification of the agent layer role within this wave. Informational — not enforced by document_api.",
           "usage_guidance": "Set at creation or via PATCH to classify agent behavior mode."
+        }
+      }
+    },
+    "document.idea": {
+      "description": "Idea document subtype (ENC-FTR-078). Terminal artifact of the architect skill's five-stage idea lifecycle (Stages 0-4). Formalizes the type already referenced by the architect skill at init time via documents.search(document_subtype='idea') (SKILL.md Init Protocol Step 3) and closes the silent-failure mode where pre-ENC-FTR-078 server-side validation rejected the value. Governing document: DOC-EDEFF7CD0BD5.",
+      "fields": {
+        "document_subtype": {
+          "type": "enum",
+          "enum": [
+            "idea"
+          ],
+          "definition": "Fixed value 'idea' for architect-lifecycle idea documents.",
+          "usage_guidance": "Use when writing or searching for idea-lifecycle artifacts. ENC-FTR-078 AC-4: architect skill init-time documents.search(document_subtype='idea') now returns matching records."
+        },
+        "required_fields": {
+          "type": "rule",
+          "definition": "Minimum required fields on PUT: title (non-empty) and content (non-empty). No additional idea-specific required fields in ENC-FTR-078 Phase 1; the architect skill is the primary author and its own workflow supplies structure.",
+          "usage_guidance": "Phase 2 may introduce idea-specific lifecycle-stage and concept-author fields; until then, idea docs carry whatever structure the architect skill supplies."
+        },
+        "edge_density_soft": {
+          "type": "rule",
+          "definition": "No hard edge-density invariant is enforced for idea in ENC-FTR-078 Phase 1. Ideas may start as orphan records during early exploration. Compliance score penalty for orphan ideas remains advisory, not blocking.",
+          "usage_guidance": "Agents should add related_items over the idea's lifecycle as anchors emerge (candidate features, issues, prior lessons). Strong edge density at proposed / validated stages is a best practice, not a gate."
+        }
+      }
+    },
+    "document.context-node": {
+      "description": "Context-node document subtype (ENC-FTR-078). A compressed ontological primitive whose purpose is to triangulate the gravitational center of a graph-defined concept (an idea, feature, component, historical narrative) by carrying a strictly bounded text body plus a dense edge set via related_items. The node is its morphisms (Yoneda), and the bounded-text constraint forces the residual prose to carry only what is irreducible under graph traversal. Target consumer: any agent whose immediate goal requires fast context initialization against a known concept locus. Derivation artifact: DOC-B5F1BC281F02 (ENC-FTR-078 AC-6). Rationale anchors: DOC-0CAD28643E2F (Extended Mind inception principle), DOC-33EB705DE23D (Layer 3 generative seed — graph theory + compression-is-learning), DOC-E2379D980FA2 (math-of-institutional-memory synthesis — Kolmogorov/MDL, rate-distortion, Yoneda, information-bottleneck). Governing document: DOC-EDEFF7CD0BD5.",
+      "fields": {
+        "document_subtype": {
+          "type": "enum",
+          "enum": [
+            "context-node"
+          ],
+          "definition": "Fixed value 'context-node' for compressed graph-anchor documents."
+        },
+        "cap_readable_body": {
+          "type": "integer",
+          "constraints": {
+            "max": 2048,
+            "value": "CAP_CONTEXT_NODE = 2048"
+          },
+          "definition": "ENC-FTR-078 AC-5 hard cap on readable body length in characters. PUT and PATCH reject documents whose readable-body character count exceeds 2048 with error code 'context_node_cap_exceeded', payload {measured: int, cap: 2048}. Readable body is markdown content stripped of (a) the H1 ID line, (b) the standard **Project**/**Related**/**Created**/**Author** metadata block, and (c) the related_items-equivalent edge block if present inline.",
+          "usage_guidance": "Target the 2048-char budget. If a candidate context-node exceeds the cap, either split into multiple focused nodes or relocate prose into a linked standard doc and reference via related_items. Derivation: DOC-B5F1BC281F02."
+        },
+        "edge_density": {
+          "type": "integer",
+          "constraints": {
+            "min": 5,
+            "value": "N_MIN_CONTEXT_NODE = 5"
+          },
+          "definition": "ENC-FTR-078 AC-7 hard minimum on related_items edges. PUT rejects context-node documents with len(related_items) < 5 via error code 'context_node_edge_density_insufficient', payload {measured: int, min: 5}. PATCH re-validates when related_items is touched. Triangulation requires >=3 anchors for planar disambiguation; the practical floor is 5 to resist degenerate clustering.",
+          "usage_guidance": "Populate related_items with diverse anchor IDs (tasks, features, lessons, documents) spanning the concept locus. Phase-2 may introduce a per-document adaptive minimum based on concept complexity (future ENC-FTR)."
+        },
+        "phase_2_upgrade": {
+          "type": "rule",
+          "definition": "Phase-2 roadmap: adaptive cap_readable_body per document derived at write time from concept complexity, and adaptive edge_density minimum. Not shipped in ENC-FTR-078. Deferred to a follow-on ENC-FTR with explicit derivation.",
+          "usage_guidance": "Do not implement adaptive logic in ENC-FTR-078. Keep caps static at 2048 / 5 respectively."
+        }
+      }
+    },
+    "document.skill": {
+      "description": "Skill document subtype (ENC-FTR-078). Enceladus-defined structure for storing skills installable across any target runtime. Day-one coverage is explicitly dual: (a) Claude-specific install via the claude_description field (1024-char ceiling, matches Claude SKILL.md external spec by construction), (b) lowest-common-denominator agnostic install via the agentskills_manifest JSON object (conformant with the open specification at agentskills.io/home at the pinned agentskills_spec_version). runtime_variants is an optional extensibility hook admitting future runtimes without further schema evolution. The full_description <-> (claude_description, agentskills_manifest) projection set expresses a rate-distortion tuple: full_description is the higher-fidelity source; the two projections are governed compressions under their respective external constraints. Derivation artifact: DOC-75425CD9786D (ENC-FTR-078 AC-10). Rationale anchor: DOC-7E9861ED6104 (rate-distortion Lagrangian, MDL, AKU working-memory sizing). Governing document: DOC-EDEFF7CD0BD5.",
+      "fields": {
+        "document_subtype": {
+          "type": "enum",
+          "enum": [
+            "skill"
+          ],
+          "definition": "Fixed value 'skill' for portable skill documents."
+        },
+        "full_description": {
+          "type": "string",
+          "constraints": {
+            "min_length": 1,
+            "max_length": 4096,
+            "value": "CAP_SKILL_FULL_DESC = 4096"
+          },
+          "definition": "ENC-FTR-078 AC-8 required field. Enceladus-native, Lagrangian-optimized canonical specification of the skill. Carries phronesis: what the skill does, when to invoke it, what context it needs, what can go wrong, and what governance constraints apply. Source of truth from which every runtime projection is derived. Missing: code 'skill_full_description_missing'. Overcap: code 'skill_full_description_invalid' with {measured, cap: 4096}.",
+          "usage_guidance": "Target the 4096-char budget. Write operationally: trigger, options, failure modes, governance. Derivation: DOC-75425CD9786D."
+        },
+        "claude_description": {
+          "type": "string",
+          "constraints": {
+            "min_length": 1,
+            "max_length": 1024
+          },
+          "definition": "ENC-FTR-078 AC-9 required field. Hard-capped at 1024 characters per Claude SKILL.md external spec (non-negotiable). Used at Claude-install time to populate the description: field in SKILL.md frontmatter. Guaranteed to pass Claude-spec validation by construction because the server validates len <= 1024 at write time. Missing: code 'skill_claude_description_missing'. Overcap: code 'skill_claude_description_too_long'.",
+          "usage_guidance": "Compressed view of full_description honoring Claude's 1024-char operational constraint. Includes trigger patterns and sibling skills when relevant. The compression ratio full_description -> claude_description is the system's beta parameter from DOC-7E9861ED6104."
+        },
+        "agentskills_manifest": {
+          "type": "object",
+          "definition": "ENC-FTR-078 AC-12 required field. JSON object conformant with the agentskills.io/home specification at the pinned agentskills_spec_version. Server validates manifest against the pinned spec at write time (PUT + PATCH); non-conformant manifests rejected with code 'skill_agentskills_manifest_invalid' including validator output. Missing: code 'skill_agentskills_manifest_missing'. Used at agnostic-install time for any agentskills.io-compliant runtime.",
+          "usage_guidance": "Conform to the pinned agentskills.io spec version. The manifest is exported verbatim to any compliant runtime with zero Enceladus-specific translation."
+        },
+        "agentskills_spec_version": {
+          "type": "string",
+          "constraints": {
+            "min_length": 1,
+            "pinned_default": "0.1.0"
+          },
+          "definition": "ENC-FTR-078 AC-12 required field. String pinning the agentskills.io spec version (e.g. '0.1.0') against which agentskills_manifest is validated at write time. Missing: code 'skill_agentskills_spec_version_missing'. The pinned value used at deploy is recorded in DOC-75425CD9786D.",
+          "usage_guidance": "Pin to a specific agentskills.io spec version. Do not leave unpinned. Escalate to io when the upstream spec publishes a new version that should become the new pin."
+        },
+        "runtime_variants": {
+          "type": "object",
+          "definition": "ENC-FTR-078 AC-13 optional field. Map of {runtime_id: variant_payload} for runtime-specific overrides beyond Claude and beyond the agentskills.io common denominator. Unknown keys are accepted (forward-compat); the field is stored verbatim. Per-runtime validation is best-effort and non-blocking for runtimes not explicitly recognized by the server at the deploy date. Empty {} is valid.",
+          "usage_guidance": "Use to admit future runtimes without requiring a schema-evolution ENC-FTR. Adding support for a new runtime is an implementation task, not a schema-evolution task."
+        },
+        "edge_density_soft": {
+          "type": "rule",
+          "constraints": {
+            "min": 2,
+            "value": "N_MIN_SKILL = 2"
+          },
+          "definition": "ENC-FTR-078 AC-14 soft edge-density invariant. PUT rejects a skill document with len(related_items) < 2 via error code 'skill_edge_density_insufficient'. Softer than context-node's 5 because leaf-node utility skills are legitimate; a zero-or-one-edge skill is a disconnected record and invalid under Enceladus edge-density discipline.",
+          "usage_guidance": "Populate related_items with at minimum the governing ENC-FTR + one anchor (feature, task, or lesson that the skill operationalizes)."
+        },
+        "phase_2_upgrade": {
+          "type": "rule",
+          "definition": "Phase-2 roadmap: per-skill beta-tuned cap_full_description derived at write time from the skill's domain complexity. Not shipped in ENC-FTR-078.",
+          "usage_guidance": "Do not implement adaptive cap logic in ENC-FTR-078. Keep the cap static at 4096."
         }
       }
     },
@@ -1973,22 +2119,22 @@
       }
     },
     "mcp_server.documents_passthrough": {
-      "description": "Open-passthrough body construction pattern for the MCP-to-document_api bridge (ENC-TSK-C71 / ENC-TSK-E63 / ENC-ISS-158 / ENC-PLN-030). Replaces the prior explicit whitelist in _documents_put and _documents_patch with a denylist-driven loop mirroring _tracker_create. Every FTR-077 subtype field (document_subtype, source_record_id, handoff_status, prerequisite_state, verification_criteria, action_checklist, expires_at, source_incident_id, coe_status, plan_anchor_id, wave_status, informed_by, document_maturity_state, confirm_subtype) now forwards automatically from execute args to the document_api HTTP body. Eliminates the recurring failure mode where new subtype fields landed in document_api but not the MCP layer (rediscovered four times: ENC-TSK-B82, ENC-PLN-016 dispatch wave 1, ENC-TSK-E57 deploy session, ENC-TSK-E62 handoff attempts).",
+      "description": "Open-passthrough body construction pattern for the MCP-to-document_api bridge (ENC-TSK-C71 / ENC-TSK-E63 / ENC-ISS-158 / ENC-PLN-030, extended by ENC-FTR-078). Replaces the prior explicit whitelist in _documents_put and _documents_patch with a denylist-driven loop mirroring _tracker_create. Every subtype field declared in document_api now forwards automatically from execute args to the document_api HTTP body. ENC-FTR-078 adds subtypepattern (doc subtype) and five skill-subtype fields (full_description, claude_description, agentskills_manifest, agentskills_spec_version, runtime_variants) to the forwardable set and extends the documents.search filter arguments with subtypepattern. Eliminates the recurring failure mode where new subtype fields landed in document_api but not the MCP layer (rediscovered four times: ENC-TSK-B82, ENC-PLN-016 dispatch wave 1, ENC-TSK-E57 deploy session, ENC-TSK-E62 handoff attempts).",
       "fields": {
         "put_body_denylist": {
           "type": "array",
           "item_type": "string",
-          "definition": "Keys NOT forwarded from execute args to document_api PUT body. Single entry: governance_hash (handled by the HTTP auth layer, never goes in body)."
+          "definition": "Keys NOT forwarded from execute args to document_api PUT body. Single entry: governance_hash (handled by the HTTP auth layer, never goes in body). ENC-FTR-078 preserves the denylist shape unchanged; new fields flow through automatically."
         },
         "patch_body_denylist": {
           "type": "array",
           "item_type": "string",
-          "definition": "Keys NOT forwarded from execute args to document_api PATCH body. Two entries: governance_hash (HTTP auth layer) and document_id (URL path parameter, not body)."
+          "definition": "Keys NOT forwarded from execute args to document_api PATCH body. Two entries: governance_hash (HTTP auth layer) and document_id (URL path parameter, not body). ENC-FTR-078 preserves the denylist shape unchanged."
         },
         "tool_schema_coverage": {
           "type": "array",
           "item_type": "string",
-          "definition": "FTR-077 subtype fields newly declared in the documents_put and documents_patch tool schemas: document_subtype, confirm_subtype, source_record_id, handoff_status, prerequisite_state, verification_criteria, action_checklist, expires_at, source_incident_id, coe_status, plan_anchor_id, wave_status, informed_by, document_maturity_state. Each field's description references its dictionary entity (document.handoff / document.coe / document.wave / docstore.document)."
+          "definition": "Subtype fields declared in the documents_put and documents_patch tool schemas. FTR-077 set: document_subtype, confirm_subtype, source_record_id, handoff_status, prerequisite_state, verification_criteria, action_checklist, expires_at, source_incident_id, coe_status, plan_anchor_id, wave_status, informed_by, document_maturity_state. FTR-078 extensions: subtypepattern (document.doc), full_description (document.skill), claude_description (document.skill), agentskills_manifest (document.skill), agentskills_spec_version (document.skill), runtime_variants (document.skill). documents.search filter arguments also include subtypepattern (FTR-078 AC-17) for exact-match canonical filtering on document_subtype='doc' records. Each field's description references its dictionary entity (document.handoff / document.coe / document.wave / document.doc / document.idea / document.context-node / document.skill / docstore.document)."
         },
         "reference_pattern": {
           "type": "string",

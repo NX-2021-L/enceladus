@@ -290,6 +290,7 @@ class UploadSuccessTests(unittest.TestCase):
             "title": "Test Document",
             "content": "# Hello World\n\nThis is a test.",
             "keywords": ["test", "hello"],
+            "document_subtype": "doc",
         })
         resp = document_api.lambda_handler(event, None)
         self.assertEqual(resp["statusCode"], 201)

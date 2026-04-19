@@ -3817,7 +3817,7 @@ async def list_tools() -> list[Tool]:
         # --- Documents (6.3) ---
         Tool(
             name="documents_search",
-            description="Search for documents by project, keyword, related item, or title.",
+            description="Search for documents by project, keyword, related item, title, document_subtype, or subtypepattern (ENC-FTR-078 AC-17).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3836,6 +3836,18 @@ async def list_tools() -> list[Tool]:
                     "title": {
                         "type": "string",
                         "description": "Title substring to search for.",
+                    },
+                    "document_subtype": {
+                        "type": "string",
+                        "description": "Filter by document_subtype (e.g. 'idea', 'context-node', 'skill', 'doc', 'handoff', 'coe', 'wave'). Legacy values still searchable as they remain readable.",
+                    },
+                    "subtypepattern": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-17 self-learning filter. Matches document_subtype='doc' "
+                            "records whose canonical subtypepattern (lowercase, alpha+dash) exactly "
+                            "equals the filter value. Combine with document_subtype='doc' for clarity."
+                        ),
                     },
                 },
             },
@@ -3922,12 +3934,67 @@ async def list_tools() -> list[Tool]:
                     },
                     "document_subtype": {
                         "type": "string",
-                        "enum": ["doc", "handoff", "coe", "wave", "general"],
-                        "description": "Document subtype classification (ENC-FTR-077). Default 'doc'. 'handoff' requires source_record_id; 'coe' requires source_incident_id; 'wave' requires plan_anchor_id.",
+                        "enum": ["doc", "handoff", "coe", "wave", "idea", "context-node", "skill"],
+                        "description": (
+                            "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078). "
+                            "Strict allow-list on writes. 'handoff' requires source_record_id; "
+                            "'coe' requires source_incident_id; 'wave' requires plan_anchor_id; "
+                            "'context-node' requires body <=2048 chars and >=5 related_items; "
+                            "'skill' requires full_description (<=4096), claude_description (<=1024), "
+                            "agentskills_manifest + agentskills_spec_version, and >=2 related_items. "
+                            "Legacy values {general, blueprint, narrative, session-log} are read-only; "
+                            "for emergent patterns use document_subtype='doc' with subtypepattern='<value>'."
+                        ),
                     },
                     "confirm_subtype": {
                         "type": "boolean",
                         "description": "Override semantic guard when title/content match handoff patterns but subtype=doc is intentional.",
+                    },
+                    "subtypepattern": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-16 self-learning field. Optional. Valid only when "
+                            "document_subtype='doc'. Server canonicalizes (trim+lowercase) and validates "
+                            "^[a-z-]+$. Examples: 'blueprint', 'runbook', 'post-mortem'. (ref: document.doc)"
+                        ),
+                    },
+                    "full_description": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-8 required field for document_subtype='skill'. "
+                            "Non-empty, len <= 4096. Canonical source of truth. (ref: document.skill)"
+                        ),
+                    },
+                    "claude_description": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-9 required field for document_subtype='skill'. "
+                            "Non-empty, len <= 1024 (Claude SKILL.md hard ceiling). (ref: document.skill)"
+                        ),
+                    },
+                    "agentskills_manifest": {
+                        "type": "object",
+                        "description": (
+                            "ENC-FTR-078 AC-12 required field for document_subtype='skill'. "
+                            "JSON object conformant with agentskills.io/home spec at pinned "
+                            "agentskills_spec_version. (ref: document.skill)"
+                        ),
+                    },
+                    "agentskills_spec_version": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-12 required field for document_subtype='skill'. "
+                            "Pinned agentskills.io/home spec version (default '0.1.0'). "
+                            "(ref: document.skill)"
+                        ),
+                    },
+                    "runtime_variants": {
+                        "type": "object",
+                        "description": (
+                            "ENC-FTR-078 AC-13 optional field for document_subtype='skill'. "
+                            "Map of {runtime_id: variant_payload}. Unknown keys permitted. "
+                            "(ref: document.skill)"
+                        ),
                     },
                     "source_record_id": {
                         "type": "string",
@@ -4041,8 +4108,56 @@ async def list_tools() -> list[Tool]:
                     },
                     "document_subtype": {
                         "type": "string",
-                        "enum": ["doc", "handoff", "coe", "wave", "general"],
-                        "description": "Document subtype classification (ENC-FTR-077). Usually immutable after creation.",
+                        "enum": ["doc", "handoff", "coe", "wave", "idea", "context-node", "skill"],
+                        "description": (
+                            "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078). "
+                            "Strict allow-list on patches. Agents may patch a legacy record "
+                            "(general/blueprint/narrative/session-log) to any allow-list subtype "
+                            "provided subtype-specific requirements are satisfied in the same PATCH."
+                        ),
+                    },
+                    "subtypepattern": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-16. Valid only when the post-patch document_subtype='doc'. "
+                            "Server canonicalizes (trim+lowercase) and validates ^[a-z-]+$. "
+                            "Empty string clears the field. (ref: document.doc)"
+                        ),
+                    },
+                    "full_description": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 skill patch. Non-empty, len <= 4096. "
+                            "Valid only when final_subtype='skill'. (ref: document.skill)"
+                        ),
+                    },
+                    "claude_description": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 skill patch. Non-empty, len <= 1024. "
+                            "Valid only when final_subtype='skill'. (ref: document.skill)"
+                        ),
+                    },
+                    "agentskills_manifest": {
+                        "type": "object",
+                        "description": (
+                            "ENC-FTR-078 skill patch. JSON object re-validated against pinned "
+                            "agentskills_spec_version. (ref: document.skill)"
+                        ),
+                    },
+                    "agentskills_spec_version": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 skill patch. Non-empty string; triggers manifest re-validation. "
+                            "(ref: document.skill)"
+                        ),
+                    },
+                    "runtime_variants": {
+                        "type": "object",
+                        "description": (
+                            "ENC-FTR-078 skill patch. JSON object. Replaces existing runtime_variants. "
+                            "(ref: document.skill)"
+                        ),
                     },
                     "source_record_id": {
                         "type": "string",
@@ -5662,6 +5777,11 @@ async def _documents_search(args: dict) -> list[TextContent]:
         query["related"] = args["related"]
     if args.get("title"):
         query["title"] = args["title"]
+    # ENC-FTR-077 subtype filter + ENC-FTR-078 subtypepattern filter (AC-17).
+    if args.get("document_subtype"):
+        query["document_subtype"] = args["document_subtype"]
+    if args.get("subtypepattern"):
+        query["subtypepattern"] = args["subtypepattern"]
 
     resp = _document_api_request("GET", "/search", query=query or None)
     return _result_text(resp)
