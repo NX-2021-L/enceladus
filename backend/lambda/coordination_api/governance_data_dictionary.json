@@ -4548,7 +4548,7 @@
         },
         "response_envelope": {
           "type": "object",
-          "definition": "GET /api/v1/tracker/graphsearch?search_type=hybrid response includes the existing nodes/edges/paths/summary/query_cypher/duration_ms fields plus: signal_availability {vector,graph,keyword: bool}, graph_algorithm ('ppr_gds'|'cypher_fallback'|'unavailable'), rrf_k, embedding_coverage_sample {covered, total_ranked}, per_node_fusion {record_id: {fused_rank, fused_score, per_signal_ranks}}, fsrs_t3_threshold, include_below_threshold. The MCP server propagates these into get_compact_context.result.hybrid_retrieval verbatim."
+          "definition": "GET /api/v1/tracker/graphsearch?search_type=hybrid response includes the existing nodes/edges/paths/summary/query_cypher/duration_ms fields plus: signal_availability {vector,graph,keyword: bool}, graph_algorithm ('gds_pagerank'|'cypher_fallback'|'unavailable'), rrf_k, embedding_coverage_sample {covered, total_ranked}, per_node_fusion {record_id: {fused_rank, fused_score, per_signal_ranks}}, fsrs_t3_threshold, include_below_threshold. The MCP server propagates these into get_compact_context.result.hybrid_retrieval verbatim."
         },
         "context_assembly_integration": {
           "type": "string",
