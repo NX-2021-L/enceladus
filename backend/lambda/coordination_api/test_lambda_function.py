@@ -3478,5 +3478,51 @@ class TriggerGovernanceSyncPushTests(unittest.TestCase):
         coordination_lambda._lambda_client = None
 
 
+class LegacyTaskSegmentAliasTests(unittest.TestCase):
+    """ENC-ISS-133 / ENC-TSK-F09: TASK is a read-only alias for TSK in
+    _SEGMENT_TO_TYPE so _key_for_record_id accepts 40 pre-convention IDs
+    (JAP-TASK-*, HFY-TASK-*, ISG-TASK-*) without rewriting DynamoDB keys.
+    Canonical minting (_TYPE_TO_SEGMENT / _build_record_id) must still emit TSK."""
+
+    def test_task_segment_in_segment_to_type(self):
+        self.assertEqual(coordination_lambda._SEGMENT_TO_TYPE["TASK"], "task")
+
+    def test_canonical_type_to_segment_unchanged(self):
+        self.assertEqual(coordination_lambda._TYPE_TO_SEGMENT["task"], "TSK")
+
+    def test_build_record_id_still_mints_tsk(self):
+        minted = coordination_lambda._build_record_id("ENC", "task", 42)
+        self.assertIn("TSK", minted)
+        self.assertNotIn("TASK", minted)
+
+    def test_key_for_record_id_accepts_legacy_jap_task(self):
+        coordination_lambda._project_cache["jobapps"] = {"prefix": "JAP"}
+        try:
+            project_id, record_type, sk = coordination_lambda._key_for_record_id("JAP-TASK-421")
+        finally:
+            coordination_lambda._project_cache.pop("jobapps", None)
+        self.assertEqual(project_id, "jobapps")
+        self.assertEqual(record_type, "task")
+        self.assertEqual(sk, "task#JAP-TASK-421")
+
+    def test_key_for_record_id_accepts_legacy_hfy_task(self):
+        coordination_lambda._project_cache["harrisonfamily"] = {"prefix": "HFY"}
+        try:
+            project_id, record_type, sk = coordination_lambda._key_for_record_id("HFY-TASK-024")
+        finally:
+            coordination_lambda._project_cache.pop("harrisonfamily", None)
+        self.assertEqual(record_type, "task")
+        self.assertEqual(sk, "task#HFY-TASK-024")
+
+    def test_key_for_record_id_accepts_legacy_isg_task(self):
+        coordination_lambda._project_cache["intelligent-scraper-generator"] = {"prefix": "ISG"}
+        try:
+            project_id, record_type, sk = coordination_lambda._key_for_record_id("ISG-TASK-205")
+        finally:
+            coordination_lambda._project_cache.pop("intelligent-scraper-generator", None)
+        self.assertEqual(record_type, "task")
+        self.assertEqual(sk, "task#ISG-TASK-205")
+
+
 if __name__ == "__main__":
     unittest.main()

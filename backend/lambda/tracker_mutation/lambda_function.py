@@ -145,6 +145,10 @@ _CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "
 _DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted", "generation": "drafted"}
 _TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN", "generation": "GEN"}
 _ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan", "GEN": "generation"}
+# ENC-ISS-133 / ENC-TSK-F09: legacy segment alias for 40 records with JAP-TASK-*,
+# HFY-TASK-*, ISG-TASK-* IDs created before the TSK convention. Read-only alias; canonical
+# minting via _TRACKER_TYPE_SUFFIX still emits TSK.
+_ID_SEGMENT_TO_TYPE["TASK"] = "task"
 
 # Category validation per record type
 _VALID_CATEGORIES = {

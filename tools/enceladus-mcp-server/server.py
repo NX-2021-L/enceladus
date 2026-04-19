@@ -706,6 +706,9 @@ def _ser_value(val: Any) -> Dict:
 
 # Record-ID to DynamoDB key mapping (mirrors tracker.py item_key logic)
 _ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
+# ENC-ISS-133 / ENC-TSK-F09: legacy segment alias for 40 records with JAP-TASK-*,
+# HFY-TASK-*, ISG-TASK-* IDs created before the TSK convention. Read-only alias.
+_ID_SEGMENT_TO_TYPE["TASK"] = "task"
 _PREFIX_MAP_CACHE: Optional[Dict[str, str]] = None
 _DEFAULT_STATUS_BY_TYPE = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted"}
 _RELATION_ID_FIELDS = {

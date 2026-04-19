@@ -476,6 +476,10 @@ _TYPE_TO_SEGMENT = {
 }
 
 _SEGMENT_TO_TYPE = {v: k for k, v in _TYPE_TO_SEGMENT.items()}
+# ENC-ISS-133 / ENC-TSK-F09: legacy segment alias for 40 records with JAP-TASK-*,
+# HFY-TASK-*, ISG-TASK-* IDs created before the TSK convention. Read-only alias;
+# canonical minting via _TYPE_TO_SEGMENT / _build_record_id still emits TSK.
+_SEGMENT_TO_TYPE["TASK"] = "task"
 
 _DEFAULT_STATUS = {
     "task": "open",

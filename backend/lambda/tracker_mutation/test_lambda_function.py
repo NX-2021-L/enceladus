@@ -307,6 +307,32 @@ class DynamoDBKeyTests(unittest.TestCase):
         self.assertEqual(key["record_id"]["S"], "feature#FTR-003")
 
 
+class LegacyTaskSegmentAliasTests(unittest.TestCase):
+    """ENC-ISS-133 / ENC-TSK-F09: TASK segment is a read-only alias for TSK so
+    40 pre-convention records (JAP-TASK-*, HFY-TASK-*, ISG-TASK-*) remain mutable
+    via the tracker API without rewriting their DynamoDB keys."""
+
+    def test_task_segment_maps_to_task_type(self):
+        self.assertEqual(tracker_mutation._ID_SEGMENT_TO_TYPE["TASK"], "task")
+
+    def test_record_type_from_legacy_jap_task_id(self):
+        self.assertEqual(tracker_mutation._record_type_from_id("JAP-TASK-421"), "task")
+
+    def test_record_type_from_legacy_hfy_task_id(self):
+        self.assertEqual(tracker_mutation._record_type_from_id("HFY-TASK-024"), "task")
+
+    def test_record_type_from_legacy_isg_task_id(self):
+        self.assertEqual(tracker_mutation._record_type_from_id("ISG-TASK-205"), "task")
+
+    def test_canonical_tsk_still_maps_to_task(self):
+        self.assertEqual(tracker_mutation._record_type_from_id("ENC-TSK-001"), "task")
+
+    def test_canonical_mint_unchanged(self):
+        # _TRACKER_TYPE_SUFFIX drives new-record minting; task must still mint as TSK.
+        self.assertEqual(tracker_mutation._TRACKER_TYPE_SUFFIX["task"], "TSK")
+        self.assertNotIn("TASK", tracker_mutation._TRACKER_TYPE_SUFFIX.values())
+
+
 class LegacyPathTests(unittest.TestCase):
     """Test both legacy /{project}/{type}/{id} and v1 /api/v1/tracker/... paths."""
 
