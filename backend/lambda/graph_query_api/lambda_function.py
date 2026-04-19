@@ -984,7 +984,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "summary":           "Hybrid: N nodes (vector=V, graph=G, keyword=K)",
         "query_cypher":      "<hybrid-multi-query marker>",
         "signal_availability": {vector: bool, graph: bool, keyword: bool},
-        "graph_algorithm":   "ppr_gds" | "cypher_fallback" | "unavailable",
+        "graph_algorithm":   "gds_pagerank" | "cypher_fallback" | "unavailable",
         "rrf_k":             60,
         "embedding_coverage_sample": {covered: N, total_ranked: N},
         "per_node_fusion":   {record_id: {fused_rank, per_signal_ranks}}
@@ -1031,7 +1031,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
                 driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
             )
             if graph_ranks:
-                graph_algorithm = "ppr_gds"
+                graph_algorithm = "gds_pagerank"
                 graph_available = True
         # Fall back to Cypher if GDS unavailable OR returned empty.
         if not graph_available:
