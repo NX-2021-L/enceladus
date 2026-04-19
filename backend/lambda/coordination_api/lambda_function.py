@@ -8033,6 +8033,51 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
         )
     transition_type = requested_type or "github_pr_deploy"
 
+    # F50/AC-6 (Option A, strict — see ENC-TSK-F50 and DOC-240A67973B13):
+    # required_transition_type is a first-class invariant field. Absent field
+    # returns 400 with a descriptive error envelope. No auto-fill from
+    # transition_type — the governance intent must be stated explicitly at
+    # create time so the checkout_service fail-loud path (AC-3) never trips
+    # on silently-defaulted data. Option B (permissive auto-fill with WARNING)
+    # was considered and rejected; the chosen behavior is documented in
+    # governance_data_dictionary.json :: checkout_service.required_transition_type_enforcement.
+    requested_required_type = (body.get("required_transition_type") or "").strip().lower()
+    if not requested_required_type:
+        return _component_validation_error(
+            400,
+            (
+                "required_transition_type is required and must be one of "
+                f"{sorted(_COMPONENT_TRANSITION_TYPES)} (ENC-TSK-F50 / ENC-ISS-270). "
+                "This field governs the minimum task strictness enforced by "
+                "checkout_service for tasks modifying this component. See "
+                "DOC-240A67973B13 for per-component selection rationale."
+            ),
+            field="required_transition_type",
+            expected_type="enum",
+            allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+            example_fix={
+                "required_transition_type": "github_pr_deploy",
+                "hint": (
+                    "For Lambda code use github_pr_deploy; for frontend/PWA use "
+                    "web_deploy; for CFN / governance docs / admin-managed "
+                    "externals use no_code. Match the existing transition_type "
+                    "unless you have a deliberate reason to diverge."
+                ),
+            },
+        )
+    if requested_required_type not in _COMPONENT_TRANSITION_TYPES:
+        return _component_validation_error(
+            400,
+            (
+                f"Invalid required_transition_type '{requested_required_type}'. "
+                f"Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}"
+            ),
+            field="required_transition_type",
+            expected_type="enum",
+            allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+        )
+    required_transition_type = requested_required_type
+
     # Build component_id from provided slug or derive from name
     component_id = (body.get("component_id") or "").strip()
     if not component_id:
@@ -8056,6 +8101,9 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
         "project_id": project_id,
         "category": category,
         "transition_type": transition_type,
+        # F50/AC-6: required_transition_type is persisted alongside transition_type;
+        # checkout_service reads THIS field for strictness enforcement.
+        "required_transition_type": required_transition_type,
         "status": status_val,
         "created_at": now,
         "updated_at": now,
@@ -8200,6 +8248,10 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
         "project_id": project_id,
         "category": (body.get("category") or "proposed").strip().lower() or "proposed",
         "transition_type": requested_type,   # placeholder until approval adjusts it
+        # F50/AC-6: stamp required_transition_type at propose time so the
+        # proposed record already carries the governed invariant field.
+        # Approval may override via _handle_components_approve.
+        "required_transition_type": requested_type,
         "status": "active",                    # active per _COMPONENT_STATUSES; governance lives on lifecycle_status
         "lifecycle_status": "proposed",
         "proposing_agent_session_id": proposing_agent_session_id,
@@ -8408,6 +8460,24 @@ def _handle_components_approve(
             allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
         )
 
+    # F50/AC-6: coord lead may also override required_transition_type at approve
+    # time. The propose handler stamps it at proposal time; this path lets the
+    # approver tighten or loosen the governed strictness independently of the
+    # legacy transition_type field.
+    override_required_type = (body.get("required_transition_type") or "").strip().lower()
+    if override_required_type and override_required_type not in _COMPONENT_TRANSITION_TYPES:
+        return _component_validation_error(
+            400,
+            (
+                f"Invalid required_transition_type '{override_required_type}'. "
+                f"Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}"
+            ),
+            field="required_transition_type",
+            component_id=component_id,
+            expected_type="enum",
+            allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+        )
+
     approved_by = _resolve_decider_identity(claims)
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -8427,6 +8497,9 @@ def _handle_components_approve(
     if override_type:
         update_parts.append("transition_type = :tt")
         attr_vals[":tt"] = {"S": override_type}
+    if override_required_type:
+        update_parts.append("required_transition_type = :rtt")
+        attr_vals[":rtt"] = {"S": override_required_type}
 
     ddb = _get_ddb()
     try:
@@ -8607,9 +8680,67 @@ def _handle_components_update(
                 allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
             )
 
+    # F50/AC-7 (ENC-TSK-F50 / ENC-ISS-270 / DOC-240A67973B13):
+    # required_transition_type can be updated to any valid enum value but
+    # NEVER unset back to null/empty/absent. Once populated, the field
+    # remains a first-class governance invariant that checkout_service reads
+    # for strictness enforcement. Cognito/assistant auth parallels the
+    # transition_type guard.
+    if "required_transition_type" in body:
+        raw_required = body.get("required_transition_type")
+        # Reject None, empty string, whitespace-only string.
+        if raw_required is None or (
+            isinstance(raw_required, str) and not raw_required.strip()
+        ):
+            return _component_validation_error(
+                400,
+                (
+                    "required_transition_type cannot be unset to null/empty "
+                    "(ENC-TSK-F50 / ENC-ISS-270). Once populated, the field "
+                    "may be updated to a different valid enum value but never "
+                    "cleared. Delete the component record if removal is the "
+                    "actual intent."
+                ),
+                field="required_transition_type",
+                component_id=component_id,
+                expected_type="enum",
+                allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+            )
+        if not (_is_cognito_session(claims) or _is_assistant_request(event)):
+            return _component_validation_error(
+                403,
+                (
+                    "Updating required_transition_type requires Cognito "
+                    "authentication (PWA session) or checkout-service-assistant "
+                    "key. Direct agent writes via internal API key are not permitted."
+                ),
+                field="required_transition_type",
+                component_id=component_id,
+                expected_type="enum",
+                allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+            )
+        new_required = str(raw_required).strip().lower()
+        if new_required not in _COMPONENT_TRANSITION_TYPES:
+            return _component_validation_error(
+                400,
+                (
+                    f"Invalid required_transition_type '{new_required}'. "
+                    f"Allowed: {sorted(_COMPONENT_TRANSITION_TYPES)}"
+                ),
+                field="required_transition_type",
+                component_id=component_id,
+                expected_type="enum",
+                allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
+            )
+        # Normalize the body value so the downstream update_parts loop writes
+        # the clean enum, not whatever case/whitespace the caller sent.
+        body["required_transition_type"] = new_required
+
     # Build update expression
     updatable_fields = {
         "component_name", "project_id", "category", "transition_type",
+        # F50/AC-7: include required_transition_type so validated PATCHes persist.
+        "required_transition_type",
         "description", "github_repo", "status", "assistant_reason",
     }
     # source_paths is a nested map — serialized via TypeSerializer, not as plain string

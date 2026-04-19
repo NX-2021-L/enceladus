@@ -921,12 +921,16 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
     pre_components = pre_task.get("components") or []
     if pre_components:
         pre_transition_type = (pre_task.get("transition_type") or "github_pr_deploy").strip().lower()
-        required_type = _get_required_transition_type(pre_components)
+        try:
+            required_type = _get_required_transition_type(pre_components)
+        except ComponentMisconfiguredError as exc:
+            return _component_misconfigured_response(exc)
         if required_type is not None:
             task_rank = STRICTNESS_RANK.get(pre_transition_type, 99)
             required_rank = STRICTNESS_RANK.get(required_type, 0)
             if task_rank > required_rank:
-                # Identify the specific conflicting component for the error message
+                # Identify the specific conflicting component for the error message.
+                # F50/AC-3: read required_transition_type, not the legacy transition_type.
                 conflicting_component = None
                 for cid in pre_components:
                     try:
@@ -937,7 +941,13 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
                         item = resp.get("Item")
                         if not item:
                             continue
-                        comp_type = item.get("transition_type", {}).get("S", "github_pr_deploy")
+                        comp_type = (
+                            item.get("required_transition_type", {}).get("S") or ""
+                        ).strip()
+                        if not comp_type:
+                            # Should be unreachable after _get_required_transition_type
+                            # succeeded for this component; skip defensively.
+                            continue
                         comp_rank = STRICTNESS_RANK.get(comp_type, 0)
                         if comp_rank < task_rank:
                             conflicting_component = cid
@@ -1681,20 +1691,106 @@ def _validate_subtask_gate(
 
 # ---------------------------------------------------------------------------
 # ENC-FTR-041: Component registry enforcement helpers
+# ENC-TSK-F50 / ENC-ISS-270: required_transition_type is now the governed
+# enforcement field (see DOC-240A67973B13). The legacy `transition_type`
+# field on component records is NOT read here post-F50 — it is retained on
+# the record for back-compat and deploy-style documentation only. A missing
+# or invalid `required_transition_type` is an invariant violation and fails
+# loud with COMPONENT_MISCONFIGURED; no silent default remains.
 # ---------------------------------------------------------------------------
 
 
-def _get_required_transition_type(component_ids: list) -> Optional[str]:
-    """Fetch components from registry; return most restrictive transition_type.
+class ComponentMisconfiguredError(Exception):
+    """Raised when a component record is missing `required_transition_type`
+    or carries an invalid enum value.
 
-    If a component is not found in the registry, a warning is logged and enforcement
-    is skipped for that component (fail-open per-component to avoid hard blocking on
-    registry gaps). If ALL components are missing, returns None (no enforcement).
+    F50/AC-3 and F50/AC-4: the previous silent-default behavior
+    (``github_pr_deploy`` when ``transition_type`` was absent) is replaced
+    with a first-class invariant violation surfaced through the standard
+    ``api.error_envelope`` contract. Callers should translate this
+    exception into an HTTP 500 response via
+    :func:`_component_misconfigured_response`.
+    """
+
+    def __init__(
+        self,
+        component_id: str,
+        *,
+        reason: str = "missing",
+        bad_value: Optional[str] = None,
+    ) -> None:
+        self.component_id = component_id
+        self.reason = reason  # "missing" or "invalid_value"
+        self.bad_value = bad_value
+        if reason == "invalid_value":
+            message = (
+                f"Component '{component_id}' has invalid required_transition_type="
+                f"'{bad_value}'; this is an invariant violation. Contact platform admin."
+            )
+        else:
+            message = (
+                f"Component '{component_id}' is missing required_transition_type; "
+                "this is an invariant violation. Contact platform admin."
+            )
+        super().__init__(message)
+
+
+def _component_misconfigured_response(exc: ComponentMisconfiguredError) -> dict:
+    """Translate :class:`ComponentMisconfiguredError` into the standard
+    ``api.error_envelope`` shape (ENC-TSK-D56).
+
+    The envelope carries component_id, remediation_url, and remediation
+    guidance sufficient for an agent to self-correct on the next attempt
+    without additional tool calls (F50/AC-4).
+    """
+    remediation_url = f"https://jreese.net/components/{exc.component_id}"
+    details: Dict[str, Any] = {
+        "component_id": exc.component_id,
+        "reason": exc.reason,
+        "remediation_url": remediation_url,
+        "remediation_guidance": (
+            "Set the component's `required_transition_type` in the registry "
+            "(DynamoDB enceladus-component-registry) via the PWA /components "
+            "edit surface or via a product-lead terminal update-item. Valid "
+            "values: github_pr_deploy|lambda_deploy|web_deploy|code_only|no_code. "
+            "After the field is populated, retry the checkout."
+        ),
+        "rule_citation": (
+            "ENC-TSK-F50 / ENC-ISS-270 / DOC-240A67973B13 (AC-1 review document)"
+        ),
+    }
+    if exc.bad_value is not None:
+        details["invalid_value"] = exc.bad_value
+    return _error(
+        500,
+        str(exc),
+        code="COMPONENT_MISCONFIGURED",
+        retryable=False,
+        details=details,
+    )
+
+
+def _get_required_transition_type(component_ids: list) -> Optional[str]:
+    """Return the most restrictive ``required_transition_type`` across the
+    given component IDs.
+
+    F50/AC-3: reads the governed ``required_transition_type`` field on each
+    component registry record — NOT the legacy ``transition_type`` field.
+    If a component record exists but has no ``required_transition_type``
+    attribute, or the value is not a valid member of STRICTNESS_RANK,
+    raises :class:`ComponentMisconfiguredError` (no silent default).
+
+    Missing components (component_id absent from the registry entirely)
+    continue to fail-open with a WARNING log, preserving the ENC-FTR-041
+    behavior for unknown IDs so a stale task.components entry does not hard
+    block every downstream call.
+
+    Returns None when ``component_ids`` is empty.
     """
     if not component_ids:
         return None
     min_rank = 99
-    required = None
+    required: Optional[str] = None
     for cid in component_ids:
         try:
             resp = _ddb.get_item(
@@ -1707,11 +1803,30 @@ def _get_required_transition_type(component_ids: list) -> Optional[str]:
                     "[FTR-041] Component '%s' not found in registry; skipping enforcement", cid
                 )
                 continue
-            comp_type = item.get("transition_type", {}).get("S", "github_pr_deploy")
-            rank = STRICTNESS_RANK.get(comp_type, 0)
+            required_attr = item.get("required_transition_type") or {}
+            comp_type = (required_attr.get("S") or "").strip()
+            if not comp_type:
+                logger.error(
+                    "[F50/AC-3] Component '%s' is missing required_transition_type "
+                    "in the registry (see DOC-240A67973B13 for governance contract)",
+                    cid,
+                )
+                raise ComponentMisconfiguredError(cid, reason="missing")
+            if comp_type not in STRICTNESS_RANK:
+                logger.error(
+                    "[F50/AC-3] Component '%s' has invalid required_transition_type='%s' "
+                    "(not in STRICTNESS_RANK)",
+                    cid, comp_type,
+                )
+                raise ComponentMisconfiguredError(
+                    cid, reason="invalid_value", bad_value=comp_type
+                )
+            rank = STRICTNESS_RANK[comp_type]
             if rank < min_rank:
                 min_rank = rank
                 required = comp_type
+        except ComponentMisconfiguredError:
+            raise
         except Exception as exc:
             logger.error("[FTR-041] Failed to fetch component '%s': %s", cid, exc)
     return required
@@ -2074,7 +2189,10 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
             )
 
     if components:
-        required_type = _get_required_transition_type(components)
+        try:
+            required_type = _get_required_transition_type(components)
+        except ComponentMisconfiguredError as exc:
+            return _component_misconfigured_response(exc)
         if required_type is not None:
             task_rank = STRICTNESS_RANK.get(transition_type, 99)
             required_rank = STRICTNESS_RANK.get(required_type, 0)

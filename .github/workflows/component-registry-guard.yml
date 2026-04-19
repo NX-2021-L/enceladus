@@ -1,0 +1,55 @@
+name: Component Registry Guard
+
+# F50/AC-10 (ENC-TSK-F50 / ENC-ISS-270): pre-merge guard that blocks PRs
+# touching the component registry surface if any seed entry is missing
+# `required_transition_type` or declares an invalid enum value. Optionally
+# (when a workflow input is set) also probes the live registry API.
+#
+# Triggering files — the scanner only runs on PRs that actually modify the
+# component registry surface, to avoid wasted CI on unrelated PRs:
+#   - tools/seed-component-registry.py
+#   - tools/verify_component_required_transition_type.py  (self-audit)
+#   - backend/lambda/coordination_api/governance_data_dictionary.json
+#     (component_registry.component field spec)
+#   - backend/lambda/coordination_api/lambda_function.py
+#     (_handle_components_create / _handle_components_update)
+#
+# Full field semantics: DOC-240A67973B13 (AC-1 governance review).
+
+on:
+  pull_request:
+    branches: [main, 'v[0-9]*/main']
+    paths:
+      - 'tools/seed-component-registry.py'
+      - 'tools/verify_component_required_transition_type.py'
+      - 'backend/lambda/coordination_api/governance_data_dictionary.json'
+      - 'backend/lambda/coordination_api/lambda_function.py'
+      - '.github/workflows/component-registry-guard.yml'
+  push:
+    branches: [main, 'v[0-9]*/main']
+    paths:
+      - 'tools/seed-component-registry.py'
+      - 'tools/verify_component_required_transition_type.py'
+      - 'backend/lambda/coordination_api/governance_data_dictionary.json'
+      - 'backend/lambda/coordination_api/lambda_function.py'
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Seed manifest + required_transition_type
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Audit seed manifest
+        run: |
+          set -euo pipefail
+          python3 tools/verify_component_required_transition_type.py
