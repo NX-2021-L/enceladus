@@ -6110,6 +6110,59 @@ async def _document_create_wave(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
+async def _document_create_note(args: dict) -> list[TextContent]:
+    """Create an ad-hoc governed note with document_subtype='doc' (ENC-ISS-259).
+
+    Purpose: give coord-lead / supervisor sessions a first-class, discoverable
+    governed write path for notes, checklists, or orchestration artifacts that
+    do not need a source-record binding (no source_record_id, no plan_anchor_id,
+    no source_incident_id). Wraps documents.put with subtype pinned to 'doc'
+    and denies caller override of subtype.
+    """
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    project_id = str(args.get("project_id") or "").strip()
+    title = str(args.get("title") or "").strip()
+    content = str(args.get("content") or "").strip()
+
+    if not project_id:
+        return _result_text(_error_payload("INVALID_INPUT", "project_id is required"))
+    if not title:
+        return _result_text(_error_payload("INVALID_INPUT", "title is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+
+    # Deny caller override of document_subtype; notes are always subtype=doc.
+    if "document_subtype" in args and args.get("document_subtype") not in (None, "", "doc"):
+        return _result_text(_error_payload(
+            "INVALID_INPUT",
+            "document.create_note pins document_subtype='doc'; do not pass a different subtype. "
+            "Use document.create_handoff / document.create_coe / document.create_wave for those "
+            "subtypes, or documents.put directly for anything else.",
+        ))
+
+    body: Dict[str, Any] = {
+        "project_id": project_id,
+        "title": title,
+        "content": content,
+        "document_subtype": "doc",
+    }
+    # Forward the common optional fields that coord-lead notes commonly carry.
+    for key in ("description", "keywords", "related_items", "file_name", "informed_by"):
+        if key in args and args.get(key) is not None:
+            body[key] = args[key]
+
+    result = _document_api_request("PUT", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_create_note: document API auth failed for project %s",
+            project_id,
+        )
+    return _result_text(result)
+
+
 async def _document_append_handoff_reply(args: dict) -> list[TextContent]:
     """Append a structured reply block to a handoff document."""
     governance_error = _require_governance_hash_envelope(args)
@@ -7255,6 +7308,14 @@ if ENABLE_HANDOFF_PRIMITIVE:
     _EXECUTE_ACTIONS["document.append_wave_entry"] = {
         "tool": "document_append_wave_entry", "requires_governance_hash": True,
     }
+
+# ENC-ISS-259: document.create_note \u2014 governed ad-hoc note path for coord-lead /
+# supervisor sessions. Wraps documents.put with document_subtype pinned to 'doc'.
+# Not gated behind ENABLE_HANDOFF_PRIMITIVE because the 'doc' subtype is the
+# stable, always-available baseline and pre-dates the handoff primitive rollout.
+_EXECUTE_ACTIONS["document.create_note"] = {
+    "tool": "document_create_note", "requires_governance_hash": True,
+}
 
 # ENC-FTR-076 / ENC-TSK-E08: Conditionally register component.propose behind feature flag
 if ENABLE_COMPONENT_PROPOSAL:
@@ -9695,6 +9756,8 @@ _TOOL_HANDLERS = {
     "document_create_wave": _document_create_wave,
     "document_append_handoff_reply": _document_append_handoff_reply,
     "document_append_wave_entry": _document_append_wave_entry,
+    # ENC-ISS-259: ad-hoc governed note path (subtype='doc', no source binding)
+    "document_create_note": _document_create_note,
     # ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry
     "component_propose": _component_propose,
 }
