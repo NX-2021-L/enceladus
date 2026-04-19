@@ -53,6 +53,37 @@ resolve_role_arn() {
   printf '%s' "${source_role}"
 }
 
+preflight_merge_live_env_vars() {
+  # ENC-ISS-258 Bug 1 fix: source Cognito env vars from the live Lambda's
+  # Environment.Variables when the operator's shell did not set them.
+  # Lets any product-lead operator deploy without out-of-band secret retrieval.
+  # No-op on first deploy (live Lambda absent); the validation block refuses
+  # as before if the secret is still empty after the merge attempt.
+  if ! function_exists; then
+    return 0
+  fi
+
+  _merge_one() {
+    local shell_var="$1" lambda_key="$2" value
+    if [[ -z "${!shell_var}" ]]; then
+      value="$(aws lambda get-function-configuration \
+        --function-name "${FUNCTION_NAME}" --region "${REGION}" \
+        --query "Environment.Variables.${lambda_key}" \
+        --output text 2>/dev/null || true)"
+      if [[ -n "${value}" && "${value}" != "None" ]]; then
+        printf -v "${shell_var}" '%s' "${value}"
+        log "[INFO] ${shell_var} sourced from live Lambda ${FUNCTION_NAME}"
+      fi
+    fi
+  }
+
+  _merge_one COGNITO_USER_POOL_ID  ENCELADUS_COGNITO_USER_POOL_ID
+  _merge_one COGNITO_CLIENT_ID     ENCELADUS_COGNITO_CLIENT_ID
+  _merge_one COGNITO_CLIENT_SECRET ENCELADUS_COGNITO_CLIENT_SECRET
+  _merge_one COGNITO_DOMAIN        ENCELADUS_COGNITO_DOMAIN
+  unset -f _merge_one
+}
+
 build_environment_payload() {
   local out_file="$1"
   local source_json='{}'
@@ -357,7 +388,17 @@ deploy_lambda() {
     exit 1
   fi
 
-  env_file="$(mktemp /tmp/${FUNCTION_NAME}-env-XXXXXX.json)"
+  # ENC-ISS-258 Bug 1 fix: source missing Cognito vars from live Lambda if it exists.
+  preflight_merge_live_env_vars
+
+  # ENC-ISS-258 Bug 2 fix: BSD mktemp (macOS) only substitutes X characters at
+  # the end of the template. The prior `/tmp/${FN}-env-XXXXXX.json` pattern
+  # left a literal `XXXXXX.json` file on disk, causing `mkstemp: File exists`
+  # on subsequent runs. PID-based naming plus a trap on EXIT is portable and
+  # self-cleaning across macOS BSD and GNU coreutils.
+  env_file="/tmp/${FUNCTION_NAME}-env-$$.json"
+  trap 'rm -f "${env_file}"' EXIT
+
   if [[ -z "${COGNITO_USER_POOL_ID}" ]]; then
     echo "Refusing deploy with empty COGNITO_USER_POOL_ID for ${FUNCTION_NAME}." >&2
     exit 1
