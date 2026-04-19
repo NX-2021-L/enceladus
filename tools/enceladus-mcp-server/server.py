@@ -9077,7 +9077,11 @@ async def _advance_task_status(args: dict) -> list[TextContent]:
     if record_type not in ("task", "plan"):
         return _result_text({"error": f"advance_task_status only applies to tasks and plans, not {record_type}"})
 
+    # ENC-ISS-266: checkout-service /advance endpoint requires active_agent_session_id
+    # in the request body for ownership-match enforcement. Mirror the pattern in
+    # _checkout_task above.
     payload: Dict[str, Any] = {
+        "active_agent_session_id": (args.get("active_agent_session_id") or "").strip(),
         "target_status": args["target_status"],
         "provider": args.get("provider", ""),
         "governance_hash": args.get("governance_hash", ""),
@@ -9126,7 +9130,11 @@ async def _append_worklog(args: dict) -> list[TextContent]:
             )
         })
 
+    # ENC-ISS-266: /log endpoint does not yet require active_agent_session_id, but forward
+    # it defensively to stay consistent with /checkout and /advance pattern. If the
+    # checkout-service tightens validation on /log later, this handler stays functional.
     payload: Dict[str, Any] = {
+        "active_agent_session_id": (args.get("active_agent_session_id") or "").strip(),
         "description": description,
         "governance_hash": args.get("governance_hash", ""),
     }
@@ -9338,7 +9346,10 @@ async def _plan_advance(args: dict) -> list[TextContent]:
     if record_type != "plan":
         return _result_text({"error": f"plan.advance requires a plan record_id, got {record_type}"})
 
+    # ENC-ISS-266: checkout-service /advance endpoint requires active_agent_session_id
+    # in the request body for ownership-match enforcement.
     payload: Dict[str, Any] = {
+        "active_agent_session_id": (args.get("active_agent_session_id") or "").strip(),
         "target_status": args.get("target_status", ""),
         "provider": args.get("provider", ""),
         "governance_hash": args.get("governance_hash", ""),
