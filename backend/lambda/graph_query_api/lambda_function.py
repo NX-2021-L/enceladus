@@ -667,6 +667,14 @@ def _hybrid_graph_ranks_gds(
             ).consume()
 
             # Create the projection with weighted edges.
+            # ENC-ISS-265 Problem C: the live instance is Aura Graph Analytics
+            # (Sessions-based GDS compute plane), not in-process AuraDB-Pro GDS.
+            # AGA requires the caller to pass {memory: '<size>'} (auto-create
+            # session) or {sessionId: '<id>'} on every gds.graph.project call.
+            # The governed corpus is currently <10k nodes / <50k edges; 2GB is
+            # the documented smallest viable session. Subsequent calls within
+            # the same query session (gds.graph.exists/drop, gds.pageRank.stream)
+            # inherit the session and do NOT need to re-specify memory.
             session.run(
                 f"""
                 MATCH (src) WHERE src.project_id = $project_id
@@ -676,7 +684,8 @@ def _hybrid_graph_ranks_gds(
                     $name,
                     src,
                     tgt,
-                    {{relationshipProperties: {{weight: {weight_case_sql}}}}}
+                    {{relationshipProperties: {{weight: {weight_case_sql}}}}},
+                    {{memory: '2GB'}}
                 ) AS g
                 RETURN g.graphName
                 """,
@@ -694,7 +703,13 @@ def _hybrid_graph_ranks_gds(
             if anchor_rec is None or anchor_rec.get("nodeId") is None:
                 return []
 
-            result = session.run(
+            # ENC-ISS-265 Problem C.2: gds.util.asNode is not supported under
+            # the AGA Sessions API surface, and the projection above does not
+            # expose record_id as a node property anyway. Return raw (nodeId,
+            # score) from pageRank.stream, then resolve record_ids via a
+            # single follow-up MATCH that hits the main DB (not the session
+            # projection). Preserves score order; one extra roundtrip.
+            stream_result = session.run(
                 """
                 CALL gds.pageRank.stream(
                     $name,
@@ -706,7 +721,7 @@ def _hybrid_graph_ranks_gds(
                     }
                 )
                 YIELD nodeId, score
-                RETURN gds.util.asNode(nodeId).record_id AS rid, score
+                RETURN nodeId, score
                 ORDER BY score DESC
                 LIMIT $limit
                 """,
@@ -716,15 +731,34 @@ def _hybrid_graph_ranks_gds(
                 maxIter=PPR_MAX_ITERATIONS,
                 limit=top_n,
             )
-            for idx, rec in enumerate(result, start=1):
-                rid = rec.get("rid")
-                if not rid or rid == anchor_record_id:
-                    continue
-                ranked.append({
-                    "record_id": rid,
-                    "score": float(rec.get("score") or 0.0),
-                    "rank": idx,
-                })
+            node_rows: List[tuple] = [(r.get("nodeId"), float(r.get("score") or 0.0)) for r in stream_result]
+            if not node_rows:
+                ranked = []
+            else:
+                node_ids = [nid for nid, _ in node_rows if nid is not None]
+                rid_map: Dict[int, str] = {}
+                if node_ids:
+                    resolved = session.run(
+                        "MATCH (n) WHERE id(n) IN $node_ids "
+                        "RETURN id(n) AS nodeId, n.record_id AS rid",
+                        node_ids=node_ids,
+                    )
+                    for rec in resolved:
+                        rid = rec.get("rid")
+                        nid = rec.get("nodeId")
+                        if rid and nid is not None:
+                            rid_map[nid] = rid
+                rank_counter = 0
+                for nid, score in node_rows:
+                    rid = rid_map.get(nid)
+                    if not rid or rid == anchor_record_id:
+                        continue
+                    rank_counter += 1
+                    ranked.append({
+                        "record_id": rid,
+                        "score": score,
+                        "rank": rank_counter,
+                    })
 
             # Clean up projection.
             session.run(
