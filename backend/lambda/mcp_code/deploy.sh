@@ -397,7 +397,10 @@ deploy_lambda() {
   # on subsequent runs. PID-based naming plus a trap on EXIT is portable and
   # self-cleaning across macOS BSD and GNU coreutils.
   env_file="/tmp/${FUNCTION_NAME}-env-$$.json"
-  trap 'rm -f "${env_file}"' EXIT
+  # ENC-ISS-267: env_file is local to deploy_lambda(); the EXIT trap fires at
+  # shell-exit after main() returns, where env_file is out of scope. Use
+  # ${env_file:-} so `rm -f ""` is a safe no-op under `set -u`.
+  trap 'rm -f "${env_file:-}"' EXIT
 
   if [[ -z "${COGNITO_USER_POOL_ID}" ]]; then
     echo "Refusing deploy with empty COGNITO_USER_POOL_ID for ${FUNCTION_NAME}." >&2
