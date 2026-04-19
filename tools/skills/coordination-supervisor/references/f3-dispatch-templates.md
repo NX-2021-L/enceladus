@@ -80,6 +80,30 @@ Retry budget: 3 attempts with exponential backoff (1s, 4s, 16s). On third failur
 Assigned work: <record_id | none>
 ```
 
+**Coord-lead ad-hoc notes (ENC-ISS-259).** Coordination lead sessions sometimes need to
+drop a governed note that is not bound to any source tracker record (task/issue/feature/plan).
+The `document.create_note` MCP action wraps `documents.put` with `document_subtype='doc'`
+pinned so the note lands as a first-class governed document with no source-binding requirement.
+Example call:
+
+```text
+execute(steps=[{
+  action: "document.create_note",
+  arguments: {
+    project_id: "enceladus",
+    title: "<short note title>",
+    content: "<markdown body>",
+    related_items: ["ENC-TSK-...", "ENC-ISS-..."],
+    keywords: ["coord-lead", "..."],
+    governance_hash: "<current hash>"
+  }
+}])
+```
+
+The action denies caller override of `document_subtype`. For `handoff`/`coe`/`wave` subtypes
+use the dedicated actions (`document.create_handoff`, `document.create_coe`, `document.create_wave`).
+For anything else that is not a note, use `documents.put` directly with the appropriate subtype.
+
 ---
 
 ## Retry Budget
