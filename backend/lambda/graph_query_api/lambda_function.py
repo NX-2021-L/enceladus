@@ -116,6 +116,18 @@ _gds_probe_state: Dict[str, Any] = {"checked_at": 0.0, "available": None}
 _neo4j_driver = None
 _secretsmanager = None
 
+# ENC-TSK-F36 / ENC-ISS-268 / DOC-D4CB8048798B — Bolt driver pool config.
+# NAT Gateway silently drops idle TCP flows at 350s; setting
+# max_connection_lifetime=300 forces proactive socket recycling below that
+# window so the cached pool never hands the caller a half-open socket. The
+# ~48s warm-invocation hang observed in ENC-ISS-268 was Bolt connection
+# acquisition blocking on such a dead socket before retrying. keep_alive
+# enables TCP keepalives, connection_acquisition_timeout caps the wait, and
+# max_connection_pool_size avoids unbounded growth under fan-out.
+_NEO4J_MAX_CONNECTION_LIFETIME_S = 300
+_NEO4J_CONNECTION_ACQUISITION_TIMEOUT_S = 120
+_NEO4J_MAX_CONNECTION_POOL_SIZE = 20
+
 
 def _get_secretsmanager():
     global _secretsmanager
@@ -149,11 +161,56 @@ def _get_neo4j_driver():
             uri = creds["NEO4J_URI"]
             user = creds.get("NEO4J_USERNAME", "neo4j")
             password = creds["NEO4J_PASSWORD"]
-            _neo4j_driver = GraphDatabase.driver(uri, auth=(user, password))
+            _neo4j_driver = GraphDatabase.driver(
+                uri,
+                auth=(user, password),
+                max_connection_lifetime=_NEO4J_MAX_CONNECTION_LIFETIME_S,
+                connection_acquisition_timeout=_NEO4J_CONNECTION_ACQUISITION_TIMEOUT_S,
+                max_connection_pool_size=_NEO4J_MAX_CONNECTION_POOL_SIZE,
+                keep_alive=True,
+            )
         except Exception:
             logger.exception("[ERROR] Failed to initialize Neo4j driver")
             return None
     return _neo4j_driver
+
+
+def _rebuild_neo4j_driver():
+    """Close the cached Bolt driver and rebuild it.
+
+    Invoked when verify_connectivity() fails, indicating the cached pool is
+    holding dead TCP sockets (typical after a Lambda container freeze that
+    exceeded the NAT 350s idle-kill window). Does not touch server-side
+    state; the AuraDB session and AGA compute instance are unaffected.
+    """
+    global _neo4j_driver
+    if _neo4j_driver is not None:
+        try:
+            _neo4j_driver.close()
+        except Exception:
+            logger.warning("[WARNING] Bolt driver close raised during rebuild", exc_info=True)
+    _neo4j_driver = None
+    return _get_neo4j_driver()
+
+
+def _ensure_live_driver(driver):
+    """Probe the Bolt pool and rebuild on failure.
+
+    Returns a driver with at least one proven-live connection, or None if
+    rebuild also failed. Cheap on the happy path (one round-trip); only
+    rebuilds when the pool has decayed.
+    """
+    if driver is None:
+        return _get_neo4j_driver()
+    try:
+        driver.verify_connectivity()
+        return driver
+    except Exception as exc:
+        logger.warning(
+            "[WARNING] Bolt pool verify_connectivity failed (%s) — rebuilding driver",
+            exc,
+        )
+        return _rebuild_neo4j_driver()
 
 
 # ---------------------------------------------------------------------------
@@ -639,10 +696,18 @@ def _hybrid_graph_ranks_gds(
     source, damping=0.85, maxIterations=25, per-relationship-type weight
     projection. Never persists state (no gds.pageRank.write).
     """
-    # Build a named graph projection on the fly. Projection name is scoped to
-    # the anchor + project to avoid cross-query collisions. GDS auto-cleans
-    # anonymous projections; we'll still drop on completion for safety.
-    projection_name = f"hybrid_{project_id}_{anchor_record_id}".replace("-", "_").lower()
+    # Build a named graph projection on the fly. Projection name includes a
+    # per-invocation random suffix so concurrent calls for the same anchor do
+    # not collide on gds.graph.drop / gds.graph.project. Without the suffix,
+    # two Lambdas fan-out on the same anchor would race and one would fail
+    # with FlightRuntimeException: INVALID_ARGUMENT: There's already a job
+    # running with jobId ... (DOC-D4CB8048798B §Concurrency Hazards). GDS
+    # auto-cleans anonymous projections; we still drop on completion for
+    # safety, now scoped to this invocation's unique name.
+    _proj_suffix = os.urandom(4).hex()
+    projection_name = (
+        f"hybrid_{project_id}_{anchor_record_id}_{_proj_suffix}".replace("-", "_").lower()
+    )
 
     # Build the edge-weight CASE for per-type weights.
     weight_case_parts = []
@@ -1037,6 +1102,19 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # At least one of query or anchor_record_id is required.
     if not query_text and not anchor_record_id:
         return {"error": "hybrid search requires at least one of: query, anchor_record_id"}
+
+    # ENC-TSK-F36 / ENC-ISS-268 / DOC-D4CB8048798B — verify the cached Bolt
+    # pool is live before dispatching to any of the three signal functions.
+    # After a Lambda container freeze that exceeded the NAT 350s idle-kill
+    # window, the cached driver holds half-open sockets that will block
+    # ~48s on the first write before raising ServiceUnavailable. One cheap
+    # round-trip here avoids per-signal rediscovery of the dead pool and
+    # ensures all three signals (vector, graph, keyword) share a live
+    # driver. On failure, rebuild rebinds the module-global so subsequent
+    # handler invocations also pick up the fresh pool.
+    driver = _ensure_live_driver(driver)
+    if driver is None:
+        return {"error": "neo4j driver unavailable after rebuild attempt"}
 
     # ---- Vector signal -----------------------------------------------------
     vector_ranks: List[Dict[str, Any]] = []

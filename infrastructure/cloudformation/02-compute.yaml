@@ -674,7 +674,12 @@ Resources:
       Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
-      Timeout: 10
+      # ENC-TSK-F36 / ENC-ISS-268: raised from 10s to 180s. Worst-case Bolt
+      # pool rebuild after a NAT 350s idle-kill can take ~60-120s; the prior
+      # 10s CFN value was shadowed by deploy.sh's 30s update anyway. The
+      # live function setting is governed by deploy.sh update-function-
+      # configuration; this value is the CFN baseline for drift recovery.
+      Timeout: 180
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
