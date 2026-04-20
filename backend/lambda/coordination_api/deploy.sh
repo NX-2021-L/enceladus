@@ -1019,6 +1019,7 @@ ensure_api_integration_and_routes() {
     "POST /api/v1/coordination/components/{componentId}/deprecate"
     "POST /api/v1/coordination/components/{componentId}/restore"
     "POST /api/v1/coordination/components/{componentId}/revert"
+    "POST /api/v1/coordination/components/{componentId}/cloudwatch_event"
   )
 
   local existing_route_keys
