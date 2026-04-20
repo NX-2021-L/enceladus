@@ -154,6 +154,15 @@ def _validate_cfn(blocks: List[LambdaBlock]) -> List[str]:
     errors: List[str] = []
 
     for block in blocks:
+        # ENC-TSK-F74: gamma-only literal Lambdas (e.g. enceladus-mcp-code-gamma)
+        # hardcode arm64/python3.12 because they never deploy to prod. They can't
+        # use !If [IsGamma, ...] because the "prod" branch would also be created
+        # (IsGamma is false when EnvironmentSuffix="") and collide with the live
+        # gamma resource. Skip arch/runtime parity on these — they're gamma-only
+        # by definition, and the !If invariant doesn't apply.
+        if block.function_name.endswith("-gamma"):
+            continue
+
         # Check Runtime
         if not EXPECTED_RUNTIME_PATTERN.match(block.runtime_line):
             match = HARDCODED_RUNTIME.match(block.runtime_line.strip())
