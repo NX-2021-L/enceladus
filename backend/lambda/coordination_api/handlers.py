@@ -1344,10 +1344,12 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
             )
 
         for tid in request.get("task_ids") or []:
+            # ENC-ISS-282: SSM dispatch advances task open -> in-progress.
             _set_tracker_status(
                 tid,
                 "in-progress",
                 f"Coordination request {request_id} running via SSM",
+                "open",
                 governance_hash=request.get("governance_hash"),
                 coordination_request_id=request_id,
                 dispatch_id=str(dispatch_meta.get("dispatch_id") or ""),
