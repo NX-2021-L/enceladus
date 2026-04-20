@@ -76,3 +76,35 @@ rule manifest_architecture_runtime_runner_consistency {
             <<ENC-FTR-090 AC-7: arm64 manifest must use runner_label ubuntu-24.04-arm>>
     }
 }
+
+# ENC-FTR-090 / ENC-TSK-F59 Phase 1 extension \u2014 artifact promotion schema.
+# The _build.yml reusable workflow (F59) produces one S3 VersionId per Lambda
+# per arch, then writes the map into the environment manifest. F60 Phase 2
+# _deploy.yml reads artifact_version_ids[<function>] to resolve exactly which
+# S3 object version to deploy.
+#
+# Schema: artifact_version_ids is an optional map keyed by Lambda function name
+# (matching backend/lambda/<name>/) with S3 VersionId strings as values.
+# Absent/empty means \"no prior build has promoted artifacts into this
+# environment yet\" \u2014 F60 workflow refuses to deploy until populated.
+
+rule manifest_artifact_version_ids_shape {
+    # If artifact_version_ids is set, every value must be a non-empty string.
+    # S3 VersionId shape is opaque (UU-hash style) so we don't regex-pin it,
+    # but we reject empty/null to catch template truncation bugs.
+    when artifact_version_ids exists {
+        artifact_version_ids is_struct
+            <<ENC-FTR-090 AC-2 (F59): artifact_version_ids must be a map (struct) of function_name -> s3_version_id>>
+        artifact_version_ids.*[*] != ""
+            <<ENC-FTR-090 AC-2 (F59): artifact_version_ids values must be non-empty S3 VersionId strings>>
+    }
+}
+
+rule manifest_artifact_commit_sha_pinned {
+    # If artifact_commit_sha is set (F60 stamps this when promoting a build into
+    # an env manifest), it must be a 40-char hex SHA.
+    when artifact_commit_sha exists {
+        artifact_commit_sha == /^[0-9a-f]{40}$/
+            <<ENC-FTR-090 AC-2 (F59): artifact_commit_sha must be a 40-char hex SHA>>
+    }
+}
