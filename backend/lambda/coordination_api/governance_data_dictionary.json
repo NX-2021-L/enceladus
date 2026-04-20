@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-19.02",
-  "updated_at": "2026-04-19T21:40:00Z",
-  "last_change_summary": "ENC-TSK-F50 / ENC-ISS-270 / DOC-240A67973B13: Elevated `required_transition_type` to a first-class invariant on component_registry.component. (1) Extended component_registry.component with a REQUIRED `required_transition_type` enum field (github_pr_deploy|lambda_deploy|web_deploy|code_only|no_code) — this is the field checkout_service now reads for strictness enforcement, NOT the legacy `transition_type` field. (2) Added new entity checkout_service.required_transition_type_enforcement documenting the 5-surface defense-in-depth contract (data layer review+backfill, checkout_service fail-loud, coordination_api create/update validation, seed script + CI guard, this governance-dictionary entry). Closes the ENC-ISS-270 deadlock where checkout_service silently defaulted missing required_transition_type to github_pr_deploy (rank 0), rejecting every no_code/code_only/lambda_deploy/web_deploy task on any registered component. Coordination API now rejects POST /components and PATCH /components/{id} requests that omit or unset required_transition_type (Option A / strict, ENC-TSK-F50 AC-6/AC-7). Prior: ENC-TSK-F36 / ENC-ISS-268 / DOC-D4CB8048798B: Added retrieval.hybrid_pipeline.bolt_pool_resilience field documenting the Bolt TCP pool dead-connection mitigations shipped in graph_query_api. Root-cause reframe: the ~14s cold / ~48s warm probe pattern observed in ENC-ISS-268 was NOT server-side AGA session contention (the original hypothesis) — AuraDB GDS sessions have a 1h idle TTL that only resets on algorithm/projection work. Actual culprit is a dead Bolt TCP pool in the warm Lambda container (NAT Gateway 350s idle kill + Lambda freeze), and the fix is driver-layer: max_connection_lifetime=300, keep_alive=True, verify_connectivity-then-rebuild, per-invocation projection name suffix, Lambda timeout 30s→180s. Intentionally skips the Python graphdatascience client pin suggested in DOC-D4CB8048798B (current code uses Bolt + Cypher procedures per ENC-TSK-F35, not AuraGraphDataScience). Prior: ENC-ISS-259 / ENC-TSK-E98 / ENC-PLN-035 Phase C: Added mcp_server.docstore_note_action entity documenting the new document.create_note MCP execute action. Wraps documents.put with document_subtype pinned to 'doc' and denies caller override; gives coord-lead / supervisor sessions a first-class, discoverable governed write path for notes that are NOT bound to any source tracker record. Registered OUTSIDE the ENABLE_HANDOFF_PRIMITIVE gate because the 'doc' subtype is the stable pre-rollout baseline. Caller attempting document_subtype='general' (deprecated) or any non-doc value is rejected with INVALID_INPUT pointing at document.create_handoff/coe/wave or documents.put. Closes the contamination vector where agents reached for 'general' when they needed an unbound note path. Prior: ENC-TSK-D36 / ENC-FTR-069 AC3+AC4: Added document_api.id_boundary_enforcement entity documenting the server-side ID_BOUNDARY_VIOLATION guard introduced in document_api/_handle_put. The guard rejects any create request carrying a top-level document_id, item_id, or record_id with HTTP 400 and a self-correcting envelope (code=ID_BOUNDARY_VIOLATION, offending_field/value, record_id_schema, rule_citation pointing to ENC-TSK-B99, example_fix, agents_md_section). Pattern mirrors the tracker_mutation line 1925 forbidden-field guard but enriched with the ENC-FTR-069 AC3 self-correcting guidance structure so any violating agent is re-educated by the response itself. Extends the ID Boundary Rule from tracker records to governed documents, closing the parallel gap called out in ENC-FTR-069 AC4. Prior: ENC-TSK-E69 / ENC-PLN-031 Phase 4: Added monitoring.deploy_capability_auditor entity documenting the new scheduled Lambda that reads component registry capability declarations, snapshots live AWS state, computes drift across apigw_routes/lambda_env_vars/iam_actions, and emits idempotent drift ENC-ISS records (keyed by SHA-256 signature). Paired with the pre-merge capability guard (ENC-TSK-E70). EventBridge DeployCapabilityAuditorScheduleRule provisioned via 05-monitoring.yaml at cron(0 10 * * ? *). Prior: ENC-TSK-E68 / ENC-PLN-031 Phase 3 / ENC-FTR-041 + ENC-FTR-076 extension: Added 5 capability-declaration fields to component_registry.component so the continuous deploy capability auditor (ENC-TSK-E69) and pre-merge guard (ENC-TSK-E70) have a governed source-of-truth to diff live AWS state against. New fields (all optional List[str], empty-array default for backwards compatibility): required_iam_actions, required_env_secrets, required_apigw_routes, required_cfn_resources, required_lambda_env_vars. Coordination API _handle_components_create, _handle_components_update, and _handle_components_propose accept + validate these fields. component_registry.propose_contract extended to document capability declaration at proposal time. agents.md Component Proposal Protocol Extension delivered via HANDOFF (ENC-TSK-E71 merged governance doc). Prior: ENC-TSK-E72 / ENC-PLN-031 Phase 0 / ENC-ISS-247 / ENC-ISS-248 / ENC-ISS-249: Three surgical deploy pipeline patches. (ISS-247) github_integration._gmf_redeclare_on_label sibling handler flips DPL.original_target undeclared->prod on post-open target:prod label events with ConditionExpression guard. (ISS-248a) deploy_decide._handle_approve now accepts status in {pending_approval, deploying, failed} when approval_token is absent - recovery path for pre-deploy gate failures that previously required IAM escalation. (ISS-248b) github_integration._webhook_workflow_run resets DPL to pending_approval (not failed) when a failure fires without a prior deployment_outcome=success, surfacing the record in the PWA pending-approval view instead of leaving it stuck. (ISS-249) lambda-deploy-reusable.yml Validate step tolerates ResourceNotFoundException for gamma-suffixed functions that have not been provisioned yet (non-fatal warning); prod validation still fails closed. Updated tracker.deployment_decision.status, original_target, and deployment_outcome field definitions to document the new recovery semantics. Prior: ENC-TSK-C71 / ENC-TSK-E63 / ENC-ISS-158 / ENC-PLN-030: Added mcp_server.documents_passthrough entity documenting the denylist-based open-passthrough pattern now used by _documents_put and _documents_patch. Replaces the prior explicit field whitelist that silently dropped ENC-FTR-077 subtype fields. Tool schemas for documents.put and documents.patch now expose 14 FTR-077 subtype fields (document_subtype, source_record_id, handoff_status, prerequisite_state, verification_criteria, action_checklist, expires_at, source_incident_id, coe_status, plan_anchor_id, wave_status, informed_by, document_maturity_state, confirm_subtype) with dictionary-linked descriptions. Mirrors _tracker_create pattern so the MCP layer stays maintenance-free for future subtype additions. Prior: ENC-TSK-E64 / ENC-ISS-158 / ENC-PLN-030: Added document_api.error_envelope entity documenting the self-correcting error shape returned by document_api for subtype validation failures (handoff/coe/wave). Extends the ENC-TSK-D56 self-correcting-error pattern to the document surface: error_envelope.details now includes required_fields, optional_fields, dictionary_entity, document_subtype, example_fix, edge_density_requirements, format_constraint so agents can recover from missing subtype fields without additional calls. Prior: ENC-TSK-E57 / ENC-ISS-243: Added approval_token, decided_by_email, bypass_reason fields to tracker.deployment_decision for deploy approval enforcement mesh. DAT token issued by deploy_decide on approve, validated by deploy-orchestration.yml workflow. Prior: ENC-FTR-077 / ENC-TSK-E53: Added mcp_server.docstore_subtype_tools entity documenting 4 new execute actions for COE and wave docstore subtypes. document.create_coe creates COE documents with source_incident_id. document.create_wave creates wave documents with plan_anchor_id. document.append_handoff_reply appends structured reply blocks with frontmatter to handoff docs; product-lead-terminal layer triggers AC-5 dual-append to active wave doc. document.append_wave_entry appends wave entries with agent-layer classification. All 4 actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag (same as handoff tools). Prior: ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
+  "version": "2026-04-19.03",
+  "updated_at": "2026-04-20T01:55:00Z",
+  "last_change_summary": "ENC-TSK-F53 / ENC-FTR-076 v2 / DOC-546B896390EA: Encoded the FTR-076 v2 governance contract on top of the F50 dictionary. (1) Extended component_registry.component.fields with `lifecycle_status` as a REQUIRED 8-status enum (proposed, approved, designed, development, production, code-red, deprecated, archived) carrying the authoritative transition_table, two hard blocks (deprecated->development and archived->any), full authority_matrix (io-only vs agent-conditional per DOC-546B896390EA §3.3), and per-transition gate_conditions (closed_count/checkout_count/deploy-success). (2) Added component_registry.component.fields.alarm_arn as an optional string v5 CloudWatch-hook field (stored now, no runtime effect until v5 per §8). (3) Added new entity component_registry.graph_edges documenting DESIGNS/DESIGNED_BY (strict_1_to_1, locks at closed_count>=1), IMPLEMENTS/IMPLEMENTED_BY (strict_1_to_1, locks at checkout_count>=1, gates development->production on deploy-success), DEPLOYS/DEPLOYED_BY (append_ok, per-edge lock at deploy-success, audit lineage only — not a gate). (4) Added new entity component_registry.opacity_model declaring OPAQUE_STATUSES={archived}, BLOCKED_STATUSES={proposed, deprecated}, PERMITTED_STATUSES={approved, designed, development, production, code-red}, with read-endpoint behavior (archived returns identical 404 as non-existent; blocked returns full record; permitted returns full record) and checkout-gate behavior (archived/nonexistent returns identical 404; blocked returns 400 with descriptive message; permitted proceeds). (5) Extended tracker.task.fields with closed_count and checkout_count as server-side-only integer counters (default 0, writable_by=[server]) — closed_count incremented by tracker_mutation task lifecycle handler on every ->closed transition, checkout_count incremented by checkout_service._handle_checkout on every successful checkout.task, both atomic via UpdateExpression ADD. Preserves all F50 additions verbatim (component_registry.component.fields.required_transition_type + checkout_service.required_transition_type_enforcement entity at rank ladder 0/1/1/2/3). Bumps dictionary_version 2026-04-19.02 -> 2026-04-19.03. Part of ENC-PLN-040 Phase 3 (ENC-TSK-F39 umbrella). Prior: ENC-TSK-F50 / ENC-ISS-270 / DOC-240A67973B13: Elevated `required_transition_type` to a first-class invariant on component_registry.component. (1) Extended component_registry.component with a REQUIRED `required_transition_type` enum field (github_pr_deploy|lambda_deploy|web_deploy|code_only|no_code) — this is the field checkout_service now reads for strictness enforcement, NOT the legacy `transition_type` field. (2) Added new entity checkout_service.required_transition_type_enforcement documenting the 5-surface defense-in-depth contract (data layer review+backfill, checkout_service fail-loud, coordination_api create/update validation, seed script + CI guard, this governance-dictionary entry). Closes the ENC-ISS-270 deadlock where checkout_service silently defaulted missing required_transition_type to github_pr_deploy (rank 0), rejecting every no_code/code_only/lambda_deploy/web_deploy task on any registered component. Coordination API now rejects POST /components and PATCH /components/{id} requests that omit or unset required_transition_type (Option A / strict, ENC-TSK-F50 AC-6/AC-7). Prior: ENC-TSK-F36 / ENC-ISS-268 / DOC-D4CB8048798B: Added retrieval.hybrid_pipeline.bolt_pool_resilience field documenting the Bolt TCP pool dead-connection mitigations shipped in graph_query_api. Root-cause reframe: the ~14s cold / ~48s warm probe pattern observed in ENC-ISS-268 was NOT server-side AGA session contention (the original hypothesis) — AuraDB GDS sessions have a 1h idle TTL that only resets on algorithm/projection work. Actual culprit is a dead Bolt TCP pool in the warm Lambda container (NAT Gateway 350s idle kill + Lambda freeze), and the fix is driver-layer: max_connection_lifetime=300, keep_alive=True, verify_connectivity-then-rebuild, per-invocation projection name suffix, Lambda timeout 30s→180s. Intentionally skips the Python graphdatascience client pin suggested in DOC-D4CB8048798B (current code uses Bolt + Cypher procedures per ENC-TSK-F35, not AuraGraphDataScience). Prior: ENC-ISS-259 / ENC-TSK-E98 / ENC-PLN-035 Phase C: Added mcp_server.docstore_note_action entity documenting the new document.create_note MCP execute action. Wraps documents.put with document_subtype pinned to 'doc' and denies caller override; gives coord-lead / supervisor sessions a first-class, discoverable governed write path for notes that are NOT bound to any source tracker record. Registered OUTSIDE the ENABLE_HANDOFF_PRIMITIVE gate because the 'doc' subtype is the stable pre-rollout baseline. Caller attempting document_subtype='general' (deprecated) or any non-doc value is rejected with INVALID_INPUT pointing at document.create_handoff/coe/wave or documents.put. Closes the contamination vector where agents reached for 'general' when they needed an unbound note path. Prior: ENC-TSK-D36 / ENC-FTR-069 AC3+AC4: Added document_api.id_boundary_enforcement entity documenting the server-side ID_BOUNDARY_VIOLATION guard introduced in document_api/_handle_put. The guard rejects any create request carrying a top-level document_id, item_id, or record_id with HTTP 400 and a self-correcting envelope (code=ID_BOUNDARY_VIOLATION, offending_field/value, record_id_schema, rule_citation pointing to ENC-TSK-B99, example_fix, agents_md_section). Pattern mirrors the tracker_mutation line 1925 forbidden-field guard but enriched with the ENC-FTR-069 AC3 self-correcting guidance structure so any violating agent is re-educated by the response itself. Extends the ID Boundary Rule from tracker records to governed documents, closing the parallel gap called out in ENC-FTR-069 AC4. Prior: ENC-TSK-E69 / ENC-PLN-031 Phase 4: Added monitoring.deploy_capability_auditor entity documenting the new scheduled Lambda that reads component registry capability declarations, snapshots live AWS state, computes drift across apigw_routes/lambda_env_vars/iam_actions, and emits idempotent drift ENC-ISS records (keyed by SHA-256 signature). Paired with the pre-merge capability guard (ENC-TSK-E70). EventBridge DeployCapabilityAuditorScheduleRule provisioned via 05-monitoring.yaml at cron(0 10 * * ? *). Prior: ENC-TSK-E68 / ENC-PLN-031 Phase 3 / ENC-FTR-041 + ENC-FTR-076 extension: Added 5 capability-declaration fields to component_registry.component so the continuous deploy capability auditor (ENC-TSK-E69) and pre-merge guard (ENC-TSK-E70) have a governed source-of-truth to diff live AWS state against. New fields (all optional List[str], empty-array default for backwards compatibility): required_iam_actions, required_env_secrets, required_apigw_routes, required_cfn_resources, required_lambda_env_vars. Coordination API _handle_components_create, _handle_components_update, and _handle_components_propose accept + validate these fields. component_registry.propose_contract extended to document capability declaration at proposal time. agents.md Component Proposal Protocol Extension delivered via HANDOFF (ENC-TSK-E71 merged governance doc). Prior: ENC-TSK-E72 / ENC-PLN-031 Phase 0 / ENC-ISS-247 / ENC-ISS-248 / ENC-ISS-249: Three surgical deploy pipeline patches. (ISS-247) github_integration._gmf_redeclare_on_label sibling handler flips DPL.original_target undeclared->prod on post-open target:prod label events with ConditionExpression guard. (ISS-248a) deploy_decide._handle_approve now accepts status in {pending_approval, deploying, failed} when approval_token is absent - recovery path for pre-deploy gate failures that previously required IAM escalation. (ISS-248b) github_integration._webhook_workflow_run resets DPL to pending_approval (not failed) when a failure fires without a prior deployment_outcome=success, surfacing the record in the PWA pending-approval view instead of leaving it stuck. (ISS-249) lambda-deploy-reusable.yml Validate step tolerates ResourceNotFoundException for gamma-suffixed functions that have not been provisioned yet (non-fatal warning); prod validation still fails closed. Updated tracker.deployment_decision.status, original_target, and deployment_outcome field definitions to document the new recovery semantics. Prior: ENC-TSK-C71 / ENC-TSK-E63 / ENC-ISS-158 / ENC-PLN-030: Added mcp_server.documents_passthrough entity documenting the denylist-based open-passthrough pattern now used by _documents_put and _documents_patch. Replaces the prior explicit field whitelist that silently dropped ENC-FTR-077 subtype fields. Tool schemas for documents.put and documents.patch now expose 14 FTR-077 subtype fields (document_subtype, source_record_id, handoff_status, prerequisite_state, verification_criteria, action_checklist, expires_at, source_incident_id, coe_status, plan_anchor_id, wave_status, informed_by, document_maturity_state, confirm_subtype) with dictionary-linked descriptions. Mirrors _tracker_create pattern so the MCP layer stays maintenance-free for future subtype additions. Prior: ENC-TSK-E64 / ENC-ISS-158 / ENC-PLN-030: Added document_api.error_envelope entity documenting the self-correcting error shape returned by document_api for subtype validation failures (handoff/coe/wave). Extends the ENC-TSK-D56 self-correcting-error pattern to the document surface: error_envelope.details now includes required_fields, optional_fields, dictionary_entity, document_subtype, example_fix, edge_density_requirements, format_constraint so agents can recover from missing subtype fields without additional calls. Prior: ENC-TSK-E57 / ENC-ISS-243: Added approval_token, decided_by_email, bypass_reason fields to tracker.deployment_decision for deploy approval enforcement mesh. DAT token issued by deploy_decide on approve, validated by deploy-orchestration.yml workflow. Prior: ENC-FTR-077 / ENC-TSK-E53: Added mcp_server.docstore_subtype_tools entity documenting 4 new execute actions for COE and wave docstore subtypes. document.create_coe creates COE documents with source_incident_id. document.create_wave creates wave documents with plan_anchor_id. document.append_handoff_reply appends structured reply blocks with frontmatter to handoff docs; product-lead-terminal layer triggers AC-5 dual-append to active wave doc. document.append_wave_entry appends wave entries with agent-layer classification. All 4 actions gated behind ENABLE_HANDOFF_PRIMITIVE feature flag (same as handoff tools). Prior: ENC-TSK-E50 / ENC-TSK-E51 / ENC-FTR-077: Added handoff reply block validation (AGENT_LAYERS constant, _parse_reply_frontmatter + _validate_reply_block helpers). Handoff append_content requires YAML-like frontmatter with reply_author, reply_timestamp, agent_layer, originating_handoff_ref (DOC-*). Tracks reply_count + last_reply_at. Wave append_content requires same frontmatter minus originating_handoff_ref. Tracks append_count + last_append_at. Non-handoff/wave documents use format-agnostic general append. Added plan_anchor_id immutability guard on PATCH. Added append_content mutual exclusion with content. New entities: document.wave_append. Extended document.handoff with reply block fields. MCP server passthrough updated for append_content. Prior: ENC-TSK-E52 / ENC-FTR-077: Graph edges for docstore subtypes (INVESTIGATES, TRACKS_WAVE_OF, HANDS_OFF). Prior: ENC-TSK-E49 / ENC-FTR-077: Subtype hardening + coe + wave. Prior: ENC-TSK-E48 / ENC-ISS-239: append_content S3 fix. Prior: ENC-TSK-E47 / ENC-ISS-242: subtask_ids fix.",
   "owners": [
     "enceladus-platform"
   ],
@@ -299,6 +299,26 @@
             "undeclared"
           ],
           "definition": "Deploy target for this task. 'prod' targets v3/main, 'gamma' targets v4/gamma stack, 'undeclared' (default) awaits labeling."
+        },
+        "closed_count": {
+          "type": "integer",
+          "default": 0,
+          "required": false,
+          "writable_by": ["server"],
+          "definition": "ENC-FTR-076 v2 / DOC-546B896390EA §5: server-side counter incremented by the task lifecycle handler on every transition to status=closed. Atomic via DynamoDB UpdateExpression ADD. Never agent-writable or io-writable — tracker_mutation rejects PATCH requests that attempt to set closed_count (ID boundary / write_source guard).",
+          "increment_trigger": "tracker_mutation Lambda task lifecycle handler on every transition to status=closed. Atomic via UpdateExpression 'ADD closed_count :one' with :one=1.",
+          "gate_use": "DESIGNS/DESIGNED_BY edge immutability trigger (edge locks when closed_count >= 1) and advance-gate for component.advance approved->designed (gate requires DESIGNED_BY task closed_count >= 1). Preferred mechanism over history-table queries per DD-4 (natural governance telemetry, zero query cost at gate evaluation).",
+          "usage_guidance": "Read-only for all external callers. Never supply in POST/PATCH bodies; attempting to do so is rejected. Initial default 0 is stamped at record creation. Existing pre-FTR-076-v2 task records without closed_count are treated as closed_count=0 for gate evaluation (fail-closed on the DESIGNS gate until a ->closed transition lands)."
+        },
+        "checkout_count": {
+          "type": "integer",
+          "default": 0,
+          "required": false,
+          "writable_by": ["server"],
+          "definition": "ENC-FTR-076 v2 / DOC-546B896390EA §5: server-side counter incremented by the checkout service on every successful checkout.task call. Atomic via DynamoDB UpdateExpression ADD. Never agent-writable or io-writable — tracker_mutation rejects PATCH requests that attempt to set checkout_count.",
+          "increment_trigger": "checkout_service._handle_checkout on every successful checkout.task invocation. Atomic via UpdateExpression 'ADD checkout_count :one' with :one=1 after the checkout state transition and the active_agent_session_id stamping succeed.",
+          "gate_use": "IMPLEMENTS/IMPLEMENTED_BY edge immutability trigger (edge locks when checkout_count >= 1) and advance-gate for component.advance designed->development (gate requires IMPLEMENTS task checkout_count >= 1). Checkout proves implementation started — this is the first half of the IMPLEMENTS evidence thread; deploy-success on the same task completes it (DD-1).",
+          "usage_guidance": "Read-only for all external callers. Never supply in POST/PATCH bodies; attempting to do so is rejected. Initial default 0 is stamped at record creation. Existing pre-FTR-076-v2 task records without checkout_count are treated as checkout_count=0 for gate evaluation (fail-closed on the IMPLEMENTS gate until a successful checkout.task lands)."
         }
       }
     },
@@ -2594,6 +2614,71 @@
           "format": "ISO 8601",
           "definition": "Last update timestamp."
         },
+        "lifecycle_status": {
+          "type": "enum",
+          "required": true,
+          "enum": [
+            "proposed",
+            "approved",
+            "designed",
+            "development",
+            "production",
+            "code-red",
+            "deprecated",
+            "archived"
+          ],
+          "default": "proposed",
+          "definition": "ENC-FTR-076 v2 / DOC-546B896390EA §3: full 8-status component lifecycle state machine. Supersedes the v1 6-status enum (proposed|approved|active|rejected|deprecated|archived) documented in component_registry.propose_contract.lifecycle_status_enum — v1 `active` folds into v2 `production`; v1 `rejected` is not carried forward (terminal rejections now archive via the revert handler). proposed is the initial state after component.propose; approved is io-confirmed; designed is set after a DESIGNS task closes; development is set after an IMPLEMENTS task is checked out; production is set after the IMPLEMENTS task reaches deploy-success; code-red is an incident state (component still live); deprecated is an io-only terminal-adjacent state; archived is permanent terminal reached only via the revert path. Backfill sets existing components to lifecycle_status=production (AC[5] of DOC-546B896390EA).",
+          "transition_table": {
+            "description": "Authoritative forward-transition config per DOC-546B896390EA §3.2. Read at runtime by the component transition validator — no code changes required when transitions evolve (DD-5). Hard blocks below are enforced INDEPENDENTLY of this table.",
+            "transitions": {
+              "proposed": ["approved", "archived"],
+              "approved": ["designed"],
+              "designed": ["development", "approved"],
+              "development": ["production", "designed"],
+              "production": ["code-red", "deprecated", "development"],
+              "code-red": ["production", "deprecated"],
+              "deprecated": ["production"],
+              "archived": []
+            }
+          },
+          "hard_blocks": [
+            "deprecated->development: version-fork required. Deprecated components that need new development work must be registered as a new component with the -v2/-v3 suffix convention (DOC-546B896390EA §7.4, DD-3).",
+            "archived->any: archived is a permanent terminal state. No recovery path exists."
+          ],
+          "authority_matrix": {
+            "description": "Per DOC-546B896390EA §3.3. Agent authority is always conditional on the evidence gate passing; io authority is unconditional for permitted transitions.",
+            "rules": {
+              "proposed->approved": "io only",
+              "proposed->archived": "io only (via revert handler, auto-archives atomically with reverted_at + reverted_reason)",
+              "approved<->designed": "io (both directions); agent (forward only, gate required: DESIGNED_BY task closed_count >= 1)",
+              "designed<->development": "io (both directions); agent (forward only, gate required: IMPLEMENTS task checkout_count >= 1)",
+              "development->production": "io or agent (gate required: IMPLEMENTS task reached deploy-success)",
+              "production<->code-red": "io or agent (both directions; no evidence gate)",
+              "production->deprecated": "io only",
+              "code-red->deprecated": "io only",
+              "deprecated->production": "io only",
+              "any->deprecated": "io only",
+              "deprecated->development": "HARD BLOCK",
+              "archived->any": "HARD BLOCK"
+            }
+          },
+          "gate_conditions": {
+            "description": "Agent-permissible advances (io is unconditional). Failed gates return HTTP 400 with the specific condition that was not met. Per DOC-546B896390EA §3.4.",
+            "approved->designed": "Component must have a DESIGNS/DESIGNED_BY graph edge to a task record; that task's closed_count must be >= 1.",
+            "designed->development": "Component must have an IMPLEMENTS/IMPLEMENTED_BY graph edge to a task record; that task's checkout_count must be >= 1.",
+            "development->production": "The IMPLEMENTS task (same one linked via IMPLEMENTS/IMPLEMENTED_BY) must have reached deploy-success status. This is the definitive gate. The DEPLOYS edge is NOT a gate for this transition (DD-1).",
+            "production<->code-red": "No evidence gate. Agent or io may call either direction. The v5 CloudWatch/EventBridge automation layer will eventually be the primary production->code-red trigger (§8)."
+          },
+          "usage_guidance": "Authoritative spec in DOC-546B896390EA §3. The 8-status enum is enforced at write time by coordination_api for component creates/advances and at checkout time by checkout_service via the opacity model (see component_registry.opacity_model). reverted is NOT a stable lifecycle_status value — the revert handler atomically writes archived alongside reverted_at/reverted_reason metadata (DD-2). Agent-permitted component.advance target statuses: designed, development, production, code-red, production (resolution from code-red). All other advances are io-only."
+        },
+        "alarm_arn": {
+          "type": "string",
+          "required": false,
+          "definition": "Optional CloudWatch alarm ARN registered by io at approval time. v5 EventBridge hook per DOC-546B896390EA §8 and §6. Stored now on the component schema to avoid a future migration (DD-6); has NO runtime effect until v5 when the component-alarm-poller Lambda is built. Coordination API accepts the field on create/update; the 501 stub handler in coordination_api accepts CloudWatch event payload format and returns 501 with message 'CloudWatch automation not available until v5'.",
+          "usage_guidance": "Optional field. Set by io at approval time (component.approve or PATCH /components/{id}) when the component has a provisioned CloudWatch alarm that should eventually drive production<->code-red transitions via the v5 EventBridge scheduled rule. Not used by any runtime code path pre-v5.",
+          "v5_intended_flow": "EventBridge scheduled rule -> component-alarm-poller Lambda -> for each component with alarm_arn set: describe_alarms(alarm_arn); if ALARM -> POST component.code_red(component_id); if OK and lifecycle_status=code-red -> POST component.resolve_code_red(component_id)."
+        },
         "required_iam_actions": {
           "type": "array",
           "item_type": "string",
@@ -2676,6 +2761,89 @@
           }
         }
       }
+    },
+    "component_registry.graph_edges": {
+      "description": "ENC-FTR-076 v2 / DOC-546B896390EA §4: typed-relationship edge pairs connecting components to their governing task evidence. Three pairs introduced by the v2 spec — DESIGNS/DESIGNED_BY, IMPLEMENTS/IMPLEMENTED_BY, DEPLOYS/DEPLOYED_BY. All edge writes must validate uniqueness via a graph read before writing, execute forward and inverse rows atomically via DynamoDB transact_write_items (mirrors the tracker_mutation/_handle_create_relationship rel# schema and relies on the ENC-TSK-E01 placeholder-node pattern in graph_sync for labeling), and return HTTP 409 with a descriptive message if uniqueness is violated. Locked-edge mutation attempts return HTTP 423 Locked.",
+      "edges": {
+        "DESIGNS": {
+          "forward": "component -[DESIGNS]-> task",
+          "inverse": "task -[DESIGNED_BY]-> component",
+          "cardinality": "strict_1_to_1",
+          "cardinality_rules": [
+            "Refuse write if the component already has a DESIGNS edge to any task.",
+            "Refuse write if the task already has a DESIGNED_BY edge from any component."
+          ],
+          "authority": ["agent", "io"],
+          "immutability_trigger": "DESIGNS task closed_count >= 1",
+          "immutability_behavior": "Edge locks permanently when the DESIGNS task closed_count becomes >= 1. Locked edges cannot be deleted or mutated by any surface. Attempts to delete or mutate a locked edge return HTTP 423 Locked.",
+          "advance_gate": "Component may advance approved->designed when the DESIGNED_BY task's closed_count >= 1.",
+          "write_action": "component.add_edge with edge_type=DESIGNS"
+        },
+        "IMPLEMENTS": {
+          "forward": "component -[IMPLEMENTS]-> task",
+          "inverse": "task -[IMPLEMENTED_BY]-> component",
+          "cardinality": "strict_1_to_1",
+          "cardinality_rules": [
+            "Refuse write if the component already has an IMPLEMENTS edge to any task.",
+            "Refuse write if the task already has an IMPLEMENTED_BY edge from any component."
+          ],
+          "authority": ["agent", "io"],
+          "immutability_trigger": "IMPLEMENTS task checkout_count >= 1",
+          "immutability_behavior": "Edge locks permanently when the IMPLEMENTS task checkout_count becomes >= 1. Attempts to delete or mutate a locked edge return HTTP 423 Locked.",
+          "advance_gate": [
+            "designed->development: IMPLEMENTS task checkout_count >= 1.",
+            "development->production: IMPLEMENTS task has reached deploy-success status."
+          ],
+          "evidence_thread_role": "The IMPLEMENTS task is the single evidence thread spanning designed, development, and production (DD-1). Checkout proves implementation started; deploy-success proves it shipped.",
+          "write_action": "component.add_edge with edge_type=IMPLEMENTS"
+        },
+        "DEPLOYS": {
+          "forward": "component -[DEPLOYS]-> task",
+          "inverse": "task -[DEPLOYED_BY]-> component",
+          "cardinality": "append_ok",
+          "cardinality_rules": [
+            "Multiple deploy tasks may link to a single component over its lifetime.",
+            "No 1:1 uniqueness constraint."
+          ],
+          "authority": ["agent", "io"],
+          "immutability_trigger": "individual edge row locks when the linked task reaches deploy-success",
+          "immutability_behavior": "Per-edge lock: earlier deploy edges remain locked; newer deploy tasks may be linked. Locked-row mutation returns HTTP 423 Locked.",
+          "governance_role": "Audit lineage and traceability only. DEPLOYS is NOT a gate for any lifecycle transition — deploy-success on the IMPLEMENTS task is what gates development->production (DD-1, DD-7).",
+          "write_action": "component.add_edge with edge_type=DEPLOYS"
+        }
+      },
+      "write_semantics": "DynamoDB transact_write_items atomically commits the forward and inverse rel# rows; 409 is returned on uniqueness violation for strict_1_to_1 edges. Schema mirrors tracker_mutation/_handle_create_relationship so graph_sync projects each edge uniformly via RELATIONSHIP_TYPE_TO_EDGE_LABEL. The ENC-TSK-E01 placeholder-node pattern in graph_sync guarantees labeled endpoint nodes when a typed-edge reference points at an ID whose DynamoDB record has not yet been projected.",
+      "locked_mutation_response": "HTTP 423 Locked with api.error_envelope code=EDGE_LOCKED, details={edge_type, component_id, task_id, lock_trigger, lock_occurred_at}.",
+      "uniqueness_violation_response": "HTTP 409 Conflict with api.error_envelope code=EDGE_UNIQUENESS_VIOLATION, details={edge_type, component_id, existing_task_id, attempted_task_id}.",
+      "spec_source": "DOC-546B896390EA §4 (edge type spec), §3.4 (gate conditions), DD-7 (cardinality rationale)."
+    },
+    "component_registry.opacity_model": {
+      "description": "ENC-FTR-076 v2 / DOC-546B896390EA §7: read-endpoint and checkout-gate visibility classification for component records. Three mutually exclusive status sets (OPAQUE, BLOCKED, PERMITTED) partition the lifecycle_status enum. OPAQUE_STATUSES produce identical 404 responses to non-existent components on both read and checkout surfaces — agents must not be able to infer existence of archived records. BLOCKED_STATUSES return full records to io-management workflows (reads) but block agent checkout with a descriptive 400. PERMITTED_STATUSES proceed normally on both surfaces.",
+      "status_classification": {
+        "OPAQUE_STATUSES": ["archived"],
+        "BLOCKED_STATUSES": ["proposed", "deprecated"],
+        "PERMITTED_STATUSES": ["approved", "designed", "development", "production", "code-red"]
+      },
+      "read_endpoint_behavior": {
+        "OPAQUE": "Return identical HTTP 404 to a non-existent component. Existence not disclosed. Response body and headers must be byte-indistinguishable from the nonexistent-record path — agents must not be able to infer existence via response timing, body, or headers.",
+        "BLOCKED": "Return full record. Visible for io management workflows (PWA pending-approval, deprecated-component audits).",
+        "PERMITTED": "Return full record."
+      },
+      "checkout_gate_behavior": {
+        "OPAQUE_or_nonexistent": "Return identical HTTP 404 with a generic message. Response must be identical whether the component never existed or is archived. Agents must not be able to infer existence.",
+        "BLOCKED": "Return HTTP 400 with a descriptive message identifying the component_id. Example message: 'Component <component_id> is in BLOCKED_STATUSES (<current_lifecycle_status>) and cannot be checked out. Pending io approval or io-only restoration.'",
+        "PERMITTED": "Checkout proceeds normally. Any strictness/transition_type enforcement continues to apply downstream."
+      },
+      "version_fork_convention": {
+        "description": "When a deprecated component requires new development, a new component record must be created with the -v2/-v3 suffix convention on the component_id and display_name. The deprecated original is never reactivated into development (HARD BLOCK deprecated->development). Naming convention enforced by coordination-lead review, not a hard server-side constraint.",
+        "example": "comp-checkout-service (deprecated) -> comp-checkout-service-v2 (new record, lifecycle_status=proposed at creation time)."
+      },
+      "reverted_event_note": "reverted is NOT a member of any status set — it is an event, not a state (DD-2). The revert handler atomically writes lifecycle_status=archived alongside reverted_at + reverted_reason + archived_at. From all external surfaces, reverted never appears as a stored lifecycle_status.",
+      "enforcement_surfaces": [
+        "coordination_api._handle_components_get: applies read_endpoint_behavior classification before returning the record.",
+        "checkout_service._handle_checkout: applies checkout_gate_behavior classification before the strictness/transition_type matrix (strictness enforcement remains downstream)."
+      ],
+      "spec_source": "DOC-546B896390EA §7 (opacity model), §3.1 (state inventory), DD-2 (reverted-is-event)."
     },
     "checkout_service.required_transition_type_enforcement": {
       "description": "Five-surface defense-in-depth contract for required_transition_type on component_registry.component (ENC-TSK-F50 / ENC-ISS-270). Mirrors the governance.ogtm pattern (ENC-FTR-066): every component record must carry required_transition_type, and every write path into the component registry validates its presence and type. Governance-intent source: DOC-240A67973B13 (AC-1 per-component review document).",
