@@ -76,6 +76,17 @@ Parameters:
       Previous COORDINATION_INTERNAL_API_KEY value used during dual-accept rotation windows
       (ENC-ISS-276). Populates COORDINATION_INTERNAL_API_KEY_PREVIOUS env var on downstream
       consumers. Empty default is expected after each rotation cycle completes.
+  # ENC-TSK-F74 / ENC-ISS-279: Cognito client secret required by enceladus-mcp-code-gamma
+  # (and future prod twin) for OAuth-direct flows. NoEcho; supplied via --parameter-overrides
+  # at deploy/IMPORT time.
+  EnceladusCognitoClientSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Cognito confidential-client secret for the Enceladus app client. Required by the
+      enceladus-mcp-code-gamma Lambda OAuth-direct path. Kept out of the repo; injected
+      at deploy/IMPORT via --parameters.
 
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
@@ -1694,6 +1705,73 @@ Resources:
           Value: enceladus
         - Key: Component
           Value: env-drift-auditor
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-F74 / ENC-ISS-279: MCP Code Gamma Lambda (F57 AC-6 CFN adoption).
+  # Live resource created out-of-band in DOC-D45141D94C55 §1.4 (2026-04-20T06:14Z).
+  # Imported into this stack via create-change-set --change-set-type=IMPORT.
+  # IAM role devops-coordination-api-lambda-role-gamma is out-of-band and
+  # referenced by ARN (not CFN-managed from this stack).
+  # Literal "-gamma" suffix — resource is gamma-only, not gamma-aware.
+  # ---------------------------------------------------------------------------
+
+  EnceladusMcpCodeGammaFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: enceladus-mcp-code-gamma
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: server.lambda_handler
+      MemorySize: 512
+      Timeout: 30
+      Architectures:
+        - arm64
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/devops-coordination-api-lambda-role-gamma"
+      Environment:
+        Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEYS: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
+          COORDINATION_INTERNAL_API_KEY_SCOPES: ""
+          COORDINATION_TABLE: coordination-requests-gamma
+          COORDINATION_GSI_IDEMPOTENCY: idempotency-key-index
+          TRACKER_TABLE: devops-project-tracker-gamma
+          PROJECTS_TABLE: projects-gamma
+          DOCUMENTS_TABLE: documents-gamma
+          GOVERNANCE_POLICIES_TABLE: governance-policies-gamma
+          GOVERNANCE_DICTIONARY_POLICY_ID: governance_data_dictionary
+          DYNAMODB_REGION: us-west-2
+          SECRETS_REGION: us-west-2
+          S3_BUCKET: jreese-net
+          S3_GOVERNANCE_HISTORY_PREFIX: governance/history
+          S3_GOVERNANCE_PREFIX: governance/live
+          CORS_ORIGIN: https://jreese.net
+          ENVIRONMENT_SUFFIX: "-gamma"
+          ENCELADUS_MCP_SERVER_PATH: server.py
+          ENCELADUS_MCP_TRANSPORT: streamable_http
+          ENCELADUS_MCP_INTERFACE_MODE: code
+          ENCELADUS_COGNITO_USER_POOL_ID: us-east-1_b2D0V3E1k
+          ENCELADUS_COGNITO_CLIENT_ID: 6q607dk3liirhtecgps7hifmlk
+          ENCELADUS_COGNITO_CLIENT_SECRET: !Ref EnceladusCognitoClientSecret
+          ENCELADUS_COGNITO_REGION: us-east-1
+          ENCELADUS_COGNITO_DOMAIN: https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com
+          MCP_AUDIT_CALLER_IDENTITY: devops-coordination-api-gamma
+          MCP_SERVER_LOG_GROUP: /enceladus/mcp/server
+          ENABLE_CLAUDE_HEADLESS: "true"
+          ENABLE_COMPONENT_PROPOSAL: "true"
+          ENABLE_CONTEXT_NODES: "true"
+          ENABLE_HANDOFF_PRIMITIVE: "true"
+          ENABLE_LESSON_PRIMITIVE: "true"
+          ENABLE_TYPED_RELATIONSHIPS: "true"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: mcp-code
+        - Key: Environment
+          Value: gamma
 
 Outputs:
   CoordinationApiFunctionArn:
