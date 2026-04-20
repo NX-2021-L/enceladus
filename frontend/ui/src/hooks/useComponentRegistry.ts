@@ -10,12 +10,20 @@ import {
   deleteComponent,
   approveComponent,
   rejectComponent,
+  revertComponent,
+  deprecateComponent,
+  restoreComponent,
+  advanceComponent,
   componentKeys,
   type ComponentFilters,
   type CreateComponentInput,
   type UpdateComponentInput,
   type ApproveComponentInput,
   type RejectComponentInput,
+  type RevertComponentInput,
+  type DeprecateComponentInput,
+  type RestoreComponentInput,
+  type AdvanceComponentInput,
 } from '../api/components'
 
 export function useComponentRegistry(filters: ComponentFilters = {}) {
@@ -70,6 +78,41 @@ export function useRejectComponent() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (input: RejectComponentInput) => rejectComponent(input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: componentKeys.all }),
+  })
+}
+
+// ENC-FTR-076 v2 / ENC-TSK-F44 — lifecycle action hooks
+// These POST to endpoints that F40 delivers. Pre-F40-deploy they 404 (UI only).
+
+export function useRevertComponent() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: RevertComponentInput) => revertComponent(input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: componentKeys.all }),
+  })
+}
+
+export function useDeprecateComponent() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: DeprecateComponentInput) => deprecateComponent(input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: componentKeys.all }),
+  })
+}
+
+export function useRestoreComponent() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: RestoreComponentInput) => restoreComponent(input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: componentKeys.all }),
+  })
+}
+
+export function useAdvanceComponent() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: AdvanceComponentInput) => advanceComponent(input),
     onSuccess: () => qc.invalidateQueries({ queryKey: componentKeys.all }),
   })
 }
