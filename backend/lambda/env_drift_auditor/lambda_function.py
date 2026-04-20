@@ -79,8 +79,6 @@ def _file_drift_issue(fn_name: str, drift: List[Dict[str, Any]], run_id: str) ->
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     missing_vars = ", ".join(d["var"] for d in drift if d.get("var"))
     body = {
-        "project_id": PROJECT_ID,
-        "record_type": "issue",
         "title": f"[auto-drift] {fn_name} missing required env vars: {missing_vars}",
         "priority": SEVERITY,
         "status": "open",
@@ -118,7 +116,7 @@ def _file_drift_issue(fn_name: str, drift: List[Dict[str, Any]], run_id: str) ->
     }
 
     req = urllib.request.Request(
-        f"{TRACKER_API_BASE}/create",
+        f"{TRACKER_API_BASE}/{PROJECT_ID}/issue",
         method="POST",
         data=json.dumps(body).encode("utf-8"),
         headers={
