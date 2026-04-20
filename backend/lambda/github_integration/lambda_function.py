@@ -1115,11 +1115,17 @@ def _gmf_create_decision(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     labels = [lbl.get("name", "") for lbl in pr.get("labels", [])]
 
-    original_target = "prod"
-    if "target:gamma" in labels:
-        original_target = "gamma"
-    elif "target:undeclared" in labels or not any(l.startswith("target:") for l in labels):
-        original_target = "undeclared"
+    # ENC-ISS-285: DPL records must never carry original_target='undeclared'.
+    # The governance dict enum {prod, gamma, undeclared} is only valid for
+    # TASK records (awaiting labeling). For DEPLOYMENT DECISIONS the target
+    # must be definitive at intake — any main-targeting PR defaults to 'prod';
+    # authors can explicitly opt in to gamma via the 'target:gamma' label.
+    # The previous behavior stored 'undeclared', which caused the PWA
+    # Deployment Manager to render an 'undeclared' badge and a downstream
+    # pattern-validator to reject approve→prod with "The string did not
+    # match the expected pattern."
+    original_target = "gamma" if "target:gamma" in labels else "prod"
+    deploy_target = original_target
 
     record_id = f"decision#ENC-DPL-{pr_number}"
     item = {
@@ -1136,6 +1142,7 @@ def _gmf_create_decision(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
         "head_branch": {"S": pr.get("head", {}).get("ref", "")},
         "head_sha": {"S": pr.get("head", {}).get("sha", "")},
         "original_target": {"S": original_target},
+        "deploy_target": {"S": deploy_target},
         "decided_by": {"S": ""},
         "decided_at": {"S": ""},
         "decision_reason": {"S": ""},
