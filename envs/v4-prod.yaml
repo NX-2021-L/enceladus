@@ -1,0 +1,36 @@
+# ENC-FTR-090 / ENC-TSK-F66 Phase 8
+# v4 production environment manifest.
+# Schema validated by tools/cfn-guard/manifest-shape.guard.
+#
+# DO NOT deploy against this manifest until:
+#   (1) AWS IAM role GitHubActions-V4Prod-DeployRole exists with trust policy from
+#       infrastructure/iam/github-actions-v4-prod-deploy-role-trust-policy.json
+#   (2) CloudFormation stack enceladus-v4-prod exists (initial creation outside Gen2)
+#   (3) GitHub environment v4-prod is configured with required-reviewer = @io
+#
+# The Gen2 reusable workflow (F60) refuses to deploy when any of those prerequisites
+# are missing. This manifest captures the target state so the workflow can reference
+# it safely during v4 preview deploys (gamma only) before cutover.
+
+env_name: v4-prod
+architecture: arm64
+runtime: python3.12
+
+stack_name: enceladus-v4-prod
+deploy_role_arn: arn:aws:iam::356364570033:role/GitHubActions-V4Prod-DeployRole
+artifact_bucket: jreese-net
+artifact_prefix: gen2-artifacts/v4-prod/
+
+required_reviewers:
+  - io
+
+# Prod canary preference: 10-minute steps to give human time to abort via
+# CodeDeploy dashboard or the CloudWatch alarm_arn CodeDeploy consumes (F63).
+canary_preference: Linear10PercentEvery10Minutes
+
+runner_label: ubuntu-24.04-arm
+
+environment: v4-prod
+
+appconfig_application_id: ""
+appconfig_environment_id: ""
