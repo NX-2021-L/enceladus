@@ -1,0 +1,78 @@
+# ENC-FTR-090 / ENC-TSK-F66 Phase 8
+# Schema invariants for envs/*.yaml environment manifests.
+# Runs via: cfn-guard validate --data envs/*.yaml --rules tools/cfn-guard/manifest-shape.guard
+#
+# The manifest schema is owned by this rule file; any change to required fields
+# MUST land here first (with a CODEOWNERS review per /.github/CODEOWNERS Phase 0).
+
+let architecture_allowed = [ "x86_64", "arm64" ]
+let runtime_allowed = [ "python3.11", "python3.12" ]
+let canary_allowed = [
+    "Linear10PercentEvery1Minute",
+    "Linear10PercentEvery2Minutes",
+    "Linear10PercentEvery3Minutes",
+    "Linear10PercentEvery10Minutes",
+    "Canary10Percent5Minutes",
+    "Canary10Percent10Minutes",
+    "Canary10Percent15Minutes",
+    "Canary10Percent30Minutes",
+    "AllAtOnce"
+]
+let runner_label_allowed = [ "ubuntu-latest", "ubuntu-24.04-arm" ]
+
+rule manifest_required_fields {
+    env_name exists
+        <<ENC-FTR-090 AC-7: manifest missing required env_name>>
+    architecture exists
+        <<ENC-FTR-090 AC-7: manifest missing required architecture>>
+    runtime exists
+        <<ENC-FTR-090 AC-7: manifest missing required runtime>>
+    stack_name exists
+        <<ENC-FTR-090 AC-7: manifest missing required stack_name>>
+    deploy_role_arn exists
+        <<ENC-FTR-090 AC-7: manifest missing required deploy_role_arn>>
+    artifact_bucket exists
+        <<ENC-FTR-090 AC-7: manifest missing required artifact_bucket>>
+    artifact_prefix exists
+        <<ENC-FTR-090 AC-7: manifest missing required artifact_prefix>>
+    required_reviewers exists
+        <<ENC-FTR-090 AC-7: manifest missing required required_reviewers>>
+    canary_preference exists
+        <<ENC-FTR-090 AC-7: manifest missing required canary_preference>>
+    runner_label exists
+        <<ENC-FTR-090 AC-7: manifest missing required runner_label>>
+    environment exists
+        <<ENC-FTR-090 AC-7: manifest missing required environment>>
+}
+
+rule manifest_field_values {
+    architecture in %architecture_allowed
+        <<ENC-FTR-090 AC-7: architecture must be one of [x86_64, arm64]>>
+    runtime in %runtime_allowed
+        <<ENC-FTR-090 AC-7: runtime must be one of [python3.11, python3.12]>>
+    canary_preference in %canary_allowed
+        <<ENC-FTR-090 AC-7: canary_preference not in SAM DeploymentPreference enum>>
+    runner_label in %runner_label_allowed
+        <<ENC-FTR-090 AC-7: runner_label must be ubuntu-latest (x86_64) or ubuntu-24.04-arm (arm64)>>
+    deploy_role_arn == /^arn:aws:iam::[0-9]{12}:role\/.+$/
+        <<ENC-FTR-090 AC-7: deploy_role_arn must be a valid IAM role ARN>>
+}
+
+rule manifest_architecture_runtime_runner_consistency {
+    # Enforces the ENC-FTR-090 matrix invariant: x86_64<->py3.11<->ubuntu-latest
+    # and arm64<->py3.12<->ubuntu-24.04-arm. Any cross-pairing is a matrix misroute
+    # that produces a bit-incompatible artifact for the target Lambda arch
+    # (ENC-ISS-213 aarch64-abi3 wheel class).
+    when architecture == "x86_64" {
+        runtime == "python3.11"
+            <<ENC-FTR-090 AC-7: x86_64 manifest must use runtime python3.11>>
+        runner_label == "ubuntu-latest"
+            <<ENC-FTR-090 AC-7: x86_64 manifest must use runner_label ubuntu-latest>>
+    }
+    when architecture == "arm64" {
+        runtime == "python3.12"
+            <<ENC-FTR-090 AC-7: arm64 manifest must use runtime python3.12>>
+        runner_label == "ubuntu-24.04-arm"
+            <<ENC-FTR-090 AC-7: arm64 manifest must use runner_label ubuntu-24.04-arm>>
+    }
+}
