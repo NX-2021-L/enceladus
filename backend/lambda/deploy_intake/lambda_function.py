@@ -1176,12 +1176,13 @@ def _handle_get_queue(project_id: str, limit: int = 50) -> Dict:
     kwargs: Dict[str, Any] = {
         "TableName": DEPLOY_TABLE,
         "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
-        "FilterExpression": "#st = :pending",
+        "FilterExpression": "#st IN (:pending, :awaiting)",
         "ExpressionAttributeNames": {"#st": "status"},
         "ExpressionAttributeValues": {
             ":pid": {"S": project_id},
             ":prefix": {"S": "decision#"},
             ":pending": {"S": "pending_approval"},
+            ":awaiting": {"S": "awaiting_prod_approval"},
         },
         "ScanIndexForward": True,
     }
