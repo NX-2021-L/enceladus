@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -7322,6 +7322,29 @@ if ENABLE_COMPONENT_PROPOSAL:
     _EXECUTE_ACTIONS["component.propose"] = {
         "tool": "component_propose", "requires_governance_hash": True,
     }
+    # ENC-FTR-076 v2 / ENC-TSK-F40 (DOC-546B896390EA §9): state machine + edge
+    # + lifecycle actions. All 6 require governance hash (governed mutations).
+    # Authority enforcement (io-only vs agent-permitted) is server-side in
+    # coordination_api handlers — the MCP surface forwards the request along
+    # with the caller's Cognito claims so the Lambda can gate per action.
+    _EXECUTE_ACTIONS["component.advance"] = {
+        "tool": "component_advance", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.revert"] = {
+        "tool": "component_revert", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.deprecate"] = {
+        "tool": "component_deprecate", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.restore"] = {
+        "tool": "component_restore", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.add_edge"] = {
+        "tool": "component_add_edge", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.remove_edge"] = {
+        "tool": "component_remove_edge", "requires_governance_hash": True,
+    }
 
 # ENC-FTR-058 / ENC-TSK-A97 / ENC-TSK-C09: Plan action aliases in code-mode surface
 _SEARCH_ACTIONS["plan.objectives_status"] = {"tool": "plan_objectives_status"}
@@ -9665,6 +9688,159 @@ async def _component_propose(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+# ============================================================================
+# ENC-FTR-076 v2 / ENC-TSK-F40: state machine + edge + lifecycle MCP actions.
+# Each helper forwards to the coordination_api POST /components/{id}/<action>
+# endpoint. Server-side authority / gate validation lives in coordination_api;
+# the MCP surface is a thin governed wrapper.
+# ============================================================================
+
+
+def _component_require_component_id(args: dict) -> Tuple[str, Optional[Dict[str, Any]]]:
+    component_id = str(args.get("component_id") or "").strip()
+    if not component_id:
+        return "", {"error": "component_id is required"}
+    return component_id, None
+
+
+async def _component_advance(args: dict) -> list[TextContent]:
+    """component.advance — lifecycle_status advance (agent or io).
+
+    Agent-permitted targets: designed, development, production, code-red.
+    io-unrestricted within the governance transition_table.
+    """
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "target_status": args.get("target_status", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("reason"):
+        payload["reason"] = args["reason"]
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/advance", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_revert(args: dict) -> list[TextContent]:
+    """component.revert — io-only atomic archive.
+
+    Requires reverted_reason (min 10 chars). Writes lifecycle_status=archived,
+    reverted_at, reverted_reason, archived_at atomically.
+    """
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "reverted_reason": args.get("reverted_reason", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/revert", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_deprecate(args: dict) -> list[TextContent]:
+    """component.deprecate — io-only. Source must be in {production, development, code-red}."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("reason"):
+        payload["reason"] = args["reason"]
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/deprecate", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_restore(args: dict) -> list[TextContent]:
+    """component.restore — io-only. Source must be deprecated; target is production."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "governance_hash": args.get("governance_hash", ""),
+    }
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/restore", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_add_edge(args: dict) -> list[TextContent]:
+    """component.add_edge — typed edge (DESIGNS/IMPLEMENTS/DEPLOYS) write."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "edge_type": args.get("edge_type", ""),
+        "task_id": args.get("task_id", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/add_edge", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_remove_edge(args: dict) -> list[TextContent]:
+    """component.remove_edge — typed edge delete (returns 423 if locked)."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "edge_type": args.get("edge_type", ""),
+        "task_id": args.get("task_id", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/remove_edge", payload=payload,
+    )
+    return _result_text(resp)
+
+
 async def _tracker_list_lessons(args: dict) -> list[TextContent]:
     """List lesson records for a project with optional filters."""
     project_id = args.get("project_id", "")
@@ -9771,6 +9947,13 @@ _TOOL_HANDLERS = {
     "document_create_note": _document_create_note,
     # ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry
     "component_propose": _component_propose,
+    # ENC-FTR-076 v2 / ENC-TSK-F40: state machine + edge + lifecycle actions
+    "component_advance": _component_advance,
+    "component_revert": _component_revert,
+    "component_deprecate": _component_deprecate,
+    "component_restore": _component_restore,
+    "component_add_edge": _component_add_edge,
+    "component_remove_edge": _component_remove_edge,
 }
 
 

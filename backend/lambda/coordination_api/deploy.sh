@@ -1001,6 +1001,24 @@ ensure_api_integration_and_routes() {
     # Phase 2b: Health route
     "GET /api/v1/health"
     "OPTIONS /api/v1/health"
+    # Component registry routes (ENC-FTR-041 base + ENC-FTR-076 v2 / ENC-TSK-F40 lifecycle)
+    # Provisioned primarily by CFN (infrastructure/cloudformation/03-api.yaml),
+    # mirrored here so direct-script deploys of coordination_api keep APIGW
+    # routes in sync when the CFN stack is temporarily drifted (ENC-ISS-275 pattern).
+    "GET /api/v1/coordination/components"
+    "POST /api/v1/coordination/components"
+    "GET /api/v1/coordination/components/{componentId}"
+    "PATCH /api/v1/coordination/components/{componentId}"
+    "DELETE /api/v1/coordination/components/{componentId}"
+    "POST /api/v1/coordination/components/propose"
+    "POST /api/v1/coordination/components/{componentId}/approve"
+    "POST /api/v1/coordination/components/{componentId}/reject"
+    "POST /api/v1/coordination/components/{componentId}/advance"
+    "POST /api/v1/coordination/components/{componentId}/add_edge"
+    "POST /api/v1/coordination/components/{componentId}/remove_edge"
+    "POST /api/v1/coordination/components/{componentId}/deprecate"
+    "POST /api/v1/coordination/components/{componentId}/restore"
+    "POST /api/v1/coordination/components/{componentId}/revert"
   )
 
   local existing_route_keys
