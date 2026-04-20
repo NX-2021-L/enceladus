@@ -8737,6 +8737,28 @@ def _handle_components_reject(
     )
 
 
+def _handle_components_cloudwatch_event(
+    component_id: str, event: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/{id}/cloudwatch_event — v5 stub.
+
+    ENC-TSK-F43 / DOC-546B896390EA §8. CloudWatch alarm automation is deferred
+    to v5. Any non-empty JSON body is accepted; malformed bodies are treated
+    gracefully. Always returns HTTP 501.
+    """
+    try:
+        json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        pass  # treat malformed body as empty — still 501, no 500
+    return _response(
+        501,
+        {
+            "error": "CloudWatch automation not available until v5",
+            "component_id": component_id,
+        },
+    )
+
+
 # ============================================================================
 # ENC-FTR-076 v2 / ENC-TSK-F40 — state machine + edge + advance/revert/deprecate/
 # restore handlers. Spec: DOC-546B896390EA §3 (state machine), §4 (edge types),
@@ -13642,7 +13664,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # (enforced inside the handlers via _is_cognito_session checks).
     match_comp_f40 = re.fullmatch(
         r"/api/v1/coordination/components/([A-Za-z0-9_\-]+)/"
-        r"(advance|add_edge|remove_edge|deprecate|restore|revert)",
+        r"(advance|add_edge|remove_edge|deprecate|restore|revert|cloudwatch_event)",
         path,
     )
     if method == "POST" and match_comp_f40:
@@ -13660,6 +13682,8 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
             return _handle_components_restore(comp_id, event, claims or {})
         if action == "revert":
             return _handle_components_revert(comp_id, event, claims or {})
+        if action == "cloudwatch_event":
+            return _handle_components_cloudwatch_event(comp_id, event)
 
     # GET /api/v1/coordination/components/{componentId}
     match_comp = re.fullmatch(r"/api/v1/coordination/components/([A-Za-z0-9_\-]+)", path)
