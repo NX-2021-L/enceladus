@@ -1,0 +1,311 @@
+name: Deploy Lambda Artifacts (Gen2)
+
+# ENC-FTR-090 / ENC-PLN-041 Phase 2 / ENC-TSK-F60
+#
+# AC-1: Sole prod-IAM-assumer. GitHubActions-V*-DeployRole is assumed ONLY here.
+#       push to main  → build (via _build.yml) then deploy to v4-gamma.
+#       workflow_dispatch → deploy a pre-built SHA to the specified target_environment.
+#       workflow_call → reusable entry point for programmatic callers.
+#       Concurrency group keyed per-environment with cancel-in-progress=false.
+#
+# AC-2: GitHub Deployments API is the deploy-state store.
+#       POST /deployments on entry; POST /deployments/N/statuses for
+#       in_progress → success|failure. Zero DynamoDB writes for deploy state.
+#
+# AC-3: All legacy per-Lambda deploy workflows + deploy-orchestration.yml +
+#       lambda-deploy-reusable.yml deleted in this PR.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Target environment"
+        type: choice
+        options: [v3-prod, v4-gamma, v4-prod]
+        required: true
+      commit_sha:
+        description: "40-char hex SHA to deploy (must be pre-built by _build.yml)"
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      target_environment:
+        type: string
+        required: true
+      commit_sha:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  deployments: write
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.target_environment || 'v4-gamma' }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  ARTIFACT_BUCKET: jreese-net
+  ARTIFACT_KEY_PREFIX: lambda-artifacts
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # BUILD — runs only on push-to-main (gamma path).
+  # workflow_dispatch / workflow_call callers provide a pre-built SHA.
+  # ---------------------------------------------------------------------------
+  build:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/_build.yml
+    with:
+      commit_sha: ${{ github.sha }}
+
+  # ---------------------------------------------------------------------------
+  # RESOLVE — parse env manifest, probe S3 for artifacts, emit deploy inputs.
+  # Runs after build (push path) or immediately (dispatch/call path).
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: Resolve artifacts (${{ inputs.target_environment || 'v4-gamma' }})
+    needs: [build]
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha:        ${{ steps.sha.outputs.commit_sha }}
+      deploy_role_arn:   ${{ steps.manifest.outputs.deploy_role_arn }}
+      environment:       ${{ steps.manifest.outputs.environment }}
+      arch:              ${{ steps.manifest.outputs.arch }}
+      py_version:        ${{ steps.manifest.outputs.py_version }}
+      canary_preference: ${{ steps.manifest.outputs.canary_preference }}
+      version_ids_json:  ${{ steps.probe.outputs.version_ids_json }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve commit SHA
+        id: sha
+        run: |
+          SHA="${{ inputs.commit_sha || github.sha }}"
+          echo "commit_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Parse environment manifest
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="${{ inputs.target_environment || 'v4-gamma' }}"
+          MANIFEST="envs/${TARGET}.yaml"
+          [[ -f "$MANIFEST" ]] || { echo "::error::Manifest not found: $MANIFEST"; exit 1; }
+
+          _parse() { grep -E "^$1:" "$MANIFEST" | head -1 | sed 's/^[^:]*: *//' | tr -d "\"'"; }
+
+          ROLE=$(_parse deploy_role_arn)
+          ENV=$(_parse environment)
+          ARCH=$(_parse architecture)
+          RUNTIME=$(_parse runtime)
+          PY="${RUNTIME#python}"
+          CANARY=$(_parse canary_preference)
+
+          [[ -n "$ROLE" ]] || { echo "::error::deploy_role_arn missing in $MANIFEST"; exit 1; }
+
+          {
+            echo "deploy_role_arn=$ROLE"
+            echo "environment=$ENV"
+            echo "arch=$ARCH"
+            echo "py_version=$PY"
+            echo "canary_preference=$CANARY"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Target=$TARGET  Arch=$ARCH  Runtime=$RUNTIME  Role=$ROLE"
+
+      - name: Configure AWS credentials (build role — S3 artifact probe)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/GitHubActions-Build-Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Probe S3 for artifacts and collect VersionIds
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.sha.outputs.commit_sha }}"
+          ARCH="${{ steps.manifest.outputs.arch }}"
+          PY="${{ steps.manifest.outputs.py_version }}"
+          KEY_PREFIX="${{ env.ARTIFACT_KEY_PREFIX }}/${ARCH}-py${PY}"
+          BUCKET="${{ env.ARTIFACT_BUCKET }}"
+
+          mapfile -t FNS < <(find backend/lambda -maxdepth 2 -name lambda_function.py \
+            | sed -E 's|backend/lambda/([^/]+)/lambda_function.py|\1|' | sort -u)
+
+          echo "Probing ${#FNS[@]} Lambda functions for SHA=${SHA}, arch=${ARCH}-py${PY}"
+
+          MISSING=()
+          > /tmp/vid_map.txt
+          for fn in "${FNS[@]}"; do
+            KEY="${KEY_PREFIX}/${fn}-${SHA}.zip"
+            VID=$(aws s3api head-object \
+              --bucket "$BUCKET" \
+              --key "$KEY" \
+              --query 'VersionId' --output text 2>/dev/null || echo "")
+            if [[ -z "$VID" || "$VID" == "None" ]]; then
+              MISSING+=("$fn")
+            else
+              printf '%s=%s\n' "$fn" "$VID" >> /tmp/vid_map.txt
+            fi
+          done
+
+          if [[ ${#MISSING[@]} -gt 0 ]]; then
+            echo "::error::Artifacts missing in S3 for SHA=${SHA} (arch=${ARCH}-py${PY}):"
+            printf '  missing: %s\n' "${MISSING[@]}"
+            echo "::error::Build artifacts first via _build.yml before dispatching _deploy.yml."
+            exit 1
+          fi
+
+          VID_JSON=$(python3 - <<'PY'
+          import json
+          d = {}
+          with open('/tmp/vid_map.txt') as f:
+              for line in f:
+                  line = line.strip()
+                  if '=' in line:
+                      k, v = line.split('=', 1)
+                      d[k] = v
+          print(json.dumps(d))
+          PY
+          )
+
+          echo "version_ids_json=$VID_JSON" >> "$GITHUB_OUTPUT"
+          echo "Resolved ${#FNS[@]} artifact VersionIds."
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY — create GH Deployment, assume prod role, update all Lambdas.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy → ${{ needs.resolve.outputs.environment }}
+    needs: resolve
+    environment: ${{ needs.resolve.outputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+
+      - name: Create GitHub Deployment
+        id: create_deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA="${{ needs.resolve.outputs.commit_sha }}"
+          ENV="${{ needs.resolve.outputs.environment }}"
+
+          DEPLOYMENT_ID=$(gh api \
+            --method POST \
+            "/repos/$GITHUB_REPOSITORY/deployments" \
+            -f ref="$SHA" \
+            -f environment="$ENV" \
+            -f description="Gen2 deploy — ENC-FTR-090" \
+            -F auto_merge=false \
+            -F required_contexts='[]' \
+            --jq '.id')
+
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "Created GitHub Deployment #$DEPLOYMENT_ID (env=$ENV, sha=$SHA)"
+
+      - name: Set deployment status → in_progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.create_deployment.outputs.deployment_id }}
+        run: |
+          gh api --method POST \
+            "/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=in_progress \
+            -f description="Deploying Lambda artifacts"
+
+      - name: Configure AWS credentials (prod deploy role — AC-1 sole assumer)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.resolve.outputs.deploy_role_arn }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy Lambda functions
+        id: lambda_deploy
+        env:
+          VERSION_IDS_JSON: ${{ needs.resolve.outputs.version_ids_json }}
+          SHA: ${{ needs.resolve.outputs.commit_sha }}
+          ARCH: ${{ needs.resolve.outputs.arch }}
+          PY_VERSION: ${{ needs.resolve.outputs.py_version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+
+          version_ids = json.loads(os.environ['VERSION_IDS_JSON'])
+          bucket = 'jreese-net'
+          arch   = os.environ['ARCH']
+          py     = os.environ['PY_VERSION']
+          sha    = os.environ['SHA']
+          prefix = f"lambda-artifacts/{arch}-py{py}"
+          region = 'us-west-2'
+
+          errors = []
+          for fn, version_id in sorted(version_ids.items()):
+              s3_key = f"{prefix}/{fn}-{sha}.zip"
+              print(f"[deploy] {fn}  s3://{bucket}/{s3_key}@{version_id}")
+              r = subprocess.run([
+                  'aws', 'lambda', 'update-function-code',
+                  '--region', region,
+                  '--function-name', fn,
+                  '--s3-bucket', bucket,
+                  '--s3-key', s3_key,
+                  '--s3-object-version', version_id,
+                  '--publish',
+              ], capture_output=True, text=True)
+              if r.returncode != 0:
+                  print(f'::error::update-function-code failed for {fn}: {r.stderr.strip()}',
+                        file=sys.stderr)
+                  errors.append(fn)
+                  continue
+              subprocess.run([
+                  'aws', 'lambda', 'wait', 'function-updated-v2',
+                  '--region', region, '--function-name', fn,
+              ], check=False)
+              print(f'  + {fn}')
+
+          if errors:
+              print(f'::error::Deploy failed for: {", ".join(errors)}', file=sys.stderr)
+              sys.exit(1)
+
+          print(f'Deployed {len(version_ids)} Lambda functions  {arch}-py{py} @ {sha[:7]}')
+          PY
+
+      - name: Set deployment status → success
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.create_deployment.outputs.deployment_id }}
+        run: |
+          gh api --method POST \
+            "/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=success \
+            -f description="${{ needs.resolve.outputs.environment }}: all Lambdas deployed"
+
+      - name: Set deployment status → failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.create_deployment.outputs.deployment_id }}
+        run: |
+          gh api --method POST \
+            "/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=failure \
+            -f description="Deploy failed — ${{ needs.resolve.outputs.environment }}"
