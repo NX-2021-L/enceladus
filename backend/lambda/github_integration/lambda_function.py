@@ -1369,6 +1369,88 @@ def _gmf_mark_reverted(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
         return _response(200, {"processed": False, "reason": "mark_reverted_skipped"})
 
 
+def _handle_gamma_success(event: Dict, claims: Dict) -> Dict:
+    # POST /api/v1/github/deploy/gamma-success/{pr_number}
+    # ENC-TSK-F54: called by deploy-orchestration.yml after gamma-health-gate
+    # passes. Advances DPL row pending_approval -> awaiting_prod_approval.
+    # Authenticated via X-Coordination-Internal-Key (GHA secret); fails closed.
+    _, path = _path_method(event)
+    m = re.search(r"/deploy/gamma-success/(\d+)", path)
+    if not m:
+        return _error(400, "Missing PR number in path: expected /deploy/gamma-success/{pr}")
+    pr_number = int(m.group(1))
+
+    body = _parse_body(event) or {}
+    commit_sha = str(body.get("commit_sha", ""))
+    function_name = str(body.get("function_name", ""))
+
+    record_id = f"decision#ENC-DPL-{pr_number}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        ddb = boto3.client("dynamodb", region_name=DYNAMODB_REGION)
+        ddb.update_item(
+            TableName=DEPLOY_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
+            UpdateExpression=(
+                "SET #s = :s_awaiting, gamma_success_at = :now, "
+                "gamma_success_sha = :sha, gamma_success_fn = :fn, updated_at = :now"
+            ),
+            # Idempotent: :s_awaiting is accepted so a re-run after success is a no-op.
+            # Fail-closed on terminal states (deployed/failed/reverted) and on
+            # unexpected states (deploying/approved) — those already advanced
+            # past gamma or skipped it.
+            ConditionExpression="#s IN (:s_pending, :s_awaiting)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":s_awaiting": {"S": "awaiting_prod_approval"},
+                ":s_pending": {"S": "pending_approval"},
+                ":now": {"S": now},
+                ":sha": {"S": commit_sha},
+                ":fn": {"S": function_name},
+            },
+        )
+        logger.info(
+            "GMF: DPL %s → awaiting_prod_approval (PR #%d gamma-success, fn=%s, sha=%s)",
+            record_id, pr_number, function_name, commit_sha[:12],
+        )
+        return _response(200, {
+            "processed": True,
+            "action": "dpl_awaiting_prod_approval",
+            "pr_number": pr_number,
+            "status": "awaiting_prod_approval",
+        })
+    except Exception as e:
+        name = type(e).__name__
+        if name == "ConditionalCheckFailedException":
+            # Fail-closed per AC#4: if gamma-success arrives for a row not in
+            # pending_approval/awaiting_prod_approval (e.g. deployed, failed,
+            # reverted), do NOT silently regress. Return 409 with current state
+            # so the GHA job can surface the mismatch.
+            try:
+                current = ddb.get_item(
+                    TableName=DEPLOY_TABLE,
+                    Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
+                    ProjectionExpression="#s",
+                    ExpressionAttributeNames={"#s": "status"},
+                ).get("Item", {}).get("status", {}).get("S", "unknown")
+            except Exception:
+                current = "unknown"
+            logger.warning(
+                "GMF: gamma-success blocked for PR #%d — row in '%s', not pending/awaiting",
+                pr_number, current,
+            )
+            return _error(
+                409,
+                f"DPL for PR #{pr_number} is in status '{current}'; gamma-success requires pending_approval or awaiting_prod_approval",
+                pr_number=pr_number,
+                current_status=current,
+                required_status="pending_approval_or_awaiting_prod_approval",
+            )
+        logger.error("GMF: gamma-success update failed for PR #%d: %s", pr_number, e)
+        return _error(500, f"gamma-success update failed: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Existing webhook handlers — issues and comments
 # ---------------------------------------------------------------------------
@@ -1849,5 +1931,8 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         return _handle_validate_commit(event, claims)
     elif method == "POST" and "/github/issues" in path:
         return _handle_create_issue(event, claims)
+    elif method == "POST" and "/github/deploy/gamma-success/" in path:
+        # ENC-TSK-F54: advance DPL pending_approval -> awaiting_prod_approval.
+        return _handle_gamma_success(event, claims)
     else:
         return _error(404, f"Route not found: {method} {path}")
