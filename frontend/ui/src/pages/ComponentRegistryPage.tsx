@@ -1,9 +1,11 @@
 /**
  * ComponentRegistryPage — ENC-FTR-041 Component Registry UI
+ * ENC-FTR-076 v2 / ENC-TSK-F44 — 8-status lifecycle UI + io-only modals.
  *
  * Lists all registered components with filters for project, category, and status.
- * Authenticated users (Cognito session) can create, edit, and delete components.
- * transition_type edits are enforced server-side as Cognito-only.
+ * Authenticated users (Cognito session) can create, edit, delete, and manage
+ * lifecycle (approve/revert/deprecate/restore/advance) components.
+ * transition_type edits and lifecycle actions are enforced server-side as Cognito-only.
  */
 
 import { useState, useMemo, useCallback } from 'react'
@@ -14,7 +16,9 @@ import {
   useUpdateComponent,
   useDeleteComponent,
   useApproveComponent,
-  useRejectComponent,
+  useRevertComponent,
+  useDeprecateComponent,
+  useRestoreComponent,
 } from '../hooks/useComponentRegistry'
 import { LoadingState } from '../components/shared/LoadingState'
 import { ErrorState } from '../components/shared/ErrorState'
@@ -29,6 +33,8 @@ import {
   COMPONENT_TRANSITION_TYPE_LABELS,
   COMPONENT_TRANSITION_TYPE_COLORS,
   COMPONENT_STATUSES,
+  COMPONENT_LIFECYCLE_STATUS_COLORS,
+  COMPONENT_LIFECYCLE_STATUS_LABELS,
   STATUS_COLORS,
   STATUS_LABELS,
 } from '../lib/constants'
@@ -67,9 +73,18 @@ interface ComponentCardProps {
   canEdit: boolean
   onEdit: (c: RegistryComponent) => void
   onDelete: (c: RegistryComponent) => void
+  onDeprecate: (c: RegistryComponent) => void
+  onRestore: (c: RegistryComponent) => void
 }
 
-function ComponentCard({ component, canEdit, onEdit, onDelete }: ComponentCardProps) {
+function ComponentCard({
+  component,
+  canEdit,
+  onEdit,
+  onDelete,
+  onDeprecate,
+  onRestore,
+}: ComponentCardProps) {
   const categoryColor =
     COMPONENT_CATEGORY_COLORS[component.category] ?? 'bg-slate-500/20 text-slate-400'
   const transitionColor =
@@ -78,8 +93,23 @@ function ComponentCard({ component, canEdit, onEdit, onDelete }: ComponentCardPr
   const statusColor =
     STATUS_COLORS[component.status] ?? 'bg-slate-500/20 text-slate-400'
 
+  // ENC-FTR-076 v2: render lifecycle_status badge when present
+  const lifecycleStatus = component.lifecycle_status
+  const lifecycleColor = lifecycleStatus
+    ? COMPONENT_LIFECYCLE_STATUS_COLORS[lifecycleStatus] ?? 'bg-slate-500/20 text-slate-400'
+    : null
+
+  // Only show Deprecate when lifecycle_status is production (io-only). Restore only
+  // when deprecated. Both paths are gated server-side — UI shows the button only
+  // when the action is contextually meaningful.
+  const canDeprecate = canEdit && lifecycleStatus === 'production'
+  const canRestore = canEdit && lifecycleStatus === 'deprecated'
+
   return (
-    <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-3 hover:border-slate-600/80 transition-colors">
+    <div
+      className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-3 hover:border-slate-600/80 transition-colors"
+      data-testid={`component-card-${component.component_id}`}
+    >
       {/* Header row */}
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
@@ -88,6 +118,30 @@ function ComponentCard({ component, canEdit, onEdit, onDelete }: ComponentCardPr
         </div>
         {canEdit && (
           <div className="flex items-center gap-1 shrink-0">
+            {canDeprecate && (
+              <button
+                onClick={() => onDeprecate(component)}
+                aria-label={`Deprecate ${component.component_name}`}
+                title="Deprecate"
+                className="p-1.5 text-slate-500 hover:text-amber-400 hover:bg-amber-500/10 rounded transition-colors"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </button>
+            )}
+            {canRestore && (
+              <button
+                onClick={() => onRestore(component)}
+                aria-label={`Restore ${component.component_name}`}
+                title="Restore to production"
+                className="p-1.5 text-slate-500 hover:text-emerald-400 hover:bg-emerald-500/10 rounded transition-colors"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+            )}
             <button
               onClick={() => onEdit(component)}
               aria-label={`Edit ${component.component_name}`}
@@ -118,6 +172,16 @@ function ComponentCard({ component, canEdit, onEdit, onDelete }: ComponentCardPr
         <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${transitionColor}`}>
           {COMPONENT_TRANSITION_TYPE_LABELS[component.transition_type] ?? component.transition_type}
         </span>
+        {/* ENC-FTR-076 v2: 8-status lifecycle badge (AC[3]-b) */}
+        {lifecycleStatus && lifecycleColor && (
+          <span
+            data-testid="lifecycle-status-badge"
+            data-lifecycle-status={lifecycleStatus}
+            className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${lifecycleColor}`}
+          >
+            {COMPONENT_LIFECYCLE_STATUS_LABELS[lifecycleStatus] ?? lifecycleStatus}
+          </span>
+        )}
         <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${statusColor}`}>
           {STATUS_LABELS[component.status] ?? component.status}
         </span>
@@ -478,64 +542,102 @@ function ProposalCard({
   proposal,
   canAct,
   onApprove,
-  onReject,
+  onRevert,
 }: {
   proposal: ComponentProposal
   canAct: boolean
   onApprove: (p: ComponentProposal) => void
-  onReject: (p: ComponentProposal) => void
+  onRevert: (p: ComponentProposal) => void
 }) {
   return (
-    <div className="bg-amber-900/20 border border-amber-500/30 rounded-lg p-4 space-y-3">
+    <div
+      className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-500/30 rounded-lg p-4 space-y-3"
+      data-testid={`proposal-card-${proposal.component_id}`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-semibold text-amber-200 truncate">{proposal.component_id}</h3>
-          <p className="text-xs text-amber-300/60 mt-0.5 truncate">
-            proposed by <span className="font-mono">{proposal.proposing_agent_session_id}</span>
+          <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200 truncate">
+            {proposal.component_id}
+          </h3>
+          <p className="text-xs text-amber-800/70 dark:text-amber-300/60 mt-0.5 truncate">
+            proposed by{' '}
+            <span className="font-mono" data-testid="proposing-agent-session-id">
+              {proposal.proposing_agent_session_id}
+            </span>
           </p>
         </div>
         {canAct && (
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               onClick={() => onApprove(proposal)}
+              data-testid={`approve-button-${proposal.component_id}`}
               className="px-2.5 py-1 text-xs font-medium text-white bg-emerald-700 hover:bg-emerald-600 rounded transition-colors"
             >
               Approve
             </button>
             <button
-              onClick={() => onReject(proposal)}
+              onClick={() => onRevert(proposal)}
+              data-testid={`revert-button-${proposal.component_id}`}
               className="px-2.5 py-1 text-xs font-medium text-white bg-rose-700 hover:bg-rose-600 rounded transition-colors"
             >
-              Reject
+              Revert
             </button>
           </div>
         )}
       </div>
 
       {proposal.description && (
-        <p className="text-xs text-amber-200/70 line-clamp-2">{proposal.description}</p>
+        <p className="text-xs text-amber-900/80 dark:text-amber-200/70 line-clamp-2">
+          {proposal.description}
+        </p>
       )}
 
       <div className="flex flex-wrap gap-1.5">
-        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-800/40 text-amber-300">
-          {COMPONENT_TRANSITION_TYPE_LABELS[proposal.requested_minimum_transition_type] ?? proposal.requested_minimum_transition_type}
+        <span
+          className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-200 dark:bg-amber-800/40 text-amber-900 dark:text-amber-300"
+          data-testid="requested-minimum-transition-type"
+        >
+          min:{' '}
+          {COMPONENT_TRANSITION_TYPE_LABELS[proposal.requested_minimum_transition_type] ??
+            proposal.requested_minimum_transition_type}
         </span>
-        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-800/40 text-amber-300/80 font-mono">
+        {proposal.requested_required_transition_type && (
+          <span
+            className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-200 dark:bg-amber-800/40 text-amber-900 dark:text-amber-300"
+            data-testid="requested-required-transition-type"
+          >
+            required:{' '}
+            {COMPONENT_TRANSITION_TYPE_LABELS[proposal.requested_required_transition_type] ??
+              proposal.requested_required_transition_type}
+          </span>
+        )}
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-200 dark:bg-amber-800/40 text-amber-900 dark:text-amber-300/80 font-mono">
           {proposal.project_id}
         </span>
       </div>
 
       {proposal.source_paths && proposal.source_paths.length > 0 && (
-        <div className="text-xs text-amber-200/50 font-mono truncate">
+        <div className="text-xs text-amber-800/60 dark:text-amber-200/50 font-mono truncate">
           {proposal.source_paths.join(', ')}
         </div>
       )}
 
-      <div className="text-xs text-amber-200/40">
-        {new Date(proposal.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+      <div className="text-xs text-amber-800/50 dark:text-amber-200/40">
+        {new Date(proposal.created_at).toLocaleDateString(undefined, {
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+        })}
       </div>
     </div>
   )
+}
+
+// ENC-FTR-076 v2 / AC[3]-c — Approve modal with required_transition_type + alarm_arn overrides.
+interface ApproveConfirmPayload {
+  minimum_transition_type: ComponentTransitionType
+  required_transition_type: ComponentTransitionType
+  alarm_arn: string
 }
 
 function ApproveModal({
@@ -545,26 +647,63 @@ function ApproveModal({
   isSubmitting,
 }: {
   proposal: ComponentProposal
-  onConfirm: (transitionType: ComponentTransitionType) => void
+  onConfirm: (payload: ApproveConfirmPayload) => void
   onCancel: () => void
   isSubmitting: boolean
 }) {
-  const [transitionType, setTransitionType] = useState<ComponentTransitionType>(
+  const [minimumType, setMinimumType] = useState<ComponentTransitionType>(
     proposal.requested_minimum_transition_type,
   )
+  // Default required_transition_type: proposal's requested value, else mirror minimum.
+  const [requiredType, setRequiredType] = useState<ComponentTransitionType>(
+    proposal.requested_required_transition_type ?? proposal.requested_minimum_transition_type,
+  )
+  const [alarmArn, setAlarmArn] = useState('')
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal
+      aria-label="Approve Component"
+      data-testid="approve-modal"
+    >
       <div className="relative z-10 w-full max-w-sm bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
         <h2 className="text-sm font-semibold text-slate-100 mb-2">Approve Component</h2>
         <p className="text-xs text-slate-400 mb-3">
-          Approve <span className="text-slate-200 font-medium font-mono">{proposal.component_id}</span> and set its minimum transition type.
+          Approve <span className="text-slate-200 font-medium font-mono">{proposal.component_id}</span>.
         </p>
+
+        <div className="bg-slate-800/40 border border-slate-700/60 rounded px-3 py-2 mb-4 space-y-1">
+          <p className="text-xs text-slate-500">
+            Proposing session:{' '}
+            <span className="text-slate-300 font-mono">{proposal.proposing_agent_session_id}</span>
+          </p>
+          <p className="text-xs text-slate-500">
+            Requested minimum:{' '}
+            <span className="text-slate-300">
+              {COMPONENT_TRANSITION_TYPE_LABELS[proposal.requested_minimum_transition_type] ??
+                proposal.requested_minimum_transition_type}
+            </span>
+          </p>
+          {proposal.requested_required_transition_type && (
+            <p className="text-xs text-slate-500">
+              Requested required:{' '}
+              <span className="text-slate-300">
+                {COMPONENT_TRANSITION_TYPE_LABELS[proposal.requested_required_transition_type] ??
+                  proposal.requested_required_transition_type}
+              </span>
+            </p>
+          )}
+        </div>
+
         <label className="block text-xs text-slate-500 mb-1">Minimum Transition Type</label>
         <select
-          value={transitionType}
-          onChange={(e) => setTransitionType(e.target.value as ComponentTransitionType)}
-          className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-slate-500 mb-4"
+          value={minimumType}
+          onChange={(e) => setMinimumType(e.target.value as ComponentTransitionType)}
+          data-testid="approve-minimum-transition-type"
+          aria-label="Minimum Transition Type"
+          className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-slate-500 mb-3"
         >
           {COMPONENT_TRANSITION_TYPES.map((tt) => (
             <option key={tt} value={tt}>
@@ -572,6 +711,35 @@ function ApproveModal({
             </option>
           ))}
         </select>
+
+        <label className="block text-xs text-slate-500 mb-1">Required Transition Type</label>
+        <select
+          value={requiredType}
+          onChange={(e) => setRequiredType(e.target.value as ComponentTransitionType)}
+          data-testid="approve-required-transition-type"
+          aria-label="Required Transition Type"
+          className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-slate-500 mb-3"
+        >
+          {COMPONENT_TRANSITION_TYPES.map((tt) => (
+            <option key={tt} value={tt}>
+              {COMPONENT_TRANSITION_TYPE_LABELS[tt] ?? tt}
+            </option>
+          ))}
+        </select>
+
+        <label className="block text-xs text-slate-500 mb-1">
+          Alarm ARN <span className="text-slate-600">(optional — v5 CloudWatch hook)</span>
+        </label>
+        <input
+          type="text"
+          value={alarmArn}
+          onChange={(e) => setAlarmArn(e.target.value)}
+          placeholder="arn:aws:cloudwatch:..."
+          data-testid="approve-alarm-arn"
+          aria-label="Alarm ARN"
+          className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 font-mono focus:outline-none focus:border-slate-500 mb-4"
+        />
+
         <div className="flex justify-end gap-2">
           <button
             type="button"
@@ -582,8 +750,15 @@ function ApproveModal({
           </button>
           <button
             type="button"
-            onClick={() => onConfirm(transitionType)}
+            onClick={() =>
+              onConfirm({
+                minimum_transition_type: minimumType,
+                required_transition_type: requiredType,
+                alarm_arn: alarmArn,
+              })
+            }
             disabled={isSubmitting}
+            data-testid="approve-confirm"
             className="px-4 py-2 text-sm font-medium text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded-lg transition-colors"
           >
             {isSubmitting ? 'Approving...' : 'Approve'}
@@ -595,7 +770,9 @@ function ApproveModal({
   )
 }
 
-function RejectModal({
+// ENC-FTR-076 v2 / AC[3]-d — Revert is terminal (archives component).
+// Requires reverted_reason (min 10 chars). Displays terminal warning.
+function RevertModal({
   proposal,
   onConfirm,
   onCancel,
@@ -609,20 +786,42 @@ function RejectModal({
   const [reason, setReason] = useState('')
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal
+      aria-label="Revert Component"
+      data-testid="revert-modal"
+    >
       <div className="relative z-10 w-full max-w-sm bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
-        <h2 className="text-sm font-semibold text-slate-100 mb-2">Reject Component</h2>
+        <h2 className="text-sm font-semibold text-slate-100 mb-2">Revert Component</h2>
         <p className="text-xs text-slate-400 mb-3">
-          Reject <span className="text-slate-200 font-medium font-mono">{proposal.component_id}</span>. Please provide a reason (min 10 characters).
+          Revert{' '}
+          <span className="text-slate-200 font-medium font-mono">{proposal.component_id}</span>.
         </p>
+        <div
+          className="bg-rose-900/30 border border-rose-500/40 rounded px-3 py-2 mb-3"
+          role="alert"
+        >
+          <p className="text-xs font-semibold text-rose-300 mb-0.5">Warning: terminal action</p>
+          <p className="text-xs text-rose-200/80">
+            Revert archives the component (lifecycle_status=archived) atomically. This cannot be
+            undone — a new proposal must be filed to re-register this component_id.
+          </p>
+        </div>
+        <label className="block text-xs text-slate-500 mb-1">Reverted Reason</label>
         <textarea
           value={reason}
           onChange={(e) => setReason(e.target.value)}
-          placeholder="Reason for rejection..."
+          placeholder="Reason for revert (min 10 chars)..."
           rows={3}
+          data-testid="revert-reason"
+          aria-label="Reverted Reason"
           className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-slate-500 mb-1 resize-none"
         />
-        <p className="text-xs text-slate-600 mb-4">{reason.length}/10 characters minimum</p>
+        <p className="text-xs text-slate-600 mb-4" data-testid="revert-reason-count">
+          {reason.length}/10 characters minimum
+        </p>
         <div className="flex justify-end gap-2">
           <button
             type="button"
@@ -635,9 +834,148 @@ function RejectModal({
             type="button"
             onClick={() => onConfirm(reason)}
             disabled={isSubmitting || reason.length < 10}
-            className="px-4 py-2 text-sm font-medium text-white bg-rose-700 hover:bg-rose-600 disabled:opacity-50 rounded-lg transition-colors"
+            data-testid="revert-confirm"
+            className="px-4 py-2 text-sm font-medium text-white bg-rose-700 hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
           >
-            {isSubmitting ? 'Rejecting...' : 'Reject'}
+            {isSubmitting ? 'Reverting...' : 'Revert (archive)'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+// ENC-FTR-076 v2 / AC[3]-e — Deprecate modal.
+// io-only action; backend is Cognito-gated. UI surfaces the -v2/-v3 fork guidance.
+function DeprecateModal({
+  component,
+  onConfirm,
+  onCancel,
+  isSubmitting,
+}: {
+  component: RegistryComponent
+  onConfirm: (reason: string) => void
+  onCancel: () => void
+  isSubmitting: boolean
+}) {
+  const [reason, setReason] = useState('')
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal
+      aria-label="Deprecate Component"
+      data-testid="deprecate-modal"
+    >
+      <div className="relative z-10 w-full max-w-sm bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
+        <h2 className="text-sm font-semibold text-slate-100 mb-2">Deprecate Component</h2>
+        <p className="text-xs text-slate-400 mb-3">
+          Deprecate{' '}
+          <span className="text-slate-200 font-medium font-mono">{component.component_id}</span>.
+        </p>
+        <div
+          className="bg-amber-900/30 border border-amber-500/40 rounded px-3 py-2 mb-3"
+          role="alert"
+        >
+          <p className="text-xs font-semibold text-amber-300 mb-0.5">io-only action</p>
+          <p className="text-xs text-amber-200/80">
+            Deprecation is Cognito-gated (io humans only). Future development on this component
+            requires a version fork (e.g.{' '}
+            <span className="font-mono">{component.component_id}-v2</span>). Restore returns the
+            component to production (lifecycle_status=production).
+          </p>
+        </div>
+        <label className="block text-xs text-slate-500 mb-1">
+          Reason <span className="text-slate-600">(optional)</span>
+        </label>
+        <textarea
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Why is this component being deprecated?"
+          rows={3}
+          data-testid="deprecate-reason"
+          aria-label="Deprecation Reason"
+          className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-slate-500 mb-4 resize-none"
+        />
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 text-sm text-slate-300 hover:text-slate-100 hover:bg-slate-800 rounded-lg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onConfirm(reason)}
+            disabled={isSubmitting}
+            data-testid="deprecate-confirm"
+            className="px-4 py-2 text-sm font-medium text-white bg-amber-700 hover:bg-amber-600 disabled:opacity-50 rounded-lg transition-colors"
+          >
+            {isSubmitting ? 'Deprecating...' : 'Deprecate'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+// ENC-FTR-076 v2 / AC[3]-e — Restore modal.
+// Only available when lifecycle_status === 'deprecated'. Target is production.
+function RestoreModal({
+  component,
+  onConfirm,
+  onCancel,
+  isSubmitting,
+}: {
+  component: RegistryComponent
+  onConfirm: () => void
+  onCancel: () => void
+  isSubmitting: boolean
+}) {
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal
+      aria-label="Restore Component"
+      data-testid="restore-modal"
+    >
+      <div className="relative z-10 w-full max-w-sm bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
+        <h2 className="text-sm font-semibold text-slate-100 mb-2">Restore Component</h2>
+        <p className="text-xs text-slate-400 mb-3">
+          Restore{' '}
+          <span className="text-slate-200 font-medium font-mono">{component.component_id}</span> to
+          production?
+        </p>
+        <div
+          className="bg-emerald-900/30 border border-emerald-500/40 rounded px-3 py-2 mb-4"
+          role="alert"
+        >
+          <p className="text-xs text-emerald-200/90">
+            Restore moves the component from <span className="font-mono">deprecated</span> to{' '}
+            <span className="font-mono">production</span>. Only deprecated components may be
+            restored.
+          </p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 text-sm text-slate-300 hover:text-slate-100 hover:bg-slate-800 rounded-lg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={isSubmitting}
+            data-testid="restore-confirm"
+            className="px-4 py-2 text-sm font-medium text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded-lg transition-colors"
+          >
+            {isSubmitting ? 'Restoring...' : 'Restore to Production'}
           </button>
         </div>
       </div>
@@ -659,7 +997,9 @@ export function ComponentRegistryPage() {
   const [editingComponent, setEditingComponent] = useState<RegistryComponent | null>(null)
   const [deletingComponent, setDeletingComponent] = useState<RegistryComponent | null>(null)
   const [approvingProposal, setApprovingProposal] = useState<ComponentProposal | null>(null)
-  const [rejectingProposal, setRejectingProposal] = useState<ComponentProposal | null>(null)
+  const [revertingProposal, setRevertingProposal] = useState<ComponentProposal | null>(null)
+  const [deprecatingComponent, setDeprecatingComponent] = useState<RegistryComponent | null>(null)
+  const [restoringComponent, setRestoringComponent] = useState<RegistryComponent | null>(null)
   const [projectSearch, setProjectSearch] = useState('')
 
   const { components, isPending, isError, dataUpdatedAt } = useComponentRegistry({
@@ -672,7 +1012,9 @@ export function ComponentRegistryPage() {
   const updateMutation = useUpdateComponent()
   const deleteMutation = useDeleteComponent()
   const approveMutation = useApproveComponent()
-  const rejectMutation = useRejectComponent()
+  const revertMutation = useRevertComponent()
+  const deprecateMutation = useDeprecateComponent()
+  const restoreMutation = useRestoreComponent()
 
   // Derive unique project IDs from the full (unfiltered) list for the filter dropdown
   const { components: allComponents } = useComponentRegistry()
@@ -682,38 +1024,60 @@ export function ComponentRegistryPage() {
     [allComponents],
   )
 
-  // ENC-FTR-076: Pending proposals (lifecycle_status === 'proposed')
-  const pendingProposals = useMemo(
-    () =>
-      allComponents.filter(
-        (c) => (c as unknown as ComponentProposal).lifecycle_status === 'proposed',
-      ) as unknown as ComponentProposal[],
-    [allComponents],
-  )
+  // ENC-FTR-076 v2 / AC[3]-a: Pending proposals (lifecycle_status === 'proposed').
+  // Sorted oldest-first so long-pending proposals surface at the top.
+  const pendingProposals = useMemo(() => {
+    const proposals = allComponents.filter(
+      (c) => (c as unknown as ComponentProposal).lifecycle_status === 'proposed',
+    ) as unknown as ComponentProposal[]
+    return [...proposals].sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+    )
+  }, [allComponents])
 
   const handleApproveConfirm = useCallback(
-    async (transitionType: ComponentTransitionType) => {
+    async (payload: ApproveConfirmPayload) => {
       if (!approvingProposal) return
       await approveMutation.mutateAsync({
         id: approvingProposal.component_id,
-        minimum_transition_type: transitionType,
+        minimum_transition_type: payload.minimum_transition_type,
+        required_transition_type: payload.required_transition_type,
+        alarm_arn: payload.alarm_arn || undefined,
       })
       setApprovingProposal(null)
     },
     [approvingProposal, approveMutation],
   )
 
-  const handleRejectConfirm = useCallback(
+  const handleRevertConfirm = useCallback(
     async (reason: string) => {
-      if (!rejectingProposal) return
-      await rejectMutation.mutateAsync({
-        id: rejectingProposal.component_id,
-        rejection_reason: reason,
+      if (!revertingProposal) return
+      await revertMutation.mutateAsync({
+        id: revertingProposal.component_id,
+        reverted_reason: reason,
       })
-      setRejectingProposal(null)
+      setRevertingProposal(null)
     },
-    [rejectingProposal, rejectMutation],
+    [revertingProposal, revertMutation],
   )
+
+  const handleDeprecateConfirm = useCallback(
+    async (reason: string) => {
+      if (!deprecatingComponent) return
+      await deprecateMutation.mutateAsync({
+        id: deprecatingComponent.component_id,
+        deprecated_reason: reason || undefined,
+      })
+      setDeprecatingComponent(null)
+    },
+    [deprecatingComponent, deprecateMutation],
+  )
+
+  const handleRestoreConfirm = useCallback(async () => {
+    if (!restoringComponent) return
+    await restoreMutation.mutateAsync({ id: restoringComponent.component_id })
+    setRestoringComponent(null)
+  }, [restoringComponent, restoreMutation])
 
   const handleOpenCreate = useCallback(() => {
     setEditingComponent(null)
@@ -752,11 +1116,14 @@ export function ComponentRegistryPage() {
 
   const generatedAt = dataUpdatedAt ? new Date(dataUpdatedAt).toISOString() : null
 
-  // Filter by project search input (local filter on top of server filters)
+  // Filter by project search input (local filter on top of server filters).
+  // ENC-FTR-076 v2: also strip lifecycle_status='proposed' from the main grid
+  // so proposals only render in the Pending Approval section (AC[3]-a).
   const filteredByProject = useMemo(() => {
-    if (!projectSearch.trim()) return components
+    const withoutProposed = components.filter((c) => c.lifecycle_status !== 'proposed')
+    if (!projectSearch.trim()) return withoutProposed
     const q = projectSearch.toLowerCase()
-    return components.filter(
+    return withoutProposed.filter(
       (c) =>
         c.project_id.includes(q) ||
         c.component_name.toLowerCase().includes(q) ||
@@ -766,6 +1133,33 @@ export function ComponentRegistryPage() {
 
   return (
     <div className="p-4 space-y-4">
+      {/* ENC-FTR-076 v2 / AC[3]-a: Pending Approval section pinned at the top
+          of the page. Amber-styled, oldest-first. */}
+      {pendingProposals.length > 0 && (
+        <section
+          data-testid="pending-approval-section"
+          className="bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-500/30 rounded-lg p-3 space-y-2"
+        >
+          <h2
+            className="text-xs font-semibold text-amber-900 dark:text-amber-200 uppercase tracking-wider"
+            data-testid="pending-approval-header"
+          >
+            Pending Approval ({pendingProposals.length})
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {pendingProposals.map((p) => (
+              <ProposalCard
+                key={p.component_id}
+                proposal={p}
+                canAct={canEdit}
+                onApprove={setApprovingProposal}
+                onRevert={setRevertingProposal}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* Top bar */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
@@ -852,26 +1246,6 @@ export function ComponentRegistryPage() {
         </div>
       </div>
 
-      {/* Pending Approval — ENC-FTR-076 Phase 6 */}
-      {pendingProposals.length > 0 && (
-        <section className="space-y-2">
-          <h2 className="text-xs font-semibold text-amber-200 uppercase tracking-wider">
-            Pending Approval ({pendingProposals.length})
-          </h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {pendingProposals.map((p) => (
-              <ProposalCard
-                key={p.component_id}
-                proposal={p}
-                canAct={canEdit}
-                onApprove={setApprovingProposal}
-                onReject={setRejectingProposal}
-              />
-            ))}
-          </div>
-        </section>
-      )}
-
       {/* Results */}
       {isPending ? (
         <LoadingState />
@@ -888,6 +1262,8 @@ export function ComponentRegistryPage() {
               canEdit={canEdit}
               onEdit={handleOpenEdit}
               onDelete={setDeletingComponent}
+              onDeprecate={setDeprecatingComponent}
+              onRestore={setRestoringComponent}
             />
           ))}
         </div>
@@ -914,7 +1290,7 @@ export function ComponentRegistryPage() {
         />
       )}
 
-      {/* Approve modal — ENC-FTR-076 Phase 6 */}
+      {/* Approve modal — ENC-FTR-076 v2 / AC[3]-c */}
       {approvingProposal && (
         <ApproveModal
           proposal={approvingProposal}
@@ -924,13 +1300,33 @@ export function ComponentRegistryPage() {
         />
       )}
 
-      {/* Reject modal — ENC-FTR-076 Phase 6 */}
-      {rejectingProposal && (
-        <RejectModal
-          proposal={rejectingProposal}
-          onConfirm={handleRejectConfirm}
-          onCancel={() => setRejectingProposal(null)}
-          isSubmitting={rejectMutation.isPending}
+      {/* Revert modal — ENC-FTR-076 v2 / AC[3]-d (terminal-archive) */}
+      {revertingProposal && (
+        <RevertModal
+          proposal={revertingProposal}
+          onConfirm={handleRevertConfirm}
+          onCancel={() => setRevertingProposal(null)}
+          isSubmitting={revertMutation.isPending}
+        />
+      )}
+
+      {/* Deprecate modal — ENC-FTR-076 v2 / AC[3]-e (io only) */}
+      {deprecatingComponent && (
+        <DeprecateModal
+          component={deprecatingComponent}
+          onConfirm={handleDeprecateConfirm}
+          onCancel={() => setDeprecatingComponent(null)}
+          isSubmitting={deprecateMutation.isPending}
+        />
+      )}
+
+      {/* Restore modal — ENC-FTR-076 v2 / AC[3]-e (deprecated → production) */}
+      {restoringComponent && (
+        <RestoreModal
+          component={restoringComponent}
+          onConfirm={handleRestoreConfirm}
+          onCancel={() => setRestoringComponent(null)}
+          isSubmitting={restoreMutation.isPending}
         />
       )}
     </div>
