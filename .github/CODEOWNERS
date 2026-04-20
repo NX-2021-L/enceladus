@@ -1,0 +1,34 @@
+# ENC-FTR-090 / ENC-TSK-F58 Phase 0 \u2014 CODEOWNERS
+#
+# Rules:
+# 1. @io is the sole owner of this CODEOWNERS file itself (meta-protection:
+#    prevents an automated PR from broadening ownership without human review).
+# 2. Gen2 pipeline surfaces (cfn-guard rules, IAM trust policies, release-bot
+#    config, rulesets, reusable deploy workflow) are owned by @io.
+# 3. CloudFormation templates and per-Lambda deploy scripts are owned by @io
+#    during Gen2 rollout; ownership will be relaxed after Phase 7 cutover
+#    (ENC-TSK-F65) when deploy.sh scripts are retired.
+# 4. No wildcard fallback \u2014 paths not listed here fall through to repo-level
+#    defaults. CODEOWNERS is an invariant surface, not a routing table.
+
+# --- Meta (highest protection) ---------------------------------------------
+/.github/CODEOWNERS                                    @io
+
+# --- Gen2 foundation surfaces ----------------------------------------------
+/tools/cfn-guard/                                      @io
+/infrastructure/iam/                                   @io
+/.github/rulesets/                                     @io
+
+# --- Gen2 pipeline surfaces (added incrementally as phases land) ----------
+# /.github/workflows/_deploy.yml                       @io   (F60)
+# /.github/workflows/_build.yml                        @io   (F59)
+# /envs/                                               @io   (F66)
+
+# --- CloudFormation (locked during rollout, owned by @io until F65) -------
+/infrastructure/cloudformation/                        @io
+
+# --- Per-Lambda deploy scripts (locked during rollout) ---------------------
+/backend/lambda/*/deploy.sh                            @io
+
+# --- Governance data dictionary (touched by every PR; keep ownership tight)
+/backend/lambda/coordination_api/governance_data_dictionary.json  @io
