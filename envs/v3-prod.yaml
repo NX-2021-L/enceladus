@@ -1,0 +1,52 @@
+# ENC-FTR-090 / ENC-TSK-F59 Phase 1
+# v3 production environment manifest (x86_64 / python3.11).
+# Schema validated by tools/cfn-guard/manifest-shape.guard.
+#
+# This is the CURRENT production target. The ubuntu-latest matrix row in
+# _build.yml produces the x86_64 artifacts that land here. F60 Phase 2
+# _deploy.yml consumes artifact_version_ids to pin exactly which S3 VersionId
+# is deployed to v3-prod.
+#
+# DO NOT deploy against this manifest until F60 Phase 2 (_deploy.yml) lands
+# AND the existing 31 deploy.sh scripts are tombstoned (F59 AC-3, deferred
+# to ship atomically with F60 to avoid Gen1 breakage). Until then, Gen1
+# deploy paths remain authoritative for v3-prod.
+
+env_name: v3-prod
+architecture: x86_64
+runtime: python3.11
+
+stack_name: enceladus-compute
+deploy_role_arn: arn:aws:iam::356364570033:role/GitHubActions-V3Prod-DeployRole
+artifact_bucket: jreese-net
+artifact_prefix: gen2-artifacts/v3-prod/
+
+required_reviewers:
+  - io
+
+# SAM CodeDeploy DeploymentPreference. v3-prod is the current production target
+# with human users; uses the slower 10-minute canary steps to give io time to
+# abort via CodeDeploy dashboard or the CloudWatch alarm_arn CodeDeploy consumes
+# (F63 Phase 5 wires the alarm in).
+canary_preference: Linear10PercentEvery10Minutes
+
+# GitHub Actions runner label. ubuntu-latest is the x86_64 row in the _build.yml
+# matrix (F59 Phase 1).
+runner_label: ubuntu-latest
+
+# GitHub Environment name. The environment's required-reviewer rule is the
+# human approval gate; OIDC trust policy
+# (infrastructure/iam/github-actions-v3-prod-deploy-role-trust-policy.json,
+# landed in PR #407) scopes sub=environment:v3-prod.
+environment: v3-prod
+
+# Optional: AppConfig application ID for runtime feature flag control (F63).
+appconfig_application_id: ""
+appconfig_environment_id: ""
+
+# ENC-FTR-090 / ENC-TSK-F59 Phase 1 \u2014 artifact promotion fields.
+# Populated by F60 Phase 2 _deploy.yml on each promotion. Empty here means
+# no Gen2 build has been promoted to v3-prod yet; v3-prod continues to receive
+# Gen1 deploys via the legacy deploy.sh + lambda-deploy-reusable.yml path.
+artifact_commit_sha: ""
+artifact_version_ids: {}

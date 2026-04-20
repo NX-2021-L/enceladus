@@ -31,3 +31,12 @@ environment: v4-gamma
 # Empty until F63 lands; the deploy workflow treats empty-string as "no AppConfig".
 appconfig_application_id: ""
 appconfig_environment_id: ""
+
+# ENC-FTR-090 / ENC-TSK-F59 Phase 1 \u2014 artifact promotion fields.
+# artifact_commit_sha + artifact_version_ids are populated by F60 Phase 2
+# _deploy.yml when it promotes a matrix-built artifact set into this env.
+# Empty map here means no build has been promoted yet \u2014 _deploy.yml refuses
+# to deploy until populated. Schema validated by tools/cfn-guard/manifest-shape.guard
+# (rules: manifest_artifact_version_ids_shape + manifest_artifact_commit_sha_pinned).
+artifact_commit_sha: ""
+artifact_version_ids: {}

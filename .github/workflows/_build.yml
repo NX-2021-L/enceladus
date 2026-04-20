@@ -1,0 +1,183 @@
+name: Build Lambda Artifacts (Gen2)
+
+# ENC-FTR-090 / ENC-PLN-041 Phase 1 / ENC-TSK-F59
+#
+# Reusable workflow. Produces arch-tagged, SHA-pinned, S3-versioned Lambda zip
+# artifacts via a strategy matrix. Native runners per architecture (zero QEMU).
+#
+# Each matrix row produces one zip per Lambda and uploads to:
+#   s3://<artifact_bucket>/lambda-artifacts/<arch>-py<ver>/<function>-<sha>.zip
+# Versioning is required on the bucket (S3 Versioning=Enabled). The returned
+# VersionId is the canonical promotable identity \u2014 captured in the output
+# manifest JSON and consumed by envs/<target>.yaml in F60 Phase 2.
+#
+# Invariants enforced:
+#   - ubuntu-latest host <=> x86_64 <=> python3.11 (matches
+#     tools/cfn-guard/lambda-architecture.guard + runtime-whitelist.guard
+#     + manifest-shape.guard matrix rules).
+#   - ubuntu-24.04-arm host <=> arm64 <=> python3.12.
+#   - pip install uses --platform + --only-binary=:all: to prevent source
+#     builds that would fall back to the host arch (ENC-ISS-213 aarch64-abi3
+#     protection). --implementation cp + --python-version pins the ABI.
+#
+# Downstream: F60 Phase 2 _deploy.yml consumes artifact_manifest.json (GitHub
+# Actions workflow artifact) to resolve which S3 VersionId to deploy per
+# function per environment.
+
+on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        description: "40-char hex commit SHA to build from. Used in S3 object key."
+        type: string
+        required: true
+      lambdas_to_build:
+        description: "Comma-separated list of Lambda directory names under backend/lambda/. Empty = all."
+        type: string
+        required: false
+        default: ""
+      artifact_bucket:
+        description: "S3 bucket for versioned artifacts. Must have versioning enabled."
+        type: string
+        required: false
+        default: "jreese-net"
+      artifact_key_prefix:
+        description: "S3 key prefix under the artifact bucket."
+        type: string
+        required: false
+        default: "lambda-artifacts"
+    outputs:
+      artifact_manifest_path:
+        description: "Workflow-artifact name containing the JSON manifest of {function: s3_version_id} per arch."
+        value: ${{ jobs.build.outputs.manifest_path }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: build-${{ matrix.arch }}-py${{ matrix.py_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            py_version: "3.11"
+            runner: ubuntu-latest
+            pip_platform: manylinux2014_x86_64
+          - arch: arm64
+            py_version: "3.12"
+            runner: ubuntu-24.04-arm
+            pip_platform: manylinux2014_aarch64
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      manifest_path: gen2-artifact-manifest-${{ matrix.arch }}
+    steps:
+      - name: Checkout repo at requested SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Set up Python ${{ matrix.py_version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py_version }}
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/GitHubActions-Build-Role
+          aws-region: us-west-2
+
+      - name: Enumerate Lambdas to build
+        id: enumerate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ inputs.lambdas_to_build }}" ]; then
+            # Discover every backend/lambda/<name>/ that contains a lambda_function.py.
+            mapfile -t fns < <(find backend/lambda -maxdepth 2 -name lambda_function.py \
+              | sed -E 's|backend/lambda/([^/]+)/lambda_function.py|\1|' | sort -u)
+          else
+            IFS=',' read -ra fns <<< "${{ inputs.lambdas_to_build }}"
+          fi
+          printf '%s\n' "${fns[@]}" > /tmp/functions.txt
+          echo "count=${#fns[@]}" >> "$GITHUB_OUTPUT"
+          echo "Functions to build: ${fns[*]}"
+
+      - name: Build + upload artifacts
+        id: build_upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/build-out
+          declare -A version_ids
+          while IFS= read -r fn; do
+            [ -z "$fn" ] && continue
+            srcdir="backend/lambda/$fn"
+            [ -d "$srcdir" ] || { echo "skip missing $srcdir"; continue; }
+
+            workdir="/tmp/build-$fn"
+            rm -rf "$workdir"
+            mkdir -p "$workdir"
+
+            # Copy source.
+            rsync -a --exclude='__pycache__' --exclude='*.pyc' "$srcdir/" "$workdir/"
+
+            # Install deps to the same dir \u2014 arch-locked wheels only.
+            if [ -f "$workdir/requirements.txt" ]; then
+              python -m pip install \
+                --platform "${{ matrix.pip_platform }}" \
+                --implementation cp \
+                --python-version "${{ matrix.py_version }}" \
+                --only-binary=:all: \
+                --upgrade \
+                --target "$workdir" \
+                -r "$workdir/requirements.txt"
+            fi
+
+            # Zip at function root (matches Lambda handler expectations).
+            zipfile="/tmp/build-out/$fn.zip"
+            (cd "$workdir" && zip -qrX "$zipfile" .)
+
+            # S3 upload (bucket must have Versioning=Enabled).
+            sha="${{ inputs.commit_sha }}"
+            key="${{ inputs.artifact_key_prefix }}/${{ matrix.arch }}-py${{ matrix.py_version }}/${fn}-${sha}.zip"
+            put_out=$(aws s3api put-object \
+              --bucket "${{ inputs.artifact_bucket }}" \
+              --key "$key" \
+              --body "$zipfile" \
+              --content-type application/zip \
+              --output json)
+            version_id=$(echo "$put_out" | python -c 'import sys,json; print(json.load(sys.stdin)["VersionId"])')
+            version_ids["$fn"]="$version_id"
+            echo "uploaded s3://${{ inputs.artifact_bucket }}/$key VersionId=$version_id"
+          done < /tmp/functions.txt
+
+          # Emit manifest JSON: {arch, py_version, commit_sha, artifact_version_ids: {fn: version_id}}.
+          python - <<PY > /tmp/manifest-${{ matrix.arch }}.json
+          import json, os
+          ids = {}
+          for fn, vid in [line.split('=', 1) for line in os.environ.get('VERSION_IDS_RAW', '').splitlines() if line]:
+              ids[fn] = vid
+          manifest = {
+              "arch": "${{ matrix.arch }}",
+              "py_version": "${{ matrix.py_version }}",
+              "commit_sha": "${{ inputs.commit_sha }}",
+              "artifact_bucket": "${{ inputs.artifact_bucket }}",
+              "artifact_key_prefix": "${{ inputs.artifact_key_prefix }}",
+              "artifact_version_ids": ids,
+          }
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+        env:
+          VERSION_IDS_RAW: |
+
+      - name: Upload manifest as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gen2-artifact-manifest-${{ matrix.arch }}
+          path: /tmp/manifest-${{ matrix.arch }}.json
+          retention-days: 30
+          if-no-files-found: error
