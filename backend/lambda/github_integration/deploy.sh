@@ -295,6 +295,10 @@ ensure_api_route() {
     "GET /api/v1/github/projects"
     "POST /api/v1/github/projects/sync"
     "OPTIONS /api/v1/github/{proxy+}"
+    # ENC-TSK-F54: gamma-success DPL transition (io-override session 2026-04-20)
+    "POST /api/v1/github/deploy/gamma-success/{pr_number}"
+    # Route existed live but was missing from this array — closing ENC-LSN-027 bifurcation drift
+    "GET /api/v1/github/commits/validate"
   )
 
   local existing_route_keys
