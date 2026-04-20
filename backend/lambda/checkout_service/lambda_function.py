@@ -934,6 +934,32 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
         return _error(pre_status, pre_task.get("error", f"Task not found: {task_id}"))
 
     pre_components = pre_task.get("components") or []
+
+    # F42: Opacity model gate (ENC-FTR-076 §7) — runs BEFORE transition_type
+    # strictness so OPAQUE components cannot leak existence via 400 mismatch errors.
+    if pre_components:
+        lifecycle_map = _get_components_lifecycle(pre_components)
+        for cid in pre_components:
+            entry = lifecycle_map.get(str(cid))
+            if not entry:
+                continue
+            ls = entry.get("lifecycle_status", "")
+            if ls in _OPAQUE_LIFECYCLE_STATUSES:
+                return _error(404, f"Component '{cid}' not found")
+            if ls in _BLOCKED_LIFECYCLE_STATUSES:
+                return _validation_error(
+                    400,
+                    f"Component {cid} is not available for checkout (status: {ls})",
+                    task_id=task_id,
+                    target_status="in-progress",
+                    provider=provider,
+                    extra_details={
+                        "code": "component_lifecycle_blocked",
+                        "component_id": cid,
+                        "lifecycle_status": ls,
+                    },
+                )
+
     if pre_components:
         pre_transition_type = (pre_task.get("transition_type") or "github_pr_deploy").strip().lower()
         try:
@@ -1799,6 +1825,11 @@ def _component_misconfigured_response(exc: ComponentMisconfiguredError) -> dict:
         retryable=False,
         details=details,
     )
+
+
+# F42: Opacity model (ENC-FTR-076 §7). Mirrors coordination_api constants.
+_OPAQUE_LIFECYCLE_STATUSES = frozenset({"archived"})
+_BLOCKED_LIFECYCLE_STATUSES = frozenset({"proposed", "deprecated"})
 
 
 def _get_required_transition_type(component_ids: list) -> Optional[str]:
