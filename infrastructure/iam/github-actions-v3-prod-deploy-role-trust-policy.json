@@ -1,0 +1,19 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowGitHubActionsOIDCForV3ProdOnly",
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::356364570033:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "repo:NX-2021-L/enceladus:environment:v3-prod"
+        }
+      }
+    }
+  ]
+}
