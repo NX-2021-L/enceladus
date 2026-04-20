@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../colors_and_type.css"><link rel="stylesheet" href="_card.css">
+<style>.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}
+.row:last-child{margin:0}
+.lbl{font-family:var(--font-body);font-size:11px;color:var(--enc-dust);text-transform:uppercase;letter-spacing:0.07em;width:100%;margin-bottom:6px}
+.badge{display:inline-block;background:rgba(61,155,168,0.1);color:var(--enc-teal);border:1px solid var(--enc-teal);padding:4px 12px;border-radius:4px;font-size:12px;font-family:var(--font-mono);font-weight:500}
+.badge-green{background:rgba(61,155,168,0.15);color:var(--enc-teal-light);border-color:var(--enc-teal-light)}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:4px;font-family:var(--font-mono);font-size:11px;font-weight:500}</style>
+</head><body><div class="card">
+<div class="row"><div class="lbl">Tag / version badges</div>
+<span class="badge">v3.0</span>
+<span class="badge badge-green">Active Production</span>
+<span class="badge">AWS Serverless</span>
+<span class="badge">Multi-Agent</span>
+</div>
+<div class="row"><div class="lbl">Status chips (PWA)</div>
+<span class="chip" style="background:rgba(61,155,168,0.1);color:#3D9BA8">open</span>
+<span class="chip" style="background:rgba(122,200,212,0.15);color:#7AC8D4">in-progress</span>
+<span class="chip" style="background:rgba(200,80,96,0.1);color:#C85060">blocked</span>
+<span class="chip" style="background:rgba(46,77,92,0.3);color:#6B8A94">closed</span>
+<span class="chip" style="background:rgba(138,140,181,0.1);color:#8A8CB5;font-style:italic">draft</span>
+</div>
+<div class="row"><div class="lbl">Session / checkout</div>
+<span class="chip" style="background:rgba(245,158,11,0.18);color:#fbbf24">Checked Out</span>
+<span class="chip" style="background:rgba(56,189,248,0.15);color:#7dd3fc">Checked In</span>
+<span class="chip" style="background:rgba(138,140,181,0.15);color:#8A8CB5">category: runtime</span>
+</div>
+</div></body></html>
