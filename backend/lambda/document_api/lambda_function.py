@@ -1092,39 +1092,55 @@ def _upsert_synced_document(
     s3_key, content_hash, size_bytes = _put_document_content_bytes(project_id, document_id, content_bytes)
 
     if existing:
-        ddb.update_item(
-            TableName=DOCUMENTS_TABLE,
-            Key={"document_id": {"S": document_id}},
-            UpdateExpression=(
-                "SET title = :title, description = :desc, file_name = :fn, "
-                "s3_bucket = :sb, s3_key = :sk, content_type = :ct, "
-                "content_hash = :hash, size_bytes = :size, keywords = :kw, "
-                "updated_at = :ts, #status = :status, "
-                "record_type = if_not_exists(record_type, :rtype), "
-                "#ver = if_not_exists(#ver, :zero) + :one"
-            ),
-            ExpressionAttributeNames={
-                "#status": "status",
-                "#ver": "version",
-            },
-            ExpressionAttributeValues={
-                ":title": {"S": title},
-                ":desc": {"S": description},
-                ":fn": {"S": file_name},
-                ":sb": {"S": S3_BUCKET},
-                ":sk": {"S": s3_key},
-                ":ct": {"S": "text/markdown"},
-                ":hash": {"S": content_hash},
-                ":size": {"N": str(size_bytes)},
-                ":kw": _serialize_list(keywords),
-                ":ts": {"S": now},
-                ":status": {"S": "active"},
-                ":zero": {"N": "0"},
-                ":one": {"N": "1"},
-                # ENC-PLN-014 / ENC-FTR-065: backfill record_type on existing sync docs
-                ":rtype": {"S": "document"},
-            },
-        )
+        # ENC-ISS-281 / ENC-LSN-044: do not let an S3/governance sync silently
+        # resurrect a document that a separate caller has moved to a terminal
+        # state (deleted/archived). The sync is background work; the terminal
+        # state was an explicit governance decision and wins.
+        try:
+            ddb.update_item(
+                TableName=DOCUMENTS_TABLE,
+                Key={"document_id": {"S": document_id}},
+                UpdateExpression=(
+                    "SET title = :title, description = :desc, file_name = :fn, "
+                    "s3_bucket = :sb, s3_key = :sk, content_type = :ct, "
+                    "content_hash = :hash, size_bytes = :size, keywords = :kw, "
+                    "updated_at = :ts, #status = :status, "
+                    "record_type = if_not_exists(record_type, :rtype), "
+                    "#ver = if_not_exists(#ver, :zero) + :one"
+                ),
+                ConditionExpression=(
+                    "attribute_not_exists(#status) "
+                    "OR (#status <> :deleted AND #status <> :archived)"
+                ),
+                ExpressionAttributeNames={
+                    "#status": "status",
+                    "#ver": "version",
+                },
+                ExpressionAttributeValues={
+                    ":title": {"S": title},
+                    ":desc": {"S": description},
+                    ":fn": {"S": file_name},
+                    ":sb": {"S": S3_BUCKET},
+                    ":sk": {"S": s3_key},
+                    ":ct": {"S": "text/markdown"},
+                    ":hash": {"S": content_hash},
+                    ":size": {"N": str(size_bytes)},
+                    ":kw": _serialize_list(keywords),
+                    ":ts": {"S": now},
+                    ":status": {"S": "active"},
+                    ":zero": {"N": "0"},
+                    ":one": {"N": "1"},
+                    # ENC-PLN-014 / ENC-FTR-065: backfill record_type on existing sync docs
+                    ":rtype": {"S": "document"},
+                    ":deleted": {"S": "deleted"},
+                    ":archived": {"S": "archived"},
+                },
+            )
+        except ddb.exceptions.ConditionalCheckFailedException:
+            logger.warning(
+                "document_api: sync upsert skipped for %s — existing status is terminal (deleted/archived)",
+                document_id,
+            )
         return
 
     item = {
