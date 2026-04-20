@@ -8435,6 +8435,29 @@ def _publish_component_proposed_event(
         logger.warning("component.propose SNS publish failed for %s: %s", component_id, exc)
 
 
+def _publish_component_lifecycle_event(event_type: str, payload: dict) -> None:
+    """Publish a component lifecycle SNS event (approve/revert/deprecate/restore).
+
+    ENC-TSK-F45 / ENC-FTR-076 AC[4]. Best-effort — DynamoDB write is source of
+    truth; SNS failure is logged but never re-raised.
+    """
+    if not COMPONENT_EVENTS_TOPIC_ARN:
+        logger.info("%s: COMPONENT_EVENTS_TOPIC_ARN not configured; skipping SNS publish", event_type)
+        return
+    try:
+        sns = boto3.client(
+            "sns",
+            region_name=os.environ.get("DYNAMODB_REGION") or os.environ.get("AWS_REGION"),
+        )
+        sns.publish(
+            TopicArn=COMPONENT_EVENTS_TOPIC_ARN,
+            Subject=f"Component {event_type}: {payload.get('component_id', '')}",
+            Message=json.dumps(payload),
+        )
+    except Exception as exc:
+        logger.warning("%s SNS publish failed for %s: %s", event_type, payload.get("component_id", ""), exc)
+
+
 def _resolve_decider_identity(claims: Dict[str, Any]) -> str:
     """Return a stable identifier for the human approver/rejecter from Cognito claims."""
     return (
@@ -8591,6 +8614,16 @@ def _handle_components_approve(
         return _error(500, f"Failed to approve component: {exc}")
 
     updated = _ddb_to_py(resp.get("Attributes", {}))
+    _publish_component_lifecycle_event(
+        "component.approved",
+        {
+            "event_type": "component.approved",
+            "component_id": component_id,
+            "project_id": updated.get("project_id", ""),
+            "approved_by_session_id": approved_by,
+            "approved_at": now,
+        },
+    )
     return _response(
         200,
         {
@@ -9847,6 +9880,14 @@ def _handle_components_deprecate(
         logger.exception("component.deprecate failed")
         return _error(500, f"Failed to deprecate component: {exc}")
 
+    _publish_component_lifecycle_event(
+        "component.deprecated",
+        {
+            "event_type": "component.deprecated",
+            "component_id": component_id,
+            "deprecated_at": now,
+        },
+    )
     return _response(
         200,
         {
@@ -9947,6 +9988,14 @@ def _handle_components_restore(
         logger.exception("component.restore failed")
         return _error(500, f"Failed to restore component: {exc}")
 
+    _publish_component_lifecycle_event(
+        "component.restored",
+        {
+            "event_type": "component.restored",
+            "component_id": component_id,
+            "restored_at": now,
+        },
+    )
     return _response(
         200,
         {
@@ -10042,6 +10091,16 @@ def _handle_components_revert(
         logger.exception("component.revert failed")
         return _error(500, f"Failed to revert component: {exc}")
 
+    _publish_component_lifecycle_event(
+        "component.reverted",
+        {
+            "event_type": "component.reverted",
+            "component_id": component_id,
+            "reverted_reason": reverted_reason,
+            "reverted_at": now,
+            "archived_at": now,
+        },
+    )
     return _response(
         200,
         {

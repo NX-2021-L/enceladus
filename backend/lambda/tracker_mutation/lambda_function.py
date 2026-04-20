@@ -4263,6 +4263,10 @@ _RELATIONSHIP_TYPES = frozenset({
     # ENC-FTR-077: Docstore subtype edges
     "investigates", "investigated-by",
     "tracks-wave-of", "has-wave-doc",
+    # ENC-FTR-076 v2 / ENC-TSK-F45: Component-task lifecycle edges
+    "designs", "designed-by",
+    "implements", "implemented-by",
+    "deploys", "deployed-by",
 })
 
 _INVERSE_PAIRS: Dict[str, str] = {
@@ -4292,6 +4296,10 @@ _INVERSE_PAIRS: Dict[str, str] = {
     # ENC-FTR-077: Docstore subtype edges
     "investigates": "investigated-by", "investigated-by": "investigates",
     "tracks-wave-of": "has-wave-doc", "has-wave-doc": "tracks-wave-of",
+    # ENC-FTR-076 v2 / ENC-TSK-F45: Component-task lifecycle edges
+    "designs": "designed-by", "designed-by": "designs",
+    "implements": "implemented-by", "implemented-by": "implements",
+    "deploys": "deployed-by", "deployed-by": "deploys",
 }
 
 _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {

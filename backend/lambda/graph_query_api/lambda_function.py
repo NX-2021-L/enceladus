@@ -332,6 +332,13 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "ADVANCES_GENERATION",    # DeploymentDecision -> Generation
     "TARGETS_GENERATION",     # Task/Lesson -> Generation
     "EXECUTES_WITHIN",        # Plan -> Generation
+    # ENC-FTR-076 v2 / ENC-TSK-F45: Component-task lifecycle edges (OGTM registration)
+    "DESIGNS",                # Component -> Task
+    "DESIGNED_BY",            # Task -> Component
+    # IMPLEMENTS already registered above (generic Task->Feature); also used for Component->Task
+    "IMPLEMENTED_BY",         # Task -> Component
+    "DEPLOYS",                # Component -> Task
+    "DEPLOYED_BY",            # Task -> Component
 })
 
 
