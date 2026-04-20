@@ -8478,18 +8478,50 @@ def _handle_components_approve(
             allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
         )
 
+    # ENC-FTR-076 v2 / ENC-TSK-F40 AC[1f] / AC[1i]: io may register a
+    # CloudWatch alarm ARN at approval time. Optional; stored verbatim on
+    # the component record. v5 EventBridge hook (no runtime effect until v5).
+    alarm_arn_raw = body.get("alarm_arn")
+    alarm_arn: Optional[str] = None
+    if alarm_arn_raw is not None:
+        if not isinstance(alarm_arn_raw, str):
+            return _component_validation_error(
+                400,
+                "alarm_arn must be a string (CloudWatch alarm ARN) or omitted.",
+                field="alarm_arn",
+                component_id=component_id,
+                expected_type="string",
+            )
+        alarm_arn_stripped = alarm_arn_raw.strip()
+        if alarm_arn_stripped and not alarm_arn_stripped.startswith("arn:"):
+            return _component_validation_error(
+                400,
+                (
+                    "alarm_arn must be a valid AWS ARN starting with 'arn:'. "
+                    "Example: 'arn:aws:cloudwatch:us-west-2:123456789012:alarm:MyAlarm'."
+                ),
+                field="alarm_arn",
+                component_id=component_id,
+                expected_type="string",
+            )
+        alarm_arn = alarm_arn_stripped or None
+
     approved_by = _resolve_decider_identity(claims)
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
+    # ENC-FTR-076 v2: approve now writes lifecycle_status='approved' (the §3.1
+    # state-inventory value), not the legacy 'active'. The opacity model
+    # classifies 'approved' as PERMITTED so downstream reads/checkout unchanged.
+    # v1 records carrying 'active' are handled by the backfill task (AC[5]).
     update_parts = [
-        "#ls = :active",
+        "#ls = :approved",
         "#ua = :now",
         "approved_at = :now",
         "approved_by = :by",
     ]
     attr_names = {"#ls": "lifecycle_status", "#ua": "updated_at"}
     attr_vals: Dict[str, Any] = {
-        ":active": {"S": "active"},
+        ":approved": {"S": "approved"},
         ":proposed": {"S": "proposed"},
         ":now": {"S": now},
         ":by": {"S": approved_by},
@@ -8500,6 +8532,9 @@ def _handle_components_approve(
     if override_required_type:
         update_parts.append("required_transition_type = :rtt")
         attr_vals[":rtt"] = {"S": override_required_type}
+    if alarm_arn is not None:
+        update_parts.append("alarm_arn = :alarm")
+        attr_vals[":alarm"] = {"S": alarm_arn}
 
     ddb = _get_ddb()
     try:
@@ -8537,9 +8572,10 @@ def _handle_components_approve(
         {
             "success": True,
             "component_id": component_id,
-            "lifecycle_status": "active",
+            "lifecycle_status": "approved",
             "approved_by": approved_by,
             "approved_at": now,
+            "alarm_arn": alarm_arn,
             "component": updated,
         },
     )
@@ -8637,6 +8673,1370 @@ def _handle_components_reject(
             "component": updated,
         },
     )
+
+
+# ============================================================================
+# ENC-FTR-076 v2 / ENC-TSK-F40 — state machine + edge + advance/revert/deprecate/
+# restore handlers. Spec: DOC-546B896390EA §3 (state machine), §4 (edge types),
+# §9 (MCP surface). Governance dict source of truth: v2026-04-19.04
+# entities.component_registry.component.fields.lifecycle_status.transition_table
+# and component_registry.graph_edges.
+# ============================================================================
+
+# Lifecycle status sets (mirrors component_registry.opacity_model in the
+# governance dictionary). Kept here so handlers can fail fast without loading
+# the full dict slice for simple membership checks.
+_COMPONENT_LIFECYCLE_OPAQUE_STATUSES = frozenset({"archived"})
+_COMPONENT_LIFECYCLE_BLOCKED_STATUSES = frozenset({"proposed", "deprecated"})
+_COMPONENT_LIFECYCLE_PERMITTED_STATUSES = frozenset(
+    {"approved", "designed", "development", "production", "code-red"}
+)
+_COMPONENT_LIFECYCLE_ALL_STATUSES = (
+    _COMPONENT_LIFECYCLE_OPAQUE_STATUSES
+    | _COMPONENT_LIFECYCLE_BLOCKED_STATUSES
+    | _COMPONENT_LIFECYCLE_PERMITTED_STATUSES
+)
+
+# Fallback transition table — used ONLY when governance dictionary load fails.
+# Matches DOC-546B896390EA §3.2 verbatim. Governance dictionary is authoritative
+# and read at cold start by _component_transition_table_cached().
+_COMPONENT_FALLBACK_TRANSITION_TABLE = {
+    "proposed": ["approved", "archived"],
+    "approved": ["designed"],
+    "designed": ["development", "approved"],
+    "development": ["production", "designed"],
+    "production": ["code-red", "deprecated", "development"],
+    "code-red": ["production", "deprecated"],
+    "deprecated": ["production"],
+    "archived": [],
+}
+
+# Hard blocks per §3.2 — enforced INDEPENDENTLY of the transition table.
+_COMPONENT_HARD_BLOCKED_TRANSITIONS = frozenset({
+    ("deprecated", "development"),  # version-fork required (-v2/-v3 naming, DD-3)
+    # archived->any enforced via source-status check (archived has empty
+    # transition list; explicit guard below keeps the error envelope specific).
+})
+
+# Edge type spec (mirrors governance dict component_registry.graph_edges).
+_COMPONENT_EDGE_TYPES = frozenset({"DESIGNS", "IMPLEMENTS", "DEPLOYS"})
+
+_COMPONENT_EDGE_REL_NAMES = {
+    "DESIGNS": ("designs", "designed-by"),
+    "IMPLEMENTS": ("implements", "implemented-by"),
+    "DEPLOYS": ("deploys", "deployed-by"),
+}
+
+_COMPONENT_EDGE_CARDINALITY = {
+    "DESIGNS": "strict_1_to_1",
+    "IMPLEMENTS": "strict_1_to_1",
+    "DEPLOYS": "append_ok",
+}
+
+# Immutability trigger fields per edge type (spec DOC-546B896390EA §4.1–4.3).
+_COMPONENT_EDGE_LOCK_FIELDS = {
+    "DESIGNS": "closed_count",      # locks at closed_count >= 1
+    "IMPLEMENTS": "checkout_count", # locks at checkout_count >= 1
+    "DEPLOYS": None,                # per-edge lock on task deploy-success status
+}
+
+# Agent-permitted component.advance targets per §3.3. io authority is
+# unconditional for permitted transitions; agent authority is conditional
+# on the evidence gate passing. These are the ONLY targets agents may request.
+_COMPONENT_AGENT_PERMITTED_TARGETS = frozenset(
+    {"designed", "development", "production", "code-red"}
+)
+
+
+# Module-level cache of the transition table slice. Populated on first use.
+# Refresh is not implemented here — a new Lambda cold start picks up
+# governance dictionary updates, which matches the F53 dictionary rollout
+# cadence (policy bumps arrive via deploy, not live config reloads).
+_COMPONENT_TRANSITION_TABLE_CACHE: Optional[Dict[str, List[str]]] = None
+
+
+def _component_transition_table_cached() -> Dict[str, List[str]]:
+    """Return the authoritative transition table, cached for the lifetime of
+    this container. Reads the governance dictionary slice at
+    entities.component_registry.component.fields.lifecycle_status.transition_table.transitions.
+    Falls back to the pinned _COMPONENT_FALLBACK_TRANSITION_TABLE if any lookup
+    fails, keeping the handler fail-safe even when governance is temporarily
+    unavailable.
+    """
+    global _COMPONENT_TRANSITION_TABLE_CACHE
+    if _COMPONENT_TRANSITION_TABLE_CACHE is not None:
+        return _COMPONENT_TRANSITION_TABLE_CACHE
+
+    try:
+        dictionary, _source = _load_governance_dictionary()
+        entities = dictionary.get("entities", {}) if isinstance(dictionary, dict) else {}
+        comp = entities.get("component_registry.component", {}) or {}
+        fields = comp.get("fields", {}) or {}
+        lifecycle = fields.get("lifecycle_status", {}) or {}
+        tt = lifecycle.get("transition_table", {}) or {}
+        transitions = tt.get("transitions")
+        if isinstance(transitions, dict) and transitions:
+            normalized: Dict[str, List[str]] = {}
+            for src, targets in transitions.items():
+                if isinstance(src, str) and isinstance(targets, list):
+                    normalized[src] = [str(t) for t in targets if isinstance(t, str)]
+            if normalized:
+                _COMPONENT_TRANSITION_TABLE_CACHE = normalized
+                return normalized
+    except Exception as exc:  # pragma: no cover — defensive, any failure falls back
+        logger.warning(
+            "Unable to load transition_table from governance dictionary; "
+            "using pinned fallback (%s)", exc,
+        )
+
+    _COMPONENT_TRANSITION_TABLE_CACHE = dict(_COMPONENT_FALLBACK_TRANSITION_TABLE)
+    return _COMPONENT_TRANSITION_TABLE_CACHE
+
+
+def _validate_lifecycle_transition(
+    from_status: str, to_status: str
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Validate a component lifecycle transition (ENC-FTR-076 v2 AC[1a]).
+
+    Returns (True, None) if the transition is permitted by the governance
+    transition table and not blocked by a hard rule. Otherwise returns
+    (False, error_envelope) where the envelope has
+      code=LIFECYCLE_TRANSITION_UNMET
+      details={from_status, to_status, allowed_targets, remediation_guidance}
+
+    Hard blocks enforced INDEPENDENTLY of the table per DOC-546B896390EA §3.2:
+      - deprecated->development (version-fork required, DD-3)
+      - archived->any (terminal, no recovery path)
+    """
+    src = str(from_status or "").strip().lower()
+    dst = str(to_status or "").strip().lower()
+
+    # archived is terminal — independent hard block.
+    if src == "archived":
+        return False, {
+            "code": "LIFECYCLE_TRANSITION_UNMET",
+            "details": {
+                "from_status": src,
+                "to_status": dst,
+                "allowed_targets": [],
+                "reason": "archived_is_terminal",
+                "remediation_guidance": (
+                    "archived is a permanent terminal lifecycle status "
+                    "(DOC-546B896390EA §3.2 hard block). No recovery path "
+                    "exists; register a new component with a -v2/-v3 suffix "
+                    "if new development is required."
+                ),
+            },
+        }
+
+    # deprecated->development is a hard block even if table ever includes it.
+    if (src, dst) in _COMPONENT_HARD_BLOCKED_TRANSITIONS:
+        return False, {
+            "code": "LIFECYCLE_TRANSITION_UNMET",
+            "details": {
+                "from_status": src,
+                "to_status": dst,
+                "allowed_targets": list(_component_transition_table_cached().get(src, [])),
+                "reason": "hard_block_deprecated_to_development",
+                "remediation_guidance": (
+                    "deprecated->development is a HARD BLOCK "
+                    "(DOC-546B896390EA §3.2, DD-3). Register a new component "
+                    "with the -v2/-v3 suffix convention; the deprecated "
+                    "original never reactivates into development."
+                ),
+            },
+        }
+
+    table = _component_transition_table_cached()
+    allowed = table.get(src, [])
+    if dst in allowed:
+        return True, None
+
+    return False, {
+        "code": "LIFECYCLE_TRANSITION_UNMET",
+        "details": {
+            "from_status": src,
+            "to_status": dst,
+            "allowed_targets": list(allowed),
+            "reason": "transition_not_in_table",
+            "remediation_guidance": (
+                f"lifecycle_status='{src}' may transition only to "
+                f"{sorted(allowed)} per the governance transition table "
+                "(entities.component_registry.component.fields.lifecycle_status."
+                "transition_table.transitions). See DOC-546B896390EA §3.2."
+            ),
+        },
+    }
+
+
+def _component_gate_error_envelope(
+    code: str,
+    *,
+    message: str,
+    component_id: str,
+    from_status: str = "",
+    to_status: str = "",
+    details_extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Uniform self-correcting error envelope for component state machine
+    violations (LIFECYCLE_TRANSITION_UNMET, GATE_CONDITION_UNMET,
+    AUTHORITY_MATRIX_DENIED, EDGE_UNIQUENESS_VIOLATION, EDGE_LOCKED)."""
+    details: Dict[str, Any] = {"component_id": component_id}
+    if from_status:
+        details["from_status"] = from_status
+    if to_status:
+        details["to_status"] = to_status
+    if details_extra:
+        details.update(details_extra)
+    # _error serializes extras into the error envelope; preserve the shape
+    # by passing details individually via kwargs.
+    return _error(
+        # Status code chosen by caller based on the violation type:
+        # 400 for gate/transition, 403 for authority, 409 for uniqueness,
+        # 423 for locked-edge mutation.
+        details.pop("__status", 400),
+        message,
+        code=code,
+        **details,
+    )
+
+
+def _get_component_record(component_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a component record from DynamoDB, returning a plain dict or None."""
+    ddb = _get_ddb()
+    resp = ddb.get_item(
+        TableName=COMPONENTS_TABLE,
+        Key={"component_id": {"S": component_id}},
+    )
+    item = resp.get("Item")
+    if not item:
+        return None
+    return _ddb_to_py(item)
+
+
+def _get_task_record(task_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a task record from DynamoDB tracker table by scanning on item_id.
+
+    Returns the full record as a plain dict, or None if not found.
+    Tracker keys are rel#/task#/... so we use a scan with a filter — the
+    tracker_mutation API does this with a GSI in prod; this helper is a
+    defensive direct-read variant used for gate evaluation. The table is
+    small enough to scan when callers already know the exact item_id.
+    """
+    ddb = _get_ddb()
+    # Tracker items are stored with record_id='task#ENC-TSK-F40' pattern.
+    # We also try 'item_id=ENC-TSK-F40' as a filter since older records may
+    # lack the record_id composite key.
+    normalized = task_id.strip()
+    record_key = normalized if normalized.startswith("task#") else f"task#{normalized}"
+    item_id = normalized if not normalized.startswith("task#") else normalized[len("task#"):]
+
+    # Most tracker rows are keyed by project_id + record_id. We don't know
+    # project_id here, so scan with item_id filter.
+    try:
+        resp = ddb.scan(
+            TableName=TRACKER_TABLE,
+            FilterExpression="item_id = :iid AND record_type = :rt",
+            ExpressionAttributeValues={
+                ":iid": {"S": item_id},
+                ":rt": {"S": "task"},
+            },
+            Limit=2,
+        )
+    except Exception as exc:
+        logger.warning("Unable to scan tracker for task %s: %s", item_id, exc)
+        return None
+
+    items = resp.get("Items", [])
+    if not items:
+        return None
+    return _ddb_to_py(items[0])
+
+
+def _query_component_edges(
+    component_id: str, rel_type: str
+) -> List[Dict[str, Any]]:
+    """Return all forward edges of the given relationship type from a component.
+
+    Tracker relationship rows are keyed as rel#{source_id}#{rel_type}#{target_id}.
+    We scan for rows where source_id=component_id, relationship_type=rel_type,
+    is_inverse=false (forward edges only).
+    """
+    ddb = _get_ddb()
+    try:
+        resp = ddb.scan(
+            TableName=TRACKER_TABLE,
+            FilterExpression=(
+                "source_id = :sid AND relationship_type = :rt "
+                "AND record_type = :rec AND is_inverse = :false"
+            ),
+            ExpressionAttributeValues={
+                ":sid": {"S": component_id},
+                ":rt": {"S": rel_type},
+                ":rec": {"S": "relationship"},
+                ":false": {"BOOL": False},
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "Unable to scan for %s edges from %s: %s",
+            rel_type, component_id, exc,
+        )
+        return []
+    return [_ddb_to_py(i) for i in resp.get("Items", [])]
+
+
+def _query_task_inverse_edges(
+    task_id: str, inverse_rel_type: str
+) -> List[Dict[str, Any]]:
+    """Return inverse edges pointing at a task (e.g. 'designed-by', 'implemented-by').
+
+    Mirrors _query_component_edges but scans for source_id=task_id,
+    relationship_type=inverse_rel_type, record_type=relationship, is_inverse=true.
+    Used for 1:1 cardinality checks (task must not already be DESIGNED_BY
+    another component).
+    """
+    ddb = _get_ddb()
+    try:
+        resp = ddb.scan(
+            TableName=TRACKER_TABLE,
+            FilterExpression=(
+                "source_id = :sid AND relationship_type = :rt "
+                "AND record_type = :rec AND is_inverse = :true"
+            ),
+            ExpressionAttributeValues={
+                ":sid": {"S": task_id},
+                ":rt": {"S": inverse_rel_type},
+                ":rec": {"S": "relationship"},
+                ":true": {"BOOL": True},
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "Unable to scan for inverse %s edges on %s: %s",
+            inverse_rel_type, task_id, exc,
+        )
+        return []
+    return [_ddb_to_py(i) for i in resp.get("Items", [])]
+
+
+def _edge_is_locked(
+    edge_type: str, task_record: Optional[Dict[str, Any]]
+) -> Tuple[bool, Dict[str, Any]]:
+    """Return (locked, details) for a typed edge based on the task it links to.
+
+    DESIGNS locks when task.closed_count >= 1.
+    IMPLEMENTS locks when task.checkout_count >= 1.
+    DEPLOYS per-edge: locks when the linked task has reached deploy-success.
+    """
+    if not task_record:
+        return False, {"reason": "task_not_found"}
+
+    if edge_type == "DESIGNS":
+        cc = int(task_record.get("closed_count") or 0)
+        if cc >= 1:
+            return True, {
+                "lock_trigger": "closed_count_ge_1",
+                "closed_count": cc,
+            }
+        return False, {"closed_count": cc}
+
+    if edge_type == "IMPLEMENTS":
+        co = int(task_record.get("checkout_count") or 0)
+        if co >= 1:
+            return True, {
+                "lock_trigger": "checkout_count_ge_1",
+                "checkout_count": co,
+            }
+        return False, {"checkout_count": co}
+
+    if edge_type == "DEPLOYS":
+        status = str(task_record.get("status") or "").strip().lower()
+        if status == "deploy-success":
+            return True, {
+                "lock_trigger": "task_status_deploy_success",
+                "task_status": status,
+            }
+        return False, {"task_status": status}
+
+    return False, {"reason": "unknown_edge_type"}
+
+
+def _handle_components_add_edge(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/{componentId}/add_edge — typed edge write.
+
+    ENC-FTR-076 v2 / ENC-TSK-F40 / DOC-546B896390EA §4. Body:
+      edge_type: "DESIGNS" | "IMPLEMENTS" | "DEPLOYS"
+      task_id:   "ENC-TSK-..."
+
+    Strict 1:1 for DESIGNS/IMPLEMENTS (refuses if either endpoint already has
+    an edge of that type). Append-ok for DEPLOYS. Writes forward+inverse rows
+    atomically via transact_write_items. Returns 409 EDGE_UNIQUENESS_VIOLATION
+    on cardinality conflict, 423 EDGE_LOCKED on locked-edge mutation.
+    """
+    if not ENABLE_COMPONENT_PROPOSAL:
+        return _error(
+            503,
+            "component.add_edge is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _component_validation_error(
+            400, "Invalid JSON body", component_id=component_id, expected_type="object",
+        )
+
+    edge_type = str(body.get("edge_type") or "").strip().upper()
+    task_id = str(body.get("task_id") or "").strip()
+
+    if not edge_type:
+        return _component_validation_error(
+            400, "edge_type is required",
+            field="edge_type", component_id=component_id,
+            expected_type="enum", allowed_values=sorted(_COMPONENT_EDGE_TYPES),
+        )
+    if edge_type not in _COMPONENT_EDGE_TYPES:
+        return _component_validation_error(
+            400,
+            f"Invalid edge_type '{edge_type}'. Allowed: {sorted(_COMPONENT_EDGE_TYPES)}",
+            field="edge_type", component_id=component_id,
+            expected_type="enum", allowed_values=sorted(_COMPONENT_EDGE_TYPES),
+        )
+    if not task_id:
+        return _component_validation_error(
+            400, "task_id is required",
+            field="task_id", component_id=component_id, expected_type="string",
+        )
+
+    # Existence + lifecycle_status gate for the component.
+    component = _get_component_record(component_id)
+    if not component:
+        return _error(404, f"Component '{component_id}' not found")
+    current_status = str(component.get("lifecycle_status") or "").strip().lower()
+    if current_status in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
+        # OPAQUE: indistinguishable from 404.
+        return _error(404, f"Component '{component_id}' not found")
+    if current_status not in _COMPONENT_LIFECYCLE_PERMITTED_STATUSES:
+        return _error(
+            400,
+            (
+                f"Component '{component_id}' lifecycle_status='{current_status}' "
+                f"is not in PERMITTED_STATUSES={sorted(_COMPONENT_LIFECYCLE_PERMITTED_STATUSES)}. "
+                "Edges may only be added to components in a permitted lifecycle state."
+            ),
+            code="EDGE_TARGET_BLOCKED",
+            component_id=component_id,
+            current_lifecycle_status=current_status,
+        )
+
+    # Existence probe for the task.
+    task = _get_task_record(task_id)
+    if not task:
+        return _component_validation_error(
+            404, f"Task '{task_id}' not found in tracker",
+            field="task_id", component_id=component_id, expected_type="string",
+        )
+
+    rel_type, inverse_type = _COMPONENT_EDGE_REL_NAMES[edge_type]
+    cardinality = _COMPONENT_EDGE_CARDINALITY[edge_type]
+
+    # Cardinality check for strict_1_to_1 edges.
+    if cardinality == "strict_1_to_1":
+        existing_fwd = _query_component_edges(component_id, rel_type)
+        if existing_fwd:
+            existing_task_id = str(existing_fwd[0].get("target_id") or "")
+            return _error(
+                409,
+                (
+                    f"Component '{component_id}' already has a {edge_type} edge "
+                    f"to task '{existing_task_id}'. "
+                    f"{edge_type} enforces strict 1:1 cardinality per "
+                    "DOC-546B896390EA §4."
+                ),
+                code="EDGE_UNIQUENESS_VIOLATION",
+                edge_type=edge_type,
+                component_id=component_id,
+                existing_task_id=existing_task_id,
+                attempted_task_id=task_id,
+            )
+        existing_inv = _query_task_inverse_edges(task_id, inverse_type)
+        if existing_inv:
+            existing_comp = str(existing_inv[0].get("target_id") or "")
+            return _error(
+                409,
+                (
+                    f"Task '{task_id}' already has a {inverse_type.upper()} edge "
+                    f"from component '{existing_comp}'. "
+                    f"{edge_type} enforces strict 1:1 cardinality per "
+                    "DOC-546B896390EA §4."
+                ),
+                code="EDGE_UNIQUENESS_VIOLATION",
+                edge_type=edge_type,
+                component_id=component_id,
+                existing_task_id=existing_comp,
+                attempted_task_id=task_id,
+            )
+
+    project_id = str(component.get("project_id") or "").strip() or "enceladus"
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    forward_sk = f"rel#{component_id}#{rel_type}#{task_id}"
+    inverse_sk = f"rel#{task_id}#{inverse_type}#{component_id}"
+
+    def _rel_item(sk: str, rt: str, src: str, tgt: str, is_inv: bool, canon_sk: str) -> Dict[str, Any]:
+        return {
+            "project_id": {"S": project_id},
+            "record_id": {"S": sk},
+            "record_type": {"S": "relationship"},
+            "relationship_type": {"S": rt},
+            "source_id": {"S": src},
+            "target_id": {"S": tgt},
+            "weight": {"N": "1.0"},
+            "confidence": {"N": "1.0"},
+            "reason": {"S": f"component.add_edge {edge_type} for {component_id}"},
+            "provenance": {"S": "component.add_edge"},
+            "is_inverse": {"BOOL": is_inv},
+            "canonical_edge_id": {"S": canon_sk},
+            "edge_type": {"S": edge_type},
+            "created_at": {"S": now},
+            "updated_at": {"S": now},
+        }
+
+    forward = _rel_item(forward_sk, rel_type, component_id, task_id, False, forward_sk)
+    inverse = _rel_item(inverse_sk, inverse_type, task_id, component_id, True, forward_sk)
+
+    ddb = _get_ddb()
+    try:
+        ddb.transact_write_items(
+            TransactItems=[
+                {
+                    "Put": {
+                        "TableName": TRACKER_TABLE,
+                        "Item": forward,
+                        "ConditionExpression": "attribute_not_exists(record_id)",
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName": TRACKER_TABLE,
+                        "Item": inverse,
+                        "ConditionExpression": "attribute_not_exists(record_id)",
+                    }
+                },
+            ]
+        )
+    except ddb.exceptions.TransactionCanceledException as exc:
+        reasons = getattr(exc, "response", {}).get("CancellationReasons") or []
+        if any((r or {}).get("Code") == "ConditionalCheckFailed" for r in reasons):
+            return _error(
+                409,
+                (
+                    f"Edge rows for {edge_type} ({component_id} <-> {task_id}) "
+                    "already exist. This duplicates an existing edge."
+                ),
+                code="EDGE_UNIQUENESS_VIOLATION",
+                edge_type=edge_type,
+                component_id=component_id,
+                attempted_task_id=task_id,
+            )
+        logger.exception("component.add_edge transaction failed")
+        return _error(500, f"Failed to add edge: {exc}")
+    except Exception as exc:
+        logger.exception("component.add_edge failed")
+        return _error(500, f"Failed to add edge: {exc}")
+
+    return _response(
+        201,
+        {
+            "success": True,
+            "component_id": component_id,
+            "task_id": task_id,
+            "edge_type": edge_type,
+            "forward_edge_id": forward_sk,
+            "inverse_edge_id": inverse_sk,
+            "cardinality": cardinality,
+            "created_at": now,
+        },
+    )
+
+
+def _handle_components_remove_edge(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/{componentId}/remove_edge — typed edge delete.
+
+    ENC-FTR-076 v2 / ENC-TSK-F40. Body:
+      edge_type: "DESIGNS" | "IMPLEMENTS" | "DEPLOYS"
+      task_id:   "ENC-TSK-..."
+
+    Returns 423 EDGE_LOCKED if the immutability trigger has fired
+    (DESIGNS: closed_count>=1; IMPLEMENTS: checkout_count>=1; DEPLOYS: linked
+    task reached deploy-success). Otherwise atomically deletes forward+inverse.
+    """
+    if not ENABLE_COMPONENT_PROPOSAL:
+        return _error(
+            503,
+            "component.remove_edge is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _component_validation_error(
+            400, "Invalid JSON body", component_id=component_id, expected_type="object",
+        )
+
+    edge_type = str(body.get("edge_type") or "").strip().upper()
+    task_id = str(body.get("task_id") or "").strip()
+
+    if edge_type not in _COMPONENT_EDGE_TYPES:
+        return _component_validation_error(
+            400,
+            f"Invalid edge_type '{edge_type}'. Allowed: {sorted(_COMPONENT_EDGE_TYPES)}",
+            field="edge_type", component_id=component_id,
+            expected_type="enum", allowed_values=sorted(_COMPONENT_EDGE_TYPES),
+        )
+    if not task_id:
+        return _component_validation_error(
+            400, "task_id is required",
+            field="task_id", component_id=component_id, expected_type="string",
+        )
+
+    task = _get_task_record(task_id)
+    locked, lock_details = _edge_is_locked(edge_type, task)
+    if locked:
+        return _error(
+            423,
+            (
+                f"Edge {edge_type} ({component_id} -> {task_id}) is locked and "
+                f"cannot be removed (trigger: {lock_details.get('lock_trigger')}). "
+                "Locked edges are permanent per DOC-546B896390EA §4."
+            ),
+            code="EDGE_LOCKED",
+            edge_type=edge_type,
+            component_id=component_id,
+            task_id=task_id,
+            **lock_details,
+        )
+
+    rel_type, inverse_type = _COMPONENT_EDGE_REL_NAMES[edge_type]
+    project_id = str((task or {}).get("project_id") or "enceladus")
+    # Component project_id is the source of truth if we have it.
+    component = _get_component_record(component_id)
+    if component and component.get("project_id"):
+        project_id = str(component.get("project_id"))
+
+    forward_sk = f"rel#{component_id}#{rel_type}#{task_id}"
+    inverse_sk = f"rel#{task_id}#{inverse_type}#{component_id}"
+
+    ddb = _get_ddb()
+    try:
+        ddb.transact_write_items(
+            TransactItems=[
+                {
+                    "Delete": {
+                        "TableName": TRACKER_TABLE,
+                        "Key": {
+                            "project_id": {"S": project_id},
+                            "record_id": {"S": forward_sk},
+                        },
+                        "ConditionExpression": "attribute_exists(record_id)",
+                    }
+                },
+                {
+                    "Delete": {
+                        "TableName": TRACKER_TABLE,
+                        "Key": {
+                            "project_id": {"S": project_id},
+                            "record_id": {"S": inverse_sk},
+                        },
+                        "ConditionExpression": "attribute_exists(record_id)",
+                    }
+                },
+            ]
+        )
+    except ddb.exceptions.TransactionCanceledException as exc:
+        reasons = getattr(exc, "response", {}).get("CancellationReasons") or []
+        if any((r or {}).get("Code") == "ConditionalCheckFailed" for r in reasons):
+            return _error(
+                404,
+                f"Edge {edge_type} ({component_id} -> {task_id}) not found",
+                code="EDGE_NOT_FOUND",
+                edge_type=edge_type,
+                component_id=component_id,
+                task_id=task_id,
+            )
+        logger.exception("component.remove_edge transaction failed")
+        return _error(500, f"Failed to remove edge: {exc}")
+    except Exception as exc:
+        logger.exception("component.remove_edge failed")
+        return _error(500, f"Failed to remove edge: {exc}")
+
+    return _response(
+        200,
+        {
+            "success": True,
+            "component_id": component_id,
+            "task_id": task_id,
+            "edge_type": edge_type,
+            "removed": True,
+        },
+    )
+
+
+def _handle_components_advance(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/{componentId}/advance — lifecycle_status advance.
+
+    ENC-FTR-076 v2 / ENC-TSK-F40 / DOC-546B896390EA §3. Authority matrix:
+      - Agents may advance to: designed, development, production, code-red
+        (forward only, with gate evidence)
+      - io may advance to any table-permitted target (no gate required)
+
+    Evidence gates (agent path):
+      approved -> designed:    DESIGNS edge task closed_count >= 1
+      designed -> development: IMPLEMENTS edge task checkout_count >= 1
+      development -> production: IMPLEMENTS edge task status == deploy-success
+      production <-> code-red: no gate
+    """
+    if not ENABLE_COMPONENT_PROPOSAL:
+        return _error(
+            503,
+            "component.advance is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _component_validation_error(
+            400, "Invalid JSON body", component_id=component_id, expected_type="object",
+        )
+
+    target_status = str(body.get("target_status") or "").strip().lower()
+    if not target_status:
+        return _component_validation_error(
+            400, "target_status is required",
+            field="target_status", component_id=component_id,
+            expected_type="enum", allowed_values=sorted(_COMPONENT_LIFECYCLE_ALL_STATUSES),
+        )
+    if target_status not in _COMPONENT_LIFECYCLE_ALL_STATUSES:
+        return _component_validation_error(
+            400,
+            f"Invalid target_status '{target_status}'. Allowed: {sorted(_COMPONENT_LIFECYCLE_ALL_STATUSES)}",
+            field="target_status", component_id=component_id,
+            expected_type="enum", allowed_values=sorted(_COMPONENT_LIFECYCLE_ALL_STATUSES),
+        )
+
+    component = _get_component_record(component_id)
+    if not component:
+        return _error(404, f"Component '{component_id}' not found")
+    current_status = str(component.get("lifecycle_status") or "").strip().lower()
+    # Opaque status: indistinguishable from 404.
+    if current_status in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
+        return _error(404, f"Component '{component_id}' not found")
+
+    # Transition table + hard block validation.
+    valid, err = _validate_lifecycle_transition(current_status, target_status)
+    if not valid:
+        envelope = err or {}
+        details = envelope.get("details") or {}
+        return _error(
+            400,
+            (
+                f"Cannot advance component '{component_id}' from "
+                f"lifecycle_status='{current_status}' to '{target_status}': "
+                f"{details.get('reason', 'not_permitted')}."
+            ),
+            code=envelope.get("code", "LIFECYCLE_TRANSITION_UNMET"),
+            component_id=component_id,
+            **details,
+        )
+
+    is_io = _is_cognito_session(claims)
+
+    # Authority matrix — agents are restricted to a fixed target subset.
+    if not is_io and target_status not in _COMPONENT_AGENT_PERMITTED_TARGETS:
+        return _error(
+            403,
+            (
+                f"Agents may not advance a component to '{target_status}'. "
+                f"Agent-permitted targets: {sorted(_COMPONENT_AGENT_PERMITTED_TARGETS)}. "
+                "This target requires io (Cognito) authentication."
+            ),
+            code="AUTHORITY_MATRIX_DENIED",
+            component_id=component_id,
+            from_status=current_status,
+            to_status=target_status,
+            caller_role="agent",
+            required_role="io",
+        )
+
+    # Agent-path evidence gates (DOC-546B896390EA §3.4). io bypasses gates.
+    if not is_io:
+        gate_err = _evaluate_advance_gate(component_id, current_status, target_status)
+        if gate_err is not None:
+            return gate_err
+
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    # Per-target status stamp fields. We always update lifecycle_status + updated_at.
+    update_parts = ["#ls = :target", "#ua = :now"]
+    attr_names = {"#ls": "lifecycle_status", "#ua": "updated_at"}
+    attr_vals = {
+        ":target": {"S": target_status},
+        ":now": {"S": now},
+        ":current": {"S": current_status},
+    }
+
+    # Target-specific stamps for downstream audit/telemetry.
+    if target_status == "designed":
+        update_parts.append("designed_at = :now")
+    elif target_status == "development":
+        update_parts.append("development_at = :now")
+    elif target_status == "production":
+        update_parts.append("production_at = :now")
+    elif target_status == "code-red":
+        update_parts.append("code_red_at = :now")
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.update_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+            UpdateExpression="SET " + ", ".join(update_parts),
+            # Concurrency guard: re-check current status to prevent races.
+            ConditionExpression=(
+                "attribute_exists(component_id) AND #ls = :current"
+            ),
+            ExpressionAttributeNames=attr_names,
+            ExpressionAttributeValues=attr_vals,
+            ReturnValues="ALL_NEW",
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        existing = ddb.get_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+        ).get("Item")
+        if not existing:
+            return _error(404, f"Component '{component_id}' not found")
+        fresh = _ddb_to_py(existing).get("lifecycle_status") or "production"
+        return _error(
+            409,
+            (
+                f"Component '{component_id}' lifecycle_status changed concurrently "
+                f"(was '{current_status}', now '{fresh}'). Retry with the fresh value."
+            ),
+            code="LIFECYCLE_STATUS_CONCURRENT_MODIFICATION",
+            component_id=component_id,
+            observed_status=current_status,
+            current_lifecycle_status=fresh,
+        )
+    except Exception as exc:
+        logger.exception("component.advance failed")
+        return _error(500, f"Failed to advance component: {exc}")
+
+    updated = _ddb_to_py(resp.get("Attributes", {}))
+    return _response(
+        200,
+        {
+            "success": True,
+            "component_id": component_id,
+            "lifecycle_status": target_status,
+            "previous_lifecycle_status": current_status,
+            "advanced_at": now,
+            "advanced_by": "io" if is_io else "agent",
+            "component": updated,
+        },
+    )
+
+
+def _evaluate_advance_gate(
+    component_id: str, from_status: str, to_status: str
+) -> Optional[Dict[str, Any]]:
+    """Evaluate the evidence gate for an agent-initiated component.advance.
+
+    Returns None if the gate passes (or no gate applies), else a full API
+    response (HTTP 400 GATE_CONDITION_UNMET) ready to return.
+
+    Gates per DOC-546B896390EA §3.4:
+      approved -> designed: DESIGNS edge task closed_count >= 1
+      designed -> development: IMPLEMENTS edge task checkout_count >= 1
+      development -> production: IMPLEMENTS edge task status == deploy-success
+      production <-> code-red: no gate
+    Other transitions: no agent gate (either io-only or not permitted).
+    """
+    pair = (from_status, to_status)
+
+    # Transitions with no gate (agent-permitted or not-applicable).
+    if pair in {("production", "code-red"), ("code-red", "production")}:
+        return None
+
+    if pair == ("approved", "designed"):
+        return _evaluate_edge_gate(
+            component_id,
+            edge_type="DESIGNS",
+            required_counter_field="closed_count",
+            required_minimum=1,
+            from_status=from_status,
+            to_status=to_status,
+            gate_spec="DOC-546B896390EA §3.4 approved->designed",
+        )
+
+    if pair == ("designed", "development"):
+        return _evaluate_edge_gate(
+            component_id,
+            edge_type="IMPLEMENTS",
+            required_counter_field="checkout_count",
+            required_minimum=1,
+            from_status=from_status,
+            to_status=to_status,
+            gate_spec="DOC-546B896390EA §3.4 designed->development",
+        )
+
+    if pair == ("development", "production"):
+        return _evaluate_edge_gate(
+            component_id,
+            edge_type="IMPLEMENTS",
+            required_status="deploy-success",
+            from_status=from_status,
+            to_status=to_status,
+            gate_spec="DOC-546B896390EA §3.4 development->production",
+        )
+
+    # No gate defined for this transition along the agent path — but the
+    # transition may still be table-permitted (e.g., development->designed
+    # is a regression that is currently io-only). The authority-matrix check
+    # in the caller has already filtered agent-impermissible targets, so
+    # reaching this branch means the target is in
+    # _COMPONENT_AGENT_PERMITTED_TARGETS but the (from, to) pair has no
+    # explicit agent gate — fall through as "no gate required".
+    return None
+
+
+def _evaluate_edge_gate(
+    component_id: str,
+    *,
+    edge_type: str,
+    from_status: str,
+    to_status: str,
+    gate_spec: str,
+    required_counter_field: str = "",
+    required_minimum: int = 0,
+    required_status: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Helper: look up the DESIGNS/IMPLEMENTS edge from the component, fetch
+    the linked task, and check either a counter (closed_count/checkout_count)
+    or a status (deploy-success). Returns None on pass, else an HTTP 400
+    GATE_CONDITION_UNMET response."""
+    rel_type, _inv = _COMPONENT_EDGE_REL_NAMES[edge_type]
+    edges = _query_component_edges(component_id, rel_type)
+    if not edges:
+        return _error(
+            400,
+            (
+                f"Component '{component_id}' cannot advance {from_status}->{to_status}: "
+                f"no {edge_type} edge registered. Create the edge first via "
+                f"component.add_edge(edge_type='{edge_type}', task_id=...)."
+            ),
+            code="GATE_CONDITION_UNMET",
+            component_id=component_id,
+            from_status=from_status,
+            to_status=to_status,
+            required_edge=edge_type,
+            missing_edge=True,
+            gate_spec=gate_spec,
+        )
+
+    # strict_1_to_1 → pick first (and only) edge. Defensive in case the
+    # cardinality invariant was ever violated elsewhere.
+    task_id = str(edges[0].get("target_id") or "")
+    task = _get_task_record(task_id)
+    if not task:
+        return _error(
+            400,
+            (
+                f"Component '{component_id}' {edge_type} edge points at task "
+                f"'{task_id}' which was not found in tracker. Unable to "
+                "evaluate gate."
+            ),
+            code="GATE_CONDITION_UNMET",
+            component_id=component_id,
+            from_status=from_status,
+            to_status=to_status,
+            required_edge=edge_type,
+            edge_task_id=task_id,
+            task_not_found=True,
+            gate_spec=gate_spec,
+        )
+
+    if required_counter_field:
+        value = int(task.get(required_counter_field) or 0)
+        if value < required_minimum:
+            return _error(
+                400,
+                (
+                    f"Component '{component_id}' cannot advance "
+                    f"{from_status}->{to_status}: {edge_type} task "
+                    f"'{task_id}' has {required_counter_field}={value} "
+                    f"(required >= {required_minimum})."
+                ),
+                code="GATE_CONDITION_UNMET",
+                component_id=component_id,
+                from_status=from_status,
+                to_status=to_status,
+                required_edge=edge_type,
+                edge_task_id=task_id,
+                required_counter_field=required_counter_field,
+                required_minimum=required_minimum,
+                observed_value=value,
+                gate_spec=gate_spec,
+            )
+
+    if required_status:
+        observed = str(task.get("status") or "").strip().lower()
+        if observed != required_status:
+            return _error(
+                400,
+                (
+                    f"Component '{component_id}' cannot advance "
+                    f"{from_status}->{to_status}: {edge_type} task "
+                    f"'{task_id}' status='{observed}' (required '{required_status}')."
+                ),
+                code="GATE_CONDITION_UNMET",
+                component_id=component_id,
+                from_status=from_status,
+                to_status=to_status,
+                required_edge=edge_type,
+                edge_task_id=task_id,
+                required_task_status=required_status,
+                observed_task_status=observed,
+                gate_spec=gate_spec,
+            )
+
+    return None
+
+
+def _handle_components_deprecate(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/{componentId}/deprecate — io-only.
+
+    ENC-FTR-076 v2 / ENC-TSK-F40 AC[1f]. Source status must be one of
+    {production, development, code-red}. Writes lifecycle_status=deprecated
+    + deprecated_at. Cognito-only (403 on internal-key callers).
+    """
+    if not ENABLE_COMPONENT_PROPOSAL:
+        return _error(
+            503,
+            "component.deprecate is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
+        )
+    if not _is_cognito_session(claims):
+        return _error(
+            403,
+            "Deprecating components requires Cognito authentication (PWA session only).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _component_validation_error(
+            400, "Invalid JSON body", component_id=component_id, expected_type="object",
+        )
+
+    reason = (body.get("reason") or "").strip()
+
+    component = _get_component_record(component_id)
+    if not component:
+        return _error(404, f"Component '{component_id}' not found")
+    current = str(component.get("lifecycle_status") or "").strip().lower()
+    if current in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
+        return _error(404, f"Component '{component_id}' not found")
+
+    allowed_sources = {"production", "development", "code-red"}
+    if current not in allowed_sources:
+        return _error(
+            409,
+            (
+                f"Component '{component_id}' cannot be deprecated from "
+                f"lifecycle_status='{current}'. Allowed sources: "
+                f"{sorted(allowed_sources)} per DOC-546B896390EA §3.3."
+            ),
+            code="LIFECYCLE_TRANSITION_UNMET",
+            component_id=component_id,
+            from_status=current,
+            to_status="deprecated",
+            allowed_source_statuses=sorted(allowed_sources),
+        )
+
+    deciding = _resolve_decider_identity(claims)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    update_parts = [
+        "#ls = :deprecated",
+        "#ua = :now",
+        "deprecated_at = :now",
+        "deprecated_by = :by",
+    ]
+    attr_vals = {
+        ":deprecated": {"S": "deprecated"},
+        ":current": {"S": current},
+        ":now": {"S": now},
+        ":by": {"S": deciding},
+    }
+    if reason:
+        update_parts.append("deprecated_reason = :reason")
+        attr_vals[":reason"] = {"S": reason}
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.update_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+            UpdateExpression="SET " + ", ".join(update_parts),
+            ConditionExpression="attribute_exists(component_id) AND #ls = :current",
+            ExpressionAttributeNames={"#ls": "lifecycle_status", "#ua": "updated_at"},
+            ExpressionAttributeValues=attr_vals,
+            ReturnValues="ALL_NEW",
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        existing = ddb.get_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+        ).get("Item")
+        if not existing:
+            return _error(404, f"Component '{component_id}' not found")
+        fresh = _ddb_to_py(existing).get("lifecycle_status") or "production"
+        return _error(
+            409,
+            (
+                f"Component '{component_id}' lifecycle_status changed "
+                f"concurrently (was '{current}', now '{fresh}')."
+            ),
+            code="LIFECYCLE_STATUS_CONCURRENT_MODIFICATION",
+            component_id=component_id,
+        )
+    except Exception as exc:
+        logger.exception("component.deprecate failed")
+        return _error(500, f"Failed to deprecate component: {exc}")
+
+    return _response(
+        200,
+        {
+            "success": True,
+            "component_id": component_id,
+            "lifecycle_status": "deprecated",
+            "previous_lifecycle_status": current,
+            "deprecated_at": now,
+            "deprecated_by": deciding,
+            "component": _ddb_to_py(resp.get("Attributes", {})),
+        },
+    )
+
+
+def _handle_components_restore(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/{componentId}/restore — io-only.
+
+    ENC-FTR-076 v2 / ENC-TSK-F40 AC[1f]. Source must be lifecycle_status=deprecated.
+    Target is always production per §3.3. Writes lifecycle_status=production +
+    restored_at. Cognito-only.
+    """
+    if not ENABLE_COMPONENT_PROPOSAL:
+        return _error(
+            503,
+            "component.restore is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
+        )
+    if not _is_cognito_session(claims):
+        return _error(
+            403,
+            "Restoring components requires Cognito authentication (PWA session only).",
+        )
+
+    component = _get_component_record(component_id)
+    if not component:
+        return _error(404, f"Component '{component_id}' not found")
+    current = str(component.get("lifecycle_status") or "").strip().lower()
+    if current in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
+        return _error(404, f"Component '{component_id}' not found")
+    if current != "deprecated":
+        return _error(
+            409,
+            (
+                f"Component '{component_id}' cannot be restored from "
+                f"lifecycle_status='{current}'. Only 'deprecated' may be "
+                "restored (target: production). See DOC-546B896390EA §3.3."
+            ),
+            code="LIFECYCLE_TRANSITION_UNMET",
+            component_id=component_id,
+            from_status=current,
+            to_status="production",
+            allowed_source_statuses=["deprecated"],
+        )
+
+    deciding = _resolve_decider_identity(claims)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.update_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+            UpdateExpression=(
+                "SET #ls = :production, #ua = :now, "
+                "restored_at = :now, restored_by = :by"
+            ),
+            ConditionExpression=(
+                "attribute_exists(component_id) AND #ls = :deprecated"
+            ),
+            ExpressionAttributeNames={"#ls": "lifecycle_status", "#ua": "updated_at"},
+            ExpressionAttributeValues={
+                ":production": {"S": "production"},
+                ":deprecated": {"S": "deprecated"},
+                ":now": {"S": now},
+                ":by": {"S": deciding},
+            },
+            ReturnValues="ALL_NEW",
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        existing = ddb.get_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+        ).get("Item")
+        if not existing:
+            return _error(404, f"Component '{component_id}' not found")
+        fresh = _ddb_to_py(existing).get("lifecycle_status") or ""
+        return _error(
+            409,
+            (
+                f"Component '{component_id}' lifecycle_status changed "
+                f"concurrently (was 'deprecated', now '{fresh}')."
+            ),
+            code="LIFECYCLE_STATUS_CONCURRENT_MODIFICATION",
+            component_id=component_id,
+        )
+    except Exception as exc:
+        logger.exception("component.restore failed")
+        return _error(500, f"Failed to restore component: {exc}")
+
+    return _response(
+        200,
+        {
+            "success": True,
+            "component_id": component_id,
+            "lifecycle_status": "production",
+            "previous_lifecycle_status": "deprecated",
+            "restored_at": now,
+            "restored_by": deciding,
+            "component": _ddb_to_py(resp.get("Attributes", {})),
+        },
+    )
+
+
+def _handle_components_revert(
+    component_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/components/{componentId}/revert — io-only atomic archive.
+
+    ENC-FTR-076 v2 / ENC-TSK-F40 AC[1f]. Requires `reverted_reason` (min 10
+    chars). Atomically writes lifecycle_status=archived, reverted_at,
+    reverted_reason, archived_at in a single update. reverted is NEVER a
+    stable lifecycle_status (DD-2). Cognito-only.
+    """
+    if not ENABLE_COMPONENT_PROPOSAL:
+        return _error(
+            503,
+            "component.revert is not enabled (ENABLE_COMPONENT_PROPOSAL=false).",
+        )
+    if not _is_cognito_session(claims):
+        return _error(
+            403,
+            "Reverting components requires Cognito authentication (PWA session only).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _component_validation_error(
+            400, "Invalid JSON body", component_id=component_id, expected_type="object",
+        )
+
+    reverted_reason = (body.get("reverted_reason") or "").strip()
+    if len(reverted_reason) < 10:
+        return _component_validation_error(
+            400,
+            "reverted_reason is required and must be at least 10 characters",
+            field="reverted_reason", component_id=component_id, expected_type="string",
+        )
+
+    component = _get_component_record(component_id)
+    if not component:
+        return _error(404, f"Component '{component_id}' not found")
+    current = str(component.get("lifecycle_status") or "").strip().lower()
+    if current in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
+        # Already archived — 404 opacity contract.
+        return _error(404, f"Component '{component_id}' not found")
+
+    deciding = _resolve_decider_identity(claims)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.update_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+            UpdateExpression=(
+                "SET #ls = :archived, #ua = :now, archived_at = :now, "
+                "reverted_at = :now, reverted_reason = :reason, reverted_by = :by"
+            ),
+            ConditionExpression=(
+                "attribute_exists(component_id) AND #ls <> :archived"
+            ),
+            ExpressionAttributeNames={"#ls": "lifecycle_status", "#ua": "updated_at"},
+            ExpressionAttributeValues={
+                ":archived": {"S": "archived"},
+                ":now": {"S": now},
+                ":reason": {"S": reverted_reason},
+                ":by": {"S": deciding},
+            },
+            ReturnValues="ALL_NEW",
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        existing = ddb.get_item(
+            TableName=COMPONENTS_TABLE,
+            Key={"component_id": {"S": component_id}},
+        ).get("Item")
+        if not existing:
+            return _error(404, f"Component '{component_id}' not found")
+        # Already archived — 404 per opacity contract.
+        return _error(404, f"Component '{component_id}' not found")
+    except Exception as exc:
+        logger.exception("component.revert failed")
+        return _error(500, f"Failed to revert component: {exc}")
+
+    return _response(
+        200,
+        {
+            "success": True,
+            "component_id": component_id,
+            "lifecycle_status": "archived",
+            "previous_lifecycle_status": current,
+            "reverted_at": now,
+            "reverted_reason": reverted_reason,
+            "reverted_by": deciding,
+            "archived_at": now,
+            "component": _ddb_to_py(resp.get("Attributes", {})),
+        },
+    )
+
+
+# ============================================================================
+# End ENC-TSK-F40 state machine + edge + lifecycle handlers.
+# ============================================================================
 
 
 def _handle_components_update(
@@ -12145,6 +13545,31 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         if decision == "approve":
             return _handle_components_approve(comp_id, event, claims or {})
         return _handle_components_reject(comp_id, event, claims or {})
+
+    # POST /api/v1/coordination/components/{componentId}/{action} where action is
+    # one of the ENC-FTR-076 v2 / ENC-TSK-F40 state-machine actions.
+    # advance/add_edge/remove_edge are agent+io; revert/deprecate/restore are io-only
+    # (enforced inside the handlers via _is_cognito_session checks).
+    match_comp_f40 = re.fullmatch(
+        r"/api/v1/coordination/components/([A-Za-z0-9_\-]+)/"
+        r"(advance|add_edge|remove_edge|deprecate|restore|revert)",
+        path,
+    )
+    if method == "POST" and match_comp_f40:
+        comp_id = match_comp_f40.group(1)
+        action = match_comp_f40.group(2)
+        if action == "advance":
+            return _handle_components_advance(comp_id, event, claims or {})
+        if action == "add_edge":
+            return _handle_components_add_edge(comp_id, event, claims or {})
+        if action == "remove_edge":
+            return _handle_components_remove_edge(comp_id, event, claims or {})
+        if action == "deprecate":
+            return _handle_components_deprecate(comp_id, event, claims or {})
+        if action == "restore":
+            return _handle_components_restore(comp_id, event, claims or {})
+        if action == "revert":
+            return _handle_components_revert(comp_id, event, claims or {})
 
     # GET /api/v1/coordination/components/{componentId}
     match_comp = re.fullmatch(r"/api/v1/coordination/components/([A-Za-z0-9_\-]+)", path)

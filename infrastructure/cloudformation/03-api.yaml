@@ -275,6 +275,54 @@ Resources:
       RouteKey: DELETE /api/v1/coordination/components/{componentId}
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-FTR-076 v2 / ENC-TSK-F40 — state machine + edge + lifecycle routes.
+  # advance/add_edge/remove_edge are agent+io (handler checks Cognito only for
+  # io-required paths); deprecate/restore/revert are io-only per DOC-546B896390EA §3.3.
+  # revert's prior sibling _handle_components_propose + _handle_components_approve
+  # registered under existing CFN routes; these six are additive.
+
+  RouteComponentsAdvance:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/advance
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsAddEdge:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/add_edge
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsRemoveEdge:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/remove_edge
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsDeprecate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/deprecate
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsRestore:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/restore
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsRevert:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/revert
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   # ---------------------------------------------------------------------------
   # Routes — Tracker Mutation
   # ---------------------------------------------------------------------------
