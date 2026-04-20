@@ -895,7 +895,22 @@ def _delete_token(token_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
-    """POST .../checkout — Atomic checkout + advance to in-progress."""
+    """POST .../checkout — Atomic checkout + advance to in-progress.
+
+    ENC-TSK-F41 / DOC-546B896390EA §5: every successful invocation of this
+    handler increments the task record's server-side checkout_count field by 1.
+    The increment is performed atomically by the tracker_mutation Lambda as part
+    of the same DynamoDB UpdateExpression that stamps active_agent_session=True
+    (see tracker_mutation._handle_update_field, field=active_agent_session,
+    checking_out=True branch — appends "ADD checkout_count :one"). This keeps
+    the counter colocated with the state transition and removes race-windows
+    between checkout and counter bump.
+
+    The checkout_count field is server-side only; tracker.set / tracker.create
+    reject direct client writes with HTTP 400 RESERVED_FIELD. Callers must
+    treat checkout_count as read-only. It feeds the FTR-076 v2 IMPLEMENTS edge
+    immutability gate (designed->development requires checkout_count >= 1).
+    """
     provider = (body.get("active_agent_session_id") or "").strip()
     if not provider:
         return _validation_error(
@@ -1020,6 +1035,21 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
         provider=provider,
     )
 
+    # ENC-TSK-F41: observe checkout_count on the returned record — this value
+    # reflects the atomic increment that tracker_mutation performed as part of
+    # the successful checkout UpdateExpression (see tracker_mutation._handle_update_field
+    # field=active_agent_session branch). Surface it on the response so callers
+    # can verify the FTR-076 v2 counter advanced, and log an observability line
+    # so operators can trace counter progression without a second read.
+    try:
+        checkout_count_val = int(task.get("checkout_count", 0) or 0)
+    except (TypeError, ValueError):
+        checkout_count_val = 0
+    logger.info(
+        "checkout.task success project=%s task=%s provider=%s checkout_count=%s",
+        project_id, task_id, provider, checkout_count_val,
+    )
+
     return _response(200, {
         "success": True,
         "task": task,
@@ -1027,6 +1057,7 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
         "checked_out_at": datetime.now(timezone.utc).isoformat(),
         "coordination_request_id": coordination_request_id or None,
         "checkout_transition_type": checkout_transition_type,
+        "checkout_count": checkout_count_val,
     })
 
 
