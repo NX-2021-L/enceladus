@@ -174,7 +174,7 @@ jobs:
         env:
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
           FUNCTION_NAME: ${{ inputs.function_name }}
-          GITHUB_API_BASE: https://jreese.net/api/v1/github
+          GITHUB_API_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/github
           COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
         run: |
           set -euo pipefail
@@ -440,7 +440,7 @@ jobs:
       - name: Advance DPL to awaiting_prod_approval
         env:
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
-          GITHUB_API_BASE: https://jreese.net/api/v1/github
+          GITHUB_API_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/github
           COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
         run: |
           set -euo pipefail
