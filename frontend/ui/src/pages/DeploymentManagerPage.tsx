@@ -30,6 +30,7 @@ function sanitizeDecision(d: DeploymentDecision): DeploymentDecision {
 
 const STATUS_COLORS: Record<string, string> = {
   pending_approval: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  awaiting_prod_approval: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
   approved: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
   diverted: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
   reverted: 'bg-red-500/20 text-red-400 border-red-500/30',
@@ -88,7 +89,8 @@ function DecisionCard({
   const [showRevertDialog, setShowRevertDialog] = useState(false)
   const [revertReason, setRevertReason] = useState('')
 
-  const isPending = decision.status === 'pending_approval'
+  const isPending =
+    decision.status === 'pending_approval' || decision.status === 'awaiting_prod_approval'
   const queue_time = timeInQueue(decision.created_at)
 
   return (
@@ -273,7 +275,12 @@ export function DeploymentManagerPage() {
   const [actionError, setActionError] = useState<string | null>(null)
 
   const pendingDecisions = useMemo(
-    () => decisions.filter((d) => d.status === 'pending_approval').map(sanitizeDecision),
+    () =>
+      decisions
+        .filter(
+          (d) => d.status === 'pending_approval' || d.status === 'awaiting_prod_approval',
+        )
+        .map(sanitizeDecision),
     [decisions],
   )
 
