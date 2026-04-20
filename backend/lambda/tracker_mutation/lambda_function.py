@@ -408,6 +408,14 @@ _TRACKER_CREATE_MAX_ATTEMPTS = 32
 # Relation fields
 _RELATION_ID_FIELDS = {"related_task_ids", "related_issue_ids", "related_feature_ids"}
 
+# ENC-TSK-F41 / DOC-546B896390EA §5: server-side-only counter fields on task
+# records. Incremented atomically by the tracker lifecycle handler (closed_count
+# on every task->closed transition; checkout_count on every successful
+# checkout.task). Never writable by agent / io / coordination callers — any
+# direct PATCH or create attempt is rejected with HTTP 400 RESERVED_FIELD.
+# Feeds the FTR-076 v2 edge-immutability gates (DESIGNS / IMPLEMENTS).
+_F41_RESERVED_COUNTER_FIELDS = frozenset({"closed_count", "checkout_count"})
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -1530,6 +1538,27 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
             missing_required_fields=["title"],
         )
 
+    # ENC-TSK-F41 / DOC-546B896390EA §5: reject create-time writes to the
+    # server-side-only counter fields before any other validation. closed_count
+    # and checkout_count are stamped to 0 below for task records and incremented
+    # exclusively by the tracker lifecycle handler. Guard runs early so client
+    # attempts to seed these fields fail fast with HTTP 400 RESERVED_FIELD
+    # rather than being silently dropped after the project-prefix lookup.
+    for _f41_field in _F41_RESERVED_COUNTER_FIELDS:
+        if _f41_field in body:
+            return _error(
+                400,
+                (
+                    f"Field '{_f41_field}' is server-side only and must not be "
+                    f"supplied at create time. It is initialized to 0 and "
+                    f"incremented by the tracker lifecycle handler."
+                ),
+                code="RESERVED_FIELD",
+                field=_f41_field,
+                reason="server_side_only",
+                rule_citation="ENC-TSK-F41 / DOC-546B896390EA §5",
+            )
+
     priority = body.get("priority")
     description = str(body.get("description") or "")
     assigned_to = str(body.get("assigned_to") or "")
@@ -1883,6 +1912,12 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         # sealed values (no_code, code_only) can actually take effect.
         if transition_type:
             item["transition_type"] = _ser_s(transition_type)
+        # ENC-TSK-F41 / DOC-546B896390EA §5: stamp FTR-076 v2 counter defaults.
+        # closed_count and checkout_count are server-side only (reserved against
+        # caller writes above) and start at 0. They are incremented atomically
+        # by the tracker lifecycle handler on state transitions.
+        item["closed_count"] = {"N": "0"}
+        item["checkout_count"] = {"N": "0"}
     # ENC-FTR-052: Lesson-specific fields
     if record_type == "lesson":
         item["observation"] = _ser_s(observation)
@@ -1925,6 +1960,8 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
     for forbidden_field in ("item_id", "record_id"):
         if body.get(forbidden_field):
             return _error(400, f"Field '{forbidden_field}' must not be provided — record IDs are generated server-side.")
+    # ENC-TSK-F41 reserved-counter-field guard runs at the top of this handler
+    # (before project prefix lookup) so body-level seed attempts fail fast.
 
     # Create with counter-based ID allocation (or hierarchical sub-task ID)
     try:
@@ -2658,15 +2695,22 @@ def _apply_user_initiated_advance(
     }}
     evidence_json = json.dumps(enriched_evidence, separators=(",", ":"))
 
+    # ENC-TSK-F41 / DOC-546B896390EA §5: even on the Cognito user-initiated
+    # human-override path, closed_count must be incremented when the target
+    # status is 'closed'. Atomic with the status SET so the FTR-076 v2 DESIGNS
+    # gate observes the counter the instant the transition commits.
+    ui_update_expr = (
+        "SET #fld = :val, updated_at = :now, last_update_note = :note, "
+        "transition_evidence = :te, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+        "history = list_append(if_not_exists(history, :empty), :hentry)"
+    )
+    if new_lower == "closed":
+        ui_update_expr += " ADD closed_count :one"
     try:
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression=(
-                "SET #fld = :val, updated_at = :now, last_update_note = :note, "
-                "transition_evidence = :te, "
-                "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                "history = list_append(if_not_exists(history, :empty), :hentry)"
-            ),
+            UpdateExpression=ui_update_expr,
             ExpressionAttributeNames={"#fld": "status"},
             ExpressionAttributeValues={
                 ":val": _ser_value(new_lower), ":now": _ser_s(now),
@@ -2764,6 +2808,26 @@ def _handle_update_field(
             record_type=record_type,
             expected_type="string",
             expected_format="single field name",
+        )
+
+    # ENC-TSK-F41 / DOC-546B896390EA §5: Counter fields closed_count and
+    # checkout_count are server-side only. Reject any direct PATCH attempt from
+    # agent / io / coordination callers with HTTP 400 RESERVED_FIELD. These
+    # fields are incremented atomically by the same UpdateExpression that
+    # performs the triggering state transition (checkout / close) below — they
+    # are never writable by clients and must never be accepted via tracker.set.
+    if field in _F41_RESERVED_COUNTER_FIELDS:
+        return _error(
+            400,
+            (
+                f"Field '{field}' is server-side only. It is incremented by the "
+                f"tracker lifecycle handler on the triggering transition and is "
+                f"not writable via tracker.set / tracker.create."
+            ),
+            code="RESERVED_FIELD",
+            field=field,
+            reason="server_side_only",
+            rule_citation="ENC-TSK-F41 / DOC-546B896390EA §5",
         )
 
     # ENC-FTR-052: Lesson append-only mutation enforcement
@@ -3433,16 +3497,26 @@ def _handle_update_field(
                 "timestamp": _ser_s(now), "status": _ser_s("worklog"),
                 "description": _ser_s(checkout_note),
             }}
+            # ENC-TSK-F41 / DOC-546B896390EA §5: atomically increment checkout_count
+            # on every successful checkout transaction for task records. The ADD
+            # action on a non-existent attribute treats it as 0, which preserves
+            # pre-FTR-076-v2 records and survives the fail-closed IMPLEMENTS gate
+            # semantic. Invocation path is checkout.task → checkout_service._handle_checkout
+            # → tracker_mutation PATCH (field=active_agent_session value=True) →
+            # this UpdateExpression. Atomic with the state transition itself.
+            checkout_update_expr = (
+                "SET active_agent_session = :t, active_agent_session_id = :aid, "
+                "checkout_state = :checked_out, checked_out_by = :aid, checked_out_at = :now, "
+                "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+                "sync_version = if_not_exists(sync_version, :zero) + :one, "
+                "history = list_append(if_not_exists(history, :empty), :hentry)"
+            )
+            if record_type == "task":
+                checkout_update_expr += " ADD checkout_count :one"
             try:
                 ddb.update_item(
                     TableName=DYNAMODB_TABLE, Key=key,
-                    UpdateExpression=(
-                        "SET active_agent_session = :t, active_agent_session_id = :aid, "
-                        "checkout_state = :checked_out, checked_out_by = :aid, checked_out_at = :now, "
-                        "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
-                        "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                        "history = list_append(if_not_exists(history, :empty), :hentry)"
-                    ),
+                    UpdateExpression=checkout_update_expr,
                     ConditionExpression="active_agent_session <> :t OR attribute_not_exists(active_agent_session)",
                     ExpressionAttributeValues={
                         ":t": {"BOOL": True}, ":aid": _ser_s(agent_id),
@@ -3568,6 +3642,15 @@ def _handle_update_field(
     if extra_sets:
         update_expr += ", " + ", ".join(extra_sets)
 
+    # ENC-TSK-F41 / DOC-546B896390EA §5: atomically increment closed_count on
+    # every task->closed transition. The ADD action is appended to the same
+    # UpdateExpression as the status SET, so the counter and the state transition
+    # commit as a single atomic DynamoDB operation. ADD treats a missing
+    # attribute as 0, which preserves pre-FTR-076-v2 records and keeps the
+    # fail-closed DESIGNS gate semantic (closed_count>=1 required).
+    if field == "status" and record_type == "task" and str(value).strip().lower() == "closed":
+        update_expr += " ADD closed_count :one"
+
     attr_values = {
         ":val": _ser_value(value), ":now": _ser_s(now),
         ":note": _ser_s(note_text), ":wsrc": _build_write_source(body),
@@ -3639,13 +3722,20 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 "agent_details": {"S": "Enceladus PWA (human user)"},
                 "closed_time": {"S": now},
             }}
+            # ENC-TSK-F41 / DOC-546B896390EA §5: when this legacy PWA close path
+            # lands a task record at closed_status, increment closed_count atomically
+            # with the status SET. Non-task record types (features/issues) do not
+            # carry a closed_count field; restrict the ADD to tasks.
+            pwa_close_update_expr = (
+                "SET #status = :status, updated_at = :ts, last_update_note = :note, "
+                "sync_version = sync_version + :one, "
+                "#history = list_append(#history, :entry)"
+            )
+            if record_type == "task" and closed_status == "closed":
+                pwa_close_update_expr += " ADD closed_count :one"
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
-                UpdateExpression=(
-                    "SET #status = :status, updated_at = :ts, last_update_note = :note, "
-                    "sync_version = sync_version + :one, "
-                    "#history = list_append(#history, :entry)"
-                ),
+                UpdateExpression=pwa_close_update_expr,
                 ConditionExpression="sync_version = :expected",
                 ExpressionAttributeNames={"#status": "status", "#history": "history"},
                 ExpressionAttributeValues={
