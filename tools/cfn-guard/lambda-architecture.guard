@@ -1,0 +1,40 @@
+# ENC-FTR-090 / ENC-TSK-F58 Phase 0
+# Every Lambda resource must declare Architectures and the value must be one of the
+# two pinned targets for the Gen2 matrix build: x86_64 (v3 prod) or arm64 (v4 prod).
+#
+# Applies to both SAM (AWS::Serverless::Function) and plain CFN (AWS::Lambda::Function).
+
+let lambda_architectures_allowed = [ "x86_64", "arm64" ]
+
+rule sam_lambda_architectures_declared {
+    Resources.*[ Type == "AWS::Serverless::Function" ] {
+        Properties.Architectures exists
+            <<ENC-FTR-090 AC-5: SAM Lambda missing required Architectures property>>
+        Properties.Architectures is_list
+            <<ENC-FTR-090 AC-5: Architectures must be a list>>
+        Properties.Architectures[*] in %lambda_architectures_allowed
+            <<ENC-FTR-090 AC-5: Architectures value not in [x86_64, arm64]>>
+    }
+}
+
+rule plain_lambda_architectures_declared {
+    Resources.*[ Type == "AWS::Lambda::Function" ] {
+        Properties.Architectures exists
+            <<ENC-FTR-090 AC-5: Lambda missing required Architectures property>>
+        Properties.Architectures is_list
+            <<ENC-FTR-090 AC-5: Architectures must be a list>>
+        Properties.Architectures[*] in %lambda_architectures_allowed
+            <<ENC-FTR-090 AC-5: Architectures value not in [x86_64, arm64]>>
+    }
+}
+
+rule lambda_architectures_single_value {
+    # Gen2 matrix build produces a separate artifact per architecture, so each resource
+    # must pin exactly one architecture. Multi-arch Architectures lists route to a
+    # non-existent build row and silently produce the wrong artifact.
+    Resources.*[ Type == "AWS::Serverless::Function" OR Type == "AWS::Lambda::Function" ] {
+        Properties.Architectures exists
+        Properties.Architectures[*] != Properties.Architectures[1..]
+            <<ENC-FTR-090 AC-5: Architectures must contain exactly one value (matrix pins one arch per row)>>
+    }
+}
