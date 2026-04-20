@@ -5692,6 +5692,21 @@ async def _tracker_log(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+# ENC-TSK-F76 / ENC-ISS-289: tracker.create forwards every body field through
+# to tracker_mutation via a denylist-driven loop, mirroring the documents_passthrough
+# pattern introduced by ENC-TSK-C71 / ENC-ISS-158. The previous explicit whitelist
+# silently dropped any tracker field not enumerated here — most recently `components`,
+# which forced a redundant post-checkout tracker.set before the first advance could
+# satisfy ENC-FTR-041. The denylist excludes MCP-plumbing keys so they don't bleed
+# into the downstream POST body; every other field declared in tracker_mutation's
+# governance schema forwards automatically, and tracker_mutation remains the single
+# source of truth for which fields are valid per record_type.
+_TRACKER_CREATE_BODY_DENYLIST = frozenset({
+    "project_id",
+    "record_type",
+})
+
+
 async def _tracker_create(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash(args)
     if governance_error:
@@ -5700,33 +5715,18 @@ async def _tracker_create(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
     record_type = args["record_type"]
 
-    # --- Phase 2d: HTTP API migration ---
-    # All validation (ontology, governed fields, ID generation, bidirectional relations)
-    # is handled by the tracker Lambda.
     payload: Dict[str, Any] = {
         "title": args["title"],
         "governance_hash": args.get("governance_hash", ""),
     }
-    for key in ("priority", "description", "assigned_to", "status", "severity",
-                "hypothesis", "technical_notes", "location_hint",
-                "success_metrics", "related", "dispatch_id",
-                "coordination", "coordination_request_id", "acceptance_criteria",
-                "user_story", "category", "intent", "evidence", "primary_task",
-                "provider", "is_child", "parent_task_id",
-                # ENC-TSK-C26 / ENC-ISS-175: forward transition_type so create-time-only
-                # arcs (no_code, code_only) can actually be set on agent-created tasks.
-                "transition_type",
-                # ENC-TSK-A97: Plan-specific fields
-                "objectives_set", "attached_documents", "related_feature_id",
-                # ENC-TSK-C70 / ENC-ISS-192: forward lesson-specific fields so the
-                # generic execute(tracker.create) action properly routes lesson payloads
-                # to tracker_mutation. Without these, lesson creates fail with
-                # "Lesson creation requires observation" because the field is dropped
-                # before the downstream Lambda sees it.
-                "observation", "insight", "confidence", "evidence_chain",
-                "provenance", "pillar_scores", "analysis_reference"):
-        if args.get(key) is not None:
-            payload[key] = args[key]
+    for key in args:
+        if key in _TRACKER_CREATE_BODY_DENYLIST:
+            continue
+        if key in payload:
+            continue
+        if args.get(key) is None:
+            continue
+        payload[key] = args[key]
 
     resp = _tracker_api_request("POST", f"/{project_id}/{record_type}", payload=payload)
     return _result_text(resp)
