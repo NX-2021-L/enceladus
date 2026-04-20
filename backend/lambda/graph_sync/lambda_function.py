@@ -181,6 +181,9 @@ def _infer_label_from_id(record_id: str) -> str:
     # Document IDs: 'DOC-XXXX' (2 segments) or PROJECT-DOC-XXXX (3+)
     if parts[0].upper() == "DOC":
         return "Document"
+    # ENC-TSK-F45: Component IDs use 'comp-<name>' prefix (not the 3-segment ENC-TYPE-XXX form)
+    if parts[0].lower() == "comp":
+        return "Component"
     if len(parts) < 2:
         return ""
     type_code = parts[1].upper()
@@ -766,6 +769,13 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "advances-generation": "ADVANCES_GENERATION",      # DeploymentDecision -> Generation
     "targets-generation": "TARGETS_GENERATION",        # Task -> Generation
     "executes-within": "EXECUTES_WITHIN",              # Plan -> Generation
+    # ENC-FTR-076 v2 / ENC-TSK-F45: Component-task lifecycle edges
+    "designs": "DESIGNS",                              # Component -> Task
+    "designed-by": "DESIGNED_BY",                     # Task -> Component
+    "implements": "IMPLEMENTS",                        # Component -> Task (IMPLEMENTS label shared with Task->Feature generic edge)
+    "implemented-by": "IMPLEMENTED_BY",               # Task -> Component
+    "deploys": "DEPLOYS",                              # Component -> Task
+    "deployed-by": "DEPLOYED_BY",                     # Task -> Component
 }
 
 
@@ -786,6 +796,18 @@ def _upsert_relationship_edge(tx, record: Dict[str, Any]) -> None:
         val = record.get(key)
         if val is not None:
             props[key] = float(val) if key in ("weight", "confidence") else val
+
+    # ENC-TSK-F45 / ENC-TSK-E01: Ensure labeled placeholder nodes exist for both
+    # endpoints so edges land even when one side (e.g. comp-* Component nodes) has
+    # not yet been projected to Neo4j. Mirrors the PLAN_CONTAINS/LEARNED_FROM
+    # placeholder pattern in _reconcile_edges.
+    for nid in (source_id, target_id):
+        n_label = _infer_label_from_id(nid)
+        if n_label:
+            tx.run(
+                f"MERGE (n:{n_label} {{record_id: $rid}}) ON CREATE SET n.is_placeholder = true",
+                rid=nid,
+            )
 
     cypher = (
         f"MATCH (s {{record_id: $source_id}}), (t {{record_id: $target_id}}) "
