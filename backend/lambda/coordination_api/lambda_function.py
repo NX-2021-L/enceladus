@@ -1748,32 +1748,50 @@ def _set_tracker_status(
     record_id: str,
     new_status: str,
     note: str,
+    expected_prior_status: str,
     *,
     governance_hash: Optional[str] = None,
     coordination_request_id: Optional[str] = None,
     dispatch_id: Optional[str] = None,
     provider: Optional[str] = None,
-) -> None:
+) -> bool:
+    # ENC-ISS-282 / ENC-LSN-044: governed status writes must fail-closed if
+    # the record is not in the expected prior state. The caller MUST pass
+    # `expected_prior_status` — this function is the highest-blast-radius
+    # DynamoDB writer in the codebase (all tracker.set / checkout.advance /
+    # coordination lifecycle terminals route through it). A blind write could
+    # regress a record from a terminal state to an earlier one if events race.
+    # Returns True on successful write, False on CCFX (drift). History is
+    # still appended on success only.
     _ = governance_hash, coordination_request_id, dispatch_id, provider
     project_id, _record_type, sk = _key_for_record_id(record_id)
     ddb = _get_ddb()
     now = _now_z()
-    ddb.update_item(
-        TableName=TRACKER_TABLE,
-        Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
-        UpdateExpression=(
-            "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
-            "sync_version = if_not_exists(sync_version, :zero) + :one"
-        ),
-        ExpressionAttributeNames={"#status": "status"},
-        ExpressionAttributeValues={
-            ":new_status": _serialize(new_status),
-            ":ts": _serialize(now),
-            ":note": _serialize(note[:1000]),
-            ":zero": _serialize(0),
-            ":one": _serialize(1),
-        },
-    )
+    try:
+        ddb.update_item(
+            TableName=TRACKER_TABLE,
+            Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
+            UpdateExpression=(
+                "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
+                "sync_version = if_not_exists(sync_version, :zero) + :one"
+            ),
+            ConditionExpression="#status = :expected_prior",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":new_status": _serialize(new_status),
+                ":expected_prior": _serialize(expected_prior_status),
+                ":ts": _serialize(now),
+                ":note": _serialize(note[:1000]),
+                ":zero": _serialize(0),
+                ":one": _serialize(1),
+            },
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        logger.warning(
+            "coordination_api: _set_tracker_status blocked for %s — expected prior=%s; record is in a different state (race, terminal, or idempotent replay). new_status=%s was NOT written.",
+            record_id, expected_prior_status, new_status,
+        )
+        return False
     _append_tracker_history(
         record_id,
         "worklog",
@@ -1783,6 +1801,7 @@ def _set_tracker_status(
         dispatch_id=dispatch_id,
         provider=provider,
     )
+    return True
 
 
 def _resolve_project_id_for_prefix(prefix: str) -> Optional[str]:
@@ -6338,11 +6357,15 @@ def _finalize_tracker_from_request(request: Dict[str, Any]) -> None:
             logger.warning("Failed cancelling coordination-linked subscriptions for %s: %s", rid, exc)
 
     if state == "succeeded":
+        # ENC-ISS-282: coordination lifecycle advances tasks in-progress -> closed
+        # and features in-progress -> completed. Fail-closed if a task/feature is
+        # already terminal (closed/completed) or in an unexpected state.
         for tid in task_ids:
             _set_tracker_status(
                 tid,
                 "closed",
                 f"Coordination request {rid} completed successfully.",
+                "in-progress",
                 governance_hash=governance_hash,
                 coordination_request_id=rid,
                 dispatch_id=dispatch_id,
@@ -6353,6 +6376,7 @@ def _finalize_tracker_from_request(request: Dict[str, Any]) -> None:
                 feature_id,
                 "completed",
                 f"Coordination request {rid} completed successfully.",
+                "in-progress",
                 governance_hash=governance_hash,
                 coordination_request_id=rid,
                 dispatch_id=dispatch_id,
@@ -11313,10 +11337,12 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
             )
 
         for tid in request.get("task_ids") or []:
+            # ENC-ISS-282: SSM dispatch advances task open -> in-progress.
             _set_tracker_status(
                 tid,
                 "in-progress",
                 f"Coordination request {request_id} running via SSM",
+                "open",
                 governance_hash=request.get("governance_hash"),
                 coordination_request_id=request_id,
                 dispatch_id=str(dispatch_meta.get("dispatch_id") or ""),
