@@ -7976,6 +7976,11 @@ def _handle_components_get(component_id: str) -> Dict[str, Any]:
         item = resp.get("Item")
         if not item:
             return _error(404, f"Component '{component_id}' not found")
+        # F42: Opacity model (ENC-FTR-076 §7) — OPAQUE_STATUSES are indistinguishable
+        # from non-existent components; existence must not be disclosed.
+        ls = _ddb_to_py(item).get("lifecycle_status", "")
+        if ls in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
+            return _error(404, f"Component '{component_id}' not found")
         return _response(200, {"success": True, "component": _ddb_to_py(item)})
     except Exception as exc:
         logger.exception("components_get failed")
