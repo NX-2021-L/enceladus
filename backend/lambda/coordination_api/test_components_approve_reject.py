@@ -103,13 +103,15 @@ class ComponentApproveTests(unittest.TestCase):
         body = json.loads(resp["body"])
         self.assertEqual(body.get("current_lifecycle_status"), "active")
 
-    def test_happy_path_200_sets_active_and_decider(self):
+    def test_happy_path_200_sets_approved_and_decider(self):
+        """ENC-FTR-076 v2: approve writes lifecycle_status='approved' (§3.1),
+        not the legacy 'active'. Backfill (AC[5]) migrates v1 records."""
         fake = mock.MagicMock()
         fake.exceptions.ConditionalCheckFailedException = _TCE
         fake.update_item.return_value = {
             "Attributes": {
                 "component_id": {"S": "comp-x"},
-                "lifecycle_status": {"S": "active"},
+                "lifecycle_status": {"S": "approved"},
                 "approved_by": {"S": "lead@example.com"},
             }
         }
@@ -119,7 +121,7 @@ class ComponentApproveTests(unittest.TestCase):
             )
         self.assertEqual(resp["statusCode"], 200)
         body = json.loads(resp["body"])
-        self.assertEqual(body["lifecycle_status"], "active")
+        self.assertEqual(body["lifecycle_status"], "approved")
         self.assertEqual(body["approved_by"], "lead@example.com")
 
         kwargs = fake.update_item.call_args.kwargs
@@ -127,13 +129,16 @@ class ComponentApproveTests(unittest.TestCase):
         self.assertEqual(
             kwargs["ExpressionAttributeValues"][":proposed"]["S"], "proposed"
         )
+        self.assertEqual(
+            kwargs["ExpressionAttributeValues"][":approved"]["S"], "approved"
+        )
         self.assertIn("#ls = :proposed", kwargs["ConditionExpression"])
 
     def test_override_transition_type_in_update(self):
         fake = mock.MagicMock()
         fake.exceptions.ConditionalCheckFailedException = _TCE
         fake.update_item.return_value = {
-            "Attributes": {"component_id": {"S": "comp-x"}, "lifecycle_status": {"S": "active"}}
+            "Attributes": {"component_id": {"S": "comp-x"}, "lifecycle_status": {"S": "approved"}}
         }
         with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake):
             resp = coordination_lambda._handle_components_approve(
@@ -143,6 +148,76 @@ class ComponentApproveTests(unittest.TestCase):
         kwargs = fake.update_item.call_args.kwargs
         self.assertEqual(kwargs["ExpressionAttributeValues"][":tt"]["S"], "code_only")
         self.assertIn("transition_type = :tt", kwargs["UpdateExpression"])
+
+    # ENC-FTR-076 v2 / ENC-TSK-F40: approve accepts alarm_arn (optional,
+    # v5 CloudWatch hook) alongside existing required_transition_type override.
+
+    def test_alarm_arn_persisted_when_provided(self):
+        fake = mock.MagicMock()
+        fake.exceptions.ConditionalCheckFailedException = _TCE
+        fake.update_item.return_value = {
+            "Attributes": {
+                "component_id": {"S": "comp-x"},
+                "lifecycle_status": {"S": "approved"},
+                "alarm_arn": {"S": "arn:aws:cloudwatch:us-west-2:123456789012:alarm:MyAlarm"},
+            }
+        }
+        with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake):
+            resp = coordination_lambda._handle_components_approve(
+                "comp-x",
+                _event({
+                    "alarm_arn": "arn:aws:cloudwatch:us-west-2:123456789012:alarm:MyAlarm",
+                }),
+                COGNITO_CLAIMS,
+            )
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertEqual(
+            body["alarm_arn"],
+            "arn:aws:cloudwatch:us-west-2:123456789012:alarm:MyAlarm",
+        )
+        kwargs = fake.update_item.call_args.kwargs
+        self.assertIn("alarm_arn = :alarm", kwargs["UpdateExpression"])
+        self.assertEqual(
+            kwargs["ExpressionAttributeValues"][":alarm"]["S"],
+            "arn:aws:cloudwatch:us-west-2:123456789012:alarm:MyAlarm",
+        )
+
+    def test_invalid_alarm_arn_returns_400(self):
+        """alarm_arn must start with 'arn:' when provided."""
+        resp = coordination_lambda._handle_components_approve(
+            "comp-x",
+            _event({"alarm_arn": "not-an-arn"}),
+            COGNITO_CLAIMS,
+        )
+        self.assertEqual(resp["statusCode"], 400)
+        body = json.loads(resp["body"])
+        # _component_validation_error flattens `field` to top-level details.
+        self.assertEqual(body["field"], "alarm_arn")
+
+    def test_required_transition_type_override_persisted(self):
+        """F50/AC-6 preserved: approve may tighten/loosen required_transition_type."""
+        fake = mock.MagicMock()
+        fake.exceptions.ConditionalCheckFailedException = _TCE
+        fake.update_item.return_value = {
+            "Attributes": {
+                "component_id": {"S": "comp-x"},
+                "lifecycle_status": {"S": "approved"},
+                "required_transition_type": {"S": "lambda_deploy"},
+            }
+        }
+        with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake):
+            resp = coordination_lambda._handle_components_approve(
+                "comp-x",
+                _event({"required_transition_type": "lambda_deploy"}),
+                COGNITO_CLAIMS,
+            )
+        self.assertEqual(resp["statusCode"], 200)
+        kwargs = fake.update_item.call_args.kwargs
+        self.assertEqual(
+            kwargs["ExpressionAttributeValues"][":rtt"]["S"], "lambda_deploy"
+        )
+        self.assertIn("required_transition_type = :rtt", kwargs["UpdateExpression"])
 
 
 class ComponentRejectTests(unittest.TestCase):
