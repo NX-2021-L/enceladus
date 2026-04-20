@@ -54,6 +54,28 @@ Parameters:
     Type: String
     Default: "112392089"
     Description: GitHub App installation ID for NX-2021-L org.
+  # ENC-TSK-F57 AC-2 / ENC-ISS-280: CoordinationInternalApiKey{,Previous} must be referenceable
+  # by CFN env vars so that stack deploys don't strip the out-of-band live values. Deploy
+  # workflow is expected to pass real values via --parameter-overrides (empty defaults would
+  # zero the env on the Lambda and regress the fix). NoEcho prevents logging.
+  CoordinationInternalApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Shared internal API key used by coordination-tier Lambdas to authenticate requests
+      between the MCP servers, intake, coordination API, and graph_query_api. Supplied at
+      deploy time via workflow parameter-overrides; defaults empty to avoid leaking in
+      repo. Graph Query API and other consumers read from COORDINATION_INTERNAL_API_KEY
+      env var populated by this parameter.
+  CoordinationInternalApiKeyPrevious:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Previous COORDINATION_INTERNAL_API_KEY value used during dual-accept rotation windows
+      (ENC-ISS-276). Populates COORDINATION_INTERNAL_API_KEY_PREVIOUS env var on downstream
+      consumers. Empty default is expected after each rotation cycle completes.
 
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
@@ -694,6 +716,13 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           CORS_ORIGIN: !Ref CorsOrigin
+          # ENC-TSK-F57 AC-2 / ENC-ISS-280: internal-key auth vars added out-of-band to
+          # live function during the 2026-04-20 override session (DOC-D45141D94C55). CFN
+          # now declares them via parameters so the next stack deploy does not strip the
+          # vars and regress graphsearch 401 PERMISSION_DENIED. Deploy workflow must pass
+          # both values via --parameter-overrides.
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
       Tags:
         - Key: Project
           Value: enceladus
