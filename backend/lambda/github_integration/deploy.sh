@@ -230,7 +230,8 @@ ensure_lambda() {
     "TRACKER_API_BASE": "${TRACKER_API_BASE}",
     "DYNAMODB_REGION": "${REGION}",
     "ALLOWED_REPOS": "${ALLOWED_REPOS}",
-    "ENABLE_GMF_GATE": "true"
+    "ENABLE_GMF_GATE": "true",
+    "DEPLOY_TABLE": "devops-deployment-manager${ENVIRONMENT_SUFFIX}"
   }
 }
 ENV_JSON
