@@ -143,12 +143,71 @@ jobs:
           path: /tmp/gamma-uat-report.json
           retention-days: 30
 
+  # ---- Gamma success transition (per-lambda, main only) ----
+  # ENC-TSK-F54: advance DPL row pending_approval -> awaiting_prod_approval on
+  # gamma-health-gate success. The transition is authenticated, idempotent, and
+  # fails closed if the row is in a terminal state. This closes the DM state
+  # machine so PWA surfaces rows only AFTER gamma has passed.
+  gamma-success-transition:
+    needs: gamma-health-gate
+    if: inputs.deploy_mode == 'per-lambda' && github.ref == 'refs/heads/main'
+    name: Gamma Success Transition (${{ inputs.function_name }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR from merge commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+            --search "$GITHUB_SHA" --state merged \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::No merged PR found for commit $GITHUB_SHA. Cannot advance DPL."
+            exit 1
+          fi
+          echo "Resolved PR #${PR_NUMBER} for commit ${GITHUB_SHA}"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Advance DPL to awaiting_prod_approval
+        env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          FUNCTION_NAME: ${{ inputs.function_name }}
+          GITHUB_API_BASE: https://jreese.net/api/v1/github
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          set -euo pipefail
+          URL="${GITHUB_API_BASE}/deploy/gamma-success/${PR_NUMBER}"
+          BODY=$(python3 -c "import json,os; print(json.dumps({'commit_sha': os.environ['GITHUB_SHA'], 'function_name': os.environ['FUNCTION_NAME']}))")
+          echo "POST $URL body=$BODY"
+
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$URL" || echo -e "\n000")
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n 1)
+          echo "Response (HTTP $HTTP_CODE): $HTTP_BODY"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ DPL for PR #${PR_NUMBER} advanced to awaiting_prod_approval"
+          else
+            # Fail-closed: if the DPL row is in a terminal state or the API is
+            # unreachable, do not silently continue. Human approval surface is
+            # how this deploy becomes reachable.
+            echo "::error::gamma-success API returned HTTP $HTTP_CODE. Failing closed (ENC-TSK-F54)."
+            exit 1
+          fi
+
   # ---- Enceladus approval gate (per-lambda, main only) ----
   # ENC-TSK-E57: Replaces GitHub environment approval with Enceladus DAT
   # token verification. Calls /api/v1/deploy/validate/approval/{prNumber}
   # to confirm the PR was approved via the Deployment Manager PWA.
   enceladus-approval-gate:
-    needs: gamma-health-gate
+    needs: gamma-success-transition
     if: inputs.deploy_mode == 'per-lambda' && github.ref == 'refs/heads/main'
     name: Enceladus Approval Gate (${{ inputs.function_name }})
     runs-on: ubuntu-latest
@@ -351,10 +410,65 @@ jobs:
           path: /tmp/gamma-fullstack-uat-report.json
           retention-days: 30
 
+  # ---- Gamma success transition (full-stack, main only) ----
+  # ENC-TSK-F54: advance DPL pending_approval -> awaiting_prod_approval on
+  # gamma-health-gate-fullstack success. Full-stack mode deploys every Lambda
+  # in the manifest from one PR, so a single DPL row covers all of them; one
+  # transition call per workflow run is correct (function_name left empty).
+  gamma-success-transition-fullstack:
+    needs: gamma-health-gate-fullstack
+    if: inputs.deploy_mode == 'full-stack' && github.ref == 'refs/heads/main'
+    name: Gamma Success Transition (full-stack)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR from merge commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+            --search "$GITHUB_SHA" --state merged \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::No merged PR found for commit $GITHUB_SHA. Cannot advance DPL."
+            exit 1
+          fi
+          echo "Resolved PR #${PR_NUMBER} for commit ${GITHUB_SHA}"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Advance DPL to awaiting_prod_approval
+        env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          GITHUB_API_BASE: https://jreese.net/api/v1/github
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          set -euo pipefail
+          URL="${GITHUB_API_BASE}/deploy/gamma-success/${PR_NUMBER}"
+          BODY=$(python3 -c "import json,os; print(json.dumps({'commit_sha': os.environ['GITHUB_SHA'], 'function_name': 'full-stack'}))")
+          echo "POST $URL body=$BODY"
+
+          HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$URL" || echo -e "\n000")
+          HTTP_BODY=$(echo "$HTTP_RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -n 1)
+          echo "Response (HTTP $HTTP_CODE): $HTTP_BODY"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Full-stack DPL for PR #${PR_NUMBER} advanced to awaiting_prod_approval"
+          else
+            echo "::error::gamma-success API returned HTTP $HTTP_CODE. Failing closed (ENC-TSK-F54)."
+            exit 1
+          fi
+
   # ---- Enceladus approval gate (full-stack, main only) ----
   # ENC-TSK-E57: Same DAT verification as per-lambda gate.
   enceladus-approval-gate-fullstack:
-    needs: gamma-health-gate-fullstack
+    needs: gamma-success-transition-fullstack
     if: inputs.deploy_mode == 'full-stack' && github.ref == 'refs/heads/main'
     name: Enceladus Approval Gate (full-stack)
     runs-on: ubuntu-latest
