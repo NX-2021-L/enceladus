@@ -30,6 +30,7 @@ export interface DeploymentDecision {
 
 export type DeploymentStatus =
   | 'pending_approval'
+  | 'awaiting_prod_approval'
   | 'approved'
   | 'diverted'
   | 'reverted'
