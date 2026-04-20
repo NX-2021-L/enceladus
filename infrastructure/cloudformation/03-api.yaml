@@ -281,12 +281,12 @@ Resources:
   # revert's prior sibling _handle_components_propose + _handle_components_approve
   # registered under existing CFN routes; these six are additive.
 
-  RouteComponentsAdvance:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: POST /api/v1/coordination/components/{componentId}/advance
-      Target: !Sub integrations/${CoordinationApiIntegration}
+  # ENC-TSK-F75 / ENC-ISS-278 Mitigation A: RouteComponentsAdvance was provisioned
+  # out-of-band on API 8nkzqkmxqc (pre-F40 H-PREREQ) and exists as an orphan not
+  # managed by this stack. Leaving it unmanaged was chosen over deleting it (the
+  # route actively serves prod traffic) so the five sibling routes below can deploy
+  # without ConflictException blocking the whole batch. Follow-up: adopt the live
+  # orphan via create-change-set --change-set-type=IMPORT (deferred).
 
   RouteComponentsAddEdge:
     Type: AWS::ApiGatewayV2::Route
