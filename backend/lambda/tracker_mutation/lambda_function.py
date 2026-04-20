@@ -1951,6 +1951,26 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         # sealed values (no_code, code_only) can actually take effect.
         if transition_type:
             item["transition_type"] = _ser_s(transition_type)
+        # ENC-TSK-F76 / ENC-ISS-289: persist components at create time so agent
+        # checkouts don't require a follow-up tracker.set to satisfy the
+        # ENC-FTR-041 component-enforcement check at the first advance gate.
+        # Accepts list or JSON-stringified list (same coercion as tracker.set
+        # via the ENC-ISS-059 pattern).
+        raw_components = body.get("components")
+        if raw_components is not None:
+            if isinstance(raw_components, str):
+                try:
+                    raw_components = json.loads(raw_components)
+                except (TypeError, ValueError):
+                    raw_components = [raw_components] if raw_components.strip() else []
+            if isinstance(raw_components, list):
+                component_ids = [
+                    str(c).strip() for c in raw_components if str(c).strip()
+                ]
+                if component_ids:
+                    item["components"] = {
+                        "L": [_ser_s(c) for c in component_ids]
+                    }
         # ENC-TSK-F41 / DOC-546B896390EA §5: stamp FTR-076 v2 counter defaults.
         # closed_count and checkout_count are server-side only (reserved against
         # caller writes above) and start at 0. They are incremented atomically
