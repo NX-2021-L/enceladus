@@ -1,0 +1,70 @@
+{
+  "_doc": "ENC-ISS-283 REQUIRED_ENV registry. Maps Lambda function name to the list of env vars that MUST be set and non-empty at runtime. Derived from three prod incidents in Apr 2026 where env vars silently went missing across deploys. Extend by adding entries — the auditor will pick them up on next scheduled run.",
+  "_policy": {
+    "scan_interval": "hourly",
+    "on_drift_action": "create_tracker_issue",
+    "severity_on_drift": "P0",
+    "placeholder_values_that_count_as_drift": ["", "CHANGE_ME", "TODO", "REPLACE_", "REPLACE_WITH_", "null", "None"],
+    "issue_project_id": "enceladus"
+  },
+  "lambdas": {
+    "devops-deploy-intake": [
+      "COORDINATION_INTERNAL_API_KEY",
+      "DEPLOY_TABLE",
+      "PROJECTS_TABLE",
+      "SQS_QUEUE_URL"
+    ],
+    "devops-graph-query-api": [
+      "COORDINATION_INTERNAL_API_KEY",
+      "NEO4J_SECRET_NAME",
+      "COGNITO_USER_POOL_ID",
+      "COGNITO_CLIENT_ID"
+    ],
+    "devops-github-integration": [
+      "COORDINATION_INTERNAL_API_KEY",
+      "DEPLOY_TABLE",
+      "ALLOWED_REPOS",
+      "GITHUB_APP_ID",
+      "GITHUB_INSTALLATION_ID"
+    ],
+    "devops-document-api": [
+      "DOCUMENTS_TABLE",
+      "COGNITO_USER_POOL_ID",
+      "COGNITO_CLIENT_ID"
+    ],
+    "devops-coordination-api": [
+      "COORDINATION_INTERNAL_API_KEY",
+      "TRACKER_TABLE",
+      "PROJECTS_TABLE",
+      "COGNITO_USER_POOL_ID",
+      "COGNITO_CLIENT_ID"
+    ],
+    "devops-deploy-decide": [
+      "COGNITO_USER_POOL_ID",
+      "COGNITO_CLIENT_ID",
+      "DEPLOY_TABLE",
+      "ALLOWED_REPOS",
+      "GITHUB_APP_ID",
+      "GITHUB_INSTALLATION_ID"
+    ],
+    "devops-deploy-finalize": [
+      "DEPLOY_TABLE",
+      "PROJECTS_TABLE",
+      "TRACKER_TABLE",
+      "CONFIG_BUCKET"
+    ],
+    "devops-tracker-mutation-api": [
+      "DYNAMODB_TABLE",
+      "PROJECTS_TABLE",
+      "COORDINATION_INTERNAL_API_KEY"
+    ],
+    "enceladus-mcp-code": [
+      "TRACKER_TABLE",
+      "PROJECTS_TABLE",
+      "DOCUMENTS_TABLE",
+      "COORDINATION_INTERNAL_API_KEY",
+      "ENCELADUS_COGNITO_USER_POOL_ID",
+      "ENCELADUS_COGNITO_CLIENT_ID"
+    ]
+  }
+}
