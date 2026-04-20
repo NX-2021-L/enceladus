@@ -1045,12 +1045,23 @@ def _webhook_workflow_run(
 
         # Query for decisions in deploying status with matching head_sha
         # Using a scan since we expect very few records in deploying state
+        # ENC-LSN-044 / Patch 4 (2026-04-20 terminal-agent session):
+        # Step 1 patch removed the premature merge-time transition to 'deploying',
+        # which left the DPL row at pending_approval → approved (via PWA) with no
+        # intermediate 'deploying' write. The prior scan filter here only matched
+        # status=deploying and silently no-op'd for rows in approved / awaiting_prod_approval
+        # / pending_approval. The downstream ConditionExpression on the update_item
+        # already permits these as valid prior states, so widening the scan filter
+        # is the complete fix.
         resp = ddb.scan(
             TableName=DEPLOY_TABLE,
-            FilterExpression="#s = :deploying AND head_sha = :sha",
+            FilterExpression="#s IN (:deploying, :approved, :awaiting, :pending) AND head_sha = :sha",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":deploying": {"S": "deploying"},
+                ":approved": {"S": "approved"},
+                ":awaiting": {"S": "awaiting_prod_approval"},
+                ":pending": {"S": "pending_approval"},
                 ":sha": {"S": head_sha},
             },
             Limit=10,
@@ -1085,19 +1096,37 @@ def _webhook_workflow_run(
             final_status = "failed"
             new_deployment_outcome = "failure"
 
-        ddb.update_item(
-            TableName=DEPLOY_TABLE,
-            Key={"project_id": {"S": pk}, "record_id": {"S": sk}},
-            UpdateExpression="SET #s = :st, deployment_outcome = :out, deployed_at = :da, updated_at = :ua",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":st": {"S": final_status},
-                ":out": {"S": new_deployment_outcome},
-                ":da": {"S": now},
-                ":ua": {"S": now},
-            },
-        )
-        logger.info("GMF: DPL %s updated to %s (SHA=%s)", sk, final_status, head_sha[:12])
+        try:
+            ddb.update_item(
+                TableName=DEPLOY_TABLE,
+                Key={"project_id": {"S": pk}, "record_id": {"S": sk}},
+                UpdateExpression="SET #s = :st, deployment_outcome = :out, deployed_at = :da, updated_at = :ua",
+                # ENC-LSN-044: only advance to a terminal state from an in-flight
+                # state. Prevents a late workflow_run webhook from clobbering a
+                # reverted/deployed row. Prior states that legitimately advance to
+                # deployed/failed: deploying, awaiting_prod_approval, approved,
+                # pending_approval (in order of normal flow maturity).
+                ConditionExpression="#s IN (:s_deploying, :s_await, :s_approved, :s_pending)",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":st": {"S": final_status},
+                    ":out": {"S": new_deployment_outcome},
+                    ":da": {"S": now},
+                    ":ua": {"S": now},
+                    ":s_deploying": {"S": "deploying"},
+                    ":s_await": {"S": "awaiting_prod_approval"},
+                    ":s_approved": {"S": "approved"},
+                    ":s_pending": {"S": "pending_approval"},
+                },
+            )
+            logger.info("GMF: DPL %s updated to %s (SHA=%s)", sk, final_status, head_sha[:12])
+        except ddb.exceptions.ConditionalCheckFailedException:
+            logger.warning(
+                "GMF: DPL %s refused workflow_run transition to %s — prior status not in in-flight set. "
+                "Likely a late webhook after revert or duplicate delivery. SHA=%s",
+                sk, final_status, head_sha[:12],
+            )
+            return _response(200, {"processed": False, "reason": "prior_status_not_in_flight"})
         return _response(200, {
             "processed": True,
             "record_id": sk,
@@ -1265,7 +1294,13 @@ def _gmf_redeclare_on_label(
 
 
 def _gmf_mark_deploying(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
-    """When PR is merged, update DPL to deploying status."""
+    """On PR merge, record merge_commit_sha only. Status stays pending_approval so
+    the Deployment Manager PWA still surfaces the row for human Cognito approval.
+    Prior behavior flipped status=deploying here, which hid the row from the PWA
+    queue filter and caused GHA Enceladus Approval Gate to fail-closed for every
+    merged PR (no approval_token ever minted). Fixed inline by terminal-agent
+    override session (2026-04-20) after ENC-ISS-255/273/275 cluster diagnosis
+    concluded the DPL state machine was the root of the chicken-and-egg."""
     pr_number = pr.get("number", 0)
     record_id = f"decision#ENC-DPL-{pr_number}"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1276,19 +1311,17 @@ def _gmf_mark_deploying(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
         ddb.update_item(
             TableName=DEPLOY_TABLE,
             Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
-            UpdateExpression="SET #s = :st, merge_commit_sha = :msha, updated_at = :ua",
-            ExpressionAttributeNames={"#s": "status"},
+            UpdateExpression="SET merge_commit_sha = :msha, updated_at = :ua",
             ExpressionAttributeValues={
-                ":st": {"S": "deploying"},
                 ":msha": {"S": merge_sha},
                 ":ua": {"S": now},
             },
         )
-        logger.info("GMF: DPL %s → deploying (merged SHA=%s)", record_id, merge_sha[:12])
-        return _response(200, {"processed": True, "action": "dpl_deploying"})
+        logger.info("GMF: DPL %s merged SHA=%s (status unchanged, awaits approval)", record_id, merge_sha[:12])
+        return _response(200, {"processed": True, "action": "dpl_merge_sha_recorded"})
     except Exception as e:
-        logger.error("GMF: Mark deploying failed for PR #%d: %s", pr_number, e)
-        return _response(200, {"processed": False, "reason": "mark_deploying_failed"})
+        logger.error("GMF: Record merge_sha failed for PR #%d: %s", pr_number, e)
+        return _response(200, {"processed": False, "reason": "record_merge_sha_failed"})
 
 
 def _gmf_mark_reverted(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
@@ -1303,16 +1336,28 @@ def _gmf_mark_reverted(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
             TableName=DEPLOY_TABLE,
             Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
             UpdateExpression="SET #s = :st, final_target = :ft, updated_at = :ua",
+            # ENC-LSN-044: do not re-revert a row that is already in a terminal
+            # state. A PR-close-without-merge event can race with or follow a
+            # deployed/failed workflow_run event; the later terminal state wins
+            # over 'reverted' because the deploy actually happened.
+            ConditionExpression="#s <> :s_deployed AND #s <> :s_failed AND #s <> :s_reverted",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":st": {"S": "reverted"},
                 ":ft": {"S": "blocked"},
                 ":ua": {"S": now},
+                ":s_deployed": {"S": "deployed"},
+                ":s_failed": {"S": "failed"},
+                ":s_reverted": {"S": "reverted"},
             },
         )
         logger.info("GMF: DPL %s → reverted (PR #%d closed without merge)", record_id, pr_number)
         return _response(200, {"processed": True, "action": "dpl_reverted"})
     except Exception as e:
+        name = type(e).__name__
+        if name == "ConditionalCheckFailedException":
+            logger.info("GMF: Mark reverted skipped for PR #%d — row already in a terminal state", pr_number)
+            return _response(200, {"processed": False, "reason": "already_terminal"})
         logger.info("GMF: Mark reverted skipped for PR #%d: %s", pr_number, e)
         return _response(200, {"processed": False, "reason": "mark_reverted_skipped"})
 
