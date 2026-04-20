@@ -1380,10 +1380,23 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
 
 
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
-    """GET /{project} — list records with optional type/status filters."""
+    """GET /{project} — list records with optional type/status filters.
+
+    ENC-TSK-F56 §6: paginated to prevent Lambda 413 on response-too-large.
+    Lambda max response is 6MB; a project with 700+ records regularly exceeded
+    that. Caps at page_size (default 50, max 200) and returns next_cursor when
+    more records remain. Prior behavior exhausted LastEvaluatedKey and returned
+    everything, causing the pre-existing 413 surfaced during the 2026-04-20
+    io-override session.
+    """
     ddb = _get_ddb()
     record_type = query_params.get("type", "")
     status_filter = query_params.get("status", "")
+    try:
+        page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
+    except (TypeError, ValueError):
+        page_size = 50
+    cursor = query_params.get("next_cursor", "")
 
     try:
         if record_type and record_type in _RECORD_TYPES:
@@ -1396,26 +1409,19 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
                     ":pid": _ser_s(project_id),
                     ":rtype": _ser_s(record_type),
                 },
+                "Limit": page_size,
             }
             if status_filter:
                 kwargs["FilterExpression"] = "#st = :st"
                 kwargs["ExpressionAttributeNames"] = {"#st": "status"}
                 kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
-
-            items = []
-            while True:
-                resp = ddb.query(**kwargs)
-                items.extend(resp.get("Items", []))
-                last_key = resp.get("LastEvaluatedKey")
-                if not last_key:
-                    break
-                kwargs["ExclusiveStartKey"] = last_key
         else:
             # Query all records for project
             kwargs = {
                 "TableName": DYNAMODB_TABLE,
                 "KeyConditionExpression": "project_id = :pid",
                 "ExpressionAttributeValues": {":pid": _ser_s(project_id)},
+                "Limit": page_size,
             }
             filter_parts = []
             expr_names: Dict[str, str] = {}
@@ -1431,14 +1437,39 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
             if expr_names:
                 kwargs["ExpressionAttributeNames"] = expr_names
 
-            items = []
-            while True:
-                resp = ddb.query(**kwargs)
-                items.extend(resp.get("Items", []))
-                last_key = resp.get("LastEvaluatedKey")
-                if not last_key:
-                    break
-                kwargs["ExclusiveStartKey"] = last_key
+        if cursor:
+            try:
+                import base64
+                kwargs["ExclusiveStartKey"] = json.loads(
+                    base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+                )
+            except Exception:
+                return _error(400, "Invalid next_cursor")
+
+        items: List[Dict[str, Any]] = []
+        next_cursor = ""
+        # Accumulate up to page_size post-filter items. DDB Limit caps the
+        # pre-filter scan, so we may need multiple pages to fill page_size when
+        # a FilterExpression is applied. Bound the loop to prevent runaway.
+        max_pages = 10
+        while len(items) < page_size and max_pages > 0:
+            resp = ddb.query(**kwargs)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+            max_pages -= 1
+            if len(items) >= page_size:
+                # Encode cursor for caller
+                import base64
+                next_cursor = base64.urlsafe_b64encode(
+                    json.dumps(last_key).encode("utf-8")
+                ).decode("ascii")
+                break
+
+        # Trim to page_size exactly
+        items = items[:page_size]
 
         # Deserialize and filter out counter records
         records = []
@@ -1448,7 +1479,15 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
                 continue
             records.append(item)
 
-        return _response(200, {"success": True, "records": records, "count": len(records)})
+        payload: Dict[str, Any] = {
+            "success": True,
+            "records": records,
+            "count": len(records),
+            "page_size": page_size,
+        }
+        if next_cursor:
+            payload["next_cursor"] = next_cursor
+        return _response(200, payload)
 
     except Exception as exc:
         logger.error("list failed: %s", exc)
