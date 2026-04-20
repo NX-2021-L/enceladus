@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="_card.css">
+<style>
+  .card { padding: 20px; }
+  h3 { margin: 0 0 4px; font-family: var(--font-body); font-size: 12px; font-weight: 600; color: var(--enc-starlight); letter-spacing: 0.02em; }
+  .attrib { margin: 0 0 10px; font-family: var(--font-mono); font-size: 10px; color: var(--enc-dust); letter-spacing: 0.05em; text-transform: uppercase; }
+  .src { margin-bottom: 20px; }
+  .src:last-child { margin-bottom: 0; }
+  .frame { position: relative; height: 240px; border-radius: 8px; overflow: hidden; background: #000; margin-bottom: 8px; }
+  .frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .meta { font-family: var(--font-body); font-size: 11px; line-height: 1.6; color: var(--enc-dust); margin: 0 0 10px; }
+
+  .swatches { display: flex; gap: 6px; margin-top: 8px; }
+  .sw { flex: 1; border-radius: 6px; overflow: hidden; border: 1px solid rgba(255,255,255,0.06); }
+  .sw .chip { height: 32px; }
+  .sw .label { font-family: var(--font-mono); font-size: 9px; color: var(--enc-dust); padding: 4px 6px; letter-spacing: 0.04em; background: rgba(0,0,0,0.2); display: flex; justify-content: space-between; }
+  .sw .name { color: var(--enc-starlight); }
+
+  .atm-row { display: flex; gap: 10px; margin-top: 10px; }
+  .atm { position: relative; flex: 1; height: 100px; border-radius: 6px; overflow: hidden; background: var(--enc-void); border: 1px solid rgba(61,155,168,0.15); }
+  .atm img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0.18; }
+  .atm-label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-family: var(--font-display); font-size: 22px; font-weight: 800; letter-spacing: 0.08em; color: var(--enc-starlight); text-transform: uppercase; }
+  .atm-note { font-family: var(--font-mono); font-size: 9px; color: var(--enc-dust); margin-top: 6px; text-align: center; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="card">
+
+  <div class="src">
+    <h3>Primary — Cassini 2008 · Enceladus</h3>
+    <p class="attrib">NASA/JPL-Caltech/SSI · Public Domain</p>
+    <div class="frame"><img src="../assets/source-enceladus-moon.jpg" alt="Enceladus moon, October 2008"></div>
+    <p class="meta">The brand is named for this moon — and its palette is extracted directly from it. Seafoam whites from the ice surface, cosmic teal from the shadowed fissures, absolute void from the space beyond the limb. The visual grammar of <em style="color:var(--enc-starlight)">tiny body, disproportionate energy</em> is the north star.</p>
+    <div class="swatches">
+      <div class="sw"><div class="chip" style="background:#0A0A0F"></div><div class="label"><span class="name">Void</span><span>0A0A0F</span></div></div>
+      <div class="sw"><div class="chip" style="background:#2E4D5C"></div><div class="label"><span class="name">Slate</span><span>2E4D5C</span></div></div>
+      <div class="sw"><div class="chip" style="background:#3D9BA8"></div><div class="label"><span class="name">Teal</span><span>3D9BA8</span></div></div>
+      <div class="sw"><div class="chip" style="background:#C8DDD9"></div><div class="label"><span class="name">Seafoam</span><span>C8DDD9</span></div></div>
+    </div>
+  </div>
+
+  <div class="src">
+    <h3>Secondary — JWST · Orion Nebula (M42)</h3>
+    <p class="attrib">ESA/Webb, NASA, CSA, M. McCaughrean &amp; S. Pearson · CC BY 4.0</p>
+    <div class="frame"><img src="../assets/source-orion-nebula.jpg" alt="JWST Orion Nebula"></div>
+    <p class="meta">Source imagery for the knowledge / alert secondaries. Nebula lavender pulls from the dust clouds; stellar crimson from the ionised jets at the core. Used sparingly — lesson-card accents, P0 alerts.</p>
+    <div class="swatches">
+      <div class="sw"><div class="chip" style="background:#8A8CB5"></div><div class="label"><span class="name">Lavender</span><span>8A8CB5</span></div></div>
+      <div class="sw"><div class="chip" style="background:#C85060"></div><div class="label"><span class="name">Crimson</span><span>C85060</span></div></div>
+      <div class="sw"><div class="chip" style="background:#F5EEDC"></div><div class="label"><span class="name">Starlight</span><span>F5EEDC</span></div></div>
+      <div class="sw"><div class="chip" style="background:#1C2333"></div><div class="label"><span class="name">Surface-alt</span><span>1C2333</span></div></div>
+    </div>
+  </div>
+
+  <div>
+    <h3 style="margin-bottom:8px">Atmospheric use · opacity 0.15–0.20</h3>
+    <div class="atm-row">
+      <div class="atm">
+        <img src="../assets/source-enceladus-moon.jpg" alt="">
+        <div class="atm-label">Enceladus</div>
+      </div>
+      <div class="atm">
+        <img src="../assets/source-orion-nebula.jpg" alt="">
+        <div class="atm-label">Enceladus</div>
+      </div>
+    </div>
+    <p class="atm-note">Never full-bleed · only behind hero text · never competes with content</p>
+  </div>
+
+</div>
+</body>
+</html>

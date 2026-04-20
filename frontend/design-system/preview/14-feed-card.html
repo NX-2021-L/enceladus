@@ -1,0 +1,37 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../colors_and_type.css"><link rel="stylesheet" href="_card.css">
+<style>body{padding:20px}.feed{display:flex;flex-direction:column;gap:10px}
+.row{background:var(--enc-surface);border:1px solid rgba(61,155,168,0.2);border-radius:8px;padding:12px 16px;transition:border-color 200ms cubic-bezier(0.4,0,0.2,1)}
+.row.hover{border-color:rgba(61,155,168,0.5)}
+.top{display:flex;justify-content:space-between;gap:8px;margin-bottom:2px}
+.ids{display:flex;gap:8px;align-items:baseline;font-family:var(--font-mono);font-size:11px}
+.id{color:var(--enc-teal)}
+.proj{color:var(--enc-dust)}
+.time{font-family:var(--font-body);font-size:11px;color:var(--enc-dust)}
+.title{font-family:var(--font-body);font-size:14px;font-weight:500;color:var(--enc-starlight);margin:2px 0 8px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.c{padding:2px 8px;border-radius:4px;font-family:var(--font-mono);font-size:10px;font-weight:500}
+.c-open{background:rgba(61,155,168,0.1);color:#3D9BA8}
+.c-prog{background:rgba(122,200,212,0.15);color:#7AC8D4}
+.c-block{background:rgba(200,80,96,0.1);color:#C85060}
+.c-pri{background:rgba(200,80,96,0.15);color:#C85060;border:1px solid rgba(200,80,96,0.4)}
+.c-session{background:rgba(245,158,11,0.18);color:#fbbf24}
+.meta{font-family:var(--font-mono);font-size:10px;color:var(--enc-dust)}</style>
+</head><body><div class="card" style="padding:14px">
+<div class="feed">
+<div class="row hover">
+<div class="top"><div class="ids"><span class="id">ENC-TSK-A57</span><span class="proj">enceladus</span></div><span class="time">4m ago</span></div>
+<div class="title">Implement governed lesson primitive lifecycle gates</div>
+<div class="chips"><span class="c c-prog">in-progress</span><span class="c c-pri">P1</span><span class="c c-session">Checked Out</span><span class="meta">3/5</span></div>
+</div>
+<div class="row">
+<div class="top"><div class="ids"><span class="id">ENC-ISS-041</span><span class="proj">enceladus</span></div><span class="time">2h ago</span></div>
+<div class="title">Tracker API JWT library missing after Lambda deploy</div>
+<div class="chips"><span class="c c-block">blocked</span><span class="c c-pri">P0</span><span class="meta">Parent: ENC-FTR-052</span></div>
+</div>
+<div class="row">
+<div class="top"><div class="ids"><span class="id">ENC-LSN-004</span><span class="proj">enceladus</span></div><span class="time">1d ago</span></div>
+<div class="title">Never build Lambda artifacts on macOS — platform mismatch</div>
+<div class="chips"><span class="c" style="background:rgba(138,140,181,0.15);color:#8A8CB5">lesson</span><span class="meta" style="color:#8A8CB5">0.82</span><span class="meta">conf: 94%</span></div>
+</div>
+</div>
+</div></body></html>

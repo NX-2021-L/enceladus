@@ -1,0 +1,6 @@
+/* Shared card chrome for preview/ cards.
+   Target card ≈ 700×variable, rendered inside design-system review tile. */
+html, body { margin: 0; padding: 0; background: var(--enc-void); color: var(--enc-starlight); font-family: var(--font-body); }
+body { padding: 20px; box-sizing: border-box; }
+* { box-sizing: border-box; }
+.card { background: var(--enc-surface); border: 1px solid rgba(61,155,168,0.2); border-radius: 12px; padding: 24px; width: 660px; }
