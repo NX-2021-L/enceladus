@@ -70,11 +70,14 @@ def _finalize_tracker_from_request(request: Dict[str, Any]) -> None:
             logger.warning("Failed cancelling coordination-linked subscriptions for %s: %s", rid, exc)
 
     if state == "succeeded":
+        # ENC-ISS-282: coordination lifecycle advances tasks in-progress -> closed
+        # and features in-progress -> completed. Fail-closed on drift.
         for tid in task_ids:
             _set_tracker_status(
                 tid,
                 "closed",
                 f"Coordination request {rid} completed successfully.",
+                "in-progress",
                 governance_hash=governance_hash,
                 coordination_request_id=rid,
                 dispatch_id=dispatch_id,
@@ -85,6 +88,7 @@ def _finalize_tracker_from_request(request: Dict[str, Any]) -> None:
                 feature_id,
                 "completed",
                 f"Coordination request {rid} completed successfully.",
+                "in-progress",
                 governance_hash=governance_hash,
                 coordination_request_id=rid,
                 dispatch_id=dispatch_id,
