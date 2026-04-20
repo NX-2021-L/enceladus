@@ -27,7 +27,13 @@ def _normalize_function_name(value: str) -> str | None:
         return None
 
     if not value.startswith("!"):
-        return value.strip('"\'')
+        name = value.strip('"\'')
+        # ENC-TSK-F74: gamma-only literals (e.g. enceladus-mcp-code-gamma) are
+        # intentionally excluded from production coverage. The prod twin is
+        # either absent or registered separately.
+        if name.endswith("-gamma"):
+            return None
+        return name
 
     match = SIMPLE_SUB_PATTERN.match(value)
     if not match:
@@ -35,6 +41,8 @@ def _normalize_function_name(value: str) -> str | None:
 
     normalized = match.group("value").replace("${EnvironmentSuffix}", "")
     if "${" in normalized:
+        return None
+    if normalized.endswith("-gamma"):
         return None
     return normalized
 

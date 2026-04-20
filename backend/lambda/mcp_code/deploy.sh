@@ -490,12 +490,40 @@ deploy_lambda() {
   log "[END] Lambda ready: ${FUNCTION_NAME}"
 }
 
+deploy_gamma_twin() {
+  # ENC-TSK-F74 / ENC-ISS-279: Opt-in gamma upsert. Keeps the out-of-band
+  # enceladus-mcp-code-gamma Lambda reachable from a code-managed deploy path
+  # after the prod twin succeeds. Triggered by `--include-gamma` arg or
+  # `DEPLOY_MCP_CODE_GAMMA=1` env.
+  log "[START] gamma twin upsert: enceladus-mcp-code-gamma"
+  (
+    export FUNCTION_NAME="enceladus-mcp-code-gamma"
+    export SOURCE_FUNCTION_NAME="devops-coordination-api-gamma"
+    export ENVIRONMENT_SUFFIX="-gamma"
+    export ZIP_FILE="/tmp/${FUNCTION_NAME}.zip"
+    package_lambda
+    deploy_lambda
+    rm -f "${ZIP_FILE}"
+  )
+  log "[END] gamma twin upsert complete"
+}
+
 main() {
+  local include_gamma=0
+  for arg in "$@"; do
+    [[ "${arg}" == "--include-gamma" ]] && include_gamma=1
+  done
+  [[ "${DEPLOY_MCP_CODE_GAMMA:-0}" == "1" ]] && include_gamma=1
+
   log "[START] Deploying ${FUNCTION_NAME}"
   package_lambda
   deploy_lambda
   rm -f "${ZIP_FILE}"
   log "[SUCCESS] ${FUNCTION_NAME} deployed"
+
+  if [[ "${include_gamma}" == "1" ]]; then
+    deploy_gamma_twin
+  fi
 }
 
 main "$@"
