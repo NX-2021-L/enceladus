@@ -764,6 +764,40 @@ Resources:
           Value: neo4j-backup
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-F73 / ENC-ISS-283: Env Drift Auditor Lambda (F57 AC-3/4 CFN adoption)
+  # Live resource created out-of-band for ENC-ISS-283; imported under this stack
+  # via create-change-set --change-set-type=IMPORT. EventBridge schedule
+  # (devops-env-drift-auditor-hourly) remains unmanaged and is not in scope here.
+  # ---------------------------------------------------------------------------
+
+  DevopsEnvDriftAuditorFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-env-drift-auditor${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt EnvDriftAuditorRole.Arn
+      Environment:
+        Variables:
+          TRACKER_API_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          ISSUE_PROJECT_ID: enceladus
+          DRIFT_SEVERITY: P0
+          DRY_RUN: "false"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: env-drift-auditor
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-C10: Graph Health Metrics Lambda (CloudWatch proxy path)
   # ---------------------------------------------------------------------------
 
@@ -1621,6 +1655,45 @@ Resources:
       Tags:
         - Key: Project
           Value: enceladus
+
+  # ENC-TSK-F73 / ENC-ISS-283: EnvDriftAuditor IAM role (F57 AC-4 CFN adoption).
+  # Inline policy `env-drift-auditor-inline` is stamped to match live exactly so
+  # the CFN IMPORT change set reports no drift on the imported role.
+  EnvDriftAuditorRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-env-drift-auditor-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: env-drift-auditor-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Sid: LambdaConfigRead
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListFunctions
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: env-drift-auditor
 
 Outputs:
   CoordinationApiFunctionArn:
