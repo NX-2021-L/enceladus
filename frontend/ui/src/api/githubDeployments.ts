@@ -1,8 +1,8 @@
 // Direct api.github.com reader for DM Gen2 (ENC-TSK-F62 AC-1, AC-3).
-// Zero proxy through Enceladus Lambda. Token (VITE_GITHUB_READ_TOKEN) is a
-// read-only fine-grained PAT injected from CI/CD build secrets — not committed
-// to source, not a bundle-level hardcode.
+// Token is a GitHub App installation access token vended at runtime by
+// GET /api/v1/auth/github-token — no build-time secrets required.
 
+import { getGitHubToken } from './githubToken'
 import type {
   GitHubDeployment,
   GitHubDeploymentStatus,
@@ -11,19 +11,18 @@ import type {
 
 const REPO = 'NX-2021-L/enceladus'
 const GH_API = 'https://api.github.com'
-const token = import.meta.env.VITE_GITHUB_READ_TOKEN as string | undefined
 
-function headers(): HeadersInit {
-  const h: Record<string, string> = {
+async function headers(): Promise<HeadersInit> {
+  const token = await getGitHubToken()
+  return {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
+    Authorization: `Bearer ${token}`,
   }
-  if (token) h['Authorization'] = `Bearer ${token}`
-  return h
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${GH_API}${path}`, { headers: headers(), cache: 'no-store' })
+  const res = await fetch(`${GH_API}${path}`, { headers: await headers(), cache: 'no-store' })
   if (!res.ok) throw new Error(`GitHub API ${res.status} — ${path}`)
   return res.json() as Promise<T>
 }
