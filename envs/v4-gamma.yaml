@@ -74,3 +74,4 @@ function_name_map:
   reference_search: devops-reference-search-gamma
   titan_embedding_backfill: devops-titan-embedding-backfill-gamma
   tracker_mutation: devops-tracker-mutation-api-gamma
+  deploy_parity_validator: devops-deploy-parity-validator-gamma
