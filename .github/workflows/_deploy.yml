@@ -205,14 +205,20 @@ jobs:
           SHA="${{ needs.resolve.outputs.commit_sha }}"
           ENV="${{ needs.resolve.outputs.environment }}"
 
-          DEPLOYMENT_ID=$(gh api \
+          PAYLOAD=$(python3 -c "
+import json, os
+print(json.dumps({
+    'ref': os.environ['SHA'],
+    'environment': os.environ['ENV'],
+    'description': 'Gen2 deploy — ENC-FTR-090',
+    'auto_merge': False,
+    'required_contexts': [],
+}))
+")
+          DEPLOYMENT_ID=$(echo "$PAYLOAD" | gh api \
             --method POST \
             "/repos/$GITHUB_REPOSITORY/deployments" \
-            -f ref="$SHA" \
-            -f environment="$ENV" \
-            -f description="Gen2 deploy — ENC-FTR-090" \
-            -F auto_merge=false \
-            -F required_contexts='[]' \
+            --input - \
             --jq '.id')
 
           echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
