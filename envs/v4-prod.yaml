@@ -34,3 +34,8 @@ environment: v4-prod
 
 appconfig_application_id: ""
 appconfig_environment_id: ""
+
+# ENC-TSK-F63 AC-2/AC-3: SnapStart (arm64/py3.12 — supported) and CodeDeploy.
+enable_snapstart: "true"
+environment_suffix: ""
+codedeploy_app_name: "enceladus-lambda"
