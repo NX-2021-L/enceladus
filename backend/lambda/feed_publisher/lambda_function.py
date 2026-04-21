@@ -390,7 +390,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 )
             except Exception as exc:
                 logger.error("feed_publisher: DynamoDB fetch failed for project=%s: %s", entry.name, exc)
-                all_project_data[entry.name] = {"tasks": [], "issues": [], "features": []}
+                all_project_data[entry.name] = {"tasks": [], "issues": [], "features": [], "lessons": [], "plans": []}
 
         # 2b. Fetch all document data from the documents DynamoDB table
         all_documents_data: Dict[str, List[Dict[str, Any]]] = {}
