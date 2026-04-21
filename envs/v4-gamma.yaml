@@ -40,3 +40,37 @@ appconfig_environment_id: ""
 # (rules: manifest_artifact_version_ids_shape + manifest_artifact_commit_sha_pinned).
 artifact_commit_sha: ""
 artifact_version_ids: {}
+
+# ENC-TSK-F60 Phase 2 — directory-name → deployed Lambda function name mapping.
+# _deploy.yml resolve step outputs this as function_name_map_json; deploy step uses
+# the mapped name in `aws lambda update-function-code --function-name`.
+# Gamma uses prefixed/hyphenated conventions that differ from backend/lambda/<dir> names.
+# Functions absent from this map are silently skipped by the deploy step.
+# deploy_capability_auditor intentionally excluded — not provisioned in v4-gamma.
+function_name_map:
+  auth_refresh: auth-refresh-gamma
+  bedrock_agent_actions: enceladus-bedrock-agent-actions-gamma
+  changelog_api: devops-changelog-api-gamma
+  checkout_service: enceladus-checkout-service-auto-gamma
+  coordination_api: devops-coordination-api-gamma
+  coordination_monitor_api: devops-coordination-monitor-api-gamma
+  deploy_decide: devops-deploy-decide-gamma
+  deploy_finalize: devops-deploy-finalize-gamma
+  deploy_intake: devops-deploy-intake-gamma
+  deploy_orchestrator: devops-deploy-orchestrator-gamma
+  doc_prep: devops-doc-prep-gamma
+  document_api: devops-document-api-gamma
+  env_drift_auditor: devops-env-drift-auditor-gamma
+  feed_publisher: devops-feed-publisher-gamma
+  feed_query: devops-feed-query-api-gamma
+  github_integration: devops-github-integration-gamma
+  governance_audit: enceladus-governance-audit-gamma
+  graph_health_metrics: enceladus-graph-health-metrics-gamma
+  graph_query_api: devops-graph-query-api-gamma
+  graph_sync: devops-graph-sync-gamma
+  neo4j_backup: enceladus-neo4j-backup-gamma
+  prod_health_monitor: enceladus-prod-health-monitor-gamma
+  project_service: devops-project-service-gamma
+  reference_search: devops-reference-search-gamma
+  titan_embedding_backfill: devops-titan-embedding-backfill-gamma
+  tracker_mutation: devops-tracker-mutation-api-gamma
