@@ -200,10 +200,10 @@ jobs:
         id: create_deployment
         env:
           GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.resolve.outputs.commit_sha }}
+          ENV: ${{ needs.resolve.outputs.environment }}
         run: |
           set -euo pipefail
-          SHA="${{ needs.resolve.outputs.commit_sha }}"
-          ENV="${{ needs.resolve.outputs.environment }}"
 
           PAYLOAD=$(python3 - <<'PY'
           import json, os
