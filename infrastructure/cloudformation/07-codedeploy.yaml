@@ -1,0 +1,1492 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus CodeDeploy Canary Infrastructure — ENC-TSK-F63 AC-3.
+  CodeDeploy application, IAM role, Lambda aliases (live), per-function
+  DeploymentGroups, and per-function CloudWatch error/latency alarms wired
+  for automatic rollback. Imported into the enceladus-compute stack family.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, gamma]
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+  ComputeStackName:
+    Type: String
+    Default: enceladus-compute
+    Description: Name of the 02-compute stack; used for cross-stack Lambda ARN imports.
+  CanaryPreference:
+    Type: String
+    Default: Linear10PercentEvery10Minutes
+    AllowedValues:
+      - Canary10Percent5Minutes
+      - Canary10Percent10Minutes
+      - Linear10PercentEvery1Minute
+      - Linear10PercentEvery10Minutes
+      - AllAtOnce
+    Description: >
+      CodeDeploy deployment config suffix. Mapped to
+      CodeDeployDefault.Lambda<CanaryPreference>. Set per-environment in
+      envs/<target>.yaml and passed via --parameter-overrides at deploy time.
+
+Conditions:
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # CodeDeploy Application (Lambda compute platform)
+  # ---------------------------------------------------------------------------
+
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub "enceladus-lambda${EnvironmentSuffix}"
+      ComputePlatform: Lambda
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ---------------------------------------------------------------------------
+  # IAM Role for CodeDeploy
+  # ---------------------------------------------------------------------------
+
+  CodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "enceladus-codedeploy-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRoleForLambda
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Alarms — per-function error + latency alarms for rollback trigger.
+  # CodeDeploy AutoRollbackConfiguration references these alarm names.
+  # EvaluationPeriods=1, 5-minute window: any error burst or p99 latency spike
+  # during the canary window triggers automatic rollback.
+  # ---------------------------------------------------------------------------
+
+  # --- coordination-api ---
+  CoordinationApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-coordination-api-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-coordination-api${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  CoordinationApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-coordination-api-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-coordination-api${EnvironmentSuffix}"
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 115000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- tracker-mutation ---
+  TrackerMutationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-tracker-mutation-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  TrackerMutationLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-tracker-mutation-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 9000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- document-api ---
+  DocumentApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-document-api-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-document-api${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DocumentApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-document-api-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-document-api${EnvironmentSuffix}"
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 29000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- graph-query-api (highest latency SLO — 180s timeout) ---
+  GraphQueryApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-graph-query-api-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  GraphQueryApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-graph-query-api-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 175000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Metric Filters — REPORT Init Duration (SnapStart cold-start telemetry)
+  # ENC-TSK-F63 AC-2: captures before/after cold-start measurements.
+  # ---------------------------------------------------------------------------
+
+  CoordinationApiInitDurationFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/devops-coordination-api${EnvironmentSuffix}"
+      FilterName: !Sub "SnapStartInitDuration-coordination-api${EnvironmentSuffix}"
+      FilterPattern: "[report=REPORT, requestId=RequestId:, reqId, duration=Duration:, dur, durUnit=ms, billedDuration=Billed, billedDur, billedDurUnit=ms, memSize=Memory, memSizeUnit=Size:, memSizeVal, memSizeUnit2=MB, maxMem=Max, memUsed=Memory, memUsedUnit=Used:, memUsedVal, memUsedUnit2=MB, initDuration=Init, initDur=Duration:, initDurVal, initDurUnit=ms]"
+      MetricTransformations:
+        - MetricNamespace: Enceladus/SnapStart
+          MetricName: !Sub "InitDuration-coordination-api${EnvironmentSuffix}"
+          MetricValue: "$initDurVal"
+          Unit: Milliseconds
+
+  GraphQueryApiInitDurationFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/devops-graph-query-api${EnvironmentSuffix}"
+      FilterName: !Sub "SnapStartInitDuration-graph-query-api${EnvironmentSuffix}"
+      FilterPattern: "[report=REPORT, requestId=RequestId:, reqId, duration=Duration:, dur, durUnit=ms, billedDuration=Billed, billedDur, billedDurUnit=ms, memSize=Memory, memSizeUnit=Size:, memSizeVal, memSizeUnit2=MB, maxMem=Max, memUsed=Memory, memUsedUnit=Used:, memUsedVal, memUsedUnit2=MB, initDuration=Init, initDur=Duration:, initDurVal, initDurUnit=ms]"
+      MetricTransformations:
+        - MetricNamespace: Enceladus/SnapStart
+          MetricName: !Sub "InitDuration-graph-query-api${EnvironmentSuffix}"
+          MetricValue: "$initDurVal"
+          Unit: Milliseconds
+
+  TrackerMutationInitDurationFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/devops-tracker-mutation-api${EnvironmentSuffix}"
+      FilterName: !Sub "SnapStartInitDuration-tracker-mutation${EnvironmentSuffix}"
+      FilterPattern: "[report=REPORT, requestId=RequestId:, reqId, duration=Duration:, dur, durUnit=ms, billedDuration=Billed, billedDur, billedDurUnit=ms, memSize=Memory, memSizeUnit=Size:, memSizeVal, memSizeUnit2=MB, maxMem=Max, memUsed=Memory, memUsedUnit=Used:, memUsedVal, memUsedUnit2=MB, initDuration=Init, initDur=Duration:, initDurVal, initDurUnit=ms]"
+      MetricTransformations:
+        - MetricNamespace: Enceladus/SnapStart
+          MetricName: !Sub "InitDuration-tracker-mutation${EnvironmentSuffix}"
+          MetricValue: "$initDurVal"
+          Unit: Milliseconds
+
+  # ---------------------------------------------------------------------------
+  # Lambda live Aliases — initial bootstrap pointing to $LATEST.
+  # The _deploy.yml canary step updates these to a specific published version
+  # after each update-function-code --publish invocation, then creates a
+  # CodeDeploy deployment for traffic shifting.
+  # ---------------------------------------------------------------------------
+
+  CoordinationApiAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-coordination-api${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  TrackerMutationAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  DocumentApiAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-document-api${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  ProjectServiceAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-project-service${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  FeedQueryAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-feed-query-api${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  CoordinationMonitorAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-coordination-monitor-api${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  DeployIntakeAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-deploy-intake${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  ReferenceSearchAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-reference-search${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  AuthRefreshAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "auth-refresh${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  DeployOrchestratorAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-deploy-orchestrator${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  DeployFinalizeAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-deploy-finalize${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  DeployDecideAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-deploy-decide${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  FeedPublisherAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-feed-publisher${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  GovernanceAuditAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "enceladus-governance-audit${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  DocPrepAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-doc-prep${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  BedrockAgentActionsAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "enceladus-bedrock-agent-actions${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  ChangelogApiAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-changelog-api${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  GraphSyncAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-graph-sync${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  GraphQueryApiAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  Neo4jBackupAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  GraphHealthMetricsAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  # ---------------------------------------------------------------------------
+  # CodeDeploy Deployment Groups — one per prod Lambda.
+  # DeploymentConfigName mapped from CanaryPreference parameter.
+  # AutoRollback on DEPLOYMENT_FAILURE + DEPLOYMENT_STOP_ON_ALARM.
+  # ---------------------------------------------------------------------------
+
+  CoordinationApiDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: CoordinationApiAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "coordination-api${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref CoordinationApiErrorAlarm
+          - Name: !Ref CoordinationApiLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+
+  TrackerMutationDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: TrackerMutationAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "tracker-mutation${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref TrackerMutationErrorAlarm
+          - Name: !Ref TrackerMutationLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+
+  DocumentApiDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: DocumentApiAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "document-api${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref DocumentApiErrorAlarm
+          - Name: !Ref DocumentApiLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+
+  GraphQueryApiDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: GraphQueryApiAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "graph-query-api${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref GraphQueryApiErrorAlarm
+          - Name: !Ref GraphQueryApiLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+
+  # ---------------------------------------------------------------------------
+  # Missing live aliases — DeployParityValidator and DevopsEnvDriftAuditor
+  # ---------------------------------------------------------------------------
+
+  DeployParityValidatorAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-deploy-parity-validator${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  DevopsEnvDriftAuditorAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Sub "devops-env-drift-auditor${EnvironmentSuffix}"
+      FunctionVersion: $LATEST
+      Name: live
+      Description: Live traffic alias — managed by _deploy.yml canary step
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Alarms — remaining prod Lambdas (error + latency, rollback triggers)
+  # Thresholds: error=3 in 5min; duration=p99 at 95% of function timeout.
+  # ---------------------------------------------------------------------------
+
+  # --- project-service ---
+  ProjectServiceErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-project-service-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-project-service${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ProjectServiceLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-project-service-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-project-service${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 28000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- feed-query ---
+  FeedQueryErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-feed-query-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-feed-query-api${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  FeedQueryLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-feed-query-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-feed-query-api${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 58000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- coordination-monitor ---
+  CoordinationMonitorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-coordination-monitor-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-coordination-monitor-api${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  CoordinationMonitorLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-coordination-monitor-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-coordination-monitor-api${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 28000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- deploy-intake ---
+  DeployIntakeErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-intake-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-intake${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DeployIntakeLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-intake-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-intake${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 115000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- reference-search ---
+  ReferenceSearchErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-reference-search-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-reference-search${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ReferenceSearchLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-reference-search-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-reference-search${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 9000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- auth-refresh ---
+  AuthRefreshErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-auth-refresh-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "auth-refresh${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  AuthRefreshLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-auth-refresh-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "auth-refresh${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 9000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- deploy-orchestrator ---
+  DeployOrchestratorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-orchestrator-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-orchestrator${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DeployOrchestratorLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-orchestrator-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-orchestrator${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 115000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- deploy-finalize ---
+  DeployFinalizeErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-finalize-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-finalize${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DeployFinalizeLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-finalize-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-finalize${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 115000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- deploy-decide ---
+  DeployDecideErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-decide-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-decide${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DeployDecideLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-decide-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-decide${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 28000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- deploy-parity-validator ---
+  DeployParityValidatorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-parity-validator-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-parity-validator${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DeployParityValidatorLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-deploy-parity-validator-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-deploy-parity-validator${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 115000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- feed-publisher ---
+  FeedPublisherErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-feed-publisher-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-feed-publisher${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  FeedPublisherLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-feed-publisher-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-feed-publisher${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 580000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- governance-audit ---
+  GovernanceAuditErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-governance-audit-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-governance-audit${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  GovernanceAuditLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-governance-audit-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-governance-audit${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 28000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- doc-prep ---
+  DocPrepErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-doc-prep-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-doc-prep${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DocPrepLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-doc-prep-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-doc-prep${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 28000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- bedrock-agent-actions ---
+  BedrockAgentActionsErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-bedrock-agent-actions-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-bedrock-agent-actions${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  BedrockAgentActionsLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-bedrock-agent-actions-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-bedrock-agent-actions${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 28000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- changelog-api ---
+  ChangelogApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-changelog-api-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-changelog-api${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ChangelogApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-changelog-api-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-changelog-api${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 28000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- graph-sync ---
+  GraphSyncErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-graph-sync-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-graph-sync${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  GraphSyncLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-graph-sync-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-graph-sync${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 58000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- neo4j-backup ---
+  Neo4jBackupErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-neo4j-backup-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  Neo4jBackupLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-neo4j-backup-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-neo4j-backup${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 290000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- env-drift-auditor ---
+  EnvDriftAuditorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-env-drift-auditor-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-env-drift-auditor${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  EnvDriftAuditorLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-env-drift-auditor-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "devops-env-drift-auditor${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 58000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # --- graph-health-metrics ---
+  GraphHealthMetricsErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-graph-health-metrics-errors${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  GraphHealthMetricsLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enc-codedeploy-graph-health-metrics-duration${EnvironmentSuffix}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{Name: FunctionName, Value: !Sub "enceladus-graph-health-metrics${EnvironmentSuffix}"}]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 115000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # ---------------------------------------------------------------------------
+  # CodeDeploy Deployment Groups — remaining prod Lambdas
+  # ---------------------------------------------------------------------------
+
+  ProjectServiceDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: ProjectServiceAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "project-service${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref ProjectServiceErrorAlarm
+          - Name: !Ref ProjectServiceLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  FeedQueryDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: FeedQueryAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "feed-query${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref FeedQueryErrorAlarm
+          - Name: !Ref FeedQueryLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  CoordinationMonitorDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: CoordinationMonitorAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "coordination-monitor${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref CoordinationMonitorErrorAlarm
+          - Name: !Ref CoordinationMonitorLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  DeployIntakeDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: DeployIntakeAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "deploy-intake${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref DeployIntakeErrorAlarm
+          - Name: !Ref DeployIntakeLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  ReferenceSearchDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: ReferenceSearchAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "reference-search${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref ReferenceSearchErrorAlarm
+          - Name: !Ref ReferenceSearchLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  AuthRefreshDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: AuthRefreshAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "auth-refresh${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref AuthRefreshErrorAlarm
+          - Name: !Ref AuthRefreshLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  DeployOrchestratorDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: DeployOrchestratorAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "deploy-orchestrator${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref DeployOrchestratorErrorAlarm
+          - Name: !Ref DeployOrchestratorLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  DeployFinalizeDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: DeployFinalizeAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "deploy-finalize${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref DeployFinalizeErrorAlarm
+          - Name: !Ref DeployFinalizeLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  DeployDecideDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: DeployDecideAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "deploy-decide${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref DeployDecideErrorAlarm
+          - Name: !Ref DeployDecideLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  DeployParityValidatorDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: DeployParityValidatorAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "deploy-parity-validator${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref DeployParityValidatorErrorAlarm
+          - Name: !Ref DeployParityValidatorLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  FeedPublisherDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: FeedPublisherAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "feed-publisher${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref FeedPublisherErrorAlarm
+          - Name: !Ref FeedPublisherLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  GovernanceAuditDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: GovernanceAuditAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "governance-audit${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref GovernanceAuditErrorAlarm
+          - Name: !Ref GovernanceAuditLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  DocPrepDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: DocPrepAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "doc-prep${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref DocPrepErrorAlarm
+          - Name: !Ref DocPrepLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  BedrockAgentActionsDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: BedrockAgentActionsAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "bedrock-agent-actions${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref BedrockAgentActionsErrorAlarm
+          - Name: !Ref BedrockAgentActionsLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  ChangelogApiDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: ChangelogApiAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "changelog-api${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref ChangelogApiErrorAlarm
+          - Name: !Ref ChangelogApiLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  GraphSyncDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: GraphSyncAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "graph-sync${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref GraphSyncErrorAlarm
+          - Name: !Ref GraphSyncLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  Neo4jBackupDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: Neo4jBackupAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "neo4j-backup${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref Neo4jBackupErrorAlarm
+          - Name: !Ref Neo4jBackupLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  EnvDriftAuditorDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: DevopsEnvDriftAuditorAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "env-drift-auditor${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref EnvDriftAuditorErrorAlarm
+          - Name: !Ref EnvDriftAuditorLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+  GraphHealthMetricsDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: GraphHealthMetricsAlias
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub "graph-health-metrics${EnvironmentSuffix}"
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentConfigName: !Sub "CodeDeployDefault.Lambda${CanaryPreference}"
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref GraphHealthMetricsErrorAlarm
+          - Name: !Ref GraphHealthMetricsLatencyAlarm
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM]
+
+Outputs:
+  CodeDeployApplicationName:
+    Value: !Ref CodeDeployApplication
+    Export:
+      Name: !Sub "${AWS::StackName}-CodeDeployApplicationName"
+    Description: Pass to _deploy.yml as CODEDEPLOY_APP_NAME
+
+  CodeDeployRoleArn:
+    Value: !GetAtt CodeDeployRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-CodeDeployRoleArn"

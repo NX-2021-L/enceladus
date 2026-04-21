@@ -40,9 +40,18 @@ runner_label: ubuntu-latest
 # landed in PR #407) scopes sub=environment:v3-prod.
 environment: v3-prod
 
-# Optional: AppConfig application ID for runtime feature flag control (F63).
+# ENC-TSK-F63 AC-1: AppConfig IDs for runtime feature flag control.
+# Populated after the 06-feature-flags stack is deployed to prod.
+# Deploy workflow passes these to --parameter-overrides for AppConfigApplicationId
+# and AppConfigEnvironmentId in the 02-compute stack update.
 appconfig_application_id: ""
 appconfig_environment_id: ""
+
+# ENC-TSK-F63 AC-2/AC-3: SnapStart and CodeDeploy settings.
+# v3-prod uses x86_64/py3.11 — SnapStart NOT supported. Canary via CodeDeploy.
+enable_snapstart: "false"
+environment_suffix: ""
+codedeploy_app_name: "enceladus-lambda"
 
 # ENC-FTR-090 / ENC-TSK-F59 Phase 1 \u2014 artifact promotion fields.
 # Populated by F60 Phase 2 _deploy.yml on each promotion. Empty here means
