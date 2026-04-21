@@ -10,7 +10,7 @@
   },
   "bypass_actors": [
     {
-      "actor_id": "PLACEHOLDER_RELEASE_BOT_APP_ID",
+      "actor_id": 3451818,
       "actor_type": "Integration",
       "bypass_mode": "pull_request"
     }
