@@ -31,9 +31,21 @@ Parameters:
       CodeDeploy deployment config suffix. Mapped to
       CodeDeployDefault.Lambda<CanaryPreference>. Set per-environment in
       envs/<target>.yaml and passed via --parameter-overrides at deploy time.
+  CreateDeployParityValidator:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "true" once devops-deploy-parity-validator and its IAM role are
+      provisioned by the 02-compute CFN stack update. Defaults false so this
+      stack deploys successfully before the function exists (ENC-TSK-F92).
 
 Conditions:
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # ENC-TSK-F92: deploy-parity-validator is provisioned by the 02-compute CFN stack
+  # update (blocked on AWS_CLOUDFORMATION_ROLE_TO_ASSUME). Default false allows the
+  # codedeploy stack to deploy before the function exists; set true after 02-compute lands.
+  HasDeployParityValidator: !Equals [!Ref CreateDeployParityValidator, "true"]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -219,7 +231,7 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/devops-coordination-api${EnvironmentSuffix}"
       FilterName: !Sub "SnapStartInitDuration-coordination-api${EnvironmentSuffix}"
-      FilterPattern: "[report=REPORT, requestId=RequestId:, reqId, duration=Duration:, dur, durUnit=ms, billedDuration=Billed, billedDur, billedDurUnit=ms, memSize=Memory, memSizeUnit=Size:, memSizeVal, memSizeUnit2=MB, maxMem=Max, memUsed=Memory, memUsedUnit=Used:, memUsedVal, memUsedUnit2=MB, initDuration=Init, initDur=Duration:, initDurVal, initDurUnit=ms]"
+      FilterPattern: "[report=REPORT, requestId=RequestId*, reqId, duration=Duration*, dur, durUnit=ms, billedDuration=Billed, billedDur, billedDurUnit=ms, memSize=Memory, memSizeUnit=Size*, memSizeVal, memSizeUnit2=MB, maxMem=Max, memUsed=Memory, memUsedUnit=Used*, memUsedVal, memUsedUnit2=MB, initDuration=Init, initDur=Duration*, initDurVal, initDurUnit=ms]"
       MetricTransformations:
         - MetricNamespace: Enceladus/SnapStart
           MetricName: !Sub "InitDuration-coordination-api${EnvironmentSuffix}"
@@ -231,7 +243,7 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/devops-graph-query-api${EnvironmentSuffix}"
       FilterName: !Sub "SnapStartInitDuration-graph-query-api${EnvironmentSuffix}"
-      FilterPattern: "[report=REPORT, requestId=RequestId:, reqId, duration=Duration:, dur, durUnit=ms, billedDuration=Billed, billedDur, billedDurUnit=ms, memSize=Memory, memSizeUnit=Size:, memSizeVal, memSizeUnit2=MB, maxMem=Max, memUsed=Memory, memUsedUnit=Used:, memUsedVal, memUsedUnit2=MB, initDuration=Init, initDur=Duration:, initDurVal, initDurUnit=ms]"
+      FilterPattern: "[report=REPORT, requestId=RequestId*, reqId, duration=Duration*, dur, durUnit=ms, billedDuration=Billed, billedDur, billedDurUnit=ms, memSize=Memory, memSizeUnit=Size*, memSizeVal, memSizeUnit2=MB, maxMem=Max, memUsed=Memory, memUsedUnit=Used*, memUsedVal, memUsedUnit2=MB, initDuration=Init, initDur=Duration*, initDurVal, initDurUnit=ms]"
       MetricTransformations:
         - MetricNamespace: Enceladus/SnapStart
           MetricName: !Sub "InitDuration-graph-query-api${EnvironmentSuffix}"
@@ -243,7 +255,7 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/devops-tracker-mutation-api${EnvironmentSuffix}"
       FilterName: !Sub "SnapStartInitDuration-tracker-mutation${EnvironmentSuffix}"
-      FilterPattern: "[report=REPORT, requestId=RequestId:, reqId, duration=Duration:, dur, durUnit=ms, billedDuration=Billed, billedDur, billedDurUnit=ms, memSize=Memory, memSizeUnit=Size:, memSizeVal, memSizeUnit2=MB, maxMem=Max, memUsed=Memory, memUsedUnit=Used:, memUsedVal, memUsedUnit2=MB, initDuration=Init, initDur=Duration:, initDurVal, initDurUnit=ms]"
+      FilterPattern: "[report=REPORT, requestId=RequestId*, reqId, duration=Duration*, dur, durUnit=ms, billedDuration=Billed, billedDur, billedDurUnit=ms, memSize=Memory, memSizeUnit=Size*, memSizeVal, memSizeUnit2=MB, maxMem=Max, memUsed=Memory, memUsedUnit=Used*, memUsedVal, memUsedUnit2=MB, initDuration=Init, initDur=Duration*, initDurVal, initDurUnit=ms]"
       MetricTransformations:
         - MetricNamespace: Enceladus/SnapStart
           MetricName: !Sub "InitDuration-tracker-mutation${EnvironmentSuffix}"
@@ -525,6 +537,7 @@ Resources:
 
   DeployParityValidatorAlias:
     Type: AWS::Lambda::Alias
+    Condition: HasDeployParityValidator
     Properties:
       FunctionName: !Sub "devops-deploy-parity-validator${EnvironmentSuffix}"
       FunctionVersion: $LATEST
@@ -808,6 +821,7 @@ Resources:
   # --- deploy-parity-validator ---
   DeployParityValidatorErrorAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: HasDeployParityValidator
     Properties:
       AlarmName: !Sub "enc-codedeploy-deploy-parity-validator-errors${EnvironmentSuffix}"
       Namespace: AWS/Lambda
@@ -822,6 +836,7 @@ Resources:
 
   DeployParityValidatorLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: HasDeployParityValidator
     Properties:
       AlarmName: !Sub "enc-codedeploy-deploy-parity-validator-duration${EnvironmentSuffix}"
       Namespace: AWS/Lambda
@@ -1281,6 +1296,7 @@ Resources:
 
   DeployParityValidatorDeploymentGroup:
     Type: AWS::CodeDeploy::DeploymentGroup
+    Condition: HasDeployParityValidator
     DependsOn: DeployParityValidatorAlias
     Properties:
       ApplicationName: !Ref CodeDeployApplication

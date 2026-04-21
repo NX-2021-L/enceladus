@@ -6,12 +6,14 @@ on:
     paths:
       - 'backend/lambda/**'
       - 'tools/package_lambda_artifact.sh'
+      - 'tools/check_lambda_pyjwt_requirements.py'
       - 'infrastructure/lambda_workflow_manifest.json'
   push:
     branches: [main]
     paths:
       - 'backend/lambda/**'
       - 'tools/package_lambda_artifact.sh'
+      - 'tools/check_lambda_pyjwt_requirements.py'
       - 'infrastructure/lambda_workflow_manifest.json'
   workflow_call:
     outputs:
@@ -31,6 +33,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Guard — every jwt-importing Lambda must declare PyJWT in requirements.txt (ENC-LSN-020)
+        run: python3 tools/check_lambda_pyjwt_requirements.py
 
       - name: Parse manifest into matrix
         id: parse
