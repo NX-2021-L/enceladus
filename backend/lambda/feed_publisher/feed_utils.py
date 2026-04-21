@@ -357,24 +357,31 @@ def fetch_from_dynamodb(
         return {"tasks": [], "issues": [], "features": []}
 
     # Group by record_type (skip reference rows — those are metadata only)
-    grouped: Dict[str, List[Dict]] = {"task": [], "issue": [], "feature": []}
+    grouped: Dict[str, List[Dict]] = {"task": [], "issue": [], "feature": [], "lesson": [], "plan": []}
     for raw in raw_items:
         item = _ddb_deserialize_item(raw)
         rtype = item.get("record_type")
         if rtype in grouped:
-            grouped[rtype].append(_ddb_item_to_yaml_record(item))
+            if rtype in ("task", "issue", "feature"):
+                grouped[rtype].append(_ddb_item_to_yaml_record(item))
+            else:
+                # lessons and plans: store raw deserialized item directly
+                grouped[rtype].append(item)
 
     artifact_payloads: Dict[str, Any] = {
         "tasks": grouped["task"],
         "issues": grouped["issue"],
         "features": grouped["feature"],
+        "lessons": grouped["lesson"],
+        "plans": grouped["plan"],
     }
 
     log(
         "INFO",
         f"{LOG_PREFIX}: DynamoDB read project={project_entry.name}: "
         f"tasks={len(grouped['task'])} issues={len(grouped['issue'])} "
-        f"features={len(grouped['feature'])}",
+        f"features={len(grouped['feature'])} lessons={len(grouped['lesson'])} "
+        f"plans={len(grouped['plan'])}",
     )
     return artifact_payloads
 
@@ -625,6 +632,137 @@ def _transform_feature(feat: Dict[str, Any], project_id: str) -> Dict[str, Any]:
     }
 
 
+def _transform_lesson(lesson: Dict[str, Any], project_id: str) -> Dict[str, Any]:
+    """Transform a raw deserialized DynamoDB lesson record into the mobile feed shape."""
+    def _to_float(v: Any) -> float:
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    history = lesson.get("history") or []
+    full_history: List[Dict[str, str]] = []
+    if isinstance(history, list):
+        for h in history:
+            if isinstance(h, dict):
+                full_history.append({
+                    "timestamp": str(h.get("timestamp", "")),
+                    "status": str(h.get("status", "")),
+                    "description": str(h.get("description", "")),
+                })
+
+    created_at = full_history[0].get("timestamp") if full_history else None
+    updated_at = full_history[-1].get("timestamp") if full_history else None
+    last_note = str(full_history[-1].get("description", "")).strip() or None if full_history else None
+    if lesson.get("updated_at"):
+        updated_at = lesson["updated_at"]
+    if lesson.get("created_at"):
+        created_at = lesson["created_at"]
+
+    evidence_chain = lesson.get("evidence_chain") or []
+    if not isinstance(evidence_chain, list):
+        evidence_chain = []
+
+    pillar_scores = lesson.get("pillar_scores") or {}
+    if isinstance(pillar_scores, dict):
+        pillar_scores = {k: _to_float(v) for k, v in pillar_scores.items()}
+    else:
+        pillar_scores = {}
+
+    extensions = lesson.get("extensions") or []
+    if isinstance(extensions, list):
+        extensions = [
+            {
+                "description": str(e.get("description", "")),
+                "timestamp": str(e.get("timestamp", "")),
+                "provider": e.get("provider") or None,
+            }
+            for e in extensions if isinstance(e, dict)
+        ]
+    else:
+        extensions = []
+
+    return {
+        "lesson_id": lesson.get("item_id", ""),
+        "project_id": project_id,
+        "title": lesson.get("title", ""),
+        "observation": str(lesson.get("observation", "")).strip(),
+        "insight": str(lesson.get("insight", "")).strip(),
+        "evidence_chain": [str(e) for e in evidence_chain],
+        "provenance": str(lesson.get("provenance", "")).strip(),
+        "confidence": _to_float(lesson.get("confidence", 0)),
+        "pillar_scores": pillar_scores,
+        "resonance_score": _to_float(lesson.get("resonance_score", 0)),
+        "pillar_composite": _to_float(lesson.get("pillar_composite", 0)),
+        "extensions": extensions,
+        "category": lesson.get("category") or None,
+        "status": str(lesson.get("status", "active")).strip(),
+        "lesson_version": int(lesson.get("lesson_version", 1) or 1),
+        "analysis_reference": lesson.get("analysis_reference") or None,
+        "governance_proposal": lesson.get("governance_proposal") or None,
+        "related_task_ids": _coerce_id_list(lesson.get("related_task_ids")),
+        "related_issue_ids": _coerce_id_list(lesson.get("related_issue_ids")),
+        "related_feature_ids": _coerce_id_list(lesson.get("related_feature_ids")),
+        "history": full_history,
+        "updated_at": updated_at,
+        "last_update_note": last_note,
+        "created_at": created_at,
+    }
+
+
+def _transform_plan(plan: Dict[str, Any], project_id: str) -> Dict[str, Any]:
+    """Transform a raw deserialized DynamoDB plan record into the mobile feed shape."""
+    history = plan.get("history") or []
+    full_history: List[Dict[str, str]] = []
+    if isinstance(history, list):
+        for h in history:
+            if isinstance(h, dict):
+                full_history.append({
+                    "timestamp": str(h.get("timestamp", "")),
+                    "status": str(h.get("status", "")),
+                    "description": str(h.get("description", "")),
+                })
+
+    created_at = full_history[0].get("timestamp") if full_history else None
+    updated_at = full_history[-1].get("timestamp") if full_history else None
+    last_note = str(full_history[-1].get("description", "")).strip() or None if full_history else None
+    if plan.get("updated_at"):
+        updated_at = plan["updated_at"]
+    if plan.get("created_at"):
+        created_at = plan["created_at"]
+
+    objectives_set = plan.get("objectives_set") or plan.get("subtask_ids") or []
+    if not isinstance(objectives_set, list):
+        objectives_set = []
+
+    attached_documents = plan.get("attached_documents") or []
+    if not isinstance(attached_documents, list):
+        attached_documents = []
+
+    return {
+        "plan_id": plan.get("item_id", ""),
+        "project_id": project_id,
+        "title": plan.get("title", ""),
+        "description": str(plan.get("description", "")).strip(),
+        "status": str(plan.get("status", "drafted")).strip(),
+        "priority": _normalize_priority(plan.get("priority")),
+        "category": plan.get("category") or None,
+        "objectives_set": [str(o) for o in objectives_set],
+        "attached_documents": [str(d) for d in attached_documents],
+        "related_feature_id": plan.get("related_feature_id") or None,
+        "checkout_state": plan.get("checkout_state") or None,
+        "checked_out_by": plan.get("checked_out_by") or None,
+        "checked_out_at": plan.get("checked_out_at") or None,
+        "related_task_ids": _coerce_id_list(plan.get("related_task_ids")),
+        "related_issue_ids": _coerce_id_list(plan.get("related_issue_ids")),
+        "related_feature_ids": _coerce_id_list(plan.get("related_feature_ids")),
+        "history": full_history,
+        "updated_at": updated_at,
+        "last_update_note": last_note,
+        "created_at": created_at,
+    }
+
+
 def _transform_document(doc: Dict[str, Any], project_id: str) -> Dict[str, Any]:
     """Transform a deserialized document record into the mobile feed shape.
 
@@ -829,6 +967,8 @@ def generate_mobile_feeds(
     all_tasks: List[Dict[str, Any]] = []
     all_issues: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
+    all_lessons: List[Dict[str, Any]] = []
+    all_plans: List[Dict[str, Any]] = []
     project_summaries: List[Dict[str, Any]] = []
 
     total_pruned = 0
@@ -837,19 +977,25 @@ def generate_mobile_feeds(
         raw_tasks = proj_data.get("tasks", [])
         raw_issues = proj_data.get("issues", [])
         raw_features = proj_data.get("features", [])
+        raw_lessons = proj_data.get("lessons", [])
+        raw_plans = proj_data.get("plans", [])
 
         # Filter out closed items older than CLOSED_ITEM_MAX_AGE_DAYS
         raw_tasks, pruned_t = _filter_stale_closed(raw_tasks)
         raw_issues, pruned_i = _filter_stale_closed(raw_issues)
         raw_features, pruned_f = _filter_stale_closed(raw_features)
-        pruned = pruned_t + pruned_i + pruned_f
+        raw_lessons, pruned_l = _filter_stale_closed(raw_lessons)
+        raw_plans, pruned_p = _filter_stale_closed(raw_plans)
+        pruned = pruned_t + pruned_i + pruned_f + pruned_l + pruned_p
         if pruned:
-            log("INFO", f"{LOG_PREFIX}: pruned {pruned} stale closed items from {entry.name} (tasks={pruned_t} issues={pruned_i} features={pruned_f})")
+            log("INFO", f"{LOG_PREFIX}: pruned {pruned} stale closed items from {entry.name} (tasks={pruned_t} issues={pruned_i} features={pruned_f} lessons={pruned_l} plans={pruned_p})")
             total_pruned += pruned
 
         tasks = [_transform_task(t, entry.name) for t in raw_tasks if isinstance(t, dict)]
         issues = [_transform_issue(i, entry.name) for i in raw_issues if isinstance(i, dict)]
         features = [_transform_feature(f, entry.name) for f in raw_features if isinstance(f, dict)]
+        lessons = [_transform_lesson(l, entry.name) for l in raw_lessons if isinstance(l, dict)]
+        plans = [_transform_plan(p, entry.name) for p in raw_plans if isinstance(p, dict)]
 
         # Compute and add children_ids for hierarchy queries
         task_children = _compute_children_ids(tasks, "task_id")
@@ -863,6 +1009,8 @@ def generate_mobile_feeds(
         all_tasks.extend(tasks)
         all_issues.extend(issues)
         all_features.extend(features)
+        all_lessons.extend(lessons)
+        all_plans.extend(plans)
         project_summaries.append(_build_project_summary(entry, tasks, issues, features))
 
     if total_pruned:
@@ -873,6 +1021,8 @@ def generate_mobile_feeds(
         "tasks": {"generated_at": generated_at, "version": MOBILE_FEED_VERSION, "tasks": all_tasks},
         "issues": {"generated_at": generated_at, "version": MOBILE_FEED_VERSION, "issues": all_issues},
         "features": {"generated_at": generated_at, "version": MOBILE_FEED_VERSION, "features": all_features},
+        "lessons": {"generated_at": generated_at, "version": MOBILE_FEED_VERSION, "lessons": all_lessons},
+        "plans": {"generated_at": generated_at, "version": MOBILE_FEED_VERSION, "plans": all_plans},
     }
 
     output_paths: Dict[str, Path] = {}
