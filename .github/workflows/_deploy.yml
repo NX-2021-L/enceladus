@@ -277,7 +277,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, subprocess, sys
+          import json, os, subprocess, sys, tempfile
 
           version_ids = json.loads(os.environ['VERSION_IDS_JSON'])
           fn_map      = json.loads(os.environ.get('FUNCTION_NAME_MAP_JSON') or '{}')
@@ -298,15 +298,35 @@ jobs:
                   continue
               s3_key = f"{prefix}/{fn}-{sha}.zip"
               print(f"[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id}")
+
+              # Download artifact to runner then push via --zip-file.
+              # Lambda UpdateFunctionCode requires S3 bucket in same region as function
+              # (us-west-2); jreese-net is in us-east-1 → PermanentRedirect on S3-side fetch.
+              tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
+              tmp.close()
+              dl = subprocess.run([
+                  'aws', 's3api', 'get-object',
+                  '--bucket', bucket,
+                  '--key', s3_key,
+                  '--version-id', version_id,
+                  '--region', 'us-east-1',
+                  tmp.name,
+              ], capture_output=True, text=True)
+              if dl.returncode != 0:
+                  print(f'::error::s3 download failed for {fn}: {dl.stderr.strip()}',
+                        file=sys.stderr)
+                  errors.append(fn)
+                  os.unlink(tmp.name)
+                  continue
+
               r = subprocess.run([
                   'aws', 'lambda', 'update-function-code',
                   '--region', region,
                   '--function-name', mapped_name,
-                  '--s3-bucket', bucket,
-                  '--s3-key', s3_key,
-                  '--s3-object-version', version_id,
+                  '--zip-file', f'fileb://{tmp.name}',
                   '--publish',
               ], capture_output=True, text=True)
+              os.unlink(tmp.name)
               if r.returncode != 0:
                   print(f'::error::update-function-code failed for {mapped_name}: {r.stderr.strip()}',
                         file=sys.stderr)
