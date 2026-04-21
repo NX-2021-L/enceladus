@@ -192,6 +192,12 @@
       "lambda_dir": "backend/lambda/env_drift_auditor",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/env_drift_auditor/deploy.sh"
+    },
+    {
+      "function_name": "devops-deploy-parity-validator",
+      "lambda_dir": "backend/lambda/deploy_parity_validator",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/deploy_parity_validator/deploy.sh"
     }
   ]
 }
