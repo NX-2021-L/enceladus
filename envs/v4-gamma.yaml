@@ -79,3 +79,5 @@ function_name_map:
   titan_embedding_backfill: devops-titan-embedding-backfill-gamma
   tracker_mutation: devops-tracker-mutation-api-gamma
   deploy_parity_validator: devops-deploy-parity-validator-gamma
+  mcp_code: enceladus-mcp-code-gamma
+  mcp_streamable: enceladus-mcp-streamable-gamma

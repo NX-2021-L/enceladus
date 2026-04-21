@@ -309,5 +309,45 @@
       "ApiId": "8nkzqkmxqc",
       "RouteId": "ur6y7wq"
     }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteComponentsAddEdge",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "r8yvurf"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteComponentsRemoveEdge",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "bamcafm"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteComponentsDeprecate",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "n5o6ut9"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteComponentsRestore",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "4y52eem"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteComponentsRevert",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "wz9oprl"
+    }
   }
 ]
