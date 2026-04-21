@@ -27,10 +27,14 @@ runner_label: ubuntu-24.04-arm
 # human approval gate; the OIDC trust policy scopes sub=environment:v4-gamma.
 environment: v4-gamma
 
-# Optional: AppConfig application ID for runtime feature flag control (F63).
-# Empty until F63 lands; the deploy workflow treats empty-string as "no AppConfig".
+# ENC-TSK-F63 AC-1: AppConfig IDs. Populated after 06-feature-flags stack deploys.
 appconfig_application_id: ""
 appconfig_environment_id: ""
+
+# ENC-TSK-F63 AC-2/AC-3: SnapStart (arm64/py3.12 — supported) and CodeDeploy.
+enable_snapstart: "true"
+environment_suffix: "-gamma"
+codedeploy_app_name: "enceladus-lambda-gamma"
 
 # ENC-FTR-090 / ENC-TSK-F59 Phase 1 \u2014 artifact promotion fields.
 # artifact_commit_sha + artifact_version_ids are populated by F60 Phase 2

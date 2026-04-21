@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus Feature Flags — AppConfig hosted configuration.
+  ENC-TSK-F63 AC-1: AppConfig application, environment, configuration profile,
+  JSON Schema validator, and initial hosted configuration version replacing
+  all ENABLE_* Lambda env vars with a governed, hot-reloadable config surface.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, gamma]
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+
+Conditions:
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # AppConfig Application
+  # ---------------------------------------------------------------------------
+
+  FeatureFlagsApplication:
+    Type: AWS::AppConfig::Application
+    Properties:
+      Name: !Sub "enceladus${EnvironmentSuffix}"
+      Description: Enceladus runtime feature flags (replaces ENABLE_* env vars)
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: feature-flags
+
+  # ---------------------------------------------------------------------------
+  # AppConfig Environment
+  # ---------------------------------------------------------------------------
+
+  FeatureFlagsEnvironment:
+    Type: AWS::AppConfig::Environment
+    Properties:
+      ApplicationId: !Ref FeatureFlagsApplication
+      Name: !If [IsGamma, gamma, production]
+      Description: !If [IsGamma, Gamma stack feature flags, Production feature flags]
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ---------------------------------------------------------------------------
+  # Configuration Profile + JSON Schema Validator
+  # ---------------------------------------------------------------------------
+
+  FeatureFlagsProfile:
+    Type: AWS::AppConfig::ConfigurationProfile
+    Properties:
+      ApplicationId: !Ref FeatureFlagsApplication
+      Name: feature-flags
+      LocationUri: hosted
+      Description: Runtime feature flag configuration for all Enceladus Lambdas
+      Validators:
+        - Type: JSON_SCHEMA
+          Content: |
+            {
+              "$schema": "https://json-schema.org/draft/2019-09/schema",
+              "type": "object",
+              "properties": {
+                "enable_claude_headless":     { "type": "boolean" },
+                "enable_component_proposal":  { "type": "boolean" },
+                "enable_context_nodes":       { "type": "boolean" },
+                "enable_handoff_primitive":   { "type": "boolean" },
+                "enable_lesson_primitive":    { "type": "boolean" },
+                "enable_typed_relationships": { "type": "boolean" },
+                "enable_mcp_governance_prompt": { "type": "boolean" }
+              },
+              "additionalProperties": false,
+              "required": [
+                "enable_claude_headless",
+                "enable_component_proposal",
+                "enable_context_nodes",
+                "enable_handoff_primitive",
+                "enable_lesson_primitive",
+                "enable_typed_relationships",
+                "enable_mcp_governance_prompt"
+              ]
+            }
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ---------------------------------------------------------------------------
+  # Initial Hosted Configuration Version
+  # All flags enabled — matches the live values previously set via ENABLE_* env vars
+  # on enceladus-mcp-code-gamma. Production defaults to all-enabled (identical
+  # to what gamma had hardcoded).
+  # ---------------------------------------------------------------------------
+
+  FeatureFlagsInitialVersion:
+    Type: AWS::AppConfig::HostedConfigurationVersion
+    Properties:
+      ApplicationId: !Ref FeatureFlagsApplication
+      ConfigurationProfileId: !Ref FeatureFlagsProfile
+      ContentType: application/json
+      Description: "Initial version — all flags enabled (migrated from ENABLE_* env vars)"
+      Content: |
+        {
+          "enable_claude_headless": true,
+          "enable_component_proposal": true,
+          "enable_context_nodes": true,
+          "enable_handoff_primitive": true,
+          "enable_lesson_primitive": true,
+          "enable_typed_relationships": true,
+          "enable_mcp_governance_prompt": true
+        }
+
+  # ---------------------------------------------------------------------------
+  # Deployment Strategy — immediate (no bake time, instant activation)
+  # ---------------------------------------------------------------------------
+
+  FeatureFlagsDeploymentStrategy:
+    Type: AWS::AppConfig::DeploymentStrategy
+    Properties:
+      Name: !Sub "enceladus-immediate${EnvironmentSuffix}"
+      Description: Immediate activation, no bake time — safe for boolean feature flags
+      ReplicateTo: NONE
+      DeploymentDurationInMinutes: 0
+      FinalBakeTimeInMinutes: 0
+      GrowthFactor: 100
+      GrowthType: LINEAR
+
+  # ---------------------------------------------------------------------------
+  # Initial Deployment — activates the hosted config version
+  # ---------------------------------------------------------------------------
+
+  FeatureFlagsInitialDeployment:
+    Type: AWS::AppConfig::Deployment
+    Properties:
+      ApplicationId: !Ref FeatureFlagsApplication
+      EnvironmentId: !Ref FeatureFlagsEnvironment
+      ConfigurationProfileId: !Ref FeatureFlagsProfile
+      ConfigurationVersion: !Ref FeatureFlagsInitialVersion
+      DeploymentStrategyId: !Ref FeatureFlagsDeploymentStrategy
+      Description: "Initial activation — migrated from ENABLE_* env vars (ENC-TSK-F63)"
+
+Outputs:
+  ApplicationId:
+    Value: !Ref FeatureFlagsApplication
+    Export:
+      Name: !Sub "${AWS::StackName}-AppConfigApplicationId"
+    Description: AppConfig Application ID — set as APPCONFIG_APPLICATION env var on all Lambdas
+
+  EnvironmentId:
+    Value: !Ref FeatureFlagsEnvironment
+    Export:
+      Name: !Sub "${AWS::StackName}-AppConfigEnvironmentId"
+    Description: AppConfig Environment ID — set as APPCONFIG_ENVIRONMENT env var on all Lambdas
+
+  ConfigurationProfileId:
+    Value: !Ref FeatureFlagsProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-AppConfigConfigProfileId"
+    Description: AppConfig Configuration Profile ID
+
+  ApplicationName:
+    Value: !Sub "enceladus${EnvironmentSuffix}"
+    Export:
+      Name: !Sub "${AWS::StackName}-AppConfigApplicationName"
+
+  EnvironmentName:
+    Value: !If [IsGamma, gamma, production]
+    Export:
+      Name: !Sub "${AWS::StackName}-AppConfigEnvironmentName"
