@@ -405,89 +405,98 @@ jobs:
                       else:
                           current_version = '$LATEST'
 
-                      account_id = subprocess.check_output(
-                          ['aws', 'sts', 'get-caller-identity', '--query', 'Account', '--output', 'text'],
-                          text=True
-                      ).strip()
-                      fn_arn_base = f"arn:aws:lambda:{region}:{account_id}:function:{mapped_name}"
-
-                      # Build AppSpec for CodeDeploy Lambda deployment.
-                      appspec = {
-                          "version": "0.0",
-                          "Resources": [{
-                              mapped_name: {
-                                  "Type": "AWS::Lambda::Function",
-                                  "Properties": {
-                                      "Name": mapped_name,
-                                      "Alias": "live",
-                                      "CurrentVersion": f"{fn_arn_base}:{current_version}" if current_version != '$LATEST' else f"{fn_arn_base}",
-                                      "TargetVersion": f"{fn_arn_base}:{new_version}",
-                                  }
-                              }
-                          }]
-                      }
-                      appspec_json = json.dumps(appspec)
-
-                      # Derive deployment group name from function name (strip env suffix).
-                      # Mapping mirrors 07-codedeploy.yaml DeploymentGroup names.
-                      dg_name_map = {
-                          'devops-coordination-api':        'coordination-api',
-                          'devops-tracker-mutation-api':    'tracker-mutation',
-                          'devops-document-api':            'document-api',
-                          'devops-graph-query-api':         'graph-query-api',
-                          'devops-project-service':         'project-service',
-                          'devops-feed-query-api':          'feed-query',
-                          'devops-coordination-monitor-api': 'coordination-monitor',
-                          'devops-deploy-intake':           'deploy-intake',
-                          'devops-reference-search':        'reference-search',
-                          'auth-refresh':                   'auth-refresh',
-                          'devops-deploy-orchestrator':     'deploy-orchestrator',
-                          'devops-deploy-finalize':         'deploy-finalize',
-                          'devops-deploy-decide':           'deploy-decide',
-                          'devops-feed-publisher':          'feed-publisher',
-                          'enceladus-governance-audit':     'governance-audit',
-                          'devops-doc-prep':                'doc-prep',
-                          'enceladus-bedrock-agent-actions': 'bedrock-agent-actions',
-                          'devops-changelog-api':           'changelog-api',
-                          'devops-graph-sync':              'graph-sync',
-                          'enceladus-neo4j-backup':         'neo4j-backup',
-                          'enceladus-graph-health-metrics': 'graph-health-metrics',
-                          'devops-env-drift-auditor':       'env-drift-auditor',
-                          'devops-deploy-parity-validator': 'deploy-parity-validator',
-                      }
-                      # Strip env suffix from mapped_name to look up base name.
-                      base_name = mapped_name
-                      if env_suffix and mapped_name.endswith(env_suffix):
-                          base_name = mapped_name[:-len(env_suffix)]
-                      dg_name = dg_name_map.get(base_name, base_name)
-                      if env_suffix:
-                          dg_name = f"{dg_name}{env_suffix}"
-
-                      # Pass --revision as JSON to avoid shell quoting issues when
-                      # appspec_json contains double-quotes (shorthand notation breaks).
-                      revision_json = json.dumps({
-                          "revisionType": "AppSpecContent",
-                          "appSpecContent": {"content": appspec_json},
-                      })
-                      cd_r = subprocess.run([
-                          'aws', 'deploy', 'create-deployment',
-                          '--application-name', codedeploy_app,
-                          '--deployment-group-name', dg_name,
-                          '--revision', revision_json,
-                          '--region', region,
-                          '--output', 'json',
-                      ], capture_output=True, text=True)
-                      if cd_r.returncode == 0:
-                          cd_info = json.loads(cd_r.stdout)
-                          dep_id = cd_info.get('deploymentId', '')
-                          print(f'  + {mapped_name} → CodeDeploy deployment {dep_id} ({canary_pref})')
-                          if dep_id:
-                              deployments.append((fn, mapped_name, dep_id))
-                          use_codedeploy_succeeded = True
-                      else:
-                          print(f'  [warn] CodeDeploy create-deployment failed for {mapped_name}: {cd_r.stderr.strip()}')
-                          print(f'  [warn] Falling back to direct alias update for {mapped_name}')
+                      # Bootstrap case: live alias still points to $LATEST (first deploy).
+                      # CodeDeploy requires integer version numbers for CurrentVersion and
+                      # TargetVersion — $LATEST is rejected with INVALID_LAMBDA_CONFIGURATION.
+                      # Fall back to direct alias update; next deploy will have a valid
+                      # integer CurrentVersion and will use the full canary path.
+                      if current_version == '$LATEST':
+                          print(f'  [bootstrap] {mapped_name}: live alias is $LATEST — direct alias update (next deploy will use CodeDeploy canary)')
                           use_codedeploy_succeeded = False
+                      else:
+                          account_id = subprocess.check_output(
+                              ['aws', 'sts', 'get-caller-identity', '--query', 'Account', '--output', 'text'],
+                              text=True
+                          ).strip()
+                          fn_arn_base = f"arn:aws:lambda:{region}:{account_id}:function:{mapped_name}"
+
+                          # Build AppSpec for CodeDeploy Lambda deployment.
+                          appspec = {
+                              "version": "0.0",
+                              "Resources": [{
+                                  mapped_name: {
+                                      "Type": "AWS::Lambda::Function",
+                                      "Properties": {
+                                          "Name": mapped_name,
+                                          "Alias": "live",
+                                          "CurrentVersion": f"{fn_arn_base}:{current_version}",
+                                          "TargetVersion": f"{fn_arn_base}:{new_version}",
+                                      }
+                                  }
+                              }]
+                          }
+                          appspec_json = json.dumps(appspec)
+
+                          # Derive deployment group name from function name (strip env suffix).
+                          # Mapping mirrors 07-codedeploy.yaml DeploymentGroup names.
+                          dg_name_map = {
+                              'devops-coordination-api':        'coordination-api',
+                              'devops-tracker-mutation-api':    'tracker-mutation',
+                              'devops-document-api':            'document-api',
+                              'devops-graph-query-api':         'graph-query-api',
+                              'devops-project-service':         'project-service',
+                              'devops-feed-query-api':          'feed-query',
+                              'devops-coordination-monitor-api': 'coordination-monitor',
+                              'devops-deploy-intake':           'deploy-intake',
+                              'devops-reference-search':        'reference-search',
+                              'auth-refresh':                   'auth-refresh',
+                              'devops-deploy-orchestrator':     'deploy-orchestrator',
+                              'devops-deploy-finalize':         'deploy-finalize',
+                              'devops-deploy-decide':           'deploy-decide',
+                              'devops-feed-publisher':          'feed-publisher',
+                              'enceladus-governance-audit':     'governance-audit',
+                              'devops-doc-prep':                'doc-prep',
+                              'enceladus-bedrock-agent-actions': 'bedrock-agent-actions',
+                              'devops-changelog-api':           'changelog-api',
+                              'devops-graph-sync':              'graph-sync',
+                              'enceladus-neo4j-backup':         'neo4j-backup',
+                              'enceladus-graph-health-metrics': 'graph-health-metrics',
+                              'devops-env-drift-auditor':       'env-drift-auditor',
+                              'devops-deploy-parity-validator': 'deploy-parity-validator',
+                          }
+                          # Strip env suffix from mapped_name to look up base name.
+                          base_name = mapped_name
+                          if env_suffix and mapped_name.endswith(env_suffix):
+                              base_name = mapped_name[:-len(env_suffix)]
+                          dg_name = dg_name_map.get(base_name, base_name)
+                          if env_suffix:
+                              dg_name = f"{dg_name}{env_suffix}"
+
+                          # Pass --revision as JSON to avoid shell quoting issues when
+                          # appspec_json contains double-quotes (shorthand notation breaks).
+                          revision_json = json.dumps({
+                              "revisionType": "AppSpecContent",
+                              "appSpecContent": {"content": appspec_json},
+                          })
+                          cd_r = subprocess.run([
+                              'aws', 'deploy', 'create-deployment',
+                              '--application-name', codedeploy_app,
+                              '--deployment-group-name', dg_name,
+                              '--revision', revision_json,
+                              '--region', region,
+                              '--output', 'json',
+                          ], capture_output=True, text=True)
+                          if cd_r.returncode == 0:
+                              cd_info = json.loads(cd_r.stdout)
+                              dep_id = cd_info.get('deploymentId', '')
+                              print(f'  + {mapped_name} → CodeDeploy deployment {dep_id} ({canary_pref})')
+                              if dep_id:
+                                  deployments.append((fn, mapped_name, dep_id))
+                              use_codedeploy_succeeded = True
+                          else:
+                              print(f'  [warn] CodeDeploy create-deployment failed for {mapped_name}: {cd_r.stderr.strip()}')
+                              print(f'  [warn] Falling back to direct alias update for {mapped_name}')
+                              use_codedeploy_succeeded = False
                   except Exception as e:
                       print(f'  [warn] CodeDeploy error for {mapped_name}: {e}', file=sys.stderr)
                       use_codedeploy_succeeded = False
