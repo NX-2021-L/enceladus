@@ -559,6 +559,13 @@ Resources:
       RouteKey: POST /api/v1/auth/refresh
       Target: !Sub integrations/${AuthRefreshIntegration}
 
+  RouteAuthGitHubToken:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/auth/github-token
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
   # NOTE: Changelog API routes (GET /api/v1/changelog/*) are provisioned by
   # backend/lambda/changelog_api/deploy.sh.
   # Keeping them out of this stack avoids route-key ownership conflicts.
