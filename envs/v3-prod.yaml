@@ -1,16 +1,10 @@
-# ENC-FTR-090 / ENC-TSK-F59 Phase 1
+# ENC-FTR-090 / ENC-TSK-F65 Phase 7
 # v3 production environment manifest (x86_64 / python3.11).
 # Schema validated by tools/cfn-guard/manifest-shape.guard.
 #
-# This is the CURRENT production target. The ubuntu-latest matrix row in
-# _build.yml produces the x86_64 artifacts that land here. F60 Phase 2
-# _deploy.yml consumes artifact_version_ids to pin exactly which S3 VersionId
-# is deployed to v3-prod.
-#
-# DO NOT deploy against this manifest until F60 Phase 2 (_deploy.yml) lands
-# AND the existing 31 deploy.sh scripts are tombstoned (F59 AC-3, deferred
-# to ship atomically with F60 to avoid Gen1 breakage). Until then, Gen1
-# deploy paths remain authoritative for v3-prod.
+# Gen2 is now the SOLE deploy path for v3-prod. All 31 legacy deploy.sh scripts
+# are tombstoned (F59 AC-3). All per-Lambda deploy workflows are deleted (F60 AC-3).
+# This manifest is the canonical state declaration for v3-prod post-cutover.
 
 env_name: v3-prod
 architecture: x86_64
@@ -48,14 +42,55 @@ appconfig_application_id: ""
 appconfig_environment_id: ""
 
 # ENC-TSK-F63 AC-2/AC-3: SnapStart and CodeDeploy settings.
-# v3-prod uses x86_64/py3.11 — SnapStart NOT supported. Canary via CodeDeploy.
+# v3-prod uses x86_64/py3.11 -- SnapStart NOT supported. Canary via CodeDeploy.
 enable_snapstart: "false"
 environment_suffix: ""
 codedeploy_app_name: "enceladus-lambda"
 
-# ENC-FTR-090 / ENC-TSK-F59 Phase 1 \u2014 artifact promotion fields.
-# Populated by F60 Phase 2 _deploy.yml on each promotion. Empty here means
-# no Gen2 build has been promoted to v3-prod yet; v3-prod continues to receive
-# Gen1 deploys via the legacy deploy.sh + lambda-deploy-reusable.yml path.
+# ENC-TSK-F65 Phase 7 -- artifact promotion fields.
+# artifact_commit_sha + artifact_version_ids are populated by _deploy.yml on each
+# workflow_dispatch promotion. Empty map = no Gen2 build promoted yet.
 artifact_commit_sha: ""
 artifact_version_ids: {}
+
+# ENC-TSK-F65 Phase 7 -- directory-name to deployed Lambda function name mapping.
+# _deploy.yml resolve step outputs this as function_name_map_json; deploy step uses
+# the mapped name in `aws lambda update-function-code --function-name`.
+# v3-prod uses no EnvironmentSuffix (prod stack suffix = "").
+# Excluded: auth_edge (Lambda@Edge -- CloudFront deployment, separate path),
+#           deploy_capability_auditor (retired; replaced by deploy_parity_validator),
+#           shared_layer (Lambda Layer -- not a function).
+# deploy_parity_validator: provisioned by CFN stack update; included here so
+# Gen2 covers it immediately post-provision without a manifest update.
+function_name_map:
+  auth_refresh: auth-refresh
+  bedrock_agent_actions: enceladus-bedrock-agent-actions
+  changelog_api: devops-changelog-api
+  checkout_service: enceladus-checkout-service-auto
+  coordination_api: devops-coordination-api
+  coordination_monitor_api: devops-coordination-monitor-api
+  deploy_decide: devops-deploy-decide
+  deploy_finalize: devops-deploy-finalize
+  deploy_intake: devops-deploy-intake
+  deploy_orchestrator: devops-deploy-orchestrator
+  deploy_parity_validator: devops-deploy-parity-validator
+  doc_prep: devops-doc-prep
+  document_api: devops-document-api
+  env_drift_auditor: devops-env-drift-auditor
+  feed_publisher: devops-feed-publisher
+  feed_query: devops-feed-query-api
+  github_integration: devops-github-integration
+  glue_crawler_launcher: devops-glue-crawler-launcher
+  governance_audit: enceladus-governance-audit
+  graph_health_metrics: enceladus-graph-health-metrics
+  graph_query_api: devops-graph-query-api
+  graph_sync: devops-graph-sync
+  json_to_parquet_transformer: devops-json-to-parquet-transformer
+  mcp_code: enceladus-mcp-code
+  mcp_streamable: enceladus-mcp-streamable
+  neo4j_backup: enceladus-neo4j-backup
+  prod_health_monitor: enceladus-prod-health-monitor
+  project_service: devops-project-service
+  reference_search: devops-reference-search
+  titan_embedding_backfill: devops-titan-embedding-backfill
+  tracker_mutation: devops-tracker-mutation-api

@@ -18,7 +18,7 @@
     {
       "function_name": "devops-coordination-api",
       "lambda_dir": "backend/lambda/coordination_api",
-      "workflow_file": ".github/workflows/api-mcp-backend-deploy.yml",
+      "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/coordination_api/deploy.sh"
     },
     {
