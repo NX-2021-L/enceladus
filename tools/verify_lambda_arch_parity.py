@@ -315,6 +315,14 @@ def _validate_shared_layer_deploy_script() -> List[str]:
 
     content = SHARED_LAYER_DEPLOY.read_text(encoding="utf-8")
 
+    # ENC-TSK-F59: script tombstoned — artifact build moved to _deploy.yml matrix
+    if content.strip().startswith("# TOMBSTONE:"):
+        print(
+            "[INFO] shared_layer/deploy.sh is tombstoned — ABI flag validation skipped"
+            " (artifact build handled by .github/workflows/_deploy.yml)"
+        )
+        return []
+
     # Must pass all three pip flags (prefix with -- so substring match isn't fooled by comments)
     required_flags = (
         "--platform",
