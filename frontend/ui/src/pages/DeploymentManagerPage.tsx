@@ -233,7 +233,7 @@ export function DeploymentManagerPage() {
         </div>
       ) : isError ? (
         <div className="dm-error">
-          GitHub API unavailable — check VITE_GITHUB_READ_TOKEN or rate limits.
+          GitHub API unavailable — authentication error or rate limit exceeded.
         </div>
       ) : items.length === 0 ? (
         <div className="dm-empty">No deployments found.</div>

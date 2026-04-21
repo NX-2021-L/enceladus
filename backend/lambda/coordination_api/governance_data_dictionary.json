@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-21.48",
-  "updated_at": "2026-04-21T17:30:00Z",
-  "last_change_summary": "Added appconfig.feature_flags entity for AppConfig extension-based feature flag resolution (ENC-TSK-F63 AC-1). Migrated coordination_api and mcp-server ENABLE_* env var reads to AppConfig flag() helper with env fallback.",
+  "version": "2026-04-21.49",
+  "updated_at": "2026-04-21T17:21:00Z",
+  "last_change_summary": "Extended deploy.parity_validator entity: added daily_drift_audit action (ENC-TSK-F64 / ENC-FTR-090 AC-20). Added monitoring.continuous_drift_audit entity documenting the devops-parity-drift-daily EventBridge schedule, CFN stack drift detection, CodeSize anomaly, and SnapStart version audit.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4947,7 +4947,7 @@
         },
         "event_schema": {
           "type": "object",
-          "definition": "{action: pre_merge_check|deploy_watch|parity_check, pr_number: int, commit_sha: str, repo: str, function_name_map?: dict, lambda_dirs?: list}."
+          "definition": "{action: pre_merge_check|deploy_watch|parity_check|daily_drift_audit, pr_number: int, commit_sha: str, repo: str, function_name_map?: dict, lambda_dirs?: list}. daily_drift_audit requires no additional fields; triggered by EventBridge Scheduler via devops-parity-drift-daily rule."
         },
         "detection_rules": {
           "type": "array",
@@ -4957,7 +4957,7 @@
         "iam_contract": {
           "type": "array",
           "item_type": "string",
-          "definition": "lambda:GetFunctionConfiguration + UpdateFunctionConfiguration on DM + MCP Lambda ARNs. dynamodb:GetItem/PutItem/UpdateItem/Query on devops-deployment-manager table. secretsmanager:GetSecretValue on devops/github-app/*."
+          "definition": "lambda:GetFunctionConfiguration + UpdateFunctionConfiguration on DM + MCP Lambda ARNs. lambda:GetFunctionConfiguration + ListFunctions + ListVersionsByFunction on * (DriftAuditLambdaRead \u2014 read-only, daily audit scope). cloudformation:DetectStackDrift + DescribeStackDriftDetectionStatus on * (DriftAuditCfn). sns:Publish on enceladus-deploy-alerts topic (DriftAuditSns). dynamodb:GetItem/PutItem/UpdateItem/Query on devops-deployment-manager table. secretsmanager:GetSecretValue on devops/github-app/*. appconfig:GetConfiguration/GetLatestConfiguration/StartConfigurationSession on *."
         },
         "readiness_doc": {
           "type": "object",
@@ -5001,6 +5001,32 @@
             "default"
           ],
           "usage_guidance": "Flag() resolution is: 1) AppConfig HTTP poll (localhost:2772, cached); 2) env_fallback env var if AppConfig unreachable; 3) default. Callers must not read ENABLE_* vars directly \u2014 always call flag()."
+        }
+      }
+    },
+    "monitoring.continuous_drift_audit": {
+      "description": "ENC-TSK-F64 / ENC-FTR-090 AC-20 \u2014 Daily drift audit added to devops-deploy-parity-validator via action=daily_drift_audit. Replaces deploy_capability_auditor (ENC-TSK-E69). Fires via devops-parity-drift-daily EventBridge rule at cron(0 10 * * ? *).",
+      "fields": {
+        "trigger": {
+          "type": "string",
+          "definition": "EventBridge Scheduler rule devops-parity-drift-daily, cron(0 10 * * ? *). Input payload: {\"action\": \"daily_drift_audit\"}. Targets devops-deploy-parity-validator function ARN."
+        },
+        "cfn_drift_stacks": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "CFN stacks checked via detect_stack_drift: enceladus-data, enceladus-api, enceladus-github-roles, enceladus-monitoring. Configurable via CFN_DRIFT_STACKS env var."
+        },
+        "code_size_check": {
+          "type": "object",
+          "definition": "Flags any Lambda with CodeSize < 1024 bytes as a CFN ZipFile stub overwrite (ENC-FTR-068 AC-5). Covers all functions with devops-/enceladus- prefix via list_functions pagination."
+        },
+        "snapstart_check": {
+          "type": "object",
+          "definition": "Flags any Lambda with >SNAPSTART_MAX_STALE_VERSIONS (default 5) published versions as a potential SnapStart storage cost trap. Uses list_versions_by_function."
+        },
+        "alert_channel": {
+          "type": "string",
+          "definition": "SNS topic arn:aws:sns:<region>:<account>:enceladus-deploy-alerts. Alert published when total_anomalies > 0. Subject pattern: [drift-audit] N anomaly(ies) \u2014 <ISO timestamp>."
         }
       }
     }

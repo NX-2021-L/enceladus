@@ -693,6 +693,10 @@ Resources:
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
+          SNS_TOPIC_ARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-deploy-alerts"
+          CFN_DRIFT_STACKS: "enceladus-data,enceladus-api,enceladus-github-roles,enceladus-monitoring"
+          SNAPSTART_MAX_STALE_VERSIONS: "5"
+          DRIFT_POLL_TIMEOUT: "240"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1770,6 +1774,24 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: "*"
+              - Sid: DriftAuditCfn
+                Effect: Allow
+                Action:
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:DescribeStackDriftDetectionStatus
+                Resource: "*"
+              - Sid: DriftAuditLambdaRead
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListFunctions
+                  - lambda:ListVersionsByFunction
+                Resource: "*"
+              - Sid: DriftAuditSns
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-deploy-alerts"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
