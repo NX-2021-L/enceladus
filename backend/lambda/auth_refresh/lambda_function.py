@@ -47,6 +47,11 @@ try:
     import jwt
     _JWT_AVAILABLE = True
 except Exception:  # noqa: BLE001
+    import logging as _enc_lsn_020_logging
+    _enc_lsn_020_logging.getLogger(__name__).exception(
+        "PyJWT import failed at module load — github-token vending will be disabled "
+        "(ENC-LSN-020: usually a shared-layer .so ABI mismatch or missing requirements.txt)"
+    )
     _JWT_AVAILABLE = False
 
 # ---------------------------------------------------------------------------

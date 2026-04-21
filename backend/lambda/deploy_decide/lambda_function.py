@@ -28,8 +28,18 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import boto3
-import jwt
 from botocore.config import Config
+
+try:
+    import jwt
+    _JWT_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    import logging as _enc_lsn_020_logging
+    _enc_lsn_020_logging.getLogger(__name__).exception(
+        "PyJWT import failed at module load — Cognito auth and GitHub token vending will be disabled "
+        "(ENC-LSN-020: usually a shared-layer .so ABI mismatch or missing requirements.txt)"
+    )
+    _JWT_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -275,6 +285,8 @@ def _get_jwks() -> Dict:
 
 def _validate_cognito_token(event: Dict) -> Optional[Dict]:
     """Validate Cognito JWT from cookie. Returns claims dict or None."""
+    if not _JWT_AVAILABLE:
+        return None
     token = _extract_token(event)
     if not token:
         return None
@@ -348,6 +360,8 @@ def _get_github_private_key() -> str:
 
 
 def _generate_app_jwt() -> str:
+    if not _JWT_AVAILABLE:
+        raise ValueError("PyJWT library not available in Lambda package (ENC-LSN-020)")
     now = int(time.time())
     payload = {
         "iat": now - 60,
