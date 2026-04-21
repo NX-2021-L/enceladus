@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-21.47",
-  "updated_at": "2026-04-21T16:00:00Z",
-  "last_change_summary": "Added auth.github_installation_token entity for GET /api/v1/auth/github-token (ENC-TSK-F62).",
+  "version": "2026-04-21.48",
+  "updated_at": "2026-04-21T17:30:00Z",
+  "last_change_summary": "Added appconfig.feature_flags entity for AppConfig extension-based feature flag resolution (ENC-TSK-F63 AC-1). Migrated coordination_api and mcp-server ENABLE_* env var reads to AppConfig flag() helper with env fallback.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4975,6 +4975,32 @@
         "expires_in": {
           "type": "integer",
           "usage_guidance": "Nominal expiry in seconds (3600). Use as a hint only; the GitHub-issued token may expire sooner if the installation is revoked."
+        }
+      }
+    },
+    "appconfig.feature_flags": {
+      "description": "AppConfig-based boolean feature flag contract (ENC-TSK-F63 AC-1). The enceladus_shared.appconfig_flags.flag() helper resolves flags via the AppConfig Lambda extension (localhost:2772, TTL 45 s) with env-var fallback for local dev. Replaces direct ENABLE_* env var reads in coordination_api and mcp-server. Extension layer ARN is arch-specific (x86 / arm64) and attached to all 24 prod Lambdas via HasAppConfigLayer CFN condition.",
+      "fields": {
+        "flag_name": {
+          "type": "string",
+          "usage_guidance": "Snake_case key in the AppConfig JSON configuration profile (e.g. 'enable_lesson_primitive'). Must match an entry in the 06-feature-flags.yaml JSON Schema to pass pre-deployment validation."
+        },
+        "env_fallback": {
+          "type": "string",
+          "usage_guidance": "Optional ENABLE_* environment variable name used when the AppConfig extension is unreachable (e.g. local dev, cold-start before layer initializes). Value is coerced: 'true' (case-insensitive) \u2192 True, anything else \u2192 False."
+        },
+        "default": {
+          "type": "boolean",
+          "usage_guidance": "Hardcoded fallback returned when both AppConfig and env_fallback are absent or unreachable. Defaults to False for all flags unless explicitly overridden (e.g. enable_mcp_governance_prompt defaults to True)."
+        },
+        "resolution_order": {
+          "type": "enum",
+          "enum": [
+            "appconfig_extension",
+            "env_fallback",
+            "default"
+          ],
+          "usage_guidance": "Flag() resolution is: 1) AppConfig HTTP poll (localhost:2772, cached); 2) env_fallback env var if AppConfig unreachable; 3) default. Callers must not read ENABLE_* vars directly \u2014 always call flag()."
         }
       }
     }

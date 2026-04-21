@@ -48,6 +48,10 @@ from mcp.types import (
     TextResourceContents,
     Tool,
 )
+try:
+    from enceladus_shared.appconfig_flags import flag as _appconfig_flag
+except ImportError:
+    from appconfig_flags import flag as _appconfig_flag  # local fallback for testing
 
 # ---------------------------------------------------------------------------
 # Lazy boto3 import (provider sessions may need pip install)
@@ -214,26 +218,19 @@ CHECKOUT_SERVICE_API_BASE = os.environ.get(
     "CHECKOUT_SERVICE_API_BASE",
     "https://jreese.net/api/v1/checkout",
 )
-# ENC-FTR-049: Typed relationship edge feature flag
-ENABLE_TYPED_RELATIONSHIPS = os.environ.get(
-    "ENABLE_TYPED_RELATIONSHIPS", "false"
-).lower() == "true"
-# ENC-FTR-050: Context Node feature flag (default off — all new code paths gated)
-ENABLE_CONTEXT_NODES = os.environ.get(
-    "ENABLE_CONTEXT_NODES", "false"
-).lower() == "true"
-# ENC-FTR-052: Governed Lesson Primitive feature flag
-ENABLE_LESSON_PRIMITIVE = os.environ.get(
-    "ENABLE_LESSON_PRIMITIVE", "false"
-).lower() == "true"
-# ENC-FTR-061: Governed Handoff Primitive feature flag
-ENABLE_HANDOFF_PRIMITIVE = os.environ.get(
-    "ENABLE_HANDOFF_PRIMITIVE", "false"
-).lower() == "true"
-# ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry feature flag
-ENABLE_COMPONENT_PROPOSAL = os.environ.get(
-    "ENABLE_COMPONENT_PROPOSAL", "false"
-).lower() == "true"
+# ENC-TSK-F63: Feature flags migrated from ENABLE_* env vars to AppConfig.
+# appconfig_flags.flag() reads from AppConfig extension (localhost:2772) with
+# env_fallback for local dev / environments without the extension layer.
+# ENC-FTR-049
+ENABLE_TYPED_RELATIONSHIPS = _appconfig_flag("enable_typed_relationships", env_fallback="ENABLE_TYPED_RELATIONSHIPS")
+# ENC-FTR-050
+ENABLE_CONTEXT_NODES = _appconfig_flag("enable_context_nodes", env_fallback="ENABLE_CONTEXT_NODES")
+# ENC-FTR-052
+ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallback="ENABLE_LESSON_PRIMITIVE")
+# ENC-FTR-061
+ENABLE_HANDOFF_PRIMITIVE = _appconfig_flag("enable_handoff_primitive", env_fallback="ENABLE_HANDOFF_PRIMITIVE")
+# ENC-FTR-076 / ENC-TSK-E08
+ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL")
 
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",

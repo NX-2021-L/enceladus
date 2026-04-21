@@ -47,6 +47,7 @@ import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
+from enceladus_shared.appconfig_flags import flag as _appconfig_flag
 
 try:
     from mcp_client import CoordinationMcpClient
@@ -308,7 +309,7 @@ ENCELADUS_MCP_SERVER_PATH = os.environ.get(
     "tools/enceladus-mcp-server/server.py",
 )
 
-ENABLE_CLAUDE_HEADLESS = os.environ.get("ENABLE_CLAUDE_HEADLESS", "false").lower() == "true"
+ENABLE_CLAUDE_HEADLESS = _appconfig_flag("enable_claude_headless", env_fallback="ENABLE_CLAUDE_HEADLESS")
 
 # v0.3 callback infrastructure
 CALLBACK_EVENTBRIDGE_BUS = os.environ.get("CALLBACK_EVENTBRIDGE_BUS", "default")
@@ -325,14 +326,12 @@ MCP_SERVER_LOG_GROUP = os.environ.get("MCP_SERVER_LOG_GROUP", "/enceladus/mcp/se
 MCP_AUDIT_CALLER_IDENTITY = os.environ.get("MCP_AUDIT_CALLER_IDENTITY", "devops-coordination-api")
 COORDINATION_PUBLIC_BASE_URL = os.environ.get("COORDINATION_PUBLIC_BASE_URL", "https://jreese.net")
 COORDINATION_MCP_HTTP_PATH = os.environ.get("COORDINATION_MCP_HTTP_PATH", "/api/v1/coordination/mcp")
-ENABLE_MCP_GOVERNANCE_PROMPT = os.environ.get("ENABLE_MCP_GOVERNANCE_PROMPT", "true").lower() == "true"
+ENABLE_MCP_GOVERNANCE_PROMPT = _appconfig_flag("enable_mcp_governance_prompt", env_fallback="ENABLE_MCP_GOVERNANCE_PROMPT", default=True)
 # ENC-FTR-052: Governed Lesson Primitive
-ENABLE_LESSON_PRIMITIVE = os.environ.get("ENABLE_LESSON_PRIMITIVE", "false").lower() == "true"
-# ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry. Default off
-# in prod; enabled in gamma via env var on the deploy. Gates POST
-# /api/v1/coordination/components/propose + the MCP component.propose action
-# + checkout-service lifecycle_status gate (delivered by E10).
-ENABLE_COMPONENT_PROPOSAL = os.environ.get("ENABLE_COMPONENT_PROPOSAL", "false").lower() == "true"
+ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallback="ENABLE_LESSON_PRIMITIVE")
+# ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry.
+# Gates POST /api/v1/coordination/components/propose + component.propose MCP action.
+ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL")
 GOVERNANCE_PROMPT_MAX_CHARS = int(os.environ.get("GOVERNANCE_PROMPT_MAX_CHARS", "120000"))
 GOVERNANCE_PROMPT_RESOURCE_URIS_FALLBACK = (
     "governance://agents.md",
