@@ -234,7 +234,9 @@ jobs:
       - name: Create GitHub Deployment
         id: create_deployment
         env:
-          GH_TOKEN: ${{ github.token }}
+          # ENC-TSK-F92 / ENC-ISS-297: dedicated read token isolates DM thin reader
+          # from the shared GITHUB_TOKEN bucket consumed by agent sessions + CI runs.
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
           SHA: ${{ needs.resolve.outputs.commit_sha }}
           ENV: ${{ needs.resolve.outputs.environment }}
         run: |
@@ -262,7 +264,7 @@ jobs:
 
       - name: Set deployment status → in_progress
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
           DEPLOYMENT_ID: ${{ steps.create_deployment.outputs.deployment_id }}
         run: |
           gh api --method POST \
@@ -557,7 +559,7 @@ jobs:
       - name: Set deployment status → success
         if: success()
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
           DEPLOYMENT_ID: ${{ steps.create_deployment.outputs.deployment_id }}
         run: |
           gh api --method POST \
@@ -568,7 +570,7 @@ jobs:
       - name: Set deployment status → failure
         if: failure()
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
           DEPLOYMENT_ID: ${{ steps.create_deployment.outputs.deployment_id }}
         run: |
           gh api --method POST \

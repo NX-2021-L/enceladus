@@ -47,6 +47,11 @@ try:
     import jwt
     _JWT_AVAILABLE = True
 except Exception:  # noqa: BLE001
+    import logging as _enc_lsn_020_logging
+    _enc_lsn_020_logging.getLogger(__name__).exception(
+        "PyJWT import failed at module load — github-token vending will be disabled "
+        "(ENC-LSN-020: usually a shared-layer .so ABI mismatch or missing requirements.txt)"
+    )
     _JWT_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
@@ -56,6 +61,8 @@ except Exception:  # noqa: BLE001
 COGNITO_REGION = os.environ.get("COGNITO_REGION", "us-east-1")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E1k")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk")
+# Lambda deployment region — used for Secrets Manager (secret lives co-located with Lambda)
+LAMBDA_REGION = os.environ.get("AWS_REGION", "us-west-2")
 CORS_ORIGIN = "https://jreese.net"
 ID_TOKEN_MAX_AGE = 3600       # 1 hour
 SESSION_COOKIE_MAX_AGE = 3600  # 1 hour
@@ -89,7 +96,7 @@ def _get_cognito():
 def _get_secretsmanager():
     global _secretsmanager
     if _secretsmanager is None:
-        _secretsmanager = boto3.client("secretsmanager", region_name=COGNITO_REGION)
+        _secretsmanager = boto3.client("secretsmanager", region_name=LAMBDA_REGION)
     return _secretsmanager
 
 
@@ -185,7 +192,7 @@ def _generate_app_jwt() -> str:
     if not GITHUB_APP_ID:
         raise ValueError("GITHUB_APP_ID not configured")
     now = int(time.time())
-    payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": int(GITHUB_APP_ID)}
+    payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": str(GITHUB_APP_ID)}
     return jwt.encode(payload, _get_github_private_key(), algorithm="RS256")
 
 
