@@ -216,6 +216,12 @@ jobs:
   deploy:
     name: Deploy → ${{ needs.resolve.outputs.environment }}
     needs: resolve
+    # Without this explicit condition, GitHub Actions' implicit success() check evaluates
+    # the transitive job chain: build (skipped on workflow_dispatch) → resolve → deploy.
+    # A skipped ancestor causes success() to return false, silently skipping the deploy job.
+    # This if: allows the deploy to run on workflow_dispatch (build skipped) as long as
+    # resolve itself succeeded.
+    if: always() && needs.resolve.result == 'success'
     environment: ${{ needs.resolve.outputs.environment }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
