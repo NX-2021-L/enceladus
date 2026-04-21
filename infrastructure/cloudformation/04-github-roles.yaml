@@ -532,6 +532,152 @@ Resources:
                   - "arn:aws:s3:::jreese-net/agent-documents/*"
 
   # ---------------------------------------------------------------------------
+  # Gen2 Build Role (ENC-FTR-090 / ENC-TSK-B76 AC-4)
+  # Used by:
+  #   - .github/workflows/_build.yml   (OIDC: ref:refs/heads/main or v4/*)
+  #   - .github/workflows/_deploy.yml  resolve job (S3 artifact probe)
+  # Role name: GitHubActions-Build-Role
+  # NOTE: This role was created manually on 2026-04-21 to unblock the gen2
+  # pipeline. Import into this stack before the next stack update:
+  #   aws cloudformation create-change-set \
+  #     --stack-name enceladus-github-roles \
+  #     --change-set-type IMPORT \
+  #     --change-set-name import-build-role \
+  #     --template-body file://infrastructure/cloudformation/04-github-roles.yaml \
+  #     --resources-to-import '[{"ResourceType":"AWS::IAM::Role","LogicalResourceId":"Gen2BuildRole","ResourceIdentifier":{"RoleName":"GitHubActions-Build-Role"}}]' \
+  #     --capabilities CAPABILITY_NAMED_IAM
+  # ---------------------------------------------------------------------------
+  Gen2BuildRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: GitHubActions-Build-Role
+      Description: >
+        GitHub Actions OIDC role for _build.yml artifact compilation and
+        _deploy.yml resolve-job S3 artifact probe (ENC-FTR-090).
+        Scoped to S3 lambda-artifacts read/write only — no Lambda mutate.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main:*"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/v4/*"
+      Policies:
+        - PolicyName: BuildArtifactsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: S3LambdaArtifactAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/lambda-artifacts/*"
+              - Sid: S3LambdaArtifactListAccess
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - "lambda-artifacts/*"
+                      - "deploy-config/*"
+              - Sid: S3DeployConfigRead
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+              - Sid: LambdaLayerOps
+                Effect: Allow
+                Action:
+                  - lambda:PublishLayerVersion
+                  - lambda:GetLayerVersion
+                Resource: "*"
+
+  # ---------------------------------------------------------------------------
+  # Gen2 v4-gamma Deploy Role (ENC-FTR-090 / ENC-TSK-B76 AC-4)
+  # Used by:
+  #   - .github/workflows/_deploy.yml  deploy job (environment: v4-gamma)
+  # Role name: GitHubActions-V4Gamma-DeployRole
+  # OIDC sub claim: repo:{org}/{repo}:environment:v4-gamma
+  # This role is the sole IAM assumer for v4-gamma Lambda deploys (AC-1 of
+  # ENC-FTR-090). The GitHub Environment "v4-gamma" required_reviewers gate
+  # provides the human approval checkpoint before this role is assumed.
+  # ---------------------------------------------------------------------------
+  Gen2V4GammaDeployRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: GitHubActions-V4Gamma-DeployRole
+      Description: >
+        GitHub Actions OIDC role assumed exclusively by _deploy.yml when
+        deploying to the v4-gamma environment (ENC-FTR-090 AC-1).
+        Scoped to Lambda code updates for v4-gamma stack functions only.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # GitHub Environment claim — only fires when the job's
+                # `environment:` field is set to "v4-gamma".
+                token.actions.githubusercontent.com:sub:
+                  !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:v4-gamma"
+      Policies:
+        - PolicyName: V4GammaLambdaDeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Lambda code update + wait for the v4-gamma stack.
+              # v4-gamma function names mirror backend/lambda/ directory names
+              # (no devops- prefix, no environment suffix) — the gen2 pipeline
+              # is a clean-slate naming convention for the v4 generation.
+              # Resource is broadly scoped here; tighten to explicit ARNs once
+              # the enceladus-v4-gamma CFn stack provisions the function set.
+              - Sid: V4GammaLambdaCodeDeploy
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:PublishVersion
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListVersionsByFunction
+                Resource: "*"
+              # S3 read for artifact version probing (belt-and-suspenders;
+              # update-function-code fetches via Lambda service role, but
+              # the resolve-job S3 probe runs under this env's job context
+              # when dispatched via workflow_call).
+              - Sid: S3ArtifactRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: "arn:aws:s3:::jreese-net/lambda-artifacts/*"
+              - Sid: S3ArtifactList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+                Condition:
+                  StringLike:
+                    s3:prefix: "lambda-artifacts/*"
+
+  # ---------------------------------------------------------------------------
   # CloudFormation Staging Bucket (ENC-TSK-E84 / ENC-ISS-257)
   # Used by:
   #   - .github/workflows/cloudformation-compute-stack-deploy.yml
@@ -588,3 +734,17 @@ Outputs:
     Value: !Ref CfnStagingBucket
     Export:
       Name: !Sub "${AWS::StackName}-CfnStagingBucketName"
+  Gen2BuildRoleArn:
+    Description: >
+      ARN of the gen2 build role assumed by _build.yml and _deploy.yml resolve
+      job. Set as the hardcoded ARN in _build.yml and _deploy.yml (ENC-FTR-090).
+    Value: !GetAtt Gen2BuildRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-Gen2BuildRoleArn"
+  Gen2V4GammaDeployRoleArn:
+    Description: >
+      ARN to set as deploy_role_arn in envs/v4-gamma.yaml (ENC-FTR-090).
+      Sole IAM assumer for v4-gamma Lambda deploys via _deploy.yml.
+    Value: !GetAtt Gen2V4GammaDeployRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-Gen2V4GammaDeployRoleArn"
