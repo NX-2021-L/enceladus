@@ -461,12 +461,17 @@ jobs:
                       if env_suffix:
                           dg_name = f"{dg_name}{env_suffix}"
 
+                      # Pass --revision as JSON to avoid shell quoting issues when
+                      # appspec_json contains double-quotes (shorthand notation breaks).
+                      revision_json = json.dumps({
+                          "revisionType": "AppSpecContent",
+                          "appSpecContent": {"content": appspec_json},
+                      })
                       cd_r = subprocess.run([
                           'aws', 'deploy', 'create-deployment',
                           '--application-name', codedeploy_app,
                           '--deployment-group-name', dg_name,
-                          '--revision',
-                          f'revisionType=AppSpecContent,appSpecContent={{content={appspec_json}}}',
+                          '--revision', revision_json,
                           '--region', region,
                           '--output', 'json',
                       ], capture_output=True, text=True)
@@ -476,16 +481,19 @@ jobs:
                           print(f'  + {mapped_name} → CodeDeploy deployment {dep_id} ({canary_pref})')
                           if dep_id:
                               deployments.append((fn, mapped_name, dep_id))
+                          use_codedeploy_succeeded = True
                       else:
                           print(f'  [warn] CodeDeploy create-deployment failed for {mapped_name}: {cd_r.stderr.strip()}')
                           print(f'  [warn] Falling back to direct alias update for {mapped_name}')
-                          # Fall through to direct alias update below.
-                          new_version = new_version  # keep for direct update
+                          use_codedeploy_succeeded = False
                   except Exception as e:
                       print(f'  [warn] CodeDeploy error for {mapped_name}: {e}', file=sys.stderr)
+                      use_codedeploy_succeeded = False
+              else:
+                  use_codedeploy_succeeded = False
 
-              # Direct alias update: used when canary is disabled, AllAtOnce, or CodeDeploy unavailable.
-              if new_version and not use_codedeploy:
+              # Direct alias update: when canary is disabled/AllAtOnce, or CodeDeploy failed.
+              if new_version and (not use_codedeploy or not use_codedeploy_succeeded):
                   alias_r = subprocess.run([
                       'aws', 'lambda', 'update-alias',
                       '--function-name', mapped_name,
