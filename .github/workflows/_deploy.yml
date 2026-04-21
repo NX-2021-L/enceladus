@@ -362,9 +362,17 @@ jobs:
               ], capture_output=True, text=True)
               os.unlink(tmp.name)
               if r.returncode != 0:
-                  print(f'::error::update-function-code failed for {mapped_name}: {r.stderr.strip()}',
-                        file=sys.stderr)
-                  errors.append(fn)
+                  stderr = r.stderr.strip()
+                  if 'ResourceNotFoundException' in stderr or 'Function not found' in stderr:
+                      # Function not yet provisioned in this environment (CFN ZipFile stub
+                      # not deployed). Skip gracefully — it will be deployed in a future
+                      # run once the CFN stack update provisions the function.
+                      print(f'  [skip] {mapped_name}: not provisioned in this environment yet')
+                      skipped.append(fn)
+                  else:
+                      print(f'::error::update-function-code failed for {mapped_name}: {stderr}',
+                            file=sys.stderr)
+                      errors.append(fn)
                   continue
 
               # ENC-TSK-F63 AC-2/AC-3: capture published version for alias + CodeDeploy.
