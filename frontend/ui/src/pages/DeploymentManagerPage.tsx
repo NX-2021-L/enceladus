@@ -1,368 +1,468 @@
-/**
- * DeploymentManagerPage — GMF Production Governance Surface (DOC-63420302EF65 §6).
- *
- * The primary governance surface through which io exercises production authority.
- * Displays pending deployment decisions with approve/divert/revert actions,
- * and a deployment history timeline.
- */
+// DM Gen2 — thin reader (ENC-TSK-F62).
+// Zero POST/PUT to any Enceladus endpoint. All data from api.github.com.
+// Action buttons are deep-links to GitHub. No state owns a deploy decision.
 
-import { useState, useCallback, useMemo } from 'react'
-import { useDeployQueue, useDeployDecision, timeInQueue } from '../hooks/useDeploymentManager'
-import { LoadingState } from '../components/shared/LoadingState'
-import { ErrorState } from '../components/shared/ErrorState'
-import { EmptyState } from '../components/shared/EmptyState'
-import type { DeploymentDecision } from '../types/deployments'
+import { ExternalLink, GitBranch, RotateCw, Terminal, Activity, Circle } from 'lucide-react'
+import { useGitHubDeployments } from '../hooks/useGitHubDeployments'
+import type { DeploymentWithStatus, DesignSystemStatus } from '../types/githubDeployments'
 
-// ENC-TSK-E76 / ENC-ISS-208: Render-boundary strip for the DynamoDB
-// composite-key prefix on DPL record_id. D51 normalizes the fetchDeployQueue
-// response; this layer guarantees the `#` separator can never reach any
-// DOM-validated attribute (form input pattern/type, CSS selector, etc.)
-// even if a mutation response, React Query cache, or downstream component
-// delivers a raw `decision#ENC-DPL-N` value.
-function sanitizeDecision(d: DeploymentDecision): DeploymentDecision {
-  if (!d.record_id || !d.record_id.startsWith('decision#')) return d
-  return { ...d, record_id: d.record_id.replace(/^decision#/, '') }
+// ---------------------------------------------------------------------------
+// StatusChip — AC-5: single variant prop, no internal color switches
+// ---------------------------------------------------------------------------
+
+const STATUS_LABEL: Record<DesignSystemStatus, string> = {
+  open: 'pending',
+  'in-progress': 'in progress',
+  blocked: 'failed',
+  closed: 'deployed',
 }
 
-// ---------------------------------------------------------------------------
-// Status badge colors
-// ---------------------------------------------------------------------------
-
-const STATUS_COLORS: Record<string, string> = {
-  pending_approval: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-  awaiting_prod_approval: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-  approved: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-  diverted: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  reverted: 'bg-red-500/20 text-red-400 border-red-500/30',
-  deploying: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-  deployed: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-  failed: 'bg-red-500/20 text-red-400 border-red-500/30',
-}
-
-const TARGET_COLORS: Record<string, string> = {
-  prod: 'bg-red-500/20 text-red-300',
-  gamma: 'bg-blue-500/20 text-blue-300',
-  undeclared: 'bg-slate-500/20 text-slate-400',
-}
-
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
-
-function StatusBadge({ status }: { status: string }) {
+function StatusChip({ status }: { status: DesignSystemStatus }) {
   return (
     <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${
-        STATUS_COLORS[status] || 'bg-slate-700 text-slate-300 border-slate-600'
-      }`}
+      className="dm-status-chip"
+      style={{
+        color: `var(--status-${status})`,
+        border: `1px solid var(--status-${status})`,
+      }}
     >
-      {status.replace(/_/g, ' ')}
-    </span>
-  )
-}
-
-function TargetBadge({ target }: { target: string }) {
-  return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-medium ${
-        TARGET_COLORS[target] || 'bg-slate-700 text-slate-400'
-      }`}
-    >
-      {target}
+      <Circle size={6} strokeWidth={0} fill={`var(--status-${status})`} style={{ flexShrink: 0 }} />
+      {STATUS_LABEL[status]}
     </span>
   )
 }
 
 // ---------------------------------------------------------------------------
-// Decision Card
+// DeploySteps — AC-6 Law 2: fracture as detail, segmented not continuous
 // ---------------------------------------------------------------------------
 
-function DecisionCard({
-  decision,
-  onAction,
-  isActing,
-}: {
-  decision: DeploymentDecision
-  onAction: (action: 'approve' | 'divert' | 'revert', prNumber: number, reason?: string) => void
-  isActing: boolean
-}) {
-  const [showRevertDialog, setShowRevertDialog] = useState(false)
-  const [revertReason, setRevertReason] = useState('')
+const STEP_STATES = ['pending', 'in_progress', 'success'] as const
 
-  const isPending =
-    decision.status === 'pending_approval' || decision.status === 'awaiting_prod_approval'
-  const queue_time = timeInQueue(decision.created_at)
+function stepIndex(state: string): number {
+  if (state === 'pending' || state === 'queued') return 0
+  if (state === 'in_progress') return 1
+  if (state === 'success') return 2
+  return -1
+}
+
+function DeploySteps({ state }: { state: string }) {
+  const current = stepIndex(state)
+  const isFailed = state === 'error' || state === 'failure'
 
   return (
-    <div className="bg-slate-800/80 border border-slate-700/50 rounded-xl p-4 space-y-3">
-      {/* Header */}
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 mb-1">
-            <a
-              href={decision.github_pr_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm font-semibold text-slate-100 hover:text-blue-400 transition-colors truncate"
-            >
-              #{decision.github_pr_number} {decision.pr_title}
-            </a>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span>{decision.pr_author}</span>
-            <span className="text-slate-600">&middot;</span>
-            <span className="font-mono">{decision.head_branch}</span>
-            <span className="text-slate-600">&middot;</span>
-            <span>{queue_time} in queue</span>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <TargetBadge target={decision.original_target} />
-          <StatusBadge status={decision.status} />
-        </div>
-      </div>
-
-      {/* SHA */}
-      <div className="flex items-center gap-2 text-xs">
-        <span className="text-slate-500">SHA:</span>
-        <code className="text-slate-400 font-mono">{decision.head_sha.slice(0, 12)}</code>
-      </div>
-
-      {/* Linked records */}
-      {(decision.related_enceladus_task_ids?.length > 0 ||
-        decision.related_enceladus_feature_ids?.length > 0) && (
-        <div className="flex flex-wrap gap-1">
-          {decision.related_enceladus_task_ids?.map((id) => (
-            <span
-              key={id}
-              className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-slate-700/50 text-slate-300 font-mono"
-            >
-              {id}
-            </span>
-          ))}
-          {decision.related_enceladus_feature_ids?.map((id) => (
-            <span
-              key={id}
-              className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-purple-500/10 text-purple-300 font-mono"
-            >
-              {id}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Decision outcome for non-pending */}
-      {!isPending && decision.decided_by && (
-        <div className="text-xs text-slate-400 border-t border-slate-700/50 pt-2">
-          {decision.status === 'approved' && 'Approved'}
-          {decision.status === 'diverted' && 'Diverted to gamma'}
-          {decision.status === 'reverted' && 'Reverted'}
-          {decision.status === 'deployed' && 'Deployed'}
-          {decision.status === 'failed' && 'Deploy failed'}
-          {' by '}
-          <span className="text-slate-300">{decision.decided_by}</span>
-          {decision.decided_at && (
-            <>
-              {' at '}
-              <span className="text-slate-300">
-                {new Date(decision.decided_at).toLocaleString()}
-              </span>
-            </>
-          )}
-          {decision.decision_reason && (
-            <div className="mt-1 text-slate-500 italic">
-              &ldquo;{decision.decision_reason}&rdquo;
-            </div>
-          )}
-          {/* ENC-TSK-E57: Show approval token for approved decisions */}
-          {decision.approval_token && (
-            <div className="mt-1">
-              <span className="text-slate-500">Token: </span>
-              <code className="text-emerald-400 font-mono text-xs select-all">
-                {decision.approval_token}
-              </code>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ENC-TSK-E57: Bypass marker for pre-E57 deploys */}
-      {decision.bypass_reason && (
-        <div className="flex items-center gap-1 text-xs">
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-400 border border-amber-500/30">
-            bypass
-          </span>
-          <span className="text-slate-500">{decision.bypass_reason}</span>
-        </div>
-      )}
-
-      {/* Action buttons (only for pending_approval) */}
-      {isPending && (
-        <>
-          {!showRevertDialog ? (
-            <div className="flex gap-2 pt-1">
-              <button
-                onClick={() => onAction('approve', decision.github_pr_number)}
-                disabled={isActing}
-                className="flex-1 px-3 py-2 rounded-lg text-sm font-medium bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Approve &rarr; Prod
-              </button>
-              <button
-                onClick={() => onAction('divert', decision.github_pr_number)}
-                disabled={isActing}
-                className="flex-1 px-3 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Divert &rarr; Gamma
-              </button>
-              <button
-                onClick={() => setShowRevertDialog(true)}
-                disabled={isActing}
-                className="px-3 py-2 rounded-lg text-sm font-medium bg-red-600/20 hover:bg-red-600/40 active:bg-red-600/60 text-red-400 border border-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Revert
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-2 pt-1 border-t border-red-500/20">
-              <p className="text-xs text-red-400 font-medium">
-                Revert will close this PR without merging. A reason is required.
-              </p>
-              <textarea
-                value={revertReason}
-                onChange={(e) => setRevertReason(e.target.value)}
-                placeholder="Why is this PR being reverted?"
-                rows={2}
-                className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-red-500/50"
+    <div className="dm-steps" aria-label={`Deploy step: ${state}`}>
+      {STEP_STATES.map((step, i) => {
+        const filled = !isFailed && current >= i
+        const isFailPoint = isFailed && i === 1
+        return (
+          <div key={step} className="dm-step-group">
+            <div
+              className="dm-step-bar"
+              style={{
+                width: i === 2 ? '32px' : '20px',
+                background: isFailPoint
+                  ? 'var(--status-blocked)'
+                  : filled
+                    ? 'var(--status-closed)'
+                    : 'var(--enc-slate)',
+              }}
+            />
+            {i < STEP_STATES.length - 1 && (
+              <div
+                className="dm-step-dot"
+                style={{ background: filled ? 'var(--enc-dust)' : 'var(--enc-slate)' }}
               />
-              <div className="flex gap-2">
-                <button
-                  onClick={() => {
-                    onAction('revert', decision.github_pr_number, revertReason)
-                    setShowRevertDialog(false)
-                    setRevertReason('')
-                  }}
-                  disabled={isActing || !revertReason.trim()}
-                  className="flex-1 px-3 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-500 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  Confirm Revert
-                </button>
-                <button
-                  onClick={() => {
-                    setShowRevertDialog(false)
-                    setRevertReason('')
-                  }}
-                  className="px-3 py-2 rounded-lg text-sm font-medium bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// DeployCard — AC-6 Laws 3,4,5: elevation, orbital motion, telemetry ambient
+// ---------------------------------------------------------------------------
+
+function DeployCard({ item }: { item: DeploymentWithStatus }) {
+  const { deployment: dep, latestStatus, designStatus, run } = item
+  const sha = dep.sha.slice(0, 12)
+  const state = latestStatus?.state ?? 'pending'
+  const env = dep.environment
+
+  const payload =
+    typeof dep.payload === 'string'
+      ? (() => { try { return JSON.parse(dep.payload) } catch { return {} } })()
+      : dep.payload
+  const prNumber: number | null =
+    (payload as Record<string, unknown>)?.pr_number as number ?? null
+
+  const ghPrUrl = prNumber
+    ? `https://github.com/NX-2021-L/enceladus/pull/${prNumber}`
+    : null
+  const runUrl = run?.html_url ?? null
+
+  return (
+    <div
+      className={`dm-card${designStatus === 'in-progress' ? ' dm-card--active' : ''}`}
+    >
+      {/* Header */}
+      <div className="dm-card-header">
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div className="dm-card-title-row">
+            <span
+              style={{
+                fontFamily: 'var(--font-heading)',
+                fontWeight: 'var(--fw-medium)',
+                fontSize: 'var(--text-sm)',
+                color: 'var(--fg-display)',
+              }}
+            >
+              {env}
+            </span>
+            {prNumber && (
+              <span className="enc-record-id" style={{ fontSize: 'var(--text-xs)' }}>
+                #{prNumber}
+              </span>
+            )}
+          </div>
+          <div className="dm-branch-row">
+            <GitBranch size={11} strokeWidth={1.5} />
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)' }}>
+              {dep.ref}
+            </span>
+          </div>
+        </div>
+        <StatusChip status={designStatus} />
+      </div>
+
+      {/* Fracture steps — Law 2 */}
+      <DeploySteps state={state} />
+
+      {/* Telemetry row — Law 5 */}
+      <div className="dm-telemetry">
+        <span className="dm-telemetry-item">
+          <Terminal size={11} strokeWidth={1.5} />
+          <span className="enc-record-id" style={{ fontSize: 'var(--text-xs)' }}>{sha}</span>
+        </span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--fg-muted)' }}>
+          {new Date(dep.created_at).toLocaleString()}
+        </span>
+        {dep.creator?.login && (
+          <span style={{ fontFamily: 'var(--font-body)', fontSize: 'var(--text-xs)', color: 'var(--fg-muted)' }}>
+            {dep.creator.login}
+          </span>
+        )}
+        {run?.run_number && (
+          <span className="dm-telemetry-item">
+            <Activity size={11} strokeWidth={1.5} />
+            <span className="enc-record-id" style={{ fontSize: 'var(--text-xs)' }}>
+              run #{run.run_number}
+            </span>
+          </span>
+        )}
+      </div>
+
+      {/* Deep-link buttons */}
+      {(ghPrUrl || runUrl) && (
+        <div className="dm-actions">
+          {ghPrUrl && (
+            <a href={ghPrUrl} target="_blank" rel="noopener noreferrer" className="dm-link-primary">
+              View PR
+              <ExternalLink size={10} strokeWidth={1.5} />
+            </a>
           )}
-        </>
+          {runUrl && (
+            <a href={runUrl} target="_blank" rel="noopener noreferrer" className="dm-link-secondary">
+              View Run
+              <ExternalLink size={10} strokeWidth={1.5} />
+            </a>
+          )}
+        </div>
       )}
     </div>
   )
 }
 
 // ---------------------------------------------------------------------------
-// Main Page
+// Page
 // ---------------------------------------------------------------------------
 
 export function DeploymentManagerPage() {
-  const { decisions, count, isPending, isError, refetch } = useDeployQueue()
-  const decideMutation = useDeployDecision()
-  const [actionError, setActionError] = useState<string | null>(null)
-
-  const pendingDecisions = useMemo(
-    () =>
-      decisions
-        .filter(
-          (d) => d.status === 'pending_approval' || d.status === 'awaiting_prod_approval',
-        )
-        .map(sanitizeDecision),
-    [decisions],
-  )
-
-  const handleAction = useCallback(
-    async (action: 'approve' | 'divert' | 'revert', prNumber: number, reason?: string) => {
-      setActionError(null)
-      try {
-        await decideMutation.mutateAsync({
-          action,
-          pr_number: prNumber,
-          decision_reason: reason,
-        })
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : 'Decision failed')
-        // Auto-dismiss after 6 seconds
-        setTimeout(() => setActionError(null), 6000)
-      }
-    },
-    [decideMutation],
-  )
-
-  if (isPending) return <LoadingState />
-  if (isError) return <ErrorState />
+  const { data: items = [], isPending, isError, refetch, isFetching } = useGitHubDeployments()
 
   return (
-    <div className="p-4 space-y-6 max-w-2xl mx-auto">
-      {/* Page header */}
-      <div>
-        <h2 className="text-lg font-semibold text-slate-100">Deployment Manager</h2>
-        <p className="text-xs text-slate-500 mt-1">
-          Production governance surface &mdash; approve, divert, or revert pending deployments
-        </p>
-      </div>
-
-      {/* Error toast */}
-      {actionError && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-400">
-          {actionError}
-        </div>
-      )}
-
-      {/* Pending Approvals Section */}
-      <section>
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-medium text-slate-300">
-            Pending Approvals
-            {count > 0 && (
-              <span className="ml-2 inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 text-xs font-bold">
-                {count}
-              </span>
-            )}
-          </h3>
+    <div className="dm-page">
+      {/* Header */}
+      <div className="dm-page-header">
+        <div className="dm-page-title-row">
+          <h2
+            style={{
+              fontFamily: 'var(--font-heading)',
+              fontWeight: 'var(--fw-bold)',
+              fontSize: 'var(--text-xl)',
+              color: 'var(--fg-display)',
+              margin: 0,
+            }}
+          >
+            Deploy Timeline
+          </h2>
           <button
             onClick={() => refetch()}
-            className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            disabled={isFetching}
+            aria-label="Refresh deployments"
+            className="dm-refresh-btn"
           >
+            <RotateCw
+              size={13}
+              strokeWidth={1.5}
+              style={{ animation: isFetching ? 'dm-spin 1s linear infinite' : 'none' }}
+            />
             Refresh
           </button>
         </div>
-
-        {pendingDecisions.length > 0 ? (
-          <div className="space-y-3">
-            {pendingDecisions.map((d) => (
-              <DecisionCard
-                key={d.record_id}
-                decision={d}
-                onAction={handleAction}
-                isActing={decideMutation.isPending}
-              />
-            ))}
-          </div>
-        ) : (
-          <EmptyState message="No deployments pending approval" />
-        )}
-      </section>
-
-      {/* Deployment Queue Info */}
-      <section className="border-t border-slate-700/50 pt-4">
-        <p className="text-xs text-slate-500">
-          Polling every 5s &middot; {count} total in queue &middot; Cognito-authenticated actions
+        <p className="dm-subtitle">
+          Live from GitHub Deployments API · actions via GitHub PR review
         </p>
-      </section>
+      </div>
+
+      {/* Body */}
+      {isPending ? (
+        <div className="dm-list">
+          {[1, 2, 3].map((i) => <div key={i} className="dm-skeleton" />)}
+        </div>
+      ) : isError ? (
+        <div className="dm-error">
+          GitHub API unavailable — check VITE_GITHUB_READ_TOKEN or rate limits.
+        </div>
+      ) : items.length === 0 ? (
+        <div className="dm-empty">No deployments found.</div>
+      ) : (
+        <div className="dm-list">
+          {items.map((item) => (
+            <DeployCard key={item.deployment.id} item={item} />
+          ))}
+        </div>
+      )}
+
+      {/* Footer telemetry — Law 5 */}
+      {!isPending && !isError && (
+        <div className="dm-footer">
+          {items.length} deployments · refreshes every 30s
+        </div>
+      )}
+
+      <style>{`
+        /* AC-4: all color values via CSS vars from colors_and_type.css */
+        .dm-page {
+          padding: var(--space-6) var(--space-4);
+          max-width: 680px;
+          margin: 0 auto;
+          background: var(--bg);
+          min-height: 100%;
+        }
+        .dm-page-header { margin-bottom: var(--space-8); }
+        .dm-page-title-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+        .dm-subtitle {
+          font-family: var(--font-body);
+          font-size: var(--text-xs);
+          color: var(--fg-muted);
+          margin-top: var(--space-1);
+          margin-bottom: 0;
+        }
+
+        /* Status chip */
+        .dm-status-chip {
+          display: inline-flex;
+          align-items: center;
+          gap: var(--space-1);
+          padding: var(--space-1) var(--space-2);
+          border-radius: var(--radius-sm);
+          font-family: var(--font-heading);
+          font-size: var(--text-xs);
+          font-weight: var(--fw-medium);
+          letter-spacing: var(--tracking-label);
+          text-transform: uppercase;
+          opacity: 0.9;
+        }
+
+        /* Steps */
+        .dm-steps {
+          display: flex;
+          align-items: center;
+          gap: var(--space-1);
+        }
+        .dm-step-group {
+          display: flex;
+          align-items: center;
+          gap: var(--space-1);
+        }
+        .dm-step-bar {
+          height: 3px;
+          border-radius: var(--radius-xs);
+          transition: background var(--dur-base) var(--ease-orbit);
+        }
+        .dm-step-dot {
+          width: 4px;
+          height: 4px;
+          border-radius: 50%;
+          transition: background var(--dur-base) var(--ease-orbit);
+        }
+
+        /* Card — Law 3: subsurface depth */
+        .dm-card {
+          background: var(--bg-surface);
+          border: var(--border-subtle);
+          border-radius: var(--radius-lg);
+          padding: var(--space-5);
+          box-shadow: var(--shadow-sm);
+          display: flex;
+          flex-direction: column;
+          gap: var(--space-3);
+          transition:
+            box-shadow var(--dur-base) var(--ease-orbit),
+            border var(--dur-base) var(--ease-orbit);
+        }
+        .dm-card--active { box-shadow: var(--shadow-md); }
+        .dm-card:hover {
+          border: var(--border-hover);
+          box-shadow: var(--shadow-md);
+        }
+
+        .dm-card-header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: var(--space-3);
+        }
+        .dm-card-title-row {
+          display: flex;
+          align-items: center;
+          gap: var(--space-2);
+          margin-bottom: var(--space-1);
+        }
+        .dm-branch-row {
+          display: flex;
+          align-items: center;
+          gap: var(--space-1);
+          color: var(--fg-muted);
+        }
+
+        /* Telemetry — Law 5 */
+        .dm-telemetry {
+          display: flex;
+          align-items: center;
+          gap: var(--space-4);
+          flex-wrap: wrap;
+        }
+        .dm-telemetry-item {
+          display: flex;
+          align-items: center;
+          gap: var(--space-1);
+          color: var(--fg-muted);
+        }
+
+        /* Deep-link buttons — Law 4: orbital motion */
+        .dm-actions {
+          display: flex;
+          gap: var(--space-2);
+          padding-top: var(--space-1);
+        }
+        .dm-link-primary,
+        .dm-link-secondary {
+          display: inline-flex;
+          align-items: center;
+          gap: var(--space-1);
+          padding: var(--space-1) var(--space-3);
+          border-radius: var(--radius-sm);
+          font-family: var(--font-heading);
+          font-weight: var(--fw-medium);
+          font-size: var(--text-xs);
+          background: transparent;
+          text-decoration: none;
+          transition:
+            color var(--dur-fast) var(--ease-orbit),
+            border var(--dur-fast) var(--ease-orbit);
+        }
+        .dm-link-primary {
+          color: var(--accent);
+          border: var(--border-subtle);
+        }
+        .dm-link-primary:hover {
+          color: var(--accent-hover);
+          border: var(--border-hover);
+        }
+        .dm-link-secondary {
+          color: var(--fg-muted);
+          border: var(--border-divider);
+        }
+        .dm-link-secondary:hover {
+          color: var(--fg);
+          border: var(--border-subtle);
+        }
+
+        /* Refresh button */
+        .dm-refresh-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: var(--space-1);
+          background: none;
+          border: none;
+          cursor: pointer;
+          color: var(--fg-muted);
+          font-family: var(--font-body);
+          font-size: var(--text-xs);
+          padding: var(--space-1);
+          transition: color var(--dur-fast) var(--ease-orbit);
+        }
+        .dm-refresh-btn:hover { color: var(--fg); }
+        .dm-refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Skeletons / states */
+        .dm-list { display: flex; flex-direction: column; gap: var(--space-3); }
+        .dm-skeleton {
+          height: 120px;
+          background: var(--bg-surface);
+          border-radius: var(--radius-lg);
+          border: var(--border-divider);
+          opacity: 0.5;
+        }
+        .dm-error {
+          padding: var(--space-5);
+          border-radius: var(--radius-lg);
+          border: 1px solid var(--status-blocked);
+          color: var(--status-blocked);
+          font-family: var(--font-body);
+          font-size: var(--text-sm);
+          background: var(--bg-surface);
+          box-shadow: var(--shadow-sm);
+        }
+        .dm-empty {
+          padding: var(--space-8);
+          text-align: center;
+          color: var(--fg-muted);
+          font-family: var(--font-body);
+          font-size: var(--text-sm);
+        }
+        .dm-footer {
+          margin-top: var(--space-6);
+          padding-top: var(--space-4);
+          border-top: var(--border-divider);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          color: var(--fg-muted);
+        }
+
+        /* Law 4: orbital motion — spin animation */
+        @keyframes dm-spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   )
 }

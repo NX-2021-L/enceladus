@@ -1,36 +1,76 @@
-/**
- * DeployApprovalBanner — Non-dismissable notification banner shown across all pages
- * when production deployments are pending approval (DOC-63420302EF65 §6.1).
- *
- * Renders above the main content in AppShell when pendingCount > 0.
- * Links to /deployments for the full Deployment Manager surface.
- */
+// Deploy activity banner — sources from GitHub Deployments API (ENC-TSK-F62 AC-1).
+// Shows when in_progress/pending deployments are active on pages other than /deployments.
 
 import { useNavigate, useLocation } from 'react-router-dom'
-import { useDeployPendingCount } from '../../hooks/useDeploymentManager'
+import { useGitHubPendingCount } from '../../hooks/useGitHubDeployments'
+import { Activity } from 'lucide-react'
 
 export function DeployApprovalBanner() {
-  const pendingCount = useDeployPendingCount()
+  const pendingCount = useGitHubPendingCount().data ?? 0
   const navigate = useNavigate()
   const { pathname } = useLocation()
 
-  // Don't show banner if no pending deployments or already on the deployments page
   if (pendingCount === 0 || pathname === '/deployments') return null
 
   return (
-    <div className="bg-amber-500/10 border-b border-amber-500/20 px-4 py-2 flex items-center justify-between">
-      <div className="flex items-center gap-2 min-w-0">
-        <span className="flex-shrink-0 w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-        <span className="text-xs text-amber-300 truncate">
-          <span className="font-semibold">{pendingCount}</span>
-          {pendingCount === 1 ? ' deployment' : ' deployments'} awaiting approval
+    <div
+      style={{
+        background: 'color-mix(in srgb, var(--enc-teal) 8%, transparent)',
+        borderBottom: 'var(--border-divider)',
+        padding: 'var(--space-2) var(--space-4)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', minWidth: 0 }}>
+        <Activity
+          size={12}
+          strokeWidth={1.5}
+          style={{ color: 'var(--accent)', flexShrink: 0 }}
+        />
+        <span
+          style={{
+            fontFamily: 'var(--font-body)',
+            fontSize: 'var(--text-xs)',
+            color: 'var(--fg-muted)',
+          }}
+        >
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              color: 'var(--accent)',
+              fontWeight: 'var(--fw-medium)',
+            }}
+          >
+            {pendingCount}
+          </span>
+          {pendingCount === 1 ? ' deployment' : ' deployments'} in progress
         </span>
       </div>
       <button
         onClick={() => navigate('/deployments')}
-        className="flex-shrink-0 text-xs font-medium text-amber-400 hover:text-amber-300 active:text-amber-200 transition-colors"
+        style={{
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          fontFamily: 'var(--font-heading)',
+          fontWeight: 'var(--fw-medium)',
+          fontSize: 'var(--text-xs)',
+          color: 'var(--accent)',
+          padding: 'var(--space-1) var(--space-2)',
+          borderRadius: 'var(--radius-sm)',
+          flexShrink: 0,
+          transition: `color var(--dur-fast) var(--ease-orbit)`,
+        }}
+        onMouseEnter={(e) => {
+          ;(e.currentTarget as HTMLButtonElement).style.color = 'var(--accent-hover)'
+        }}
+        onMouseLeave={(e) => {
+          ;(e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)'
+        }}
       >
-        Review Now &rarr;
+        View →
       </button>
     </div>
   )
