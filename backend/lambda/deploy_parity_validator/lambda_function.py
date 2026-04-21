@@ -45,6 +45,20 @@ INTERNAL_API_KEY     = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
 ENVIRONMENT_SUFFIX   = os.environ.get("ENVIRONMENT_SUFFIX", "")  # "" = prod, "-gamma" = gamma
 AWS_REGION           = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
 
+# ENC-TSK-F64 / ENC-FTR-090 AC-20 — daily drift audit config
+SNS_TOPIC_ARN        = os.environ.get("SNS_TOPIC_ARN", "")
+CFN_DRIFT_STACKS     = [
+    s.strip()
+    for s in os.environ.get(
+        "CFN_DRIFT_STACKS",
+        "enceladus-data,enceladus-api,enceladus-github-roles,enceladus-monitoring",
+    ).split(",")
+    if s.strip()
+]
+SNAPSTART_MAX_STALE  = int(os.environ.get("SNAPSTART_MAX_STALE_VERSIONS", "5"))
+DRIFT_POLL_TIMEOUT   = int(os.environ.get("DRIFT_POLL_TIMEOUT", "240"))
+_LAMBDA_FN_PREFIXES  = ("devops-", "enceladus-")
+
 # Deployment Manager pipeline Lambdas — env health checked before every merge.
 _DM_BASE_NAMES = [
     "devops-deploy-intake",
@@ -100,6 +114,24 @@ def _get_secrets():
     if _secrets is None:
         _secrets = boto3.client("secretsmanager", region_name=DEPLOY_REGION)
     return _secrets
+
+
+_cfn  = None
+_sns  = None
+
+
+def _get_cfn():
+    global _cfn
+    if _cfn is None:
+        _cfn = boto3.client("cloudformation", region_name=DEPLOY_REGION)
+    return _cfn
+
+
+def _get_sns():
+    global _sns
+    if _sns is None:
+        _sns = boto3.client("sns", region_name=DEPLOY_REGION)
+    return _sns
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +501,159 @@ def _patch_readiness_doc(doc_id: str, outcome: Dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-F64 / ENC-FTR-090 AC-20 — Daily drift audit
+# ---------------------------------------------------------------------------
+
+def _detect_and_poll_stack_drift(stack_name: str) -> Dict:
+    """Trigger CFN detect_stack_drift, poll until complete or DRIFT_POLL_TIMEOUT."""
+    cfn = _get_cfn()
+    try:
+        resp = cfn.detect_stack_drift(StackName=stack_name)
+        detection_id = resp["StackDriftDetectionId"]
+    except Exception as exc:
+        return {"stack": stack_name, "status": "detection_error", "error": str(exc)}
+
+    deadline = time.monotonic() + DRIFT_POLL_TIMEOUT
+    while time.monotonic() < deadline:
+        sr = cfn.describe_stack_drift_detection_status(StackDriftDetectionId=detection_id)
+        ds = sr.get("DetectionStatus")
+        if ds == "DETECTION_COMPLETE":
+            drift_status = sr.get("StackDriftStatus", "UNKNOWN")
+            return {
+                "stack": stack_name,
+                "drift_status": drift_status,
+                "drifted_resource_count": sr.get("DriftedStackResourceCount", 0),
+                "drifted": drift_status == "DRIFTED",
+            }
+        if ds == "DETECTION_FAILED":
+            return {"stack": stack_name, "status": "detection_failed",
+                    "reason": sr.get("DetectionStatusReason", "")}
+        time.sleep(15)
+
+    return {"stack": stack_name, "status": "detection_timeout", "detection_id": detection_id}
+
+
+def _list_prod_lambda_names() -> List[str]:
+    """Return all Lambda function names matching the devops-/enceladus- prefixes."""
+    lc = _get_lambda()
+    names: List[str] = []
+    paginator = lc.get_paginator("list_functions")
+    for page in paginator.paginate():
+        for fn in page.get("Functions", []):
+            name = fn.get("FunctionName", "")
+            if any(name.startswith(p) for p in _LAMBDA_FN_PREFIXES):
+                names.append(name)
+    return names
+
+
+def _audit_code_size(fn_names: List[str]) -> List[Dict]:
+    """CodeSize < 1024 bytes = CFN ZipFile stub overwrite (ENC-FTR-068 AC-5)."""
+    lc = _get_lambda()
+    anomalies: List[Dict] = []
+    for name in fn_names:
+        try:
+            cfg = lc.get_function_configuration(FunctionName=name)
+            size = cfg.get("CodeSize", 0)
+            if size < 1024:
+                anomalies.append({"lambda": name, "code_size": size,
+                                  "reason": "CFN ZipFile stub overwrite (ENC-FTR-068 AC-5)"})
+        except Exception as exc:
+            logger.warning("code_size check failed for %s: %s", name, exc)
+    return anomalies
+
+
+def _audit_snapstart_versions(fn_names: List[str]) -> List[Dict]:
+    """Flag Lambdas with >SNAPSTART_MAX_STALE published versions (SnapStart cost trap)."""
+    lc = _get_lambda()
+    anomalies: List[Dict] = []
+    for name in fn_names:
+        try:
+            resp = lc.list_versions_by_function(FunctionName=name, MaxItems=50)
+            versions = [v for v in resp.get("Versions", []) if v.get("Version") != "$LATEST"]
+            if len(versions) > SNAPSTART_MAX_STALE:
+                anomalies.append({"lambda": name, "published_versions": len(versions),
+                                  "reason": f"{len(versions)} published versions exceeds {SNAPSTART_MAX_STALE} — potential SnapStart storage cost trap"})
+        except Exception as exc:
+            logger.warning("snapstart version check failed for %s: %s", name, exc)
+    return anomalies
+
+
+def _publish_drift_alert(subject: str, lines: List[str]) -> None:
+    if not SNS_TOPIC_ARN:
+        logger.warning("SNS_TOPIC_ARN not set; skipping drift alert")
+        return
+    try:
+        _get_sns().publish(
+            TopicArn=SNS_TOPIC_ARN,
+            Subject=subject[:100],
+            Message="\n".join(lines)[:262144],
+        )
+        logger.info("drift alert published: %s", subject)
+    except Exception as exc:
+        logger.error("SNS publish failed: %s", exc)
+
+
+def _run_daily_drift_audit() -> Dict:
+    """
+    ENC-FTR-090 AC-20 daily drift audit: CFN stack drift, CodeSize anomaly,
+    SnapStart published-version count. Publishes SNS alert if any anomaly found.
+    """
+    run_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    logger.info("[START] daily_drift_audit run_at=%s stacks=%s", run_at, CFN_DRIFT_STACKS)
+
+    # 1. CFN stack drift
+    cfn_results = [_detect_and_poll_stack_drift(s) for s in CFN_DRIFT_STACKS]
+    cfn_anomalies = [r for r in cfn_results
+                     if r.get("drifted") or r.get("status") in
+                     ("detection_error", "detection_failed", "detection_timeout")]
+
+    # 2 & 3. Lambda CodeSize + SnapStart version count
+    fn_names = _list_prod_lambda_names()
+    size_anomalies = _audit_code_size(fn_names)
+    snap_anomalies = _audit_snapstart_versions(fn_names)
+
+    total = len(cfn_anomalies) + len(size_anomalies) + len(snap_anomalies)
+
+    if total > 0:
+        lines = [f"deploy-parity-validator daily drift audit: {total} anomaly(ies) at {run_at}", ""]
+        if cfn_anomalies:
+            lines.append("=== CFN Stack Drift ===")
+            for r in cfn_anomalies:
+                detail = r.get("drift_status", r.get("status", ""))
+                count = r.get("drifted_resource_count", "")
+                lines.append(f"  {r['stack']}: {detail}" + (f" ({count} resources)" if count else ""))
+        if size_anomalies:
+            lines.append("=== CodeSize Anomaly (<1024 bytes — CFN stomp) ===")
+            for a in size_anomalies:
+                lines.append(f"  {a['lambda']}: {a['code_size']} bytes")
+        if snap_anomalies:
+            lines.append(f"=== SnapStart Version Count (>{SNAPSTART_MAX_STALE} stale) ===")
+            for a in snap_anomalies:
+                lines.append(f"  {a['lambda']}: {a['published_versions']} versions")
+        _publish_drift_alert(
+            subject=f"[drift-audit] {total} anomaly(ies) — {run_at}",
+            lines=lines,
+        )
+
+    result = {
+        "action": "daily_drift_audit",
+        "run_at": run_at,
+        "cfn_stacks_checked": len(cfn_results),
+        "cfn_anomalies": len(cfn_anomalies),
+        "lambdas_checked": len(fn_names),
+        "code_size_anomalies": len(size_anomalies),
+        "snapstart_anomalies": len(snap_anomalies),
+        "total_anomalies": total,
+        "alert_published": total > 0 and bool(SNS_TOPIC_ARN),
+        "cfn_detail": cfn_results,
+        "code_size_detail": size_anomalies,
+        "snapstart_detail": snap_anomalies,
+    }
+    logger.info("[END] daily_drift_audit total_anomalies=%d", total)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Pre-merge analysis + fix pass
 # ---------------------------------------------------------------------------
 def _run_pre_merge(event: Dict) -> Dict:
@@ -586,6 +771,9 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             result = _run_pre_merge(event)
         elif action in ("deploy_watch", "pr_merged"):
             result = _run_deploy_watch(event)
+        elif action == "daily_drift_audit":
+            # ENC-TSK-F64 / ENC-FTR-090 AC-20 — triggered by devops-parity-drift-daily schedule
+            result = _run_daily_drift_audit()
         else:
             return {
                 "statusCode": 400,
