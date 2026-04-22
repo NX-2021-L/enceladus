@@ -9053,27 +9053,35 @@ def _query_component_edges(
     is_inverse=false (forward edges only).
     """
     ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "FilterExpression": (
+            "source_id = :sid AND relationship_type = :rt "
+            "AND record_type = :rec AND is_inverse = :false"
+        ),
+        "ExpressionAttributeValues": {
+            ":sid": {"S": component_id},
+            ":rt": {"S": rel_type},
+            ":rec": {"S": "relationship"},
+            ":false": {"BOOL": False},
+        },
+    }
+    items: List[Dict[str, Any]] = []
     try:
-        resp = ddb.scan(
-            TableName=TRACKER_TABLE,
-            FilterExpression=(
-                "source_id = :sid AND relationship_type = :rt "
-                "AND record_type = :rec AND is_inverse = :false"
-            ),
-            ExpressionAttributeValues={
-                ":sid": {"S": component_id},
-                ":rt": {"S": rel_type},
-                ":rec": {"S": "relationship"},
-                ":false": {"BOOL": False},
-            },
-        )
+        while True:
+            resp = ddb.scan(**scan_kwargs)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last_key
     except Exception as exc:
         logger.warning(
             "Unable to scan for %s edges from %s: %s",
             rel_type, component_id, exc,
         )
         return []
-    return [_ddb_to_py(i) for i in resp.get("Items", [])]
+    return [_ddb_to_py(i) for i in items]
 
 
 def _query_task_inverse_edges(
@@ -9087,27 +9095,35 @@ def _query_task_inverse_edges(
     another component).
     """
     ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "FilterExpression": (
+            "source_id = :sid AND relationship_type = :rt "
+            "AND record_type = :rec AND is_inverse = :true"
+        ),
+        "ExpressionAttributeValues": {
+            ":sid": {"S": task_id},
+            ":rt": {"S": inverse_rel_type},
+            ":rec": {"S": "relationship"},
+            ":true": {"BOOL": True},
+        },
+    }
+    items: List[Dict[str, Any]] = []
     try:
-        resp = ddb.scan(
-            TableName=TRACKER_TABLE,
-            FilterExpression=(
-                "source_id = :sid AND relationship_type = :rt "
-                "AND record_type = :rec AND is_inverse = :true"
-            ),
-            ExpressionAttributeValues={
-                ":sid": {"S": task_id},
-                ":rt": {"S": inverse_rel_type},
-                ":rec": {"S": "relationship"},
-                ":true": {"BOOL": True},
-            },
-        )
+        while True:
+            resp = ddb.scan(**scan_kwargs)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last_key
     except Exception as exc:
         logger.warning(
             "Unable to scan for inverse %s edges on %s: %s",
             inverse_rel_type, task_id, exc,
         )
         return []
-    return [_ddb_to_py(i) for i in resp.get("Items", [])]
+    return [_ddb_to_py(i) for i in items]
 
 
 def _edge_is_locked(
