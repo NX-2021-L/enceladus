@@ -421,16 +421,17 @@ jobs:
                           fn_arn_base = f"arn:aws:lambda:{region}:{account_id}:function:{mapped_name}"
 
                           # Build AppSpec for CodeDeploy Lambda deployment.
+                          # CurrentVersion/TargetVersion must be bare integer strings, not qualified ARNs.
                           appspec = {
-                              "version": "0.0",
+                              "version": 0.0,
                               "Resources": [{
                                   mapped_name: {
                                       "Type": "AWS::Lambda::Function",
                                       "Properties": {
                                           "Name": mapped_name,
                                           "Alias": "live",
-                                          "CurrentVersion": f"{fn_arn_base}:{current_version}",
-                                          "TargetVersion": f"{fn_arn_base}:{new_version}",
+                                          "CurrentVersion": current_version,
+                                          "TargetVersion": new_version,
                                       }
                                   }
                               }]
