@@ -8998,24 +8998,32 @@ def _get_component_record(component_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _get_task_record(task_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a task record from DynamoDB tracker table by scanning on item_id.
+    """Fetch a task record from DynamoDB tracker table by item_id.
 
     Returns the full record as a plain dict, or None if not found.
-    Tracker keys are rel#/task#/... so we use a scan with a filter — the
-    tracker_mutation API does this with a GSI in prod; this helper is a
-    defensive direct-read variant used for gate evaluation. The table is
-    small enough to scan when callers already know the exact item_id.
+    Primary path: direct get_item using the known composite key (project_id=enceladus,
+    record_id=task#<item_id>). Fallback: full-table scan for cross-project tasks.
+    The previous scan(Limit=2) evaluated at most 2 items before filtering and was
+    statistically unable to locate any specific task in a large table (ENC-ISS-300).
     """
     ddb = _get_ddb()
-    # Tracker items are stored with record_id='task#ENC-TSK-F40' pattern.
-    # We also try 'item_id=ENC-TSK-F40' as a filter since older records may
-    # lack the record_id composite key.
     normalized = task_id.strip()
     record_key = normalized if normalized.startswith("task#") else f"task#{normalized}"
     item_id = normalized if not normalized.startswith("task#") else normalized[len("task#"):]
 
-    # Most tracker rows are keyed by project_id + record_id. We don't know
-    # project_id here, so scan with item_id filter.
+    # Primary path: direct key lookup for the common single-project case.
+    try:
+        resp = ddb.get_item(
+            TableName=TRACKER_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_key}},
+        )
+        item = resp.get("Item")
+        if item:
+            return _ddb_to_py(item)
+    except Exception as exc:
+        logger.warning("get_item for task %s failed, falling back to scan: %s", item_id, exc)
+
+    # Fallback: full scan for cross-project tasks not keyed under 'enceladus'.
     try:
         resp = ddb.scan(
             TableName=TRACKER_TABLE,
@@ -9024,7 +9032,6 @@ def _get_task_record(task_id: str) -> Optional[Dict[str, Any]]:
                 ":iid": {"S": item_id},
                 ":rt": {"S": "task"},
             },
-            Limit=2,
         )
     except Exception as exc:
         logger.warning("Unable to scan tracker for task %s: %s", item_id, exc)
