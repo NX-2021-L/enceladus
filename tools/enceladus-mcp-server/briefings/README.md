@@ -7,6 +7,7 @@ Canonical, Git-managed briefing templates for MCP session initialization now liv
 - `native-desktop-mcp-briefing/`: minimal desktop UI MCP-only briefing pack.
 - `native-terminal-mcp-briefing/`: minimal terminal/host-v2 MCP-only briefing pack.
 - `native-desktop-mcp-briefing-extras/`: related bootstrap contracts, validation matrix, and host-v2 helper scripts.
+- `cursor-cloud-agent-briefing/`: setup guide for Cursor Cloud Agents using the HTTP MCP gateway with `.cursor/mcp.json`.
 
 ## Scope
 
