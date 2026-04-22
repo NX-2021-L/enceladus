@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-22.01",
-  "updated_at": "2026-04-22T06:08:00Z",
-  "last_change_summary": "ENC-TSK-F93: added feed_publisher.s3_lessons_plans entity documenting lessons.json and plans.json S3 outputs added to feed_publisher generate_mobile_feeds(). ENC-ISS-299 follow-on.",
+  "version": "2026-04-22.02",
+  "updated_at": "2026-04-22T06:58:00Z",
+  "last_change_summary": "ENC-TSK-G02 (ENC-ISS-301): no schema changes — behavioral fix only. _query_component_edges() and _query_task_inverse_edges() now paginate DynamoDB scan to exhaustion via LastEvaluatedKey. Version bump required by CI governance-dictionary guard.",
   "owners": [
     "enceladus-platform"
   ],
