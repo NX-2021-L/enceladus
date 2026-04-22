@@ -1,6 +1,6 @@
 {
-  "version": "2026-04-21.51",
-  "updated_at": "2026-04-21T23:20:00Z",
+  "version": "2026-04-22.01",
+  "updated_at": "2026-04-22T06:08:00Z",
   "last_change_summary": "ENC-TSK-F93: added feed_publisher.s3_lessons_plans entity documenting lessons.json and plans.json S3 outputs added to feed_publisher generate_mobile_feeds(). ENC-ISS-299 follow-on.",
   "owners": [
     "enceladus-platform"
@@ -5052,5 +5052,12 @@
       }
     }
   },
-  "change_summary": "ENC-TSK-F45 / ENC-FTR-076 v2 Phase 9: SNS lifecycle events on component.approve/revert/deprecate/restore; 6 new typed relationship types (designs/designed-by/implements/implemented-by/deploys/deployed-by) in tracker_mutation; RELATIONSHIP_TYPE_TO_EDGE_LABEL + _upsert_relationship_edge placeholder support in graph_sync; 5 new OGTM edge labels (DESIGNS/DESIGNED_BY/IMPLEMENTED_BY/DEPLOYS/DEPLOYED_BY) in graph_query_api _ALLOWED_EDGE_TYPES. | ENC-FTR-091/F87: Added deploy.parity_validator entity."
+  "change_summary": "ENC-TSK-F45 / ENC-FTR-076 v2 Phase 9: SNS lifecycle events on component.approve/revert/deprecate/restore; 6 new typed relationship types (designs/designed-by/implements/implemented-by/deploys/deployed-by) in tracker_mutation; RELATIONSHIP_TYPE_TO_EDGE_LABEL + _upsert_relationship_edge placeholder support in graph_sync; 5 new OGTM edge labels (DESIGNS/DESIGNED_BY/IMPLEMENTED_BY/DEPLOYS/DEPLOYED_BY) in graph_query_api _ALLOWED_EDGE_TYPES. | ENC-FTR-091/F87: Added deploy.parity_validator entity.",
+  "change_log": [
+    {
+      "version": "2026-04-22.01",
+      "date": "2026-04-22",
+      "summary": "ENC-TSK-F99: no schema changes \u2014 version bump required by CI guard for lambda_function.py modification (ENC-ISS-300 _get_task_record scan fix)"
+    }
+  ]
 }
