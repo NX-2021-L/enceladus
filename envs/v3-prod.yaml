@@ -18,11 +18,11 @@ artifact_prefix: gen2-artifacts/v3-prod/
 required_reviewers:
   - io
 
-# SAM CodeDeploy DeploymentPreference. v3-prod is the current production target
-# with human users; uses the slower 10-minute canary steps to give io time to
-# abort via CodeDeploy dashboard or the CloudWatch alarm_arn CodeDeploy consumes
-# (F63 Phase 5 wires the alarm in).
-canary_preference: Linear10PercentEvery10Minutes
+# SAM CodeDeploy DeploymentPreference. Canary10Percent10Minutes: 10% canary
+# for 10 minutes, then 90% all-at-once — total deploy time ~10 min. Matches
+# F63 AC-3 intent (Canary10Percent5Minutes spec) while giving a short
+# observation window before the CloudWatch alarm_arn auto-rollback lands (F63 Phase 5).
+canary_preference: Canary10Percent10Minutes
 
 # GitHub Actions runner label. ubuntu-latest is the x86_64 row in the _build.yml
 # matrix (F59 Phase 1).
