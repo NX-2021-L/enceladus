@@ -1,7 +1,10 @@
 # Enceladus Workspace — Agent Bootstrap
 
-MCP server `enceladus` is configured in `~/.codex/config.toml`.
-Source: `tools/enceladus-mcp-server/server.py`
+MCP server `enceladus` is configured via remote HTTP gateway.
+- **Cursor Cloud Agents**: configured by `.cursor/mcp.json` (HTTP, proxied through backend — requires `ENCELADUS_COORDINATION_INTERNAL_API_KEY` secret in Cursor Dashboard).
+- **Local/Codex sessions**: configured in `~/.codex/config.toml` (run `tools/enceladus-mcp-server/install_profile.sh` to install).
+- Gateway URL: `https://jreese.net/api/v1/coordination/mcp`
+- Source: `tools/enceladus-mcp-server/server.py` (deployed as Lambda)
 
 ## Initialization (REQUIRED — run in order every session)
 
