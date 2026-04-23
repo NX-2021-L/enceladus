@@ -22,7 +22,7 @@ required_reviewers:
 # for 10 minutes, then 90% all-at-once — total deploy time ~10 min. Matches
 # F63 AC-3 intent (Canary10Percent5Minutes spec) while giving a short
 # observation window before the CloudWatch alarm_arn auto-rollback lands (F63 Phase 5).
-canary_preference: Canary10Percent10Minutes
+canary_preference: Canary10Percent5Minutes
 
 # GitHub Actions runner label. ubuntu-latest is the x86_64 row in the _build.yml
 # matrix (F59 Phase 1).
