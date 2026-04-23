@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-22.02",
-  "updated_at": "2026-04-22T06:58:00Z",
-  "last_change_summary": "ENC-TSK-G02 (ENC-ISS-301): no schema changes — behavioral fix only. _query_component_edges() and _query_task_inverse_edges() now paginate DynamoDB scan to exhaustion via LastEvaluatedKey. Version bump required by CI governance-dictionary guard.",
+  "version": "2026-04-23.01",
+  "updated_at": "2026-04-23T11:29:00Z",
+  "last_change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan is_placeholder nodes after MODIFY/REMOVE and archived relationship edge removal; backfill_graph replay follows the canonical tracker+documents projection contract.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4295,6 +4295,10 @@
         "race_fix_invariant": {
           "type": "string",
           "definition": "ENC-TSK-E01 (ENC-ISS-184) race-fix invariant preserved: typed edges PLAN_CONTAINS / PLAN_ATTACHED_DOC / PLAN_IMPLEMENTS / LEARNED_FROM / RELATED_TO / INFORMED_BY still materialize via placeholder MERGE when the target node has not yet been projected. is_placeholder=true does not suppress the edge \u2014 it only distinguishes the stub so retrieval scoring and coverage accounting can treat it as a low-information anchor rather than a missing record."
+        },
+        "orphan_purge_on_edge_removal": {
+          "type": "string",
+          "definition": "ENC-TSK-G06: graph_sync now collects the label-qualified placeholder candidates implied by plan/lesson/document/relationship edges and, after MODIFY/REMOVE or archived relationship deletion, runs `MATCH (n:{Label} {record_id: $rid}) WHERE coalesce(n.is_placeholder, false) = true AND NOT (n)--() DETACH DELETE n`. This removes phantom placeholder stubs once their final incident edge disappears while preserving real projected nodes and placeholders still anchored by any remaining relationship."
         }
       }
     },
@@ -4446,6 +4450,11 @@
           "definition": "Structured agent-session output in docstore .md documents MUST use comment-free YAML code blocks (```yaml ... ```) instead of GFM pipe tables. Pipe tables are permitted only for purely presentational content where renderer-dependence is explicitly acknowledged. YAML hash-comments (# ...) must be omitted inside fenced blocks to avoid compliance checker heading false positives. MCP server injects format_guidance in document.put/patch responses when pipe-table warnings are detected.",
           "governing_lesson": "ENC-LSN-026",
           "enforcement": "Advisory via MCP format_guidance response field. Compliance checker fence-awareness prevents false positives on conforming documents."
+        },
+        "graph_remove_identity": {
+          "type": "rule",
+          "definition": "ENC-TSK-G06: graph_sync normalizes document stream images so INSERT/MODIFY and REMOVE project by the same bare document identity. REMOVE resolves Keys.record_id, Keys.document_id, then Keys.item_id, and falls back to OldImage fields before deleting the Neo4j node. This prevents DOC-* nodes from surviving a documents-table delete solely because the stream key lacked record_id.",
+          "write_authority": "graph_sync Lambda (derived index behavior)."
         }
       }
     },
@@ -5052,8 +5061,13 @@
       }
     }
   },
-  "change_summary": "ENC-TSK-F45 / ENC-FTR-076 v2 Phase 9: SNS lifecycle events on component.approve/revert/deprecate/restore; 6 new typed relationship types (designs/designed-by/implements/implemented-by/deploys/deployed-by) in tracker_mutation; RELATIONSHIP_TYPE_TO_EDGE_LABEL + _upsert_relationship_edge placeholder support in graph_sync; 5 new OGTM edge labels (DESIGNS/DESIGNED_BY/IMPLEMENTED_BY/DEPLOYS/DEPLOYED_BY) in graph_query_api _ALLOWED_EDGE_TYPES. | ENC-FTR-091/F87: Added deploy.parity_validator entity.",
+  "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
   "change_log": [
+    {
+      "version": "2026-04-23.01",
+      "date": "2026-04-23",
+      "summary": "ENC-TSK-G06: documented graph_sync document DELETE identity normalization and orphan placeholder purge semantics; version bump required by CI governance-dictionary guard."
+    },
     {
       "version": "2026-04-22.01",
       "date": "2026-04-22",

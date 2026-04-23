@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # ENC-TSK-B94: Incremental Titan V2 embedding helpers. build_embedding_text,
 # hash_embedding_text, compute_embedding_for_record, and the model/property
@@ -124,6 +124,44 @@ def _deser_image(image: Dict) -> Dict[str, Any]:
     return {k: _deser_value(v) for k, v in image.items()}
 
 
+def _normalize_record_for_graph(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize cross-table record identity before graph projection.
+
+    Tracker rows key on ``record_id`` while document rows key on
+    ``document_id``. The graph projection code expects ``record_id``.
+    """
+    normalized = dict(record or {})
+    if not normalized:
+        return normalized
+
+    record_type = str(normalized.get("record_type") or "").strip()
+    if not record_type and normalized.get("document_id"):
+        record_type = "document"
+        normalized["record_type"] = record_type
+
+    if record_type == "document" and not normalized.get("record_id"):
+        normalized["record_id"] = normalized.get("document_id", "")
+
+    return normalized
+
+
+def _extract_remove_record_id(keys: Dict[str, Any], old_record: Optional[Dict[str, Any]] = None) -> str:
+    """Resolve the primary ID for REMOVE events across tracker + document tables."""
+    for key_name in ("record_id", "document_id", "item_id"):
+        typed = keys.get(key_name) or {}
+        value = str(typed.get("S") or "").strip()
+        if value:
+            return value
+
+    if old_record:
+        for key_name in ("record_id", "document_id", "item_id"):
+            value = str(old_record.get(key_name) or "").strip()
+            if value:
+                return value
+
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Graph schema constants
 # ---------------------------------------------------------------------------
@@ -195,6 +233,94 @@ NODE_PROPERTIES = [
     "record_id", "project_id", "title", "status", "priority",
     "category", "updated_at", "created_at",
 ]
+
+
+PlaceholderRef = Tuple[str, str]
+
+
+def _add_placeholder_ref(refs: Set[PlaceholderRef], label: str, raw_id: Any) -> None:
+    """Add a label-qualified placeholder candidate if the id is non-empty."""
+    record_id = _bare_id(str(raw_id).strip()) if raw_id is not None else ""
+    if label and record_id:
+        refs.add((label, record_id))
+
+
+def _collect_placeholder_target_refs(record: Dict[str, Any]) -> Set[PlaceholderRef]:
+    """Collect label-qualified placeholder nodes that a record may create.
+
+    Only graph_sync branches that use placeholder MERGE participate here.
+    This lets MODIFY/REMOVE flows prune stale placeholders after edges are
+    removed without touching real projected nodes.
+    """
+    refs: Set[PlaceholderRef] = set()
+    record_type = str(record.get("record_type") or "").strip()
+
+    if record_type == "plan":
+        for objective_id in record.get("objectives_set", []) or []:
+            obj_id = _bare_id(str(objective_id).strip()) if objective_id else ""
+            _add_placeholder_ref(refs, _infer_label_from_id(obj_id), obj_id)
+        for document_id in record.get("attached_documents", []) or []:
+            _add_placeholder_ref(refs, "Document", document_id)
+        _add_placeholder_ref(refs, "Feature", record.get("related_feature_id", ""))
+
+    elif record_type == "lesson":
+        for evidence_id in record.get("evidence_chain", []) or []:
+            ev_id = _bare_id(str(evidence_id).strip()) if evidence_id else ""
+            _add_placeholder_ref(refs, _infer_label_from_id(ev_id), ev_id)
+        for ext in record.get("extensions", []) or []:
+            if not isinstance(ext, dict):
+                continue
+            for evidence_id in ext.get("evidence_ids", []) or []:
+                ev_id = _bare_id(str(evidence_id).strip()) if evidence_id else ""
+                _add_placeholder_ref(refs, _infer_label_from_id(ev_id), ev_id)
+
+    elif record_type == "document":
+        for related_id in record.get("related_items", []) or []:
+            rid = _bare_id(str(related_id).strip()) if related_id else ""
+            _add_placeholder_ref(refs, _infer_label_from_id(rid), rid)
+        for source_id in record.get("informed_by", []) or []:
+            _add_placeholder_ref(refs, "Document", source_id)
+
+        doc_subtype = str(record.get("document_subtype") or "").strip()
+        if doc_subtype == "coe":
+            src = _bare_id(str(record.get("source_incident_id") or "").strip())
+            _add_placeholder_ref(refs, _infer_label_from_id(src), src)
+        elif doc_subtype == "wave":
+            _add_placeholder_ref(refs, "Plan", record.get("plan_anchor_id", ""))
+        elif doc_subtype == "handoff":
+            src = _bare_id(str(record.get("source_record_id") or "").strip())
+            _add_placeholder_ref(refs, _infer_label_from_id(src), src)
+
+    elif record_type == "relationship":
+        for endpoint in (record.get("source_id", ""), record.get("target_id", "")):
+            endpoint_id = _bare_id(str(endpoint).strip()) if endpoint else ""
+            _add_placeholder_ref(refs, _infer_label_from_id(endpoint_id), endpoint_id)
+
+    return refs
+
+
+def _relationship_placeholder_refs_from_sk(record_id_sk: str) -> Set[PlaceholderRef]:
+    """Infer placeholder endpoints from a rel# sort key when OldImage is absent."""
+    refs: Set[PlaceholderRef] = set()
+    parts = str(record_id_sk or "").split("#")
+    if len(parts) < 4 or parts[0] != "rel":
+        return refs
+    for endpoint in (parts[1], parts[3]):
+        endpoint_id = _bare_id(endpoint)
+        _add_placeholder_ref(refs, _infer_label_from_id(endpoint_id), endpoint_id)
+    return refs
+
+
+def _purge_orphan_placeholders(tx, refs: Set[PlaceholderRef]) -> None:
+    """Delete placeholder nodes that no longer participate in any edge."""
+    for label, record_id in refs:
+        tx.run(
+            f"MATCH (n:{label} {{record_id: $rid}}) "
+            "WHERE coalesce(n.is_placeholder, false) = true "
+            "AND NOT (n)--() "
+            "DETACH DELETE n",
+            rid=record_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -874,27 +1000,27 @@ def _process_record(driver, stream_record: Dict) -> None:
         if not new_image:
             return
 
-        record = _deser_image(new_image)
+        record = _normalize_record_for_graph(_deser_image(new_image))
         record_type = record.get("record_type", "")
-
-        # ENC-TSK-C49: Documents use 'document_id' as their DynamoDB primary
-        # key, not 'record_id'. Normalize here so downstream _upsert_node and
-        # _reconcile_edges (which both extract via record.get("record_id"))
-        # project Document nodes and edges correctly. Without this fix every
-        # document stream event silently bails out at `if not record_id: return`
-        # in _upsert_node, leaving Neo4j with zero Document nodes even though
-        # the DocumentsToGraphPipe is delivering events.
-        if record_type == "document" and not record.get("record_id"):
-            record["record_id"] = record.get("document_id", "")
+        old_image = dynamodb.get("OldImage", {})
+        old_record = _normalize_record_for_graph(_deser_image(old_image)) if old_image else {}
+        stale_placeholder_refs = _collect_placeholder_target_refs(old_record) - _collect_placeholder_target_refs(record)
 
         # ENC-FTR-049: Handle typed relationship records
         if record_type == "relationship":
             rel_status = record.get("status", "")
             record_id_sk = record.get("record_id", "")
+            relationship_refs = (
+                _collect_placeholder_target_refs(record)
+                if rel_status == "archived"
+                else set()
+            )
             with driver.session() as session:
                 if rel_status == "archived":
                     # Soft-deleted: remove edge from Neo4j projection
                     session.execute_write(lambda tx: _delete_relationship_edge(tx, record_id_sk))
+                    if relationship_refs:
+                        session.execute_write(lambda tx: _purge_orphan_placeholders(tx, relationship_refs))
                     logger.info(
                         "[INFO] Archived relationship edge removed from graph: %s",
                         record_id_sk,
@@ -925,6 +1051,8 @@ def _process_record(driver, stream_record: Dict) -> None:
 
             session.execute_write(lambda tx: _upsert_node(tx, record))
             session.execute_write(lambda tx: _reconcile_edges(tx, record))
+            if stale_placeholder_refs:
+                session.execute_write(lambda tx: _purge_orphan_placeholders(tx, stale_placeholder_refs))
 
             # ENC-TSK-B94: Incremental Titan V2 embedding. Runs inline on the
             # already-async SQS consumer so the user-visible mutation path is
@@ -970,24 +1098,34 @@ def _process_record(driver, stream_record: Dict) -> None:
         )
 
     elif event_name == "REMOVE":
+        old_image = dynamodb.get("OldImage", {})
+        old_record = _normalize_record_for_graph(_deser_image(old_image)) if old_image else {}
         keys = dynamodb.get("Keys", {})
-        record_id_val = keys.get("record_id", {}).get("S", "")
+        record_id_val = _extract_remove_record_id(keys, old_record)
         if not record_id_val:
             return
 
         # ENC-FTR-049: Handle relationship record removal
         if record_id_val.startswith("rel#"):
+            relationship_refs = _collect_placeholder_target_refs(old_record)
+            if not relationship_refs:
+                relationship_refs = _relationship_placeholder_refs_from_sk(record_id_val)
             with driver.session() as session:
                 session.execute_write(lambda tx: _delete_relationship_edge(tx, record_id_val))
+                if relationship_refs:
+                    session.execute_write(lambda tx: _purge_orphan_placeholders(tx, relationship_refs))
             logger.info("[INFO] Deleted relationship edge %s (event=REMOVE)", record_id_val)
             return
 
         # Extract the actual item_id from the record_id key
         # DynamoDB record_id format: "task#ENC-TSK-123" or bare "ENC-TSK-123"
         item_id = record_id_val.split("#", 1)[-1] if "#" in record_id_val else record_id_val
+        stale_placeholder_refs = _collect_placeholder_target_refs(old_record)
 
         with driver.session() as session:
             session.execute_write(lambda tx: _delete_node(tx, item_id))
+            if stale_placeholder_refs:
+                session.execute_write(lambda tx: _purge_orphan_placeholders(tx, stale_placeholder_refs))
 
         logger.info("[INFO] Deleted node %s (event=REMOVE)", item_id)
 
