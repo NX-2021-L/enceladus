@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-23.01",
-  "updated_at": "2026-04-23T11:29:00Z",
-  "last_change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan is_placeholder nodes after MODIFY/REMOVE and archived relationship edge removal; backfill_graph replay follows the canonical tracker+documents projection contract.",
+  "version": "2026-04-23.02",
+  "updated_at": "2026-04-23T22:59:00Z",
+  "last_change_summary": "ENC-TSK-F19: Add telemetry_eligible (bool, required) and vocabulary_bounded (bool, optional) per-field metadata properties. New governance.per_field_metadata entity documents the schema. tracker.task.components, document.doc.subtypepattern marked telemetry_eligible:true + vocabulary_bounded:true. tracker.issue.location_hint marked telemetry_eligible:true (vocabulary_bounded omitted \u2014 unbounded free text). Also includes ENC-TSK-G06 changes (graph_sync document DELETE normalization + backfill_graph canonical projection).",
   "owners": [
     "enceladus-platform"
   ],
@@ -249,7 +249,9 @@
             "type": "string"
           },
           "definition": "List of component_ids from the component registry that this task modifies (ENC-FTR-041). The checkout service enforces that task.transition_type is at least as strict as the most restrictive component's transition_type. Required for agent-initiated advances; human PWA advances bypass this check (user_initiated=true Cognito path).",
-          "usage_guidance": "ENC-TSK-F76 / ENC-ISS-289: tracker.create now accepts components at create time (MCP server uses denylist-driven passthrough; tracker_mutation persists components from the POST body). Canonical path is to include components in the tracker.create payload alongside title/category/priority/transition_type/acceptance_criteria. Post-create tracker_set is no longer required unless adding or changing components after creation. Format: [\"comp-checkout-service\", \"comp-jreese-pwa\"]. If not set by the time checkout.advance runs, agent advances are blocked (ENC-FTR-041 enforcement)."
+          "usage_guidance": "ENC-TSK-F76 / ENC-ISS-289: tracker.create now accepts components at create time (MCP server uses denylist-driven passthrough; tracker_mutation persists components from the POST body). Canonical path is to include components in the tracker.create payload alongside title/category/priority/transition_type/acceptance_criteria. Post-create tracker_set is no longer required unless adding or changing components after creation. Format: [\"comp-checkout-service\", \"comp-jreese-pwa\"]. If not set by the time checkout.advance runs, agent advances are blocked (ENC-FTR-041 enforcement).",
+          "telemetry_eligible": true,
+          "vocabulary_bounded": true
         },
         "parent": {
           "type": "string",
@@ -406,7 +408,8 @@
         "location_hint": {
           "type": "string",
           "definition": "Suspected code paths for investigation. Required at issue creation (ENC-TSK-805).",
-          "usage_guidance": "Point to specific files, functions, or domains where the root cause likely lives. Example: 'Check routes.tsx auth wrapper and authState.tsx session check'."
+          "usage_guidance": "Point to specific files, functions, or domains where the root cause likely lives. Example: 'Check routes.tsx auth wrapper and authState.tsx session check'.",
+          "telemetry_eligible": true
         }
       }
     },
@@ -852,7 +855,9 @@
             "max_length": 64
           },
           "definition": "ENC-FTR-078 self-learning field (AC-16). Optional string capturing an emergent type pattern for doc-subtype records. Valid only when document_subtype='doc'; presence on any other subtype is rejected with code 'subtypepattern_wrong_subtype'. Canonicalization: input is trimmed and lowercased at write time, then validated against ^[a-z-]+$; invalid formats rejected with code 'subtypepattern_invalid_format'. The canonical form is what the server stores and returns. Applied on both PUT and PATCH when the field is touched. Valid examples: blueprint, runbook, post-mortem, design-decision. Invalid examples: 'blueprint_2' (underscore), 'BLUE PRINT' (space), 'blueprint?' (punctuation), '2024-blueprint' (digit).",
-          "usage_guidance": "Use to replace colon-prefixed titles (rejected by title_hygiene_rule). Example migration: title 'Blueprint: API Auth Design' + subtype='doc' becomes title 'API Auth Design' + subtypepattern='blueprint'. Queryable via documents.search subtypepattern filter (ENC-FTR-078 AC-17)."
+          "usage_guidance": "Use to replace colon-prefixed titles (rejected by title_hygiene_rule). Example migration: title 'Blueprint: API Auth Design' + subtype='doc' becomes title 'API Auth Design' + subtypepattern='blueprint'. Queryable via documents.search subtypepattern filter (ENC-FTR-078 AC-17).",
+          "telemetry_eligible": true,
+          "vocabulary_bounded": true
         },
         "title_hygiene_rule": {
           "type": "rule",
@@ -5057,6 +5062,23 @@
         "s3_fallback_pwa": {
           "type": "object",
           "definition": "useFeed.ts wires lessonsQuery/plansQuery via feedKeys.lessons/feedKeys.plans and fetchLessons/fetchPlans hitting CloudFront /mobile/v1/lessons.json and /mobile/v1/plans.json. When hasLiveSnapshot is false (live feed unavailable), the hook falls back to these S3-cached feeds instead of returning hardcoded []."
+        }
+      }
+    },
+    "governance.per_field_metadata": {
+      "description": "Per-field metadata properties that may be applied to any entity field definition in the governance data dictionary. Declares policy for value-frequency telemetry (Convergence Surface, ENC-FTR-086) and vocabulary boundedness hints used for capacity sizing.",
+      "fields": {
+        "telemetry_eligible": {
+          "type": "boolean",
+          "required": true,
+          "definition": "When true, the Convergence Surface telemetry service (ENC-FTR-086) tracks attribute-value frequency for this field. Only fields explicitly marked telemetry_eligible:true are tracked; unmarked fields are excluded by default.",
+          "usage_guidance": "Set on fields whose value distributions carry operational or governance signal. Candidate fields at F19 launch: tracker.task.components, document.doc.subtypepattern, tracker.issue.location_hint."
+        },
+        "vocabulary_bounded": {
+          "type": "boolean",
+          "required": false,
+          "definition": "Optional hint. When true, indicates the field's value space is semantically bounded (enum-like or registry-constrained), enabling the Convergence Surface to apply a lower capacity cap. When false or absent, the field is treated as unbounded free text.",
+          "usage_guidance": "Set to true for enum fields or registry-keyed arrays (e.g. tracker.task.components, document.doc.subtypepattern). Omit or set false for open free-text fields (e.g. tracker.issue.location_hint)."
         }
       }
     }
