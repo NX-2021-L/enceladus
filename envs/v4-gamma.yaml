@@ -17,7 +17,7 @@ required_reviewers:
 # SAM CodeDeploy DeploymentPreference for post-deploy traffic shift.
 # Gamma uses a faster canary cadence (1-minute steps) since gamma traffic is
 # synthetic / low-risk. Prod uses 10-minute steps.
-canary_preference: Linear10PercentEvery1Minute
+canary_preference: AllAtOnce
 
 # GitHub Actions runner label. ubuntu-24.04-arm is the native arm64 runner
 # (zero QEMU, full aarch64 ABI); all arm64 Lambdas build here.
