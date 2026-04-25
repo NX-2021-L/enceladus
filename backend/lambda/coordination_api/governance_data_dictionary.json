@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-25.01",
-  "updated_at": "2026-04-25T06:30:00Z",
-  "last_change_summary": "ENC-FTR-097 / ENC-TSK-G27: Register Manifest Primitive v1 read actions. Adds five entities \u2014 tracker.manifest, tracker.get_acs, tracker.worklog_timeline, tracker.worklogs, tracker.manifest_bulk \u2014 plus tracker.content_hash documenting the SHA-256 read-side freshness token consumed by the selective-fetch actions. Backwards compatible: no existing entities modified, no schemas removed.",
+  "version": "2026-04-25.02",
+  "updated_at": "2026-04-25T19:47:38Z",
+  "last_change_summary": "ENC-FTR-098 / ENC-TSK-G33: add graph_sync.mentions_extraction entity (prose-field allowlist, ID-prefix alphabet, code-fence skip, provenance schema); register MENTIONS in document.graph_edges, gmf.graph_edges, and tracker.graphsearch.edge_types.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3205,7 +3205,8 @@
         "LEARNED_FROM",
         "TEACHES",
         "SUPERSEDES",
-        "SUPERSEDED_BY"
+        "SUPERSEDED_BY",
+        "MENTIONS"
       ],
       "data_source": "DynamoDB stream -> EventBridge Pipe -> SQS FIFO -> graph_sync Lambda -> Neo4j AuraDB",
       "auth": "Cognito JWT cookie OR X-Coordination-Internal-Key header",
@@ -3221,12 +3222,17 @@
       "fields": {
         "record_id": {
           "type": "string",
-          "constraints": {"format": "tracker_id", "required": true},
+          "constraints": {
+            "format": "tracker_id",
+            "required": true
+          },
           "definition": "Bare tracker record ID (e.g. ENC-TSK-890)."
         },
         "fields": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "definition": "Optional projection narrowing. When supplied, only the listed top-level manifest fields are returned. record_id, content_hash, and updated_at are always retained."
         },
         "response_envelope": {
@@ -3234,7 +3240,9 @@
           "definition": "Shape: {record_id, title, record_type, status, priority, transition_type, updated_at, acs:[{ac_index, short_title, status, evidence_ref, last_touched}], ac_count, content_hash}. ac status enum: 'complete' | 'incomplete'. content_hash is the SHA-256 read-side freshness token (see governance.dictionary.tracker.content_hash)."
         }
       },
-      "covered_lambdas": ["enceladus-mcp-code"],
+      "covered_lambdas": [
+        "enceladus-mcp-code"
+      ],
       "field_count": 3
     },
     "tracker.get_acs": {
@@ -3242,13 +3250,21 @@
       "fields": {
         "record_id": {
           "type": "string",
-          "constraints": {"format": "tracker_id", "required": true},
+          "constraints": {
+            "format": "tracker_id",
+            "required": true
+          },
           "definition": "Bare tracker record ID."
         },
         "indices": {
           "type": "array",
-          "items": {"type": "integer"},
-          "constraints": {"required": true, "min_items": 1},
+          "items": {
+            "type": "integer"
+          },
+          "constraints": {
+            "required": true,
+            "min_items": 1
+          },
           "definition": "Non-negative AC indices to fetch. Out-of-range indices return STRUCTURED_ERROR error_code AC_INDEX_OUT_OF_RANGE."
         },
         "content_hash": {
@@ -3260,7 +3276,9 @@
           "definition": "Shape: {record_id, acs:[{ac_index, body, status, evidence_ref}], content_hash}. Indices are returned in caller-supplied order after deduplication and sort."
         }
       },
-      "covered_lambdas": ["enceladus-mcp-code"],
+      "covered_lambdas": [
+        "enceladus-mcp-code"
+      ],
       "field_count": 4
     },
     "tracker.worklog_timeline": {
@@ -3268,7 +3286,10 @@
       "fields": {
         "record_id": {
           "type": "string",
-          "constraints": {"format": "tracker_id", "required": true},
+          "constraints": {
+            "format": "tracker_id",
+            "required": true
+          },
           "definition": "Bare tracker record ID."
         },
         "response_envelope": {
@@ -3276,7 +3297,9 @@
           "definition": "Shape: {record_id, timeline:[{worklog_id, timestamp, author, size_bytes, transition?}], count, content_hash}. worklog_id is a deterministic position-based label of the form wl-NNNN suitable for use as input to tracker.worklogs ids[]. transition is populated for entries that record a status write and contains {to:<new_status>}."
         }
       },
-      "covered_lambdas": ["enceladus-mcp-code"],
+      "covered_lambdas": [
+        "enceladus-mcp-code"
+      ],
       "field_count": 2
     },
     "tracker.worklogs": {
@@ -3284,22 +3307,31 @@
       "fields": {
         "record_id": {
           "type": "string",
-          "constraints": {"format": "tracker_id", "required": true},
+          "constraints": {
+            "format": "tracker_id",
+            "required": true
+          },
           "definition": "Bare tracker record ID."
         },
         "since": {
           "type": "string",
-          "constraints": {"format": "ISO 8601 datetime"},
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
           "definition": "Inclusive lower bound on worklog timestamp. Lexicographic comparison; correct for normalized UTC Zulu timestamps."
         },
         "until": {
           "type": "string",
-          "constraints": {"format": "ISO 8601 datetime"},
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
           "definition": "Inclusive upper bound on worklog timestamp."
         },
         "ids": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "definition": "Explicit set of worklog_id labels (form: wl-NNNN) returned by tracker.worklog_timeline. Combined with since/until via intersection."
         },
         "content_hash": {
@@ -3311,7 +3343,9 @@
           "definition": "Shape: {record_id, worklogs:[{worklog_id, timestamp, author, size_bytes, transition?, body, status}], count, content_hash}."
         }
       },
-      "covered_lambdas": ["enceladus-mcp-code"],
+      "covered_lambdas": [
+        "enceladus-mcp-code"
+      ],
       "field_count": 6
     },
     "tracker.manifest_bulk": {
@@ -3319,21 +3353,31 @@
       "fields": {
         "record_ids": {
           "type": "array",
-          "items": {"type": "string"},
-          "constraints": {"required": true, "min_items": 1, "max_items": 50},
+          "items": {
+            "type": "string"
+          },
+          "constraints": {
+            "required": true,
+            "min_items": 1,
+            "max_items": 50
+          },
           "definition": "List of bare tracker record IDs. Hard cap of 50 per call; oversize requests return STRUCTURED_ERROR error_code BULK_SIZE_EXCEEDED."
         },
         "fields": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "definition": "Optional projection narrowing applied uniformly to every manifest. Same semantics as tracker.manifest.fields."
         },
         "response_envelope": {
           "type": "object",
-          "definition": "Shape: {manifests:[{record_id, manifest, content_hash}], errors:[{record_id, error|error_payload}], manifest_count, error_count}. Records that fail to fetch are reported under errors[] with the same envelope shape — they do not abort the batch."
+          "definition": "Shape: {manifests:[{record_id, manifest, content_hash}], errors:[{record_id, error|error_payload}], manifest_count, error_count}. Records that fail to fetch are reported under errors[] with the same envelope shape \u2014 they do not abort the batch."
         }
       },
-      "covered_lambdas": ["enceladus-mcp-code"],
+      "covered_lambdas": [
+        "enceladus-mcp-code"
+      ],
       "field_count": 3
     },
     "tracker.content_hash": {
@@ -3341,7 +3385,11 @@
       "fields": {
         "algorithm": {
           "type": "string",
-          "constraints": {"enum": ["sha256"]},
+          "constraints": {
+            "enum": [
+              "sha256"
+            ]
+          },
           "definition": "Hash algorithm. Always sha256 hex-encoded."
         },
         "freshness_contract": {
@@ -4599,7 +4647,7 @@
       }
     },
     "document.graph_edges": {
-      "description": "Neo4j edge types projected from Document nodes via the DocumentsToGraphPipe \u2192 GraphSyncQueue \u2192 graph_sync handler (ENC-PLN-014). Document nodes carry BELONGS_TO (project), RELATED_TO (any related_items target), INFORMED_BY (source document, GDMP provenance), INFORMS (inverse provenance), and DOC_ATTACHED_TO_PLAN (inverse of plan PLAN_ATTACHED_DOC). ENC-FTR-077 adds subtype-specific edges: COE documents emit INVESTIGATES/INVESTIGATED_BY from source_incident_id, wave documents emit TRACKS_WAVE_OF/HAS_WAVE_DOC from plan_anchor_id, and handoff documents emit HANDS_OFF/HANDED_OFF_BY from source_record_id. Edge emission is implemented in backend/lambda/graph_sync/lambda_function.py inside the document branch of _reconcile_edges(), and the edge labels are registered in backend/lambda/graph_query_api/lambda_function.py _ALLOWED_EDGE_TYPES so they are queryable via tracker.graphsearch. ENC-TSK-E01: RELATED_TO and INFORMED_BY now MERGE label-correct placeholder target nodes (using _infer_label_from_id for related_items, hard-coded :Document for informed_by) before MERGEing the edge, eliminating the silent zero-edge race window when targets have not yet been projected.",
+      "description": "Neo4j edge types projected from Document nodes via the DocumentsToGraphPipe \u2192 GraphSyncQueue \u2192 graph_sync handler (ENC-PLN-014). Document nodes carry BELONGS_TO (project), RELATED_TO (any related_items target), INFORMED_BY (source document, GDMP provenance), INFORMS (inverse provenance), and DOC_ATTACHED_TO_PLAN (inverse of plan PLAN_ATTACHED_DOC). ENC-FTR-077 adds subtype-specific edges: COE documents emit INVESTIGATES/INVESTIGATED_BY from source_incident_id, wave documents emit TRACKS_WAVE_OF/HAS_WAVE_DOC from plan_anchor_id, and handoff documents emit HANDS_OFF/HANDED_OFF_BY from source_record_id. Edge emission is implemented in backend/lambda/graph_sync/lambda_function.py inside the document branch of _reconcile_edges(), and the edge labels are registered in backend/lambda/graph_query_api/lambda_function.py _ALLOWED_EDGE_TYPES so they are queryable via tracker.graphsearch. ENC-TSK-E01: RELATED_TO and INFORMED_BY now MERGE label-correct placeholder target nodes (using _infer_label_from_id for related_items, hard-coded :Document for informed_by) before MERGEing the edge, eliminating the silent zero-edge race window when targets have not yet been projected. ENC-FTR-098 / ENC-TSK-G35: Documents additionally emit MENTIONS edges from auto-extracted ID tokens in title/description/content prose. See entity graph_sync.mentions_extraction for the full extraction contract.",
       "fields": {
         "BELONGS_TO": {
           "type": "edge",
@@ -4673,6 +4721,13 @@
           "source_subtype": "handoff",
           "definition": "Task/Issue/Feature -> Document (handoff). Inverse of HANDS_OFF.",
           "edge_weight": 0.65
+        },
+        "MENTIONS": {
+          "type": "edge",
+          "target_label": "any",
+          "source_field": "prose fields per graph_sync.mentions_extraction.prose_field_allowlist['document']",
+          "definition": "Document -> Task/Issue/Feature/Plan/Lesson/Document/Component. Auto-extracted from title, description, and content prose by graph_sync._reconcile_mentions_edges() (ENC-FTR-098 / ENC-TSK-G35). Properties: source, extracted_from_field. Code-fence stripped before extraction.",
+          "governing_feature": "ENC-FTR-098"
         }
       },
       "governing_feature": "ENC-FTR-065",
@@ -4924,6 +4979,10 @@
         "EXECUTES_WITHIN": {
           "type": "edge",
           "definition": "Plan -> Generation development arc."
+        },
+        "MENTIONS": {
+          "type": "edge",
+          "definition": "Generation -> any governed record. Auto-extracted from title, description, architectural_thesis prose by graph_sync._reconcile_mentions_edges() (ENC-FTR-098 / ENC-TSK-G35). Same auto-extraction contract as graph_sync.mentions_extraction."
         }
       }
     },
@@ -5216,6 +5275,89 @@
           "usage_guidance": "Set to true for enum fields or registry-keyed arrays (e.g. tracker.task.components, document.doc.subtypepattern). Omit or set false for open free-text fields (e.g. tracker.issue.location_hint)."
         }
       }
+    },
+    "graph_sync.mentions_extraction": {
+      "description": "Auto-extraction of MENTIONS edges from prose fields on every governed record/document mutation (ENC-FTR-098, ENC-TSK-G28). Implemented in backend/lambda/graph_sync/mentions_extraction.py (pure helpers: strip_code_fences, extract_id_tokens, stamp_provenance) and wired into _reconcile_edges() via _reconcile_mentions_edges() (ENC-TSK-G35). Generalizes the LEARNED_FROM precedent (ENC-FTR-052 / ENC-TSK-B89) to corpus-scale prose. The wipe-and-recreate semantics of _reconcile_edges' top-level outgoing-edge prune deliver diff-and-delete for free; the branch is idempotent by construction. Source: DOC-59D2295AA7FD section 7.2.",
+      "governing_feature": "ENC-FTR-098",
+      "governing_task": "ENC-TSK-G28",
+      "prose_field_allowlist": {
+        "task": [
+          "title",
+          "description",
+          "intent"
+        ],
+        "issue": [
+          "title",
+          "description",
+          "hypothesis",
+          "technical_notes",
+          "location_hint"
+        ],
+        "feature": [
+          "title",
+          "description",
+          "user_story"
+        ],
+        "plan": [
+          "title",
+          "description",
+          "intent"
+        ],
+        "lesson": [
+          "title",
+          "description"
+        ],
+        "generation": [
+          "title",
+          "description",
+          "architectural_thesis"
+        ],
+        "document": [
+          "title",
+          "description",
+          "content"
+        ]
+      },
+      "id_alphabet": {
+        "description": "Regex alphabet of governed Enceladus ID prefixes resolvable by graph_sync._infer_label_from_id. Mirrors ID_PREFIX_TO_LABEL in graph_sync/lambda_function.py.",
+        "enc_record_prefixes": [
+          "TSK",
+          "ISS",
+          "FTR",
+          "LSN",
+          "PLN",
+          "GEN",
+          "DPL"
+        ],
+        "enc_pattern": "\\bENC-(TSK|ISS|FTR|LSN|PLN|GEN|DPL)-[A-Za-z0-9]{3,4}\\b",
+        "document_pattern": "\\bDOC-[A-Fa-f0-9]{12}\\b",
+        "component_pattern": "\\bcomp-[a-z0-9-]+\\b"
+      },
+      "code_fence_skip": {
+        "enabled": true,
+        "description": "Triple-backtick fenced code blocks are stripped before extraction so example payloads do not produce spurious MENTIONS. Single-backtick inline spans are preserved -- IDs in `inline code` remain intentional references.",
+        "regex": "```.*?```"
+      },
+      "provenance_schema": {
+        "description": "Edge property bag stamped on every MENTIONS edge by stamp_provenance(). Distinguishes auto-extracted edges from typed-relationship edges and lets the drift-audit (ENC-TSK-G43) and backfill (ENC-TSK-G42) paths tag their provenance distinctly.",
+        "properties": {
+          "source": {
+            "type": "enum",
+            "enum": [
+              "auto_mention",
+              "backfill",
+              "audit_recompute"
+            ],
+            "definition": "Origin of this MENTIONS edge. auto_mention = live graph_sync stream path; backfill = one-shot ENC-TSK-G42 corpus run; audit_recompute = drift-audit reconciliation."
+          },
+          "extracted_from_field": {
+            "type": "string",
+            "definition": "Name of the prose field from which the target ID token was lifted (e.g. 'description', 'intent', 'user_story', 'content')."
+          }
+        }
+      },
+      "self_reference_policy": "Self-mentions (target == source) are filtered out before MERGE -- they clutter neighbor queries and add no information to the graph.",
+      "unknown_prefix_policy": "Tokens whose prefix is not in ID_PREFIX_TO_LABEL are skipped with a WARNING log line (no unlabelled placeholder is created). Future record types extend the alphabet via this entity."
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
