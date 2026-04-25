@@ -295,8 +295,12 @@ jobs:
           ENVIRONMENT_SUFFIX: ${{ needs.resolve.outputs.environment_suffix }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json, os, subprocess, sys, tempfile, time
+          python3 -u - <<'PY'
+          # ENC-TSK-G69: Parallel kickoff via ThreadPoolExecutor + flush-on-print + 900s
+          # per-deployment internal timeout. Compresses ~28-Lambda kickoff from ~14 min
+          # (sequential) to ~2 min (8 workers), enabling sub-10-min end-to-end Gen2
+          # dispatch. Mirrors the proven Sev1 brute-force pattern from ENC-ISS-305.
+          import concurrent.futures, json, os, subprocess, sys, tempfile, threading, time
 
           version_ids     = json.loads(os.environ['VERSION_IDS_JSON'])
           fn_map          = json.loads(os.environ.get('FUNCTION_NAME_MAP_JSON') or '{}')
@@ -307,12 +311,9 @@ jobs:
           sha    = os.environ['SHA']
           prefix = f"lambda-artifacts/{arch}-py{py}"
           region = 'us-west-2'
-          # CodeDeploy application name mirrors the CFN resource in 07-codedeploy.yaml.
-          # EnvironmentSuffix embedded in the app name; v3-prod uses "" suffix.
           env_suffix = os.environ.get('ENVIRONMENT_SUFFIX', '')
           codedeploy_app = f"enceladus-lambda{env_suffix}"
 
-          # Map manifest canary_preference to CodeDeploy built-in config name.
           CODEDEPLOY_CONFIG_MAP = {
               'Canary10Percent5Minutes':        'CodeDeployDefault.LambdaCanary10Percent5Minutes',
               'Canary10Percent10Minutes':       'CodeDeployDefault.LambdaCanary10Percent10Minutes',
@@ -322,106 +323,128 @@ jobs:
           }
           use_codedeploy = canary_pref and canary_pref != 'AllAtOnce' and canary_pref in CODEDEPLOY_CONFIG_MAP
 
-          errors  = []
-          skipped = []
-          deployments = []  # (fn, mapped_name, deployment_id) for CodeDeploy wait
+          # Hoisted out of the per-function loop: 1 sts call total instead of 1 per function.
+          if use_codedeploy:
+              account_id = subprocess.check_output(
+                  ['aws', 'sts', 'get-caller-identity', '--query', 'Account', '--output', 'text'],
+                  text=True,
+              ).strip()
+          else:
+              account_id = ''
 
-          for fn, version_id in sorted(version_ids.items()):
+          # Mapping mirrors 07-codedeploy.yaml DeploymentGroup names. Hoisted out.
+          DG_NAME_MAP = {
+              'devops-coordination-api':        'coordination-api',
+              'devops-tracker-mutation-api':    'tracker-mutation',
+              'devops-document-api':            'document-api',
+              'devops-graph-query-api':         'graph-query-api',
+              'devops-project-service':         'project-service',
+              'devops-feed-query-api':          'feed-query',
+              'devops-coordination-monitor-api': 'coordination-monitor',
+              'devops-deploy-intake':           'deploy-intake',
+              'devops-reference-search':        'reference-search',
+              'auth-refresh':                   'auth-refresh',
+              'devops-deploy-orchestrator':     'deploy-orchestrator',
+              'devops-deploy-finalize':         'deploy-finalize',
+              'devops-deploy-decide':           'deploy-decide',
+              'devops-feed-publisher':          'feed-publisher',
+              'enceladus-governance-audit':     'governance-audit',
+              'devops-doc-prep':                'doc-prep',
+              'enceladus-bedrock-agent-actions': 'bedrock-agent-actions',
+              'devops-changelog-api':           'changelog-api',
+              'devops-graph-sync':              'graph-sync',
+              'enceladus-neo4j-backup':         'neo4j-backup',
+              'enceladus-graph-health-metrics': 'graph-health-metrics',
+              'devops-env-drift-auditor':       'env-drift-auditor',
+              'devops-deploy-parity-validator': 'deploy-parity-validator',
+          }
+
+          _print_lock = threading.Lock()
+          def log(msg, err=False):
+              # Serialize prints across worker threads so log lines don't interleave.
+              # flush=True surfaces progress in real time (ENC-ISS-305 buffering fix).
+              with _print_lock:
+                  print(msg, file=(sys.stderr if err else sys.stdout), flush=True)
+
+          def deploy_one(fn, version_id):
+              """Per-function pipeline: download artifact, update code, publish version,
+              kick off CodeDeploy canary (or fall back to direct alias). Returns:
+                {'fn', 'mapped_name', 'status', 'dep_id'?, 'error'?}
+              status in {'codedeploy', 'direct', 'skip', 'error'}."""
               mapped_name = fn_map.get(fn)
               if not mapped_name:
-                  print(f'[skip] {fn}  (not in function_name_map)')
-                  skipped.append(fn)
-                  continue
+                  log(f'[skip] {fn}  (not in function_name_map)')
+                  return {'fn': fn, 'status': 'skip'}
               s3_key = f"{prefix}/{fn}-{sha}.zip"
-              print(f"[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id}")
+              log(f'[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id}')
 
-              # Download artifact to runner then push via --zip-file.
-              # Lambda UpdateFunctionCode requires S3 bucket in same region as function
-              # (us-west-2); jreese-net is in us-east-1 → PermanentRedirect on S3-side fetch.
               tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
               tmp.close()
-              dl = subprocess.run([
-                  'aws', 's3api', 'get-object',
-                  '--bucket', bucket,
-                  '--key', s3_key,
-                  '--version-id', version_id,
-                  '--region', 'us-east-1',
-                  tmp.name,
-              ], capture_output=True, text=True)
-              if dl.returncode != 0:
-                  print(f'::error::s3 download failed for {fn}: {dl.stderr.strip()}',
-                        file=sys.stderr)
-                  errors.append(fn)
-                  os.unlink(tmp.name)
-                  continue
+              try:
+                  dl = subprocess.run(
+                      ['aws', 's3api', 'get-object',
+                       '--bucket', bucket, '--key', s3_key,
+                       '--version-id', version_id,
+                       '--region', 'us-east-1', tmp.name],
+                      capture_output=True, text=True,
+                  )
+                  if dl.returncode != 0:
+                      log(f'::error::s3 download failed for {fn}: {dl.stderr.strip()}', err=True)
+                      return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 's3 download'}
 
-              r = subprocess.run([
-                  'aws', 'lambda', 'update-function-code',
-                  '--region', region,
-                  '--function-name', mapped_name,
-                  '--zip-file', f'fileb://{tmp.name}',
-                  '--publish',
-              ], capture_output=True, text=True)
-              os.unlink(tmp.name)
+                  r = subprocess.run(
+                      ['aws', 'lambda', 'update-function-code',
+                       '--region', region, '--function-name', mapped_name,
+                       '--zip-file', f'fileb://{tmp.name}', '--publish'],
+                      capture_output=True, text=True,
+                  )
+              finally:
+                  try: os.unlink(tmp.name)
+                  except OSError: pass
+
               if r.returncode != 0:
                   stderr = r.stderr.strip()
                   if 'ResourceNotFoundException' in stderr or 'Function not found' in stderr:
-                      # Function not yet provisioned in this environment (CFN ZipFile stub
-                      # not deployed). Skip gracefully — it will be deployed in a future
-                      # run once the CFN stack update provisions the function.
-                      print(f'  [skip] {mapped_name}: not provisioned in this environment yet')
-                      skipped.append(fn)
-                  else:
-                      print(f'::error::update-function-code failed for {mapped_name}: {stderr}',
-                            file=sys.stderr)
-                      errors.append(fn)
-                  continue
+                      log(f'  [skip] {mapped_name}: not provisioned in this environment yet')
+                      return {'fn': fn, 'mapped_name': mapped_name, 'status': 'skip'}
+                  log(f'::error::update-function-code failed for {mapped_name}: {stderr}', err=True)
+                  return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 'update-function-code'}
 
-              # ENC-TSK-F63 AC-2/AC-3: capture published version for alias + CodeDeploy.
               try:
-                  fn_info = json.loads(r.stdout)
-                  new_version = fn_info.get('Version', '')
+                  new_version = json.loads(r.stdout).get('Version', '')
               except (json.JSONDecodeError, KeyError):
                   new_version = ''
+              if not new_version:
+                  log(f'::error::could not parse Version from update-function-code for {mapped_name}', err=True)
+                  return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 'no version'}
 
-              subprocess.run([
-                  'aws', 'lambda', 'wait', 'function-updated-v2',
-                  '--region', region, '--function-name', mapped_name,
-              ], check=False)
+              subprocess.run(
+                  ['aws', 'lambda', 'wait', 'function-updated-v2',
+                   '--region', region, '--function-name', mapped_name],
+                  check=False,
+              )
 
-              # ENC-TSK-F63 AC-3: Canary traffic shift via CodeDeploy.
-              # Get current alias version (CurrentVersion for CodeDeploy AppSpec).
-              if new_version and use_codedeploy:
+              # CodeDeploy canary path
+              use_cd_succeeded = False
+              if use_codedeploy:
                   try:
-                      alias_r = subprocess.run([
-                          'aws', 'lambda', 'get-alias',
-                          '--function-name', mapped_name,
-                          '--name', 'live',
-                          '--region', region,
-                      ], capture_output=True, text=True)
+                      alias_r = subprocess.run(
+                          ['aws', 'lambda', 'get-alias',
+                           '--function-name', mapped_name, '--name', 'live',
+                           '--region', region],
+                          capture_output=True, text=True,
+                      )
                       if alias_r.returncode == 0:
-                          alias_info = json.loads(alias_r.stdout)
-                          current_version = alias_info.get('FunctionVersion', '$LATEST')
+                          current_version = json.loads(alias_r.stdout).get('FunctionVersion', '$LATEST')
                       else:
                           current_version = '$LATEST'
 
-                      # Bootstrap case: live alias still points to $LATEST (first deploy).
-                      # CodeDeploy requires integer version numbers for CurrentVersion and
-                      # TargetVersion — $LATEST is rejected with INVALID_LAMBDA_CONFIGURATION.
-                      # Fall back to direct alias update; next deploy will have a valid
-                      # integer CurrentVersion and will use the full canary path.
                       if current_version == '$LATEST':
-                          print(f'  [bootstrap] {mapped_name}: live alias is $LATEST — direct alias update (next deploy will use CodeDeploy canary)')
-                          use_codedeploy_succeeded = False
+                          # Bootstrap: live alias points to $LATEST. CodeDeploy rejects
+                          # $LATEST as CurrentVersion. Direct alias update; next deploy
+                          # will use the canary path with a valid integer CurrentVersion.
+                          log(f'  [bootstrap] {mapped_name}: live alias is $LATEST — direct alias update (next deploy will use CodeDeploy canary)')
                       else:
-                          account_id = subprocess.check_output(
-                              ['aws', 'sts', 'get-caller-identity', '--query', 'Account', '--output', 'text'],
-                              text=True
-                          ).strip()
-                          fn_arn_base = f"arn:aws:lambda:{region}:{account_id}:function:{mapped_name}"
-
-                          # Build AppSpec for CodeDeploy Lambda deployment.
-                          # CurrentVersion/TargetVersion must be bare integer strings, not qualified ARNs.
                           appspec = {
                               "version": 0.0,
                               "Resources": [{
@@ -436,134 +459,126 @@ jobs:
                                   }
                               }]
                           }
-                          appspec_json = json.dumps(appspec)
-
-                          # Derive deployment group name from function name (strip env suffix).
-                          # Mapping mirrors 07-codedeploy.yaml DeploymentGroup names.
-                          dg_name_map = {
-                              'devops-coordination-api':        'coordination-api',
-                              'devops-tracker-mutation-api':    'tracker-mutation',
-                              'devops-document-api':            'document-api',
-                              'devops-graph-query-api':         'graph-query-api',
-                              'devops-project-service':         'project-service',
-                              'devops-feed-query-api':          'feed-query',
-                              'devops-coordination-monitor-api': 'coordination-monitor',
-                              'devops-deploy-intake':           'deploy-intake',
-                              'devops-reference-search':        'reference-search',
-                              'auth-refresh':                   'auth-refresh',
-                              'devops-deploy-orchestrator':     'deploy-orchestrator',
-                              'devops-deploy-finalize':         'deploy-finalize',
-                              'devops-deploy-decide':           'deploy-decide',
-                              'devops-feed-publisher':          'feed-publisher',
-                              'enceladus-governance-audit':     'governance-audit',
-                              'devops-doc-prep':                'doc-prep',
-                              'enceladus-bedrock-agent-actions': 'bedrock-agent-actions',
-                              'devops-changelog-api':           'changelog-api',
-                              'devops-graph-sync':              'graph-sync',
-                              'enceladus-neo4j-backup':         'neo4j-backup',
-                              'enceladus-graph-health-metrics': 'graph-health-metrics',
-                              'devops-env-drift-auditor':       'env-drift-auditor',
-                              'devops-deploy-parity-validator': 'deploy-parity-validator',
-                          }
-                          # Strip env suffix from mapped_name to look up base name.
                           base_name = mapped_name
                           if env_suffix and mapped_name.endswith(env_suffix):
                               base_name = mapped_name[:-len(env_suffix)]
-                          dg_name = dg_name_map.get(base_name, base_name)
+                          dg_name = DG_NAME_MAP.get(base_name, base_name)
                           if env_suffix:
                               dg_name = f"{dg_name}{env_suffix}"
-
-                          # Pass --revision as JSON to avoid shell quoting issues when
-                          # appspec_json contains double-quotes (shorthand notation breaks).
                           revision_json = json.dumps({
                               "revisionType": "AppSpecContent",
-                              "appSpecContent": {"content": appspec_json},
+                              "appSpecContent": {"content": json.dumps(appspec)},
                           })
-                          cd_r = subprocess.run([
-                              'aws', 'deploy', 'create-deployment',
-                              '--application-name', codedeploy_app,
-                              '--deployment-group-name', dg_name,
-                              '--revision', revision_json,
-                              '--region', region,
-                              '--output', 'json',
-                          ], capture_output=True, text=True)
+                          cd_r = subprocess.run(
+                              ['aws', 'deploy', 'create-deployment',
+                               '--application-name', codedeploy_app,
+                               '--deployment-group-name', dg_name,
+                               '--revision', revision_json,
+                               '--region', region, '--output', 'json'],
+                              capture_output=True, text=True,
+                          )
                           if cd_r.returncode == 0:
-                              cd_info = json.loads(cd_r.stdout)
-                              dep_id = cd_info.get('deploymentId', '')
-                              print(f'  + {mapped_name} → CodeDeploy deployment {dep_id} ({canary_pref})')
+                              dep_id = json.loads(cd_r.stdout).get('deploymentId', '')
+                              log(f'  + {mapped_name} → CodeDeploy deployment {dep_id} ({canary_pref})')
                               if dep_id:
-                                  deployments.append((fn, mapped_name, dep_id))
-                              use_codedeploy_succeeded = True
+                                  return {'fn': fn, 'mapped_name': mapped_name,
+                                          'status': 'codedeploy', 'dep_id': dep_id}
+                              use_cd_succeeded = False
                           else:
-                              print(f'  [warn] CodeDeploy create-deployment failed for {mapped_name}: {cd_r.stderr.strip()}')
-                              print(f'  [warn] Falling back to direct alias update for {mapped_name}')
-                              use_codedeploy_succeeded = False
+                              log(f'  [warn] CodeDeploy create-deployment failed for {mapped_name}: {cd_r.stderr.strip()}')
+                              log(f'  [warn] Falling back to direct alias update for {mapped_name}')
                   except Exception as e:
-                      print(f'  [warn] CodeDeploy error for {mapped_name}: {e}', file=sys.stderr)
-                      use_codedeploy_succeeded = False
-              else:
-                  use_codedeploy_succeeded = False
+                      log(f'  [warn] CodeDeploy error for {mapped_name}: {e}', err=True)
 
-              # Direct alias update: when canary is disabled/AllAtOnce, or CodeDeploy failed.
-              if new_version and (not use_codedeploy or not use_codedeploy_succeeded):
-                  alias_r = subprocess.run([
-                      'aws', 'lambda', 'update-alias',
-                      '--function-name', mapped_name,
-                      '--name', 'live',
-                      '--function-version', new_version,
-                      '--region', region,
-                  ], capture_output=True, text=True)
-                  if alias_r.returncode != 0:
-                      # Alias may not exist yet (first deploy) — create it.
-                      subprocess.run([
-                          'aws', 'lambda', 'create-alias',
-                          '--function-name', mapped_name,
-                          '--name', 'live',
-                          '--function-version', new_version,
-                          '--region', region,
-                      ], capture_output=True, text=True, check=False)
-                  print(f'  + {mapped_name} → live:{new_version} (direct)')
+              # Direct alias update fallback (canary disabled/AllAtOnce/CD-failed/bootstrap)
+              alias_r = subprocess.run(
+                  ['aws', 'lambda', 'update-alias',
+                   '--function-name', mapped_name, '--name', 'live',
+                   '--function-version', new_version, '--region', region],
+                  capture_output=True, text=True,
+              )
+              if alias_r.returncode != 0:
+                  subprocess.run(
+                      ['aws', 'lambda', 'create-alias',
+                       '--function-name', mapped_name, '--name', 'live',
+                       '--function-version', new_version, '--region', region],
+                      capture_output=True, text=True, check=False,
+                  )
+              log(f'  + {mapped_name} → live:{new_version} (direct)')
+              return {'fn': fn, 'mapped_name': mapped_name, 'status': 'direct'}
 
-          # Wait for all CodeDeploy deployments to complete.
+          # ============================================================
+          # PARALLEL KICKOFF — 8-worker pool
+          # ============================================================
+          targets = sorted(version_ids.items())
+          log(f'Kicking off {len(targets)} Lambda updates with 8-worker pool...')
+          t_kickoff = time.time()
+          deployments = []  # list of (fn, mapped_name, dep_id)
+          errors = []
+          skipped = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+              futures = {pool.submit(deploy_one, fn, vid): fn for fn, vid in targets}
+              for fut in concurrent.futures.as_completed(futures):
+                  try:
+                      result = fut.result()
+                  except Exception as e:
+                      fn = futures[fut]
+                      log(f'::error::worker exception on {fn}: {e}', err=True)
+                      errors.append(fn)
+                      continue
+                  fn = result['fn']
+                  if result['status'] == 'codedeploy':
+                      deployments.append((fn, result['mapped_name'], result['dep_id']))
+                  elif result['status'] == 'skip':
+                      skipped.append(fn)
+                  elif result['status'] == 'error':
+                      errors.append(fn)
+                  # 'direct' = success already finalized; nothing to track for wait phase
+          log(f'Kickoff phase complete in {time.time() - t_kickoff:.1f}s')
+
+          # ============================================================
+          # CODEDEPLOY WAIT — parallel poll, 900s per-deployment timeout (was 3600s)
+          # ============================================================
+          PER_DEPLOY_TIMEOUT_S = 900
           if deployments:
-              print(f'Waiting for {len(deployments)} CodeDeploy deployment(s)...')
-              timeout_at = time.time() + 3600
+              log(f'Waiting for {len(deployments)} CodeDeploy deployment(s)...')
+              t_wait = time.time()
+              deadline = t_wait + PER_DEPLOY_TIMEOUT_S
               pending = list(deployments)
-              while pending and time.time() < timeout_at:
+              while pending and time.time() < deadline:
                   time.sleep(30)
                   still_pending = []
                   for fn, mapped_name, dep_id in pending:
-                      status_r = subprocess.run([
-                          'aws', 'deploy', 'get-deployment',
-                          '--deployment-id', dep_id,
-                          '--region', region,
-                          '--query', 'deploymentInfo.status',
-                          '--output', 'text',
-                      ], capture_output=True, text=True)
+                      status_r = subprocess.run(
+                          ['aws', 'deploy', 'get-deployment',
+                           '--deployment-id', dep_id, '--region', region,
+                           '--query', 'deploymentInfo.status', '--output', 'text'],
+                          capture_output=True, text=True,
+                      )
                       status = status_r.stdout.strip()
                       if status in ('Succeeded', 'Failed', 'Stopped'):
-                          if status != 'Succeeded':
-                              print(f'::error::CodeDeploy {dep_id} for {mapped_name}: {status}',
-                                    file=sys.stderr)
-                              errors.append(fn)
+                          if status == 'Succeeded':
+                              log(f'  ✓ {mapped_name} CodeDeploy {dep_id}: {status}')
                           else:
-                              print(f'  ✓ {mapped_name} CodeDeploy {dep_id}: {status}')
+                              log(f'::error::CodeDeploy {dep_id} for {mapped_name}: {status}', err=True)
+                              errors.append(fn)
                       else:
                           still_pending.append((fn, mapped_name, dep_id))
                   pending = still_pending
               if pending:
                   for fn, mapped_name, dep_id in pending:
-                      print(f'::error::CodeDeploy {dep_id} for {mapped_name} timed out', file=sys.stderr)
+                      log(f'::error::CodeDeploy {dep_id} for {mapped_name} did not reach terminal state in {PER_DEPLOY_TIMEOUT_S}s — investigate deployment group config (alarm-rollback, hooks, MinimumHealthyHosts)', err=True)
                       errors.append(fn)
+              log(f'Wait phase complete in {time.time() - t_wait:.1f}s')
 
           deployed = len(version_ids) - len(skipped) - len(errors)
           if skipped:
-              print(f'Skipped {len(skipped)} functions with no env mapping: {", ".join(skipped)}')
+              log(f'Skipped {len(skipped)} functions with no env mapping or not provisioned: {", ".join(skipped)}')
           if errors:
-              print(f'::error::Deploy failed for: {", ".join(errors)}', file=sys.stderr)
+              log(f'::error::Deploy failed for: {", ".join(errors)}', err=True)
               sys.exit(1)
 
-          print(f'Deployed {deployed} Lambda functions  {arch}-py{py} @ {sha[:7]}')
+          log(f'Deployed {deployed} Lambda functions  {arch}-py{py} @ {sha[:7]}')
           PY
 
       - name: Set deployment status → success
