@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-23.02",
-  "updated_at": "2026-04-23T22:59:00Z",
-  "last_change_summary": "ENC-TSK-F19: Add telemetry_eligible (bool, required) and vocabulary_bounded (bool, optional) per-field metadata properties. New governance.per_field_metadata entity documents the schema. tracker.task.components, document.doc.subtypepattern marked telemetry_eligible:true + vocabulary_bounded:true. tracker.issue.location_hint marked telemetry_eligible:true (vocabulary_bounded omitted \u2014 unbounded free text). Also includes ENC-TSK-G06 changes (graph_sync document DELETE normalization + backfill_graph canonical projection).",
+  "version": "2026-04-25.01",
+  "updated_at": "2026-04-25T06:30:00Z",
+  "last_change_summary": "ENC-FTR-097 / ENC-TSK-G27: Register Manifest Primitive v1 read actions. Adds five entities \u2014 tracker.manifest, tracker.get_acs, tracker.worklog_timeline, tracker.worklogs, tracker.manifest_bulk \u2014 plus tracker.content_hash documenting the SHA-256 read-side freshness token consumed by the selective-fetch actions. Backwards compatible: no existing entities modified, no schemas removed.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3215,6 +3215,141 @@
       ],
       "usage_guidance": "Use via search(action='tracker.graphsearch', arguments={search_type, project_id, ...}). All record_id values use bare tracker ID format (ENC-TSK-890, not task#ENC-TSK-890). Graph is a read-only derived index; DynamoDB remains source of truth. When graph is unavailable (AuraDB paused/down), returns HTTP 503 GRAPH_UNAVAILABLE with fallback_hint to use tracker.list. Depth guard rejects depth > 5 with HTTP 400.",
       "field_count": 13
+    },
+    "tracker.manifest": {
+      "description": "Read-only MCP search action returning the per-AC manifest projection plus the record-level addendum for a single tracker record (ENC-FTR-097, DOC-59D2295AA7FD section 7.1.1).",
+      "fields": {
+        "record_id": {
+          "type": "string",
+          "constraints": {"format": "tracker_id", "required": true},
+          "definition": "Bare tracker record ID (e.g. ENC-TSK-890)."
+        },
+        "fields": {
+          "type": "array",
+          "items": {"type": "string"},
+          "definition": "Optional projection narrowing. When supplied, only the listed top-level manifest fields are returned. record_id, content_hash, and updated_at are always retained."
+        },
+        "response_envelope": {
+          "type": "object",
+          "definition": "Shape: {record_id, title, record_type, status, priority, transition_type, updated_at, acs:[{ac_index, short_title, status, evidence_ref, last_touched}], ac_count, content_hash}. ac status enum: 'complete' | 'incomplete'. content_hash is the SHA-256 read-side freshness token (see governance.dictionary.tracker.content_hash)."
+        }
+      },
+      "covered_lambdas": ["enceladus-mcp-code"],
+      "field_count": 3
+    },
+    "tracker.get_acs": {
+      "description": "Read-only MCP search action returning full acceptance-criterion bodies for a specified subset of indices on a single tracker record (ENC-FTR-097, DOC-59D2295AA7FD section 7.1.2).",
+      "fields": {
+        "record_id": {
+          "type": "string",
+          "constraints": {"format": "tracker_id", "required": true},
+          "definition": "Bare tracker record ID."
+        },
+        "indices": {
+          "type": "array",
+          "items": {"type": "integer"},
+          "constraints": {"required": true, "min_items": 1},
+          "definition": "Non-negative AC indices to fetch. Out-of-range indices return STRUCTURED_ERROR error_code AC_INDEX_OUT_OF_RANGE."
+        },
+        "content_hash": {
+          "type": "string",
+          "definition": "Optional freshness token returned by a prior tracker.manifest or tracker.manifest_bulk read. When supplied and the record has changed, the action returns STRUCTURED_ERROR error_code STALE_CONTENT_HASH with the current_content_hash and retry_guidance."
+        },
+        "response_envelope": {
+          "type": "object",
+          "definition": "Shape: {record_id, acs:[{ac_index, body, status, evidence_ref}], content_hash}. Indices are returned in caller-supplied order after deduplication and sort."
+        }
+      },
+      "covered_lambdas": ["enceladus-mcp-code"],
+      "field_count": 4
+    },
+    "tracker.worklog_timeline": {
+      "description": "Read-only MCP search action returning metadata-only worklog projection (no body bytes) for the entire history of a tracker record, ordered by timestamp ascending (ENC-FTR-097, DOC-59D2295AA7FD section 7.1.3).",
+      "fields": {
+        "record_id": {
+          "type": "string",
+          "constraints": {"format": "tracker_id", "required": true},
+          "definition": "Bare tracker record ID."
+        },
+        "response_envelope": {
+          "type": "object",
+          "definition": "Shape: {record_id, timeline:[{worklog_id, timestamp, author, size_bytes, transition?}], count, content_hash}. worklog_id is a deterministic position-based label of the form wl-NNNN suitable for use as input to tracker.worklogs ids[]. transition is populated for entries that record a status write and contains {to:<new_status>}."
+        }
+      },
+      "covered_lambdas": ["enceladus-mcp-code"],
+      "field_count": 2
+    },
+    "tracker.worklogs": {
+      "description": "Read-only MCP search action returning full worklog body text bounded by a time window or by an explicit worklog_id set, ordered by timestamp ascending (ENC-FTR-097, DOC-59D2295AA7FD section 7.1.4).",
+      "fields": {
+        "record_id": {
+          "type": "string",
+          "constraints": {"format": "tracker_id", "required": true},
+          "definition": "Bare tracker record ID."
+        },
+        "since": {
+          "type": "string",
+          "constraints": {"format": "ISO 8601 datetime"},
+          "definition": "Inclusive lower bound on worklog timestamp. Lexicographic comparison; correct for normalized UTC Zulu timestamps."
+        },
+        "until": {
+          "type": "string",
+          "constraints": {"format": "ISO 8601 datetime"},
+          "definition": "Inclusive upper bound on worklog timestamp."
+        },
+        "ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "definition": "Explicit set of worklog_id labels (form: wl-NNNN) returned by tracker.worklog_timeline. Combined with since/until via intersection."
+        },
+        "content_hash": {
+          "type": "string",
+          "definition": "Optional freshness token. When supplied and the record has changed, the action returns STRUCTURED_ERROR error_code STALE_CONTENT_HASH."
+        },
+        "response_envelope": {
+          "type": "object",
+          "definition": "Shape: {record_id, worklogs:[{worklog_id, timestamp, author, size_bytes, transition?, body, status}], count, content_hash}."
+        }
+      },
+      "covered_lambdas": ["enceladus-mcp-code"],
+      "field_count": 6
+    },
+    "tracker.manifest_bulk": {
+      "description": "Read-only MCP search action returning manifests for an explicit list of record IDs in one round trip via parallel fetches against the tracker API (ENC-FTR-097, DOC-59D2295AA7FD section 7.1.5).",
+      "fields": {
+        "record_ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "constraints": {"required": true, "min_items": 1, "max_items": 50},
+          "definition": "List of bare tracker record IDs. Hard cap of 50 per call; oversize requests return STRUCTURED_ERROR error_code BULK_SIZE_EXCEEDED."
+        },
+        "fields": {
+          "type": "array",
+          "items": {"type": "string"},
+          "definition": "Optional projection narrowing applied uniformly to every manifest. Same semantics as tracker.manifest.fields."
+        },
+        "response_envelope": {
+          "type": "object",
+          "definition": "Shape: {manifests:[{record_id, manifest, content_hash}], errors:[{record_id, error|error_payload}], manifest_count, error_count}. Records that fail to fetch are reported under errors[] with the same envelope shape — they do not abort the batch."
+        }
+      },
+      "covered_lambdas": ["enceladus-mcp-code"],
+      "field_count": 3
+    },
+    "tracker.content_hash": {
+      "description": "Read-side freshness token attached to every Manifest Primitive v1 response (ENC-FTR-097, DOC-59D2295AA7FD section 7.1.6). SHA-256 hex digest computed over a stable canonical subset of the record (excludes ephemeral metadata: sync_version, write_source, history). Two reads of an unchanged record return the same digest.",
+      "fields": {
+        "algorithm": {
+          "type": "string",
+          "constraints": {"enum": ["sha256"]},
+          "definition": "Hash algorithm. Always sha256 hex-encoded."
+        },
+        "freshness_contract": {
+          "type": "object",
+          "definition": "tracker.get_acs and tracker.worklogs accept the token as their content_hash argument. When supplied and the current digest differs, the action returns STRUCTURED_ERROR error_code STALE_CONTENT_HASH with current_content_hash, supplied_content_hash, and retry_guidance pointing the caller back to tracker.manifest or tracker.manifest_bulk for refresh."
+        }
+      },
+      "field_count": 2
     },
     "tracker.relationship": {
       "description": "First-class governed typed relationship edge between tracker records (ENC-FTR-049). Stored in devops-project-tracker with rel# SK prefix. Each relationship creates an atomic forward+inverse pair. DynamoDB is system of record; Neo4j receives MERGE projections via DynamoDB Streams.",
