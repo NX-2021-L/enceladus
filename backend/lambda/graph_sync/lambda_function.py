@@ -43,6 +43,16 @@ from embedding import (
     compute_embedding_for_record,
 )
 
+# ENC-FTR-098 / ENC-TSK-G34: pure helpers for MENTIONS edge auto-extraction
+# from prose fields. The same module powers the live reconciler path
+# (ENC-TSK-G35), the one-shot corpus backfill (ENC-TSK-G42), and the daily
+# drift audit (ENC-TSK-G43) so all three derive identical token sets.
+from mentions_extraction import (
+    extract_id_tokens,
+    stamp_provenance,
+    strip_code_fences,
+)
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -812,6 +822,19 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                         doc_id, source_record_id,
                     )
 
+    # ENC-FTR-098 / ENC-TSK-G35: MENTIONS edge auto-extraction from prose.
+    # For every governed record_type with prose fields, strip fenced code
+    # blocks, regex-extract Enceladus ID tokens via the Unit 2 extractor,
+    # MERGE label-correct placeholder targets (ENC-TSK-E01 pattern), and
+    # MERGE the directed (source)-[:MENTIONS {source: 'auto_mention',
+    # extracted_from_field}]->(target) edge. The top-level outgoing-edge
+    # wipe at the head of _reconcile_edges() handles diff-and-delete:
+    # MENTIONS edges no longer present in the freshly-extracted set are
+    # naturally pruned because every reconcile starts from a blank
+    # outgoing slate. Idempotent by construction. Source: DOC-59D2295AA7FD
+    # §7.2.3.
+    _reconcile_mentions_edges(tx, record_type, label, record_id, record)
+
     # GMF: Generation edge projections (DOC-63420302EF65 §8.2)
     if record_type == "generation":
         gen_id = record_id
@@ -843,6 +866,98 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                 "WHERE n.record_id = $nid AND g.record_id = $gid "
                 f"MERGE (n)-[:{edge_type}]->(g)",
                 nid=record_id, gid=target_gen,
+            )
+
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-098 / ENC-TSK-G35: MENTIONS edge auto-extraction (prose -> graph)
+# ---------------------------------------------------------------------------
+
+# Prose-field allowlist per record_type. Mirrors the dictionary entity
+# graph_sync.mentions_extraction (Unit 1, ENC-TSK-G33). Document subtype-
+# specific structured fields (source_record_id, plan_anchor_id, ...) are
+# intentionally excluded — those project as typed edges via the document
+# branch above, so re-extracting them as MENTIONS would double-count.
+_MENTIONS_PROSE_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "task":       ("title", "description", "intent"),
+    "issue":      ("title", "description", "hypothesis", "technical_notes",
+                   "location_hint"),
+    "feature":    ("title", "description", "user_story"),
+    "plan":       ("title", "description", "intent"),
+    "lesson":     ("title", "description"),
+    "generation": ("title", "description", "architectural_thesis"),
+    "document":   ("title", "description", "content"),
+}
+
+
+def _reconcile_mentions_edges(
+    tx,
+    record_type: str,
+    label: Optional[str],
+    record_id: str,
+    record: Dict[str, Any],
+) -> None:
+    """Emit MENTIONS edges from prose-field ID tokens on this record.
+
+    Pulled out of _reconcile_edges() so the prose-extraction logic stays
+    independently testable and the corpus backfill Lambda (ENC-TSK-G42) can
+    invoke it directly. ENC-FTR-098 / ENC-TSK-G35.
+    """
+    fields = _MENTIONS_PROSE_FIELDS.get(record_type)
+    if not fields or not label or not record_id:
+        return
+
+    extracted: Dict[str, Set[str]] = {}
+    for field_name in fields:
+        value = record.get(field_name, "")
+        if not isinstance(value, str) or not value:
+            continue
+        cleaned = strip_code_fences(value)
+        tokens = extract_id_tokens(cleaned)
+        if not tokens:
+            continue
+        # Drop self-mentions — they clutter neighbor queries and add no
+        # information to the graph.
+        tokens.discard(record_id)
+        if tokens:
+            extracted[field_name] = tokens
+
+    if not extracted:
+        return
+
+    total = sum(len(v) for v in extracted.values())
+    logger.info(
+        "[INFO] MENTIONS reconcile %s (%s): %d field(s), %d token(s)",
+        record_id, record_type, len(extracted), total,
+    )
+
+    for field_name, tokens in extracted.items():
+        for target_id in tokens:
+            target_label = _infer_label_from_id(target_id)
+            if not target_label:
+                logger.warning(
+                    "[WARNING] MENTIONS source %s extracted token %s with "
+                    "unrecognised prefix; skipping edge",
+                    record_id, target_id,
+                )
+                continue
+            # Placeholder MERGE on inferred label (ENC-TSK-E01 + E06 pattern)
+            # so the edge lands even when the target node has not yet been
+            # projected.
+            tx.run(
+                f"MERGE (t:{target_label} {{record_id: $tid}}) "
+                "ON CREATE SET t.is_placeholder = true",
+                tid=target_id,
+            )
+            edge_props = stamp_provenance({}, field_name)
+            tx.run(
+                f"MATCH (s:{label}), (t:{target_label}) "
+                "WHERE s.record_id = $sid AND t.record_id = $tid "
+                "MERGE (s)-[r:MENTIONS]->(t) "
+                "SET r.source = $source, r.extracted_from_field = $field",
+                sid=record_id, tid=target_id,
+                source=edge_props["source"],
+                field=edge_props["extracted_from_field"],
             )
 
 
