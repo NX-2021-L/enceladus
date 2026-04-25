@@ -5388,6 +5388,197 @@ async def _tracker_get(args: dict) -> list[TextContent]:
     return _result_text(record)
 
 
+# --- ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions ---------
+# Pure projection helpers live in ``manifest_projection``. Handlers are thin
+# wrappers that fetch a record (or set of records) via the existing tracker
+# API GET path and emit a manifest, AC body, or worklog projection.
+
+from manifest_projection import (  # noqa: E402  (lazy import keeps cold-start lean)
+    BULK_LIMIT_ERROR_CODE as _MANIFEST_BULK_LIMIT_CODE,
+    INDEX_OUT_OF_RANGE_ERROR_CODE as _MANIFEST_AC_OOR_CODE,
+    coerce_indices as _manifest_coerce_indices,
+    compute_content_hash as _manifest_content_hash,
+    filter_worklogs as _manifest_filter_worklogs,
+    project_ac_body as _manifest_project_ac_body,
+    project_record_manifest as _manifest_project_record,
+    project_worklog_body as _manifest_project_worklog_body,
+    project_worklog_metadata as _manifest_project_worklog_metadata,
+    staleness_envelope as _manifest_staleness_envelope,
+)
+
+_MANIFEST_BULK_CAP = 50
+
+
+def _manifest_fetch_record(record_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Fetch one record via the tracker API GET path.
+
+    Returns ``(record, None)`` on success or ``(None, error_payload)`` on
+    failure. The record dict is the same shape that ``_tracker_get`` consumes
+    — the worklog history is preserved (this read path explicitly needs it).
+    """
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return None, {"error": str(exc), "record_id": record_id}
+    resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
+    if resp.get("error"):
+        return None, {"error_payload": resp, "record_id": record_id}
+    record = resp.get("record", resp)
+    return record, None
+
+
+async def _tracker_manifest(args: dict) -> list[TextContent]:
+    """Per-AC manifest + record-level addendum for a single record."""
+    record_id = args.get("record_id")
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+    fields = args.get("fields")
+    record, err = _manifest_fetch_record(str(record_id))
+    if err is not None:
+        return _result_text(err.get("error_payload") or err)
+    return _result_text(_manifest_project_record(record, fields=fields))
+
+
+async def _tracker_get_acs(args: dict) -> list[TextContent]:
+    """Subset AC body fetch with bounds + freshness validation."""
+    record_id = args.get("record_id")
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+    raw_indices = args.get("indices")
+    if raw_indices is None:
+        return _result_text({"error": "indices is required"})
+    try:
+        indices = _manifest_coerce_indices(raw_indices)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+    if not indices:
+        return _result_text({"error": "indices must be non-empty"})
+    supplied_hash = args.get("content_hash")
+    record, err = _manifest_fetch_record(str(record_id))
+    if err is not None:
+        return _result_text(err.get("error_payload") or err)
+    current_hash = _manifest_content_hash(record)
+    if supplied_hash and str(supplied_hash) != current_hash:
+        return _result_text(
+            _manifest_staleness_envelope(str(record_id), current_hash, str(supplied_hash))
+        )
+    ac_list = record.get("acceptance_criteria") or []
+    out: List[Dict[str, Any]] = []
+    for idx in indices:
+        if idx >= len(ac_list):
+            return _result_text({
+                "error": True,
+                "error_code": _MANIFEST_AC_OOR_CODE,
+                "record_id": record_id,
+                "index": idx,
+                "ac_count": len(ac_list),
+            })
+        out.append(_manifest_project_ac_body(ac_list[idx], idx))
+    return _result_text({
+        "record_id": str(record_id),
+        "acs": out,
+        "content_hash": current_hash,
+    })
+
+
+async def _tracker_worklog_timeline(args: dict) -> list[TextContent]:
+    """Metadata-only worklog projection ordered by timestamp ascending."""
+    record_id = args.get("record_id")
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+    record, err = _manifest_fetch_record(str(record_id))
+    if err is not None:
+        return _result_text(err.get("error_payload") or err)
+    history = record.get("history") if isinstance(record.get("history"), list) else []
+    indexed = list(enumerate(history))
+    indexed.sort(key=lambda pair: str(pair[1].get("timestamp") or ""))
+    timeline = [_manifest_project_worklog_metadata(entry, idx) for idx, entry in indexed]
+    return _result_text({
+        "record_id": str(record_id),
+        "timeline": timeline,
+        "count": len(timeline),
+        "content_hash": _manifest_content_hash(record),
+    })
+
+
+async def _tracker_worklogs(args: dict) -> list[TextContent]:
+    """Bounded worklog body fetch (time window or explicit ID set)."""
+    record_id = args.get("record_id")
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+    since = args.get("since")
+    until = args.get("until")
+    ids = args.get("ids")
+    supplied_hash = args.get("content_hash")
+    record, err = _manifest_fetch_record(str(record_id))
+    if err is not None:
+        return _result_text(err.get("error_payload") or err)
+    current_hash = _manifest_content_hash(record)
+    if supplied_hash and str(supplied_hash) != current_hash:
+        return _result_text(
+            _manifest_staleness_envelope(str(record_id), current_hash, str(supplied_hash))
+        )
+    history = record.get("history") if isinstance(record.get("history"), list) else []
+    matched = _manifest_filter_worklogs(history, since=since, until=until, ids=ids)
+    out = [_manifest_project_worklog_body(entry, idx) for idx, entry in matched]
+    return _result_text({
+        "record_id": str(record_id),
+        "worklogs": out,
+        "count": len(out),
+        "content_hash": current_hash,
+    })
+
+
+async def _tracker_manifest_bulk(args: dict) -> list[TextContent]:
+    """Parallel batch manifest fetch (cap ``_MANIFEST_BULK_CAP``)."""
+    record_ids = args.get("record_ids")
+    if not isinstance(record_ids, list) or not record_ids:
+        return _result_text({"error": "record_ids must be a non-empty list"})
+    if len(record_ids) > _MANIFEST_BULK_CAP:
+        return _result_text({
+            "error": True,
+            "error_code": _MANIFEST_BULK_LIMIT_CODE,
+            "limit": _MANIFEST_BULK_CAP,
+            "supplied": len(record_ids),
+            "retry_guidance": (
+                f"tracker.manifest_bulk caps at {_MANIFEST_BULK_CAP} record_ids "
+                "per call. Split the request into batches and call again."
+            ),
+        })
+    fields = args.get("fields")
+
+    def _one(rid: str) -> Dict[str, Any]:
+        record, err = _manifest_fetch_record(rid)
+        if err is not None:
+            envelope = {"record_id": rid}
+            envelope.update(err)
+            return envelope
+        manifest = _manifest_project_record(record, fields=fields)
+        return {
+            "record_id": rid,
+            "manifest": manifest,
+            "content_hash": manifest.get("content_hash") or _manifest_content_hash(record),
+        }
+
+    loop = asyncio.get_running_loop()
+    results = await asyncio.gather(
+        *(loop.run_in_executor(None, _one, str(rid)) for rid in record_ids)
+    )
+    manifests: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for entry in results:
+        if "manifest" in entry:
+            manifests.append(entry)
+        else:
+            errors.append(entry)
+    return _result_text({
+        "manifests": manifests,
+        "errors": errors,
+        "manifest_count": len(manifests),
+        "error_count": len(errors),
+    })
+
+
 def _normalized_status(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -7225,6 +7416,12 @@ _SEARCH_ACTIONS: Dict[str, Dict[str, Any]] = {
     "system.connection_health": {"tool": "connection_health"},
     "github.projects_list": {"tool": "github_projects_list"},
     "tracker.graphsearch": {"tool": "tracker_graphsearch"},
+    # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
+    "tracker.manifest": {"tool": "tracker_manifest"},
+    "tracker.get_acs": {"tool": "tracker_get_acs"},
+    "tracker.worklog_timeline": {"tool": "tracker_worklog_timeline"},
+    "tracker.worklogs": {"tool": "tracker_worklogs"},
+    "tracker.manifest_bulk": {"tool": "tracker_manifest_bulk"},
 }
 
 _COORDINATION_ACTIONS: Dict[str, Dict[str, Any]] = {
@@ -9909,6 +10106,12 @@ _TOOL_HANDLERS = {
     "github_projects_list": _github_projects_list,
     # ENC-FTR-047: Graph search
     "tracker_graphsearch": _tracker_graphsearch,
+    # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
+    "tracker_manifest": _tracker_manifest,
+    "tracker_get_acs": _tracker_get_acs,
+    "tracker_worklog_timeline": _tracker_worklog_timeline,
+    "tracker_worklogs": _tracker_worklogs,
+    "tracker_manifest_bulk": _tracker_manifest_bulk,
     # ENC-FTR-049: Typed relationship edges
     "tracker_create_relationship": _tracker_create_relationship,
     "tracker_archive_relationship": _tracker_archive_relationship,
