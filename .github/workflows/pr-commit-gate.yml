@@ -25,8 +25,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ENC-TSK-G71: sync-main-to-v4main.yml opens transient PRs base=v4/main
+      # head=auto/sync-main-to-v4main-* to forward-sync v4/main without bypass
+      # actors. These PRs are not task-bound and have no CCI. Recognize the
+      # pattern + base and short-circuit the gate as a pass.
+      - name: Detect auto sync PR (CCI-exempt)
+        id: classify
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [[ "$HEAD_REF" == auto/sync-main-to-v4main-* && "$BASE_REF" == "v4/main" ]]; then
+            echo "Auto-sync PR detected (head=$HEAD_REF base=$BASE_REF) — CCI requirement waived."
+            echo "auto_sync=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "auto_sync=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Extract commit-complete-id from PR body
         id: extract_cci
+        if: steps.classify.outputs.auto_sync != 'true'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
@@ -45,6 +63,7 @@ jobs:
           echo "cci_id=$CCI_ID" >> "$GITHUB_OUTPUT"
 
       - name: Validate commit-complete-id with checkout service
+        if: steps.classify.outputs.auto_sync != 'true'
         env:
           CCI_ID: ${{ steps.extract_cci.outputs.cci_id }}
           CHECKOUT_SERVICE_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/checkout
@@ -87,6 +106,7 @@ jobs:
 
       # ENC-TSK-E57 AC1: Reject PRs with undeclared deploy target
       - name: Validate deploy target declaration
+        if: steps.classify.outputs.auto_sync != 'true'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           DEPLOY_API_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/deploy
