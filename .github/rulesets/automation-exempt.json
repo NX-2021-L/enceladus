@@ -1,0 +1,31 @@
+{
+  "name": "automation-exempt",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [
+    {
+      "actor_id": 3451818,
+      "actor_type": "Integration",
+      "bypass_mode": "pull_request"
+    }
+  ],
+  "rules": [
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false
+      }
+    }
+  ],
+  "comment": "Scope: this ruleset narrowly exempts the release-bot GitHub App (actor_id to be filled in post-install per /infrastructure/iam/release-bot-installation-README.md) from the PR review requirement ONLY for merges that have already passed all main-quality required status checks. It does NOT bypass non_fast_forward, deletion, required_linear_history, or required_status_checks \u2014 those remain enforced by main-quality. ENC-FTR-090 AC-4."
+}

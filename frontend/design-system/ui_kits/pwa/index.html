@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Enceladus PWA · UI Kit</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="../../assets/original-favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['Inter', 'system-ui', 'sans-serif'],
+          mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+        },
+        colors: { slate: { 750: '#283449' } },
+      },
+    },
+  };
+</script>
+<style>
+  html,body{background:#0A0A0F}
+  body{font-family:'Inter', system-ui, sans-serif}
+</style>
+</head>
+<body class="text-slate-200">
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel">
+const { useState, Fragment } = React;
+
+// ==================== DATA ====================
+const encData = {
+  projects: [
+    { prefix: 'ENC', project_id: 'enceladus', name: 'Enceladus', summary: 'Multi-agent governance platform. Core monorepo: MCP, Scoring, Checkout, PWA.', updated_at: '2026-04-20T11:12:00Z', open_tasks: 14, open_issues: 3, completed_features: 52 },
+    { prefix: 'DVP', project_id: 'devops', name: 'DevOps', summary: 'CI/CD pipelines, secrets guardrail, nightly SHA-256 parity audits.', updated_at: '2026-04-19T22:04:00Z', open_tasks: 6, open_issues: 1, completed_features: 31 },
+    { prefix: 'SHW', project_id: 'showcase', name: 'Showcase', summary: 'Public portfolio site at jreese.net/enceladus-showcase.', updated_at: '2026-04-18T14:30:00Z', open_tasks: 2, open_issues: 0, completed_features: 7 },
+    { prefix: 'KND', project_id: 'kindred', name: 'Kindred', summary: 'Secondary constitutional-AI research spike. Dormant.', updated_at: '2026-04-10T09:00:00Z', open_tasks: 0, open_issues: 0, completed_features: 4 },
+  ],
+  tasks: [
+    { task_id: 'ENC-TSK-A57', project_id: 'enceladus', title: 'Implement governed lesson primitive lifecycle gates', status: 'in-progress', priority: 'P1', active_agent_session: true, checkout_state: 'checked_out', checked_out_by: 'claude-code', checked_out_at: '2026-04-20T10:47:00Z', checklist_done: 3, checklist_total: 5, parent: 'ENC-FTR-052', updated_at: '2026-04-20T11:08:00Z' },
+    { task_id: 'ENC-TSK-A58', project_id: 'enceladus', title: 'Wire up pillar_composite rollup in scoring service', status: 'open', priority: 'P2', checkout_state: null, checklist_done: 0, checklist_total: 4, parent: 'ENC-FTR-052', updated_at: '2026-04-20T09:22:00Z' },
+    { task_id: 'DVP-TSK-214', project_id: 'devops', title: 'Rotate Neo4j AuraDB credentials quarterly', status: 'open', priority: 'P3', checkout_state: null, checklist_done: 0, checklist_total: 3, updated_at: '2026-04-19T20:00:00Z' },
+    { task_id: 'ENC-TSK-A55', project_id: 'enceladus', title: 'Constitutional radar chart — four pillars view', status: 'closed', priority: 'P2', checkout_state: 'checked_in', checked_in_by: 'claude-code', checked_in_at: '2026-04-19T14:12:00Z', checklist_done: 4, checklist_total: 4, updated_at: '2026-04-19T14:12:00Z' },
+  ],
+  issues: [
+    { issue_id: 'ENC-ISS-041', project_id: 'enceladus', title: 'Tracker API JWT library missing after Lambda deploy', status: 'blocked', priority: 'P0', parent: 'ENC-FTR-052', updated_at: '2026-04-20T09:08:00Z' },
+    { issue_id: 'DVP-ISS-018', project_id: 'devops', title: 'Nightly parity audit false-positive on timestamp drift', status: 'open', priority: 'P2', updated_at: '2026-04-19T03:44:00Z' },
+  ],
+  features: [
+    { feature_id: 'ENC-FTR-052', project_id: 'enceladus', title: 'Governed Lesson Primitive', status: 'in-progress', updated_at: '2026-04-20T10:47:00Z' },
+    { feature_id: 'ENC-FTR-048', project_id: 'enceladus', title: 'Code-mode MCP meta-tools (5 operations)', status: 'closed', updated_at: '2026-04-12T16:20:00Z' },
+  ],
+  lessons: [
+    { lesson_id: 'ENC-LSN-004', project_id: 'enceladus', title: 'Never build Lambda artifacts on macOS — platform mismatch breaks native deps', status: 'open', category: 'runtime', provenance: 'post-mortem', pillar_composite: 0.82, confidence: 0.94, updated_at: '2026-04-18T12:00:00Z' },
+    { lesson_id: 'ENC-LSN-011', project_id: 'enceladus', title: 'DynamoDB GSI propagation is eventually consistent — read-after-write will lie', status: 'open', category: 'data', provenance: 'incident', pillar_composite: 0.78, confidence: 0.88, updated_at: '2026-04-15T09:00:00Z' },
+    { lesson_id: 'DVP-LSN-003', project_id: 'devops', title: 'Secrets guardrail must run pre-push, not pre-commit — developers edit staged', status: 'open', category: 'security', provenance: 'near-miss', pillar_composite: 0.85, confidence: 0.96, updated_at: '2026-04-14T22:00:00Z' },
+  ],
+  changelog: [
+    { version: 'v0.20.12', project: 'enceladus', date: '2026-04-20', note: 'Lesson primitive gate: pillar_composite ≥ 0.80 enforced in governance proposals.' },
+    { version: 'v0.20.11', project: 'enceladus', date: '2026-04-18', note: 'Added constitutional radar chart — 4 pillars.' },
+    { version: 'v2.4.0', project: 'devops', date: '2026-04-16', note: 'SHA-256 parity audit now runs nightly across all 8 DynamoDB tables.' },
+    { version: 'v0.20.10', project: 'enceladus', date: '2026-04-12', note: 'Code-mode MCP: 5 meta-tools replace 47 raw mode operations (89% schema reduction).' },
+  ],
+  docs: [
+    { doc_id: 'DOC-0CD901005ECA', project_id: 'enceladus', title: 'PWA 2.0 Architectural Framework', kind: 'architecture', updated_at: '2026-04-15' },
+    { doc_id: 'DOC-6EFD5DB32CD8', project_id: 'enceladus', title: 'v4 Service Boundary Migration Plan', kind: 'plan', updated_at: '2026-04-14' },
+    { doc_id: 'DOC-8A2C4B9F1E5D', project_id: 'enceladus', title: 'Constitutional Scoring — Pillar Semantics', kind: 'spec', updated_at: '2026-04-11' },
+    { doc_id: 'DOC-3F8A9C2D7E4F', project_id: 'enceladus', title: 'Brand Identity & Visual System v1.0', kind: 'brand', updated_at: '2026-04-09' },
+  ],
+};
+window.encData = encData;
+
+// ==================== BADGES ====================
+function timeAgo(iso) {
+  if (!iso) return '';
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+function StatusChip({ status }) {
+  const map = {
+    'open': 'bg-blue-500/20 text-blue-300',
+    'in-progress': 'bg-sky-500/20 text-sky-300',
+    'blocked': 'bg-red-500/20 text-red-300',
+    'closed': 'bg-slate-700/50 text-slate-400',
+    'draft': 'bg-purple-500/15 text-purple-300 italic',
+  };
+  return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${map[status] || map.open}`}>{status}</span>;
+}
+
+function PriorityBadge({ priority }) {
+  if (!priority) return null;
+  const map = {
+    'P0': 'bg-red-500/20 text-red-300 border border-red-500/40',
+    'P1': 'bg-amber-500/20 text-amber-300 border border-amber-500/30',
+    'P2': 'bg-slate-700/50 text-slate-400',
+    'P3': 'bg-slate-700/30 text-slate-500',
+  };
+  return <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono font-medium ${map[priority] || map.P2}`}>{priority}</span>;
+}
+
+function CheckoutStateBadge({ activeSession, checkoutState }) {
+  if (activeSession || checkoutState === 'checked_out') {
+    return <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-amber-500/20 text-amber-300">Checked Out</span>;
+  }
+  if (checkoutState === 'checked_in') {
+    return <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-sky-500/20 text-sky-300">Checked In</span>;
+  }
+  return null;
+}
+
+function ActiveSessionBadge({ isActive }) {
+  if (!isActive) return null;
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-emerald-500/15 text-emerald-300">
+      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />active
+    </span>
+  );
+}
+
+function CategoryTag({ category }) {
+  if (!category) return null;
+  return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-500/20 text-purple-400">{category}</span>;
+}
+
+// ==================== CARDS ====================
+function TaskRow({ task, onClick }) {
+  return (
+    <a onClick={(e) => { e.preventDefault(); onClick && onClick(task); }} href="#"
+      className="block bg-slate-800 rounded-lg px-4 py-3 hover:bg-slate-700/80 active:bg-slate-700 transition-colors">
+      <div className="flex items-start justify-between gap-2 mb-1">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-xs font-mono text-slate-500 shrink-0">{task.task_id}</span>
+            <span className="text-xs text-slate-600">{task.project_id}</span>
+          </div>
+          <h4 className="text-sm font-medium text-slate-200 truncate">{task.title}</h4>
+        </div>
+        <span className="text-xs text-slate-500 shrink-0">{timeAgo(task.updated_at)}</span>
+      </div>
+      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+        <StatusChip status={task.status} />
+        <PriorityBadge priority={task.priority} />
+        {task.active_agent_session && <ActiveSessionBadge isActive />}
+        <CheckoutStateBadge activeSession={task.active_agent_session} checkoutState={task.checkout_state} />
+        {task.checklist_total > 0 && (
+          <span className="text-xs text-slate-500 font-mono">{task.checklist_done}/{task.checklist_total}</span>
+        )}
+        {task.parent && <span className="text-xs text-blue-400 truncate">Parent: {task.parent}</span>}
+      </div>
+    </a>
+  );
+}
+
+function IssueRow({ issue, onClick }) {
+  return (
+    <a onClick={(e) => { e.preventDefault(); onClick && onClick(issue); }} href="#"
+      className="block bg-slate-800 rounded-lg px-4 py-3 hover:bg-slate-700/80 active:bg-slate-700 transition-colors">
+      <div className="flex items-start justify-between gap-2 mb-1">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-xs font-mono text-slate-500">{issue.issue_id}</span>
+            <span className="text-xs text-slate-600">{issue.project_id}</span>
+          </div>
+          <h4 className="text-sm font-medium text-slate-200 truncate">{issue.title}</h4>
+        </div>
+        <span className="text-xs text-slate-500 shrink-0">{timeAgo(issue.updated_at)}</span>
+      </div>
+      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+        <StatusChip status={issue.status} />
+        <PriorityBadge priority={issue.priority} />
+        {issue.parent && <span className="text-xs text-blue-400">Parent: {issue.parent}</span>}
+      </div>
+    </a>
+  );
+}
+
+function FeatureRow({ feature, onClick }) {
+  return (
+    <a onClick={(e) => { e.preventDefault(); onClick && onClick(feature); }} href="#"
+      className="block bg-slate-800 rounded-lg px-4 py-3 hover:bg-slate-700/80 active:bg-slate-700 transition-colors">
+      <div className="flex items-start justify-between gap-2 mb-1">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-xs font-mono text-slate-500">{feature.feature_id}</span>
+            <span className="text-xs text-slate-600">{feature.project_id}</span>
+          </div>
+          <h4 className="text-sm font-medium text-slate-200 truncate">{feature.title}</h4>
+        </div>
+        <span className="text-xs text-slate-500 shrink-0">{timeAgo(feature.updated_at)}</span>
+      </div>
+      <div className="flex items-center gap-2 mt-1.5"><StatusChip status={feature.status} /></div>
+    </a>
+  );
+}
+
+function LessonRow({ lesson, onClick }) {
+  const composite = typeof lesson.pillar_composite === 'number' ? lesson.pillar_composite.toFixed(2) : null;
+  return (
+    <a onClick={(e) => { e.preventDefault(); onClick && onClick(lesson); }} href="#"
+      className="block bg-slate-800 rounded-lg px-4 py-3 hover:bg-slate-700/80 active:bg-slate-700 transition-colors">
+      <div className="flex items-start justify-between gap-2 mb-1">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-xs font-mono text-slate-500">{lesson.lesson_id}</span>
+            <span className="text-xs text-slate-600">{lesson.project_id}</span>
+          </div>
+          <h4 className="text-sm font-medium text-slate-200 truncate">{lesson.title}</h4>
+        </div>
+        <span className="text-xs text-slate-500 shrink-0">{timeAgo(lesson.updated_at)}</span>
+      </div>
+      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+        <StatusChip status={lesson.status} />
+        <CategoryTag category={lesson.category} />
+        {lesson.provenance && <span className="text-xs text-slate-500">{lesson.provenance}</span>}
+        {composite && <span className="text-xs font-mono text-purple-300">{composite}</span>}
+        {typeof lesson.confidence === 'number' && <span className="text-xs text-slate-500">conf: {(lesson.confidence * 100).toFixed(0)}%</span>}
+      </div>
+    </a>
+  );
+}
+
+function ProjectCard({ project, onClick }) {
+  return (
+    <a onClick={(e) => { e.preventDefault(); onClick && onClick(project); }} href="#"
+      className="block bg-slate-800 rounded-lg p-4 hover:bg-slate-700/80 active:bg-slate-700 transition-colors">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono text-slate-500">{project.prefix}</span>
+          <h3 className="font-medium text-slate-100">{project.name}</h3>
+        </div>
+        <span className="text-xs text-slate-500">{timeAgo(project.updated_at)}</span>
+      </div>
+      {project.summary && <p className="text-sm text-slate-400 mb-3 line-clamp-2">{project.summary}</p>}
+      <div className="flex gap-4 text-xs text-slate-500">
+        <span><span className="text-blue-400 font-medium">{project.open_tasks}</span> tasks</span>
+        <span><span className="text-amber-400 font-medium">{project.open_issues}</span> issues</span>
+        <span><span className="text-emerald-400 font-medium">{project.completed_features}</span> live features</span>
+      </div>
+    </a>
+  );
+}
+
+function DocumentRow({ doc, onClick }) {
+  return (
+    <a onClick={(e) => { e.preventDefault(); onClick && onClick(doc); }} href="#"
+      className="block bg-slate-800 rounded-lg px-4 py-3 hover:bg-slate-700/80 active:bg-slate-700 transition-colors">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-xs font-mono text-slate-500">{doc.doc_id}</span>
+            <span className="text-xs text-slate-600">{doc.project_id}</span>
+          </div>
+          <h4 className="text-sm font-medium text-slate-200 truncate">{doc.title}</h4>
+        </div>
+        <span className="text-xs text-slate-500 shrink-0">{doc.updated_at}</span>
+      </div>
+      <div className="flex items-center gap-2 mt-1.5"><CategoryTag category={doc.kind} /></div>
+    </a>
+  );
+}
+
+function FeedSectionTitle({ children, count }) {
+  return (
+    <div className="flex items-baseline justify-between px-1 mt-6 mb-2">
+      <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{children}</h3>
+      {typeof count === 'number' && <span className="text-xs text-slate-500 font-mono">{count}</span>}
+    </div>
+  );
+}
+
+// ==================== CHROME ====================
+function Header({ title, version, onMenuToggle, menuOpen, onNav, onLogout }) {
+  return (
+    <header className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-700/50 px-4 py-3 flex items-center justify-between">
+      <h1 className="text-lg font-semibold text-slate-100">{title}</h1>
+      <div className="flex items-center gap-3">
+        <span className="text-xs text-slate-500 font-mono">{version ? `v${version}` : '—'}</span>
+        <div className="relative">
+          <button onClick={onMenuToggle} aria-label="Menu" className="text-slate-400 hover:text-slate-200 active:text-slate-100 transition-colors p-1 -mr-1">
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+          {menuOpen && (
+            <div className="absolute right-0 top-full mt-2 w-52 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-1 z-50">
+              <button onClick={() => onNav('deployments')} className="w-full text-left px-4 py-3 text-sm text-amber-300 hover:bg-slate-700 transition-colors font-medium">Deployment Manager</button>
+              <div className="border-t border-slate-700/50 my-1" />
+              <button onClick={() => onNav('components')} className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 transition-colors">Component Registry</button>
+              <button onClick={() => onNav('terminal')} className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 transition-colors">Terminal Sessions</button>
+              <button onClick={() => onNav('coordination')} className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 transition-colors">Coordination Monitor</button>
+              <button onClick={() => onNav('tokens')} className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 transition-colors">Access Tokens</button>
+              <button onClick={onLogout} className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 transition-colors">Log Out</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </header>
+  );
+}
+
+const NAV_ITEMS = [
+  { key: 'home',      label: 'Home',      icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1' },
+  { key: 'projects',  label: 'Projects',  icon: 'M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10' },
+  { key: 'feed',      label: 'Feed',      icon: 'M4 6h16M4 10h16M4 14h16M4 18h16' },
+  { key: 'docs',      label: 'Docs',      icon: 'M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z' },
+  { key: 'changelog', label: 'Changelog', icon: 'M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z' },
+];
+
+function BottomNav({ active, onNav }) {
+  return (
+    <nav className="fixed bottom-0 inset-x-0 z-10 bg-slate-900/95 backdrop-blur border-t border-slate-700/50">
+      <div className="flex justify-around">
+        {NAV_ITEMS.map(({ key, label, icon }) => {
+          const isActive = active === key;
+          return (
+            <button key={key} onClick={() => onNav(key)}
+              className={`flex flex-col items-center py-2 px-2 min-h-[44px] min-w-[40px] transition-colors ${isActive ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}>
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d={icon} />
+              </svg>
+              <span className="text-xs mt-0.5">{label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+// ==================== SCREENS ====================
+function DashboardScreen({ onOpen }) {
+  const d = encData;
+  const stats = {
+    records: 2789, projects: d.projects.length,
+    openIssues: d.issues.filter(i => i.status !== 'closed').length,
+    activeSessions: d.tasks.filter(t => t.active_agent_session).length,
+  };
+  return (
+    <div className="px-4 pt-4 space-y-4">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="bg-slate-800 rounded-lg p-3">
+          <div className="text-2xl font-semibold text-slate-100 tabular-nums">{stats.records.toLocaleString()}</div>
+          <div className="text-xs text-slate-500 uppercase tracking-wider mt-0.5">Records</div>
+        </div>
+        <div className="bg-slate-800 rounded-lg p-3">
+          <div className="text-2xl font-semibold text-slate-100 tabular-nums">{stats.projects}</div>
+          <div className="text-xs text-slate-500 uppercase tracking-wider mt-0.5">Projects</div>
+        </div>
+        <div className="bg-slate-800 rounded-lg p-3">
+          <div className="text-2xl font-semibold text-red-300 tabular-nums">{stats.openIssues}</div>
+          <div className="text-xs text-slate-500 uppercase tracking-wider mt-0.5">Open issues</div>
+        </div>
+        <div className="bg-slate-800 rounded-lg p-3">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <div className="text-2xl font-semibold text-emerald-300 tabular-nums">{stats.activeSessions}</div>
+          </div>
+          <div className="text-xs text-slate-500 uppercase tracking-wider mt-0.5">Active sessions</div>
+        </div>
+      </div>
+      <div className="bg-slate-800/60 rounded-lg p-4 border border-slate-700/40">
+        <div className="flex items-baseline justify-between mb-3">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Constitutional Pillars</h3>
+          <span className="text-xs font-mono text-purple-300">composite 0.823</span>
+        </div>
+        {[
+          ['Efficiency', 0.82, 'bg-sky-400'],
+          ['Human Protection', 0.91, 'bg-slate-200'],
+          ['Intention', 0.76, 'bg-teal-400'],
+          ['Alignment', 0.79, 'bg-purple-400'],
+        ].map(([name, val, bar]) => (
+          <div key={name} className="flex items-center gap-2.5 my-1.5">
+            <span className="text-xs text-slate-300 w-32">{name}</span>
+            <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+              <div className={`h-full ${bar}`} style={{ width: `${val*100}%` }} />
+            </div>
+            <span className="text-xs font-mono text-slate-400 w-8 text-right tabular-nums">{val.toFixed(2)}</span>
+          </div>
+        ))}
+      </div>
+      <div>
+        <FeedSectionTitle count={d.tasks.length}>Active tasks</FeedSectionTitle>
+        <div className="space-y-2">
+          {d.tasks.slice(0, 3).map(t => <TaskRow key={t.task_id} task={t} onClick={onOpen} />)}
+        </div>
+      </div>
+      <div>
+        <FeedSectionTitle count={d.lessons.length}>Recent lessons</FeedSectionTitle>
+        <div className="space-y-2">
+          {d.lessons.slice(0, 2).map(l => <LessonRow key={l.lesson_id} lesson={l} onClick={onOpen} />)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProjectsScreen({ onOpen }) {
+  return (
+    <div className="px-4 pt-4 space-y-2">
+      {encData.projects.map(p => <ProjectCard key={p.project_id} project={p} onClick={onOpen} />)}
+    </div>
+  );
+}
+
+function FeedScreen({ onOpen }) {
+  const d = encData;
+  return (
+    <div className="px-4 pt-4 pb-2">
+      <FeedSectionTitle count={d.issues.length}>Issues</FeedSectionTitle>
+      <div className="space-y-2">{d.issues.map(i => <IssueRow key={i.issue_id} issue={i} onClick={onOpen} />)}</div>
+      <FeedSectionTitle count={d.tasks.length}>Tasks</FeedSectionTitle>
+      <div className="space-y-2">{d.tasks.map(t => <TaskRow key={t.task_id} task={t} onClick={onOpen} />)}</div>
+      <FeedSectionTitle count={d.features.length}>Features</FeedSectionTitle>
+      <div className="space-y-2">{d.features.map(f => <FeatureRow key={f.feature_id} feature={f} onClick={onOpen} />)}</div>
+      <FeedSectionTitle count={d.lessons.length}>Lessons</FeedSectionTitle>
+      <div className="space-y-2">{d.lessons.map(l => <LessonRow key={l.lesson_id} lesson={l} onClick={onOpen} />)}</div>
+    </div>
+  );
+}
+
+function DocsScreen({ onOpen }) {
+  return (
+    <div className="px-4 pt-4 space-y-2">
+      {encData.docs.map(d => <DocumentRow key={d.doc_id} doc={d} onClick={onOpen} />)}
+    </div>
+  );
+}
+
+function ChangelogScreen() {
+  return (
+    <div className="px-4 pt-4 space-y-2">
+      {encData.changelog.map(c => (
+        <div key={c.version} className="bg-slate-800 rounded-lg px-4 py-3">
+          <div className="flex items-baseline justify-between mb-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-mono text-blue-300">{c.version}</span>
+              <span className="text-xs text-slate-600">{c.project}</span>
+            </div>
+            <span className="text-xs text-slate-500 font-mono">{c.date}</span>
+          </div>
+          <p className="text-sm text-slate-300">{c.note}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DetailSheet({ record, onClose }) {
+  if (!record) return null;
+  const idKey = Object.keys(record).find(k => k.endsWith('_id')) || 'id';
+  const id = record[idKey];
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={onClose}>
+      <div className="bg-slate-900 border-t sm:border border-slate-700 sm:rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="sticky top-0 bg-slate-900/95 backdrop-blur border-b border-slate-700/60 px-4 py-3 flex items-center justify-between">
+          <span className="text-xs font-mono text-blue-400">{id}</span>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-200">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div className="px-4 py-4">
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">{record.title || record.name}</h2>
+          <div className="space-y-2 text-sm">
+            {Object.entries(record).map(([k, v]) => (
+              <div key={k} className="flex gap-3 items-baseline border-b border-slate-800 pb-1.5">
+                <span className="text-xs uppercase tracking-wider text-slate-500 w-32 shrink-0">{k.replace(/_/g, ' ')}</span>
+                <span className="text-slate-300 font-mono text-xs break-all">{v === null || v === undefined ? '—' : String(v)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ==================== APP ====================
+const TITLES = {
+  home: 'Dashboard', projects: 'Projects', feed: 'Feed', docs: 'Documents', changelog: 'Changelog',
+  deployments: 'Deployment Manager', components: 'Component Registry', terminal: 'Terminal Sessions',
+  coordination: 'Coordination', tokens: 'Access Tokens',
+};
+
+function App() {
+  const [screen, setScreen] = useState(() => localStorage.getItem('enc-screen') || 'home');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [detail, setDetail] = useState(null);
+  const nav = (key) => { setScreen(key); setMenuOpen(false); localStorage.setItem('enc-screen', key); };
+
+  return (
+    <div className="min-h-screen w-full flex justify-center" style={{background:'radial-gradient(ellipse at top, rgba(61,155,168,0.05), transparent 60%), #0A0A0F'}}>
+      <div className="w-full max-w-[430px] min-h-screen bg-[#0A0A0F] flex flex-col relative shadow-[0_0_60px_rgba(61,155,168,0.1)]">
+        <Header title={TITLES[screen] || 'Enceladus'} version="0.20.12" menuOpen={menuOpen}
+          onMenuToggle={() => setMenuOpen(o => !o)} onNav={nav} onLogout={() => alert('Logged out (demo).')} />
+        <main className="flex-1 pb-24">
+          {screen === 'home' && <DashboardScreen onOpen={setDetail} />}
+          {screen === 'projects' && <ProjectsScreen onOpen={setDetail} />}
+          {screen === 'feed' && <FeedScreen onOpen={setDetail} />}
+          {screen === 'docs' && <DocsScreen onOpen={setDetail} />}
+          {screen === 'changelog' && <ChangelogScreen />}
+          {!['home','projects','feed','docs','changelog'].includes(screen) && (
+            <div className="px-4 pt-10 text-center text-slate-500">
+              <p className="text-sm">"{TITLES[screen]}" screen is stubbed in this UI kit.</p>
+              <button onClick={() => nav('home')} className="mt-3 text-blue-400 text-sm">← Back to Dashboard</button>
+            </div>
+          )}
+        </main>
+        <BottomNav active={screen} onNav={nav} />
+        <DetailSheet record={detail} onClose={() => setDetail(null)} />
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

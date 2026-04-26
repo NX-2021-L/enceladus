@@ -1,0 +1,83 @@
+# ENC-FTR-090 / ENC-TSK-F66 Phase 8
+# v4 gamma environment manifest \u2014 the first end-to-end consumer of the Gen2 pipeline.
+# Schema validated by tools/cfn-guard/manifest-shape.guard.
+
+env_name: v4-gamma
+architecture: arm64
+runtime: python3.12
+
+stack_name: enceladus-v4-gamma
+deploy_role_arn: arn:aws:iam::356364570033:role/GitHubActions-V4Gamma-DeployRole
+artifact_bucket: jreese-net
+artifact_prefix: gen2-artifacts/v4-gamma/
+
+required_reviewers:
+  - io
+
+# SAM CodeDeploy DeploymentPreference for post-deploy traffic shift.
+# Gamma uses a faster canary cadence (1-minute steps) since gamma traffic is
+# synthetic / low-risk. Prod uses 10-minute steps.
+canary_preference: AllAtOnce
+
+# GitHub Actions runner label. ubuntu-24.04-arm is the native arm64 runner
+# (zero QEMU, full aarch64 ABI); all arm64 Lambdas build here.
+runner_label: ubuntu-24.04-arm
+
+# GitHub Environment name. The environment's required-reviewer rule is the
+# human approval gate; the OIDC trust policy scopes sub=environment:v4-gamma.
+environment: v4-gamma
+
+# ENC-TSK-F63 AC-1: AppConfig IDs. Populated after 06-feature-flags stack deploys.
+appconfig_application_id: ""
+appconfig_environment_id: ""
+
+# ENC-TSK-F63 AC-2/AC-3: SnapStart (arm64/py3.12 — supported) and CodeDeploy.
+enable_snapstart: "true"
+environment_suffix: "-gamma"
+codedeploy_app_name: "enceladus-lambda-gamma"
+
+# ENC-FTR-090 / ENC-TSK-F59 Phase 1 \u2014 artifact promotion fields.
+# artifact_commit_sha + artifact_version_ids are populated by F60 Phase 2
+# _deploy.yml when it promotes a matrix-built artifact set into this env.
+# Empty map here means no build has been promoted yet \u2014 _deploy.yml refuses
+# to deploy until populated. Schema validated by tools/cfn-guard/manifest-shape.guard
+# (rules: manifest_artifact_version_ids_shape + manifest_artifact_commit_sha_pinned).
+artifact_commit_sha: ""
+artifact_version_ids: {}
+
+# ENC-TSK-F60 Phase 2 — directory-name → deployed Lambda function name mapping.
+# _deploy.yml resolve step outputs this as function_name_map_json; deploy step uses
+# the mapped name in `aws lambda update-function-code --function-name`.
+# Gamma uses prefixed/hyphenated conventions that differ from backend/lambda/<dir> names.
+# Functions absent from this map are silently skipped by the deploy step.
+# deploy_capability_auditor intentionally excluded — not provisioned in v4-gamma.
+function_name_map:
+  auth_refresh: auth-refresh-gamma
+  bedrock_agent_actions: enceladus-bedrock-agent-actions-gamma
+  changelog_api: devops-changelog-api-gamma
+  checkout_service: enceladus-checkout-service-auto-gamma
+  coordination_api: devops-coordination-api-gamma
+  coordination_monitor_api: devops-coordination-monitor-api-gamma
+  deploy_decide: devops-deploy-decide-gamma
+  deploy_finalize: devops-deploy-finalize-gamma
+  deploy_intake: devops-deploy-intake-gamma
+  deploy_orchestrator: devops-deploy-orchestrator-gamma
+  doc_prep: devops-doc-prep-gamma
+  document_api: devops-document-api-gamma
+  env_drift_auditor: devops-env-drift-auditor-gamma
+  feed_publisher: devops-feed-publisher-gamma
+  feed_query: devops-feed-query-api-gamma
+  github_integration: devops-github-integration-gamma
+  governance_audit: enceladus-governance-audit-gamma
+  graph_health_metrics: enceladus-graph-health-metrics-gamma
+  graph_query_api: devops-graph-query-api-gamma
+  graph_sync: devops-graph-sync-gamma
+  neo4j_backup: enceladus-neo4j-backup-gamma
+  prod_health_monitor: enceladus-prod-health-monitor-gamma
+  project_service: devops-project-service-gamma
+  reference_search: devops-reference-search-gamma
+  titan_embedding_backfill: devops-titan-embedding-backfill-gamma
+  tracker_mutation: devops-tracker-mutation-api-gamma
+  deploy_parity_validator: devops-deploy-parity-validator-gamma
+  mcp_code: enceladus-mcp-code-gamma
+  mcp_streamable: enceladus-mcp-streamable-gamma

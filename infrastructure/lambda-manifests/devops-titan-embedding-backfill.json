@@ -1,0 +1,30 @@
+{
+  "entry_file": "lambda_function.py",
+  "function_name": "devops-titan-embedding-backfill",
+  "generated_at": "2026-04-15T08:20:00Z",
+  "live_configuration": {
+    "architectures": [
+      "x86_64"
+    ],
+    "environment": {
+      "NEO4J_SECRET_NAME": "enceladus/neo4j/auradb-credentials",
+      "SECRETS_REGION": "us-west-2",
+      "DDB_REGION": "us-west-2",
+      "BEDROCK_REGION": "us-west-2",
+      "TRACKER_TABLE": "devops-project-tracker",
+      "DOCUMENTS_TABLE": "documents"
+    },
+    "function_arn": "",
+    "handler": "lambda_function.lambda_handler",
+    "last_modified": "",
+    "layers": [],
+    "memory_size": 1024,
+    "role": "",
+    "runtime": "python3.11",
+    "timeout": 900,
+    "version": "$LATEST"
+  },
+  "parity_status": "PENDING_DEPLOY",
+  "region": "us-west-2",
+  "repo_entry_path": "backend/lambda/titan_embedding_backfill/lambda_function.py"
+}

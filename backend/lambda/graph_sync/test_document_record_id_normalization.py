@@ -176,6 +176,78 @@ class TestDocumentRecordIdNormalization(unittest.TestCase):
         self.assertIn("Document", cypher)
         self.assertIn("MERGE", cypher)
 
+    def test_process_remove_uses_document_id_key_for_document_delete(self):
+        """REMOVE events from the documents table must resolve document_id."""
+        captured: dict = {}
+
+        def fake_delete_node(tx, record_id):
+            captured["deleted_record_id"] = record_id
+
+        def fake_purge(tx, refs):
+            captured["purge_refs"] = set(refs)
+
+        GS._delete_node = fake_delete_node  # type: ignore[assignment]
+        GS._purge_orphan_placeholders = fake_purge  # type: ignore[assignment]
+
+        driver = MagicMock()
+        session_cm = MagicMock()
+        driver.session.return_value = session_cm
+        session_cm.__enter__.return_value = session_cm
+        session_cm.__exit__.return_value = False
+        session_cm.execute_write.side_effect = lambda fn: fn(MagicMock())
+
+        stream_record = {
+            "eventName": "REMOVE",
+            "dynamodb": {
+                "Keys": {"document_id": {"S": "DOC-REMOVE-123"}},
+                "OldImage": _dynamodb_image_for_document("DOC-REMOVE-123"),
+            },
+        }
+
+        GS._process_record(driver, stream_record)
+
+        self.assertEqual(captured.get("deleted_record_id"), "DOC-REMOVE-123")
+        self.assertNotIn("purge_refs", captured)
+
+    def test_process_remove_purges_orphan_placeholders_from_old_document_edges(self):
+        """REMOVE should purge placeholder stubs that only existed for old doc edges."""
+        captured: dict = {}
+
+        def fake_delete_node(tx, record_id):
+            captured["deleted_record_id"] = record_id
+
+        def fake_purge(tx, refs):
+            captured["purge_refs"] = set(refs)
+
+        GS._delete_node = fake_delete_node  # type: ignore[assignment]
+        GS._purge_orphan_placeholders = fake_purge  # type: ignore[assignment]
+
+        driver = MagicMock()
+        session_cm = MagicMock()
+        driver.session.return_value = session_cm
+        session_cm.__enter__.return_value = session_cm
+        session_cm.__exit__.return_value = False
+        session_cm.execute_write.side_effect = lambda fn: fn(MagicMock())
+
+        image = _dynamodb_image_for_document("DOC-REMOVE-EDGE")
+        image["related_items"] = {"L": [{"S": "ENC-TSK-999"}]}
+        stream_record = {
+            "eventName": "REMOVE",
+            "dynamodb": {
+                "Keys": {"document_id": {"S": "DOC-REMOVE-EDGE"}},
+                "OldImage": image,
+            },
+        }
+
+        GS._process_record(driver, stream_record)
+
+        self.assertEqual(captured.get("deleted_record_id"), "DOC-REMOVE-EDGE")
+        self.assertEqual(
+            captured.get("purge_refs"),
+            {("Task", "ENC-TSK-999")},
+            "document REMOVE should surface old placeholder targets for cleanup",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

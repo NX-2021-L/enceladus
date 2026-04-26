@@ -1,0 +1,173 @@
+name: CloudFormation CodeDeploy Stack Deploy
+
+# ENC-TSK-F92 / ENC-ISS-298
+#
+# Provisions the enceladus-codedeploy CFN stack from 07-codedeploy.yaml.
+# Creates: CodeDeploy application (enceladus-lambda), IAM role, CloudWatch
+# alarms, Lambda live aliases, and per-function DeploymentGroups for canary
+# traffic shifting in v3-prod.
+#
+# Prerequisites (set as GitHub Actions secrets):
+#   AWS_CLOUDFORMATION_ROLE_TO_ASSUME — ARN of a role with cloudformation:*,
+#     codedeploy:*, lambda:*, iam:*, cloudwatch:* permissions.
+#
+# After this stack is deployed, the first _deploy.yml run will update aliases
+# from $LATEST bootstrap to a specific published version and then use CodeDeploy
+# for subsequent canary traffic shifts (Linear10PercentEvery10Minutes for prod).
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infrastructure/cloudformation/07-codedeploy.yaml"
+      - ".github/workflows/cloudformation-codedeploy-stack-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: "CloudFormation stack name"
+        type: string
+        required: false
+        default: "enceladus-codedeploy"
+      compute_stack_name:
+        description: "Compute stack name (for cross-stack imports)"
+        type: string
+        required: false
+        default: "enceladus-compute"
+      canary_preference:
+        description: "CodeDeploy canary preference"
+        type: choice
+        required: false
+        default: "Linear10PercentEvery10Minutes"
+        options:
+          - Canary10Percent5Minutes
+          - Canary10Percent10Minutes
+          - Linear10PercentEvery1Minute
+          - Linear10PercentEvery10Minutes
+          - AllAtOnce
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual codedeploy stack deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  TEMPLATE_FILE: infrastructure/cloudformation/07-codedeploy.yaml
+  DEFAULT_STACK_NAME: enceladus-codedeploy
+  DEFAULT_COMPUTE_STACK_NAME: enceladus-compute
+  DEFAULT_CANARY_PREFERENCE: Linear10PercentEvery10Minutes
+
+jobs:
+  deploy:
+    name: Deploy CodeDeploy CloudFormation stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: cloudformation-codedeploy-stack-deploy-${{ github.ref_name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify CF role secret is set
+        run: |
+          if [ -z "${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}" ]; then
+            echo "::error::AWS_CLOUDFORMATION_ROLE_TO_ASSUME secret is not set or empty."
+            echo "::error::Set it to the ARN of a role with cloudformation:*, codedeploy:*, lambda:*, iam:*, cloudwatch:* permissions."
+            exit 1
+          fi
+          echo "AWS_CLOUDFORMATION_ROLE_TO_ASSUME is set."
+
+      - name: Configure AWS credentials (OIDC privileged CloudFormation role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment parameters
+        id: params
+        env:
+          INPUT_STACK_NAME: ${{ github.event.inputs.stack_name }}
+          INPUT_COMPUTE_STACK_NAME: ${{ github.event.inputs.compute_stack_name }}
+          INPUT_CANARY_PREFERENCE: ${{ github.event.inputs.canary_preference }}
+        run: |
+          set -euo pipefail
+
+          stack_name="${INPUT_STACK_NAME:-${DEFAULT_STACK_NAME}}"
+          compute_stack_name="${INPUT_COMPUTE_STACK_NAME:-${DEFAULT_COMPUTE_STACK_NAME}}"
+          canary_preference="${INPUT_CANARY_PREFERENCE:-${DEFAULT_CANARY_PREFERENCE}}"
+
+          {
+            echo "stack_name=${stack_name}"
+            echo "compute_stack_name=${compute_stack_name}"
+            echo "canary_preference=${canary_preference}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Stack: ${stack_name}  Compute: ${compute_stack_name}  Canary: ${canary_preference}"
+
+      - name: Deploy CodeDeploy stack (07-codedeploy)
+        id: deploy
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --template-file "${TEMPLATE_FILE}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 07-codedeploy/ \
+            --parameter-overrides \
+              Environment=production \
+              EnvironmentSuffix="" \
+              ComputeStackName="${{ steps.params.outputs.compute_stack_name }}" \
+              CanaryPreference="${{ steps.params.outputs.canary_preference }}"
+
+      - name: Report stack events on failure
+        if: failure() && steps.deploy.conclusion == 'failure'
+        run: |
+          echo "=== Stack events (last 20) ==="
+          aws cloudformation describe-stack-events \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --query 'StackEvents[:20].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+            --output table || echo "(describe-stack-events unavailable)"
+
+      - name: Verify deployed stack state
+        run: |
+          set -euo pipefail
+          status=$(aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text)
+          echo "Stack status: ${status}"
+          if [ "${status}" != "UPDATE_COMPLETE" ] && [ "${status}" != "CREATE_COMPLETE" ]; then
+            echo "::error::Stack ${{ steps.params.outputs.stack_name }} is in unexpected state: ${status}"
+            exit 1
+          fi
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
+            --output table
+
+      - name: Verify CodeDeploy application exists
+        run: |
+          set -euo pipefail
+          aws deploy get-application \
+            --application-name enceladus-lambda \
+            --region "${AWS_REGION}" \
+            --query 'application.{Name:applicationName,Platform:computePlatform,CreateTime:createTime}' \
+            --output table
+          echo "CodeDeploy application enceladus-lambda confirmed."

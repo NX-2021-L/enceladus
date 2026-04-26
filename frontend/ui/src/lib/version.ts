@@ -18,7 +18,7 @@
  */
 
 /** Current release version — update this on every deployment */
-export const APP_VERSION = '1.0.1'
+export const APP_VERSION = '1.0.2'
 
 /** Structured release history — newest first */
 export interface ReleaseNote {
@@ -39,6 +39,17 @@ export interface ReleaseNote {
  * Do not delete until backfill (ENC-TSK-687-690) is complete and validated.
  */
 export const RELEASE_NOTES: ReleaseNote[] = [
+  {
+    version: '1.0.2',
+    date: '2026-04-17',
+    type: 'patch',
+    summary: 'Close ENC-ISS-208: PWA Deployment Manager approve surface restored (ENC-TSK-E76 / ENC-PLN-033 Wave W3)',
+    changes: [
+      'Add regression test for the decision# prefix strip in fetchDeployQueue (api/deploy.test.ts) — locks in D51 behavior so future refactors cannot silently regress the DPL record_id normalization',
+      'Verification of ENC-ISS-208 closure: ENC-TSK-D51 (PR #293) stripped the DynamoDB composite-key "decision#" prefix in fetchDeployQueue; ENC-ISS-211 (PRs #294-296) hardened the build pipeline with the forcePageChunks Rollup plugin, manualChunks page pattern, and package.json post-build chunk guard. Build 528c691 at 2026-04-17T01:08:17Z emitted DeploymentManagerPage-*.js (9.52 kB) and issued CloudFront invalidation I4XBIJ22Z8EYAYK55JG8KK0R3S',
+      'Unblocks ENC-PLN-032 Phase 2 (E73/E74) and resolves the ENC-ISS-243 deploy-approval bypass findings that accumulated while the PWA approve surface was dark',
+    ],
+  },
   {
     version: '1.0.1',
     date: '2026-04-07',

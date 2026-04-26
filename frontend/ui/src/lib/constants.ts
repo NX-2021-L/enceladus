@@ -320,3 +320,48 @@ export const COMPONENT_TRANSITION_TYPE_RANK: Record<string, number> = {
 }
 
 export const COMPONENT_STATUSES = ['active', 'deprecated', 'archived'] as const
+
+// ENC-FTR-076 v2 / DOC-546B896390EA §3 — 8-status component lifecycle.
+// Source of truth: governance_data_dictionary.json
+//   entities.component_registry.component.fields.lifecycle_status (v2026-04-19.04)
+// Distinct colors per AC[3]-b:
+//   proposed / approved → neutral gray (awaiting further action)
+//   designed / development → blue (in-flight)
+//   production → green (live)
+//   code-red → red (incident)
+//   deprecated → amber (fork required)
+//   archived → slate (terminal)
+export const COMPONENT_LIFECYCLE_STATUSES = [
+  'proposed',
+  'approved',
+  'designed',
+  'development',
+  'production',
+  'code-red',
+  'deprecated',
+  'archived',
+] as const
+
+export type ComponentLifecycleStatus = (typeof COMPONENT_LIFECYCLE_STATUSES)[number]
+
+export const COMPONENT_LIFECYCLE_STATUS_LABELS: Record<string, string> = {
+  proposed: 'Proposed',
+  approved: 'Approved',
+  designed: 'Designed',
+  development: 'Development',
+  production: 'Production',
+  'code-red': 'Code Red',
+  deprecated: 'Deprecated',
+  archived: 'Archived',
+}
+
+export const COMPONENT_LIFECYCLE_STATUS_COLORS: Record<string, string> = {
+  proposed: 'bg-slate-500/20 text-slate-300',
+  approved: 'bg-slate-400/20 text-slate-200',
+  designed: 'bg-blue-500/20 text-blue-400',
+  development: 'bg-indigo-500/20 text-indigo-400',
+  production: 'bg-emerald-500/20 text-emerald-400',
+  'code-red': 'bg-rose-500/20 text-rose-400',
+  deprecated: 'bg-amber-500/20 text-amber-400',
+  archived: 'bg-slate-700/40 text-slate-500',
+}

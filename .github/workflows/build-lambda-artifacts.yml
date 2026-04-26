@@ -1,0 +1,142 @@
+name: Build Lambda Artifacts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/lambda/**'
+      - 'tools/package_lambda_artifact.sh'
+      - 'tools/check_lambda_pyjwt_requirements.py'
+      - 'infrastructure/lambda_workflow_manifest.json'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/lambda/**'
+      - 'tools/package_lambda_artifact.sh'
+      - 'tools/check_lambda_pyjwt_requirements.py'
+      - 'infrastructure/lambda_workflow_manifest.json'
+  workflow_call:
+    outputs:
+      artifact_prefix:
+        description: 'S3 prefix for built artifacts'
+        value: ${{ jobs.upload-artifacts.outputs.artifact_prefix }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Guard — every jwt-importing Lambda must declare PyJWT in requirements.txt (ENC-LSN-020)
+        run: python3 tools/check_lambda_pyjwt_requirements.py
+
+      - name: Parse manifest into matrix
+        id: parse
+        run: |
+          matrix=$(jq -c '{include: [.functions[] | {function_name: .function_name, lambda_dir: .lambda_dir, package_extra_files: (.package_extra_files // "")}]}' \
+            infrastructure/lambda_workflow_manifest.json)
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "Parsed matrix:" >&2
+          echo "${matrix}" | jq . >&2
+
+  build:
+    needs: setup-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 10
+      matrix:
+        arch_tag: [x86_64-py311, arm64-py312]
+        include: ${{ fromJson(needs.setup-matrix.outputs.matrix).include }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Package Lambda artifact
+        id: package
+        run: |
+          zip_path=$(bash tools/package_lambda_artifact.sh \
+            "${{ matrix.function_name }}" \
+            "${{ matrix.lambda_dir }}" \
+            "${{ matrix.arch_tag }}" \
+            "${{ matrix.package_extra_files }}")
+          echo "zip_path=${zip_path}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive expected architecture
+        id: arch
+        run: |
+          case "${{ matrix.arch_tag }}" in
+            x86_64-py311) echo "expected=x86_64" >> "$GITHUB_OUTPUT" ;;
+            arm64-py312)  echo "expected=arm64"  >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Verify package architecture
+        run: |
+          python3 tools/verify_lambda_package_arch.py \
+            --package "${{ steps.package.outputs.zip_path }}" \
+            --expected-arch "${{ steps.arch.outputs.expected }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-${{ matrix.function_name }}-${{ matrix.arch_tag }}
+          path: ${{ steps.package.outputs.zip_path }}
+          retention-days: 7
+
+  upload-artifacts:
+    needs: build
+    # Upload on push to main (standalone) or when called via workflow_call (from deploy-orchestration)
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_call' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_prefix: ${{ steps.upload.outputs.artifact_prefix }}
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Upload artifacts to S3
+        id: upload
+        run: |
+          prefix="lambda-artifacts/${GITHUB_SHA}"
+          for dir in artifacts/lambda-*; do
+            artifact_name=$(basename "${dir}")
+            # artifact_name is lambda-<function_name>-<arch_tag>
+            # Extract arch_tag (last segment after the last hyphen-group matching an arch pattern)
+            arch_tag=$(echo "${artifact_name}" | grep -oE '(x86_64-py311|arm64-py312)$')
+            function_name=$(echo "${artifact_name}" | sed "s/^lambda-//" | sed "s/-${arch_tag}$//")
+
+            zip_file=$(find "${dir}" -name '*.zip' | head -1)
+            if [[ -z "${zip_file}" ]]; then
+              echo "WARNING: No zip found in ${dir}, skipping" >&2
+              continue
+            fi
+
+            s3_key="${prefix}/${arch_tag}/${function_name}.zip"
+            echo "Uploading ${zip_file} -> s3://jreese-net/${s3_key}" >&2
+            aws s3 cp "${zip_file}" "s3://jreese-net/${s3_key}"
+          done
+
+          echo "artifact_prefix=${prefix}" >> "$GITHUB_OUTPUT"
+          echo "All artifacts uploaded to s3://jreese-net/${prefix}/" >&2

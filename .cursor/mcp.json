@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "enceladus": {
+      "type": "http",
+      "url": "https://jreese.net/api/v1/coordination/mcp",
+      "headers": {
+        "X-Coordination-Internal-Key": "${env:ENCELADUS_COORDINATION_INTERNAL_API_KEY}"
+      }
+    }
+  }
+}

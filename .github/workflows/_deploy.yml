@@ -1,0 +1,619 @@
+name: Deploy Lambda Artifacts (Gen2)
+
+# ENC-FTR-090 / ENC-PLN-041 Phase 2 / ENC-TSK-F60
+# ENC-TSK-G70: branch-based env routing. push to main → no-op (v3-prod is
+# workflow_dispatch-only). push to v4/main → build + deploy v4-gamma.
+#
+# AC-1: Sole prod-IAM-assumer. GitHubActions-V*-DeployRole is assumed ONLY here.
+#       push to v4/main → build (via _build.yml) then deploy to v4-gamma.
+#       push to main → skipped (deploy chain rebuilt in ENC-TSK-G71 fires v3-prod via
+#         post-gamma promotion + required-reviewer gate).
+#       workflow_dispatch → deploy a pre-built SHA to the specified target_environment.
+#       workflow_call → reusable entry point for programmatic callers.
+#       Concurrency group keyed per-environment with cancel-in-progress=false.
+#
+# AC-2: GitHub Deployments API is the deploy-state store.
+#       POST /deployments on entry; POST /deployments/N/statuses for
+#       in_progress → success|failure. Zero DynamoDB writes for deploy state.
+#
+# AC-3: All legacy per-Lambda deploy workflows + deploy-orchestration.yml +
+#       lambda-deploy-reusable.yml deleted in this PR.
+
+on:
+  push:
+    branches: [main, v4/main]
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Target environment"
+        type: choice
+        options: [v3-prod, v4-gamma, v4-prod]
+        required: true
+      commit_sha:
+        description: "40-char hex SHA to deploy (must be pre-built by _build.yml)"
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      target_environment:
+        type: string
+        required: true
+      commit_sha:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  deployments: write
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.target_environment || 'v4-gamma' }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  ARTIFACT_BUCKET: jreese-net
+  ARTIFACT_KEY_PREFIX: lambda-artifacts
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # BUILD — runs only on push-to-v4/main (gamma path).
+  # push-to-main is intentionally a no-op: v3-prod is workflow_dispatch-only,
+  # and v4/main is forward-synced from main by the sync-main-to-v4main workflow
+  # (ENC-TSK-G71) which then triggers this workflow on the v4/main push.
+  # workflow_dispatch / workflow_call callers provide a pre-built SHA.
+  # ---------------------------------------------------------------------------
+  build:
+    if: github.event_name == 'push' && github.ref_name == 'v4/main'
+    uses: ./.github/workflows/_build.yml
+    with:
+      commit_sha: ${{ github.sha }}
+
+  # ---------------------------------------------------------------------------
+  # RESOLVE — parse env manifest, probe S3 for artifacts, emit deploy inputs.
+  # Runs after build (push path) or immediately (dispatch/call path).
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: Resolve artifacts (${{ inputs.target_environment || 'v4-gamma' }})
+    needs: [build]
+    # On push events, only proceed when the build job actually ran (v4/main).
+    # On workflow_dispatch / workflow_call, build is skipped — proceed with the
+    # caller-supplied commit_sha + target_environment.
+    if: |
+      always() &&
+      (
+        (github.event_name == 'push' && needs.build.result == 'success') ||
+        (github.event_name != 'push' && needs.build.result == 'skipped')
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha:            ${{ steps.sha.outputs.commit_sha }}
+      deploy_role_arn:       ${{ steps.manifest.outputs.deploy_role_arn }}
+      environment:           ${{ steps.manifest.outputs.environment }}
+      arch:                  ${{ steps.manifest.outputs.arch }}
+      py_version:            ${{ steps.manifest.outputs.py_version }}
+      canary_preference:     ${{ steps.manifest.outputs.canary_preference }}
+      version_ids_json:      ${{ steps.probe.outputs.version_ids_json }}
+      function_name_map_json: ${{ steps.manifest.outputs.function_name_map_json }}
+      environment_suffix:    ${{ steps.manifest.outputs.environment_suffix }}
+      codedeploy_app_name:   ${{ steps.manifest.outputs.codedeploy_app_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve commit SHA
+        id: sha
+        run: |
+          SHA="${{ inputs.commit_sha || github.sha }}"
+          echo "commit_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Parse environment manifest
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="${{ inputs.target_environment || 'v4-gamma' }}"
+          MANIFEST="envs/${TARGET}.yaml"
+          [[ -f "$MANIFEST" ]] || { echo "::error::Manifest not found: $MANIFEST"; exit 1; }
+
+          _parse() { grep -E "^$1:" "$MANIFEST" | head -1 | sed 's/^[^:]*: *//' | tr -d "\"'"; }
+
+          ROLE=$(_parse deploy_role_arn)
+          ENV=$(_parse environment)
+          ARCH=$(_parse architecture)
+          RUNTIME=$(_parse runtime)
+          PY="${RUNTIME#python}"
+          CANARY=$(_parse canary_preference)
+          # ENC-TSK-F63 AC-2/AC-3: SnapStart and CodeDeploy fields
+          ENV_SUFFIX=$(_parse environment_suffix)
+          CODEDEPLOY_APP=$(_parse codedeploy_app_name)
+
+          [[ -n "$ROLE" ]] || { echo "::error::deploy_role_arn missing in $MANIFEST"; exit 1; }
+
+          FNMAP_JSON=$(python3 - "$MANIFEST" <<'PY'
+          import json, re, sys
+          content = open(sys.argv[1]).read()
+          result = {}
+          in_map = False
+          for line in content.splitlines():
+              if line.rstrip() == 'function_name_map:':
+                  in_map = True
+                  continue
+              if in_map:
+                  m = re.match(r'^  (\w+):\s+(\S+)', line)
+                  if m:
+                      result[m.group(1)] = m.group(2)
+                  elif line and not line.startswith(' ') and not line.startswith('#'):
+                      break
+          print(json.dumps(result))
+          PY
+          )
+
+          {
+            echo "deploy_role_arn=$ROLE"
+            echo "environment=$ENV"
+            echo "arch=$ARCH"
+            echo "py_version=$PY"
+            echo "canary_preference=$CANARY"
+            echo "function_name_map_json=$FNMAP_JSON"
+            echo "environment_suffix=${ENV_SUFFIX}"
+            echo "codedeploy_app_name=${CODEDEPLOY_APP}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Target=$TARGET  Arch=$ARCH  Runtime=$RUNTIME  Role=$ROLE"
+          echo "function_name_map: $(echo "$FNMAP_JSON" | python3 -c 'import json,sys; m=json.load(sys.stdin); print(f"{len(m)} entries")')"
+
+      - name: Configure AWS credentials (build role — S3 artifact probe)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/GitHubActions-Build-Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Probe S3 for artifacts and collect VersionIds
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.sha.outputs.commit_sha }}"
+          ARCH="${{ steps.manifest.outputs.arch }}"
+          PY="${{ steps.manifest.outputs.py_version }}"
+          KEY_PREFIX="${{ env.ARTIFACT_KEY_PREFIX }}/${ARCH}-py${PY}"
+          BUCKET="${{ env.ARTIFACT_BUCKET }}"
+
+          mapfile -t FNS < <(find backend/lambda -maxdepth 2 -name lambda_function.py \
+            | sed -E 's|backend/lambda/([^/]+)/lambda_function.py|\1|' | sort -u)
+
+          echo "Probing ${#FNS[@]} Lambda functions for SHA=${SHA}, arch=${ARCH}-py${PY}"
+
+          MISSING=()
+          > /tmp/vid_map.txt
+          for fn in "${FNS[@]}"; do
+            KEY="${KEY_PREFIX}/${fn}-${SHA}.zip"
+            VID=$(aws s3api head-object \
+              --bucket "$BUCKET" \
+              --key "$KEY" \
+              --query 'VersionId' --output text 2>/dev/null || echo "")
+            if [[ -z "$VID" || "$VID" == "None" ]]; then
+              MISSING+=("$fn")
+            else
+              printf '%s=%s\n' "$fn" "$VID" >> /tmp/vid_map.txt
+            fi
+          done
+
+          if [[ ${#MISSING[@]} -gt 0 ]]; then
+            echo "::error::Artifacts missing in S3 for SHA=${SHA} (arch=${ARCH}-py${PY}):"
+            printf '  missing: %s\n' "${MISSING[@]}"
+            echo "::error::Build artifacts first via _build.yml before dispatching _deploy.yml."
+            exit 1
+          fi
+
+          VID_JSON=$(python3 - <<'PY'
+          import json
+          d = {}
+          with open('/tmp/vid_map.txt') as f:
+              for line in f:
+                  line = line.strip()
+                  if '=' in line:
+                      k, v = line.split('=', 1)
+                      d[k] = v
+          print(json.dumps(d))
+          PY
+          )
+
+          echo "version_ids_json=$VID_JSON" >> "$GITHUB_OUTPUT"
+          echo "Resolved ${#FNS[@]} artifact VersionIds."
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY — create GH Deployment, assume prod role, update all Lambdas.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy → ${{ needs.resolve.outputs.environment }}
+    needs: resolve
+    # Without this explicit condition, GitHub Actions' implicit success() check evaluates
+    # the transitive job chain: build (skipped on workflow_dispatch) → resolve → deploy.
+    # A skipped ancestor causes success() to return false, silently skipping the deploy job.
+    # This if: allows the deploy to run on workflow_dispatch (build skipped) as long as
+    # resolve itself succeeded.
+    if: always() && needs.resolve.result == 'success'
+    environment: ${{ needs.resolve.outputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+
+      - name: Create GitHub Deployment
+        id: create_deployment
+        env:
+          # ENC-TSK-F92 / ENC-ISS-297: dedicated read token isolates DM thin reader
+          # from the shared GITHUB_TOKEN bucket consumed by agent sessions + CI runs.
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
+          SHA: ${{ needs.resolve.outputs.commit_sha }}
+          ENV: ${{ needs.resolve.outputs.environment }}
+        run: |
+          set -euo pipefail
+
+          PAYLOAD=$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({
+              'ref': os.environ['SHA'],
+              'environment': os.environ['ENV'],
+              'description': 'Gen2 deploy — ENC-FTR-090',
+              'auto_merge': False,
+              'required_contexts': [],
+          }))
+          PY
+          )
+          DEPLOYMENT_ID=$(echo "$PAYLOAD" | gh api \
+            --method POST \
+            "/repos/$GITHUB_REPOSITORY/deployments" \
+            --input - \
+            --jq '.id')
+
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "Created GitHub Deployment #$DEPLOYMENT_ID (env=$ENV, sha=$SHA)"
+
+      - name: Set deployment status → in_progress
+        env:
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
+          DEPLOYMENT_ID: ${{ steps.create_deployment.outputs.deployment_id }}
+        run: |
+          gh api --method POST \
+            "/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=in_progress \
+            -f description="Deploying Lambda artifacts"
+
+      - name: Configure AWS credentials (prod deploy role — AC-1 sole assumer)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.resolve.outputs.deploy_role_arn }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy Lambda functions
+        id: lambda_deploy
+        env:
+          VERSION_IDS_JSON: ${{ needs.resolve.outputs.version_ids_json }}
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+          SHA: ${{ needs.resolve.outputs.commit_sha }}
+          ARCH: ${{ needs.resolve.outputs.arch }}
+          PY_VERSION: ${{ needs.resolve.outputs.py_version }}
+          # ENC-TSK-F63 AC-3: CodeDeploy canary preference from env manifest.
+          # Empty string → direct alias update (AllAtOnce). Non-empty → CodeDeploy traffic shift.
+          CANARY_PREFERENCE: ${{ needs.resolve.outputs.canary_preference }}
+          ENVIRONMENT_SUFFIX: ${{ needs.resolve.outputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          python3 -u - <<'PY'
+          # ENC-TSK-G69: Parallel kickoff via ThreadPoolExecutor + flush-on-print + 900s
+          # per-deployment internal timeout. Compresses ~28-Lambda kickoff from ~14 min
+          # (sequential) to ~2 min (8 workers), enabling sub-10-min end-to-end Gen2
+          # dispatch. Mirrors the proven Sev1 brute-force pattern from ENC-ISS-305.
+          import concurrent.futures, json, os, subprocess, sys, tempfile, threading, time
+
+          version_ids     = json.loads(os.environ['VERSION_IDS_JSON'])
+          fn_map          = json.loads(os.environ.get('FUNCTION_NAME_MAP_JSON') or '{}')
+          canary_pref     = os.environ.get('CANARY_PREFERENCE', '').strip()
+          bucket = 'jreese-net'
+          arch   = os.environ['ARCH']
+          py     = os.environ['PY_VERSION']
+          sha    = os.environ['SHA']
+          prefix = f"lambda-artifacts/{arch}-py{py}"
+          region = 'us-west-2'
+          env_suffix = os.environ.get('ENVIRONMENT_SUFFIX', '')
+          codedeploy_app = f"enceladus-lambda{env_suffix}"
+
+          CODEDEPLOY_CONFIG_MAP = {
+              'Canary10Percent5Minutes':        'CodeDeployDefault.LambdaCanary10Percent5Minutes',
+              'Canary10Percent10Minutes':       'CodeDeployDefault.LambdaCanary10Percent10Minutes',
+              'Linear10PercentEvery1Minute':    'CodeDeployDefault.LambdaLinear10PercentEvery1Minute',
+              'Linear10PercentEvery10Minutes':  'CodeDeployDefault.LambdaLinear10PercentEvery10Minutes',
+              'AllAtOnce':                      'CodeDeployDefault.LambdaAllAtOnce',
+          }
+          use_codedeploy = canary_pref and canary_pref != 'AllAtOnce' and canary_pref in CODEDEPLOY_CONFIG_MAP
+
+          # Hoisted out of the per-function loop: 1 sts call total instead of 1 per function.
+          if use_codedeploy:
+              account_id = subprocess.check_output(
+                  ['aws', 'sts', 'get-caller-identity', '--query', 'Account', '--output', 'text'],
+                  text=True,
+              ).strip()
+          else:
+              account_id = ''
+
+          # Mapping mirrors 07-codedeploy.yaml DeploymentGroup names. Hoisted out.
+          DG_NAME_MAP = {
+              'devops-coordination-api':        'coordination-api',
+              'devops-tracker-mutation-api':    'tracker-mutation',
+              'devops-document-api':            'document-api',
+              'devops-graph-query-api':         'graph-query-api',
+              'devops-project-service':         'project-service',
+              'devops-feed-query-api':          'feed-query',
+              'devops-coordination-monitor-api': 'coordination-monitor',
+              'devops-deploy-intake':           'deploy-intake',
+              'devops-reference-search':        'reference-search',
+              'auth-refresh':                   'auth-refresh',
+              'devops-deploy-orchestrator':     'deploy-orchestrator',
+              'devops-deploy-finalize':         'deploy-finalize',
+              'devops-deploy-decide':           'deploy-decide',
+              'devops-feed-publisher':          'feed-publisher',
+              'enceladus-governance-audit':     'governance-audit',
+              'devops-doc-prep':                'doc-prep',
+              'enceladus-bedrock-agent-actions': 'bedrock-agent-actions',
+              'devops-changelog-api':           'changelog-api',
+              'devops-graph-sync':              'graph-sync',
+              'enceladus-neo4j-backup':         'neo4j-backup',
+              'enceladus-graph-health-metrics': 'graph-health-metrics',
+              'devops-env-drift-auditor':       'env-drift-auditor',
+              'devops-deploy-parity-validator': 'deploy-parity-validator',
+          }
+
+          _print_lock = threading.Lock()
+          def log(msg, err=False):
+              # Serialize prints across worker threads so log lines don't interleave.
+              # flush=True surfaces progress in real time (ENC-ISS-305 buffering fix).
+              with _print_lock:
+                  print(msg, file=(sys.stderr if err else sys.stdout), flush=True)
+
+          def deploy_one(fn, version_id):
+              """Per-function pipeline: download artifact, update code, publish version,
+              kick off CodeDeploy canary (or fall back to direct alias). Returns:
+                {'fn', 'mapped_name', 'status', 'dep_id'?, 'error'?}
+              status in {'codedeploy', 'direct', 'skip', 'error'}."""
+              mapped_name = fn_map.get(fn)
+              if not mapped_name:
+                  log(f'[skip] {fn}  (not in function_name_map)')
+                  return {'fn': fn, 'status': 'skip'}
+              s3_key = f"{prefix}/{fn}-{sha}.zip"
+              log(f'[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id}')
+
+              tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
+              tmp.close()
+              try:
+                  dl = subprocess.run(
+                      ['aws', 's3api', 'get-object',
+                       '--bucket', bucket, '--key', s3_key,
+                       '--version-id', version_id,
+                       '--region', 'us-east-1', tmp.name],
+                      capture_output=True, text=True,
+                  )
+                  if dl.returncode != 0:
+                      log(f'::error::s3 download failed for {fn}: {dl.stderr.strip()}', err=True)
+                      return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 's3 download'}
+
+                  r = subprocess.run(
+                      ['aws', 'lambda', 'update-function-code',
+                       '--region', region, '--function-name', mapped_name,
+                       '--zip-file', f'fileb://{tmp.name}', '--publish'],
+                      capture_output=True, text=True,
+                  )
+              finally:
+                  try: os.unlink(tmp.name)
+                  except OSError: pass
+
+              if r.returncode != 0:
+                  stderr = r.stderr.strip()
+                  if 'ResourceNotFoundException' in stderr or 'Function not found' in stderr:
+                      log(f'  [skip] {mapped_name}: not provisioned in this environment yet')
+                      return {'fn': fn, 'mapped_name': mapped_name, 'status': 'skip'}
+                  log(f'::error::update-function-code failed for {mapped_name}: {stderr}', err=True)
+                  return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 'update-function-code'}
+
+              try:
+                  new_version = json.loads(r.stdout).get('Version', '')
+              except (json.JSONDecodeError, KeyError):
+                  new_version = ''
+              if not new_version:
+                  log(f'::error::could not parse Version from update-function-code for {mapped_name}', err=True)
+                  return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 'no version'}
+
+              subprocess.run(
+                  ['aws', 'lambda', 'wait', 'function-updated-v2',
+                   '--region', region, '--function-name', mapped_name],
+                  check=False,
+              )
+
+              # CodeDeploy canary path
+              use_cd_succeeded = False
+              if use_codedeploy:
+                  try:
+                      alias_r = subprocess.run(
+                          ['aws', 'lambda', 'get-alias',
+                           '--function-name', mapped_name, '--name', 'live',
+                           '--region', region],
+                          capture_output=True, text=True,
+                      )
+                      if alias_r.returncode == 0:
+                          current_version = json.loads(alias_r.stdout).get('FunctionVersion', '$LATEST')
+                      else:
+                          current_version = '$LATEST'
+
+                      if current_version == '$LATEST':
+                          # Bootstrap: live alias points to $LATEST. CodeDeploy rejects
+                          # $LATEST as CurrentVersion. Direct alias update; next deploy
+                          # will use the canary path with a valid integer CurrentVersion.
+                          log(f'  [bootstrap] {mapped_name}: live alias is $LATEST — direct alias update (next deploy will use CodeDeploy canary)')
+                      else:
+                          appspec = {
+                              "version": 0.0,
+                              "Resources": [{
+                                  mapped_name: {
+                                      "Type": "AWS::Lambda::Function",
+                                      "Properties": {
+                                          "Name": mapped_name,
+                                          "Alias": "live",
+                                          "CurrentVersion": current_version,
+                                          "TargetVersion": new_version,
+                                      }
+                                  }
+                              }]
+                          }
+                          base_name = mapped_name
+                          if env_suffix and mapped_name.endswith(env_suffix):
+                              base_name = mapped_name[:-len(env_suffix)]
+                          dg_name = DG_NAME_MAP.get(base_name, base_name)
+                          if env_suffix:
+                              dg_name = f"{dg_name}{env_suffix}"
+                          revision_json = json.dumps({
+                              "revisionType": "AppSpecContent",
+                              "appSpecContent": {"content": json.dumps(appspec)},
+                          })
+                          cd_r = subprocess.run(
+                              ['aws', 'deploy', 'create-deployment',
+                               '--application-name', codedeploy_app,
+                               '--deployment-group-name', dg_name,
+                               '--revision', revision_json,
+                               '--region', region, '--output', 'json'],
+                              capture_output=True, text=True,
+                          )
+                          if cd_r.returncode == 0:
+                              dep_id = json.loads(cd_r.stdout).get('deploymentId', '')
+                              log(f'  + {mapped_name} → CodeDeploy deployment {dep_id} ({canary_pref})')
+                              if dep_id:
+                                  return {'fn': fn, 'mapped_name': mapped_name,
+                                          'status': 'codedeploy', 'dep_id': dep_id}
+                              use_cd_succeeded = False
+                          else:
+                              log(f'  [warn] CodeDeploy create-deployment failed for {mapped_name}: {cd_r.stderr.strip()}')
+                              log(f'  [warn] Falling back to direct alias update for {mapped_name}')
+                  except Exception as e:
+                      log(f'  [warn] CodeDeploy error for {mapped_name}: {e}', err=True)
+
+              # Direct alias update fallback (canary disabled/AllAtOnce/CD-failed/bootstrap)
+              alias_r = subprocess.run(
+                  ['aws', 'lambda', 'update-alias',
+                   '--function-name', mapped_name, '--name', 'live',
+                   '--function-version', new_version, '--region', region],
+                  capture_output=True, text=True,
+              )
+              if alias_r.returncode != 0:
+                  subprocess.run(
+                      ['aws', 'lambda', 'create-alias',
+                       '--function-name', mapped_name, '--name', 'live',
+                       '--function-version', new_version, '--region', region],
+                      capture_output=True, text=True, check=False,
+                  )
+              log(f'  + {mapped_name} → live:{new_version} (direct)')
+              return {'fn': fn, 'mapped_name': mapped_name, 'status': 'direct'}
+
+          # ============================================================
+          # PARALLEL KICKOFF — 8-worker pool
+          # ============================================================
+          targets = sorted(version_ids.items())
+          log(f'Kicking off {len(targets)} Lambda updates with 8-worker pool...')
+          t_kickoff = time.time()
+          deployments = []  # list of (fn, mapped_name, dep_id)
+          errors = []
+          skipped = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+              futures = {pool.submit(deploy_one, fn, vid): fn for fn, vid in targets}
+              for fut in concurrent.futures.as_completed(futures):
+                  try:
+                      result = fut.result()
+                  except Exception as e:
+                      fn = futures[fut]
+                      log(f'::error::worker exception on {fn}: {e}', err=True)
+                      errors.append(fn)
+                      continue
+                  fn = result['fn']
+                  if result['status'] == 'codedeploy':
+                      deployments.append((fn, result['mapped_name'], result['dep_id']))
+                  elif result['status'] == 'skip':
+                      skipped.append(fn)
+                  elif result['status'] == 'error':
+                      errors.append(fn)
+                  # 'direct' = success already finalized; nothing to track for wait phase
+          log(f'Kickoff phase complete in {time.time() - t_kickoff:.1f}s')
+
+          # ============================================================
+          # CODEDEPLOY WAIT — parallel poll, 900s per-deployment timeout (was 3600s)
+          # ============================================================
+          PER_DEPLOY_TIMEOUT_S = 900
+          if deployments:
+              log(f'Waiting for {len(deployments)} CodeDeploy deployment(s)...')
+              t_wait = time.time()
+              deadline = t_wait + PER_DEPLOY_TIMEOUT_S
+              pending = list(deployments)
+              while pending and time.time() < deadline:
+                  time.sleep(30)
+                  still_pending = []
+                  for fn, mapped_name, dep_id in pending:
+                      status_r = subprocess.run(
+                          ['aws', 'deploy', 'get-deployment',
+                           '--deployment-id', dep_id, '--region', region,
+                           '--query', 'deploymentInfo.status', '--output', 'text'],
+                          capture_output=True, text=True,
+                      )
+                      status = status_r.stdout.strip()
+                      if status in ('Succeeded', 'Failed', 'Stopped'):
+                          if status == 'Succeeded':
+                              log(f'  ✓ {mapped_name} CodeDeploy {dep_id}: {status}')
+                          else:
+                              log(f'::error::CodeDeploy {dep_id} for {mapped_name}: {status}', err=True)
+                              errors.append(fn)
+                      else:
+                          still_pending.append((fn, mapped_name, dep_id))
+                  pending = still_pending
+              if pending:
+                  for fn, mapped_name, dep_id in pending:
+                      log(f'::error::CodeDeploy {dep_id} for {mapped_name} did not reach terminal state in {PER_DEPLOY_TIMEOUT_S}s — investigate deployment group config (alarm-rollback, hooks, MinimumHealthyHosts)', err=True)
+                      errors.append(fn)
+              log(f'Wait phase complete in {time.time() - t_wait:.1f}s')
+
+          deployed = len(version_ids) - len(skipped) - len(errors)
+          if skipped:
+              log(f'Skipped {len(skipped)} functions with no env mapping or not provisioned: {", ".join(skipped)}')
+          if errors:
+              log(f'::error::Deploy failed for: {", ".join(errors)}', err=True)
+              sys.exit(1)
+
+          log(f'Deployed {deployed} Lambda functions  {arch}-py{py} @ {sha[:7]}')
+          PY
+
+      - name: Set deployment status → success
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
+          DEPLOYMENT_ID: ${{ steps.create_deployment.outputs.deployment_id }}
+        run: |
+          gh api --method POST \
+            "/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=success \
+            -f description="${{ needs.resolve.outputs.environment }}: all Lambdas deployed"
+
+      - name: Set deployment status → failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
+          DEPLOYMENT_ID: ${{ steps.create_deployment.outputs.deployment_id }}
+        run: |
+          gh api --method POST \
+            "/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=failure \
+            -f description="Deploy failed — ${{ needs.resolve.outputs.environment }}"

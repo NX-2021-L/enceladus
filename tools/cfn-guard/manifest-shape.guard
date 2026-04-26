@@ -1,0 +1,110 @@
+# ENC-FTR-090 / ENC-TSK-F66 Phase 8
+# Schema invariants for envs/*.yaml environment manifests.
+# Runs via: cfn-guard validate --data envs/*.yaml --rules tools/cfn-guard/manifest-shape.guard
+#
+# The manifest schema is owned by this rule file; any change to required fields
+# MUST land here first (with a CODEOWNERS review per /.github/CODEOWNERS Phase 0).
+
+let architecture_allowed = [ "x86_64", "arm64" ]
+let runtime_allowed = [ "python3.11", "python3.12" ]
+let canary_allowed = [
+    "Linear10PercentEvery1Minute",
+    "Linear10PercentEvery2Minutes",
+    "Linear10PercentEvery3Minutes",
+    "Linear10PercentEvery10Minutes",
+    "Canary10Percent5Minutes",
+    "Canary10Percent10Minutes",
+    "Canary10Percent15Minutes",
+    "Canary10Percent30Minutes",
+    "AllAtOnce"
+]
+let runner_label_allowed = [ "ubuntu-latest", "ubuntu-24.04-arm" ]
+
+rule manifest_required_fields {
+    env_name exists
+        <<ENC-FTR-090 AC-7: manifest missing required env_name>>
+    architecture exists
+        <<ENC-FTR-090 AC-7: manifest missing required architecture>>
+    runtime exists
+        <<ENC-FTR-090 AC-7: manifest missing required runtime>>
+    stack_name exists
+        <<ENC-FTR-090 AC-7: manifest missing required stack_name>>
+    deploy_role_arn exists
+        <<ENC-FTR-090 AC-7: manifest missing required deploy_role_arn>>
+    artifact_bucket exists
+        <<ENC-FTR-090 AC-7: manifest missing required artifact_bucket>>
+    artifact_prefix exists
+        <<ENC-FTR-090 AC-7: manifest missing required artifact_prefix>>
+    required_reviewers exists
+        <<ENC-FTR-090 AC-7: manifest missing required required_reviewers>>
+    canary_preference exists
+        <<ENC-FTR-090 AC-7: manifest missing required canary_preference>>
+    runner_label exists
+        <<ENC-FTR-090 AC-7: manifest missing required runner_label>>
+    environment exists
+        <<ENC-FTR-090 AC-7: manifest missing required environment>>
+}
+
+rule manifest_field_values {
+    architecture in %architecture_allowed
+        <<ENC-FTR-090 AC-7: architecture must be one of [x86_64, arm64]>>
+    runtime in %runtime_allowed
+        <<ENC-FTR-090 AC-7: runtime must be one of [python3.11, python3.12]>>
+    canary_preference in %canary_allowed
+        <<ENC-FTR-090 AC-7: canary_preference not in SAM DeploymentPreference enum>>
+    runner_label in %runner_label_allowed
+        <<ENC-FTR-090 AC-7: runner_label must be ubuntu-latest (x86_64) or ubuntu-24.04-arm (arm64)>>
+    deploy_role_arn == /^arn:aws:iam::[0-9]{12}:role\/.+$/
+        <<ENC-FTR-090 AC-7: deploy_role_arn must be a valid IAM role ARN>>
+}
+
+rule manifest_architecture_runtime_runner_consistency {
+    # Enforces the ENC-FTR-090 matrix invariant: x86_64<->py3.11<->ubuntu-latest
+    # and arm64<->py3.12<->ubuntu-24.04-arm. Any cross-pairing is a matrix misroute
+    # that produces a bit-incompatible artifact for the target Lambda arch
+    # (ENC-ISS-213 aarch64-abi3 wheel class).
+    when architecture == "x86_64" {
+        runtime == "python3.11"
+            <<ENC-FTR-090 AC-7: x86_64 manifest must use runtime python3.11>>
+        runner_label == "ubuntu-latest"
+            <<ENC-FTR-090 AC-7: x86_64 manifest must use runner_label ubuntu-latest>>
+    }
+    when architecture == "arm64" {
+        runtime == "python3.12"
+            <<ENC-FTR-090 AC-7: arm64 manifest must use runtime python3.12>>
+        runner_label == "ubuntu-24.04-arm"
+            <<ENC-FTR-090 AC-7: arm64 manifest must use runner_label ubuntu-24.04-arm>>
+    }
+}
+
+# ENC-FTR-090 / ENC-TSK-F59 Phase 1 extension \u2014 artifact promotion schema.
+# The _build.yml reusable workflow (F59) produces one S3 VersionId per Lambda
+# per arch, then writes the map into the environment manifest. F60 Phase 2
+# _deploy.yml reads artifact_version_ids[<function>] to resolve exactly which
+# S3 object version to deploy.
+#
+# Schema: artifact_version_ids is an optional map keyed by Lambda function name
+# (matching backend/lambda/<name>/) with S3 VersionId strings as values.
+# Absent/empty means \"no prior build has promoted artifacts into this
+# environment yet\" \u2014 F60 workflow refuses to deploy until populated.
+
+rule manifest_artifact_version_ids_shape {
+    # If artifact_version_ids is set, every value must be a non-empty string.
+    # S3 VersionId shape is opaque (UU-hash style) so we don't regex-pin it,
+    # but we reject empty/null to catch template truncation bugs.
+    when artifact_version_ids exists {
+        artifact_version_ids is_struct
+            <<ENC-FTR-090 AC-2 (F59): artifact_version_ids must be a map (struct) of function_name -> s3_version_id>>
+        artifact_version_ids.*[*] != ""
+            <<ENC-FTR-090 AC-2 (F59): artifact_version_ids values must be non-empty S3 VersionId strings>>
+    }
+}
+
+rule manifest_artifact_commit_sha_pinned {
+    # If artifact_commit_sha is set (F60 stamps this when promoting a build into
+    # an env manifest), it must be a 40-char hex SHA.
+    when artifact_commit_sha exists {
+        artifact_commit_sha == /^[0-9a-f]{40}$/
+            <<ENC-FTR-090 AC-2 (F59): artifact_commit_sha must be a 40-char hex SHA>>
+    }
+}

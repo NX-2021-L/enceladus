@@ -197,6 +197,82 @@ class UploadValidationTests(unittest.TestCase):
         self.assertEqual(resp["statusCode"], 400)
 
 
+class IdBoundaryTests(unittest.TestCase):
+    """ENC-TSK-D36 / ENC-FTR-069: Reject client-supplied document identifiers.
+
+    Server-side ID generation is the sole producer of document_id. Any create
+    request that carries document_id, item_id, or record_id must be rejected
+    with HTTP 400 and an ID_BOUNDARY_VIOLATION self-correcting envelope.
+    """
+
+    def _make_put_body(self, **extra):
+        body = {
+            "project_id": "devops",
+            "title": "Boundary test",
+            "content": "# Hello",
+            "document_subtype": "doc",
+        }
+        body.update(extra)
+        return body
+
+    @patch.object(document_api, "_authenticate",
+                  return_value=({"sub": "user1"}, None))
+    def test_client_supplied_document_id_rejected(self, _mock_auth):
+        event = _make_event(body=self._make_put_body(document_id="DOC-CLIENTSET001"))
+        resp = document_api.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 400)
+        body = json.loads(resp["body"])
+        self.assertFalse(body["success"])
+        self.assertIn("document_id", body["error"])
+        envelope = body["error_envelope"]
+        self.assertEqual(envelope["code"], "ID_BOUNDARY_VIOLATION")
+        self.assertFalse(envelope["retryable"])
+        details = envelope["details"]
+        self.assertEqual(details["offending_field"], "document_id")
+        self.assertEqual(details["offending_value"], "DOC-CLIENTSET001")
+        self.assertEqual(details["rule_citation"]["rule_id"], "ENC-TSK-B99")
+        self.assertIn("format", details["record_id_schema"])
+        self.assertEqual(details["example_fix"]["tool"], "documents.put")
+        self.assertNotIn("document_id", details["example_fix"]["arguments"])
+        self.assertIn("agents.md", details["agents_md_section"])
+
+    @patch.object(document_api, "_authenticate",
+                  return_value=({"sub": "user1"}, None))
+    def test_client_supplied_item_id_rejected(self, _mock_auth):
+        event = _make_event(body=self._make_put_body(item_id="DOC-ITEM999"))
+        resp = document_api.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 400)
+        envelope = json.loads(resp["body"])["error_envelope"]
+        self.assertEqual(envelope["code"], "ID_BOUNDARY_VIOLATION")
+        self.assertEqual(envelope["details"]["offending_field"], "item_id")
+
+    @patch.object(document_api, "_authenticate",
+                  return_value=({"sub": "user1"}, None))
+    def test_client_supplied_record_id_rejected(self, _mock_auth):
+        event = _make_event(body=self._make_put_body(record_id="DOC-RECRD123"))
+        resp = document_api.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 400)
+        envelope = json.loads(resp["body"])["error_envelope"]
+        self.assertEqual(envelope["code"], "ID_BOUNDARY_VIOLATION")
+        self.assertEqual(envelope["details"]["offending_field"], "record_id")
+
+    @patch.object(document_api, "_authenticate",
+                  return_value=({"sub": "user1"}, None))
+    def test_empty_or_missing_identifiers_not_rejected_by_guard(self, _mock_auth):
+        """Empty-string identifiers should fall through the guard and reach downstream validation.
+
+        The ID boundary guard only trips on truthy values; absent / empty identifiers
+        must not be mischaracterised as boundary violations.
+        """
+        event = _make_event(body=self._make_put_body(document_id=""))
+        resp = document_api.lambda_handler(event, None)
+        # Downstream validation may still reject for other reasons (project, compliance, etc.),
+        # but the rejection must not be an ID_BOUNDARY_VIOLATION.
+        body = json.loads(resp["body"])
+        envelope = body.get("error_envelope") or {}
+        self.assertNotEqual(envelope.get("code"), "ID_BOUNDARY_VIOLATION")
+
+
 class UploadSuccessTests(unittest.TestCase):
     @patch.object(document_api, "_authenticate",
                   return_value=({"sub": "user1"}, None))
@@ -214,6 +290,7 @@ class UploadSuccessTests(unittest.TestCase):
             "title": "Test Document",
             "content": "# Hello World\n\nThis is a test.",
             "keywords": ["test", "hello"],
+            "document_subtype": "doc",
         })
         resp = document_api.lambda_handler(event, None)
         self.assertEqual(resp["statusCode"], 201)

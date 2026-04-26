@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { feedKeys, fetchTasks, fetchIssues, fetchFeatures } from '../api/feeds'
+import { feedKeys, fetchTasks, fetchIssues, fetchFeatures, fetchLessons, fetchPlans } from '../api/feeds'
 import { useLiveFeed } from '../contexts/LiveFeedContext'
 import { PRIORITY_ORDER } from '../lib/constants'
 import type { Task, Issue, Feature, Lesson, Plan } from '../types/feeds'
@@ -33,23 +33,29 @@ export function useFeed(filters?: FeedFilters, _options?: UseFeedOptions) {
   const tasksQuery = useQuery({ queryKey: feedKeys.tasks, queryFn: fetchTasks })
   const issuesQuery = useQuery({ queryKey: feedKeys.issues, queryFn: fetchIssues })
   const featuresQuery = useQuery({ queryKey: feedKeys.features, queryFn: fetchFeatures })
+  const lessonsQuery = useQuery({ queryKey: feedKeys.lessons, queryFn: fetchLessons })
+  const plansQuery = useQuery({ queryKey: feedKeys.plans, queryFn: fetchPlans })
 
   const tasks: Task[] = hasLiveSnapshot ? liveTasks : (tasksQuery.data?.tasks ?? [])
   const issues: Issue[] = hasLiveSnapshot ? liveIssues : (issuesQuery.data?.issues ?? [])
   const features: Feature[] = hasLiveSnapshot ? liveFeatures : (featuresQuery.data?.features ?? [])
-  const lessons: Lesson[] = hasLiveSnapshot ? liveLessons : []
-  const plans: Plan[] = hasLiveSnapshot ? livePlans : []
+  const lessons: Lesson[] = hasLiveSnapshot ? liveLessons : (lessonsQuery.data?.lessons ?? [])
+  const plans: Plan[] = hasLiveSnapshot ? livePlans : (plansQuery.data?.plans ?? [])
 
   // Pending only while live context hasn't loaded AND S3 feeds are still loading.
   const isPending = !hasLiveSnapshot
-    && (tasksQuery.isPending || issuesQuery.isPending || featuresQuery.isPending)
+    && (tasksQuery.isPending || issuesQuery.isPending || featuresQuery.isPending
+      || lessonsQuery.isPending || plansQuery.isPending)
   const isError = !hasLiveSnapshot
-    && (tasksQuery.isError || issuesQuery.isError || featuresQuery.isError)
+    && (tasksQuery.isError || issuesQuery.isError || featuresQuery.isError
+      || lessonsQuery.isError || plansQuery.isError)
 
   const generatedAt = liveGeneratedAt
     ?? tasksQuery.data?.generated_at
     ?? issuesQuery.data?.generated_at
     ?? featuresQuery.data?.generated_at
+    ?? lessonsQuery.data?.generated_at
+    ?? plansQuery.data?.generated_at
     ?? null
 
   const items = useMemo(() => {

@@ -144,7 +144,8 @@ ALLOWED_FILE_EXTENSIONS = {".md", ".markdown"}
 # Handoff document schema (ENC-FTR-061 / ENC-TSK-B52)
 # ---------------------------------------------------------------------------
 
-DOCUMENT_SUBTYPES = {"general", "handoff", "blueprint", "narrative", "session-log"}
+DOCUMENT_SUBTYPES = {"doc", "handoff", "coe", "wave", "idea", "context-node", "skill"}
+DOCUMENT_SUBTYPES_LEGACY_READ_ONLY = {"blueprint", "narrative", "session-log", "general"}
 HANDOFF_STATUSES = {"pending", "claimed", "completed", "stale"}
 HANDOFF_STATUS_TRANSITIONS = {
     "pending": {"claimed", "stale"},
@@ -153,6 +154,192 @@ HANDOFF_STATUS_TRANSITIONS = {
     "stale": set(),
 }
 HANDOFF_REQUIRED_FIELDS = {"source_record_id"}  # required when subtype=handoff
+
+# ---------------------------------------------------------------------------
+# COE (correction-of-errors) document schema (ENC-FTR-077)
+# ---------------------------------------------------------------------------
+
+COE_STATUSES = {"drafting", "under-review", "accepted", "archived"}
+COE_STATUS_TRANSITIONS = {
+    "drafting": {"under-review"},
+    "under-review": {"accepted", "drafting"},
+    "accepted": {"archived"},
+    "archived": set(),
+}
+
+# ---------------------------------------------------------------------------
+# Wave (coordination wave tracking) document schema (ENC-FTR-077)
+# ---------------------------------------------------------------------------
+
+WAVE_STATUSES = {"active", "concluded", "archived"}
+WAVE_STATUS_TRANSITIONS = {
+    "active": {"concluded"},
+    "concluded": {"archived"},
+    "archived": set(),
+}
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-078: idea / context-node / skill subtypes + doc subtypepattern
+# Derivation: DOC-EDEFF7CD0BD5. Caps derived from DOC-TBD-01 (context-node)
+# and DOC-TBD-02 (skill). See governance_data_dictionary.json entries
+# document.idea / document.context-node / document.skill / document.doc.
+# ---------------------------------------------------------------------------
+
+CAP_CONTEXT_NODE = 2048  # readable-body characters (AC-5)
+N_MIN_CONTEXT_NODE = 5  # minimum related_items edges (AC-7)
+CAP_SKILL_FULL_DESC = 4096  # skill full_description characters (AC-8)
+CAP_SKILL_CLAUDE_DESC = 1024  # skill claude_description characters; matches Claude SKILL.md external spec (AC-9)
+N_MIN_SKILL = 2  # minimum related_items edges (AC-14)
+AGENTSKILLS_SPEC_VERSION_DEFAULT = "0.1.0"
+
+# Subtypepattern canonical format: lowercase alpha and dashes only.
+SUBTYPEPATTERN_REGEX = re.compile(r"^[a-z-]+$")
+
+# Doc title colon-prefix rejection (AC-15). Case-insensitive leading alpha-or-dash
+# word of length 2-31 followed by a colon. Match enforced on subtype=doc only.
+DOC_TITLE_COLON_PREFIX_REGEX = re.compile(r"^[A-Za-z][A-Za-z-]{1,30}:")
+
+# Metadata block lines to strip from content when measuring context-node readable body.
+# Mirrors the convention in other governed docs and matches the canonicalization in
+# _measure_context_node_readable_body below.
+CONTEXT_NODE_METADATA_KEYS = (
+    "**Project**",
+    "**Related**",
+    "**Created**",
+    "**Author**",
+)
+
+# Pedagogical error messages (AC-2, AC-15).
+_ENUM_REDIRECT_MSG = (
+    "If this value represents an emergent pattern, use document_subtype='doc' with "
+    "subtypepattern='<your-pattern>' (alpha characters and dashes only)."
+)
+_DOC_TITLE_COLON_PREFIX_MSG = (
+    "Title starts with a '<type>:' prefix. Titles should not encode subtype. "
+    "Remove the '<type>:' prefix and place '<type>' (lowercased, alpha and dashes only) "
+    "into the 'subtypepattern' field."
+)
+
+
+def _canonicalize_subtypepattern(value: Any) -> Optional[str]:
+    """Return the canonical (trim+lowercase) form of a subtypepattern input, or None if invalid type."""
+    if not isinstance(value, str):
+        return None
+    return value.strip().lower()
+
+
+def _measure_context_node_readable_body(content: str) -> int:
+    """
+    Compute the readable-body character count for a context-node document.
+
+    Readable body = markdown content with the following stripped:
+      (a) the H1 ID line (first line starting with '# ')
+      (b) the standard metadata block (lines starting with **Project**/**Related**/
+          **Created**/**Author**)
+      (c) inline related_items-equivalent edge blocks if present
+
+    The dictionary definition lives at document.context-node.fields.cap_readable_body.
+    """
+    if not isinstance(content, str):
+        return 0
+    readable_lines = []
+    saw_h1 = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not saw_h1 and stripped.startswith("# "):
+            saw_h1 = True
+            continue
+        if any(stripped.startswith(key) for key in CONTEXT_NODE_METADATA_KEYS):
+            continue
+        readable_lines.append(line)
+    return len("\n".join(readable_lines))
+
+
+def _validate_agentskills_manifest(
+    manifest: Any, spec_version: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Validate a skill's agentskills_manifest against the pinned agentskills.io/home spec.
+
+    ENC-FTR-078 Phase-1 implementation pins spec version '0.1.0' and enforces the core
+    invariants required by the agentskills.io common denominator: manifest must be a JSON
+    object containing non-empty 'name', 'description', and 'version' string fields. When
+    agentskills.io publishes a machine-readable schema for a given version, this function
+    should be upgraded to run that schema validator.
+
+    Returns:
+        None on success. A dict of {code, message, details} on failure.
+    """
+    if not isinstance(manifest, dict):
+        return {
+            "code": "skill_agentskills_manifest_invalid",
+            "message": "agentskills_manifest must be a JSON object",
+            "details": {"measured_type": type(manifest).__name__},
+        }
+    if spec_version != AGENTSKILLS_SPEC_VERSION_DEFAULT:
+        return {
+            "code": "skill_agentskills_manifest_invalid",
+            "message": (
+                f"agentskills_spec_version '{spec_version}' is not supported by this "
+                f"deploy. Supported versions: ['{AGENTSKILLS_SPEC_VERSION_DEFAULT}']."
+            ),
+            "details": {
+                "pinned_version": AGENTSKILLS_SPEC_VERSION_DEFAULT,
+                "requested_version": spec_version,
+            },
+        }
+    required_keys = ("name", "description", "version")
+    missing = [k for k in required_keys if not isinstance(manifest.get(k), str) or not manifest.get(k, "").strip()]
+    if missing:
+        return {
+            "code": "skill_agentskills_manifest_invalid",
+            "message": (
+                f"agentskills_manifest missing required non-empty string keys: {missing}. "
+                f"agentskills.io spec {AGENTSKILLS_SPEC_VERSION_DEFAULT} requires "
+                f"name + description + version."
+            ),
+            "details": {
+                "pinned_version": AGENTSKILLS_SPEC_VERSION_DEFAULT,
+                "missing_keys": missing,
+            },
+        }
+    return None
+
+# ---------------------------------------------------------------------------
+# Semantic handoff-detection patterns (ENC-FTR-077)
+# ---------------------------------------------------------------------------
+
+HANDOFF_TITLE_PATTERNS = [
+    r'(?i)\bHANDOFF\b',
+    r'(?i)\bDispatch\s+[A-Z]\b',
+    r'(?i)GOVERNANCE_SYNC_REQUIRED',
+    r'(?i)EXECUTION_REQUIRED',
+    r'(?i)Coordination.*Handoff',
+    r'(?i)Handoff.*dispatch',
+]
+
+HANDOFF_CONTENT_PATTERNS = [
+    r'(?i)\baction_checklist\b',
+    r'(?i)\bverification_criteria\b',
+    r'(?i)\bprerequisite_state\b',
+    r'(?i)##\s*Scope\s+Statement',
+    r'(?i)##\s*Acceptance\s+Criteria.*dispatch',
+]
+
+# Required COE sections (compliance warnings, not hard blocks)
+COE_REQUIRED_SECTIONS = [
+    "## Root-Cause Analysis",
+    "## Timeline",
+    "## Remediation Status",
+    "## Systemic Lessons",
+    "## Outstanding Questions",
+]
+
+# ---------------------------------------------------------------------------
+# Agent layer classification (ENC-TSK-E50 / ENC-TSK-E51)
+# ---------------------------------------------------------------------------
+
+AGENT_LAYERS = {"supervisor", "coord-lead", "dispatched-agent", "product-lead-terminal"}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -466,9 +653,18 @@ def _is_table_divider(line: str) -> bool:
     return bool(re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", line))
 
 
-def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
+def _evaluate_markdown_compliance(content: str, document_subtype: str = "") -> Dict[str, Any]:
     warnings: List[str] = []
     lines = content.splitlines()
+
+    # ENC-FTR-078 AC-20: subtype-aware compliance gates. Context-nodes are
+    # intentionally terse (cap 2048 chars); skills carry their canonical spec
+    # in full_description rather than the content body. For these two subtypes
+    # we skip the title-format and metadata-block warnings to avoid penalizing
+    # field-based structure. The remaining structural rules (fences, heading
+    # hierarchy, list markers, table dividers, alerts) still apply.
+    _FTR078_RELAXED_STRUCTURE = {"context-node", "skill"}
+    _relax_title_and_metadata = document_subtype in _FTR078_RELAXED_STRUCTURE
 
     # Pre-scan: identify fenced code block boundaries (ENC-LSN-026).
     # Other rules skip lines inside fences to prevent false positives
@@ -484,7 +680,7 @@ def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
             break
     if first_non_empty_idx is None:
         warnings.append("Document is empty.")
-    else:
+    elif not _relax_title_and_metadata:
         first_line = lines[first_non_empty_idx]
         if not re.match(r"^#\s+\S+", first_line):
             warnings.append("First non-empty line should be a level-1 title heading ('# ...').")
@@ -496,10 +692,11 @@ def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
                 "Title should follow '# {ITEM_ID} Title' (e.g., '# DVP-TSK-123 Name')."
             )
 
-    metadata_window = "\n".join(lines[: min(len(lines), 30)])
-    for field in ("Project", "Related", "Created", "Author"):
-        if f"**{field}**:" not in metadata_window:
-            warnings.append(f"Metadata block missing '**{field}**:' near top of document.")
+    if not _relax_title_and_metadata:
+        metadata_window = "\n".join(lines[: min(len(lines), 30)])
+        for field in ("Project", "Related", "Created", "Author"):
+            if f"**{field}**:" not in metadata_window:
+                warnings.append(f"Metadata block missing '**{field}**:' near top of document.")
 
     # Rule 1: heading hierarchy (skip fenced lines — ENC-LSN-026).
     last_level = 0
@@ -564,12 +761,109 @@ def _evaluate_markdown_compliance(content: str) -> Dict[str, Any]:
         if "[!" in line and not re.search(r"^\s*>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$", line):
             warnings.append(f"Malformed alert syntax at line {idx}.")
 
+    # COE-specific section warnings (ENC-FTR-077): warn when required sections
+    # are missing. These are advisory, not hard blocks.
+    if document_subtype == "coe":
+        content_lower = content.lower()
+        for section in COE_REQUIRED_SECTIONS:
+            if section.lower() not in content_lower:
+                warnings.append(f"COE document missing recommended section: '{section}'.")
+
     warnings = warnings[:MAX_COMPLIANCE_WARNINGS]
     score = max(0, 100 - (len(warnings) * 10))
     return {
         "compliance_score": score,
         "compliance_warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Reply block / append frontmatter validation (ENC-TSK-E50 / ENC-TSK-E51)
+# ---------------------------------------------------------------------------
+
+
+def _parse_reply_frontmatter(text: str) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    """Parse YAML-like frontmatter from append_content text.
+
+    Expects the text to start with ``---`` followed by key: value lines and a
+    closing ``---``.  Returns (parsed_dict, None) on success or
+    (None, error_message) on failure.
+    """
+    stripped = text.lstrip("\n")
+    if not stripped.startswith("---"):
+        return None, "append_content must start with a '---' frontmatter block"
+
+    # Split on '---' markers: first element is empty (before first ---),
+    # second element is the frontmatter body, remainder is content.
+    parts = stripped.split("---", 2)
+    if len(parts) < 3:
+        return None, "frontmatter block is missing closing '---' delimiter"
+
+    fm_body = parts[1].strip()
+    if not fm_body:
+        return None, "frontmatter block is empty"
+
+    result: Dict[str, str] = {}
+    for line in fm_body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        colon_idx = line.find(":")
+        if colon_idx < 0:
+            return None, f"frontmatter line is not a valid key: value pair: '{line}'"
+        key = line[:colon_idx].strip()
+        value = line[colon_idx + 1:].strip()
+        result[key] = value
+
+    return result, None
+
+
+def _validate_reply_block(
+    frontmatter: Dict[str, str],
+    *,
+    require_handoff_ref: bool = False,
+) -> Optional[str]:
+    """Validate reply block frontmatter fields.
+
+    Returns None on success or an error message string on failure.
+    ``require_handoff_ref`` controls whether ``originating_handoff_ref`` is
+    mandatory (True for handoff documents, False for wave documents).
+    """
+    # reply_author
+    author = frontmatter.get("reply_author", "").strip()
+    if not author:
+        return "reply_author is required and must be non-empty"
+
+    # reply_timestamp — must be valid ISO 8601
+    ts = frontmatter.get("reply_timestamp", "").strip()
+    if not ts:
+        return "reply_timestamp is required"
+    try:
+        dt.datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return f"reply_timestamp is not a valid ISO 8601 timestamp: '{ts}'"
+
+    # agent_layer
+    layer = frontmatter.get("agent_layer", "").strip()
+    if not layer:
+        return "agent_layer is required"
+    if layer not in AGENT_LAYERS:
+        return (
+            f"agent_layer '{layer}' is not valid. "
+            f"Must be one of: {', '.join(sorted(AGENT_LAYERS))}"
+        )
+
+    # originating_handoff_ref — required only for handoff subtype
+    if require_handoff_ref:
+        ref = frontmatter.get("originating_handoff_ref", "").strip()
+        if not ref:
+            return "originating_handoff_ref is required for handoff reply blocks"
+        if not ref.startswith("DOC-"):
+            return (
+                f"originating_handoff_ref must start with 'DOC-', got: '{ref}'"
+            )
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -798,39 +1092,55 @@ def _upsert_synced_document(
     s3_key, content_hash, size_bytes = _put_document_content_bytes(project_id, document_id, content_bytes)
 
     if existing:
-        ddb.update_item(
-            TableName=DOCUMENTS_TABLE,
-            Key={"document_id": {"S": document_id}},
-            UpdateExpression=(
-                "SET title = :title, description = :desc, file_name = :fn, "
-                "s3_bucket = :sb, s3_key = :sk, content_type = :ct, "
-                "content_hash = :hash, size_bytes = :size, keywords = :kw, "
-                "updated_at = :ts, #status = :status, "
-                "record_type = if_not_exists(record_type, :rtype), "
-                "#ver = if_not_exists(#ver, :zero) + :one"
-            ),
-            ExpressionAttributeNames={
-                "#status": "status",
-                "#ver": "version",
-            },
-            ExpressionAttributeValues={
-                ":title": {"S": title},
-                ":desc": {"S": description},
-                ":fn": {"S": file_name},
-                ":sb": {"S": S3_BUCKET},
-                ":sk": {"S": s3_key},
-                ":ct": {"S": "text/markdown"},
-                ":hash": {"S": content_hash},
-                ":size": {"N": str(size_bytes)},
-                ":kw": _serialize_list(keywords),
-                ":ts": {"S": now},
-                ":status": {"S": "active"},
-                ":zero": {"N": "0"},
-                ":one": {"N": "1"},
-                # ENC-PLN-014 / ENC-FTR-065: backfill record_type on existing sync docs
-                ":rtype": {"S": "document"},
-            },
-        )
+        # ENC-ISS-281 / ENC-LSN-044: do not let an S3/governance sync silently
+        # resurrect a document that a separate caller has moved to a terminal
+        # state (deleted/archived). The sync is background work; the terminal
+        # state was an explicit governance decision and wins.
+        try:
+            ddb.update_item(
+                TableName=DOCUMENTS_TABLE,
+                Key={"document_id": {"S": document_id}},
+                UpdateExpression=(
+                    "SET title = :title, description = :desc, file_name = :fn, "
+                    "s3_bucket = :sb, s3_key = :sk, content_type = :ct, "
+                    "content_hash = :hash, size_bytes = :size, keywords = :kw, "
+                    "updated_at = :ts, #status = :status, "
+                    "record_type = if_not_exists(record_type, :rtype), "
+                    "#ver = if_not_exists(#ver, :zero) + :one"
+                ),
+                ConditionExpression=(
+                    "attribute_not_exists(#status) "
+                    "OR (#status <> :deleted AND #status <> :archived)"
+                ),
+                ExpressionAttributeNames={
+                    "#status": "status",
+                    "#ver": "version",
+                },
+                ExpressionAttributeValues={
+                    ":title": {"S": title},
+                    ":desc": {"S": description},
+                    ":fn": {"S": file_name},
+                    ":sb": {"S": S3_BUCKET},
+                    ":sk": {"S": s3_key},
+                    ":ct": {"S": "text/markdown"},
+                    ":hash": {"S": content_hash},
+                    ":size": {"N": str(size_bytes)},
+                    ":kw": _serialize_list(keywords),
+                    ":ts": {"S": now},
+                    ":status": {"S": "active"},
+                    ":zero": {"N": "0"},
+                    ":one": {"N": "1"},
+                    # ENC-PLN-014 / ENC-FTR-065: backfill record_type on existing sync docs
+                    ":rtype": {"S": "document"},
+                    ":deleted": {"S": "deleted"},
+                    ":archived": {"S": "archived"},
+                },
+            )
+        except ddb.exceptions.ConditionalCheckFailedException:
+            logger.warning(
+                "document_api: sync upsert skipped for %s — existing status is terminal (deleted/archived)",
+                document_id,
+            )
         return
 
     item = {
@@ -1039,6 +1349,53 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     except (ValueError, TypeError):
         return _error(400, "Invalid JSON body.")
 
+    # ENC-TSK-D36 / ENC-FTR-069: ID Boundary Rule (ENC-TSK-B99).
+    # Document IDs are generated server-side — reject any client-supplied identifier
+    # with a self-correcting envelope mirroring the tracker_mutation guard pattern.
+    for forbidden_field in ("document_id", "item_id", "record_id"):
+        if body.get(forbidden_field):
+            return _error(
+                400,
+                (
+                    f"Field '{forbidden_field}' must not be provided — "
+                    "document IDs are generated server-side (ENC-TSK-B99 ID Boundary Rule)."
+                ),
+                code="ID_BOUNDARY_VIOLATION",
+                offending_field=forbidden_field,
+                offending_value=body.get(forbidden_field),
+                record_id_schema={
+                    "format": "DOC-{12_hex_upper}",
+                    "example": "DOC-A1B2C3D4E5F6",
+                    "generator": "server-assigned via uuid4().hex[:12].upper()",
+                    "authority": "devops-document-api Lambda is the sole producer of document_id values.",
+                },
+                rule_citation={
+                    "rule_id": "ENC-TSK-B99",
+                    "text": (
+                        "Never predict, compute, infer, or scan for the next available record ID "
+                        "before submitting a create call. Submit only the minimum required "
+                        "attributes. Read the server-assigned identifier from the success response."
+                    ),
+                },
+                example_fix={
+                    "tool": "documents.put",
+                    "arguments": {
+                        "project_id": "<project_id>",
+                        "title": "<document title>",
+                        "content": "<markdown body>",
+                        "document_subtype": "doc",
+                        "governance_hash": "<governance_hash>",
+                    },
+                    "note": (
+                        "Omit document_id, item_id, and record_id entirely. "
+                        "The server assigns the identifier and returns it in the "
+                        "success response under the 'document_id' key."
+                    ),
+                },
+                agents_md_section="agents.md §6 Tracker Operations — ID Boundary Rule",
+                retryable=False,
+            )
+
     # Required fields
     project_id = body.get("project_id", "").strip()
     title = body.get("title", "").strip()
@@ -1054,18 +1411,6 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         return _error(400, f"Title exceeds {MAX_TITLE_LENGTH} characters.")
     if len(content.encode("utf-8")) > MAX_CONTENT_SIZE:
         return _error(400, f"Content exceeds {MAX_CONTENT_SIZE} bytes.")
-
-    compliance = _evaluate_markdown_compliance(content)
-    if MIN_COMPLIANCE_SCORE > 0 and compliance["compliance_score"] < MIN_COMPLIANCE_SCORE:
-        return _error(
-            400,
-            (
-                f"Document compliance_score {compliance['compliance_score']} is below "
-                f"minimum required score {MIN_COMPLIANCE_SCORE}."
-            ),
-            compliance_score=compliance["compliance_score"],
-            compliance_warnings=compliance["compliance_warnings"],
-        )
 
     # Validate project
     project_err = _validate_project_exists(project_id)
@@ -1090,10 +1435,64 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
     related_items = [str(r).strip() for r in related_items[:MAX_RELATED_ITEMS] if str(r).strip()]
     keywords = [str(k).strip().lower() for k in keywords[:MAX_KEYWORDS] if str(k).strip()]
 
-    # Document subtype (ENC-FTR-061)
-    document_subtype = str(body.get("document_subtype", "general")).strip().lower()
+    # Document subtype (ENC-FTR-061 / ENC-FTR-077)
+    if "document_subtype" not in body:
+        return _error(
+            400,
+            "document_subtype is required. Use 'doc' for standard documents, "
+            "'handoff' for dispatch/report-back, 'coe' for correction-of-errors, "
+            "'wave' for coordination wave tracking.",
+        )
+    document_subtype = str(body.get("document_subtype", "")).strip().lower()
+    if not document_subtype:
+        return _error(
+            400,
+            "document_subtype is required. Use 'doc' for standard documents, "
+            "'handoff' for dispatch/report-back, 'coe' for correction-of-errors, "
+            "'wave' for coordination wave tracking, 'idea' for architect-lifecycle "
+            "ideas, 'context-node' for compressed graph anchors, or 'skill' for "
+            "portable skills.",
+        )
+    # ENC-FTR-078 AC-2: strict allow-list on writes. Legacy values remain readable
+    # on GET but are rejected on PUT/PATCH. Pedagogical error redirects agents to
+    # document_subtype='doc' + subtypepattern for emergent patterns.
     if document_subtype not in DOCUMENT_SUBTYPES:
-        return _error(400, f"Invalid document_subtype '{document_subtype}'. Must be one of: {', '.join(sorted(DOCUMENT_SUBTYPES))}")
+        if document_subtype in DOCUMENT_SUBTYPES_LEGACY_READ_ONLY:
+            return _error(
+                400,
+                (
+                    f"document_subtype '{document_subtype}' is legacy-readable-only and "
+                    f"cannot be used for new writes. Allowed values: "
+                    f"{sorted(DOCUMENT_SUBTYPES)}. {_ENUM_REDIRECT_MSG}"
+                ),
+                code="document_subtype_not_in_enum",
+                allowed_values=sorted(DOCUMENT_SUBTYPES),
+                legacy_readable_only=sorted(DOCUMENT_SUBTYPES_LEGACY_READ_ONLY),
+                subtypepattern_redirect=_ENUM_REDIRECT_MSG,
+            )
+        return _error(
+            400,
+            (
+                f"Invalid document_subtype '{document_subtype}'. Must be one of: "
+                f"{sorted(DOCUMENT_SUBTYPES)}. {_ENUM_REDIRECT_MSG}"
+            ),
+            code="document_subtype_not_in_enum",
+            allowed_values=sorted(DOCUMENT_SUBTYPES),
+            subtypepattern_redirect=_ENUM_REDIRECT_MSG,
+        )
+
+    # Compliance check (pass subtype for COE section warnings — ENC-FTR-077)
+    compliance = _evaluate_markdown_compliance(content, document_subtype=document_subtype)
+    if MIN_COMPLIANCE_SCORE > 0 and compliance["compliance_score"] < MIN_COMPLIANCE_SCORE:
+        return _error(
+            400,
+            (
+                f"Document compliance_score {compliance['compliance_score']} is below "
+                f"minimum required score {MIN_COMPLIANCE_SCORE}."
+            ),
+            compliance_score=compliance["compliance_score"],
+            compliance_warnings=compliance["compliance_warnings"],
+        )
 
     # ENC-TSK-C10 / ENC-FTR-065: Document maturity state (GDMP pipeline)
     VALID_MATURITY_STATES = {"raw", "compliant", "contextualized", "mature"}
@@ -1105,12 +1504,106 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             f"Must be one of: {', '.join(sorted(VALID_MATURITY_STATES))}",
         )
 
-    # Handoff-specific fields
+    # --- ENC-FTR-078 AC-16: subtypepattern validation (doc-subtype only) ---
+    # Valid only when document_subtype='doc'; on any other subtype presence is an error.
+    # Canonicalize (trim + lowercase), then validate against ^[a-z-]+$.
+    subtypepattern_raw = body.get("subtypepattern")
+    subtypepattern_canonical: Optional[str] = None
+    if subtypepattern_raw is not None and subtypepattern_raw != "":
+        if document_subtype != "doc":
+            return _error(
+                400,
+                (
+                    f"Field 'subtypepattern' is valid only when document_subtype='doc'. "
+                    f"Received document_subtype='{document_subtype}'."
+                ),
+                code="subtypepattern_wrong_subtype",
+                document_subtype=document_subtype,
+                dictionary_entity="document.doc",
+            )
+        canonical = _canonicalize_subtypepattern(subtypepattern_raw)
+        if canonical is None or not SUBTYPEPATTERN_REGEX.match(canonical):
+            return _error(
+                400,
+                (
+                    f"Field 'subtypepattern' has invalid format. Canonical form must match "
+                    f"^[a-z-]+$ (lowercase alpha and dashes only, no digits, underscores, "
+                    f"spaces, or punctuation). Received: {subtypepattern_raw!r}"
+                    + (f" -> canonicalized to {canonical!r}" if canonical is not None else "")
+                ),
+                code="subtypepattern_invalid_format",
+                invalid_value=subtypepattern_raw,
+                canonical_attempt=canonical,
+                dictionary_entity="document.doc",
+            )
+        subtypepattern_canonical = canonical
+
+    # --- ENC-FTR-078 AC-15: doc title colon-prefix rejection ---
+    if document_subtype == "doc" and DOC_TITLE_COLON_PREFIX_REGEX.match(title):
+        return _error(
+            400,
+            _DOC_TITLE_COLON_PREFIX_MSG + f" Title received: {title!r}",
+            code="doc_title_colon_prefix_disallowed",
+            title=title,
+            rejected_regex=r"^[A-Za-z][A-Za-z-]{1,30}:",
+            remediation="Remove the prefix from title and populate subtypepattern with the lowercased prefix word.",
+            dictionary_entity="document.doc",
+        )
+
+    # --- Semantic handoff-detection guard (ENC-FTR-077) ---
+    # When subtype is 'doc', check for handoff-like patterns in title/content.
+    if document_subtype == "doc":
+        confirm_subtype = body.get("confirm_subtype")
+        if not confirm_subtype:
+            handoff_detected = False
+            for pattern in HANDOFF_TITLE_PATTERNS:
+                if re.search(pattern, title):
+                    handoff_detected = True
+                    break
+            if not handoff_detected:
+                for pattern in HANDOFF_CONTENT_PATTERNS:
+                    if re.search(pattern, content):
+                        handoff_detected = True
+                        break
+            if handoff_detected:
+                return _error(
+                    400,
+                    "Document title/structure suggests this should use document_subtype='handoff'. "
+                    "If 'doc' is intentionally correct, retry with confirm_subtype=true.",
+                )
+
+    # --- Handoff-specific fields (ENC-FTR-061) ---
     handoff_fields: Dict[str, Any] = {}
     if document_subtype == "handoff":
         source_record_id = str(body.get("source_record_id", "")).strip()
         if not source_record_id:
-            return _error(400, "Field 'source_record_id' is required when document_subtype is 'handoff'.")
+            return _error(
+                400,
+                "Field 'source_record_id' is required when document_subtype is 'handoff'.",
+                required_fields=["source_record_id"],
+                optional_fields=[
+                    "prerequisite_state",
+                    "verification_criteria",
+                    "action_checklist",
+                    "expires_at",
+                ],
+                dictionary_entity="document.handoff",
+                document_subtype="handoff",
+                example_fix={
+                    "tool": "documents.put",
+                    "arguments": {
+                        "project_id": "<project_id>",
+                        "title": "HANDOFF \u2014 <brief description>",
+                        "content": "<full markdown body>",
+                        "document_subtype": "handoff",
+                        "source_record_id": "<ENC-TSK-XXX or similar>",
+                        "prerequisite_state": "<state required before executor begins>",
+                        "verification_criteria": "<how to verify success>",
+                        "action_checklist": ["step 1", "step 2"],
+                        "governance_hash": "<governance_hash>",
+                    },
+                },
+            )
         handoff_fields["source_record_id"] = source_record_id
         handoff_fields["handoff_status"] = "pending"
         handoff_fields["prerequisite_state"] = str(body.get("prerequisite_state", "")).strip()
@@ -1124,6 +1617,248 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         expires_at = str(body.get("expires_at", "")).strip()
         if expires_at:
             handoff_fields["expires_at"] = expires_at
+
+    # --- COE-specific validation (ENC-FTR-077) ---
+    coe_fields: Dict[str, Any] = {}
+    if document_subtype == "coe":
+        source_incident_id = str(body.get("source_incident_id", "")).strip()
+        if not source_incident_id:
+            return _error(
+                400,
+                "Field 'source_incident_id' is required when document_subtype is 'coe'.",
+                required_fields=["source_incident_id"],
+                edge_density_requirements={
+                    "feature": "at least 1 ENC-FTR-* in related_items",
+                    "lesson": "at least 1 ENC-LSN-* in related_items",
+                    "issue": "at least 1 ENC-ISS-* in related_items",
+                },
+                dictionary_entity="document.coe",
+                document_subtype="coe",
+                example_fix={
+                    "tool": "documents.put",
+                    "arguments": {
+                        "project_id": "<project_id>",
+                        "title": "COE \u2014 <brief incident summary>",
+                        "content": "<full COE markdown>",
+                        "document_subtype": "coe",
+                        "source_incident_id": "<ENC-ISS-XXX>",
+                        "related_items": ["ENC-FTR-XXX", "ENC-LSN-XXX", "ENC-ISS-XXX"],
+                        "governance_hash": "<governance_hash>",
+                    },
+                },
+            )
+        coe_fields["source_incident_id"] = source_incident_id
+        coe_fields["coe_status"] = "drafting"
+        # Edge density validation: require at least 1 FTR, 1 LSN, 1 ISS in related_items
+        missing_edges = []
+        has_ftr = any("-FTR-" in item for item in related_items)
+        has_lsn = any("-LSN-" in item for item in related_items)
+        has_iss = any("-ISS-" in item for item in related_items)
+        if not has_ftr:
+            missing_edges.append("feature (*-FTR-*)")
+        if not has_lsn:
+            missing_edges.append("lesson (*-LSN-*)")
+        if not has_iss:
+            missing_edges.append("issue (*-ISS-*)")
+        if missing_edges:
+            return _error(
+                400,
+                "COE requires minimum edge density: related_items must include "
+                ">= 1 feature (*-FTR-*), >= 1 lesson (*-LSN-*), >= 1 issue (*-ISS-*). "
+                f"Missing: {', '.join(missing_edges)}",
+            )
+
+    # --- Wave-specific validation (ENC-FTR-077) ---
+    wave_fields: Dict[str, Any] = {}
+    if document_subtype == "wave":
+        plan_anchor_id = str(body.get("plan_anchor_id", "")).strip()
+        if not plan_anchor_id or "-PLN-" not in plan_anchor_id:
+            return _error(
+                400,
+                "Field 'plan_anchor_id' is required when document_subtype is 'wave' "
+                "and must contain '-PLN-' (e.g. ENC-PLN-029).",
+                required_fields=["plan_anchor_id"],
+                format_constraint="plan_anchor_id must contain '-PLN-' substring",
+                dictionary_entity="document.wave",
+                document_subtype="wave",
+                example_fix={
+                    "tool": "documents.put",
+                    "arguments": {
+                        "project_id": "<project_id>",
+                        "title": "WAVE \u2014 <brief description>",
+                        "content": "<wave tracking content>",
+                        "document_subtype": "wave",
+                        "plan_anchor_id": "ENC-PLN-XXX",
+                        "governance_hash": "<governance_hash>",
+                    },
+                },
+            )
+        wave_fields["plan_anchor_id"] = plan_anchor_id
+        wave_fields["wave_status"] = "active"
+
+    # --- ENC-FTR-078 idea subtype (AC-4): no additional required fields in Phase 1 ---
+    # idea docs pass through standard validation. The architect skill's workflow
+    # supplies structure; closing the silent-failure mode is the primary AC here.
+    idea_fields: Dict[str, Any] = {}
+    if document_subtype == "idea":
+        # Phase 1: no additional required fields. Placeholder for future idea-specific
+        # lifecycle fields (exploration_stage, concept_author) if introduced in a
+        # follow-on ENC-FTR.
+        pass
+
+    # --- ENC-FTR-078 context-node subtype (AC-5, AC-7) ---
+    context_node_fields: Dict[str, Any] = {}
+    if document_subtype == "context-node":
+        readable_body_length = _measure_context_node_readable_body(content)
+        if readable_body_length > CAP_CONTEXT_NODE:
+            return _error(
+                400,
+                (
+                    f"context-node readable body length {readable_body_length} exceeds "
+                    f"CAP_CONTEXT_NODE = {CAP_CONTEXT_NODE} characters. Reduce body "
+                    f"length or split into multiple context-nodes."
+                ),
+                code="context_node_cap_exceeded",
+                measured=readable_body_length,
+                cap=CAP_CONTEXT_NODE,
+                dictionary_entity="document.context-node",
+                derivation_doc="DOC-B5F1BC281F02",
+            )
+        if len(related_items) < N_MIN_CONTEXT_NODE:
+            return _error(
+                400,
+                (
+                    f"context-node requires at least {N_MIN_CONTEXT_NODE} related_items "
+                    f"for edge density. Received {len(related_items)}."
+                ),
+                code="context_node_edge_density_insufficient",
+                measured=len(related_items),
+                min=N_MIN_CONTEXT_NODE,
+                dictionary_entity="document.context-node",
+            )
+        context_node_fields["readable_body_length"] = readable_body_length
+
+    # --- ENC-FTR-078 skill subtype (AC-8..14) ---
+    skill_fields: Dict[str, Any] = {}
+    if document_subtype == "skill":
+        # Required: full_description (non-empty, len <= CAP_SKILL_FULL_DESC)
+        full_description = body.get("full_description")
+        if not isinstance(full_description, str) or not full_description.strip():
+            return _error(
+                400,
+                "Field 'full_description' is required and must be a non-empty string when document_subtype='skill'.",
+                code="skill_full_description_missing",
+                dictionary_entity="document.skill",
+                required_fields=[
+                    "full_description",
+                    "claude_description",
+                    "agentskills_manifest",
+                    "agentskills_spec_version",
+                ],
+            )
+        if len(full_description) > CAP_SKILL_FULL_DESC:
+            return _error(
+                400,
+                (
+                    f"skill full_description length {len(full_description)} exceeds "
+                    f"CAP_SKILL_FULL_DESC = {CAP_SKILL_FULL_DESC} characters."
+                ),
+                code="skill_full_description_invalid",
+                measured=len(full_description),
+                cap=CAP_SKILL_FULL_DESC,
+                dictionary_entity="document.skill",
+                derivation_doc="DOC-75425CD9786D",
+            )
+
+        # Required: claude_description (non-empty, len <= CAP_SKILL_CLAUDE_DESC)
+        claude_description = body.get("claude_description")
+        if not isinstance(claude_description, str) or not claude_description.strip():
+            return _error(
+                400,
+                "Field 'claude_description' is required and must be a non-empty string when document_subtype='skill'.",
+                code="skill_claude_description_missing",
+                dictionary_entity="document.skill",
+                spec_reference="Claude SKILL.md external spec: description field must be <=1024 chars",
+            )
+        if len(claude_description) > CAP_SKILL_CLAUDE_DESC:
+            return _error(
+                400,
+                (
+                    f"skill claude_description length {len(claude_description)} exceeds "
+                    f"Claude SKILL.md hard ceiling of {CAP_SKILL_CLAUDE_DESC} characters."
+                ),
+                code="skill_claude_description_too_long",
+                measured=len(claude_description),
+                cap=CAP_SKILL_CLAUDE_DESC,
+                dictionary_entity="document.skill",
+                spec_reference="Claude SKILL.md external spec",
+            )
+
+        # Required: agentskills_manifest (JSON object)
+        agentskills_manifest = body.get("agentskills_manifest")
+        if agentskills_manifest is None:
+            return _error(
+                400,
+                "Field 'agentskills_manifest' is required when document_subtype='skill'.",
+                code="skill_agentskills_manifest_missing",
+                dictionary_entity="document.skill",
+                spec_reference=f"agentskills.io/home spec v{AGENTSKILLS_SPEC_VERSION_DEFAULT}",
+            )
+
+        # Required: agentskills_spec_version (non-empty string)
+        agentskills_spec_version = body.get("agentskills_spec_version")
+        if not isinstance(agentskills_spec_version, str) or not agentskills_spec_version.strip():
+            return _error(
+                400,
+                "Field 'agentskills_spec_version' is required and must be a non-empty string when document_subtype='skill'.",
+                code="skill_agentskills_spec_version_missing",
+                dictionary_entity="document.skill",
+                pinned_default=AGENTSKILLS_SPEC_VERSION_DEFAULT,
+            )
+
+        # Validate manifest conformance at pinned spec version
+        manifest_err = _validate_agentskills_manifest(agentskills_manifest, agentskills_spec_version.strip())
+        if manifest_err is not None:
+            return _error(
+                400,
+                manifest_err["message"],
+                code=manifest_err["code"],
+                validator_output=manifest_err["details"],
+                dictionary_entity="document.skill",
+            )
+
+        # Optional: runtime_variants (JSON object, any keys permitted)
+        runtime_variants = body.get("runtime_variants")
+        if runtime_variants is None:
+            runtime_variants = {}
+        if not isinstance(runtime_variants, dict):
+            return _error(
+                400,
+                "Field 'runtime_variants' must be a JSON object when present (empty {} is valid).",
+                code="skill_runtime_variants_invalid",
+                measured_type=type(runtime_variants).__name__,
+                dictionary_entity="document.skill",
+            )
+
+        # Edge density: len(related_items) >= N_MIN_SKILL (soft: 2)
+        if len(related_items) < N_MIN_SKILL:
+            return _error(
+                400,
+                (
+                    f"skill requires at least {N_MIN_SKILL} related_items for edge density. "
+                    f"Received {len(related_items)}."
+                ),
+                code="skill_edge_density_insufficient",
+                measured=len(related_items),
+                min=N_MIN_SKILL,
+                dictionary_entity="document.skill",
+            )
+
+        skill_fields["full_description"] = full_description
+        skill_fields["claude_description"] = claude_description
+        skill_fields["agentskills_manifest"] = agentskills_manifest
+        skill_fields["agentskills_spec_version"] = agentskills_spec_version.strip()
+        skill_fields["runtime_variants"] = runtime_variants
 
     # Generate document ID
     document_id = f"DOC-{uuid.uuid4().hex[:12].upper()}"
@@ -1181,6 +1916,32 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             item["action_checklist"] = _serialize_list(handoff_fields["action_checklist"])
         if handoff_fields.get("expires_at"):
             item["expires_at"] = {"S": handoff_fields["expires_at"]}
+
+    # Add COE-specific fields to DynamoDB item (ENC-FTR-077)
+    if coe_fields:
+        item["source_incident_id"] = {"S": coe_fields["source_incident_id"]}
+        item["coe_status"] = {"S": coe_fields["coe_status"]}
+
+    # Add wave-specific fields to DynamoDB item (ENC-FTR-077)
+    if wave_fields:
+        item["plan_anchor_id"] = {"S": wave_fields["plan_anchor_id"]}
+        item["wave_status"] = {"S": wave_fields["wave_status"]}
+
+    # ENC-FTR-078: persist context-node readable_body_length audit field
+    if context_node_fields:
+        item["readable_body_length"] = {"N": str(context_node_fields["readable_body_length"])}
+
+    # ENC-FTR-078: persist skill-specific fields
+    if skill_fields:
+        item["full_description"] = {"S": skill_fields["full_description"]}
+        item["claude_description"] = {"S": skill_fields["claude_description"]}
+        item["agentskills_manifest"] = {"S": json.dumps(skill_fields["agentskills_manifest"])}
+        item["agentskills_spec_version"] = {"S": skill_fields["agentskills_spec_version"]}
+        item["runtime_variants"] = {"S": json.dumps(skill_fields["runtime_variants"])}
+
+    # ENC-FTR-078: persist subtypepattern (canonical) on doc subtype when present
+    if document_subtype == "doc" and subtypepattern_canonical:
+        item["subtypepattern"] = {"S": subtypepattern_canonical}
 
     try:
         ddb.put_item(TableName=DOCUMENTS_TABLE, Item=item)
@@ -1344,6 +2105,14 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     project_id = existing.get("project_id", {}).get("S", "")
     now = _now_z()
 
+    # ENC-FTR-078 AC-3 / AC-19: determine final_subtype for subsequent validations.
+    # existing_subtype is the pre-patch value (may be a legacy read-only value for
+    # grandfathered records). final_subtype is the post-patch target — either the
+    # existing value, or a newly-requested enum value that must pass the allow-list.
+    existing_subtype = existing.get("document_subtype", {}).get("S", "general")
+    final_subtype = existing_subtype
+    _subtype_change_staged = False
+
     # Build update expression
     # ENC-PLN-014 / ENC-FTR-065: idempotently backfill record_type on every patch
     # so existing documents created before the stamping fix become routable by
@@ -1362,11 +2131,58 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     }
     compliance: Optional[Dict[str, Any]] = None
 
+    # ENC-FTR-078 AC-3: document_subtype patch validation (strict allow-list).
+    # AC-19 backward compat: legacy values are readable but cannot be re-written.
+    if "document_subtype" in body:
+        requested_subtype = str(body["document_subtype"]).strip().lower()
+        if not requested_subtype:
+            return _error(400, "document_subtype, if present, must be a non-empty string.")
+        if requested_subtype not in DOCUMENT_SUBTYPES:
+            if requested_subtype in DOCUMENT_SUBTYPES_LEGACY_READ_ONLY:
+                return _error(
+                    400,
+                    (
+                        f"Cannot patch document_subtype to legacy-readable-only value "
+                        f"'{requested_subtype}'. Allowed values: {sorted(DOCUMENT_SUBTYPES)}. "
+                        f"{_ENUM_REDIRECT_MSG}"
+                    ),
+                    code="document_subtype_not_in_enum",
+                    allowed_values=sorted(DOCUMENT_SUBTYPES),
+                    legacy_readable_only=sorted(DOCUMENT_SUBTYPES_LEGACY_READ_ONLY),
+                    subtypepattern_redirect=_ENUM_REDIRECT_MSG,
+                )
+            return _error(
+                400,
+                (
+                    f"Invalid document_subtype '{requested_subtype}'. Must be one of: "
+                    f"{sorted(DOCUMENT_SUBTYPES)}. {_ENUM_REDIRECT_MSG}"
+                ),
+                code="document_subtype_not_in_enum",
+                allowed_values=sorted(DOCUMENT_SUBTYPES),
+                subtypepattern_redirect=_ENUM_REDIRECT_MSG,
+            )
+        final_subtype = requested_subtype
+        if requested_subtype != existing_subtype:
+            expr_parts.append("document_subtype = :ds_new")
+            attr_values[":ds_new"] = {"S": requested_subtype}
+            _subtype_change_staged = True
+
     # Updatable metadata fields
     if "title" in body:
         title = str(body["title"]).strip()
         if not title or len(title) > MAX_TITLE_LENGTH:
             return _error(400, f"Title must be 1-{MAX_TITLE_LENGTH} characters.")
+        # ENC-FTR-078 AC-15: apply title colon-prefix rule when post-patch subtype is 'doc'.
+        if final_subtype == "doc" and DOC_TITLE_COLON_PREFIX_REGEX.match(title):
+            return _error(
+                400,
+                _DOC_TITLE_COLON_PREFIX_MSG + f" Title received: {title!r}",
+                code="doc_title_colon_prefix_disallowed",
+                title=title,
+                rejected_regex=r"^[A-Za-z][A-Za-z-]{1,30}:",
+                remediation="Remove the prefix from title and populate subtypepattern with the lowercased prefix word in the same PATCH.",
+                dictionary_entity="document.doc",
+            )
         expr_parts.append("title = :title")
         attr_values[":title"] = {"S": title}
 
@@ -1379,6 +2195,32 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         if not isinstance(items, list):
             return _error(400, "'related_items' must be an array.")
         items = [str(r).strip() for r in items[:MAX_RELATED_ITEMS] if str(r).strip()]
+        # ENC-FTR-078 AC-7: context-node edge-density re-validation on PATCH when related_items touched.
+        if final_subtype == "context-node" and len(items) < N_MIN_CONTEXT_NODE:
+            return _error(
+                400,
+                (
+                    f"context-node requires at least {N_MIN_CONTEXT_NODE} related_items "
+                    f"for edge density. Received {len(items)}."
+                ),
+                code="context_node_edge_density_insufficient",
+                measured=len(items),
+                min=N_MIN_CONTEXT_NODE,
+                dictionary_entity="document.context-node",
+            )
+        # ENC-FTR-078 AC-14: skill edge-density re-validation on PATCH when related_items touched.
+        if final_subtype == "skill" and len(items) < N_MIN_SKILL:
+            return _error(
+                400,
+                (
+                    f"skill requires at least {N_MIN_SKILL} related_items for edge density. "
+                    f"Received {len(items)}."
+                ),
+                code="skill_edge_density_insufficient",
+                measured=len(items),
+                min=N_MIN_SKILL,
+                dictionary_entity="document.skill",
+            )
         expr_parts.append("related_items = :ri")
         attr_values[":ri"] = _serialize_list(items)
 
@@ -1389,6 +2231,43 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         kws = [str(k).strip().lower() for k in kws[:MAX_KEYWORDS] if str(k).strip()]
         expr_parts.append("keywords = :kw")
         attr_values[":kw"] = _serialize_list(kws)
+
+    # ENC-FTR-078 AC-16: subtypepattern PATCH.
+    # Valid only when final_subtype == 'doc'. Canonicalize + format validate.
+    if "subtypepattern" in body:
+        sp_value = body["subtypepattern"]
+        if sp_value is None or sp_value == "":
+            # Empty string / None clears the field (stores blank, logically absent).
+            expr_parts.append("subtypepattern = :sp")
+            attr_values[":sp"] = {"S": ""}
+        else:
+            if final_subtype != "doc":
+                return _error(
+                    400,
+                    (
+                        f"Field 'subtypepattern' is valid only when document_subtype='doc'. "
+                        f"Resulting subtype for this patch: '{final_subtype}'."
+                    ),
+                    code="subtypepattern_wrong_subtype",
+                    document_subtype=final_subtype,
+                    dictionary_entity="document.doc",
+                )
+            sp_canonical = _canonicalize_subtypepattern(sp_value)
+            if sp_canonical is None or not SUBTYPEPATTERN_REGEX.match(sp_canonical):
+                return _error(
+                    400,
+                    (
+                        f"Field 'subtypepattern' has invalid format. Canonical form must match "
+                        f"^[a-z-]+$. Received: {sp_value!r}"
+                        + (f" -> canonicalized to {sp_canonical!r}" if sp_canonical is not None else "")
+                    ),
+                    code="subtypepattern_invalid_format",
+                    invalid_value=sp_value,
+                    canonical_attempt=sp_canonical,
+                    dictionary_entity="document.doc",
+                )
+            expr_parts.append("subtypepattern = :sp")
+            attr_values[":sp"] = {"S": sp_canonical}
 
     if "status" in body:
         status = str(body["status"]).strip().lower()
@@ -1472,6 +2351,194 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             expr_parts.append("expires_at = :exp")
             attr_values[":exp"] = {"S": str(body["expires_at"]).strip()}
 
+    # Mutual exclusion: content vs append_content (ENC-ISS-239)
+    if "content" in body and "append_content" in body:
+        return _error(
+            400,
+            "Cannot specify both 'content' and 'append_content' — they are mutually exclusive.",
+        )
+
+    # COE status transitions (ENC-FTR-077)
+    if "coe_status" in body:
+        if current_subtype != "coe":
+            return _error(400, "Cannot set coe_status on a non-COE document.")
+        new_coe_status = str(body["coe_status"]).strip().lower()
+        if new_coe_status not in COE_STATUSES:
+            return _error(400, f"Invalid coe_status '{new_coe_status}'. Must be one of: {', '.join(sorted(COE_STATUSES))}")
+        current_coe_status = existing.get("coe_status", {}).get("S", "drafting")
+        allowed_coe = COE_STATUS_TRANSITIONS.get(current_coe_status, set())
+        if new_coe_status != current_coe_status and new_coe_status not in allowed_coe:
+            return _error(
+                400,
+                f"Cannot transition coe_status from '{current_coe_status}' to '{new_coe_status}'. "
+                f"Allowed transitions: {', '.join(sorted(allowed_coe)) if allowed_coe else 'none (terminal state)'}",
+            )
+        expr_parts.append("coe_status = :cs")
+        attr_values[":cs"] = {"S": new_coe_status}
+
+    # Wave status transitions (ENC-FTR-077)
+    if "wave_status" in body:
+        if current_subtype != "wave":
+            return _error(400, "Cannot set wave_status on a non-wave document.")
+        new_wave_status = str(body["wave_status"]).strip().lower()
+        if new_wave_status not in WAVE_STATUSES:
+            return _error(400, f"Invalid wave_status '{new_wave_status}'. Must be one of: {', '.join(sorted(WAVE_STATUSES))}")
+        current_wave_status = existing.get("wave_status", {}).get("S", "active")
+        allowed_wave = WAVE_STATUS_TRANSITIONS.get(current_wave_status, set())
+        if new_wave_status != current_wave_status and new_wave_status not in allowed_wave:
+            return _error(
+                400,
+                f"Cannot transition wave_status from '{current_wave_status}' to '{new_wave_status}'. "
+                f"Allowed transitions: {', '.join(sorted(allowed_wave)) if allowed_wave else 'none (terminal state)'}",
+            )
+        expr_parts.append("wave_status = :ws")
+        attr_values[":ws"] = {"S": new_wave_status}
+
+    # plan_anchor_id immutability (ENC-FTR-077)
+    if "plan_anchor_id" in body:
+        return _error(400, "plan_anchor_id is immutable after wave document creation.")
+
+    # ENC-FTR-078 AC-8, AC-9, AC-12, AC-13: skill subtype field patches.
+    # Only permitted when final_subtype == 'skill'. Re-run cap / spec validators.
+    skill_field_keys = ("full_description", "claude_description", "agentskills_manifest",
+                        "agentskills_spec_version", "runtime_variants")
+    if any(k in body for k in skill_field_keys):
+        if final_subtype != "skill":
+            return _error(
+                400,
+                (
+                    f"Fields {[k for k in skill_field_keys if k in body]} are valid only when "
+                    f"document_subtype='skill'. Resulting subtype for this patch: '{final_subtype}'."
+                ),
+                code="skill_fields_wrong_subtype",
+                document_subtype=final_subtype,
+                dictionary_entity="document.skill",
+            )
+
+        if "full_description" in body:
+            fd = body["full_description"]
+            if not isinstance(fd, str) or not fd.strip():
+                return _error(
+                    400,
+                    "full_description must be a non-empty string when patched.",
+                    code="skill_full_description_missing",
+                    dictionary_entity="document.skill",
+                )
+            if len(fd) > CAP_SKILL_FULL_DESC:
+                return _error(
+                    400,
+                    (
+                        f"skill full_description length {len(fd)} exceeds "
+                        f"CAP_SKILL_FULL_DESC = {CAP_SKILL_FULL_DESC} characters."
+                    ),
+                    code="skill_full_description_invalid",
+                    measured=len(fd),
+                    cap=CAP_SKILL_FULL_DESC,
+                    dictionary_entity="document.skill",
+                )
+            expr_parts.append("full_description = :fd")
+            attr_values[":fd"] = {"S": fd}
+
+        if "claude_description" in body:
+            cd = body["claude_description"]
+            if not isinstance(cd, str) or not cd.strip():
+                return _error(
+                    400,
+                    "claude_description must be a non-empty string when patched.",
+                    code="skill_claude_description_missing",
+                    dictionary_entity="document.skill",
+                )
+            if len(cd) > CAP_SKILL_CLAUDE_DESC:
+                return _error(
+                    400,
+                    (
+                        f"skill claude_description length {len(cd)} exceeds "
+                        f"Claude SKILL.md hard ceiling of {CAP_SKILL_CLAUDE_DESC} characters."
+                    ),
+                    code="skill_claude_description_too_long",
+                    measured=len(cd),
+                    cap=CAP_SKILL_CLAUDE_DESC,
+                    dictionary_entity="document.skill",
+                )
+            expr_parts.append("claude_description = :cd")
+            attr_values[":cd"] = {"S": cd}
+
+        if "agentskills_manifest" in body or "agentskills_spec_version" in body:
+            # If either field is touched, both must be valid together (validator runs against pinned version).
+            new_manifest = body.get("agentskills_manifest")
+            new_version = body.get("agentskills_spec_version")
+            # Fall back to existing values for whichever is not being patched.
+            if new_manifest is None:
+                existing_manifest_str = existing.get("agentskills_manifest", {}).get("S", "")
+                try:
+                    new_manifest = json.loads(existing_manifest_str) if existing_manifest_str else None
+                except Exception:
+                    new_manifest = None
+            if new_version is None:
+                new_version = existing.get("agentskills_spec_version", {}).get("S", "")
+            if new_manifest is None:
+                return _error(
+                    400,
+                    "agentskills_manifest is missing and cannot be inferred from existing record.",
+                    code="skill_agentskills_manifest_missing",
+                    dictionary_entity="document.skill",
+                )
+            if not isinstance(new_version, str) or not new_version.strip():
+                return _error(
+                    400,
+                    "agentskills_spec_version must be a non-empty string.",
+                    code="skill_agentskills_spec_version_missing",
+                    dictionary_entity="document.skill",
+                )
+            manifest_err = _validate_agentskills_manifest(new_manifest, new_version.strip())
+            if manifest_err is not None:
+                return _error(
+                    400,
+                    manifest_err["message"],
+                    code=manifest_err["code"],
+                    validator_output=manifest_err["details"],
+                    dictionary_entity="document.skill",
+                )
+            if "agentskills_manifest" in body:
+                expr_parts.append("agentskills_manifest = :am")
+                attr_values[":am"] = {"S": json.dumps(new_manifest)}
+            if "agentskills_spec_version" in body:
+                expr_parts.append("agentskills_spec_version = :asv")
+                attr_values[":asv"] = {"S": new_version.strip()}
+
+        if "runtime_variants" in body:
+            rv = body["runtime_variants"]
+            if rv is None:
+                rv = {}
+            if not isinstance(rv, dict):
+                return _error(
+                    400,
+                    "runtime_variants must be a JSON object (empty {} is valid).",
+                    code="skill_runtime_variants_invalid",
+                    measured_type=type(rv).__name__,
+                    dictionary_entity="document.skill",
+                )
+            expr_parts.append("runtime_variants = :rv")
+            attr_values[":rv"] = {"S": json.dumps(rv)}
+
+    # COE edge density re-validation on related_items change (ENC-FTR-077)
+    if "related_items" in body and current_subtype == "coe":
+        patched_items = [str(r).strip() for r in body["related_items"][:MAX_RELATED_ITEMS] if str(r).strip()]
+        missing_edges = []
+        if not any("-FTR-" in item for item in patched_items):
+            missing_edges.append("feature (*-FTR-*)")
+        if not any("-LSN-" in item for item in patched_items):
+            missing_edges.append("lesson (*-LSN-*)")
+        if not any("-ISS-" in item for item in patched_items):
+            missing_edges.append("issue (*-ISS-*)")
+        if missing_edges:
+            return _error(
+                400,
+                "COE requires minimum edge density: related_items must include "
+                ">= 1 feature (*-FTR-*), >= 1 lesson (*-LSN-*), >= 1 issue (*-ISS-*). "
+                f"Missing: {', '.join(missing_edges)}",
+            )
+
     # Content update — re-upload to S3
     if "content" in body:
         content = body["content"]
@@ -1479,8 +2546,26 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             return _error(400, "Field 'content' must be a non-empty string.")
         if len(content.encode("utf-8")) > MAX_CONTENT_SIZE:
             return _error(400, f"Content must be 1-{MAX_CONTENT_SIZE} bytes.")
+        # ENC-FTR-078 AC-5: context-node cap re-validation on PATCH when content touched.
+        if final_subtype == "context-node":
+            readable_body_length = _measure_context_node_readable_body(content)
+            if readable_body_length > CAP_CONTEXT_NODE:
+                return _error(
+                    400,
+                    (
+                        f"context-node readable body length {readable_body_length} exceeds "
+                        f"CAP_CONTEXT_NODE = {CAP_CONTEXT_NODE} characters."
+                    ),
+                    code="context_node_cap_exceeded",
+                    measured=readable_body_length,
+                    cap=CAP_CONTEXT_NODE,
+                    dictionary_entity="document.context-node",
+                    derivation_doc="DOC-B5F1BC281F02",
+                )
+            expr_parts.append("readable_body_length = :rbl")
+            attr_values[":rbl"] = {"N": str(readable_body_length)}
         try:
-            compliance = _evaluate_markdown_compliance(content)
+            compliance = _evaluate_markdown_compliance(content, document_subtype=final_subtype)
             if MIN_COMPLIANCE_SCORE > 0 and compliance["compliance_score"] < MIN_COMPLIANCE_SCORE:
                 return _error(
                     400,
@@ -1507,6 +2592,79 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         except Exception as exc:
             logger.error("S3 upload (edit) failed: %s", exc)
             return _error(500, "Failed to update document content.")
+
+    # Append content — read-modify-write cycle (ENC-ISS-239 / ENC-TSK-E50 / ENC-TSK-E51)
+    if "append_content" in body:
+        append_text = body["append_content"]
+        if append_text is None or not isinstance(append_text, str) or not append_text:
+            return _error(400, "Field 'append_content' must be a non-empty string.")
+
+        # --- Handoff reply block validation (ENC-TSK-E50) ---
+        if current_subtype == "handoff":
+            fm, fm_err = _parse_reply_frontmatter(append_text)
+            if fm_err:
+                return _error(
+                    400,
+                    f"Handoff reply block validation failed: {fm_err}",
+                )
+            validation_err = _validate_reply_block(fm, require_handoff_ref=True)
+            if validation_err:
+                return _error(
+                    400,
+                    f"Handoff reply block validation failed: {validation_err}",
+                )
+            # Track reply metadata on the handoff document
+            expr_parts.append("reply_count = if_not_exists(reply_count, :zero) + :one")
+            expr_parts.append("last_reply_at = :lra")
+            attr_values[":zero"] = {"N": "0"}
+            attr_values[":lra"] = {"S": now}
+
+        # --- Wave multi-author append validation (ENC-TSK-E51) ---
+        elif current_subtype == "wave":
+            fm, fm_err = _parse_reply_frontmatter(append_text)
+            if fm_err:
+                return _error(
+                    400,
+                    f"Wave append validation failed: {fm_err}",
+                )
+            validation_err = _validate_reply_block(fm, require_handoff_ref=False)
+            if validation_err:
+                return _error(
+                    400,
+                    f"Wave append validation failed: {validation_err}",
+                )
+            # Track append metadata on the wave document
+            expr_parts.append("append_count = if_not_exists(append_count, :zero) + :one")
+            expr_parts.append("last_append_at = :laa")
+            attr_values[":zero"] = {"N": "0"}
+            attr_values[":laa"] = {"S": now}
+
+        # Non-handoff/wave: format-agnostic general append (no validation)
+
+        try:
+            existing_content = _get_content(project_id, document_id)
+            if existing_content is None:
+                existing_content = ""
+            new_content = existing_content + "\n\n" + str(append_text)
+            if len(new_content.encode("utf-8")) > MAX_CONTENT_SIZE:
+                return _error(400, f"Appended content exceeds maximum size of {MAX_CONTENT_SIZE} bytes.")
+            compliance = _evaluate_markdown_compliance(new_content)
+            s3_key, content_hash, size_bytes = _upload_content(project_id, document_id, new_content)
+            expr_parts.append("content_hash = :hash")
+            expr_parts.append("size_bytes = :size")
+            expr_parts.append("s3_key = :s3k")
+            expr_parts.append("compliance_score = :cscore")
+            expr_parts.append("compliance_warnings = :cwarnings")
+            expr_parts.append("compliance_checked_at = :cchecked")
+            attr_values[":hash"] = {"S": content_hash}
+            attr_values[":size"] = {"N": str(size_bytes)}
+            attr_values[":s3k"] = {"S": s3_key}
+            attr_values[":cscore"] = {"N": str(compliance["compliance_score"])}
+            attr_values[":cwarnings"] = _serialize_list(compliance["compliance_warnings"])
+            attr_values[":cchecked"] = {"S": now}
+        except Exception as exc:
+            logger.error("S3 append content failed: %s", exc)
+            return _error(500, "Failed to append document content.")
 
     update_expr = "SET " + ", ".join(expr_parts)
 
@@ -1598,6 +2756,16 @@ def _handle_search(qs: Dict) -> Dict:
     subtype_filter = qs.get("document_subtype", "").strip().lower()
     if subtype_filter:
         docs = [d for d in docs if d.get("document_subtype", "general") == subtype_filter]
+
+    # ENC-FTR-078 AC-17: subtypepattern filter. Canonicalizes input (trim+lowercase).
+    # Returns only document_subtype='doc' records with matching canonical subtypepattern.
+    subtypepattern_filter = qs.get("subtypepattern", "").strip().lower()
+    if subtypepattern_filter:
+        docs = [
+            d for d in docs
+            if d.get("document_subtype", "general") == "doc"
+            and d.get("subtypepattern", "").strip().lower() == subtypepattern_filter
+        ]
 
     # Don't include content in search results
     for d in docs:

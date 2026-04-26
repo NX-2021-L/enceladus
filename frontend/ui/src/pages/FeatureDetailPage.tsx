@@ -1,14 +1,12 @@
 import { useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useParams, Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
 import { useFeatures } from '../hooks/useFeatures'
 import { useTasks } from '../hooks/useTasks'
 import { useIssues } from '../hooks/useIssues'
-import { useProjects } from '../hooks/useProjects'
+import { useRecordFallback } from '../hooks/useRecordFallback'
 import { useRecordMutation } from '../hooks/useRecordMutation'
 import { isMutationRetryExhaustedError } from '../api/mutations'
-import { fetchFeatureById, resolveProjectFromRecordId, trackerKeys } from '../api/tracker'
 import { StatusChip } from '../components/shared/StatusChip'
 import { GitHubLinkBadge } from '../components/shared/GitHubLinkBadge'
 import { GitHubOverlay } from '../components/shared/GitHubOverlay'
@@ -21,8 +19,9 @@ import { ParentRecord } from '../components/shared/ParentRecord'
 import { ChildRecords } from '../components/shared/ChildRecords'
 import { TypedRelationshipSection } from '../components/shared/TypedRelationshipSection'
 import { ContextNodeBadges } from '../components/shared/ContextNodeBadges'
-import { LoadingState } from '../components/shared/LoadingState'
-import { ErrorState } from '../components/shared/ErrorState'
+import { RecordFallbackLoading } from '../components/shared/RecordFallbackLoading'
+import { RecordNotFound } from '../components/shared/RecordNotFound'
+import { RecordFallbackError } from '../components/shared/RecordFallbackError'
 import { CopyButton } from '../components/shared/CopyButton'
 import { formatDate } from '../lib/formatters'
 import { filterRelatedItems, getChildrenIds } from '../lib/relationshipFilters'
@@ -32,7 +31,6 @@ export function FeatureDetailPage() {
   const { allFeatures, isPending: feedPending, isError: feedError } = useFeatures()
   const { allTasks } = useTasks()
   const { allIssues } = useIssues()
-  const { projects } = useProjects()
   const { mutate, isPending: isMutating } = useRecordMutation()
 
   const [showNote, setShowNote] = useState(false)
@@ -41,22 +39,22 @@ export function FeatureDetailPage() {
   const [mutationError, setMutationError] = useState<string | null>(null)
   const [mutationSuccess, setMutationSuccess] = useState<string | null>(null)
 
-  // ENC-ISS-200: feed_query caps features at 10 per project; direct-URL loads
-  // of older features need a tracker API fallback.
+  // ENC-FTR-073: feed_query caps features at 10 per project; direct-URL loads
+  // of older features use the shared useRecordFallback hook.
   const cachedFeature = allFeatures.find((f) => f.feature_id === featureId)
-  const fallbackProjectId = !cachedFeature && featureId
-    ? resolveProjectFromRecordId(featureId, projects)
-    : null
-  const fallbackEnabled = !feedPending && !cachedFeature && !!featureId && !!fallbackProjectId
-
-  const fallbackQuery = useQuery({
-    queryKey: trackerKeys.feature(featureId ?? ''),
-    queryFn: () => fetchFeatureById(fallbackProjectId!, featureId!),
-    enabled: fallbackEnabled,
-    retry: 1,
+  const {
+    data: feature,
+    isLoading: fallbackLoading,
+    isError: fallbackIsError,
+    isNotFound,
+    refetch,
+  } = useRecordFallback({
+    recordType: 'feature',
+    recordId: featureId,
+    cached: cachedFeature,
+    feedPending,
+    feedError,
   })
-
-  const feature = cachedFeature ?? fallbackQuery.data
 
   const relatedTaskIds = useMemo(() => {
     if (!feature) return []
@@ -117,9 +115,9 @@ export function FeatureDetailPage() {
     return map
   }, [allTasks, allIssues, allFeatures])
 
-  if (feedPending || (fallbackEnabled && fallbackQuery.isPending)) return <LoadingState />
-  if (feedError && !feature) return <ErrorState />
-  if (!feature) return <ErrorState message={`Feature not found: ${featureId ?? 'unknown'}`} />
+  if (fallbackLoading) return <RecordFallbackLoading />
+  if (isNotFound) return <RecordNotFound recordType="feature" recordId={featureId ?? 'unknown'} />
+  if (fallbackIsError || !feature) return <RecordFallbackError onRetry={refetch} />
 
   function handleSubmitNote() {
     if (!note.trim()) return

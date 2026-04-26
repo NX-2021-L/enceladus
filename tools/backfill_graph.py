@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Backfill Neo4j graph index from DynamoDB tracker table.
+"""Backfill Neo4j graph index from DynamoDB tracker + document tables.
 
-Scans devops-project-tracker, creates nodes and edges in Neo4j AuraDB.
-Uses MERGE for idempotent upserts. Filters out COUNTER-* records.
+Replays the current ``graph_sync`` node and edge projection logic against the
+authoritative DynamoDB corpus so parity repairs do not fork the live contract.
+Supports optional graph wipe before replay to remove historical phantom nodes.
 
 Usage:
     NEO4J_SECRET_NAME=enceladus/neo4j/auradb-credentials \
     python3 tools/backfill_graph.py --region us-west-2
 """
 import argparse
+import importlib.util
 import json
 import logging
 import os
+import pathlib
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -24,21 +27,25 @@ logger = logging.getLogger(__name__)
 FREE_TIER_NODE_LIMIT = 50_000
 FREE_TIER_RELATIONSHIP_LIMIT = 175_000
 
-RECORD_TYPE_TO_LABEL = {
-    "task": "Task",
-    "issue": "Issue",
-    "feature": "Feature",
-    "project": "Project",
-}
+
+def _load_graph_sync_module():
+    """Load the canonical graph_sync implementation for parity replays."""
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    graph_sync_dir = repo_root / "backend" / "lambda" / "graph_sync"
+    if str(graph_sync_dir) not in sys.path:
+        sys.path.insert(0, str(graph_sync_dir))
+    spec = importlib.util.spec_from_file_location(
+        "enceladus_graph_sync_backfill_module",
+        graph_sync_dir / "lambda_function.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
 
 
-def _bare_id(record_id: str) -> str:
-    """Strip the 'type#' prefix from a composite DynamoDB record_id.
-
-    DynamoDB stores record_ids as 'task#ENC-TSK-890' but related fields
-    and user queries use bare IDs like 'ENC-TSK-890'.
-    """
-    return record_id.split("#", 1)[-1] if "#" in record_id else record_id
+GS = _load_graph_sync_module()
+RECORD_TYPE_TO_LABEL = GS.RECORD_TYPE_TO_LABEL
 
 
 def get_neo4j_credentials(secret_name: str, region: str) -> Dict[str, str]:
@@ -55,7 +62,7 @@ def get_neo4j_driver(creds: Dict[str, str]):
     )
 
 
-def scan_tracker_table(region: str, table_name: str = "devops-project-tracker"):
+def scan_table(region: str, table_name: str):
     dynamodb = boto3.resource("dynamodb", region_name=region)
     table = dynamodb.Table(table_name)
     kwargs: Dict[str, Any] = {}
@@ -75,135 +82,48 @@ def scan_tracker_table(region: str, table_name: str = "devops-project-tracker"):
         if not last_key:
             break
         kwargs["ExclusiveStartKey"] = last_key
-    logger.info("[INFO] Total records scanned: %d", total)
+    logger.info("[INFO] Total records scanned from %s: %d", table_name, total)
 
 
-def determine_label(record: Dict[str, Any]) -> Optional[str]:
-    record_id = record.get("record_id", "")
-    record_type = record.get("record_type", "")
-    if record_type in RECORD_TYPE_TO_LABEL:
-        return RECORD_TYPE_TO_LABEL[record_type]
-    parts = record_id.split("-")
-    if len(parts) >= 3:
-        type_part = parts[1].lower()
-        if type_part == "tsk":
-            return "Task"
-        elif type_part == "iss":
-            return "Issue"
-        elif type_part == "ftr":
-            return "Feature"
-        elif type_part == "prj":
-            return "Project"
-    return "Task"
+def _normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply graph_sync's identity normalization to scanned DynamoDB rows."""
+    normalized = GS._normalize_record_for_graph(dict(record))
+    if normalized.get("document_id") and not normalized.get("record_type"):
+        normalized["record_type"] = "document"
+    return normalized
 
 
-def merge_node(tx, record: Dict[str, Any], label: str):
-    record_id = _bare_id(record.get("record_id", ""))
-    project_id = record.get("project_id", "")
-    props = {
-        "record_id": record_id,
-        "project_id": project_id,
-        "title": record.get("title", ""),
-        "status": record.get("status", ""),
-        "priority": record.get("priority", ""),
-        "record_type": record.get("record_type", ""),
-        "updated_at": record.get("updated_at", ""),
-    }
-    query = f"""
-    MERGE (n:{label} {{record_id: $record_id}})
-    SET n.project_id = $project_id,
-        n.title = $title,
-        n.status = $status,
-        n.priority = $priority,
-        n.record_type = $record_type,
-        n.updated_at = $updated_at
-    """
-    tx.run(query, **props)
+def _load_projection_records(
+    region: str,
+    tracker_table: str,
+    documents_table: str,
+) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for item in scan_table(region, tracker_table):
+        records.append(_normalize_record(item))
+    for item in scan_table(region, documents_table):
+        records.append(_normalize_record(item))
+    return records
 
 
-def reconcile_edges(tx, record: Dict[str, Any]):
-    record_id = _bare_id(record.get("record_id", ""))
-    project_id = record.get("project_id", "")
+def _is_entity_record(record: Dict[str, Any]) -> bool:
+    return str(record.get("record_type") or "").strip() in RECORD_TYPE_TO_LABEL
 
-    # CHILD_OF: child -> parent
-    parent = _bare_id(record.get("parent", ""))
-    if parent:
-        tx.run(
-            "MATCH (child), (parent) "
-            "WHERE child.record_id = $child_id AND child.project_id = $project_id "
-            "AND parent.record_id = $parent_id AND parent.project_id = $project_id "
-            "MERGE (child)-[:CHILD_OF]->(parent)",
-            child_id=record_id, parent_id=parent, project_id=project_id,
-        )
 
-    # BELONGS_TO: record -> project node (if project node exists)
-    if project_id:
-        tx.run(
-            "MATCH (n), (p:Project) "
-            "WHERE n.record_id = $record_id AND n.project_id = $project_id "
-            "AND p.project_id = $project_id "
-            "MERGE (n)-[:BELONGS_TO]->(p)",
-            record_id=record_id, project_id=project_id,
-        )
+def _is_relationship_record(record: Dict[str, Any]) -> bool:
+    return str(record.get("record_type") or "").strip() == "relationship"
 
-    # RELATED_TO: from related_task_ids
-    related_task_ids = record.get("related_task_ids", []) or []
-    if isinstance(related_task_ids, str):
-        related_task_ids = [related_task_ids]
-    for rid in related_task_ids:
-        rid = _bare_id(rid) if rid else ""
-        if rid:
-            tx.run(
-                "MATCH (a), (b) "
-                "WHERE a.record_id = $a_id AND a.project_id = $project_id "
-                "AND b.record_id = $b_id AND b.project_id = $project_id "
-                "MERGE (a)-[:RELATED_TO]->(b)",
-                a_id=record_id, b_id=rid, project_id=project_id,
-            )
 
-    # RELATED_TO + ADDRESSES: from related_issue_ids
-    related_issue_ids = record.get("related_issue_ids", []) or []
-    if isinstance(related_issue_ids, str):
-        related_issue_ids = [related_issue_ids]
-    for iid in related_issue_ids:
-        iid = _bare_id(iid) if iid else ""
-        if iid:
-            tx.run(
-                "MATCH (a), (b) "
-                "WHERE a.record_id = $a_id AND a.project_id = $project_id "
-                "AND b.record_id = $b_id AND b.project_id = $project_id "
-                "MERGE (a)-[:RELATED_TO]->(b)",
-                a_id=record_id, b_id=iid, project_id=project_id,
-            )
-            tx.run(
-                "MATCH (t), (i) "
-                "WHERE t.record_id = $task_id AND t.project_id = $project_id "
-                "AND i.record_id = $issue_id AND i.project_id = $project_id "
-                "MERGE (t)-[:ADDRESSES]->(i)",
-                task_id=record_id, issue_id=iid, project_id=project_id,
-            )
-
-    # RELATED_TO + IMPLEMENTS: from related_feature_ids
-    related_feature_ids = record.get("related_feature_ids", []) or []
-    if isinstance(related_feature_ids, str):
-        related_feature_ids = [related_feature_ids]
-    for fid in related_feature_ids:
-        fid = _bare_id(fid) if fid else ""
-        if fid:
-            tx.run(
-                "MATCH (a), (b) "
-                "WHERE a.record_id = $a_id AND a.project_id = $project_id "
-                "AND b.record_id = $b_id AND b.project_id = $project_id "
-                "MERGE (a)-[:RELATED_TO]->(b)",
-                a_id=record_id, b_id=fid, project_id=project_id,
-            )
-            tx.run(
-                "MATCH (t), (f) "
-                "WHERE t.record_id = $task_id AND t.project_id = $project_id "
-                "AND f.record_id = $feature_id AND f.project_id = $project_id "
-                "MERGE (t)-[:IMPLEMENTS]->(f)",
-                task_id=record_id, feature_id=fid, project_id=project_id,
-            )
+def _wipe_graph(driver) -> None:
+    """Clear the existing graph before replaying projection state."""
+    with driver.session() as session:
+        summary = session.run("MATCH (n) DETACH DELETE n").consume()
+    counters = summary.counters
+    logger.info(
+        "[INFO] Cleared graph: nodes_deleted=%s relationships_deleted=%s",
+        counters.nodes_deleted,
+        counters.relationships_deleted,
+    )
 
 
 def report_counts(driver):
@@ -219,51 +139,180 @@ def report_counts(driver):
     return node_count, edge_count
 
 
+def _split_cypher_statements(text: str) -> List[str]:
+    """Split a .cypher file into individual statements.
+
+    Strips `//` line comments before splitting on `;`. Ignores trailing
+    whitespace-only fragments. Does not attempt to honor semicolons inside
+    string literals -- the migration files under tools/neo4j-migrations/ do
+    not use them, and this helper is not a general-purpose Cypher parser.
+    """
+    scrubbed_lines = []
+    for line in text.splitlines():
+        comment_at = line.find("//")
+        if comment_at >= 0:
+            line = line[:comment_at]
+        scrubbed_lines.append(line)
+    blob = "\n".join(scrubbed_lines)
+    statements = []
+    for chunk in blob.split(";"):
+        chunk = chunk.strip()
+        if chunk:
+            statements.append(chunk)
+    return statements
+
+
+def run_migration_file(driver, path: str) -> int:
+    """Run each Cypher statement in `path` against the Neo4j driver.
+
+    Returns the count of statements executed. Each statement runs in its own
+    auto-commit transaction (migrations are expected to use `IF NOT EXISTS`
+    for idempotency, not transactional rollback).
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    statements = _split_cypher_statements(text)
+    if not statements:
+        logger.warning("[WARN] No executable statements in %s", path)
+        return 0
+    logger.info("[START] Running migration %s (%d statements)", path, len(statements))
+    with driver.session() as session:
+        for i, stmt in enumerate(statements, 1):
+            preview = " ".join(stmt.split())[:80]
+            logger.info("[INFO] [%d/%d] %s", i, len(statements), preview)
+            session.run(stmt).consume()
+    logger.info("[END] Migration complete: %d statements applied", len(statements))
+    return len(statements)
+
+
+def show_vector_indexes(driver) -> List[Dict[str, Any]]:
+    """Return all vector indexes currently defined on the Neo4j instance."""
+    with driver.session() as session:
+        result = session.run(
+            "SHOW VECTOR INDEXES "
+            "YIELD name, state, labelsOrTypes, properties, options"
+        )
+        rows = [dict(record) for record in result]
+    logger.info("[INFO] %d vector index(es) found", len(rows))
+    for row in rows:
+        index_config = (row.get("options") or {}).get("indexConfig") or {}
+        dim = index_config.get("vector.dimensions")
+        sim = index_config.get("vector.similarity_function")
+        logger.info(
+            "[INFO]   - %s state=%s labels=%s props=%s dim=%s sim=%s",
+            row.get("name"),
+            row.get("state"),
+            row.get("labelsOrTypes"),
+            row.get("properties"),
+            dim,
+            sim,
+        )
+    return rows
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Backfill Neo4j graph from DynamoDB tracker table")
+    parser = argparse.ArgumentParser(description="Backfill Neo4j graph from governed DynamoDB tables")
     parser.add_argument("--region", default="us-west-2")
-    parser.add_argument("--table", default="devops-project-tracker")
+    parser.add_argument("--tracker-table", default="devops-project-tracker")
+    parser.add_argument("--documents-table", default="documents")
     parser.add_argument("--secret-name", default=None,
                         help="Secrets Manager secret name (default: env NEO4J_SECRET_NAME)")
     parser.add_argument("--dry-run", action="store_true", help="Scan only, no graph writes")
+    parser.add_argument("--wipe-existing", action="store_true",
+                        help="DETACH DELETE the current graph before replaying projection state")
+    parser.add_argument("--run-migration", default=None,
+                        help="Path to a .cypher migration file; when set, runs only the migration "
+                             "and exits (no DynamoDB scan, no backfill). See "
+                             "tools/neo4j-migrations/ for managed migrations.")
+    parser.add_argument("--verify-vector-indexes", action="store_true",
+                        help="Run SHOW VECTOR INDEXES and print each index's name, state, "
+                             "labels, properties, and (dimensions, similarity_function). "
+                             "Implies skip-backfill; exits after printing.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
     secret_name = args.secret_name or os.environ.get("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
 
-    logger.info("[START] Backfill graph from %s (region=%s)", args.table, args.region)
+    # Migration / verification fast paths -- run before the DynamoDB scan and
+    # exit without touching the tracker table or backfilling any records.
+    if args.run_migration or args.verify_vector_indexes:
+        logger.info("[INFO] Connecting to Neo4j (secret=%s, region=%s)...",
+                    secret_name, args.region)
+        creds = get_neo4j_credentials(secret_name, args.region)
+        driver = get_neo4j_driver(creds)
+        try:
+            if args.run_migration:
+                run_migration_file(driver, args.run_migration)
+            if args.verify_vector_indexes:
+                show_vector_indexes(driver)
+        finally:
+            driver.close()
+        return
 
-    records = list(scan_tracker_table(args.region, args.table))
-    logger.info("[INFO] Loaded %d records (excluding COUNTER-*)", len(records))
+    logger.info(
+        "[START] Backfill graph from %s + %s (region=%s)",
+        args.tracker_table,
+        args.documents_table,
+        args.region,
+    )
+
+    records = _load_projection_records(args.region, args.tracker_table, args.documents_table)
+    entity_records = [record for record in records if _is_entity_record(record)]
+    relationship_records = [record for record in records if _is_relationship_record(record)]
+    logger.info(
+        "[INFO] Loaded %d entity records and %d relationship records",
+        len(entity_records),
+        len(relationship_records),
+    )
 
     if args.dry_run:
-        logger.info("[END] Dry run complete — %d records would be backfilled", len(records))
+        logger.info(
+            "[END] Dry run complete — %d entity rows and %d relationship rows would be replayed",
+            len(entity_records),
+            len(relationship_records),
+        )
         return
 
     logger.info("[INFO] Connecting to Neo4j...")
     creds = get_neo4j_credentials(secret_name, args.region)
     driver = get_neo4j_driver(creds)
 
+    if args.wipe_existing:
+        _wipe_graph(driver)
+
     # Phase 1: Create all nodes
     logger.info("[START] Creating nodes...")
     start = time.time()
     with driver.session() as session:
-        for i, record in enumerate(records, 1):
-            label = determine_label(record)
-            session.execute_write(merge_node, record, label)
+        for i, record in enumerate(entity_records, 1):
+            project_id = str(record.get("project_id") or "").strip()
+            if project_id:
+                session.execute_write(GS._upsert_project_node, project_id)
+            session.execute_write(GS._upsert_node, record)
             if i % 100 == 0:
-                logger.info("[INFO] Nodes created: %d / %d", i, len(records))
+                logger.info("[INFO] Nodes created: %d / %d", i, len(entity_records))
     logger.info("[END] Nodes created in %.1fs", time.time() - start)
 
     # Phase 2: Reconcile all edges
     logger.info("[START] Reconciling edges...")
     start = time.time()
     with driver.session() as session:
-        for i, record in enumerate(records, 1):
-            session.execute_write(reconcile_edges, record)
+        for i, record in enumerate(entity_records, 1):
+            session.execute_write(GS._reconcile_edges, record)
             if i % 100 == 0:
-                logger.info("[INFO] Edges reconciled: %d / %d", i, len(records))
+                logger.info("[INFO] Entity edges reconciled: %d / %d", i, len(entity_records))
+        for i, record in enumerate(relationship_records, 1):
+            if str(record.get("status") or "").strip() == "archived":
+                session.execute_write(GS._delete_relationship_edge, record.get("record_id", ""))
+            else:
+                session.execute_write(GS._upsert_relationship_edge, record)
+            if i % 100 == 0:
+                logger.info(
+                    "[INFO] Relationship edges reconciled: %d / %d",
+                    i,
+                    len(relationship_records),
+                )
     logger.info("[END] Edges reconciled in %.1fs", time.time() - start)
 
     node_count, edge_count = report_counts(driver)

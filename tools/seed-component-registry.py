@@ -29,6 +29,15 @@ The script is idempotent: it GETs each component first. If the existing record h
 transition_type as the seed entry it is skipped. If the type differs, a warning is emitted
 and the record is left unchanged.
 
+ENC-TSK-F50 / ENC-ISS-270 update (2026-04-19): every entry below now also carries a
+``required_transition_type`` field, matched to the governance-intent decisions in
+DOC-240A67973B13 (AC-1 review). ``required_transition_type`` is the field that
+checkout_service reads for strictness enforcement post-F50 — ``transition_type`` is
+retained for back-compat documentation. For all current components in this manifest
+the two fields carry the same value, but that equivalence is a deliberate governance
+output, not a blind copy. The coordination API create handler rejects any POST missing
+``required_transition_type`` with HTTP 400 (F50/AC-6 strict mode).
+
 Components seeded:
     Enceladus project (ENC-FTR-041):
         comp-checkout-service      enceladus  lambda          github_pr_deploy
@@ -87,6 +96,7 @@ KNOWN_COMPONENTS = [
         "project_id": "enceladus",
         "category": "lambda",
         "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
         "description": "Enceladus checkout service Lambda — sole authorized caller for task status transitions and worklog appends.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
@@ -104,6 +114,7 @@ KNOWN_COMPONENTS = [
         "project_id": "enceladus",
         "category": "lambda",
         "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
         "description": "Enceladus coordination API Lambda — coordination mode, governance routes, projects, documents, components.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
@@ -125,6 +136,7 @@ KNOWN_COMPONENTS = [
         "project_id": "enceladus",
         "category": "lambda",
         "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
         "description": "Enceladus tracker mutation Lambda — handles all tracker record writes (create, set, log, etc.).",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
@@ -143,6 +155,7 @@ KNOWN_COMPONENTS = [
         "project_id": "enceladus",
         "category": "library",
         "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
         "description": "Enceladus MCP server (tools/enceladus-mcp-server/server.py) — exposed to Claude agents via MCP protocol.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
@@ -159,6 +172,7 @@ KNOWN_COMPONENTS = [
         "project_id": "enceladus",
         "category": "frontend",
         "transition_type": "web_deploy",
+        "required_transition_type": "web_deploy",
         "description": "Enceladus Progressive Web App — React UI deployed to jreese.net via CloudFront/S3.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
@@ -232,6 +246,7 @@ KNOWN_COMPONENTS = [
         "project_id": "enceladus",
         "category": "infrastructure",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "Enceladus data CloudFormation stack (01-data.yaml) — DynamoDB tables, S3 buckets, etc. Updated by product lead via elevated IAM role.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
@@ -247,6 +262,7 @@ KNOWN_COMPONENTS = [
         "project_id": "enceladus",
         "category": "infrastructure",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "Enceladus compute/app CloudFormation stack (02-compute.yaml) — Lambda functions, API Gateway, EventBridge rules, etc. Updated by product lead via elevated IAM role.",
         "github_repo": "NX-2021-L/enceladus",
         "status": "active",
@@ -264,6 +280,7 @@ KNOWN_COMPONENTS = [
         "project_id": "harrisonfamily",
         "category": "frontend",
         "transition_type": "web_deploy",
+        "required_transition_type": "web_deploy",
         "description": "Harrison Family static site — Eleventy + 11ty deployed to CloudFront/S3.",
         "github_repo": "me-jreese/harrisonfamily",
         "status": "active",
@@ -280,6 +297,7 @@ KNOWN_COMPONENTS = [
         "project_id": "mod",
         "category": "frontend",
         "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
         "description": "MOD Next.js/SST frontend app — deployed via GitHub Actions sst deploy to CloudFront/Lambda@Edge.",
         "github_repo": "NX-2021-L/mod",
         "status": "active",
@@ -290,6 +308,7 @@ KNOWN_COMPONENTS = [
         "project_id": "mod",
         "category": "lambda",
         "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
         "description": "MOD Lambda API handlers (objects, custody, users, comments, search, QR) — deployed via GitHub Actions sst deploy.",
         "github_repo": "NX-2021-L/mod",
         "status": "active",
@@ -300,6 +319,7 @@ KNOWN_COMPONENTS = [
         "project_id": "mod",
         "category": "infrastructure",
         "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
         "description": "MOD SST v3 infrastructure stack — DynamoDB tables, IAM roles, CloudFront, API Gateway; deployed via GitHub Actions sst deploy.",
         "github_repo": "NX-2021-L/mod",
         "status": "active",
@@ -310,6 +330,7 @@ KNOWN_COMPONENTS = [
         "project_id": "mod",
         "category": "external",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "MOD Keycloak identity provider on AWS Lightsail (auth.vagamod.io) — admin-managed via Lightsail console and SSH. No GitHub Actions pipeline.",
         "github_repo": "NX-2021-L/mod",
         "status": "active",
@@ -321,6 +342,7 @@ KNOWN_COMPONENTS = [
         "project_id": "devops",
         "category": "workflow",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "DevOps governance policies (agents.md, data dictionary), deployment configs, and agent SOPs in S3. Updated via MCP governance_update.",
         "status": "active",
         "source_paths": {
@@ -338,6 +360,7 @@ KNOWN_COMPONENTS = [
         "project_id": "jreesewebops",
         "category": "infrastructure",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "Unified web infrastructure for jreese.net, jree.se, go.thepup.io — CloudFront distributions, S3 origins, Cloudflare Workers/DNS, Lightsail instances. Admin-managed via consoles.",
         "status": "active",
     },
@@ -348,6 +371,7 @@ KNOWN_COMPONENTS = [
         "project_id": "jreeseGPT",
         "category": "external",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "AI recruiter assistant — corpus ingestion, embeddings, Bedrock/Lambda APIs, scheduling workflows. Development stage.",
         "status": "active",
     },
@@ -358,6 +382,7 @@ KNOWN_COMPONENTS = [
         "project_id": "jobapps",
         "category": "external",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "JDS scraper runners, configuration playbooks, ChromeDriver hardening, and analytics. Development stage.",
         "status": "active",
     },
@@ -368,6 +393,7 @@ KNOWN_COMPONENTS = [
         "project_id": "intelligent-scraper-generator",
         "category": "library",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "LLM-assisted toolkit for analyzing employer career sites and generating scraper/playbook scaffolding. Child of jobapps JDS pipeline.",
         "status": "active",
     },
@@ -378,6 +404,7 @@ KNOWN_COMPONENTS = [
         "project_id": "property160c1",
         "category": "workflow",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "Property 160C1 project planning and requirements artifacts. Planning stage.",
         "status": "active",
     },
@@ -388,6 +415,7 @@ KNOWN_COMPONENTS = [
         "project_id": "agentharmony",
         "category": "workflow",
         "transition_type": "no_code",
+        "required_transition_type": "no_code",
         "description": "Agent documentation standards, templates (bootstrap-session.sh, codex-auto.sh), and operational tooling inherited by all downstream projects.",
         "status": "active",
     },

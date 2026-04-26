@@ -66,7 +66,7 @@ if ('serviceWorker' in navigator) {
 // React app mount
 // ---------------------------------------------------------------------------
 
-createRoot(document.getElementById('root')!).render(
+const appTree = (
   <StrictMode>
     <AuthStateProvider>
       <QueryClientProvider client={queryClient}>
@@ -75,3 +75,23 @@ createRoot(document.getElementById('root')!).render(
     </AuthStateProvider>
   </StrictMode>
 )
+
+const rootEl = document.getElementById('root')!
+createRoot(rootEl).render(appTree)
+
+// ENC-ISS-255 mount-guard: some browser extensions inject MAIN-world scripts
+// that strip React fiber keys from #root by id after mount, leaving the
+// rendered markup but breaking event delegation. At t=2s, if #root has zero
+// __react*/_reactListening* own-properties, re-mount the app into a fresh
+// <div id="root-live"> appended to body. One-shot; no retry loop.
+setTimeout(() => {
+  const fiberKeys = Object.getOwnPropertyNames(rootEl).filter((k) =>
+    /^(__react|_reactListening)/.test(k),
+  )
+  if (fiberKeys.length === 0) {
+    const liveEl = document.createElement('div')
+    liveEl.id = 'root-live'
+    document.body.appendChild(liveEl)
+    createRoot(liveEl).render(appTree)
+  }
+}, 2000)

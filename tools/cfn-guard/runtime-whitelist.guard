@@ -1,0 +1,38 @@
+# ENC-FTR-090 / ENC-TSK-F58 Phase 0
+# Runtime whitelist for Gen2: python3.11 (v3 prod x86_64) and python3.12 (v4 prod arm64).
+# Any other runtime is a governance violation (ENC-ISS-202 python-version drift class).
+
+let lambda_runtime_allowed = [ "python3.11", "python3.12" ]
+
+rule sam_lambda_runtime_whitelisted {
+    Resources.*[ Type == "AWS::Serverless::Function" ] {
+        Properties.Runtime exists
+            <<ENC-FTR-090 AC-5: SAM Lambda missing Runtime property>>
+        Properties.Runtime in %lambda_runtime_allowed
+            <<ENC-FTR-090 AC-5: Runtime must be one of [python3.11, python3.12] (ENC-ISS-202 drift class)>>
+    }
+}
+
+rule plain_lambda_runtime_whitelisted {
+    Resources.*[ Type == "AWS::Lambda::Function" ] {
+        Properties.Runtime exists
+            <<ENC-FTR-090 AC-5: Lambda missing Runtime property>>
+        Properties.Runtime in %lambda_runtime_allowed
+            <<ENC-FTR-090 AC-5: Runtime must be one of [python3.11, python3.12] (ENC-ISS-202 drift class)>>
+    }
+}
+
+rule runtime_architecture_consistency {
+    # x86_64 must pair with python3.11 (v3 prod), arm64 with python3.12 (v4 prod).
+    # Any other pairing breaks the Gen2 matrix build invariant.
+    Resources.*[ Type == "AWS::Serverless::Function" OR Type == "AWS::Lambda::Function" ] {
+        when Properties.Architectures[*] == "x86_64" {
+            Properties.Runtime == "python3.11"
+                <<ENC-FTR-090 AC-5: x86_64 Lambdas must use python3.11 (v3 prod pin)>>
+        }
+        when Properties.Architectures[*] == "arm64" {
+            Properties.Runtime == "python3.12"
+                <<ENC-FTR-090 AC-5: arm64 Lambdas must use python3.12 (v4 prod pin)>>
+        }
+    }
+}

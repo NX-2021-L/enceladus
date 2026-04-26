@@ -234,6 +234,28 @@ _REVERT_TRANSITIONS = {
     },
 }
 
+# ENC-FTR-076 / ENC-TSK-E08: Component lifecycle transitions.
+# Components are registered in the component-registry table (separate from
+# the tracker). These maps colocate the lifecycle rules with the other
+# record-type transition maps following the ENC-FTR-052 Lesson precedent so
+# future validators can share a single source of truth. The coordination_api
+# handler enforces these maps; tracker_mutation retains them for parity with
+# subsequent lifecycle-gating work.
+_VALID_COMPONENT_LIFECYCLE_TRANSITIONS = {
+    "proposed": {"approved", "rejected"},
+    "approved": {"active", "archived"},
+    "active": {"deprecated", "archived"},
+    "rejected": set(),          # terminal
+    "deprecated": {"archived"},
+    "archived": set(),          # terminal
+}
+
+_REVERT_COMPONENT_LIFECYCLE_TRANSITIONS = {
+    "approved": {"proposed"},
+    "active": {"approved"},
+    "deprecated": {"active"},
+}
+
 # ---------------------------------------------------------------------------
 # ENC-FTR-054: Constitutional scoring (canonical: coordination_api/lambda_function.py:7247-7350)
 # Pure functions copied here so every write path gets atomic scoring during PutItem.
@@ -385,6 +407,14 @@ _TRACKER_CREATE_MAX_ATTEMPTS = 32
 
 # Relation fields
 _RELATION_ID_FIELDS = {"related_task_ids", "related_issue_ids", "related_feature_ids"}
+
+# ENC-TSK-F41 / DOC-546B896390EA §5: server-side-only counter fields on task
+# records. Incremented atomically by the tracker lifecycle handler (closed_count
+# on every task->closed transition; checkout_count on every successful
+# checkout.task). Never writable by agent / io / coordination callers — any
+# direct PATCH or create attempt is rejected with HTTP 400 RESERVED_FIELD.
+# Feeds the FTR-076 v2 edge-immutability gates (DESIGNS / IMPLEMENTS).
+_F41_RESERVED_COUNTER_FIELDS = frozenset({"closed_count", "checkout_count"})
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1350,10 +1380,23 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
 
 
 def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
-    """GET /{project} — list records with optional type/status filters."""
+    """GET /{project} — list records with optional type/status filters.
+
+    ENC-TSK-F56 §6: paginated to prevent Lambda 413 on response-too-large.
+    Lambda max response is 6MB; a project with 700+ records regularly exceeded
+    that. Caps at page_size (default 50, max 200) and returns next_cursor when
+    more records remain. Prior behavior exhausted LastEvaluatedKey and returned
+    everything, causing the pre-existing 413 surfaced during the 2026-04-20
+    io-override session.
+    """
     ddb = _get_ddb()
     record_type = query_params.get("type", "")
     status_filter = query_params.get("status", "")
+    try:
+        page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
+    except (TypeError, ValueError):
+        page_size = 50
+    cursor = query_params.get("next_cursor", "")
 
     try:
         if record_type and record_type in _RECORD_TYPES:
@@ -1366,26 +1409,19 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
                     ":pid": _ser_s(project_id),
                     ":rtype": _ser_s(record_type),
                 },
+                "Limit": page_size,
             }
             if status_filter:
                 kwargs["FilterExpression"] = "#st = :st"
                 kwargs["ExpressionAttributeNames"] = {"#st": "status"}
                 kwargs["ExpressionAttributeValues"][":st"] = _ser_s(status_filter)
-
-            items = []
-            while True:
-                resp = ddb.query(**kwargs)
-                items.extend(resp.get("Items", []))
-                last_key = resp.get("LastEvaluatedKey")
-                if not last_key:
-                    break
-                kwargs["ExclusiveStartKey"] = last_key
         else:
             # Query all records for project
             kwargs = {
                 "TableName": DYNAMODB_TABLE,
                 "KeyConditionExpression": "project_id = :pid",
                 "ExpressionAttributeValues": {":pid": _ser_s(project_id)},
+                "Limit": page_size,
             }
             filter_parts = []
             expr_names: Dict[str, str] = {}
@@ -1401,14 +1437,39 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
             if expr_names:
                 kwargs["ExpressionAttributeNames"] = expr_names
 
-            items = []
-            while True:
-                resp = ddb.query(**kwargs)
-                items.extend(resp.get("Items", []))
-                last_key = resp.get("LastEvaluatedKey")
-                if not last_key:
-                    break
-                kwargs["ExclusiveStartKey"] = last_key
+        if cursor:
+            try:
+                import base64
+                kwargs["ExclusiveStartKey"] = json.loads(
+                    base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+                )
+            except Exception:
+                return _error(400, "Invalid next_cursor")
+
+        items: List[Dict[str, Any]] = []
+        next_cursor = ""
+        # Accumulate up to page_size post-filter items. DDB Limit caps the
+        # pre-filter scan, so we may need multiple pages to fill page_size when
+        # a FilterExpression is applied. Bound the loop to prevent runaway.
+        max_pages = 10
+        while len(items) < page_size and max_pages > 0:
+            resp = ddb.query(**kwargs)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+            max_pages -= 1
+            if len(items) >= page_size:
+                # Encode cursor for caller
+                import base64
+                next_cursor = base64.urlsafe_b64encode(
+                    json.dumps(last_key).encode("utf-8")
+                ).decode("ascii")
+                break
+
+        # Trim to page_size exactly
+        items = items[:page_size]
 
         # Deserialize and filter out counter records
         records = []
@@ -1418,7 +1479,15 @@ def _handle_list_records(project_id: str, query_params: Dict) -> Dict:
                 continue
             records.append(item)
 
-        return _response(200, {"success": True, "records": records, "count": len(records)})
+        payload: Dict[str, Any] = {
+            "success": True,
+            "records": records,
+            "count": len(records),
+            "page_size": page_size,
+        }
+        if next_cursor:
+            payload["next_cursor"] = next_cursor
+        return _response(200, payload)
 
     except Exception as exc:
         logger.error("list failed: %s", exc)
@@ -1507,6 +1576,27 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
             record_type=record_type,
             missing_required_fields=["title"],
         )
+
+    # ENC-TSK-F41 / DOC-546B896390EA §5: reject create-time writes to the
+    # server-side-only counter fields before any other validation. closed_count
+    # and checkout_count are stamped to 0 below for task records and incremented
+    # exclusively by the tracker lifecycle handler. Guard runs early so client
+    # attempts to seed these fields fail fast with HTTP 400 RESERVED_FIELD
+    # rather than being silently dropped after the project-prefix lookup.
+    for _f41_field in _F41_RESERVED_COUNTER_FIELDS:
+        if _f41_field in body:
+            return _error(
+                400,
+                (
+                    f"Field '{_f41_field}' is server-side only and must not be "
+                    f"supplied at create time. It is initialized to 0 and "
+                    f"incremented by the tracker lifecycle handler."
+                ),
+                code="RESERVED_FIELD",
+                field=_f41_field,
+                reason="server_side_only",
+                rule_citation="ENC-TSK-F41 / DOC-546B896390EA §5",
+            )
 
     priority = body.get("priority")
     description = str(body.get("description") or "")
@@ -1861,6 +1951,32 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         # sealed values (no_code, code_only) can actually take effect.
         if transition_type:
             item["transition_type"] = _ser_s(transition_type)
+        # ENC-TSK-F76 / ENC-ISS-289: persist components at create time so agent
+        # checkouts don't require a follow-up tracker.set to satisfy the
+        # ENC-FTR-041 component-enforcement check at the first advance gate.
+        # Accepts list or JSON-stringified list (same coercion as tracker.set
+        # via the ENC-ISS-059 pattern).
+        raw_components = body.get("components")
+        if raw_components is not None:
+            if isinstance(raw_components, str):
+                try:
+                    raw_components = json.loads(raw_components)
+                except (TypeError, ValueError):
+                    raw_components = [raw_components] if raw_components.strip() else []
+            if isinstance(raw_components, list):
+                component_ids = [
+                    str(c).strip() for c in raw_components if str(c).strip()
+                ]
+                if component_ids:
+                    item["components"] = {
+                        "L": [_ser_s(c) for c in component_ids]
+                    }
+        # ENC-TSK-F41 / DOC-546B896390EA §5: stamp FTR-076 v2 counter defaults.
+        # closed_count and checkout_count are server-side only (reserved against
+        # caller writes above) and start at 0. They are incremented atomically
+        # by the tracker lifecycle handler on state transitions.
+        item["closed_count"] = {"N": "0"}
+        item["checkout_count"] = {"N": "0"}
     # ENC-FTR-052: Lesson-specific fields
     if record_type == "lesson":
         item["observation"] = _ser_s(observation)
@@ -1903,6 +2019,8 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
     for forbidden_field in ("item_id", "record_id"):
         if body.get(forbidden_field):
             return _error(400, f"Field '{forbidden_field}' must not be provided — record IDs are generated server-side.")
+    # ENC-TSK-F41 reserved-counter-field guard runs at the top of this handler
+    # (before project prefix lookup) so body-level seed attempts fail fast.
 
     # Create with counter-based ID allocation (or hierarchical sub-task ID)
     try:
@@ -2636,15 +2754,22 @@ def _apply_user_initiated_advance(
     }}
     evidence_json = json.dumps(enriched_evidence, separators=(",", ":"))
 
+    # ENC-TSK-F41 / DOC-546B896390EA §5: even on the Cognito user-initiated
+    # human-override path, closed_count must be incremented when the target
+    # status is 'closed'. Atomic with the status SET so the FTR-076 v2 DESIGNS
+    # gate observes the counter the instant the transition commits.
+    ui_update_expr = (
+        "SET #fld = :val, updated_at = :now, last_update_note = :note, "
+        "transition_evidence = :te, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+        "history = list_append(if_not_exists(history, :empty), :hentry)"
+    )
+    if new_lower == "closed":
+        ui_update_expr += " ADD closed_count :one"
     try:
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression=(
-                "SET #fld = :val, updated_at = :now, last_update_note = :note, "
-                "transition_evidence = :te, "
-                "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                "history = list_append(if_not_exists(history, :empty), :hentry)"
-            ),
+            UpdateExpression=ui_update_expr,
             ExpressionAttributeNames={"#fld": "status"},
             ExpressionAttributeValues={
                 ":val": _ser_value(new_lower), ":now": _ser_s(now),
@@ -2744,6 +2869,26 @@ def _handle_update_field(
             expected_format="single field name",
         )
 
+    # ENC-TSK-F41 / DOC-546B896390EA §5: Counter fields closed_count and
+    # checkout_count are server-side only. Reject any direct PATCH attempt from
+    # agent / io / coordination callers with HTTP 400 RESERVED_FIELD. These
+    # fields are incremented atomically by the same UpdateExpression that
+    # performs the triggering state transition (checkout / close) below — they
+    # are never writable by clients and must never be accepted via tracker.set.
+    if field in _F41_RESERVED_COUNTER_FIELDS:
+        return _error(
+            400,
+            (
+                f"Field '{field}' is server-side only. It is incremented by the "
+                f"tracker lifecycle handler on the triggering transition and is "
+                f"not writable via tracker.set / tracker.create."
+            ),
+            code="RESERVED_FIELD",
+            field=field,
+            reason="server_side_only",
+            rule_citation="ENC-TSK-F41 / DOC-546B896390EA §5",
+        )
+
     # ENC-FTR-052: Lesson append-only mutation enforcement
     if record_type == "lesson":
         if not ENABLE_LESSON_PRIMITIVE:
@@ -2776,30 +2921,37 @@ def _handle_update_field(
     # entries cannot be removed — only appended. This prevents agents from clearing
     # subtask_ids to bypass the ENC-ISS-106 subtask completion gate.
     if record_type == "task" and field == "subtask_ids":
-        current_status = (item_data.get("status", "") or "").strip().lower()
-        has_been_checked_out = bool(item_data.get("checked_out_at"))
-        existing_subtask_ids = set()
-        for st in item_data.get("subtask_ids", {}).get("L", []):
-            existing_subtask_ids.add(st.get("S", ""))
-        existing_subtask_ids.discard("")
-        if existing_subtask_ids and (current_status != "open" or has_been_checked_out):
-            new_subtask_ids = set()
-            if isinstance(value, list):
-                new_subtask_ids = {str(v).strip() for v in value if str(v).strip()}
-            removed = existing_subtask_ids - new_subtask_ids
-            if removed:
-                return _tracker_field_validation_error(
-                    f"Cannot remove entries from subtask_ids on a task that is past 'open' "
-                    f"status or has been checked out (current status: '{current_status}'). "
-                    f"subtask_ids is append-only to preserve the ENC-ISS-106 subtask "
-                    f"completion gate. Attempted to remove: {', '.join(sorted(removed))}",
-                    field=field, record_id=record_id, record_type=record_type,
-                    expected_type="append_only",
-                    governed_rules=[
-                        "subtask_ids is append-only once task leaves 'open' or has been checked out (ENC-ISS-140).",
-                        "Use PWA user_initiated path to override if needed.",
-                    ],
-                )
+        try:
+            current_status = (item_data.get("status", "") or "").strip().lower()
+            has_been_checked_out = bool(item_data.get("checked_out_at"))
+            # ENC-ISS-242: item_data is deserialized (Python list), not raw DynamoDB format.
+            # Previous code used .get("L", [])/.get("S", "") which raised AttributeError on lists.
+            existing_subtask_ids = set()
+            raw_subtask_ids = item_data.get("subtask_ids") or []
+            if isinstance(raw_subtask_ids, list):
+                for st in raw_subtask_ids:
+                    existing_subtask_ids.add(str(st).strip())
+            existing_subtask_ids.discard("")
+            if existing_subtask_ids and (current_status != "open" or has_been_checked_out):
+                new_subtask_ids = set()
+                if isinstance(value, list):
+                    new_subtask_ids = {str(v).strip() for v in value if str(v).strip()}
+                removed = existing_subtask_ids - new_subtask_ids
+                if removed:
+                    return _tracker_field_validation_error(
+                        f"Cannot remove entries from subtask_ids on a task that is past 'open' "
+                        f"status or has been checked out (current status: '{current_status}'). "
+                        f"subtask_ids is append-only to preserve the ENC-ISS-106 subtask "
+                        f"completion gate. Attempted to remove: {', '.join(sorted(removed))}",
+                        field=field, record_id=record_id, record_type=record_type,
+                        expected_type="append_only",
+                        governed_rules=[
+                            "subtask_ids is append-only once task leaves 'open' or has been checked out (ENC-ISS-140).",
+                            "Use PWA user_initiated path to override if needed.",
+                        ],
+                    )
+        except Exception as e:
+            logger.warning("subtask_ids immutability check failed (non-blocking): %s", e)
 
     # ENC-FTR-058 / ENC-TSK-C09: Plan objectives_set immutability enforcement
     # Objectives are append-only unless: plan is 'incomplete', or a governed removal/replacement
@@ -3404,16 +3556,26 @@ def _handle_update_field(
                 "timestamp": _ser_s(now), "status": _ser_s("worklog"),
                 "description": _ser_s(checkout_note),
             }}
+            # ENC-TSK-F41 / DOC-546B896390EA §5: atomically increment checkout_count
+            # on every successful checkout transaction for task records. The ADD
+            # action on a non-existent attribute treats it as 0, which preserves
+            # pre-FTR-076-v2 records and survives the fail-closed IMPLEMENTS gate
+            # semantic. Invocation path is checkout.task → checkout_service._handle_checkout
+            # → tracker_mutation PATCH (field=active_agent_session value=True) →
+            # this UpdateExpression. Atomic with the state transition itself.
+            checkout_update_expr = (
+                "SET active_agent_session = :t, active_agent_session_id = :aid, "
+                "checkout_state = :checked_out, checked_out_by = :aid, checked_out_at = :now, "
+                "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+                "sync_version = if_not_exists(sync_version, :zero) + :one, "
+                "history = list_append(if_not_exists(history, :empty), :hentry)"
+            )
+            if record_type == "task":
+                checkout_update_expr += " ADD checkout_count :one"
             try:
                 ddb.update_item(
                     TableName=DYNAMODB_TABLE, Key=key,
-                    UpdateExpression=(
-                        "SET active_agent_session = :t, active_agent_session_id = :aid, "
-                        "checkout_state = :checked_out, checked_out_by = :aid, checked_out_at = :now, "
-                        "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
-                        "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                        "history = list_append(if_not_exists(history, :empty), :hentry)"
-                    ),
+                    UpdateExpression=checkout_update_expr,
                     ConditionExpression="active_agent_session <> :t OR attribute_not_exists(active_agent_session)",
                     ExpressionAttributeValues={
                         ":t": {"BOOL": True}, ":aid": _ser_s(agent_id),
@@ -3539,6 +3701,15 @@ def _handle_update_field(
     if extra_sets:
         update_expr += ", " + ", ".join(extra_sets)
 
+    # ENC-TSK-F41 / DOC-546B896390EA §5: atomically increment closed_count on
+    # every task->closed transition. The ADD action is appended to the same
+    # UpdateExpression as the status SET, so the counter and the state transition
+    # commit as a single atomic DynamoDB operation. ADD treats a missing
+    # attribute as 0, which preserves pre-FTR-076-v2 records and keeps the
+    # fail-closed DESIGNS gate semantic (closed_count>=1 required).
+    if field == "status" and record_type == "task" and str(value).strip().lower() == "closed":
+        update_expr += " ADD closed_count :one"
+
     attr_values = {
         ":val": _ser_value(value), ":now": _ser_s(now),
         ":note": _ser_s(note_text), ":wsrc": _build_write_source(body),
@@ -3610,13 +3781,20 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 "agent_details": {"S": "Enceladus PWA (human user)"},
                 "closed_time": {"S": now},
             }}
+            # ENC-TSK-F41 / DOC-546B896390EA §5: when this legacy PWA close path
+            # lands a task record at closed_status, increment closed_count atomically
+            # with the status SET. Non-task record types (features/issues) do not
+            # carry a closed_count field; restrict the ADD to tasks.
+            pwa_close_update_expr = (
+                "SET #status = :status, updated_at = :ts, last_update_note = :note, "
+                "sync_version = sync_version + :one, "
+                "#history = list_append(#history, :entry)"
+            )
+            if record_type == "task" and closed_status == "closed":
+                pwa_close_update_expr += " ADD closed_count :one"
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
-                UpdateExpression=(
-                    "SET #status = :status, updated_at = :ts, last_update_note = :note, "
-                    "sync_version = sync_version + :one, "
-                    "#history = list_append(#history, :entry)"
-                ),
+                UpdateExpression=pwa_close_update_expr,
                 ConditionExpression="sync_version = :expected",
                 ExpressionAttributeNames={"#status": "status", "#history": "history"},
                 ExpressionAttributeValues={
@@ -4080,6 +4258,15 @@ _RELATIONSHIP_TYPES = frozenset({
     "hands-off", "handed-off-by",
     # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships
     "dispatches", "dispatched-by",
+    # ENC-FTR-076 / ENC-TSK-E08: Component proposal provenance
+    "component-proposed-by", "proposes-component",
+    # ENC-FTR-077: Docstore subtype edges
+    "investigates", "investigated-by",
+    "tracks-wave-of", "has-wave-doc",
+    # ENC-FTR-076 v2 / ENC-TSK-F45: Component-task lifecycle edges
+    "designs", "designed-by",
+    "implements", "implemented-by",
+    "deploys", "deployed-by",
 })
 
 _INVERSE_PAIRS: Dict[str, str] = {
@@ -4103,6 +4290,16 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "hands-off": "handed-off-by", "handed-off-by": "hands-off",
     # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships
     "dispatches": "dispatched-by", "dispatched-by": "dispatches",
+    # ENC-FTR-076 / ENC-TSK-E08: Component proposal provenance
+    "component-proposed-by": "proposes-component",
+    "proposes-component": "component-proposed-by",
+    # ENC-FTR-077: Docstore subtype edges
+    "investigates": "investigated-by", "investigated-by": "investigates",
+    "tracks-wave-of": "has-wave-doc", "has-wave-doc": "tracks-wave-of",
+    # ENC-FTR-076 v2 / ENC-TSK-F45: Component-task lifecycle edges
+    "designs": "designed-by", "designed-by": "designs",
+    "implements": "implemented-by", "implemented-by": "implements",
+    "deploys": "deployed-by", "deployed-by": "deploys",
 }
 
 _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {

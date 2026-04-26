@@ -23,12 +23,23 @@ import re
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import boto3
-import jwt
 from botocore.config import Config
+
+try:
+    import jwt
+    _JWT_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    import logging as _enc_lsn_020_logging
+    _enc_lsn_020_logging.getLogger(__name__).exception(
+        "PyJWT import failed at module load — Cognito auth and GitHub token vending will be disabled "
+        "(ENC-LSN-020: usually a shared-layer .so ABI mismatch or missing requirements.txt)"
+    )
+    _JWT_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -52,6 +63,12 @@ ALLOWED_REPOS = [
     if r.strip()
 ]
 GAMMA_INTEGRATION_BRANCH = os.environ.get("GAMMA_INTEGRATION_BRANCH", "v4/main")
+
+# ENC-TSK-E57: Four-eyes enforcement for deploy approvals.
+# When true, deploy_decide rejects approval if the Cognito user's email
+# matches the PR author (self-approval). Defaults to false (warning only)
+# until additional operators exist.
+ENFORCE_FOUR_EYES = os.environ.get("ENFORCE_FOUR_EYES", "false").lower() == "true"
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -155,6 +172,8 @@ def _update_decision(
     final_target: str,
     decided_by: str,
     decision_reason: str = "",
+    approval_token: str = "",
+    decided_by_email: str = "",
 ) -> Dict:
     """Update a deployment_decision record with the decision."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -180,6 +199,17 @@ def _update_decision(
         expr_names["#dr"] = "decision_reason"
         expr_values[":dr"] = {"S": decision_reason}
         update_expr += ", #dr = :dr"
+
+    # ENC-TSK-E57: Store approval token and email on the DPL record
+    if approval_token:
+        expr_names["#at"] = "approval_token"
+        expr_values[":at"] = {"S": approval_token}
+        update_expr += ", #at = :at"
+
+    if decided_by_email:
+        expr_names["#dbe"] = "decided_by_email"
+        expr_values[":dbe"] = {"S": decided_by_email}
+        update_expr += ", #dbe = :dbe"
 
     resp = _get_ddb().update_item(
         TableName=DEPLOY_TABLE,
@@ -255,6 +285,8 @@ def _get_jwks() -> Dict:
 
 def _validate_cognito_token(event: Dict) -> Optional[Dict]:
     """Validate Cognito JWT from cookie. Returns claims dict or None."""
+    if not _JWT_AVAILABLE:
+        return None
     token = _extract_token(event)
     if not token:
         return None
@@ -328,6 +360,8 @@ def _get_github_private_key() -> str:
 
 
 def _generate_app_jwt() -> str:
+    if not _JWT_AVAILABLE:
+        raise ValueError("PyJWT library not available in Lambda package (ENC-LSN-020)")
     now = int(time.time())
     payload = {
         "iat": now - 60,
@@ -389,7 +423,7 @@ def _github_api(
 # ---------------------------------------------------------------------------
 
 
-def _handle_approve(decision: Dict, user_sub: str, reason: str) -> dict:
+def _handle_approve(decision: Dict, user_sub: str, reason: str, user_email: str = "") -> dict:
     """Approve a deployment — merge the PR via GitHub API."""
     pr_number = decision.get("github_pr_number")
     repo = decision.get("github_repo", "NX-2021-L/enceladus")
@@ -397,6 +431,22 @@ def _handle_approve(decision: Dict, user_sub: str, reason: str) -> dict:
 
     if f"{owner}/{repo_name}" not in ALLOWED_REPOS:
         return _error(403, f"Repository {owner}/{repo_name} not in allowed repos")
+
+    # ENC-TSK-E57 AC9: Four-eyes enforcement — detect self-approval
+    pr_author = decision.get("pr_author", "")
+    if user_email and pr_author and user_email.lower() == pr_author.lower():
+        if ENFORCE_FOUR_EYES:
+            return _error(
+                403,
+                f"Self-approval blocked: {user_email} authored PR #{pr_number} and cannot also approve it.",
+                four_eyes_violation=True,
+                pr_author=pr_author,
+                decided_by_email=user_email,
+            )
+        logger.warning(
+            f"Self-approval detected: {user_email} authored and approved PR #{pr_number}. "
+            f"ENFORCE_FOUR_EYES is disabled — logging only."
+        )
 
     # Merge the PR
     status, gh_resp = _github_api(
@@ -415,6 +465,10 @@ def _handle_approve(decision: Dict, user_sub: str, reason: str) -> dict:
             github_response=gh_resp,
         )
 
+    # ENC-TSK-E57 AC4: Generate Deploy Approval Token (DAT)
+    dat = f"DAT-{uuid.uuid4().hex}"
+    logger.info(f"Generated approval token {dat} for PR #{pr_number}")
+
     # Update DynamoDB record
     updated = _update_decision(
         project_id=decision["project_id"],
@@ -423,6 +477,8 @@ def _handle_approve(decision: Dict, user_sub: str, reason: str) -> dict:
         final_target="prod",
         decided_by=user_sub,
         decision_reason=reason,
+        approval_token=dat,
+        decided_by_email=user_email,
     )
 
     logger.info(f"PR #{pr_number} approved and merged by {user_sub}")
@@ -431,6 +487,7 @@ def _handle_approve(decision: Dict, user_sub: str, reason: str) -> dict:
         "pr_number": pr_number,
         "merged": True,
         "merge_sha": gh_resp.get("sha", ""),
+        "approval_token": dat,
         "decision": updated,
     })
 
@@ -647,7 +704,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
         )
 
     current_status = decision.get("status", "")
-    if current_status != "pending_approval":
+    approval_token = decision.get("approval_token", "")
+    # ENC-ISS-248: Accept {pending_approval, deploying, failed} for 'approve'
+    # action when no approval_token has been issued yet. This is the recovery
+    # path for pre-deploy gate failures that left the DPL deployed-ish with no
+    # DAT, previously requiring IAM escalation to unstick. Other actions and
+    # other statuses still require pending_approval.
+    recoverable_for_approve = (
+        action == "approve"
+        and not approval_token
+        and current_status in ("pending_approval", "deploying", "failed")
+    )
+    if current_status != "pending_approval" and not recoverable_for_approve:
         return _error(
             409,
             f"Decision for PR #{pr_number} is in status '{current_status}', not 'pending_approval'",
@@ -665,7 +733,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict:
     )
 
     if action == "approve":
-        return _handle_approve(decision, user_sub, reason)
+        return _handle_approve(decision, user_sub, reason, user_email=user_email)
     elif action == "divert":
         return _handle_divert(decision, user_sub, reason)
     elif action == "revert":

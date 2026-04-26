@@ -98,6 +98,70 @@ Resources:
           Arn: !GetAtt ProdHealthMonitorFunction.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-F64 / ENC-FTR-090 AC-20 — Daily parity + drift schedule
+  # ---------------------------------------------------------------------------
+  # Extends devops-deploy-parity-validator (ENC-TSK-F87) via EventBridge to run
+  # daily at 10:00 UTC with action=daily_drift_audit. Adds to its scope:
+  #   (a) CFN detect_stack_drift across enceladus-data/api/github-roles/monitoring
+  #   (b) CodeSize < 1024 bytes anomaly detection (CFN stomp — ENC-FTR-068 AC-5)
+  #   (c) SnapStart published-version count audit (>5 stale triggers SNS alert)
+  # No new Lambda created; all logic consolidated in deploy-parity-validator per
+  # ENC-LSN-027 (minimise blast-radius surface).
+
+  ParityDriftDailyScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "devops-parity-drift-daily${EnvironmentSuffix}"
+      Description: >
+        Triggers deploy-parity-validator daily_drift_audit at 10:00 UTC (ENC-TSK-F64 / AC-20)
+      ScheduleExpression: "cron(0 10 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: ParityDriftDailyTarget
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-parity-validator${EnvironmentSuffix}"
+          Input: '{"action": "daily_drift_audit"}'
+
+  ParityDriftDailyInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-deploy-parity-validator${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ParityDriftDailyScheduleRule.Arn
+
+  # ---------------------------------------------------------------------------
+  # ENC-ISS-283 / ENC-LSN-027 — Env Drift Auditor schedule
+  # ---------------------------------------------------------------------------
+  # The Lambda function itself + its IAM role were created out-of-band during
+  # the 2026-04-20 io-override session (DOC-298D807FB175). This block owns the
+  # EventBridge rule + lambda:InvokeFunction permission so the schedule is
+  # IaC-managed and visible to the CFN drift audit. Mirror of the
+  # DeployCapabilityAuditor pattern directly above.
+  #
+  # Adopting the existing Lambda + role into CFN requires a stack-update with
+  # resource-import; tracked in ENC-TSK-F56 AC#2. Until imported, the Lambda
+  # and role are orphan in CFN but live in AWS.
+
+  EnvDriftAuditorScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "devops-env-drift-auditor-hourly${EnvironmentSuffix}"
+      Description: Triggers env drift auditor Lambda hourly at :07 past the hour
+      ScheduleExpression: "cron(7 * * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: EnvDriftAuditorTarget
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-env-drift-auditor${EnvironmentSuffix}"
+
+  EnvDriftAuditorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-env-drift-auditor${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EnvDriftAuditorScheduleRule.Arn
+
+  # ---------------------------------------------------------------------------
   # CloudWatch Alarms
   # ---------------------------------------------------------------------------
 
@@ -152,3 +216,7 @@ Outputs:
   HealthProbeScheduleRuleArn:
     Description: ARN of the EventBridge health probe schedule
     Value: !GetAtt HealthProbeScheduleRule.Arn
+
+  ParityDriftDailyScheduleRuleArn:
+    Description: ARN of the daily parity+drift EventBridge schedule (ENC-TSK-F64 / AC-20)
+    Value: !GetAtt ParityDriftDailyScheduleRule.Arn
