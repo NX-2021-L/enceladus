@@ -92,14 +92,12 @@ jobs:
 
           git push origin "$MAIN_SHA:refs/heads/$BRANCH"
 
+          BODY="Automated forward-sync of main into v4/main (ENC-TSK-G71). Source SHA: $MAIN_SHA. This PR is exempt from the PR Commit Gate via head_ref pattern auto/sync-main-to-v4main-*. Will auto-merge once required status checks pass."
           PR_URL=$(gh pr create \
             --base v4/main \
             --head "$BRANCH" \
             --title "chore(sync): main -> v4/main @ ${MAIN_SHA:0:12} (auto)" \
-            --body "Automated forward-sync of main into v4/main (ENC-TSK-G71). \
-Source SHA: \`$MAIN_SHA\`. \
-This PR is exempt from the PR Commit Gate via head_ref pattern \`auto/sync-main-to-v4main-*\`. \
-Will auto-merge once required status checks pass.")
+            --body "$BODY")
           echo "Opened sync PR: $PR_URL"
 
           gh pr merge "$PR_URL" --auto --merge --delete-branch
