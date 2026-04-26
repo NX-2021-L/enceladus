@@ -339,6 +339,11 @@ _ALLOWED_EDGE_TYPES = frozenset({
     "IMPLEMENTED_BY",         # Task -> Component
     "DEPLOYS",                # Component -> Task
     "DEPLOYED_BY",            # Task -> Component
+    # ENC-FTR-098 / ENC-TSK-G35: MENTIONS edge auto-extracted from prose by
+    # graph_sync._reconcile_mentions_edges(). Properties: source ('auto_mention'
+    # | 'backfill' | 'audit_recompute'), extracted_from_field. See dictionary
+    # entity graph_sync.mentions_extraction for the full extraction contract.
+    "MENTIONS",
 })
 
 

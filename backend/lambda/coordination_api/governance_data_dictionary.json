@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-25.02",
-  "updated_at": "2026-04-25T19:47:38Z",
-  "last_change_summary": "ENC-FTR-098 / ENC-TSK-G33: add graph_sync.mentions_extraction entity (prose-field allowlist, ID-prefix alphabet, code-fence skip, provenance schema); register MENTIONS in document.graph_edges, gmf.graph_edges, and tracker.graphsearch.edge_types.",
+  "version": "2026-04-25.03",
+  "updated_at": "2026-04-26T00:36:46Z",
+  "last_change_summary": "ENC-FTR-098 / ENC-TSK-G36: graph_query_api._ALLOWED_EDGE_TYPES += MENTIONS (Unit 4 of MENTIONS Edge MVP). Documents the API-gate uplift; the dictionary entity graph_sync.mentions_extraction (added in 2026-04-25.02) already declared the contract.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3091,7 +3091,7 @@
       }
     },
     "tracker.graphsearch": {
-      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges.",
+      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges. ENC-FTR-098 / ENC-TSK-G36: MENTIONS added to graph_query_api._ALLOWED_EDGE_TYPES so tracker.graphsearch queries with edge_types=['MENTIONS'] no longer reject at the API gate.",
       "fields": {
         "search_type": {
           "type": "enum",
