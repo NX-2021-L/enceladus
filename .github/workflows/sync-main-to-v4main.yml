@@ -6,9 +6,10 @@ name: Sync main to v4/main
 # its head is auto/sync-main-to-v4main-<sha>. pr-commit-gate.yml exempts this
 # head_ref pattern from the CCI requirement (these PRs are not task-bound).
 #
-# Pre-fork mode: each main push fast-forward-merges into v4/main.
-# Post-fork mode: when v4/main has commits not in main, the PR will be a
-# non-fast-forward merge (or conflict). Conflicts FAIL the workflow loudly,
+# Pre-fork mode: each main push fast-forward-merges into v4/main (or
+# absorbs prior merge-only divergence via -s ours; see G73).
+# Post-fork mode: when v4/main has commits with content delta vs the
+# merge-base, the workflow FAILS loudly with the v4-only file list,
 # which is the cutover signal.
 
 on:
