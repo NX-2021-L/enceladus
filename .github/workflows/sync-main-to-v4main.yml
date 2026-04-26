@@ -1,0 +1,104 @@
+name: Sync main to v4/main
+
+# ENC-TSK-G71: Auto-sync main -> v4/main on every main push.
+# v4/main rulesets reject direct push from non-bypass actors, so the sync
+# runs as a transient PR with auto-merge enabled. The PR base is v4/main and
+# its head is auto/sync-main-to-v4main-<sha>. pr-commit-gate.yml exempts this
+# head_ref pattern from the CCI requirement (these PRs are not task-bound).
+#
+# Pre-fork mode: each main push fast-forward-merges into v4/main.
+# Post-fork mode: when v4/main has commits not in main, the PR will be a
+# non-fast-forward merge (or conflict). Conflicts FAIL the workflow loudly,
+# which is the cutover signal.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: sync-main-to-v4main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Decide sync action
+        id: decide
+        env:
+          MAIN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main v4/main
+          MAIN_SHA="$(git rev-parse origin/main)"
+          V4_SHA="$(git rev-parse origin/v4/main)"
+          echo "main_sha=$MAIN_SHA" >> "$GITHUB_OUTPUT"
+          echo "v4_sha=$V4_SHA" >> "$GITHUB_OUTPUT"
+
+          if [ "$MAIN_SHA" = "$V4_SHA" ]; then
+            echo "v4/main already at main HEAD ($MAIN_SHA) — no-op"
+            echo "action=noop" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "$MAIN_SHA" "$V4_SHA"; then
+            echo "v4/main already strictly ahead of main (post-fork mode) — no-op"
+            echo "action=noop" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "$V4_SHA" "$MAIN_SHA"; then
+            echo "Pre-fork fast-forward: main is ahead, v4/main is ancestor."
+            echo "action=ff_pr" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::error::v4/main has diverged from main (post-fork mode). Manual coordination required."
+          echo "main:    $MAIN_SHA"
+          echo "v4/main: $V4_SHA"
+          echo "merge-base: $(git merge-base "$MAIN_SHA" "$V4_SHA")"
+          exit 1
+
+      - name: Open + auto-merge sync PR
+        if: steps.decide.outputs.action == 'ff_pr'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAIN_SHA: ${{ steps.decide.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          BRANCH="auto/sync-main-to-v4main-${MAIN_SHA:0:12}"
+
+          if gh api -X GET "/repos/$GITHUB_REPOSITORY/branches/$BRANCH" >/dev/null 2>&1; then
+            echo "Sync branch $BRANCH already exists — assuming a previous run is in flight; exiting OK"
+            exit 0
+          fi
+
+          git push origin "$MAIN_SHA:refs/heads/$BRANCH"
+
+          BODY="Automated forward-sync of main into v4/main (ENC-TSK-G71). Source SHA: $MAIN_SHA. This PR is exempt from the PR Commit Gate via head_ref pattern auto/sync-main-to-v4main-*. Will auto-merge once required status checks pass."
+          PR_URL=$(gh pr create \
+            --base v4/main \
+            --head "$BRANCH" \
+            --title "chore(sync): main -> v4/main @ ${MAIN_SHA:0:12} (auto)" \
+            --body "$BODY")
+          echo "Opened sync PR: $PR_URL"
+
+          gh pr merge "$PR_URL" --auto --merge --delete-branch
+          echo "Auto-merge enabled on $PR_URL"
