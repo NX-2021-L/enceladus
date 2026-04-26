@@ -33,13 +33,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.workflow_run.head_sha }}
           GAMMA_RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           echo "Gamma success run=$GAMMA_RUN_ID sha=$SHA — dispatching v3-prod request"
 
-          gh workflow run "_deploy.yml" \
-            --ref main \
-            -f target_environment=v3-prod \
-            -f commit_sha="$SHA"
+          # gh api is used here (not gh workflow run) because there's no
+          # checkout in this job and gh workflow run requires a local git
+          # context. Workflow ID 263796502 = Deploy Lambda Artifacts (Gen2).
+          gh api -X POST \
+            "/repos/$REPO/actions/workflows/263796502/dispatches" \
+            -f ref=main \
+            -f "inputs[target_environment]=v3-prod" \
+            -f "inputs[commit_sha]=$SHA"
 
           echo "v3-prod deploy request dispatched. Awaiting reviewer approval on the GitHub Environment."
