@@ -1,0 +1,45 @@
+name: Promote v4-gamma success to v3-prod request
+
+# ENC-TSK-G71: Listens for successful v4-gamma deploys (push events on v4/main)
+# and dispatches _deploy.yml with target_environment=v3-prod. The dispatch hits
+# the v3-prod GitHub Environment's required-reviewer rule and pauses until
+# io approves. The approval click is the cutover toggle: stop approving =>
+# v4 work stays in gamma without any workflow rewiring.
+
+on:
+  workflow_run:
+    workflows: ["Deploy Lambda Artifacts (Gen2)"]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: promote-gamma-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'v4/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch v3-prod deploy request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          GAMMA_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          echo "Gamma success run=$GAMMA_RUN_ID sha=$SHA — dispatching v3-prod request"
+
+          gh workflow run "_deploy.yml" \
+            --ref main \
+            -f target_environment=v3-prod \
+            -f commit_sha="$SHA"
+
+          echo "v3-prod deploy request dispatched. Awaiting reviewer approval on the GitHub Environment."
