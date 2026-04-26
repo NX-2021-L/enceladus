@@ -99,7 +99,15 @@ jobs:
       - name: Open + auto-merge sync PR
         if: steps.decide.outputs.action == 'ff_pr' || steps.decide.outputs.action == 'ours_pr'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # ENC-TSK-G81 / ENC-ISS-307: prefer SYNC_PAT (a fine-grained PAT or
+          # GitHub App installation token) so PR creation fires required
+          # pull_request workflows on the auto-sync PR. GITHUB_TOKEN-created
+          # PRs are blocked from firing recursive workflows by GitHub design,
+          # which leaves the auto-merge armed but never triggered. If
+          # SYNC_PAT is not yet provisioned, fall back to GITHUB_TOKEN —
+          # the chain still works but requires a manual empty-commit nudge
+          # on the auto-sync PR to fire required checks.
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
           MAIN_SHA: ${{ steps.decide.outputs.main_sha }}
           V4_SHA: ${{ steps.decide.outputs.v4_sha }}
           ACTION: ${{ steps.decide.outputs.action }}
