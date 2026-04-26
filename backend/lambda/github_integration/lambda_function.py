@@ -994,6 +994,10 @@ def _webhook_pull_request(
         label_name = payload.get("label", {}).get("name", "")
         if label_name == "target:gamma":
             return _gmf_divert_on_label(pr, repo_full, delivery_id)
+        if label_name == "target:prod":
+            return _gmf_redeclare_on_label(
+                pr, repo_full, delivery_id, target="prod"
+            )
         return _response(200, {"processed": False, "reason": "irrelevant_label"})
 
     elif action == "closed":
@@ -1041,12 +1045,23 @@ def _webhook_workflow_run(
 
         # Query for decisions in deploying status with matching head_sha
         # Using a scan since we expect very few records in deploying state
+        # ENC-LSN-044 / Patch 4 (2026-04-20 terminal-agent session):
+        # Step 1 patch removed the premature merge-time transition to 'deploying',
+        # which left the DPL row at pending_approval → approved (via PWA) with no
+        # intermediate 'deploying' write. The prior scan filter here only matched
+        # status=deploying and silently no-op'd for rows in approved / awaiting_prod_approval
+        # / pending_approval. The downstream ConditionExpression on the update_item
+        # already permits these as valid prior states, so widening the scan filter
+        # is the complete fix.
         resp = ddb.scan(
             TableName=DEPLOY_TABLE,
-            FilterExpression="#s = :deploying AND head_sha = :sha",
+            FilterExpression="#s IN (:deploying, :approved, :awaiting, :pending) AND head_sha = :sha",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":deploying": {"S": "deploying"},
+                ":approved": {"S": "approved"},
+                ":awaiting": {"S": "awaiting_prod_approval"},
+                ":pending": {"S": "pending_approval"},
                 ":sha": {"S": head_sha},
             },
             Limit=10,
@@ -1060,25 +1075,63 @@ def _webhook_workflow_run(
         item = items[0]
         pk = item["project_id"]["S"]
         sk = item["record_id"]["S"]
-        final_status = "deployed" if outcome == "success" else "failed"
+        prior_outcome = item.get("deployment_outcome", {}).get("S", "")
 
-        ddb.update_item(
-            TableName=DEPLOY_TABLE,
-            Key={"project_id": {"S": pk}, "record_id": {"S": sk}},
-            UpdateExpression="SET #s = :st, deployment_outcome = :out, deployed_at = :da, updated_at = :ua",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":st": {"S": final_status},
-                ":out": {"S": outcome},
-                ":da": {"S": now},
-                ":ua": {"S": now},
-            },
-        )
-        logger.info("GMF: DPL %s updated to %s (SHA=%s)", sk, final_status, head_sha[:12])
+        # ENC-ISS-248: Pre-deploy failures (approval gate, etc.) left DPLs stuck
+        # at deploying/failed with no DAT, invisible in the PWA pending-approval
+        # view and un-approvable without IAM escalation. When the only observed
+        # outcome is a failure and nothing ever succeeded, reset to
+        # pending_approval so the PWA can re-surface the record for decision.
+        if outcome == "success":
+            final_status = "deployed"
+            new_deployment_outcome = "success"
+        elif prior_outcome != "success":
+            final_status = "pending_approval"
+            new_deployment_outcome = ""
+            logger.info(
+                "GMF: DPL %s pre-deploy failure — resetting to pending_approval (ENC-ISS-248)",
+                sk,
+            )
+        else:
+            final_status = "failed"
+            new_deployment_outcome = "failure"
+
+        try:
+            ddb.update_item(
+                TableName=DEPLOY_TABLE,
+                Key={"project_id": {"S": pk}, "record_id": {"S": sk}},
+                UpdateExpression="SET #s = :st, deployment_outcome = :out, deployed_at = :da, updated_at = :ua",
+                # ENC-LSN-044: only advance to a terminal state from an in-flight
+                # state. Prevents a late workflow_run webhook from clobbering a
+                # reverted/deployed row. Prior states that legitimately advance to
+                # deployed/failed: deploying, awaiting_prod_approval, approved,
+                # pending_approval (in order of normal flow maturity).
+                ConditionExpression="#s IN (:s_deploying, :s_await, :s_approved, :s_pending)",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":st": {"S": final_status},
+                    ":out": {"S": new_deployment_outcome},
+                    ":da": {"S": now},
+                    ":ua": {"S": now},
+                    ":s_deploying": {"S": "deploying"},
+                    ":s_await": {"S": "awaiting_prod_approval"},
+                    ":s_approved": {"S": "approved"},
+                    ":s_pending": {"S": "pending_approval"},
+                },
+            )
+            logger.info("GMF: DPL %s updated to %s (SHA=%s)", sk, final_status, head_sha[:12])
+        except ddb.exceptions.ConditionalCheckFailedException:
+            logger.warning(
+                "GMF: DPL %s refused workflow_run transition to %s — prior status not in in-flight set. "
+                "Likely a late webhook after revert or duplicate delivery. SHA=%s",
+                sk, final_status, head_sha[:12],
+            )
+            return _response(200, {"processed": False, "reason": "prior_status_not_in_flight"})
         return _response(200, {
             "processed": True,
             "record_id": sk,
-            "deployment_outcome": outcome,
+            "deployment_outcome": new_deployment_outcome,
+            "final_status": final_status,
         })
     except Exception as e:
         logger.error("GMF workflow_run handler error: %s", e, exc_info=True)
@@ -1091,11 +1144,17 @@ def _gmf_create_decision(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     labels = [lbl.get("name", "") for lbl in pr.get("labels", [])]
 
-    original_target = "prod"
-    if "target:gamma" in labels:
-        original_target = "gamma"
-    elif "target:undeclared" in labels or not any(l.startswith("target:") for l in labels):
-        original_target = "undeclared"
+    # ENC-ISS-285: DPL records must never carry original_target='undeclared'.
+    # The governance dict enum {prod, gamma, undeclared} is only valid for
+    # TASK records (awaiting labeling). For DEPLOYMENT DECISIONS the target
+    # must be definitive at intake — any main-targeting PR defaults to 'prod';
+    # authors can explicitly opt in to gamma via the 'target:gamma' label.
+    # The previous behavior stored 'undeclared', which caused the PWA
+    # Deployment Manager to render an 'undeclared' badge and a downstream
+    # pattern-validator to reject approve→prod with "The string did not
+    # match the expected pattern."
+    original_target = "gamma" if "target:gamma" in labels else "prod"
+    deploy_target = original_target
 
     record_id = f"decision#ENC-DPL-{pr_number}"
     item = {
@@ -1112,6 +1171,7 @@ def _gmf_create_decision(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
         "head_branch": {"S": pr.get("head", {}).get("ref", "")},
         "head_sha": {"S": pr.get("head", {}).get("sha", "")},
         "original_target": {"S": original_target},
+        "deploy_target": {"S": deploy_target},
         "decided_by": {"S": ""},
         "decided_at": {"S": ""},
         "decision_reason": {"S": ""},
@@ -1193,8 +1253,61 @@ def _gmf_divert_on_label(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
         return _response(200, {"processed": False, "reason": "divert_skipped"})
 
 
+def _gmf_redeclare_on_label(
+    pr: Dict, repo_full: str, delivery_id: str, target: str,
+) -> Dict:
+    """ENC-ISS-247: update DPL.original_target when target:prod label is added
+    post-open. Guarded to only overwrite 'undeclared' so human-set or
+    system-set values are preserved.
+    """
+    pr_number = pr.get("number", 0)
+    record_id = f"decision#ENC-DPL-{pr_number}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        ddb = boto3.client("dynamodb", region_name=DYNAMODB_REGION)
+        ddb.update_item(
+            TableName=DEPLOY_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
+            UpdateExpression="SET original_target = :new_target, updated_at = :ua",
+            ConditionExpression="original_target = :undeclared",
+            ExpressionAttributeValues={
+                ":new_target": {"S": target},
+                ":undeclared": {"S": "undeclared"},
+                ":ua": {"S": now},
+            },
+        )
+        logger.info(
+            "GMF: DPL %s original_target undeclared->%s via label on PR #%d",
+            record_id, target, pr_number,
+        )
+        return _response(200, {
+            "processed": True,
+            "action": "dpl_target_redeclared",
+            "new_target": target,
+        })
+    except ddb.exceptions.ConditionalCheckFailedException:
+        logger.info(
+            "GMF: Redeclare-on-label skipped for PR #%d (original_target already set)",
+            pr_number,
+        )
+        return _response(200, {
+            "processed": False,
+            "reason": "original_target_not_undeclared",
+        })
+    except Exception as e:
+        logger.info("GMF: Redeclare-on-label error for PR #%d: %s", pr_number, e)
+        return _response(200, {"processed": False, "reason": "redeclare_error"})
+
+
 def _gmf_mark_deploying(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
-    """When PR is merged, update DPL to deploying status."""
+    """On PR merge, record merge_commit_sha only. Status stays pending_approval so
+    the Deployment Manager PWA still surfaces the row for human Cognito approval.
+    Prior behavior flipped status=deploying here, which hid the row from the PWA
+    queue filter and caused GHA Enceladus Approval Gate to fail-closed for every
+    merged PR (no approval_token ever minted). Fixed inline by terminal-agent
+    override session (2026-04-20) after ENC-ISS-255/273/275 cluster diagnosis
+    concluded the DPL state machine was the root of the chicken-and-egg."""
     pr_number = pr.get("number", 0)
     record_id = f"decision#ENC-DPL-{pr_number}"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1205,19 +1318,17 @@ def _gmf_mark_deploying(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
         ddb.update_item(
             TableName=DEPLOY_TABLE,
             Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
-            UpdateExpression="SET #s = :st, merge_commit_sha = :msha, updated_at = :ua",
-            ExpressionAttributeNames={"#s": "status"},
+            UpdateExpression="SET merge_commit_sha = :msha, updated_at = :ua",
             ExpressionAttributeValues={
-                ":st": {"S": "deploying"},
                 ":msha": {"S": merge_sha},
                 ":ua": {"S": now},
             },
         )
-        logger.info("GMF: DPL %s → deploying (merged SHA=%s)", record_id, merge_sha[:12])
-        return _response(200, {"processed": True, "action": "dpl_deploying"})
+        logger.info("GMF: DPL %s merged SHA=%s (status unchanged, awaits approval)", record_id, merge_sha[:12])
+        return _response(200, {"processed": True, "action": "dpl_merge_sha_recorded"})
     except Exception as e:
-        logger.error("GMF: Mark deploying failed for PR #%d: %s", pr_number, e)
-        return _response(200, {"processed": False, "reason": "mark_deploying_failed"})
+        logger.error("GMF: Record merge_sha failed for PR #%d: %s", pr_number, e)
+        return _response(200, {"processed": False, "reason": "record_merge_sha_failed"})
 
 
 def _gmf_mark_reverted(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
@@ -1232,18 +1343,112 @@ def _gmf_mark_reverted(pr: Dict, repo_full: str, delivery_id: str) -> Dict:
             TableName=DEPLOY_TABLE,
             Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
             UpdateExpression="SET #s = :st, final_target = :ft, updated_at = :ua",
+            # ENC-LSN-044: do not re-revert a row that is already in a terminal
+            # state. A PR-close-without-merge event can race with or follow a
+            # deployed/failed workflow_run event; the later terminal state wins
+            # over 'reverted' because the deploy actually happened.
+            ConditionExpression="#s <> :s_deployed AND #s <> :s_failed AND #s <> :s_reverted",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":st": {"S": "reverted"},
                 ":ft": {"S": "blocked"},
                 ":ua": {"S": now},
+                ":s_deployed": {"S": "deployed"},
+                ":s_failed": {"S": "failed"},
+                ":s_reverted": {"S": "reverted"},
             },
         )
         logger.info("GMF: DPL %s → reverted (PR #%d closed without merge)", record_id, pr_number)
         return _response(200, {"processed": True, "action": "dpl_reverted"})
     except Exception as e:
+        name = type(e).__name__
+        if name == "ConditionalCheckFailedException":
+            logger.info("GMF: Mark reverted skipped for PR #%d — row already in a terminal state", pr_number)
+            return _response(200, {"processed": False, "reason": "already_terminal"})
         logger.info("GMF: Mark reverted skipped for PR #%d: %s", pr_number, e)
         return _response(200, {"processed": False, "reason": "mark_reverted_skipped"})
+
+
+def _handle_gamma_success(event: Dict, claims: Dict) -> Dict:
+    # POST /api/v1/github/deploy/gamma-success/{pr_number}
+    # ENC-TSK-F54: called by deploy-orchestration.yml after gamma-health-gate
+    # passes. Advances DPL row pending_approval -> awaiting_prod_approval.
+    # Authenticated via X-Coordination-Internal-Key (GHA secret); fails closed.
+    _, path = _path_method(event)
+    m = re.search(r"/deploy/gamma-success/(\d+)", path)
+    if not m:
+        return _error(400, "Missing PR number in path: expected /deploy/gamma-success/{pr}")
+    pr_number = int(m.group(1))
+
+    body = _parse_body(event) or {}
+    commit_sha = str(body.get("commit_sha", ""))
+    function_name = str(body.get("function_name", ""))
+
+    record_id = f"decision#ENC-DPL-{pr_number}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        ddb = boto3.client("dynamodb", region_name=DYNAMODB_REGION)
+        ddb.update_item(
+            TableName=DEPLOY_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
+            UpdateExpression=(
+                "SET #s = :s_awaiting, gamma_success_at = :now, "
+                "gamma_success_sha = :sha, gamma_success_fn = :fn, updated_at = :now"
+            ),
+            # Idempotent: :s_awaiting is accepted so a re-run after success is a no-op.
+            # Fail-closed on terminal states (deployed/failed/reverted) and on
+            # unexpected states (deploying/approved) — those already advanced
+            # past gamma or skipped it.
+            ConditionExpression="#s IN (:s_pending, :s_awaiting)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":s_awaiting": {"S": "awaiting_prod_approval"},
+                ":s_pending": {"S": "pending_approval"},
+                ":now": {"S": now},
+                ":sha": {"S": commit_sha},
+                ":fn": {"S": function_name},
+            },
+        )
+        logger.info(
+            "GMF: DPL %s → awaiting_prod_approval (PR #%d gamma-success, fn=%s, sha=%s)",
+            record_id, pr_number, function_name, commit_sha[:12],
+        )
+        return _response(200, {
+            "processed": True,
+            "action": "dpl_awaiting_prod_approval",
+            "pr_number": pr_number,
+            "status": "awaiting_prod_approval",
+        })
+    except Exception as e:
+        name = type(e).__name__
+        if name == "ConditionalCheckFailedException":
+            # Fail-closed per AC#4: if gamma-success arrives for a row not in
+            # pending_approval/awaiting_prod_approval (e.g. deployed, failed,
+            # reverted), do NOT silently regress. Return 409 with current state
+            # so the GHA job can surface the mismatch.
+            try:
+                current = ddb.get_item(
+                    TableName=DEPLOY_TABLE,
+                    Key={"project_id": {"S": "enceladus"}, "record_id": {"S": record_id}},
+                    ProjectionExpression="#s",
+                    ExpressionAttributeNames={"#s": "status"},
+                ).get("Item", {}).get("status", {}).get("S", "unknown")
+            except Exception:
+                current = "unknown"
+            logger.warning(
+                "GMF: gamma-success blocked for PR #%d — row in '%s', not pending/awaiting",
+                pr_number, current,
+            )
+            return _error(
+                409,
+                f"DPL for PR #{pr_number} is in status '{current}'; gamma-success requires pending_approval or awaiting_prod_approval",
+                pr_number=pr_number,
+                current_status=current,
+                required_status="pending_approval_or_awaiting_prod_approval",
+            )
+        logger.error("GMF: gamma-success update failed for PR #%d: %s", pr_number, e)
+        return _error(500, f"gamma-success update failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1726,5 +1931,8 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         return _handle_validate_commit(event, claims)
     elif method == "POST" and "/github/issues" in path:
         return _handle_create_issue(event, claims)
+    elif method == "POST" and "/github/deploy/gamma-success/" in path:
+        # ENC-TSK-F54: advance DPL pending_approval -> awaiting_prod_approval.
+        return _handle_gamma_success(event, claims)
     else:
         return _error(404, f"Route not found: {method} {path}")

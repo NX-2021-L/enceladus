@@ -212,6 +212,508 @@ Resources:
                   - logs:DescribeLogStreams
                 Resource: "*"
 
+              # S3 staging for `aws cloudformation deploy --s3-bucket` path.
+              # Required since 02-compute.yaml crossed the 51,200-byte inline
+              # limit (ENC-ISS-257). The CLI uploads the template to
+              # s3://enceladus-cfn-staging-us-west-2/<stack>/<hash>.template
+              # before creating the changeset. Used by all three CFN workflows:
+              # cloudformation-{compute,api,monitoring}-stack-deploy.yml.
+              # Bucket must be in us-west-2 so CFN CreateChangeSet can fetch
+              # the template without cross-region redirect (ENC-TSK-E84).
+              - Sid: S3CfnStagingAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${CfnStagingBucket}/*"
+
+  # ---------------------------------------------------------------------------
+  # Backend Deploy Role (ENC-TSK-E31 / ENC-ISS-237)
+  # Used by:
+  #   - .github/workflows/lambda-deploy-reusable.yml
+  #   - .github/workflows/build-lambda-artifacts.yml
+  #   - .github/workflows/api-mcp-backend-deploy.yml
+  #   - .github/workflows/deploy-orchestration.yml
+  # Secret:  AWS_BACKEND_ROLE_TO_ASSUME
+  #
+  # NOTE: This role pre-exists as a manually-created IAM role. To bring it
+  # under CloudFormation management, import it into the stack:
+  #   aws cloudformation create-change-set \
+  #     --stack-name enceladus-github-roles \
+  #     --template-body file://infrastructure/cloudformation/04-github-roles.yaml \
+  #     --change-set-name import-backend-deploy-role \
+  #     --change-set-type IMPORT \
+  #     --resources-to-import '[{"ResourceType":"AWS::IAM::Role","LogicalResourceId":"BackendDeployRole","ResourceIdentifier":{"RoleName":"enceladus-backend-deploy-github-role"}}]' \
+  #     --capabilities CAPABILITY_NAMED_IAM
+  # Then execute the change set, and subsequent stack updates will manage it.
+  # ---------------------------------------------------------------------------
+  BackendDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: enceladus-backend-deploy-github-role
+      Description: >
+        GitHub Actions OIDC role for Lambda backend deployments and
+        artifact build/upload. Used by lambda-deploy-reusable.yml,
+        build-lambda-artifacts.yml, and deploy-orchestration.yml.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/v4/*"
+      Policies:
+        # Split into original named policies to stay under IAM 10KB
+        # per-policy limit (ENC-TSK-E32). Source: iam:GetRolePolicy dump
+        # captured by product-lead terminal 2026-04-16.
+        - PolicyName: BackendDeployAllow
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: LambdaCodeDeploy
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:CreateFunction
+                  - lambda:AddPermission
+                  - lambda:InvokeFunction
+                  - lambda:ListFunctions
+                  - lambda:GetPolicy
+                  - lambda:ListEventSourceMappings
+                  - lambda:CreateEventSourceMapping
+                  - lambda:UpdateEventSourceMapping
+                Resource:
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:devops-*"
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-*"
+              - Sid: LambdaWait
+                Effect: Allow
+                Action: lambda:GetFunctionConfiguration
+                Resource: "*"
+              - Sid: LambdaExecutionRoles
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:CreateRole
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/devops-*-lambda-role"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-*-role"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-*-lambda-role"
+              - Sid: ApiGateway
+                Effect: Allow
+                Action: "apigateway:*"
+                Resource: !Sub "arn:aws:apigateway:us-west-2::/apis/8nkzqkmxqc/*"
+              - Sid: InfrastructureDynamoDB
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:UpdateTable
+                  - dynamodb:ListTables
+                Resource:
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/coordination-requests"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/deploy-deployment-manager"
+              - Sid: CloudWatchLogsManage
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:PutRetentionPolicy
+                Resource:
+                  - !Sub "arn:aws:logs:us-west-2:${AWS::AccountId}:log-group:/aws/lambda/devops-*"
+                  - !Sub "arn:aws:logs:us-west-2:${AWS::AccountId}:log-group:/aws/lambda/enceladus-*"
+                  - !Sub "arn:aws:logs:us-west-2:${AWS::AccountId}:log-group:/enceladus/*"
+              - Sid: CloudWatchLogsDescribe
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
+              - Sid: S3DeployArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: "arn:aws:s3:::jreese-net/deploy/*"
+              - Sid: SecretsRead
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:devops/coordination/*"
+              - Sid: EC2Fleet
+                Effect: Allow
+                Action:
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - ec2:DescribeInstances
+                  - ec2:CreateTags
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeLaunchTemplates
+                  - ec2:DescribeLaunchTemplateVersions
+                Resource: "*"
+              - Sid: SSM
+                Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                Resource: "*"
+              - Sid: SNSPublish
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Sub "arn:aws:sns:us-west-2:${AWS::AccountId}:devops-*"
+              - Sid: GammaLambdaDeploy
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                Resource:
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:*-gamma"
+                  - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:*-gamma:*"
+              - Sid: GammaIAMRoleManagement
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/*-gamma"
+              - Sid: GammaDynamoDBBootstrap
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/*-gamma"
+
+        - PolicyName: BackendDeployPolicy-LambdaArtifacts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: S3LambdaArtifactAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/lambda-artifacts/*"
+              - Sid: S3LambdaArtifactListAccess
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - "lambda-artifacts/*"
+                      - "deploy-config/*"
+              - Sid: S3DeployConfigRead
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+              - Sid: LambdaLayerOps
+                Effect: Allow
+                Action:
+                  - lambda:PublishLayerVersion
+                  - lambda:GetLayerVersion
+                Resource: "*"
+
+        - PolicyName: allow-auth-refresh-updatecode
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowAuthRefreshCodeUpdate
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:GetFunctionConfiguration
+                  - lambda:GetFunction
+                Resource: !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:auth-refresh*"
+
+        # Superset of the former EnceladusCloudFormationApiDeployAccess
+        - PolicyName: enceladus-cloudformation-api-unblock-v1
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowCloudFormationApiStackLifecycle
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:UpdateStack
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+              - Sid: AllowApiGatewayMutations
+                Effect: Allow
+                Action: "apigateway:*"
+                Resource: "*"
+              - Sid: AllowLambdaPermissionMutationsForApiIntegrations
+                Effect: Allow
+                Action:
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:GetPolicy
+                  - lambda:GetFunctionConfiguration
+                Resource: "*"
+
+        - PolicyName: enceladus-cognito-terminal-provisioning-v1
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CognitoTerminalAgentProvisioning
+                Effect: Allow
+                Action:
+                  - cognito-idp:DescribeUserPoolClient
+                  - cognito-idp:UpdateUserPoolClient
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminSetUserPassword
+                Resource: !Sub "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/us-east-1_b2D0V3E1k"
+              - Sid: SecretsManagerTerminalAgentProvisioning
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:PutSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:devops/coordination/*"
+
+        - PolicyName: MpcStreamableFunctionUrlManagement
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowMcpStreamableFunctionUrl
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunctionUrlConfig
+                  - lambda:GetFunctionUrlConfig
+                  - lambda:UpdateFunctionUrlConfig
+                  - lambda:DeleteFunctionUrlConfig
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                Resource: !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-mcp-streamable"
+
+        - PolicyName: GovernedResourceDeny
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DenyGovernedTableWrites
+                Effect: Deny
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/devops-project-tracker"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/projects"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/documents"
+              - Sid: DenyGovernedS3Writes
+                Effect: Deny
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - "arn:aws:s3:::jreese-net/governance/*"
+                  - "arn:aws:s3:::jreese-net/agent-documents/*"
+
+  # ---------------------------------------------------------------------------
+  # Gen2 Build Role (ENC-FTR-090 / ENC-TSK-B76 AC-4)
+  # Used by:
+  #   - .github/workflows/_build.yml   (OIDC: ref:refs/heads/main or v4/*)
+  #   - .github/workflows/_deploy.yml  resolve job (S3 artifact probe)
+  # Role name: GitHubActions-Build-Role
+  # NOTE: This role was created manually on 2026-04-21 to unblock the gen2
+  # pipeline. Import into this stack before the next stack update:
+  #   aws cloudformation create-change-set \
+  #     --stack-name enceladus-github-roles \
+  #     --change-set-type IMPORT \
+  #     --change-set-name import-build-role \
+  #     --template-body file://infrastructure/cloudformation/04-github-roles.yaml \
+  #     --resources-to-import '[{"ResourceType":"AWS::IAM::Role","LogicalResourceId":"Gen2BuildRole","ResourceIdentifier":{"RoleName":"GitHubActions-Build-Role"}}]' \
+  #     --capabilities CAPABILITY_NAMED_IAM
+  # ---------------------------------------------------------------------------
+  Gen2BuildRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: GitHubActions-Build-Role
+      Description: >
+        GitHub Actions OIDC role for _build.yml artifact compilation and
+        _deploy.yml resolve-job S3 artifact probe (ENC-FTR-090).
+        Scoped to S3 lambda-artifacts read/write only — no Lambda mutate.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main:*"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/v4/*"
+      Policies:
+        - PolicyName: BuildArtifactsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: S3LambdaArtifactAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/lambda-artifacts/*"
+              - Sid: S3LambdaArtifactListAccess
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - "lambda-artifacts/*"
+                      - "deploy-config/*"
+              - Sid: S3DeployConfigRead
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+              - Sid: LambdaLayerOps
+                Effect: Allow
+                Action:
+                  - lambda:PublishLayerVersion
+                  - lambda:GetLayerVersion
+                Resource: "*"
+
+  # ---------------------------------------------------------------------------
+  # Gen2 v4-gamma Deploy Role (ENC-FTR-090 / ENC-TSK-B76 AC-4)
+  # Used by:
+  #   - .github/workflows/_deploy.yml  deploy job (environment: v4-gamma)
+  # Role name: GitHubActions-V4Gamma-DeployRole
+  # OIDC sub claim: repo:{org}/{repo}:environment:v4-gamma
+  # This role is the sole IAM assumer for v4-gamma Lambda deploys (AC-1 of
+  # ENC-FTR-090). The GitHub Environment "v4-gamma" required_reviewers gate
+  # provides the human approval checkpoint before this role is assumed.
+  # ---------------------------------------------------------------------------
+  Gen2V4GammaDeployRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: GitHubActions-V4Gamma-DeployRole
+      Description: >
+        GitHub Actions OIDC role assumed exclusively by _deploy.yml when
+        deploying to the v4-gamma environment (ENC-FTR-090 AC-1).
+        Scoped to Lambda code updates for v4-gamma stack functions only.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # GitHub Environment claim — only fires when the job's
+                # `environment:` field is set to "v4-gamma".
+                token.actions.githubusercontent.com:sub:
+                  !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:v4-gamma"
+      Policies:
+        - PolicyName: V4GammaLambdaDeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Lambda code update + wait for the v4-gamma stack.
+              # v4-gamma function names mirror backend/lambda/ directory names
+              # (no devops- prefix, no environment suffix) — the gen2 pipeline
+              # is a clean-slate naming convention for the v4 generation.
+              # Resource is broadly scoped here; tighten to explicit ARNs once
+              # the enceladus-v4-gamma CFn stack provisions the function set.
+              - Sid: V4GammaLambdaCodeDeploy
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:PublishVersion
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListVersionsByFunction
+                Resource: "*"
+              # S3 read for artifact version probing (belt-and-suspenders;
+              # update-function-code fetches via Lambda service role, but
+              # the resolve-job S3 probe runs under this env's job context
+              # when dispatched via workflow_call).
+              - Sid: S3ArtifactRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: "arn:aws:s3:::jreese-net/lambda-artifacts/*"
+              - Sid: S3ArtifactList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+                Condition:
+                  StringLike:
+                    s3:prefix: "lambda-artifacts/*"
+
+  # ---------------------------------------------------------------------------
+  # CloudFormation Staging Bucket (ENC-TSK-E84 / ENC-ISS-257)
+  # Used by:
+  #   - .github/workflows/cloudformation-compute-stack-deploy.yml
+  #   - .github/workflows/cloudformation-api-stack-deploy.yml
+  #   - .github/workflows/cloudformation-monitoring-stack-deploy.yml
+  # Purpose: hosts the transient template bodies that `aws cloudformation
+  # deploy --s3-bucket` uploads before creating the changeset, so that CFN
+  # templates larger than the 51,200-byte inline limit can be applied.
+  # MUST live in us-west-2 so CreateChangeSet in the same region can fetch
+  # the object without a cross-region redirect.
+  # Objects are ephemeral; lifecycle rule expires them after 7 days.
+  # ---------------------------------------------------------------------------
+  CfnStagingBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: enceladus-cfn-staging-us-west-2
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireStagedTemplates
+            Status: Enabled
+            ExpirationInDays: 7
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Purpose
+          Value: cfn-template-staging
+
 Outputs:
   CloudFormationDeployRoleArn:
     Description: >
@@ -219,3 +721,30 @@ Outputs:
     Value: !GetAtt CloudFormationDeployRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}-CloudFormationDeployRoleArn"
+  BackendDeployRoleArn:
+    Description: >
+      ARN to set as the AWS_BACKEND_ROLE_TO_ASSUME repository secret.
+    Value: !GetAtt BackendDeployRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-BackendDeployRoleArn"
+  CfnStagingBucketName:
+    Description: >
+      Name of the us-west-2 S3 bucket used by aws cloudformation deploy
+      --s3-bucket to stage templates that exceed the 51,200-byte inline limit.
+    Value: !Ref CfnStagingBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-CfnStagingBucketName"
+  Gen2BuildRoleArn:
+    Description: >
+      ARN of the gen2 build role assumed by _build.yml and _deploy.yml resolve
+      job. Set as the hardcoded ARN in _build.yml and _deploy.yml (ENC-FTR-090).
+    Value: !GetAtt Gen2BuildRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-Gen2BuildRoleArn"
+  Gen2V4GammaDeployRoleArn:
+    Description: >
+      ARN to set as deploy_role_arn in envs/v4-gamma.yaml (ENC-FTR-090).
+      Sole IAM assumer for v4-gamma Lambda deploys via _deploy.yml.
+    Value: !GetAtt Gen2V4GammaDeployRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-Gen2V4GammaDeployRoleArn"

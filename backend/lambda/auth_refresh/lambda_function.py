@@ -1,20 +1,29 @@
 """auth_refresh/lambda_function.py
 
-Lambda endpoint for refreshing Cognito tokens using a refresh_token cookie.
+Lambda endpoint for refreshing Cognito tokens and vending GitHub App tokens.
 
-Route (via API Gateway proxy):
-    POST /api/v1/auth/refresh
-    OPTIONS /api/v1/auth/refresh  (CORS preflight)
+Routes (via API Gateway proxy):
+    POST /api/v1/auth/refresh          — Cognito token refresh
+    GET  /api/v1/auth/github-token     — GitHub App installation access token
+    OPTIONS /api/v1/auth/*             (CORS preflight)
 
-Auth:
+Auth (POST /refresh):
     Reads the `enceladus_refresh_token` cookie from the Cookie header.
     Calls Cognito InitiateAuth with REFRESH_TOKEN_AUTH flow.
     Returns new id_token as an HttpOnly cookie + session timestamp cookie.
 
+Auth (GET /github-token):
+    Requires valid Cognito session cookie (enceladus_id_token).
+    Returns a short-lived GitHub App installation access token for
+    direct api.github.com reads (read:deployments, actions scopes).
+
 Environment variables:
-    COGNITO_USER_POOL_ID   us-east-1_b2D0V3E1k
-    COGNITO_CLIENT_ID      6q607dk3liirhtecgps7hifmlk
-    COGNITO_REGION         default: us-east-1
+    COGNITO_USER_POOL_ID        us-east-1_b2D0V3E1k
+    COGNITO_CLIENT_ID           6q607dk3liirhtecgps7hifmlk
+    COGNITO_REGION              default: us-east-1
+    GITHUB_APP_ID               GitHub App numeric ID
+    GITHUB_INSTALLATION_ID      Installation ID for NX-2021-L org
+    GITHUB_PRIVATE_KEY_SECRET   Secrets Manager secret name (default: devops/github-app/private-key)
 
 CORS:
     Allows https://jreese.net only. Returns CORS headers on every response.
@@ -26,11 +35,24 @@ import json
 import logging
 import os
 import time
+import urllib.request
+import urllib.error
 from typing import Any, Dict, Optional
 from urllib.parse import unquote
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+
+try:
+    import jwt
+    _JWT_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    import logging as _enc_lsn_020_logging
+    _enc_lsn_020_logging.getLogger(__name__).exception(
+        "PyJWT import failed at module load — github-token vending will be disabled "
+        "(ENC-LSN-020: usually a shared-layer .so ABI mismatch or missing requirements.txt)"
+    )
+    _JWT_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -39,9 +61,15 @@ from botocore.exceptions import BotoCoreError, ClientError
 COGNITO_REGION = os.environ.get("COGNITO_REGION", "us-east-1")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "us-east-1_b2D0V3E1k")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "6q607dk3liirhtecgps7hifmlk")
+# Lambda deployment region — used for Secrets Manager (secret lives co-located with Lambda)
+LAMBDA_REGION = os.environ.get("AWS_REGION", "us-west-2")
 CORS_ORIGIN = "https://jreese.net"
 ID_TOKEN_MAX_AGE = 3600       # 1 hour
 SESSION_COOKIE_MAX_AGE = 3600  # 1 hour
+GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID", "")
+GITHUB_INSTALLATION_ID = os.environ.get("GITHUB_INSTALLATION_ID", "")
+GITHUB_PRIVATE_KEY_SECRET = os.environ.get("GITHUB_PRIVATE_KEY_SECRET", "devops/github-app/private-key")
+GITHUB_API_BASE = "https://api.github.com"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -55,6 +83,7 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 
 _cognito = None
+_secretsmanager = None
 
 
 def _get_cognito():
@@ -62,6 +91,13 @@ def _get_cognito():
     if _cognito is None:
         _cognito = boto3.client("cognito-idp", region_name=COGNITO_REGION)
     return _cognito
+
+
+def _get_secretsmanager():
+    global _secretsmanager
+    if _secretsmanager is None:
+        _secretsmanager = boto3.client("secretsmanager", region_name=LAMBDA_REGION)
+    return _secretsmanager
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +144,7 @@ def _extract_refresh_token(event: Dict) -> Optional[str]:
 def _cors_headers() -> Dict[str, str]:
     return {
         "Access-Control-Allow-Origin": CORS_ORIGIN,
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Cookie",
         "Access-Control-Allow-Credentials": "true",
     }
@@ -127,6 +163,69 @@ def _response(status_code: int, body: Any, extra_headers: Optional[Dict] = None)
 
 def _error(status_code: int, message: str) -> Dict:
     return _response(status_code, {"success": False, "error": message})
+
+
+# ---------------------------------------------------------------------------
+# GitHub App token vending
+# ---------------------------------------------------------------------------
+
+_private_key_cache: Optional[str] = None
+_private_key_fetched_at: float = 0.0
+_PRIVATE_KEY_TTL: float = 3600.0
+
+
+def _get_github_private_key() -> str:
+    global _private_key_cache, _private_key_fetched_at
+    now = time.time()
+    if _private_key_cache and (now - _private_key_fetched_at) < _PRIVATE_KEY_TTL:
+        return _private_key_cache
+    sm = _get_secretsmanager()
+    resp = sm.get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
+    _private_key_cache = resp["SecretString"]
+    _private_key_fetched_at = now
+    return _private_key_cache
+
+
+def _generate_app_jwt() -> str:
+    if not _JWT_AVAILABLE:
+        raise ValueError("PyJWT library not available in Lambda package")
+    if not GITHUB_APP_ID:
+        raise ValueError("GITHUB_APP_ID not configured")
+    now = int(time.time())
+    payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": str(GITHUB_APP_ID)}
+    return jwt.encode(payload, _get_github_private_key(), algorithm="RS256")
+
+
+def _get_installation_token() -> str:
+    if not GITHUB_INSTALLATION_ID:
+        raise ValueError("GITHUB_INSTALLATION_ID not configured")
+    app_jwt = _generate_app_jwt()
+    url = f"{GITHUB_API_BASE}/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {app_jwt}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            return data["token"]
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        logger.error("GitHub token exchange failed: %s %s", exc.code, body)
+        raise ValueError(f"GitHub token exchange failed ({exc.code})") from exc
+
+
+def _extract_id_token(event: Dict) -> Optional[str]:
+    """Extract enceladus_id_token from Cookie header or event.cookies."""
+    for pair in _iter_cookie_pairs(event):
+        if pair.startswith("enceladus_id_token="):
+            return pair[len("enceladus_id_token="):]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +264,25 @@ def _refresh_tokens(refresh_token: str) -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# GitHub token handler
+# ---------------------------------------------------------------------------
+
+def _handle_github_token(event: Dict) -> Dict:
+    id_token = _extract_id_token(event)
+    if not id_token:
+        return _error(401, "Not authenticated. Sign in first.")
+
+    try:
+        gh_token = _get_installation_token()
+    except ValueError as exc:
+        logger.error("github token vend failed: %s", exc)
+        return _error(502, "GitHub token unavailable")
+
+    logger.info("github installation token vended")
+    return _response(200, {"token": gh_token, "expires_in": 3600})
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
@@ -182,8 +300,16 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             "body": "",
         }
 
+    path = (
+        (event.get("requestContext") or {}).get("http", {}).get("path")
+        or event.get("path", "")
+    )
+
+    if method == "GET" and path.rstrip("/").endswith("/github-token"):
+        return _handle_github_token(event)
+
     if method != "POST":
-        return _error(405, "Method not allowed. Use POST.")
+        return _error(405, "Method not allowed.")
 
     logger.info("auth refresh request")
 

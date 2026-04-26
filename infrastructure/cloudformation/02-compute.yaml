@@ -54,10 +54,79 @@ Parameters:
     Type: String
     Default: "112392089"
     Description: GitHub App installation ID for NX-2021-L org.
+  # ENC-TSK-F57 AC-2 / ENC-ISS-280: CoordinationInternalApiKey{,Previous} must be referenceable
+  # by CFN env vars so that stack deploys don't strip the out-of-band live values. Deploy
+  # workflow is expected to pass real values via --parameter-overrides (empty defaults would
+  # zero the env on the Lambda and regress the fix). NoEcho prevents logging.
+  CoordinationInternalApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Shared internal API key used by coordination-tier Lambdas to authenticate requests
+      between the MCP servers, intake, coordination API, and graph_query_api. Supplied at
+      deploy time via workflow parameter-overrides; defaults empty to avoid leaking in
+      repo. Graph Query API and other consumers read from COORDINATION_INTERNAL_API_KEY
+      env var populated by this parameter.
+  CoordinationInternalApiKeyPrevious:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Previous COORDINATION_INTERNAL_API_KEY value used during dual-accept rotation windows
+      (ENC-ISS-276). Populates COORDINATION_INTERNAL_API_KEY_PREVIOUS env var on downstream
+      consumers. Empty default is expected after each rotation cycle completes.
+  # ENC-TSK-F74 / ENC-ISS-279: Cognito client secret required by enceladus-mcp-code-gamma
+  # (and future prod twin) for OAuth-direct flows. NoEcho; supplied via --parameter-overrides
+  # at deploy/IMPORT time.
+  EnceladusCognitoClientSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Cognito confidential-client secret for the Enceladus app client. Required by the
+      enceladus-mcp-code-gamma Lambda OAuth-direct path. Kept out of the repo; injected
+      at deploy/IMPORT via --parameters.
+
+  # ENC-TSK-F63 AC-1: AppConfig extension layer ARNs.
+  # Arch-specific; separate params because AWS publishes distinct layer versions.
+  # See: https://docs.aws.amazon.com/appconfig/latest/userguide/appconfig-integration-lambda-extensions.html
+  AppConfigExtensionLayerArnX86:
+    Type: String
+    Default: "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension:147"
+    Description: AppConfig Lambda extension layer ARN for x86_64 (us-west-2). Pin to latest per AWS docs.
+  AppConfigExtensionLayerArnArm64:
+    Type: String
+    Default: "arn:aws:lambda:us-west-2:359756378197:layer:AWS-AppConfig-Extension-Arm64:147"
+    Description: AppConfig Lambda extension layer ARN for arm64 (us-west-2). Pin to latest per AWS docs.
+
+  # ENC-TSK-F63 AC-1: AppConfig IDs — populated after 06-feature-flags.yaml stack deploy.
+  # Empty defaults disable AppConfig polling; appconfig_flags.flag() falls back to env_fallback.
+  AppConfigApplicationId:
+    Type: String
+    Default: ""
+    Description: AppConfig Application ID from 06-feature-flags stack. Pass via --parameter-overrides.
+  AppConfigEnvironmentId:
+    Type: String
+    Default: ""
+    Description: AppConfig Environment ID from 06-feature-flags stack. Pass via --parameter-overrides.
+
+  # ENC-TSK-F63 AC-2: SnapStart.ApplyOn=PublishedVersions. Only arm64/py3.12 supports it.
+  # v3-prod (x86_64/py3.11): false. v4-gamma/v4-prod (arm64/py3.12): true.
+  EnableSnapStart:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Enable SnapStart on all Lambdas. Set true only for arm64/python3.12 stacks.
 
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # ENC-TSK-F63 AC-2: SnapStart enabled only when EnableSnapStart=true (arm64/py3.12 targets).
+  # Replaces the old IsProduction-negation pattern (was: !If [IsProduction, NoValue, SnapStart]).
+  SnapStartEnabled: !Equals [!Ref EnableSnapStart, "true"]
+  # ENC-TSK-F63 AC-1: AppConfig layer conditional — only attach when an ARN is provided.
+  HasAppConfigLayer: !Not [!Equals [!Ref AppConfigExtensionLayerArnX86, ""]]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -78,12 +147,17 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt CoordinationApiRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        # ENC-TSK-F63 AC-1: AppConfig extension layer (arch-conditional)
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -98,6 +172,11 @@ Resources:
           ENCELADUS_MCP_INTERFACE_MODE: code
           DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
+          # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -118,12 +197,16 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt TrackerMutationRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -131,6 +214,10 @@ Resources:
           DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -151,12 +238,16 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt DocumentApiRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -169,6 +260,10 @@ Resources:
           S3_PREFIX: !Sub "${S3EnvPrefix}agent-documents"
           S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
           S3_GOVERNANCE_PREFIX: !Sub "${S3EnvPrefix}governance/live"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -189,12 +284,16 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt ProjectServiceRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -204,6 +303,10 @@ Resources:
           DYNAMODB_REGION: !Ref AWS::Region
           S3_BUCKET: !Ref S3Bucket
           S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -224,12 +327,16 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt FeedQueryRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -238,6 +345,10 @@ Resources:
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           FEED_PUBLISHER_FUNCTION: !Sub "devops-feed-publisher${EnvironmentSuffix}"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -258,18 +369,26 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt CoordinationMonitorRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -290,12 +409,16 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt DeployIntakeRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -304,8 +427,12 @@ Resources:
           DEPLOY_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
-          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deployment-config"
+          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
           CORS_ORIGIN: !Ref CorsOrigin
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -326,18 +453,26 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt ReferenceSearchRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           S3_BUCKET: !Ref S3Bucket
           S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -358,15 +493,27 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt AuthRefreshRole.Arn
+      Layers:
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           COGNITO_REGION: us-east-1
+          GITHUB_APP_ID: !Ref GitHubAppId
+          GITHUB_INSTALLATION_ID: !Ref GitHubInstallationId
+          GITHUB_PRIVATE_KEY_SECRET: devops/github-app/private-key
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -391,18 +538,28 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt DeployOrchestratorRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DEPLOY_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
-          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deployment-config"
+          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
           CODEBUILD_PROJECT: devops-ui-deploy-builder
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -423,10 +580,16 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt DeployFinalizeRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
@@ -434,7 +597,11 @@ Resources:
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
-          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deployment-config"
+          CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -456,9 +623,17 @@ Resources:
       Timeout: 30
       Architectures:
         - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt DeployDecideRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -471,6 +646,57 @@ Resources:
           GITHUB_PRIVATE_KEY_SECRET: devops/github-app/private-key
           ALLOWED_REPOS: NX-2021-L/enceladus
           GAMMA_INTEGRATION_BRANCH: v4/main
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: deployment
+
+  # ENC-FTR-091 / ENC-TSK-F87 — Deploy Parity Validator
+  DeployParityValidatorFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-deploy-parity-validator${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 120
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt DeployParityValidatorRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
+          DEPLOY_REGION: !Ref AWS::Region
+          ENVIRONMENT_SUFFIX: !Ref EnvironmentSuffix
+          GITHUB_TOKEN_SECRET: devops/github-app/private-key
+          DOCUMENT_API_URL: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1
+          TRACKER_API_URL: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+          SNS_TOPIC_ARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-deploy-alerts"
+          CFN_DRIFT_STACKS: "enceladus-data,enceladus-api,enceladus-github-roles,enceladus-monitoring"
+          SNAPSTART_MAX_STALE_VERSIONS: "5"
+          DRIFT_POLL_TIMEOUT: "240"
       Tags:
         - Key: Project
           Value: enceladus
@@ -491,11 +717,17 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt FeedPublisherRole.Arn
       Description: Event-driven mobile feed publisher triggered by DynamoDB Streams via SQS FIFO
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
@@ -506,6 +738,10 @@ Resources:
           FEED_PREFIX: !Sub "${S3EnvPrefix}mobile/v1"
           EVENT_BUS: default
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -526,10 +762,22 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt GovernanceAuditRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -550,10 +798,16 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt DocPrepRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
@@ -561,6 +815,10 @@ Resources:
           TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           S3_BUCKET: !Ref S3Bucket
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -581,10 +839,16 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt BedrockActionsRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
@@ -595,6 +859,10 @@ Resources:
           S3_BUCKET: !Ref S3Bucket
           GOVERNANCE_POLICIES_TABLE: !Sub "governance-policies${EnvironmentSuffix}"
           AGENT_COMPLIANCE_TABLE: !Sub "agent-compliance-violations${EnvironmentSuffix}"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -615,12 +883,16 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt ChangelogApiRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
@@ -630,6 +902,10 @@ Resources:
           CONFIG_BUCKET: !Ref S3Bucket
           CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
           CORS_ORIGIN: !Ref CorsOrigin
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -650,14 +926,24 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt GraphSyncRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
           SECRETS_REGION: !Ref AWS::Region
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -674,14 +960,25 @@ Resources:
       Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 256
-      Timeout: 10
+      # ENC-TSK-F36 / ENC-ISS-268: raised from 10s to 180s. Worst-case Bolt
+      # pool rebuild after a NAT 350s idle-kill can take ~60-120s; the prior
+      # 10s CFN value was shadowed by deploy.sh's 30s update anyway. The
+      # live function setting is governed by deploy.sh update-function-
+      # configuration; this value is the CFN baseline for drift recovery.
+      Timeout: 180
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt GraphQueryApiRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
@@ -689,6 +986,17 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           CORS_ORIGIN: !Ref CorsOrigin
+          # ENC-TSK-F57 AC-2 / ENC-ISS-280: internal-key auth vars added out-of-band to
+          # live function during the 2026-04-20 override session (DOC-D45141D94C55). CFN
+          # now declares them via parameters so the next stack deploy does not strip the
+          # vars and regress graphsearch 401 PERMISSION_DENIED. Deploy workflow must pass
+          # both values via --parameter-overrides.
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -713,21 +1021,79 @@ Resources:
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
-        - IsProduction
-        - !Ref AWS::NoValue
+        - SnapStartEnabled
         - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt Neo4jBackupRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
           S3_BUCKET: !Ref S3Bucket
           S3_PREFIX: !Sub "${S3EnvPrefix}neo4j-backups/"
           SECRETS_REGION: !Ref "AWS::Region"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
         - Key: Component
           Value: neo4j-backup
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-F73 / ENC-ISS-283: Env Drift Auditor Lambda (F57 AC-3/4 CFN adoption)
+  # Live resource created out-of-band for ENC-ISS-283; imported under this stack
+  # via create-change-set --change-set-type=IMPORT. EventBridge schedule
+  # (devops-env-drift-auditor-hourly) remains unmanaged and is not in scope here.
+  # ---------------------------------------------------------------------------
+
+  DevopsEnvDriftAuditorFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-env-drift-auditor${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt EnvDriftAuditorRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          TRACKER_API_BASE: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/tracker
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          ISSUE_PROJECT_ID: enceladus
+          DRIFT_SEVERITY: P0
+          DRY_RUN: "false"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: env-drift-auditor
 
   # ---------------------------------------------------------------------------
   # ENC-TSK-C10: Graph Health Metrics Lambda (CloudWatch proxy path)
@@ -746,13 +1112,27 @@ Resources:
       Timeout: 120
       Architectures:
         - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
       Role: !GetAtt GraphHealthMetricsRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
           CLOUDWATCH_NAMESPACE: Enceladus/GraphHealth
           PROJECT_ID: enceladus
           SECRETS_REGION: !Ref "AWS::Region"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
           Value: enceladus
@@ -1035,6 +1415,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1051,6 +1443,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   DocumentApiRole:
     Type: AWS::IAM::Role
@@ -1064,6 +1468,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   ProjectServiceRole:
     Type: AWS::IAM::Role
@@ -1077,6 +1493,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   FeedQueryRole:
     Type: AWS::IAM::Role
@@ -1101,6 +1529,17 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}:*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   CoordinationMonitorRole:
     Type: AWS::IAM::Role
@@ -1114,6 +1553,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   DeployIntakeRole:
     Type: AWS::IAM::Role
@@ -1127,6 +1578,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   DeployOrchestratorRole:
     Type: AWS::IAM::Role
@@ -1164,6 +1627,17 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   DeployFinalizeRole:
     Type: AWS::IAM::Role
@@ -1177,6 +1651,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   # GMF: Deploy Decide IAM Role (DOC-63420302EF65)
   DeployDecideRole:
@@ -1219,6 +1705,104 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: "*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+
+  # ENC-FTR-091 / ENC-TSK-F87 — Deploy Parity Validator IAM role
+  DeployParityValidatorRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-deploy-parity-validator-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DeployParityValidatorInline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: LambdaReadAndFixEnv
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:UpdateFunctionConfiguration
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-intake${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-decide${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-finalize${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-deploy-orchestrator${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-code${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-streamable${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-api${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-github-integration${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-code-gamma"
+              - Sid: DeployTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+              - Sid: SecretsManagerRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/github-app/*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Sid: DriftAuditCfn
+                Effect: Allow
+                Action:
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:DescribeStackDriftDetectionStatus
+                Resource: "*"
+              - Sid: DriftAuditLambdaRead
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListFunctions
+                  - lambda:ListVersionsByFunction
+                Resource: "*"
+              - Sid: DriftAuditSns
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-deploy-alerts"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   ReferenceSearchRole:
     Type: AWS::IAM::Role
@@ -1232,6 +1816,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   FeedPublisherRole:
     Type: AWS::IAM::Role
@@ -1269,6 +1865,17 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   GovernanceAuditRole:
     Type: AWS::IAM::Role
@@ -1307,6 +1914,17 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   DocPrepRole:
     Type: AWS::IAM::Role
@@ -1320,6 +1938,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   BedrockActionsRole:
     Type: AWS::IAM::Role
@@ -1333,6 +1963,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   ChangelogApiRole:
     Type: AWS::IAM::Role
@@ -1346,6 +1988,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1362,6 +2016,26 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsManagerGitHubApp
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerAccess
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/github-app/*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   FeedPipeRole:
     Type: AWS::IAM::Role
@@ -1440,6 +2114,17 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1456,6 +2141,18 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1494,6 +2191,17 @@ Resources:
                 Action:
                   - s3:PutObject
                 Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}neo4j-backups/*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1533,6 +2241,17 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1587,6 +2306,133 @@ Resources:
       Tags:
         - Key: Project
           Value: enceladus
+
+  # ENC-TSK-F73 / ENC-ISS-283: EnvDriftAuditor IAM role (F57 AC-4 CFN adoption).
+  # Inline policy `env-drift-auditor-inline` is stamped to match live exactly so
+  # the CFN IMPORT change set reports no drift on the imported role.
+  EnvDriftAuditorRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-env-drift-auditor-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: env-drift-auditor-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Sid: LambdaConfigRead
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListFunctions
+                Resource: "*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: env-drift-auditor
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-F74 / ENC-ISS-279: MCP Code Gamma Lambda (F57 AC-6 CFN adoption).
+  # Live resource created out-of-band in DOC-D45141D94C55 §1.4 (2026-04-20T06:14Z).
+  # Imported into this stack via create-change-set --change-set-type=IMPORT.
+  # IAM role devops-coordination-api-lambda-role-gamma is out-of-band and
+  # referenced by ARN (not CFN-managed from this stack).
+  # Literal "-gamma" suffix — resource is gamma-only, not gamma-aware.
+  # ---------------------------------------------------------------------------
+
+  EnceladusMcpCodeGammaFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: enceladus-mcp-code-gamma
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: server.lambda_handler
+      MemorySize: 512
+      Timeout: 30
+      Architectures:
+        - arm64
+      # ENC-TSK-F63 AC-2: SnapStart enabled (arm64/py3.12)
+      SnapStart:
+        ApplyOn: PublishedVersions
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/devops-coordination-api-lambda-role-gamma"
+      Layers:
+        - !Ref SharedLayerArn
+        # ENC-TSK-F63 AC-1: AppConfig extension layer (arm64)
+        - !If
+          - HasAppConfigLayer
+          - !Ref AppConfigExtensionLayerArnArm64
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEYS: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
+          COORDINATION_INTERNAL_API_KEY_SCOPES: ""
+          COORDINATION_TABLE: coordination-requests-gamma
+          COORDINATION_GSI_IDEMPOTENCY: idempotency-key-index
+          TRACKER_TABLE: devops-project-tracker-gamma
+          PROJECTS_TABLE: projects-gamma
+          DOCUMENTS_TABLE: documents-gamma
+          GOVERNANCE_POLICIES_TABLE: governance-policies-gamma
+          GOVERNANCE_DICTIONARY_POLICY_ID: governance_data_dictionary
+          DYNAMODB_REGION: us-west-2
+          SECRETS_REGION: us-west-2
+          S3_BUCKET: jreese-net
+          S3_GOVERNANCE_HISTORY_PREFIX: governance/history
+          S3_GOVERNANCE_PREFIX: governance/live
+          CORS_ORIGIN: https://jreese.net
+          ENVIRONMENT_SUFFIX: "-gamma"
+          ENCELADUS_MCP_SERVER_PATH: server.py
+          ENCELADUS_MCP_TRANSPORT: streamable_http
+          ENCELADUS_MCP_INTERFACE_MODE: code
+          ENCELADUS_COGNITO_USER_POOL_ID: us-east-1_b2D0V3E1k
+          ENCELADUS_COGNITO_CLIENT_ID: 6q607dk3liirhtecgps7hifmlk
+          ENCELADUS_COGNITO_CLIENT_SECRET: !Ref EnceladusCognitoClientSecret
+          ENCELADUS_COGNITO_REGION: us-east-1
+          ENCELADUS_COGNITO_DOMAIN: https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com
+          MCP_AUDIT_CALLER_IDENTITY: devops-coordination-api-gamma
+          MCP_SERVER_LOG_GROUP: /enceladus/mcp/server
+          # ENC-TSK-F63 AC-1: ENABLE_* env vars removed — feature flags now served by AppConfig.
+          # enceladus_shared.appconfig_flags.flag() polls localhost:2772 via the extension layer.
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: mcp-code
+        - Key: Environment
+          Value: gamma
 
 Outputs:
   CoordinationApiFunctionArn:

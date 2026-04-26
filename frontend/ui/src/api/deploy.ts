@@ -26,6 +26,7 @@ export async function fetchDeployQueue(
   )
   if (!res.ok) throw new Error(`Failed to fetch deploy queue: ${res.status}`)
   const data: DeployQueueResponse = await res.json()
+  // ISS-208 AC3 validation — safe to remove
   // ENC-ISS-208: Strip DynamoDB composite key prefix from record_id.
   // The "decision#" prefix contains a # that breaks native browser
   // input validation (url/email types reject it). The backend
@@ -45,9 +46,18 @@ export async function submitDeployDecision(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
   })
-  const data = await res.json()
+  const data: DeployDecideResponse = await res.json()
   if (!res.ok || !data.success) {
     throw new Error(data.error || `Deploy decision failed: ${res.status}`)
+  }
+  // ENC-ISS-208 defense-in-depth: mirror the fetchDeployQueue strip on the
+  // mutation response so the full DPL record echoed back to the UI is already
+  // prefix-free before it can re-enter React Query cache or any consumer.
+  if (data.decision && typeof data.decision.record_id === 'string') {
+    data.decision = {
+      ...data.decision,
+      record_id: data.decision.record_id.replace(/^decision#/, ''),
+    }
   }
   return data
 }

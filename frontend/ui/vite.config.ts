@@ -82,14 +82,58 @@ export default defineConfig({
         // Do NOT cache /mobile/v1 feeds via service worker — they require
         // the auth cookie and are intercepted by Lambda@Edge. Network-only
         // fetches let the browser send cookies naturally through CloudFront.
-        runtimeCaching: [],
+        // ENC-ISS-260 / ENC-TSK-F10: explicit NetworkOnly bypass for
+        // /api/v1/deploy/* — the Deployment Manager posts decide/approve/
+        // divert/revert to these endpoints and the SW navigateFallback was
+        // catching same-origin POSTs and returning the index.html app-shell,
+        // producing "Unexpected token <" JSON-parse errors and silently
+        // breaking every governed deployment approval (which also definitionally
+        // blocks ENC-TSK-E76 AC3). NetworkOnly ensures every method on this
+        // prefix goes straight to CloudFront without SW cache involvement.
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith('/api/v1/deploy/'),
+            handler: 'NetworkOnly',
+            method: 'POST',
+            options: { matchOptions: { ignoreSearch: true } },
+          },
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith('/api/v1/deploy/'),
+            handler: 'NetworkOnly',
+            method: 'GET',
+            options: { matchOptions: { ignoreSearch: true } },
+          },
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith('/api/v1/deploy/'),
+            handler: 'NetworkOnly',
+            method: 'DELETE',
+            options: { matchOptions: { ignoreSearch: true } },
+          },
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith('/api/v1/deploy/'),
+            handler: 'NetworkOnly',
+            method: 'PATCH',
+            options: { matchOptions: { ignoreSearch: true } },
+          },
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith('/api/v1/deploy/'),
+            handler: 'NetworkOnly',
+            method: 'PUT',
+            options: { matchOptions: { ignoreSearch: true } },
+          },
+        ],
         // Exclude /enceladus/callback from the NavigationRoute fallback.
         // Lambda@Edge handles /callback server-side (token exchange + cookie
         // set + 302 redirect). If the SW intercepts this navigation, the
         // Set-Cookie headers from the 302 chain may not be flushed to
         // document.cookie before the app bootstrap reads them, causing the
         // session to appear expired after a successful re-login.
-        navigateFallbackDenylist: [/\/callback/],
+        // ENC-ISS-260 / ENC-TSK-F10: also exclude /api/* from the navigation
+        // fallback as a belt-and-suspenders measure. Even though Workbox's
+        // NavigationRoute normally only fires on accept:text/html GETs, the
+        // denylist prevents any future misclassification from routing API
+        // calls into the precached app shell.
+        navigateFallbackDenylist: [/\/callback/, /\/api\//],
       },
     }),
   ],

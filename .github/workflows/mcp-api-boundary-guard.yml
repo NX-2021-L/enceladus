@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'v[0-9]*/main'
     paths:
       - "tools/enceladus-mcp-server/server.py"
       - "tools/check_mcp_api_boundary.py"

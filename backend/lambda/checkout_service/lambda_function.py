@@ -895,7 +895,22 @@ def _delete_token(token_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
-    """POST .../checkout — Atomic checkout + advance to in-progress."""
+    """POST .../checkout — Atomic checkout + advance to in-progress.
+
+    ENC-TSK-F41 / DOC-546B896390EA §5: every successful invocation of this
+    handler increments the task record's server-side checkout_count field by 1.
+    The increment is performed atomically by the tracker_mutation Lambda as part
+    of the same DynamoDB UpdateExpression that stamps active_agent_session=True
+    (see tracker_mutation._handle_update_field, field=active_agent_session,
+    checking_out=True branch — appends "ADD checkout_count :one"). This keeps
+    the counter colocated with the state transition and removes race-windows
+    between checkout and counter bump.
+
+    The checkout_count field is server-side only; tracker.set / tracker.create
+    reject direct client writes with HTTP 400 RESERVED_FIELD. Callers must
+    treat checkout_count as read-only. It feeds the FTR-076 v2 IMPLEMENTS edge
+    immutability gate (designed->development requires checkout_count >= 1).
+    """
     provider = (body.get("active_agent_session_id") or "").strip()
     if not provider:
         return _validation_error(
@@ -919,14 +934,44 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
         return _error(pre_status, pre_task.get("error", f"Task not found: {task_id}"))
 
     pre_components = pre_task.get("components") or []
+
+    # F42: Opacity model gate (ENC-FTR-076 §7) — runs BEFORE transition_type
+    # strictness so OPAQUE components cannot leak existence via 400 mismatch errors.
+    if pre_components:
+        lifecycle_map = _get_components_lifecycle(pre_components)
+        for cid in pre_components:
+            entry = lifecycle_map.get(str(cid))
+            if not entry:
+                continue
+            ls = entry.get("lifecycle_status", "")
+            if ls in _OPAQUE_LIFECYCLE_STATUSES:
+                return _error(404, f"Component '{cid}' not found")
+            if ls in _BLOCKED_LIFECYCLE_STATUSES:
+                return _validation_error(
+                    400,
+                    f"Component {cid} is not available for checkout (status: {ls})",
+                    task_id=task_id,
+                    target_status="in-progress",
+                    provider=provider,
+                    extra_details={
+                        "code": "component_lifecycle_blocked",
+                        "component_id": cid,
+                        "lifecycle_status": ls,
+                    },
+                )
+
     if pre_components:
         pre_transition_type = (pre_task.get("transition_type") or "github_pr_deploy").strip().lower()
-        required_type = _get_required_transition_type(pre_components)
+        try:
+            required_type = _get_required_transition_type(pre_components)
+        except ComponentMisconfiguredError as exc:
+            return _component_misconfigured_response(exc)
         if required_type is not None:
             task_rank = STRICTNESS_RANK.get(pre_transition_type, 99)
             required_rank = STRICTNESS_RANK.get(required_type, 0)
             if task_rank > required_rank:
-                # Identify the specific conflicting component for the error message
+                # Identify the specific conflicting component for the error message.
+                # F50/AC-3: read required_transition_type, not the legacy transition_type.
                 conflicting_component = None
                 for cid in pre_components:
                     try:
@@ -937,7 +982,13 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
                         item = resp.get("Item")
                         if not item:
                             continue
-                        comp_type = item.get("transition_type", {}).get("S", "github_pr_deploy")
+                        comp_type = (
+                            item.get("required_transition_type", {}).get("S") or ""
+                        ).strip()
+                        if not comp_type:
+                            # Should be unreachable after _get_required_transition_type
+                            # succeeded for this component; skip defensively.
+                            continue
                         comp_rank = STRICTNESS_RANK.get(comp_type, 0)
                         if comp_rank < task_rank:
                             conflicting_component = cid
@@ -1010,6 +1061,21 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
         provider=provider,
     )
 
+    # ENC-TSK-F41: observe checkout_count on the returned record — this value
+    # reflects the atomic increment that tracker_mutation performed as part of
+    # the successful checkout UpdateExpression (see tracker_mutation._handle_update_field
+    # field=active_agent_session branch). Surface it on the response so callers
+    # can verify the FTR-076 v2 counter advanced, and log an observability line
+    # so operators can trace counter progression without a second read.
+    try:
+        checkout_count_val = int(task.get("checkout_count", 0) or 0)
+    except (TypeError, ValueError):
+        checkout_count_val = 0
+    logger.info(
+        "checkout.task success project=%s task=%s provider=%s checkout_count=%s",
+        project_id, task_id, provider, checkout_count_val,
+    )
+
     return _response(200, {
         "success": True,
         "task": task,
@@ -1017,6 +1083,7 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
         "checked_out_at": datetime.now(timezone.utc).isoformat(),
         "coordination_request_id": coordination_request_id or None,
         "checkout_transition_type": checkout_transition_type,
+        "checkout_count": checkout_count_val,
     })
 
 
@@ -1681,20 +1748,111 @@ def _validate_subtask_gate(
 
 # ---------------------------------------------------------------------------
 # ENC-FTR-041: Component registry enforcement helpers
+# ENC-TSK-F50 / ENC-ISS-270: required_transition_type is now the governed
+# enforcement field (see DOC-240A67973B13). The legacy `transition_type`
+# field on component records is NOT read here post-F50 — it is retained on
+# the record for back-compat and deploy-style documentation only. A missing
+# or invalid `required_transition_type` is an invariant violation and fails
+# loud with COMPONENT_MISCONFIGURED; no silent default remains.
 # ---------------------------------------------------------------------------
 
 
-def _get_required_transition_type(component_ids: list) -> Optional[str]:
-    """Fetch components from registry; return most restrictive transition_type.
+class ComponentMisconfiguredError(Exception):
+    """Raised when a component record is missing `required_transition_type`
+    or carries an invalid enum value.
 
-    If a component is not found in the registry, a warning is logged and enforcement
-    is skipped for that component (fail-open per-component to avoid hard blocking on
-    registry gaps). If ALL components are missing, returns None (no enforcement).
+    F50/AC-3 and F50/AC-4: the previous silent-default behavior
+    (``github_pr_deploy`` when ``transition_type`` was absent) is replaced
+    with a first-class invariant violation surfaced through the standard
+    ``api.error_envelope`` contract. Callers should translate this
+    exception into an HTTP 500 response via
+    :func:`_component_misconfigured_response`.
+    """
+
+    def __init__(
+        self,
+        component_id: str,
+        *,
+        reason: str = "missing",
+        bad_value: Optional[str] = None,
+    ) -> None:
+        self.component_id = component_id
+        self.reason = reason  # "missing" or "invalid_value"
+        self.bad_value = bad_value
+        if reason == "invalid_value":
+            message = (
+                f"Component '{component_id}' has invalid required_transition_type="
+                f"'{bad_value}'; this is an invariant violation. Contact platform admin."
+            )
+        else:
+            message = (
+                f"Component '{component_id}' is missing required_transition_type; "
+                "this is an invariant violation. Contact platform admin."
+            )
+        super().__init__(message)
+
+
+def _component_misconfigured_response(exc: ComponentMisconfiguredError) -> dict:
+    """Translate :class:`ComponentMisconfiguredError` into the standard
+    ``api.error_envelope`` shape (ENC-TSK-D56).
+
+    The envelope carries component_id, remediation_url, and remediation
+    guidance sufficient for an agent to self-correct on the next attempt
+    without additional tool calls (F50/AC-4).
+    """
+    remediation_url = f"https://jreese.net/components/{exc.component_id}"
+    details: Dict[str, Any] = {
+        "component_id": exc.component_id,
+        "reason": exc.reason,
+        "remediation_url": remediation_url,
+        "remediation_guidance": (
+            "Set the component's `required_transition_type` in the registry "
+            "(DynamoDB enceladus-component-registry) via the PWA /components "
+            "edit surface or via a product-lead terminal update-item. Valid "
+            "values: github_pr_deploy|lambda_deploy|web_deploy|code_only|no_code. "
+            "After the field is populated, retry the checkout."
+        ),
+        "rule_citation": (
+            "ENC-TSK-F50 / ENC-ISS-270 / DOC-240A67973B13 (AC-1 review document)"
+        ),
+    }
+    if exc.bad_value is not None:
+        details["invalid_value"] = exc.bad_value
+    return _error(
+        500,
+        str(exc),
+        code="COMPONENT_MISCONFIGURED",
+        retryable=False,
+        details=details,
+    )
+
+
+# F42: Opacity model (ENC-FTR-076 §7). Mirrors coordination_api constants.
+_OPAQUE_LIFECYCLE_STATUSES = frozenset({"archived"})
+_BLOCKED_LIFECYCLE_STATUSES = frozenset({"proposed", "deprecated"})
+
+
+def _get_required_transition_type(component_ids: list) -> Optional[str]:
+    """Return the most restrictive ``required_transition_type`` across the
+    given component IDs.
+
+    F50/AC-3: reads the governed ``required_transition_type`` field on each
+    component registry record — NOT the legacy ``transition_type`` field.
+    If a component record exists but has no ``required_transition_type``
+    attribute, or the value is not a valid member of STRICTNESS_RANK,
+    raises :class:`ComponentMisconfiguredError` (no silent default).
+
+    Missing components (component_id absent from the registry entirely)
+    continue to fail-open with a WARNING log, preserving the ENC-FTR-041
+    behavior for unknown IDs so a stale task.components entry does not hard
+    block every downstream call.
+
+    Returns None when ``component_ids`` is empty.
     """
     if not component_ids:
         return None
     min_rank = 99
-    required = None
+    required: Optional[str] = None
     for cid in component_ids:
         try:
             resp = _ddb.get_item(
@@ -1707,14 +1865,70 @@ def _get_required_transition_type(component_ids: list) -> Optional[str]:
                     "[FTR-041] Component '%s' not found in registry; skipping enforcement", cid
                 )
                 continue
-            comp_type = item.get("transition_type", {}).get("S", "github_pr_deploy")
-            rank = STRICTNESS_RANK.get(comp_type, 0)
+            required_attr = item.get("required_transition_type") or {}
+            comp_type = (required_attr.get("S") or "").strip()
+            if not comp_type:
+                logger.error(
+                    "[F50/AC-3] Component '%s' is missing required_transition_type "
+                    "in the registry (see DOC-240A67973B13 for governance contract)",
+                    cid,
+                )
+                raise ComponentMisconfiguredError(cid, reason="missing")
+            if comp_type not in STRICTNESS_RANK:
+                logger.error(
+                    "[F50/AC-3] Component '%s' has invalid required_transition_type='%s' "
+                    "(not in STRICTNESS_RANK)",
+                    cid, comp_type,
+                )
+                raise ComponentMisconfiguredError(
+                    cid, reason="invalid_value", bad_value=comp_type
+                )
+            rank = STRICTNESS_RANK[comp_type]
             if rank < min_rank:
                 min_rank = rank
                 required = comp_type
+        except ComponentMisconfiguredError:
+            raise
         except Exception as exc:
             logger.error("[FTR-041] Failed to fetch component '%s': %s", cid, exc)
     return required
+
+
+def _get_components_lifecycle(component_ids: list) -> Dict[str, Dict[str, str]]:
+    """Fetch per-component lifecycle metadata for the FTR-076 / E10 gate.
+
+    Returns a dict keyed by component_id with sub-dicts containing
+    `lifecycle_status` and (when present) `rejection_reason`. Components
+    not found in the registry are omitted (matching the fail-open posture
+    of `_get_required_transition_type` for missing-component cases).
+    Components without a `lifecycle_status` attribute (pre-FTR-076 records
+    that escaped the E12 backfill) are reported as `lifecycle_status='active'`
+    so the gate treats them as the historical default.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    if not component_ids:
+        return out
+    for cid in component_ids:
+        try:
+            resp = _ddb.get_item(
+                TableName=COMPONENTS_TABLE,
+                Key={"component_id": {"S": str(cid)}},
+            )
+            item = resp.get("Item")
+            if not item:
+                logger.warning(
+                    "[FTR-076] Component '%s' not found in registry; skipping lifecycle gate", cid
+                )
+                continue
+            ls = item.get("lifecycle_status", {}).get("S", "active")
+            entry: Dict[str, str] = {"lifecycle_status": ls}
+            rr = item.get("rejection_reason", {}).get("S", "")
+            if rr:
+                entry["rejection_reason"] = rr
+            out[str(cid)] = entry
+        except Exception as exc:
+            logger.error("[FTR-076] Failed to fetch component '%s' lifecycle: %s", cid, exc)
+    return out
 
 
 def _get_component_transition_type(component_id: str) -> str:
@@ -1967,8 +2181,80 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
             required_fields=["components"],
             example_fix=_example_checkout_fix(task_id),
         )
+    # --- ENC-FTR-076 / ENC-TSK-E10: Component lifecycle_status gate ---
+    # Block agent-initiated advances when any task component is in
+    # `proposed` or `rejected` state. PWA users (user_initiated=true) bypass
+    # this gate so io can still close legacy tasks against unapproved
+    # components if needed. `approved` is a transient state that should not
+    # be observed at advance time (it flips to `active` atomically inside
+    # the same DynamoDB transaction in coordination_api E09); if observed,
+    # we treat it as `active` and log a warning for ops visibility.
+    if components and not is_user_initiated:
+        lifecycle_map = _get_components_lifecycle(components)
+        proposed_ids: list = []
+        rejected_entries: list = []
+        for cid in components:
+            entry = lifecycle_map.get(str(cid))
+            if not entry:
+                continue
+            ls = entry.get("lifecycle_status", "active")
+            if ls == "proposed":
+                proposed_ids.append(str(cid))
+            elif ls == "rejected":
+                rejected_entries.append({
+                    "component_id": str(cid),
+                    "rejection_reason": entry.get("rejection_reason", ""),
+                })
+            elif ls == "approved":
+                logger.warning(
+                    "[FTR-076] Component '%s' observed in lifecycle_status=approved at advance time; "
+                    "expected approved -> active to be atomic. Treating as active.", cid,
+                )
+
+        if proposed_ids:
+            return _validation_error(
+                400,
+                (
+                    f"Component(s) {proposed_ids} are pending coordination-lead approval "
+                    f"(lifecycle_status='proposed'). Wait for io to approve via the PWA "
+                    f"Components page, or escalate."
+                ),
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                extra_details={
+                    "code": "component_not_approved",
+                    "component_ids": proposed_ids,
+                    "guidance": "Pending coordination lead approval. Wait for io to approve via PWA or escalate.",
+                },
+            )
+        if rejected_entries:
+            primary = rejected_entries[0]
+            return _validation_error(
+                400,
+                (
+                    f"Component '{primary['component_id']}' has been rejected "
+                    f"(lifecycle_status='rejected'). Reason: {primary['rejection_reason'] or '(no reason recorded)'}. "
+                    "Choose a different component or escalate to coord lead."
+                ),
+                task_id=task_id,
+                current_status=current_status,
+                target_status=target_status,
+                transition_type=transition_type,
+                provider=provider or session_id,
+                extra_details={
+                    "code": "component_rejected",
+                    "rejected_components": rejected_entries,
+                },
+            )
+
     if components:
-        required_type = _get_required_transition_type(components)
+        try:
+            required_type = _get_required_transition_type(components)
+        except ComponentMisconfiguredError as exc:
+            return _component_misconfigured_response(exc)
         if required_type is not None:
             task_rank = STRICTNESS_RANK.get(transition_type, 99)
             required_rank = STRICTNESS_RANK.get(required_type, 0)

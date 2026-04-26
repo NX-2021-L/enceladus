@@ -20,6 +20,10 @@ COMPUTE_TEMPLATE = REPO_ROOT / "infrastructure/cloudformation/02-compute.yaml"
 MANIFEST_PATH = REPO_ROOT / "infrastructure/lambda_workflow_manifest.json"
 SIMPLE_SUB_PATTERN = re.compile(r"""^!Sub\s+['"](?P<value>[^'"]+)['"]$""")
 
+# ENC-TSK-F60: Gen2 reusable deploy workflow — single file covers all Lambdas.
+# Per-function name checks do not apply; the workflow deploys via matrix from envs/*.yaml.
+GEN2_DEPLOY_WORKFLOW = ".github/workflows/_deploy.yml"
+
 
 def _normalize_function_name(value: str) -> str | None:
     value = value.strip()
@@ -27,7 +31,13 @@ def _normalize_function_name(value: str) -> str | None:
         return None
 
     if not value.startswith("!"):
-        return value.strip('"\'')
+        name = value.strip('"\'')
+        # ENC-TSK-F74: gamma-only literals (e.g. enceladus-mcp-code-gamma) are
+        # intentionally excluded from production coverage. The prod twin is
+        # either absent or registered separately.
+        if name.endswith("-gamma"):
+            return None
+        return name
 
     match = SIMPLE_SUB_PATTERN.match(value)
     if not match:
@@ -35,6 +45,8 @@ def _normalize_function_name(value: str) -> str | None:
 
     normalized = match.group("value").replace("${EnvironmentSuffix}", "")
     if "${" in normalized:
+        return None
+    if normalized.endswith("-gamma"):
         return None
     return normalized
 
@@ -91,7 +103,8 @@ def _validate(manifest: List[Dict[str, object]], production: List[str]) -> List[
         if function_name in seen:
             errors.append(f"Duplicate function_name in manifest: {function_name}")
         seen.add(function_name)
-        manifest_names.append(function_name)
+        if entry.get("cfn_managed") is not False:
+            manifest_names.append(function_name)
 
         if not isinstance(lambda_dir, str) or not lambda_dir:
             errors.append(f"{function_name}: lambda_dir must be a non-empty string")
@@ -106,7 +119,8 @@ def _validate(manifest: List[Dict[str, object]], production: List[str]) -> List[
             workflow_path = REPO_ROOT / workflow_file
             if not workflow_path.is_file():
                 errors.append(f"{function_name}: workflow file missing: {workflow_file}")
-            else:
+            elif workflow_file != GEN2_DEPLOY_WORKFLOW:
+                # Gen1 per-function checks: name reference + reusable caller permissions.
                 text = workflow_path.read_text(encoding="utf-8")
                 if function_name not in text:
                     errors.append(
@@ -121,6 +135,7 @@ def _validate(manifest: List[Dict[str, object]], production: List[str]) -> List[
                         errors.append(
                             f"{function_name}: reusable workflow caller must grant id-token: write: {workflow_file}"
                         )
+            # Gen2: _deploy.yml covers all Lambdas via matrix — no per-function name check.
 
         if isinstance(deploy_script, str) and deploy_script:
             deploy_script_path = REPO_ROOT / deploy_script

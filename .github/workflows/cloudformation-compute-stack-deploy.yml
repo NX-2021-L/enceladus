@@ -94,6 +94,8 @@ jobs:
             --template-file "${TEMPLATE_FILE}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 02-compute/ \
             --parameter-overrides \
               DataStackName="${{ steps.params.outputs.data_stack_name }}"
 

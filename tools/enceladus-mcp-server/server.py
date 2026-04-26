@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -48,6 +48,10 @@ from mcp.types import (
     TextResourceContents,
     Tool,
 )
+try:
+    from enceladus_shared.appconfig_flags import flag as _appconfig_flag
+except ImportError:
+    from appconfig_flags import flag as _appconfig_flag  # local fallback for testing
 
 # ---------------------------------------------------------------------------
 # Lazy boto3 import (provider sessions may need pip install)
@@ -214,22 +218,19 @@ CHECKOUT_SERVICE_API_BASE = os.environ.get(
     "CHECKOUT_SERVICE_API_BASE",
     "https://jreese.net/api/v1/checkout",
 )
-# ENC-FTR-049: Typed relationship edge feature flag
-ENABLE_TYPED_RELATIONSHIPS = os.environ.get(
-    "ENABLE_TYPED_RELATIONSHIPS", "false"
-).lower() == "true"
-# ENC-FTR-050: Context Node feature flag (default off — all new code paths gated)
-ENABLE_CONTEXT_NODES = os.environ.get(
-    "ENABLE_CONTEXT_NODES", "false"
-).lower() == "true"
-# ENC-FTR-052: Governed Lesson Primitive feature flag
-ENABLE_LESSON_PRIMITIVE = os.environ.get(
-    "ENABLE_LESSON_PRIMITIVE", "false"
-).lower() == "true"
-# ENC-FTR-061: Governed Handoff Primitive feature flag
-ENABLE_HANDOFF_PRIMITIVE = os.environ.get(
-    "ENABLE_HANDOFF_PRIMITIVE", "false"
-).lower() == "true"
+# ENC-TSK-F63: Feature flags migrated from ENABLE_* env vars to AppConfig.
+# appconfig_flags.flag() reads from AppConfig extension (localhost:2772) with
+# env_fallback for local dev / environments without the extension layer.
+# ENC-FTR-049
+ENABLE_TYPED_RELATIONSHIPS = _appconfig_flag("enable_typed_relationships", env_fallback="ENABLE_TYPED_RELATIONSHIPS")
+# ENC-FTR-050
+ENABLE_CONTEXT_NODES = _appconfig_flag("enable_context_nodes", env_fallback="ENABLE_CONTEXT_NODES")
+# ENC-FTR-052
+ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallback="ENABLE_LESSON_PRIMITIVE")
+# ENC-FTR-061
+ENABLE_HANDOFF_PRIMITIVE = _appconfig_flag("enable_handoff_primitive", env_fallback="ENABLE_HANDOFF_PRIMITIVE")
+# ENC-FTR-076 / ENC-TSK-E08
+ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL")
 
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
@@ -3269,7 +3270,12 @@ def _code_mode_tool_catalog() -> list[Tool]:
             name="get_compact_context",
             description=(
                 "Budgeted composite context assembly that reuses existing issue-context, codemap, "
-                "architecture, document, governance, and project helpers while preserving raw codemap payloads."
+                "architecture, document, governance, and project helpers while preserving raw codemap payloads. "
+                "ENC-TSK-B92: when `query` or `anchor_record_id` is supplied the response additionally "
+                "includes a `hybrid_retrieval` section containing records ranked by Reciprocal Rank Fusion "
+                "over three signals (vector cosine via HNSW, graph Personalized PageRank / Cypher fallback, "
+                "keyword title/intent/description match). Backward-compatible: callers who do not pass "
+                "`query`/`anchor_record_id` receive the legacy context shape unchanged."
             ),
             inputSchema={
                 "type": "object",
@@ -3309,7 +3315,23 @@ def _code_mode_tool_catalog() -> list[Tool]:
                     },
                     "query": {
                         "type": "string",
-                        "description": "Topic or reference search query.",
+                        "description": "Topic or reference search query. When supplied, enables the hybrid retrieval vector + keyword signals (ENC-TSK-B92).",
+                    },
+                    "anchor_record_id": {
+                        "type": "string",
+                        "description": "Optional record_id used as the graph anchor for Personalized PageRank / fallback edge-walk scoring in hybrid retrieval. Defaults to `record_id` for record modes. (ENC-TSK-B92)",
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Hybrid retrieval top-N result count (default 20, max 50). Applied after RRF fusion and FSRS-6 T3 Lesson filtering. (ENC-TSK-B92)",
+                    },
+                    "include_below_threshold": {
+                        "type": "boolean",
+                        "description": "If true, includes Lessons with FSRS-6 stability < T3 (0.7) in hybrid retrieval results. Default false suppresses below-threshold Lessons per B62 scope item #4. (ENC-TSK-B92)",
+                    },
+                    "record_type": {
+                        "type": "string",
+                        "description": "Optional record-type filter (task/issue/feature/plan/lesson/document) applied to hybrid retrieval. (ENC-TSK-B92)",
                     },
                     "include_code_map": {
                         "type": "boolean",
@@ -3322,6 +3344,10 @@ def _code_mode_tool_catalog() -> list[Tool]:
                     "include_related_documents": {
                         "type": "boolean",
                         "description": "If true, include related document summaries when available.",
+                    },
+                    "include_hybrid_retrieval": {
+                        "type": "boolean",
+                        "description": "If true (default when query/anchor_record_id is set), include three-signal hybrid retrieval results under hybrid_retrieval. Set false to disable. (ENC-TSK-B92)",
                     },
                 },
             },
@@ -3788,7 +3814,7 @@ async def list_tools() -> list[Tool]:
         # --- Documents (6.3) ---
         Tool(
             name="documents_search",
-            description="Search for documents by project, keyword, related item, or title.",
+            description="Search for documents by project, keyword, related item, title, document_subtype, or subtypepattern (ENC-FTR-078 AC-17).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3807,6 +3833,18 @@ async def list_tools() -> list[Tool]:
                     "title": {
                         "type": "string",
                         "description": "Title substring to search for.",
+                    },
+                    "document_subtype": {
+                        "type": "string",
+                        "description": "Filter by document_subtype (e.g. 'idea', 'context-node', 'skill', 'doc', 'handoff', 'coe', 'wave'). Legacy values still searchable as they remain readable.",
+                    },
+                    "subtypepattern": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-17 self-learning filter. Matches document_subtype='doc' "
+                            "records whose canonical subtypepattern (lowercase, alpha+dash) exactly "
+                            "equals the filter value. Combine with document_subtype='doc' for clarity."
+                        ),
                     },
                 },
             },
@@ -3891,6 +3929,124 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional output file name (.md/.markdown).",
                     },
+                    "document_subtype": {
+                        "type": "string",
+                        "enum": ["doc", "handoff", "coe", "wave", "idea", "context-node", "skill"],
+                        "description": (
+                            "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078). "
+                            "Strict allow-list on writes. 'handoff' requires source_record_id; "
+                            "'coe' requires source_incident_id; 'wave' requires plan_anchor_id; "
+                            "'context-node' requires body <=2048 chars and >=5 related_items; "
+                            "'skill' requires full_description (<=4096), claude_description (<=1024), "
+                            "agentskills_manifest + agentskills_spec_version, and >=2 related_items. "
+                            "Legacy values {general, blueprint, narrative, session-log} are read-only; "
+                            "for emergent patterns use document_subtype='doc' with subtypepattern='<value>'."
+                        ),
+                    },
+                    "confirm_subtype": {
+                        "type": "boolean",
+                        "description": "Override semantic guard when title/content match handoff patterns but subtype=doc is intentional.",
+                    },
+                    "subtypepattern": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-16 self-learning field. Optional. Valid only when "
+                            "document_subtype='doc'. Server canonicalizes (trim+lowercase) and validates "
+                            "^[a-z-]+$. Examples: 'blueprint', 'runbook', 'post-mortem'. (ref: document.doc)"
+                        ),
+                    },
+                    "full_description": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-8 required field for document_subtype='skill'. "
+                            "Non-empty, len <= 4096. Canonical source of truth. (ref: document.skill)"
+                        ),
+                    },
+                    "claude_description": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-9 required field for document_subtype='skill'. "
+                            "Non-empty, len <= 1024 (Claude SKILL.md hard ceiling). (ref: document.skill)"
+                        ),
+                    },
+                    "agentskills_manifest": {
+                        "type": "object",
+                        "description": (
+                            "ENC-FTR-078 AC-12 required field for document_subtype='skill'. "
+                            "JSON object conformant with agentskills.io/home spec at pinned "
+                            "agentskills_spec_version. (ref: document.skill)"
+                        ),
+                    },
+                    "agentskills_spec_version": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-12 required field for document_subtype='skill'. "
+                            "Pinned agentskills.io/home spec version (default '0.1.0'). "
+                            "(ref: document.skill)"
+                        ),
+                    },
+                    "runtime_variants": {
+                        "type": "object",
+                        "description": (
+                            "ENC-FTR-078 AC-13 optional field for document_subtype='skill'. "
+                            "Map of {runtime_id: variant_payload}. Unknown keys permitted. "
+                            "(ref: document.skill)"
+                        ),
+                    },
+                    "source_record_id": {
+                        "type": "string",
+                        "description": "Tracker record ID the handoff targets (e.g. ENC-TSK-XXX). Required when document_subtype=handoff. (ref: document.handoff)",
+                    },
+                    "handoff_status": {
+                        "type": "string",
+                        "enum": ["pending", "claimed", "completed", "stale"],
+                        "description": "Handoff lifecycle state; defaults to 'pending' on creation. (ref: document.handoff)",
+                    },
+                    "prerequisite_state": {
+                        "type": "string",
+                        "description": "Plain-English description of state required before handoff executor begins. (ref: document.handoff)",
+                    },
+                    "verification_criteria": {
+                        "type": "string",
+                        "description": "Plain-English description of how handoff success is verified. (ref: document.handoff)",
+                    },
+                    "action_checklist": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ordered checklist the handoff executor should follow. (ref: document.handoff)",
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "description": "Optional handoff expiry in ISO 8601 format. (ref: document.handoff)",
+                    },
+                    "source_incident_id": {
+                        "type": "string",
+                        "description": "Tracker record ID of the incident a COE investigates. Required when document_subtype=coe. (ref: document.coe)",
+                    },
+                    "coe_status": {
+                        "type": "string",
+                        "enum": ["drafting", "investigating", "published", "superseded"],
+                        "description": "COE lifecycle status. (ref: document.coe)",
+                    },
+                    "plan_anchor_id": {
+                        "type": "string",
+                        "description": "Plan record ID this wave tracks (must contain '-PLN-', e.g. ENC-PLN-029). Required when document_subtype=wave. (ref: document.wave)",
+                    },
+                    "wave_status": {
+                        "type": "string",
+                        "enum": ["active", "complete", "archived"],
+                        "description": "Wave lifecycle status. (ref: document.wave)",
+                    },
+                    "informed_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Source documents that informed this one (GDMP provenance). Array of document IDs. (ref: document.graph_edges)",
+                    },
+                    "document_maturity_state": {
+                        "type": "string",
+                        "enum": ["raw", "compliant", "contextualized", "mature"],
+                        "description": "GDMP maturity lifecycle; 'raw' on creation, advances via documents.patch. (ref: docstore.document)",
+                    },
                     "governance_hash": {
                         "type": "string",
                         "description": "Current governance hash for write authorization.",
@@ -3920,6 +4076,10 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional updated markdown content.",
                     },
+                    "append_content": {
+                        "type": "string",
+                        "description": "Optional content to append to existing document. Mutually exclusive with 'content'. For handoff docs, must include reply block frontmatter. For wave docs, must include agent-layer frontmatter.",
+                    },
                     "description": {
                         "type": "string",
                         "description": "Optional updated description.",
@@ -3937,11 +4097,118 @@ async def list_tools() -> list[Tool]:
                     "status": {
                         "type": "string",
                         "enum": ["active", "archived"],
-                        "description": "Optional status change.",
+                        "description": "Optional document-level status change. Subtype-specific lifecycle fields (handoff_status/coe_status/wave_status) are separate.",
                     },
                     "file_name": {
                         "type": "string",
                         "description": "Optional updated file name (.md/.markdown).",
+                    },
+                    "document_subtype": {
+                        "type": "string",
+                        "enum": ["doc", "handoff", "coe", "wave", "idea", "context-node", "skill"],
+                        "description": (
+                            "Document subtype classification (ENC-FTR-077, extended by ENC-FTR-078). "
+                            "Strict allow-list on patches. Agents may patch a legacy record "
+                            "(general/blueprint/narrative/session-log) to any allow-list subtype "
+                            "provided subtype-specific requirements are satisfied in the same PATCH."
+                        ),
+                    },
+                    "subtypepattern": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 AC-16. Valid only when the post-patch document_subtype='doc'. "
+                            "Server canonicalizes (trim+lowercase) and validates ^[a-z-]+$. "
+                            "Empty string clears the field. (ref: document.doc)"
+                        ),
+                    },
+                    "full_description": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 skill patch. Non-empty, len <= 4096. "
+                            "Valid only when final_subtype='skill'. (ref: document.skill)"
+                        ),
+                    },
+                    "claude_description": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 skill patch. Non-empty, len <= 1024. "
+                            "Valid only when final_subtype='skill'. (ref: document.skill)"
+                        ),
+                    },
+                    "agentskills_manifest": {
+                        "type": "object",
+                        "description": (
+                            "ENC-FTR-078 skill patch. JSON object re-validated against pinned "
+                            "agentskills_spec_version. (ref: document.skill)"
+                        ),
+                    },
+                    "agentskills_spec_version": {
+                        "type": "string",
+                        "description": (
+                            "ENC-FTR-078 skill patch. Non-empty string; triggers manifest re-validation. "
+                            "(ref: document.skill)"
+                        ),
+                    },
+                    "runtime_variants": {
+                        "type": "object",
+                        "description": (
+                            "ENC-FTR-078 skill patch. JSON object. Replaces existing runtime_variants. "
+                            "(ref: document.skill)"
+                        ),
+                    },
+                    "source_record_id": {
+                        "type": "string",
+                        "description": "Tracker record ID the handoff targets (e.g. ENC-TSK-XXX). (ref: document.handoff)",
+                    },
+                    "handoff_status": {
+                        "type": "string",
+                        "enum": ["pending", "claimed", "completed", "stale"],
+                        "description": "Handoff lifecycle state. Canonical path to advance handoff docs. (ref: document.handoff)",
+                    },
+                    "prerequisite_state": {
+                        "type": "string",
+                        "description": "Plain-English description of state required before handoff executor begins. (ref: document.handoff)",
+                    },
+                    "verification_criteria": {
+                        "type": "string",
+                        "description": "Plain-English description of how handoff success is verified. (ref: document.handoff)",
+                    },
+                    "action_checklist": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ordered checklist the handoff executor should follow. (ref: document.handoff)",
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "description": "Optional handoff expiry in ISO 8601 format. (ref: document.handoff)",
+                    },
+                    "source_incident_id": {
+                        "type": "string",
+                        "description": "Tracker record ID of the incident a COE investigates. (ref: document.coe)",
+                    },
+                    "coe_status": {
+                        "type": "string",
+                        "enum": ["drafting", "investigating", "published", "superseded"],
+                        "description": "COE lifecycle status. (ref: document.coe)",
+                    },
+                    "plan_anchor_id": {
+                        "type": "string",
+                        "description": "Plan record ID this wave tracks (must contain '-PLN-'). (ref: document.wave)",
+                    },
+                    "wave_status": {
+                        "type": "string",
+                        "enum": ["active", "complete", "archived"],
+                        "description": "Wave lifecycle status. (ref: document.wave)",
+                    },
+                    "informed_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Source documents that informed this one (GDMP provenance). (ref: document.graph_edges)",
+                    },
+                    "document_maturity_state": {
+                        "type": "string",
+                        "enum": ["raw", "compliant", "contextualized", "mature"],
+                        "description": "GDMP maturity lifecycle. Canonical path to advance maturity via patch. (ref: docstore.document)",
                     },
                     "governance_hash": {
                         "type": "string",
@@ -4268,6 +4535,16 @@ async def list_tools() -> list[Tool]:
                     "non_ui_config": {
                         "type": "object",
                         "description": "Non-UI deployment config for infrastructure deployment types.",
+                    },
+                    "source_artifact_s3_key": {
+                        "type": "string",
+                        "description": (
+                            "Optional S3 key for a pre-built Lambda artifact zip. "
+                            "Format: lambda-artifacts/{git_sha}/{arch_tag}/{function_name}.zip "
+                            "where arch_tag is x86_64-py311 (prod) or arm64-py312 (gamma). "
+                            "When present, deploy_intake validates the arch tag matches "
+                            "the target environment."
+                        ),
                     },
                     "governance_hash": {
                         "type": "string",
@@ -5111,6 +5388,197 @@ async def _tracker_get(args: dict) -> list[TextContent]:
     return _result_text(record)
 
 
+# --- ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions ---------
+# Pure projection helpers live in ``manifest_projection``. Handlers are thin
+# wrappers that fetch a record (or set of records) via the existing tracker
+# API GET path and emit a manifest, AC body, or worklog projection.
+
+from manifest_projection import (  # noqa: E402  (lazy import keeps cold-start lean)
+    BULK_LIMIT_ERROR_CODE as _MANIFEST_BULK_LIMIT_CODE,
+    INDEX_OUT_OF_RANGE_ERROR_CODE as _MANIFEST_AC_OOR_CODE,
+    coerce_indices as _manifest_coerce_indices,
+    compute_content_hash as _manifest_content_hash,
+    filter_worklogs as _manifest_filter_worklogs,
+    project_ac_body as _manifest_project_ac_body,
+    project_record_manifest as _manifest_project_record,
+    project_worklog_body as _manifest_project_worklog_body,
+    project_worklog_metadata as _manifest_project_worklog_metadata,
+    staleness_envelope as _manifest_staleness_envelope,
+)
+
+_MANIFEST_BULK_CAP = 50
+
+
+def _manifest_fetch_record(record_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Fetch one record via the tracker API GET path.
+
+    Returns ``(record, None)`` on success or ``(None, error_payload)`` on
+    failure. The record dict is the same shape that ``_tracker_get`` consumes
+    — the worklog history is preserved (this read path explicitly needs it).
+    """
+    try:
+        project_id, record_type, rid = _parse_record_id(record_id)
+    except ValueError as exc:
+        return None, {"error": str(exc), "record_id": record_id}
+    resp = _tracker_api_request("GET", f"/{project_id}/{record_type}/{rid}")
+    if resp.get("error"):
+        return None, {"error_payload": resp, "record_id": record_id}
+    record = resp.get("record", resp)
+    return record, None
+
+
+async def _tracker_manifest(args: dict) -> list[TextContent]:
+    """Per-AC manifest + record-level addendum for a single record."""
+    record_id = args.get("record_id")
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+    fields = args.get("fields")
+    record, err = _manifest_fetch_record(str(record_id))
+    if err is not None:
+        return _result_text(err.get("error_payload") or err)
+    return _result_text(_manifest_project_record(record, fields=fields))
+
+
+async def _tracker_get_acs(args: dict) -> list[TextContent]:
+    """Subset AC body fetch with bounds + freshness validation."""
+    record_id = args.get("record_id")
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+    raw_indices = args.get("indices")
+    if raw_indices is None:
+        return _result_text({"error": "indices is required"})
+    try:
+        indices = _manifest_coerce_indices(raw_indices)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+    if not indices:
+        return _result_text({"error": "indices must be non-empty"})
+    supplied_hash = args.get("content_hash")
+    record, err = _manifest_fetch_record(str(record_id))
+    if err is not None:
+        return _result_text(err.get("error_payload") or err)
+    current_hash = _manifest_content_hash(record)
+    if supplied_hash and str(supplied_hash) != current_hash:
+        return _result_text(
+            _manifest_staleness_envelope(str(record_id), current_hash, str(supplied_hash))
+        )
+    ac_list = record.get("acceptance_criteria") or []
+    out: List[Dict[str, Any]] = []
+    for idx in indices:
+        if idx >= len(ac_list):
+            return _result_text({
+                "error": True,
+                "error_code": _MANIFEST_AC_OOR_CODE,
+                "record_id": record_id,
+                "index": idx,
+                "ac_count": len(ac_list),
+            })
+        out.append(_manifest_project_ac_body(ac_list[idx], idx))
+    return _result_text({
+        "record_id": str(record_id),
+        "acs": out,
+        "content_hash": current_hash,
+    })
+
+
+async def _tracker_worklog_timeline(args: dict) -> list[TextContent]:
+    """Metadata-only worklog projection ordered by timestamp ascending."""
+    record_id = args.get("record_id")
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+    record, err = _manifest_fetch_record(str(record_id))
+    if err is not None:
+        return _result_text(err.get("error_payload") or err)
+    history = record.get("history") if isinstance(record.get("history"), list) else []
+    indexed = list(enumerate(history))
+    indexed.sort(key=lambda pair: str(pair[1].get("timestamp") or ""))
+    timeline = [_manifest_project_worklog_metadata(entry, idx) for idx, entry in indexed]
+    return _result_text({
+        "record_id": str(record_id),
+        "timeline": timeline,
+        "count": len(timeline),
+        "content_hash": _manifest_content_hash(record),
+    })
+
+
+async def _tracker_worklogs(args: dict) -> list[TextContent]:
+    """Bounded worklog body fetch (time window or explicit ID set)."""
+    record_id = args.get("record_id")
+    if not record_id:
+        return _result_text({"error": "record_id is required"})
+    since = args.get("since")
+    until = args.get("until")
+    ids = args.get("ids")
+    supplied_hash = args.get("content_hash")
+    record, err = _manifest_fetch_record(str(record_id))
+    if err is not None:
+        return _result_text(err.get("error_payload") or err)
+    current_hash = _manifest_content_hash(record)
+    if supplied_hash and str(supplied_hash) != current_hash:
+        return _result_text(
+            _manifest_staleness_envelope(str(record_id), current_hash, str(supplied_hash))
+        )
+    history = record.get("history") if isinstance(record.get("history"), list) else []
+    matched = _manifest_filter_worklogs(history, since=since, until=until, ids=ids)
+    out = [_manifest_project_worklog_body(entry, idx) for idx, entry in matched]
+    return _result_text({
+        "record_id": str(record_id),
+        "worklogs": out,
+        "count": len(out),
+        "content_hash": current_hash,
+    })
+
+
+async def _tracker_manifest_bulk(args: dict) -> list[TextContent]:
+    """Parallel batch manifest fetch (cap ``_MANIFEST_BULK_CAP``)."""
+    record_ids = args.get("record_ids")
+    if not isinstance(record_ids, list) or not record_ids:
+        return _result_text({"error": "record_ids must be a non-empty list"})
+    if len(record_ids) > _MANIFEST_BULK_CAP:
+        return _result_text({
+            "error": True,
+            "error_code": _MANIFEST_BULK_LIMIT_CODE,
+            "limit": _MANIFEST_BULK_CAP,
+            "supplied": len(record_ids),
+            "retry_guidance": (
+                f"tracker.manifest_bulk caps at {_MANIFEST_BULK_CAP} record_ids "
+                "per call. Split the request into batches and call again."
+            ),
+        })
+    fields = args.get("fields")
+
+    def _one(rid: str) -> Dict[str, Any]:
+        record, err = _manifest_fetch_record(rid)
+        if err is not None:
+            envelope = {"record_id": rid}
+            envelope.update(err)
+            return envelope
+        manifest = _manifest_project_record(record, fields=fields)
+        return {
+            "record_id": rid,
+            "manifest": manifest,
+            "content_hash": manifest.get("content_hash") or _manifest_content_hash(record),
+        }
+
+    loop = asyncio.get_running_loop()
+    results = await asyncio.gather(
+        *(loop.run_in_executor(None, _one, str(rid)) for rid in record_ids)
+    )
+    manifests: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for entry in results:
+        if "manifest" in entry:
+            manifests.append(entry)
+        else:
+            errors.append(entry)
+    return _result_text({
+        "manifests": manifests,
+        "errors": errors,
+        "manifest_count": len(manifests),
+        "error_count": len(errors),
+    })
+
+
 def _normalized_status(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -5412,6 +5880,21 @@ async def _tracker_log(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+# ENC-TSK-F76 / ENC-ISS-289: tracker.create forwards every body field through
+# to tracker_mutation via a denylist-driven loop, mirroring the documents_passthrough
+# pattern introduced by ENC-TSK-C71 / ENC-ISS-158. The previous explicit whitelist
+# silently dropped any tracker field not enumerated here — most recently `components`,
+# which forced a redundant post-checkout tracker.set before the first advance could
+# satisfy ENC-FTR-041. The denylist excludes MCP-plumbing keys so they don't bleed
+# into the downstream POST body; every other field declared in tracker_mutation's
+# governance schema forwards automatically, and tracker_mutation remains the single
+# source of truth for which fields are valid per record_type.
+_TRACKER_CREATE_BODY_DENYLIST = frozenset({
+    "project_id",
+    "record_type",
+})
+
+
 async def _tracker_create(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash(args)
     if governance_error:
@@ -5420,33 +5903,18 @@ async def _tracker_create(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
     record_type = args["record_type"]
 
-    # --- Phase 2d: HTTP API migration ---
-    # All validation (ontology, governed fields, ID generation, bidirectional relations)
-    # is handled by the tracker Lambda.
     payload: Dict[str, Any] = {
         "title": args["title"],
         "governance_hash": args.get("governance_hash", ""),
     }
-    for key in ("priority", "description", "assigned_to", "status", "severity",
-                "hypothesis", "technical_notes", "location_hint",
-                "success_metrics", "related", "dispatch_id",
-                "coordination", "coordination_request_id", "acceptance_criteria",
-                "user_story", "category", "intent", "evidence", "primary_task",
-                "provider", "is_child", "parent_task_id",
-                # ENC-TSK-C26 / ENC-ISS-175: forward transition_type so create-time-only
-                # arcs (no_code, code_only) can actually be set on agent-created tasks.
-                "transition_type",
-                # ENC-TSK-A97: Plan-specific fields
-                "objectives_set", "attached_documents", "related_feature_id",
-                # ENC-TSK-C70 / ENC-ISS-192: forward lesson-specific fields so the
-                # generic execute(tracker.create) action properly routes lesson payloads
-                # to tracker_mutation. Without these, lesson creates fail with
-                # "Lesson creation requires observation" because the field is dropped
-                # before the downstream Lambda sees it.
-                "observation", "insight", "confidence", "evidence_chain",
-                "provenance", "pillar_scores", "analysis_reference"):
-        if args.get(key) is not None:
-            payload[key] = args[key]
+    for key in args:
+        if key in _TRACKER_CREATE_BODY_DENYLIST:
+            continue
+        if key in payload:
+            continue
+        if args.get(key) is None:
+            continue
+        payload[key] = args[key]
 
     resp = _tracker_api_request("POST", f"/{project_id}/{record_type}", payload=payload)
     return _result_text(resp)
@@ -5497,6 +5965,11 @@ async def _documents_search(args: dict) -> list[TextContent]:
         query["related"] = args["related"]
     if args.get("title"):
         query["title"] = args["title"]
+    # ENC-FTR-077 subtype filter + ENC-FTR-078 subtypepattern filter (AC-17).
+    if args.get("document_subtype"):
+        query["document_subtype"] = args["document_subtype"]
+    if args.get("subtypepattern"):
+        query["subtypepattern"] = args["subtypepattern"]
 
     resp = _document_api_request("GET", "/search", query=query or None)
     return _result_text(resp)
@@ -5555,6 +6028,14 @@ def _enrich_document_compliance_response(result: dict) -> dict:
     return result
 
 
+# ENC-TSK-E63 / ENC-TSK-C71: open-passthrough body construction for the
+# document_api bridge. Mirror _tracker_create's denylist-driven pattern so
+# new subtype fields land in document_api automatically instead of silently
+# dropping on an outdated whitelist (ENC-ISS-158).
+_DOCUMENTS_PUT_BODY_DENYLIST = frozenset({"governance_hash"})
+_DOCUMENTS_PATCH_BODY_DENYLIST = frozenset({"governance_hash", "document_id"})
+
+
 async def _documents_put(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash_envelope(args)
     if governance_error:
@@ -5572,9 +6053,12 @@ async def _documents_put(args: dict) -> list[TextContent]:
         "title": args["title"],
         "content": args["content"],
     }
-    for key in ("description", "keywords", "related_items", "file_name"):
-        if key in args and args.get(key) is not None:
-            body[key] = args.get(key)
+    for key in args:
+        if key in _DOCUMENTS_PUT_BODY_DENYLIST:
+            continue
+        if args.get(key) is None:
+            continue
+        body[key] = args[key]
 
     result = _document_api_request("PUT", payload=body)
     if _is_authentication_required_error(result):
@@ -5607,9 +6091,12 @@ async def _documents_patch(args: dict) -> list[TextContent]:
         )
 
     body: Dict[str, Any] = {}
-    for key in ("title", "content", "description", "keywords", "related_items", "status", "file_name", "document_maturity_state"):
-        if key in args and args.get(key) is not None:
-            body[key] = args.get(key)
+    for key in args:
+        if key in _DOCUMENTS_PATCH_BODY_DENYLIST:
+            continue
+        if args.get(key) is None:
+            continue
+        body[key] = args[key]
     if not body:
         return _result_text(
             _error_payload(
@@ -5724,6 +6211,342 @@ async def _document_complete_handoff(args: dict) -> list[TextContent]:
             document_id,
         )
     return _result_text(result)
+
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-077 / ENC-TSK-E53: COE + Wave docstore subtype MCP execute actions
+# ---------------------------------------------------------------------------
+
+
+async def _document_create_coe(args: dict) -> list[TextContent]:
+    """Create a COE document with required fields."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    project_id = str(args.get("project_id") or "").strip()
+    title = str(args.get("title") or "").strip()
+    content = str(args.get("content") or "").strip()
+    source_incident_id = str(args.get("source_incident_id") or "").strip()
+
+    if not project_id:
+        return _result_text(_error_payload("INVALID_INPUT", "project_id is required"))
+    if not title:
+        return _result_text(_error_payload("INVALID_INPUT", "title is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not source_incident_id:
+        return _result_text(_error_payload("INVALID_INPUT", "source_incident_id is required for COE documents"))
+
+    body: Dict[str, Any] = {
+        "project_id": project_id,
+        "title": title,
+        "content": content,
+        "document_subtype": "coe",
+        "source_incident_id": source_incident_id,
+    }
+    for key in ("description", "keywords", "related_items", "file_name", "informed_by"):
+        if key in args and args.get(key) is not None:
+            body[key] = args[key]
+
+    result = _document_api_request("PUT", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_create_coe: document API auth failed for project %s",
+            project_id,
+        )
+    return _result_text(result)
+
+
+async def _document_create_wave(args: dict) -> list[TextContent]:
+    """Create a wave coordination document anchored to a plan."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    project_id = str(args.get("project_id") or "").strip()
+    title = str(args.get("title") or "").strip()
+    content = str(args.get("content") or "").strip()
+    plan_anchor_id = str(args.get("plan_anchor_id") or "").strip()
+
+    if not project_id:
+        return _result_text(_error_payload("INVALID_INPUT", "project_id is required"))
+    if not title:
+        return _result_text(_error_payload("INVALID_INPUT", "title is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not plan_anchor_id:
+        return _result_text(_error_payload("INVALID_INPUT", "plan_anchor_id is required for wave documents"))
+
+    body: Dict[str, Any] = {
+        "project_id": project_id,
+        "title": title,
+        "content": content,
+        "document_subtype": "wave",
+        "plan_anchor_id": plan_anchor_id,
+    }
+    for key in ("description", "keywords", "related_items", "file_name"):
+        if key in args and args.get(key) is not None:
+            body[key] = args[key]
+
+    result = _document_api_request("PUT", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_create_wave: document API auth failed for project %s",
+            project_id,
+        )
+    return _result_text(result)
+
+
+async def _document_create_note(args: dict) -> list[TextContent]:
+    """Create an ad-hoc governed note with document_subtype='doc' (ENC-ISS-259).
+
+    Purpose: give coord-lead / supervisor sessions a first-class, discoverable
+    governed write path for notes, checklists, or orchestration artifacts that
+    do not need a source-record binding (no source_record_id, no plan_anchor_id,
+    no source_incident_id). Wraps documents.put with subtype pinned to 'doc'
+    and denies caller override of subtype.
+    """
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    project_id = str(args.get("project_id") or "").strip()
+    title = str(args.get("title") or "").strip()
+    content = str(args.get("content") or "").strip()
+
+    if not project_id:
+        return _result_text(_error_payload("INVALID_INPUT", "project_id is required"))
+    if not title:
+        return _result_text(_error_payload("INVALID_INPUT", "title is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+
+    # Deny caller override of document_subtype; notes are always subtype=doc.
+    if "document_subtype" in args and args.get("document_subtype") not in (None, "", "doc"):
+        return _result_text(_error_payload(
+            "INVALID_INPUT",
+            "document.create_note pins document_subtype='doc'; do not pass a different subtype. "
+            "Use document.create_handoff / document.create_coe / document.create_wave for those "
+            "subtypes, or documents.put directly for anything else.",
+        ))
+
+    body: Dict[str, Any] = {
+        "project_id": project_id,
+        "title": title,
+        "content": content,
+        "document_subtype": "doc",
+    }
+    # Forward the common optional fields that coord-lead notes commonly carry.
+    for key in ("description", "keywords", "related_items", "file_name", "informed_by"):
+        if key in args and args.get(key) is not None:
+            body[key] = args[key]
+
+    result = _document_api_request("PUT", payload=body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_create_note: document API auth failed for project %s",
+            project_id,
+        )
+    return _result_text(result)
+
+
+async def _document_append_handoff_reply(args: dict) -> list[TextContent]:
+    """Append a structured reply block to a handoff document."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    content = str(args.get("content") or "").strip()
+    agent_layer = str(args.get("agent_layer") or "").strip()
+
+    if not document_id:
+        return _result_text(_error_payload("INVALID_INPUT", "document_id is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not agent_layer:
+        return _result_text(_error_payload("INVALID_INPUT", "agent_layer is required"))
+
+    valid_layers = {"supervisor", "coord-lead", "dispatched-agent", "product-lead-terminal"}
+    if agent_layer not in valid_layers:
+        return _result_text(_error_payload(
+            "INVALID_INPUT",
+            f"agent_layer must be one of: {', '.join(sorted(valid_layers))}",
+        ))
+
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc).isoformat()
+    author = str(args.get("author") or agent_layer).strip()
+    originating_ref = str(args.get("originating_handoff_ref") or document_id).strip()
+
+    reply_block = (
+        f"---\n"
+        f"reply_author: {author}\n"
+        f"reply_timestamp: {now}\n"
+        f"agent_layer: {agent_layer}\n"
+        f"originating_handoff_ref: {originating_ref}\n"
+        f"---\n\n"
+        f"{content}"
+    )
+
+    patch_body: Dict[str, Any] = {"append_content": reply_block}
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=patch_body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_append_handoff_reply: document API auth failed for document %s",
+            document_id,
+        )
+
+    # AC-5: Dual-append for product-lead-terminal
+    is_success = isinstance(result, dict) and (
+        result.get("success") or result.get("document_id")
+    )
+    if agent_layer == "product-lead-terminal" and is_success:
+        await _dual_append_to_wave(args, content, now, author, document_id)
+
+    return _result_text(result)
+
+
+async def _document_append_wave_entry(args: dict) -> list[TextContent]:
+    """Append a wave entry with agent-layer classification."""
+    governance_error = _require_governance_hash_envelope(args)
+    if governance_error:
+        return _result_text(governance_error)
+
+    document_id = str(args.get("document_id") or "").strip()
+    content = str(args.get("content") or "").strip()
+    agent_layer = str(args.get("agent_layer") or "").strip()
+
+    if not document_id:
+        return _result_text(_error_payload("INVALID_INPUT", "document_id is required"))
+    if not content:
+        return _result_text(_error_payload("INVALID_INPUT", "content is required"))
+    if not agent_layer:
+        return _result_text(_error_payload("INVALID_INPUT", "agent_layer is required"))
+
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc).isoformat()
+    author = str(args.get("author") or agent_layer).strip()
+    originating_handoff_ref = str(args.get("originating_handoff_ref") or "").strip()
+
+    # Construct wave entry with frontmatter
+    frontmatter_lines = [
+        "---",
+        f"reply_author: {author}",
+        f"reply_timestamp: {now}",
+        f"agent_layer: {agent_layer}",
+    ]
+    if originating_handoff_ref:
+        frontmatter_lines.append(f"originating_handoff_ref: {originating_handoff_ref}")
+    frontmatter_lines.append("---")
+
+    entry_block = "\n".join(frontmatter_lines) + f"\n\n{content}"
+
+    patch_body: Dict[str, Any] = {"append_content": entry_block}
+    encoded_id = urllib.parse.quote(document_id, safe="")
+    result = _document_api_request("PATCH", path=f"/{encoded_id}", payload=patch_body)
+    if _is_authentication_required_error(result):
+        logger.error(
+            "[ERROR] document_append_wave_entry: document API auth failed for document %s",
+            document_id,
+        )
+    return _result_text(result)
+
+
+async def _dual_append_to_wave(
+    args: dict,
+    content: str,
+    timestamp: str,
+    author: str,
+    handoff_doc_id: str,
+) -> None:
+    """Best-effort append to active wave doc when product-lead appends to handoff.
+
+    AC-5 (ENC-FTR-077): product-lead terminal sessions append to BOTH the
+    originating handoff doc AND the active wave doc. Handoff append always
+    succeeds even if wave append fails.
+    """
+    try:
+        # Fetch the handoff document to get project_id for wave search
+        encoded_id = urllib.parse.quote(handoff_doc_id, safe="")
+        doc_resp = _document_api_request(
+            "GET", f"/{encoded_id}", query={"include_content": "false"},
+        )
+        if not isinstance(doc_resp, dict):
+            logger.warning("Dual-append: could not fetch handoff %s", handoff_doc_id)
+            return
+
+        # Extract project_id from the document or its nested document key
+        doc = doc_resp.get("document", doc_resp)
+        project_id = doc.get("project_id", "")
+        if not project_id:
+            logger.warning("Dual-append: handoff %s has no project_id", handoff_doc_id)
+            return
+
+        # Search for wave docs in the same project
+        search_resp = _document_api_request(
+            "GET", "/search",
+            query={"project": project_id, "keyword": "wave"},
+        )
+        if not isinstance(search_resp, dict):
+            logger.warning("Dual-append: wave search failed for project %s", project_id)
+            return
+
+        wave_docs = (
+            search_resp.get("documents")
+            or search_resp.get("results")
+            or []
+        )
+
+        # Find an active wave doc (wave_status == "active" or status == "active")
+        active_wave = None
+        for wd in wave_docs:
+            subtype = wd.get("document_subtype", "")
+            if subtype != "wave":
+                continue
+            wave_status = wd.get("wave_status") or wd.get("status") or ""
+            if wave_status == "active":
+                active_wave = wd
+                break
+
+        if not active_wave:
+            logger.info("Dual-append: no active wave doc found for project %s, skipping", project_id)
+            return
+
+        wave_doc_id = active_wave.get("document_id") or active_wave.get("id")
+        if not wave_doc_id:
+            logger.warning("Dual-append: active wave doc has no document_id")
+            return
+
+        # Construct wave entry from the handoff reply
+        wave_entry = (
+            f"---\n"
+            f"reply_author: {author}\n"
+            f"reply_timestamp: {timestamp}\n"
+            f"agent_layer: product-lead-terminal\n"
+            f"originating_handoff_ref: {handoff_doc_id}\n"
+            f"---\n\n"
+            f"{content}"
+        )
+
+        wave_encoded_id = urllib.parse.quote(str(wave_doc_id), safe="")
+        wave_result = _document_api_request(
+            "PATCH", path=f"/{wave_encoded_id}",
+            payload={"append_content": wave_entry},
+        )
+
+        if isinstance(wave_result, dict) and (
+            wave_result.get("success") or wave_result.get("document_id")
+        ):
+            logger.info("Dual-append: successfully appended to wave %s", wave_doc_id)
+        else:
+            error_detail = wave_result.get("error", "unknown") if isinstance(wave_result, dict) else str(wave_result)
+            logger.warning("Dual-append: wave append failed: %s", error_detail)
+
+    except Exception as exc:
+        logger.warning("Dual-append: best-effort failed: %s", exc)
 
 
 async def _check_document_policy(args: dict) -> list[TextContent]:
@@ -6593,6 +7416,12 @@ _SEARCH_ACTIONS: Dict[str, Dict[str, Any]] = {
     "system.connection_health": {"tool": "connection_health"},
     "github.projects_list": {"tool": "github_projects_list"},
     "tracker.graphsearch": {"tool": "tracker_graphsearch"},
+    # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
+    "tracker.manifest": {"tool": "tracker_manifest"},
+    "tracker.get_acs": {"tool": "tracker_get_acs"},
+    "tracker.worklog_timeline": {"tool": "tracker_worklog_timeline"},
+    "tracker.worklogs": {"tool": "tracker_worklogs"},
+    "tracker.manifest_bulk": {"tool": "tracker_manifest_bulk"},
 }
 
 _COORDINATION_ACTIONS: Dict[str, Dict[str, Any]] = {
@@ -6659,6 +7488,56 @@ if ENABLE_HANDOFF_PRIMITIVE:
     }
     _EXECUTE_ACTIONS["document.complete_handoff"] = {
         "tool": "document_complete_handoff", "requires_governance_hash": True,
+    }
+    # ENC-FTR-077 / ENC-TSK-E53: COE + Wave docstore subtype actions
+    _EXECUTE_ACTIONS["document.create_coe"] = {
+        "tool": "document_create_coe", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.create_wave"] = {
+        "tool": "document_create_wave", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.append_handoff_reply"] = {
+        "tool": "document_append_handoff_reply", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["document.append_wave_entry"] = {
+        "tool": "document_append_wave_entry", "requires_governance_hash": True,
+    }
+
+# ENC-ISS-259: document.create_note \u2014 governed ad-hoc note path for coord-lead /
+# supervisor sessions. Wraps documents.put with document_subtype pinned to 'doc'.
+# Not gated behind ENABLE_HANDOFF_PRIMITIVE because the 'doc' subtype is the
+# stable, always-available baseline and pre-dates the handoff primitive rollout.
+_EXECUTE_ACTIONS["document.create_note"] = {
+    "tool": "document_create_note", "requires_governance_hash": True,
+}
+
+# ENC-FTR-076 / ENC-TSK-E08: Conditionally register component.propose behind feature flag
+if ENABLE_COMPONENT_PROPOSAL:
+    _EXECUTE_ACTIONS["component.propose"] = {
+        "tool": "component_propose", "requires_governance_hash": True,
+    }
+    # ENC-FTR-076 v2 / ENC-TSK-F40 (DOC-546B896390EA §9): state machine + edge
+    # + lifecycle actions. All 6 require governance hash (governed mutations).
+    # Authority enforcement (io-only vs agent-permitted) is server-side in
+    # coordination_api handlers — the MCP surface forwards the request along
+    # with the caller's Cognito claims so the Lambda can gate per action.
+    _EXECUTE_ACTIONS["component.advance"] = {
+        "tool": "component_advance", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.revert"] = {
+        "tool": "component_revert", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.deprecate"] = {
+        "tool": "component_deprecate", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.restore"] = {
+        "tool": "component_restore", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.add_edge"] = {
+        "tool": "component_add_edge", "requires_governance_hash": True,
+    }
+    _EXECUTE_ACTIONS["component.remove_edge"] = {
+        "tool": "component_remove_edge", "requires_governance_hash": True,
     }
 
 # ENC-FTR-058 / ENC-TSK-A97 / ENC-TSK-C09: Plan action aliases in code-mode surface
@@ -7237,6 +8116,74 @@ async def _get_compact_context_meta(args: dict) -> list[TextContent]:
             mode=mode,
         )
 
+    # ENC-TSK-B92 Phase 1: three-signal hybrid retrieval.
+    # Opt-in by passing `query` and/or `anchor_record_id`. Backward-compat:
+    # callers who do not pass either receive exactly the legacy context shape.
+    include_hybrid_retrieval = args.get("include_hybrid_retrieval")
+    query_text = str(args.get("query") or "").strip()
+    anchor_id = str(args.get("anchor_record_id") or "").strip()
+    # Default anchor for record-oriented modes: use the primary record_id.
+    if not anchor_id and mode in _RECORD_CONTEXT_MODES:
+        anchor_id = str(args.get("record_id") or "").strip()
+    # Infer project_id from args first, then from the assembled context.
+    hybrid_project_id = str(args.get("project_id") or "").strip()
+    if not hybrid_project_id and isinstance(context.get("record_context"), dict):
+        rc = context["record_context"]
+        hybrid_project_id = str((rc or {}).get("project_id") or "").strip()
+    if not hybrid_project_id and anchor_id:
+        try:
+            hybrid_project_id, _rt, _rid = _parse_record_id(anchor_id)
+        except Exception:
+            hybrid_project_id = ""
+
+    # Auto-enable when the caller provided a query or anchor and did not
+    # explicitly opt out. Explicit True is honored regardless.
+    should_invoke_hybrid = (
+        include_hybrid_retrieval is True
+        or (include_hybrid_retrieval is not False and (query_text or anchor_id))
+    )
+    if should_invoke_hybrid and hybrid_project_id and (query_text or anchor_id):
+        try:
+            hybrid_resp = _invoke_hybrid_retrieval(
+                project_id=hybrid_project_id,
+                query_text=query_text or None,
+                anchor_record_id=anchor_id or None,
+                record_type_filter=args.get("record_type"),
+                top_n=args.get("top_n"),
+                include_below_threshold=bool(args.get("include_below_threshold", False)),
+            )
+            underlying_calls.append({
+                "tool": "graph_query_api.hybrid",
+                "status": "success" if hybrid_resp.get("success") else "error",
+                "arguments": {
+                    "project_id": hybrid_project_id,
+                    "query": query_text,
+                    "anchor_record_id": anchor_id,
+                    "record_type": args.get("record_type"),
+                    "top_n": args.get("top_n"),
+                    "include_below_threshold": bool(args.get("include_below_threshold", False)),
+                },
+            })
+            if hybrid_resp.get("error"):
+                warnings.append(
+                    "hybrid retrieval unavailable: " + str(hybrid_resp.get("error"))
+                )
+            else:
+                context["hybrid_retrieval"] = {
+                    "nodes": hybrid_resp.get("nodes", []),
+                    "summary": hybrid_resp.get("summary", ""),
+                    "signal_availability": hybrid_resp.get("signal_availability", {}),
+                    "graph_algorithm": hybrid_resp.get("graph_algorithm"),
+                    "rrf_k": hybrid_resp.get("rrf_k"),
+                    "embedding_coverage_sample": hybrid_resp.get("embedding_coverage_sample", {}),
+                    "per_node_fusion": hybrid_resp.get("per_node_fusion", {}),
+                    "fsrs_t3_threshold": hybrid_resp.get("fsrs_t3_threshold"),
+                    "include_below_threshold": hybrid_resp.get("include_below_threshold"),
+                    "duration_ms": hybrid_resp.get("duration_ms"),
+                }
+        except Exception as exc:
+            warnings.append(f"hybrid retrieval failed: {exc}")
+
     # ENC-FTR-050: Context Node assembly manifest (flagged off by default)
     if ENABLE_CONTEXT_NODES and args.get("max_tokens"):
         try:
@@ -7505,6 +8452,7 @@ async def _deploy_submit(args: dict) -> list[TextContent]:
     merged_at = str(args.get("merged_at") or "")
     pr_owner = str(args.get("pr_owner") or "NX-2021-L")
     pr_repo = str(args.get("pr_repo") or "enceladus")
+    source_artifact_s3_key = str(args.get("source_artifact_s3_key") or "").strip()
 
     # Validate pr_id and merged_at
     if pr_id is None or not merged_at:
@@ -7600,6 +8548,8 @@ async def _deploy_submit(args: dict) -> list[TextContent]:
         body["github_config"] = github_config
     if isinstance(non_ui_config, dict):
         body["non_ui_config"] = non_ui_config
+    if source_artifact_s3_key:
+        body["source_artifact_s3_key"] = source_artifact_s3_key
 
     result = _deploy_api_request("POST", "/submit", payload=body)
     return _result_text(result)
@@ -7936,11 +8886,46 @@ async def _tracker_graphsearch(args: dict) -> list[TextContent]:
     for key in ("edge_types", "edge_type", "min_weight"):
         if args.get(key) is not None:
             query_params[key] = args[key]
+    # ENC-TSK-B92: hybrid-specific knobs (forwarded when search_type=hybrid)
+    for key in ("anchor_record_id", "top_n", "include_below_threshold"):
+        if args.get(key) is not None:
+            query_params[key] = args[key]
 
     resp = _graph_query_api_request(query=query_params)
     if resp.get("error"):
         return _result_text(resp)
     return _result_text(resp)
+
+
+def _invoke_hybrid_retrieval(
+    project_id: str,
+    query_text: Optional[str],
+    anchor_record_id: Optional[str],
+    record_type_filter: Optional[str] = None,
+    top_n: Optional[int] = None,
+    include_below_threshold: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Call the graph_query_api `hybrid` search_type via HTTP (ENC-TSK-B92).
+
+    Returns the raw response dict; callers inspect `error` / `success` keys.
+    """
+    params: Dict[str, Any] = {
+        "search_type": "hybrid",
+        "project_id": project_id,
+    }
+    q = (query_text or "").strip()
+    if q:
+        params["query"] = q
+    a = (anchor_record_id or "").strip()
+    if a:
+        params["anchor_record_id"] = a
+    if record_type_filter:
+        params["record_type"] = record_type_filter
+    if top_n is not None:
+        params["top_n"] = str(int(top_n))
+    if include_below_threshold:
+        params["include_below_threshold"] = "true"
+    return _graph_query_api_request(query=params)
 
 
 # --- ENC-FTR-049: Typed Relationship Edge Tools ---
@@ -8309,7 +9294,11 @@ async def _advance_task_status(args: dict) -> list[TextContent]:
     if record_type not in ("task", "plan"):
         return _result_text({"error": f"advance_task_status only applies to tasks and plans, not {record_type}"})
 
+    # ENC-ISS-266: checkout-service /advance endpoint requires active_agent_session_id
+    # in the request body for ownership-match enforcement. Mirror the pattern in
+    # _checkout_task above.
     payload: Dict[str, Any] = {
+        "active_agent_session_id": (args.get("active_agent_session_id") or "").strip(),
         "target_status": args["target_status"],
         "provider": args.get("provider", ""),
         "governance_hash": args.get("governance_hash", ""),
@@ -8358,7 +9347,11 @@ async def _append_worklog(args: dict) -> list[TextContent]:
             )
         })
 
+    # ENC-ISS-266: /log endpoint does not yet require active_agent_session_id, but forward
+    # it defensively to stay consistent with /checkout and /advance pattern. If the
+    # checkout-service tightens validation on /log later, this handler stays functional.
     payload: Dict[str, Any] = {
+        "active_agent_session_id": (args.get("active_agent_session_id") or "").strip(),
         "description": description,
         "governance_hash": args.get("governance_hash", ""),
     }
@@ -8570,7 +9563,10 @@ async def _plan_advance(args: dict) -> list[TextContent]:
     if record_type != "plan":
         return _result_text({"error": f"plan.advance requires a plan record_id, got {record_type}"})
 
+    # ENC-ISS-266: checkout-service /advance endpoint requires active_agent_session_id
+    # in the request body for ownership-match enforcement.
     payload: Dict[str, Any] = {
+        "active_agent_session_id": (args.get("active_agent_session_id") or "").strip(),
         "target_status": args.get("target_status", ""),
         "provider": args.get("provider", ""),
         "governance_hash": args.get("governance_hash", ""),
@@ -8853,6 +9849,192 @@ async def _tracker_extend_lesson(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+async def _component_propose(args: dict) -> list[TextContent]:
+    """Propose a new component record (ENC-FTR-076 / ENC-TSK-E08).
+
+    Forwards to coordination_api POST /api/v1/coordination/components/propose.
+    Gated by ENABLE_COMPONENT_PROPOSAL. The coordination_api writes the
+    component record with lifecycle_status=proposed and atomically emits a
+    COMPONENT_PROPOSED_BY typed relationship edge from the component to the
+    proposing_agent_session_id.
+    """
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    payload: Dict[str, Any] = {
+        "component_id": args.get("component_id", ""),
+        "display_name": args.get("display_name", ""),
+        "project_id": args.get("project_id", ""),
+        "source_paths": args.get("source_paths", []),
+        "description": args.get("description", ""),
+        "requested_minimum_transition_type": args.get("requested_minimum_transition_type", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("proposing_agent_session_id"):
+        payload["proposing_agent_session_id"] = args["proposing_agent_session_id"]
+    if args.get("category"):
+        payload["category"] = args["category"]
+
+    resp = _coordination_api_request(
+        "POST", "/components/propose", payload=payload,
+    )
+    return _result_text(resp)
+
+
+# ============================================================================
+# ENC-FTR-076 v2 / ENC-TSK-F40: state machine + edge + lifecycle MCP actions.
+# Each helper forwards to the coordination_api POST /components/{id}/<action>
+# endpoint. Server-side authority / gate validation lives in coordination_api;
+# the MCP surface is a thin governed wrapper.
+# ============================================================================
+
+
+def _component_require_component_id(args: dict) -> Tuple[str, Optional[Dict[str, Any]]]:
+    component_id = str(args.get("component_id") or "").strip()
+    if not component_id:
+        return "", {"error": "component_id is required"}
+    return component_id, None
+
+
+async def _component_advance(args: dict) -> list[TextContent]:
+    """component.advance — lifecycle_status advance (agent or io).
+
+    Agent-permitted targets: designed, development, production, code-red.
+    io-unrestricted within the governance transition_table.
+    """
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "target_status": args.get("target_status", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("reason"):
+        payload["reason"] = args["reason"]
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/advance", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_revert(args: dict) -> list[TextContent]:
+    """component.revert — io-only atomic archive.
+
+    Requires reverted_reason (min 10 chars). Writes lifecycle_status=archived,
+    reverted_at, reverted_reason, archived_at atomically.
+    """
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "reverted_reason": args.get("reverted_reason", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/revert", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_deprecate(args: dict) -> list[TextContent]:
+    """component.deprecate — io-only. Source must be in {production, development, code-red}."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("reason"):
+        payload["reason"] = args["reason"]
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/deprecate", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_restore(args: dict) -> list[TextContent]:
+    """component.restore — io-only. Source must be deprecated; target is production."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "governance_hash": args.get("governance_hash", ""),
+    }
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/restore", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_add_edge(args: dict) -> list[TextContent]:
+    """component.add_edge — typed edge (DESIGNS/IMPLEMENTS/DEPLOYS) write."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "edge_type": args.get("edge_type", ""),
+        "task_id": args.get("task_id", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/add_edge", payload=payload,
+    )
+    return _result_text(resp)
+
+
+async def _component_remove_edge(args: dict) -> list[TextContent]:
+    """component.remove_edge — typed edge delete (returns 423 if locked)."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    component_id, err = _component_require_component_id(args)
+    if err:
+        return _result_text(err)
+
+    payload: Dict[str, Any] = {
+        "edge_type": args.get("edge_type", ""),
+        "task_id": args.get("task_id", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+
+    resp = _coordination_api_request(
+        "POST", f"/components/{component_id}/remove_edge", payload=payload,
+    )
+    return _result_text(resp)
+
+
 async def _tracker_list_lessons(args: dict) -> list[TextContent]:
     """List lesson records for a project with optional filters."""
     project_id = args.get("project_id", "")
@@ -8924,6 +10106,12 @@ _TOOL_HANDLERS = {
     "github_projects_list": _github_projects_list,
     # ENC-FTR-047: Graph search
     "tracker_graphsearch": _tracker_graphsearch,
+    # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
+    "tracker_manifest": _tracker_manifest,
+    "tracker_get_acs": _tracker_get_acs,
+    "tracker_worklog_timeline": _tracker_worklog_timeline,
+    "tracker_worklogs": _tracker_worklogs,
+    "tracker_manifest_bulk": _tracker_manifest_bulk,
     # ENC-FTR-049: Typed relationship edges
     "tracker_create_relationship": _tracker_create_relationship,
     "tracker_archive_relationship": _tracker_archive_relationship,
@@ -8950,6 +10138,22 @@ _TOOL_HANDLERS = {
     "document_create_handoff": _document_create_handoff,
     "document_claim_handoff": _document_claim_handoff,
     "document_complete_handoff": _document_complete_handoff,
+    # ENC-FTR-077 / ENC-TSK-E53: COE + Wave docstore subtype tools
+    "document_create_coe": _document_create_coe,
+    "document_create_wave": _document_create_wave,
+    "document_append_handoff_reply": _document_append_handoff_reply,
+    "document_append_wave_entry": _document_append_wave_entry,
+    # ENC-ISS-259: ad-hoc governed note path (subtype='doc', no source binding)
+    "document_create_note": _document_create_note,
+    # ENC-FTR-076 / ENC-TSK-E08: Agent-proposable component registry
+    "component_propose": _component_propose,
+    # ENC-FTR-076 v2 / ENC-TSK-F40: state machine + edge + lifecycle actions
+    "component_advance": _component_advance,
+    "component_revert": _component_revert,
+    "component_deprecate": _component_deprecate,
+    "component_restore": _component_restore,
+    "component_add_edge": _component_add_edge,
+    "component_remove_edge": _component_remove_edge,
 }
 
 

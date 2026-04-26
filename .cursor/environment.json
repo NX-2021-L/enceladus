@@ -1,0 +1,3 @@
+{
+  "install": "python3 -m pip install --quiet --user mcp boto3 PyYAML; ENCELADUS_WORKSPACE_ROOT=$(pwd) ENCELADUS_SKIP_MCP_SMOKE_TEST=true ENCELADUS_ALLOW_KEYLESS_PROFILE=true tools/enceladus-mcp-server/install_profile.sh || true"
+}

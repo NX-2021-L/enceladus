@@ -1,20 +1,52 @@
 # Enceladus Workspace — Agent Bootstrap
 
-MCP server `enceladus` is configured in `~/.codex/config.toml`.
-Source: `tools/enceladus-mcp-server/server.py`
+MCP server `enceladus` is configured via remote HTTP gateway.
+- **Cursor Cloud Agents**: configured by `.cursor/mcp.json` (HTTP, proxied through backend — requires `ENCELADUS_COORDINATION_INTERNAL_API_KEY` secret in Cursor Dashboard).
+- **Local/Codex sessions**: configured in `~/.codex/config.toml` (run `tools/enceladus-mcp-server/install_profile.sh` to install).
+- Gateway URL: `https://jreese.net/api/v1/coordination/mcp`
+- Source: `tools/enceladus-mcp-server/server.py` (deployed as Lambda)
 
-## Initialization (REQUIRED — run in order every session)
+## Initialization (REQUIRED — 4 calls, in order)
 
-1. `mcp: connection_health` — verify DynamoDB/S3/API connectivity, get governance hash
-2. `mcp: governance_get("agents.md")` — **load full governance rules and execute all steps**
-3. `mcp: governance_dictionary` — load compact enum/constraint index
-4. `mcp: governance_get("agents/bootstrap-template.md")` — load session init protocol
-5. `mcp: governance_get("agents/lifecycle-primer.md")` — load lifecycle gates before any PR work
-6. `mcp: tracker_list(project_id="enceladus", record_type="task", status="open")` — open tasks
-7. `mcp: tracker_pending_updates(project_id="enceladus")` — pending updates
+Token-optimized init derived from `DOC-89D35679FE91` (enceladus-agent-webui-alpha skill). Saves ~15–20k tokens vs. the former 7-call sequence by deferring heavy governance fetches until actually needed.
 
-All operating rules, tool reference, and task policies are in `governance://agents.md`.
-Do not proceed with any work until steps 1-5 are complete.
+1. `mcp: connection_health` — verify DynamoDB/S3/API connectivity, capture `governance_hash`
+2. `mcp: tracker_list(project_id="enceladus", record_type="task", status="open", page_size=10)` — P0/P1 open tasks
+3. `mcp: tracker_list(project_id="enceladus", record_type="lesson", page_size=5)` — recent lessons
+4. `mcp: plan.objectives_status(record_id="ENC-PLN-006")` — active plan health
+
+After step 4, produce a 3–5 paragraph briefing: service status, priority tasks, active lessons, plan progress.
+
+## Lazy-Load Triggers (do NOT fetch at init)
+
+| Condition | Load |
+|---|---|
+| Task involves git / PR workflow | `governance.get("agents.md")` §7, §8 |
+| Task involves deploy / evidence schemas | `governance.get("agents.md")` §11 |
+| Task involves governance file edits | `governance.get("agents.md")` §13 |
+| Task involves OGTM compliance | `governance.get("agents.md")` §2a |
+| Creating or validating records | `governance.dictionary` |
+| Checking PWA state | `tracker.pending_updates` |
+| Full lifecycle arc / strictness rank table | `governance.get("agents/lifecycle-primer.md")` |
+
+Completed plans (e.g. ENC-PLN-012): static state — do not re-check.
+
+## Agent Skills (MCP docstore)
+
+Skills are stored as governed documents in the MCP docstore and loaded dynamically. Do not copy skill content into this file.
+
+```
+mcp: documents.search(project_id="enceladus", document_subtype="skill")
+```
+
+| Skill doc | Name | Use when |
+|---|---|---|
+| `DOC-89D35679FE91` | enceladus-agent-webui-alpha | Ad-hoc governed sessions, token-optimized init |
+| `DOC-D340B31BDDE9` | enceladus-skill-manual-sync | Export skill to claude.ai skill manager |
+| `DOC-84F23F2C80DC` | enc-cognito-auth | Authenticated curl/Playwright against PWA |
+| `DOC-654BB71C4420` | enceladus-doc-export-alpha | Canonicalize chat payload as docstore document |
+
+Load a skill: `mcp: documents.get(document_id="DOC-...")` — use `full_description` field as instructions.
 
 ## Git Lifecycle Quick Reference
 

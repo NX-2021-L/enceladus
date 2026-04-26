@@ -275,6 +275,60 @@ Resources:
       RouteKey: DELETE /api/v1/coordination/components/{componentId}
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-FTR-076 v2 / ENC-TSK-F40 — state machine + edge + lifecycle routes.
+  # advance/add_edge/remove_edge are agent+io (handler checks Cognito only for
+  # io-required paths); deprecate/restore/revert are io-only per DOC-546B896390EA §3.3.
+  # revert's prior sibling _handle_components_propose + _handle_components_approve
+  # registered under existing CFN routes; these six are additive.
+
+  # ENC-TSK-F75 / ENC-ISS-278 Mitigation A: RouteComponentsAdvance was provisioned
+  # out-of-band on API 8nkzqkmxqc (pre-F40 H-PREREQ) and exists as an orphan not
+  # managed by this stack. Leaving it unmanaged was chosen over deleting it (the
+  # route actively serves prod traffic).
+  # ENC-TSK-F85 / ENC-ISS-294: The five sibling routes below were also provisioned
+  # out-of-band. DeletionPolicy: Retain required for IMPORT change set adoption and
+  # retained permanently to protect live traffic routes from accidental deletion.
+
+  RouteComponentsAddEdge:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/add_edge
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsRemoveEdge:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/remove_edge
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsDeprecate:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/deprecate
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsRestore:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/restore
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteComponentsRevert:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/revert
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   # ---------------------------------------------------------------------------
   # Routes — Tracker Mutation
   # ---------------------------------------------------------------------------
@@ -459,6 +513,15 @@ Resources:
       RouteKey: POST /api/v1/deploy/trigger/{projectId}
       Target: !Sub integrations/${DeployIntakeIntegration}
 
+  # ENC-TSK-E57/E62: Deploy approval validation route for enceladus-approval-gate
+  # Supersedes CLI-created route zmra44n; makes the route IaC-managed.
+  RouteDeployValidateApproval:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/deploy/validate/approval/{prNumber}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
   # GMF routes (DOC-63420302EF65)
   RouteDeployQueue:
     Type: AWS::ApiGatewayV2::Route
@@ -494,6 +557,13 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/auth/refresh
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  RouteAuthGitHubToken:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/auth/github-token
       Target: !Sub integrations/${AuthRefreshIntegration}
 
   # NOTE: Changelog API routes (GET /api/v1/changelog/*) are provisioned by

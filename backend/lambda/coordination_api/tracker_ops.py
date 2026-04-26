@@ -191,32 +191,45 @@ def _set_tracker_status(
     record_id: str,
     new_status: str,
     note: str,
+    expected_prior_status: str,
     *,
     governance_hash: Optional[str] = None,
     coordination_request_id: Optional[str] = None,
     dispatch_id: Optional[str] = None,
     provider: Optional[str] = None,
-) -> None:
+) -> bool:
+    # ENC-ISS-282 / ENC-LSN-044: governed status writes must fail-closed if
+    # the record is not in the expected prior state. Caller MUST pass
+    # expected_prior_status. Returns True on write, False on drift (CCFX).
     _ = governance_hash, coordination_request_id, dispatch_id, provider
     project_id, _record_type, sk = _key_for_record_id(record_id)
     ddb = _get_ddb()
     now = _now_z()
-    ddb.update_item(
-        TableName=TRACKER_TABLE,
-        Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
-        UpdateExpression=(
-            "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
-            "sync_version = if_not_exists(sync_version, :zero) + :one"
-        ),
-        ExpressionAttributeNames={"#status": "status"},
-        ExpressionAttributeValues={
-            ":new_status": _serialize(new_status),
-            ":ts": _serialize(now),
-            ":note": _serialize(note[:1000]),
-            ":zero": _serialize(0),
-            ":one": _serialize(1),
-        },
-    )
+    try:
+        ddb.update_item(
+            TableName=TRACKER_TABLE,
+            Key={"project_id": _serialize(project_id), "record_id": _serialize(sk)},
+            UpdateExpression=(
+                "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
+                "sync_version = if_not_exists(sync_version, :zero) + :one"
+            ),
+            ConditionExpression="#status = :expected_prior",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":new_status": _serialize(new_status),
+                ":expected_prior": _serialize(expected_prior_status),
+                ":ts": _serialize(now),
+                ":note": _serialize(note[:1000]),
+                ":zero": _serialize(0),
+                ":one": _serialize(1),
+            },
+        )
+    except ddb.exceptions.ConditionalCheckFailedException:
+        logger.warning(
+            "coordination_api.tracker_ops: _set_tracker_status blocked for %s — expected prior=%s; record drifted, new_status=%s NOT written.",
+            record_id, expected_prior_status, new_status,
+        )
+        return False
     _append_tracker_history(
         record_id,
         "worklog",
@@ -226,6 +239,7 @@ def _set_tracker_status(
         dispatch_id=dispatch_id,
         provider=provider,
     )
+    return True
 
 
 def _resolve_project_id_for_prefix(prefix: str) -> Optional[str]:

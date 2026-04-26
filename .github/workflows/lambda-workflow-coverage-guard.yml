@@ -11,6 +11,7 @@ on:
   push:
     branches:
       - main
+      - 'v[0-9]*/main'
     paths:
       - "backend/lambda/**"
       - "infrastructure/cloudformation/02-compute.yaml"

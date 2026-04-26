@@ -46,3 +46,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/verify_lambda_arch_parity.py
+
+      - name: Test Lambda package architecture parity guard (ENC-TSK-E19)
+        run: |
+          set -euo pipefail
+          python3 -m unittest tools.test_verify_lambda_package_arch -v
