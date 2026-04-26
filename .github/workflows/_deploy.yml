@@ -1,9 +1,13 @@
 name: Deploy Lambda Artifacts (Gen2)
 
 # ENC-FTR-090 / ENC-PLN-041 Phase 2 / ENC-TSK-F60
+# ENC-TSK-G70: branch-based env routing. push to main → no-op (v3-prod is
+# workflow_dispatch-only). push to v4/main → build + deploy v4-gamma.
 #
 # AC-1: Sole prod-IAM-assumer. GitHubActions-V*-DeployRole is assumed ONLY here.
-#       push to main  → build (via _build.yml) then deploy to v4-gamma.
+#       push to v4/main → build (via _build.yml) then deploy to v4-gamma.
+#       push to main → skipped (deploy chain rebuilt in ENC-TSK-G71 fires v3-prod via
+#         post-gamma promotion + required-reviewer gate).
 #       workflow_dispatch → deploy a pre-built SHA to the specified target_environment.
 #       workflow_call → reusable entry point for programmatic callers.
 #       Concurrency group keyed per-environment with cancel-in-progress=false.
@@ -17,7 +21,7 @@ name: Deploy Lambda Artifacts (Gen2)
 
 on:
   push:
-    branches: [main]
+    branches: [main, v4/main]
   workflow_dispatch:
     inputs:
       target_environment:
@@ -55,11 +59,14 @@ env:
 jobs:
 
   # ---------------------------------------------------------------------------
-  # BUILD — runs only on push-to-main (gamma path).
+  # BUILD — runs only on push-to-v4/main (gamma path).
+  # push-to-main is intentionally a no-op: v3-prod is workflow_dispatch-only,
+  # and v4/main is forward-synced from main by the sync-main-to-v4main workflow
+  # (ENC-TSK-G71) which then triggers this workflow on the v4/main push.
   # workflow_dispatch / workflow_call callers provide a pre-built SHA.
   # ---------------------------------------------------------------------------
   build:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_name == 'v4/main'
     uses: ./.github/workflows/_build.yml
     with:
       commit_sha: ${{ github.sha }}
@@ -71,7 +78,15 @@ jobs:
   resolve:
     name: Resolve artifacts (${{ inputs.target_environment || 'v4-gamma' }})
     needs: [build]
-    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    # On push events, only proceed when the build job actually ran (v4/main).
+    # On workflow_dispatch / workflow_call, build is skipped — proceed with the
+    # caller-supplied commit_sha + target_environment.
+    if: |
+      always() &&
+      (
+        (github.event_name == 'push' && needs.build.result == 'success') ||
+        (github.event_name != 'push' && needs.build.result == 'skipped')
+      )
     runs-on: ubuntu-latest
     outputs:
       commit_sha:            ${{ steps.sha.outputs.commit_sha }}
