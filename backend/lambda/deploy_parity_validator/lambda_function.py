@@ -704,13 +704,13 @@ _DOCUMENT_RECORD_TYPE = "document"
 
 def _query_recent_records_by_type(table: str, index: str, record_type: str,
                                     limit: int) -> List[Dict]:
-    """Query a (record_type)-(updated_at) GSI for the N most-recently-mutated rows.
+    """Query a (record_type, updated_at) GSI for the N most-recently-mutated rows.
 
-    Both `devops-project-tracker` and `documents` ship a `type-updated-index`
-    GSI keyed (record_type HASH, updated_at RANGE). ScanIndexForward=False
-    yields newest first. Projection is INCLUDE (project_id/item_id only) so
-    the caller MUST GetItem the full record from the base table to obtain
-    prose fields.
+    Used against `devops-project-tracker` + its `type-updated-index` GSI
+    (HASH=record_type, RANGE=updated_at, Projection=INCLUDE). ScanIndexForward=False
+    yields newest first; the caller MUST follow up with GetItem on the base
+    table to obtain prose fields the GSI does not project. The documents
+    table has a different shape — see _query_recent_documents.
     """
     try:
         resp = _get_ddb().query(
@@ -757,6 +757,30 @@ def _get_record_full(table: str, key: Dict[str, Dict]) -> Optional[Dict[str, Any
     return _ddb_to_python(item) if item else None
 
 
+def _query_recent_documents(limit: int) -> List[Dict]:
+    """Query the documents table's project-updated-index GSI for the N most-
+    recently-mutated rows under project_id=enceladus.
+
+    Documents are keyed (document_id HASH) only — the base table has no
+    record_type or record_id. The project-updated-index GSI has Projection=ALL,
+    so the rows returned here already include every prose field the audit
+    needs; no follow-up GetItem is required.
+    """
+    try:
+        resp = _get_ddb().query(
+            TableName=DOCUMENTS_TABLE,
+            IndexName="project-updated-index",
+            KeyConditionExpression="project_id = :pid",
+            ExpressionAttributeValues={":pid": {"S": "enceladus"}},
+            ScanIndexForward=False,
+            Limit=limit,
+        )
+        return resp.get("Items", [])
+    except ClientError as e:
+        logger.error("recent-documents query failed: %s", e)
+        return []
+
+
 def _sample_recent_records(per_type_limit: int) -> List[Tuple[str, str, Dict[str, Any]]]:
     """Return ~sample_size (record_type, record_id, full_record) tuples.
 
@@ -765,6 +789,8 @@ def _sample_recent_records(per_type_limit: int) -> List[Tuple[str, str, Dict[str
     """
     sample: List[Tuple[str, str, Dict[str, Any]]] = []
 
+    # Tracker: query type-updated-index per record_type, then GetItem each
+    # row from the base table (the GSI projection is INCLUDE, not ALL).
     for rt in _TRACKER_RECORD_TYPES:
         rows = _query_recent_records_by_type(
             TRACKER_TABLE, "type-updated-index", rt, per_type_limit,
@@ -781,20 +807,13 @@ def _sample_recent_records(per_type_limit: int) -> List[Tuple[str, str, Dict[str
             if full:
                 sample.append((rt, record_id, full))
 
-    doc_rows = _query_recent_records_by_type(
-        DOCUMENTS_TABLE, "type-updated-index", _DOCUMENT_RECORD_TYPE, per_type_limit,
-    )
-    for row in doc_rows:
-        project_id  = row.get("project_id", {}).get("S", "")
-        document_id = row.get("document_id", {}).get("S", "") or row.get("record_id", {}).get("S", "")
-        if not project_id or not document_id:
+    # Documents: GSI projection is ALL so the query result is already complete.
+    for row in _query_recent_documents(per_type_limit):
+        document_id = row.get("document_id", {}).get("S", "")
+        if not document_id:
             continue
-        full = _get_record_full(
-            DOCUMENTS_TABLE,
-            {"project_id": {"S": project_id}, "document_id": {"S": document_id}},
-        )
-        if full:
-            sample.append((_DOCUMENT_RECORD_TYPE, document_id, full))
+        full = _ddb_to_python(row)
+        sample.append((_DOCUMENT_RECORD_TYPE, document_id, full))
 
     return sample
 
@@ -883,16 +902,29 @@ def _emit_drift_iss(run_at: str, sample_size: int, mismatch_count: int,
             f"missing={sorted(d['missing'])[:5]} extra={sorted(d['extra'])[:5]}"
         )
 
+    # tracker_mutation route: POST /api/v1/tracker/{project}/{type}.
+    # TRACKER_API_URL is the .../api/v1/tracker base, so we append /enceladus/issue.
+    # tracker_mutation requires issue records to ship at least one evidence
+    # entry with description + steps_to_duplicate (ENC-TSK-805 issue schema).
+    repro_steps = [
+        "1. Wait for the next scheduled mentions_drift_audit run (cron(0 10 * * ? *) via devops-parity-drift-daily).",
+        "2. Inspect /aws/lambda/devops-deploy-parity-validator CloudWatch logs for [START]/[END] mentions_drift_audit lines and the divergent_first_10 payload.",
+        "3. For each record_id in divergent_first_10, run search(action='tracker.graphsearch', arguments={record_id, search_type='neighbors', edge_types=['MENTIONS'], direction='outgoing', depth=1}) and compare against the prose-extractor output for the same record.",
+    ]
     body = {
-        "project_id":  "enceladus",
-        "record_type": "issue",
         "title":       f"MENTIONS drift detected — {mismatch_count}/{sample_size} records divergent",
         "description": "\n".join(detail_lines),
         "category":    "bug",
         "priority":    "P2",
         "source":      "mentions_drift_audit",
+        "evidence": [
+            {
+                "description":      "\n".join(detail_lines),
+                "steps_to_duplicate": repro_steps,
+            }
+        ],
     }
-    status, resp = _http("POST", f"{TRACKER_API_URL}/create", body=body)
+    status, resp = _http("POST", f"{TRACKER_API_URL}/enceladus/issue", body=body)
     if status not in (200, 201):
         logger.error("[ERROR] drift ENC-ISS create failed status=%s body=%s",
                      status, resp)
