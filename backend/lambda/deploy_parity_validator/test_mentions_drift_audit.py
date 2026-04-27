@@ -171,7 +171,8 @@ class TestEmitDriftIss:
             captured["method"] = method
             captured["url"] = url
             captured["body"] = body
-            return 201, {"item_id": "ENC-ISS-XXX"}
+            # tracker_mutation create returns {"success": True, "record_id": ..., "created_at": ...}.
+            return 201, {"success": True, "record_id": "ENC-ISS-XXX", "created_at": "2026-04-27T00:00:00Z"}
 
         divergent = [{"record_id": "ENC-TSK-A", "record_type": "task",
                       "missing": ["ENC-TSK-B01"], "extra": []}]
@@ -180,11 +181,21 @@ class TestEmitDriftIss:
             new_id = lf._emit_drift_iss("2026-04-27T00:00:00Z", 100, 5, divergent)
         assert new_id == "ENC-ISS-XXX"
         assert captured["method"] == "POST"
-        assert captured["url"].endswith("/create")
-        assert captured["body"]["record_type"] == "issue"
+        # tracker_mutation route is POST /api/v1/tracker/{project}/{type}.
+        assert captured["url"].endswith("/enceladus/issue")
+        # record_type is implied by the URL; body must NOT contain it (tracker_mutation
+        # rejects redundant fields). Schema requires title + description + evidence.
+        assert "record_type" not in captured["body"]
         assert captured["body"]["category"] == "bug"
         assert captured["body"]["source"] == "mentions_drift_audit"
         assert "5/100" in captured["body"]["title"]
+        # Issue creation requires a non-empty evidence list with description
+        # and steps_to_duplicate per tracker_mutation issue schema.
+        ev = captured["body"]["evidence"]
+        assert isinstance(ev, list) and len(ev) >= 1
+        assert ev[0]["description"]
+        assert isinstance(ev[0]["steps_to_duplicate"], list)
+        assert len(ev[0]["steps_to_duplicate"]) >= 1
 
     def test_returns_none_on_non_2xx(self):
         with patch.object(lf, "TRACKER_API_URL", "https://api.example/v1/tracker"), \
@@ -291,6 +302,78 @@ class TestRunMentionsDriftAudit:
             result = lf._run_mentions_drift_audit()
         assert len(result["divergent_first_10"]) == 10
         assert all("missing" in d for d in result["divergent_first_10"])
+
+
+# ---------------------------------------------------------------------------
+# _sample_recent_records — query-shape correctness for tracker + documents
+# ---------------------------------------------------------------------------
+
+class TestSampleRecentRecords:
+    def test_uses_correct_indexes_per_table(self):
+        """Tracker queries type-updated-index per record_type; documents queries
+        project-updated-index. The documents table has no type-updated-index
+        GSI — querying it would 400 at runtime."""
+        calls: List[Dict[str, Any]] = []
+
+        def fake_query(**kw):
+            calls.append({"table": kw["TableName"], "index": kw.get("IndexName")})
+            return {"Items": []}
+
+        def fake_get_item(**kw):
+            return {}
+
+        ddb_mock = types.SimpleNamespace(query=fake_query, get_item=fake_get_item)
+        with patch.object(lf, "_get_ddb", return_value=ddb_mock), \
+             patch.object(lf, "TRACKER_TABLE", "trk"), \
+             patch.object(lf, "DOCUMENTS_TABLE", "docs"):
+            lf._sample_recent_records(per_type_limit=5)
+
+        tracker_calls = [c for c in calls if c["table"] == "trk"]
+        doc_calls = [c for c in calls if c["table"] == "docs"]
+
+        # One tracker call per tracker record_type, all using type-updated-index.
+        assert len(tracker_calls) == len(lf._TRACKER_RECORD_TYPES)
+        assert all(c["index"] == "type-updated-index" for c in tracker_calls)
+
+        # Exactly one documents call, using project-updated-index.
+        assert len(doc_calls) == 1
+        assert doc_calls[0]["index"] == "project-updated-index"
+
+    def test_documents_skip_followup_get_item(self):
+        """The documents project-updated-index has Projection=ALL, so the
+        sample should consume the row directly without a second GetItem call."""
+        get_item_calls: List[Dict[str, Any]] = []
+
+        def fake_query(**kw):
+            if kw["TableName"] == "docs":
+                return {"Items": [{
+                    "document_id": {"S": "DOC-ABCDEF012345"},
+                    "project_id":  {"S": "enceladus"},
+                    "record_type": {"S": "document"},
+                    "title":       {"S": "Test doc"},
+                    "description": {"S": "see ENC-TSK-G43"},
+                    "content":     {"S": ""},
+                }]}
+            return {"Items": []}
+
+        def fake_get_item(**kw):
+            get_item_calls.append({"table": kw["TableName"], "key": kw.get("Key")})
+            return {}
+
+        ddb_mock = types.SimpleNamespace(query=fake_query, get_item=fake_get_item)
+        with patch.object(lf, "_get_ddb", return_value=ddb_mock), \
+             patch.object(lf, "TRACKER_TABLE", "trk"), \
+             patch.object(lf, "DOCUMENTS_TABLE", "docs"):
+            sample = lf._sample_recent_records(per_type_limit=5)
+
+        # Tracker GetItems may happen (none in this stub since Items: []).
+        # Documents GetItems must NOT happen.
+        assert all(c["table"] != "docs" for c in get_item_calls)
+        # The document row must be returned with the document_id as the second tuple element.
+        doc_records = [s for s in sample if s[0] == "document"]
+        assert len(doc_records) == 1
+        assert doc_records[0][1] == "DOC-ABCDEF012345"
+        assert doc_records[0][2]["title"] == "Test doc"
 
 
 # ---------------------------------------------------------------------------

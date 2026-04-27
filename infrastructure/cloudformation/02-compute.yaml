@@ -705,6 +705,10 @@ Resources:
           DOCUMENTS_TABLE:  !Sub "documents${EnvironmentSuffix}"
           MENTIONS_AUDIT_SAMPLE_SIZE: "100"
           MENTIONS_AUDIT_THRESHOLD:   "0.01"
+          # Required for the audit to POST drift findings to tracker_api
+          # (X-Coordination-Internal-Key) and to query graph_query_api when
+          # they enforce internal-key auth on service-to-service calls.
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
       Tags:
         - Key: Project
           Value: enceladus
