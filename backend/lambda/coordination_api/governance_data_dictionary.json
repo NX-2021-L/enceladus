@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-25.03",
-  "updated_at": "2026-04-26T00:36:46Z",
-  "last_change_summary": "ENC-FTR-098 / ENC-TSK-G36: graph_query_api._ALLOWED_EDGE_TYPES += MENTIONS (Unit 4 of MENTIONS Edge MVP). Documents the API-gate uplift; the dictionary entity graph_sync.mentions_extraction (added in 2026-04-25.02) already declared the contract.",
+  "version": "2026-04-27.01",
+  "updated_at": "2026-04-27T18:55:00Z",
+  "last_change_summary": "ENC-FTR-098 / ENC-TSK-G43: register monitoring.mentions_drift_audit entity covering Unit 6 (daily sample-and-diff against live MENTIONS edge state). The audit shares the prose-field allowlist with graph_sync.mentions_extraction so live and audit paths cannot drift. Chained into the existing devops-parity-drift-daily EventBridge rule (no new infra). Threshold-breach emits ENC-ISS via tracker_api.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5235,6 +5235,37 @@
         "alert_channel": {
           "type": "string",
           "definition": "SNS topic arn:aws:sns:<region>:<account>:enceladus-deploy-alerts. Alert published when total_anomalies > 0. Subject pattern: [drift-audit] N anomaly(ies) \u2014 <ISO timestamp>."
+        }
+      }
+    },
+    "monitoring.mentions_drift_audit": {
+      "description": "ENC-TSK-G43 / ENC-FTR-098 AC-7 \u2014 Daily sample-and-diff audit catching divergence between the live MENTIONS edge projection (graph_sync._reconcile_mentions_edges, ENC-TSK-G35) and the prose extracted from current record state. Implemented as the action=mentions_drift_audit handler in devops-deploy-parity-validator and chained synchronously into action=daily_drift_audit so the existing devops-parity-drift-daily EventBridge rule (cron(0 10 * * ? *)) fires both passes in one invocation. The audit imports the same backend/lambda/graph_sync/mentions_extraction.py module as graph_sync via the .build_extras manifest mechanism, guaranteeing the live and audit extractors cannot drift apart.",
+      "governing_feature": "ENC-FTR-098",
+      "governing_task": "ENC-TSK-G43",
+      "fields": {
+        "trigger": {
+          "type": "string",
+          "definition": "Two paths. (1) Chained from action=daily_drift_audit (cron(0 10 * * ? *) via devops-parity-drift-daily) inside _run_daily_drift_audit() after the existing checks. (2) Direct dispatch via action=mentions_drift_audit for ad-hoc invocation."
+        },
+        "sample_size": {
+          "type": "integer",
+          "definition": "Total records sampled per run (env MENTIONS_AUDIT_SAMPLE_SIZE, default 100). Distributed roughly evenly across the 6 tracker record_types in MENTIONS_PROSE_FIELDS plus the document table, queried via the type-updated-index GSI ScanIndexForward=False so the most-recently-mutated rows are picked first."
+        },
+        "extraction_parity": {
+          "type": "object",
+          "definition": "The audit imports graph_sync/mentions_extraction.py (MENTIONS_PROSE_FIELDS allowlist + extract_id_tokens + strip_code_fences) so its expected edge set is computed by the same code that emits the live edges. Drift between live and audit is structurally impossible by build."
+        },
+        "current_edge_query": {
+          "type": "string",
+          "definition": "graph_query_api /api/v1/tracker/graphsearch with search_type=neighbors, edge_types=MENTIONS, direction=outgoing, depth=1. Resolved from env GRAPHSEARCH_URL falling back to ${TRACKER_API_URL}/graphsearch. Transport failures cause the affected record to be skipped (counted as skipped_transport, excluded from the divergence ratio) rather than scored as zero-divergence."
+        },
+        "iss_emission": {
+          "type": "object",
+          "definition": "When mismatch_count / effective_sample > MENTIONS_AUDIT_THRESHOLD (env, default 0.01 = 1%), the audit POSTs to ${TRACKER_API_URL}/create with project_id=enceladus, record_type=issue, category=bug, priority=P2, source=mentions_drift_audit, description listing the first 10 divergent records (record_id, record_type, missing edge target_ids, extra edge target_ids)."
+        },
+        "iam_scope": {
+          "type": "string",
+          "definition": "DeployParityValidatorRole inline policy MentionsAuditTrackerRead grants dynamodb:GetItem and dynamodb:Query on devops-project-tracker${EnvironmentSuffix}, documents${EnvironmentSuffix}, and their /index/* GSIs. Read-only by design \u2014 ENC-ISS emission goes through the tracker_api HTTP path with X-Coordination-Internal-Key, not direct DDB write."
         }
       }
     },
