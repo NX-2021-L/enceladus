@@ -1,0 +1,5 @@
+# ENC-TSK-G43: cross-Lambda module sharing manifest.
+# Each non-comment line is a repo-relative path to a single file; the build
+# step copies it to the function root so the Lambda can `import` it normally.
+# Honored by .github/workflows/_build.yml.
+backend/lambda/graph_sync/mentions_extraction.py

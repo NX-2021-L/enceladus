@@ -13,7 +13,7 @@ guaranteed to extract identical token sets from the same input text.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, Set
+from typing import Any, Dict, Iterable, Set, Tuple
 
 # Triple-backtick fenced code blocks, optionally with a language tag on the
 # opening line. Markdown does not nest fences; the first matching closing run
@@ -27,6 +27,25 @@ _CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 DEFAULT_ID_ALPHABET = (
     "TSK", "ISS", "FTR", "LSN", "PLN", "GEN", "DPL",
 )
+
+# Prose-field allowlist per record_type. Mirrors dictionary entity
+# graph_sync.mentions_extraction (Unit 1, ENC-TSK-G33). Owned here so the
+# live reconciler (graph_sync._reconcile_mentions_edges) and the daily
+# drift audit (deploy_parity_validator._run_mentions_drift_audit) share
+# one definition; drift between them would silently emit false-positive
+# ENC-ISS records. Document subtype-specific structured fields are
+# excluded — those project as typed edges via the document branch in
+# graph_sync, so re-extracting them as MENTIONS would double-count.
+MENTIONS_PROSE_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "task":       ("title", "description", "intent"),
+    "issue":      ("title", "description", "hypothesis", "technical_notes",
+                   "location_hint"),
+    "feature":    ("title", "description", "user_story"),
+    "plan":       ("title", "description", "intent"),
+    "lesson":     ("title", "description"),
+    "generation": ("title", "description", "architectural_thesis"),
+    "document":   ("title", "description", "content"),
+}
 
 # Pre-compiled extractor for the default alphabet (the hot path).
 # Custom alphabets re-build the regex inside extract_id_tokens.
