@@ -25,7 +25,7 @@ import os
 import time
 import urllib.request
 import urllib.error
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
@@ -44,6 +44,20 @@ GITHUB_TOKEN_SECRET  = os.environ.get("GITHUB_TOKEN_SECRET", "devops/github-app/
 INTERNAL_API_KEY     = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
 ENVIRONMENT_SUFFIX   = os.environ.get("ENVIRONMENT_SUFFIX", "")  # "" = prod, "-gamma" = gamma
 AWS_REGION           = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
+
+# ENC-TSK-G43 / ENC-FTR-098 AC-7 — mentions_drift_audit config.
+# TRACKER_TABLE / DOCUMENTS_TABLE: source-of-truth tables sampled per record_type.
+# GRAPHSEARCH_URL: where the audit reads current MENTIONS edges. Falls back to
+#   ${TRACKER_API_URL}/graphsearch (same API Gateway base) if unset.
+# MENTIONS_AUDIT_SAMPLE_SIZE: total records sampled per run, distributed
+#   roughly evenly across record_types in MENTIONS_PROSE_FIELDS.
+# MENTIONS_AUDIT_THRESHOLD: mismatch_count / sample_size ratio above which
+#   an ENC-ISS record is auto-emitted (spec: 0.01 = 1%).
+TRACKER_TABLE        = os.environ.get("TRACKER_TABLE",   "devops-project-tracker")
+DOCUMENTS_TABLE      = os.environ.get("DOCUMENTS_TABLE", "documents")
+GRAPHSEARCH_URL      = os.environ.get("GRAPHSEARCH_URL", "")
+MENTIONS_AUDIT_SAMPLE_SIZE = int(os.environ.get("MENTIONS_AUDIT_SAMPLE_SIZE", "100"))
+MENTIONS_AUDIT_THRESHOLD   = float(os.environ.get("MENTIONS_AUDIT_THRESHOLD", "0.01"))
 
 # ENC-TSK-F64 / ENC-FTR-090 AC-20 — daily drift audit config
 SNS_TOPIC_ARN        = os.environ.get("SNS_TOPIC_ARN", "")
@@ -654,6 +668,327 @@ def _run_daily_drift_audit() -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-G43 / ENC-FTR-098 AC-7 — mentions_drift_audit
+# ---------------------------------------------------------------------------
+# Daily sample-and-diff: pull recently-mutated records, recompute the expected
+# MENTIONS edge set with the same pure helper graph_sync uses on the live
+# path (mentions_extraction.py, copied in via .build_extras), compare against
+# Neo4j current state via graphsearch HTTP, emit an ENC-ISS record when the
+# divergence ratio exceeds MENTIONS_AUDIT_THRESHOLD.
+#
+# Catches:
+#   - graph_sync handler bugs (extractor regression silently dropping edges).
+#   - SQS consumer lag where stream events fall behind real mutations.
+#   - Silent placeholder-MERGE failures when target labels can't be inferred.
+#
+# Reuses the existing devops-parity-drift-daily EventBridge rule by chaining
+# a synchronous call from _run_daily_drift_audit. Lambda timeout was raised to
+# accommodate both passes in one invocation.
+
+# Loaded via .build_extras at build time. Local import keeps import-time
+# cost off cold paths (pre_merge/deploy_watch don't need it).
+def _load_mentions_helpers():
+    from mentions_extraction import (  # type: ignore[import-not-found]
+        MENTIONS_PROSE_FIELDS,
+        extract_id_tokens,
+        strip_code_fences,
+    )
+    return MENTIONS_PROSE_FIELDS, extract_id_tokens, strip_code_fences
+
+
+_TRACKER_RECORD_TYPES = (
+    "task", "issue", "feature", "plan", "lesson", "generation",
+)
+_DOCUMENT_RECORD_TYPE = "document"
+
+
+def _query_recent_records_by_type(table: str, index: str, record_type: str,
+                                    limit: int) -> List[Dict]:
+    """Query a (record_type)-(updated_at) GSI for the N most-recently-mutated rows.
+
+    Both `devops-project-tracker` and `documents` ship a `type-updated-index`
+    GSI keyed (record_type HASH, updated_at RANGE). ScanIndexForward=False
+    yields newest first. Projection is INCLUDE (project_id/item_id only) so
+    the caller MUST GetItem the full record from the base table to obtain
+    prose fields.
+    """
+    try:
+        resp = _get_ddb().query(
+            TableName=table,
+            IndexName=index,
+            KeyConditionExpression="record_type = :rt",
+            ExpressionAttributeValues={":rt": {"S": record_type}},
+            ScanIndexForward=False,
+            Limit=limit,
+        )
+        return resp.get("Items", [])
+    except ClientError as e:
+        logger.error("recent-records query failed table=%s rt=%s: %s",
+                     table, record_type, e)
+        return []
+
+
+def _ddb_to_python(item: Dict) -> Dict[str, Any]:
+    """Lossy DDB attribute-value -> python conversion for prose-field reads.
+
+    Only handles the types the audit cares about: S (strings), N (numbers
+    coerced to str), and BOOL. Lists/maps/binary are dropped because the
+    extractor consumes only string prose fields.
+    """
+    out: Dict[str, Any] = {}
+    for key, val in item.items():
+        if "S" in val:
+            out[key] = val["S"]
+        elif "N" in val:
+            out[key] = val["N"]
+        elif "BOOL" in val:
+            out[key] = val["BOOL"]
+    return out
+
+
+def _get_record_full(table: str, key: Dict[str, Dict]) -> Optional[Dict[str, Any]]:
+    """GetItem and convert to a flat python dict the extractor can read."""
+    try:
+        resp = _get_ddb().get_item(TableName=table, Key=key, ConsistentRead=False)
+    except ClientError as e:
+        logger.warning("get_item failed table=%s key=%s: %s", table, key, e)
+        return None
+    item = resp.get("Item")
+    return _ddb_to_python(item) if item else None
+
+
+def _sample_recent_records(per_type_limit: int) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """Return ~sample_size (record_type, record_id, full_record) tuples.
+
+    Distributes the sample across MENTIONS_PROSE_FIELDS record_types so a
+    single high-traffic type cannot starve the others.
+    """
+    sample: List[Tuple[str, str, Dict[str, Any]]] = []
+
+    for rt in _TRACKER_RECORD_TYPES:
+        rows = _query_recent_records_by_type(
+            TRACKER_TABLE, "type-updated-index", rt, per_type_limit,
+        )
+        for row in rows:
+            project_id = row.get("project_id", {}).get("S", "")
+            record_id  = row.get("record_id", {}).get("S", "")
+            if not project_id or not record_id:
+                continue
+            full = _get_record_full(
+                TRACKER_TABLE,
+                {"project_id": {"S": project_id}, "record_id": {"S": record_id}},
+            )
+            if full:
+                sample.append((rt, record_id, full))
+
+    doc_rows = _query_recent_records_by_type(
+        DOCUMENTS_TABLE, "type-updated-index", _DOCUMENT_RECORD_TYPE, per_type_limit,
+    )
+    for row in doc_rows:
+        project_id  = row.get("project_id", {}).get("S", "")
+        document_id = row.get("document_id", {}).get("S", "") or row.get("record_id", {}).get("S", "")
+        if not project_id or not document_id:
+            continue
+        full = _get_record_full(
+            DOCUMENTS_TABLE,
+            {"project_id": {"S": project_id}, "document_id": {"S": document_id}},
+        )
+        if full:
+            sample.append((_DOCUMENT_RECORD_TYPE, document_id, full))
+
+    return sample
+
+
+def _expected_mentions_for(record_type: str, record_id: str, record: Dict[str, Any],
+                            mentions_fields: Dict[str, Tuple[str, ...]],
+                            extract_id_tokens: Any,
+                            strip_code_fences: Any) -> Set[str]:
+    """Mirror graph_sync._reconcile_mentions_edges' extraction logic exactly.
+
+    Drift between the live and audit extractors here would surface as
+    false-positive ENC-ISS records, so the helper module is shared (live
+    path imports from graph_sync/, audit path imports the same file via
+    .build_extras) and this function applies identical rules: fence-strip,
+    extract, drop self-mentions.
+    """
+    fields = mentions_fields.get(record_type, ())
+    expected: Set[str] = set()
+    for field_name in fields:
+        value = record.get(field_name, "")
+        if not isinstance(value, str) or not value:
+            continue
+        cleaned = strip_code_fences(value)
+        tokens = extract_id_tokens(cleaned)
+        tokens.discard(record_id)
+        expected |= tokens
+    return expected
+
+
+def _graphsearch_url() -> str:
+    """Resolve the graphsearch endpoint, falling back to the tracker base."""
+    if GRAPHSEARCH_URL:
+        return GRAPHSEARCH_URL
+    if TRACKER_API_URL:
+        return f"{TRACKER_API_URL}/graphsearch"
+    return ""
+
+
+def _current_mentions_for(record_id: str, project_id: str = "enceladus") -> Optional[Set[str]]:
+    """Query graphsearch for outgoing MENTIONS edges from this record.
+
+    Returns None on transport error so the caller can skip the record
+    rather than score it as zero-divergence (which would mask audit gaps).
+    """
+    url = _graphsearch_url()
+    if not url:
+        return None
+    qs = (f"?project_id={project_id}&search_type=neighbors&record_id={record_id}"
+          f"&edge_types=MENTIONS&direction=outgoing&depth=1")
+    status, body = _http("GET", url + qs)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    targets: Set[str] = set()
+    for edge in body.get("edges", []) or []:
+        target = edge.get("target") or edge.get("to") or edge.get("target_id")
+        if isinstance(target, str) and target:
+            targets.add(target)
+    # Some graphsearch responses surface the neighbors as `nodes` with the
+    # source filtered out; consume that shape too.
+    if not targets:
+        for node in body.get("nodes", []) or []:
+            nid = node.get("record_id") or node.get("id")
+            if isinstance(nid, str) and nid and nid != record_id:
+                targets.add(nid)
+    return targets
+
+
+def _emit_drift_iss(run_at: str, sample_size: int, mismatch_count: int,
+                     divergent: List[Dict]) -> Optional[str]:
+    """Create an ENC-ISS record via tracker_api when the threshold is breached.
+
+    Returns the new record_id on success, None on failure (already logged).
+    """
+    if not TRACKER_API_URL:
+        logger.warning("TRACKER_API_URL not set; cannot emit drift ENC-ISS")
+        return None
+
+    detail_lines = [
+        f"mentions_drift_audit run_at={run_at}",
+        f"sample_size={sample_size} mismatch_count={mismatch_count} ratio={mismatch_count / max(sample_size, 1):.4f}",
+        "First divergent records:",
+    ]
+    for d in divergent[:10]:
+        detail_lines.append(
+            f"  {d['record_id']} ({d['record_type']}): "
+            f"missing={sorted(d['missing'])[:5]} extra={sorted(d['extra'])[:5]}"
+        )
+
+    body = {
+        "project_id":  "enceladus",
+        "record_type": "issue",
+        "title":       f"MENTIONS drift detected — {mismatch_count}/{sample_size} records divergent",
+        "description": "\n".join(detail_lines),
+        "category":    "bug",
+        "priority":    "P2",
+        "source":      "mentions_drift_audit",
+    }
+    status, resp = _http("POST", f"{TRACKER_API_URL}/create", body=body)
+    if status not in (200, 201):
+        logger.error("[ERROR] drift ENC-ISS create failed status=%s body=%s",
+                     status, resp)
+        return None
+    new_id = (resp or {}).get("item_id") or (resp or {}).get("record_id", "")
+    logger.info("[INFO] drift ENC-ISS emitted: %s", new_id)
+    return new_id
+
+
+def _run_mentions_drift_audit() -> Dict:
+    """Sample 100 recent records, diff expected vs live MENTIONS edges, emit ISS on >threshold."""
+    run_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    logger.info("[START] mentions_drift_audit run_at=%s sample_target=%d threshold=%.4f",
+                run_at, MENTIONS_AUDIT_SAMPLE_SIZE, MENTIONS_AUDIT_THRESHOLD)
+
+    try:
+        mentions_fields, extract_id_tokens, strip_code_fences = _load_mentions_helpers()
+    except Exception as exc:
+        logger.error("[ERROR] mentions_extraction import failed: %s", exc)
+        return {
+            "action": "mentions_drift_audit",
+            "run_at": run_at,
+            "status": "error",
+            "error":  f"mentions_extraction import failed: {exc}",
+        }
+
+    # Distribute sample across the 6 tracker types + documents, +1 per-type
+    # buffer to absorb GetItem misses.
+    types_total = len(_TRACKER_RECORD_TYPES) + 1
+    per_type_limit = max(1, MENTIONS_AUDIT_SAMPLE_SIZE // types_total + 2)
+
+    sample = _sample_recent_records(per_type_limit)
+    if len(sample) > MENTIONS_AUDIT_SAMPLE_SIZE:
+        sample = sample[:MENTIONS_AUDIT_SAMPLE_SIZE]
+
+    logger.info("[INFO] mentions_drift_audit sampled=%d records", len(sample))
+
+    divergent: List[Dict] = []
+    skipped = 0
+
+    for record_type, record_id, record in sample:
+        expected = _expected_mentions_for(
+            record_type, record_id, record, mentions_fields,
+            extract_id_tokens, strip_code_fences,
+        )
+        current = _current_mentions_for(record_id)
+        if current is None:
+            skipped += 1
+            continue
+        missing = expected - current
+        extra   = current - expected
+        if missing or extra:
+            divergent.append({
+                "record_id":   record_id,
+                "record_type": record_type,
+                "missing":     list(missing),
+                "extra":       list(extra),
+            })
+
+    effective_sample = max(len(sample) - skipped, 1)
+    mismatch_count   = len(divergent)
+    ratio            = mismatch_count / effective_sample
+    breach           = ratio > MENTIONS_AUDIT_THRESHOLD
+
+    iss_record_id: Optional[str] = None
+    if breach:
+        iss_record_id = _emit_drift_iss(run_at, effective_sample, mismatch_count, divergent)
+
+    result: Dict[str, Any] = {
+        "action":            "mentions_drift_audit",
+        "run_at":            run_at,
+        "status":            "ok",
+        "sample_size":       len(sample),
+        "skipped_transport": skipped,
+        "effective_sample":  effective_sample,
+        "mismatch_count":    mismatch_count,
+        "mismatch_ratio":    round(ratio, 4),
+        "threshold":         MENTIONS_AUDIT_THRESHOLD,
+        "threshold_breached": breach,
+        "iss_emitted":       iss_record_id,
+        "divergent_first_10": [
+            {
+                "record_id":   d["record_id"],
+                "record_type": d["record_type"],
+                "missing":     sorted(d["missing"])[:5],
+                "extra":       sorted(d["extra"])[:5],
+            }
+            for d in divergent[:10]
+        ],
+    }
+    logger.info("[END] mentions_drift_audit mismatch=%d/%d ratio=%.4f breached=%s iss=%s",
+                mismatch_count, effective_sample, ratio, breach, iss_record_id or "-")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Pre-merge analysis + fix pass
 # ---------------------------------------------------------------------------
 def _run_pre_merge(event: Dict) -> Dict:
@@ -772,8 +1107,23 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         elif action in ("deploy_watch", "pr_merged"):
             result = _run_deploy_watch(event)
         elif action == "daily_drift_audit":
-            # ENC-TSK-F64 / ENC-FTR-090 AC-20 — triggered by devops-parity-drift-daily schedule
+            # ENC-TSK-F64 / ENC-FTR-090 AC-20 — triggered by devops-parity-drift-daily schedule.
+            # ENC-TSK-G43 chains mentions_drift_audit into the same daily slot per the spec
+            # ("schedule daily at the existing cron(0 10 * * ? *) slot via the EventBridge
+            # rule devops-parity-drift-daily"); a failure in one pass does not skip the other.
             result = _run_daily_drift_audit()
+            try:
+                result["mentions_audit"] = _run_mentions_drift_audit()
+            except Exception as mexc:
+                logger.exception("[ERROR] mentions_drift_audit chain failed: %s", mexc)
+                result["mentions_audit"] = {
+                    "action": "mentions_drift_audit",
+                    "status": "error",
+                    "error":  str(mexc),
+                }
+        elif action == "mentions_drift_audit":
+            # ENC-TSK-G43 / ENC-FTR-098 AC-7 — direct dispatch for ad-hoc invocation.
+            result = _run_mentions_drift_audit()
         else:
             return {
                 "statusCode": 400,
