@@ -9,10 +9,42 @@ import pytest
 
 from mentions_extraction import (
     DEFAULT_ID_ALPHABET,
+    MENTIONS_PROSE_FIELDS,
     extract_id_tokens,
     stamp_provenance,
     strip_code_fences,
 )
+
+
+# ---------------------------------------------------------------------------
+# MENTIONS_PROSE_FIELDS (ENC-TSK-G43)
+# ---------------------------------------------------------------------------
+# The allowlist is the single source of truth shared between the live
+# reconciler (graph_sync.lambda_function) and the daily drift audit
+# (deploy_parity_validator). Drift between them would silently emit
+# false-positive ENC-ISS records, so these guards are load-bearing.
+
+class TestMentionsProseFields:
+    def test_covers_all_governed_record_types(self):
+        expected = {"task", "issue", "feature", "plan", "lesson",
+                    "generation", "document"}
+        assert set(MENTIONS_PROSE_FIELDS) == expected
+
+    def test_every_record_type_has_title_and_description(self):
+        for record_type, fields in MENTIONS_PROSE_FIELDS.items():
+            assert "title" in fields, f"{record_type} missing title"
+            assert "description" in fields, f"{record_type} missing description"
+
+    def test_issue_includes_hypothesis_and_technical_notes(self):
+        assert "hypothesis" in MENTIONS_PROSE_FIELDS["issue"]
+        assert "technical_notes" in MENTIONS_PROSE_FIELDS["issue"]
+
+    def test_document_includes_content(self):
+        assert "content" in MENTIONS_PROSE_FIELDS["document"]
+
+    def test_fields_are_immutable_tuples(self):
+        for record_type, fields in MENTIONS_PROSE_FIELDS.items():
+            assert isinstance(fields, tuple), f"{record_type}: expected tuple"
 
 
 # ---------------------------------------------------------------------------

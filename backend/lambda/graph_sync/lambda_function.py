@@ -48,6 +48,7 @@ from embedding import (
 # (ENC-TSK-G35), the one-shot corpus backfill (ENC-TSK-G42), and the daily
 # drift audit (ENC-TSK-G43) so all three derive identical token sets.
 from mentions_extraction import (
+    MENTIONS_PROSE_FIELDS as _MENTIONS_PROSE_FIELDS,
     extract_id_tokens,
     stamp_provenance,
     strip_code_fences,
@@ -872,23 +873,6 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # ENC-FTR-098 / ENC-TSK-G35: MENTIONS edge auto-extraction (prose -> graph)
 # ---------------------------------------------------------------------------
-
-# Prose-field allowlist per record_type. Mirrors the dictionary entity
-# graph_sync.mentions_extraction (Unit 1, ENC-TSK-G33). Document subtype-
-# specific structured fields (source_record_id, plan_anchor_id, ...) are
-# intentionally excluded — those project as typed edges via the document
-# branch above, so re-extracting them as MENTIONS would double-count.
-_MENTIONS_PROSE_FIELDS: Dict[str, Tuple[str, ...]] = {
-    "task":       ("title", "description", "intent"),
-    "issue":      ("title", "description", "hypothesis", "technical_notes",
-                   "location_hint"),
-    "feature":    ("title", "description", "user_story"),
-    "plan":       ("title", "description", "intent"),
-    "lesson":     ("title", "description"),
-    "generation": ("title", "description", "architectural_thesis"),
-    "document":   ("title", "description", "content"),
-}
-
 
 def _reconcile_mentions_edges(
     tx,

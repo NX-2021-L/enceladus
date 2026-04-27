@@ -125,6 +125,26 @@ jobs:
             # Copy source.
             rsync -a --exclude='__pycache__' --exclude='*.pyc' "$srcdir/" "$workdir/"
 
+            # ENC-TSK-G43: cross-Lambda module sharing via .build_extras manifest.
+            # Each non-comment line is a path (relative to repo root) to a single
+            # file that gets copied to the function root. Used by Lambdas that
+            # import a pure-helper module owned by another Lambda dir
+            # (e.g. graph_sync/mentions_extraction.py -> deploy_parity_validator).
+            # The manifest itself is stripped from the build artifact.
+            if [ -f "$workdir/.build_extras" ]; then
+              while IFS= read -r extra; do
+                [ -z "$extra" ] && continue
+                case "$extra" in \#*) continue ;; esac
+                if [ ! -f "$extra" ]; then
+                  echo "ERROR: $fn .build_extras references missing file: $extra" >&2
+                  exit 1
+                fi
+                cp "$extra" "$workdir/$(basename "$extra")"
+                echo "  [extras] $fn <- $extra"
+              done < "$workdir/.build_extras"
+              rm -f "$workdir/.build_extras"
+            fi
+
             # Install deps to the same dir \u2014 arch-locked wheels only.
             if [ -f "$workdir/requirements.txt" ]; then
               python -m pip install \
