@@ -75,3 +75,15 @@ Define one idempotent startup contract for terminal sessions that may begin with
 - `COORDINATION_PREFLIGHT_ERROR={"stage":"mcp",...}` on failure paths
 
 These markers provide deterministic evidence during validation matrix runs.
+
+## Required Environment Variables (stdio mode only)
+
+HTTP gateway surfaces (Claude Code, Codex, Cursor desktop, Cursor cloud, claude.ai web) are unaffected — the coordination_api gateway enforces code mode independently of env vars.
+
+For sessions running `tools/enceladus-mcp-server/server.py` directly via stdio (local development, test harness, future stdio-transport surfaces):
+
+| Variable | Required value | Effect if absent |
+|----------|---------------|-----------------|
+| `ENCELADUS_MCP_INTERFACE_MODE` | `code` | server.py defaults to raw mode (50+ tools instead of the governed 4-tool code-mode surface) |
+
+Set this in your shell or in the session launcher before invoking `server.py`. The `install_profile.sh` installer documents this requirement in the managed codex startup comment block.
