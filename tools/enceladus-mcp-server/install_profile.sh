@@ -159,8 +159,12 @@ import os
 import pathlib
 import re
 
+import sys
 cfg = pathlib.Path(os.environ["CODEX_CONFIG_FILE"])
 text = cfg.read_text() if cfg.exists() else ""
+
+if "mcp.jreese.net" in text:
+    print("[WARNING] Existing codex config contains legacy URL (mcp.jreese.net) — overwriting with canonical URL.", file=sys.stderr)
 
 # Remove prior managed blocks to avoid duplicate TOML keys.
 text = re.sub(r"(?ms)^# BEGIN ENCELADUS CODEX STARTUP \(managed\)\n.*?# END ENCELADUS CODEX STARTUP \(managed\)\n?", "", text)
@@ -212,6 +216,7 @@ text += (
     "# - During init, load governance://agents/bootstrap-template.md and governance://agents/lifecycle-primer.md.\n"
     "# - Use MCP checkout_task / advance_task_status for the CAI -> CCI lifecycle; put CCI-... in the PR body.\n"
     "# - Prefer non-interactive git flows and operate from the task worktree CWD, not the shared main checkout.\n"
+    "# - For stdio-mode sessions (server.py direct): set ENCELADUS_MCP_INTERFACE_MODE=code to surface the governed 4-tool interface.\n"
     "# END ENCELADUS CODEX STARTUP (managed)\n\n"
 )
 
@@ -231,6 +236,11 @@ if auth_key:
     lines.append("")
     lines.append(f"[mcp_servers.{alias}.headers]")
     lines.append(f"X-Coordination-Internal-Key = {_toml_str(auth_key)}")
+
+for tool in ("search", "coordination", "get_compact_context", "execute"):
+    lines.append("")
+    lines.append(f"[mcp_servers.{alias}.tools.{tool}]")
+    lines.append(f"approval_mode = {_toml_str('approve')}")
 
 server_block = "\n".join(lines)
 managed = "# BEGIN ENCELADUS MCP PROFILE (managed)\n" + server_block + "\n# END ENCELADUS MCP PROFILE (managed)\n"
