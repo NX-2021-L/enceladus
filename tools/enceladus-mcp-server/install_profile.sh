@@ -171,7 +171,7 @@ text = re.sub(r"(?ms)^# BEGIN ENCELADUS CODEX STARTUP \(managed\)\n.*?# END ENCE
 text = re.sub(r"(?ms)^# BEGIN ENCELADUS MCP PROFILE \(managed\)\n.*?# END ENCELADUS MCP PROFILE \(managed\)\n?", "", text)
 alias = os.environ["MCP_PRIMARY_ALIAS"]
 # Remove any prior stdio or HTTP server sections for this alias.
-for section_suffix in ("", ".env", ".headers"):
+for section_suffix in ("", ".env", ".headers", ".http_headers"):
     text = re.sub(
         rf"(?ms)^\[mcp_servers\.{re.escape(alias)}{re.escape(section_suffix)}\]\n.*?(?=^\[|\Z)",
         "",
@@ -234,7 +234,7 @@ lines = [
 ]
 if auth_key:
     lines.append("")
-    lines.append(f"[mcp_servers.{alias}.headers]")
+    lines.append(f"[mcp_servers.{alias}.http_headers]")
     lines.append(f"X-Coordination-Internal-Key = {_toml_str(auth_key)}")
 
 for tool in ("search", "coordination", "get_compact_context", "execute"):
