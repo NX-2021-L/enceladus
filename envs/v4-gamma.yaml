@@ -32,7 +32,10 @@ appconfig_application_id: ""
 appconfig_environment_id: ""
 
 # ENC-TSK-F63 AC-2/AC-3: SnapStart (arm64/py3.12 — supported) and CodeDeploy.
-enable_snapstart: "true"
+# Disabled in gamma: SnapStart cached snapshot storage bills per GB-second per
+# published version, and the canary pipeline publishes a version on every deploy.
+# Cold-start latency is a prod concern only. Re-enable with a version-prune step.
+enable_snapstart: "false"
 environment_suffix: "-gamma"
 codedeploy_app_name: "enceladus-lambda-gamma"
 

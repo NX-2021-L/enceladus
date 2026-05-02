@@ -36,6 +36,9 @@ appconfig_application_id: ""
 appconfig_environment_id: ""
 
 # ENC-TSK-F63 AC-2/AC-3: SnapStart (arm64/py3.12 — supported) and CodeDeploy.
-enable_snapstart: "true"
+# Disabled (Sev1 cost incident 2026-04-22): SnapStart cached snapshot storage
+# bills per GB-second per published version. Re-enable only with a paired
+# version-prune step in the deploy pipeline.
+enable_snapstart: "false"
 environment_suffix: ""
 codedeploy_app_name: "enceladus-lambda"
