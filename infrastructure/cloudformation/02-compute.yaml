@@ -2181,6 +2181,21 @@ Resources:
                   - appconfig:GetLatestConfiguration
                   - appconfig:StartConfigurationSession
                 Resource: "*"
+        # ENC-ISS-304 / ENC-TSK-G94: re-grant the Bedrock Titan V2 invoke that the
+        # tombstoned per-Lambda deploy.sh ensure_role() used to apply. Required by
+        # backend/lambda/graph_sync/embedding.py invoke_titan_v2 for the
+        # hybrid-retrieval query-side embedding (the vector signal). Foundation-model
+        # ARNs are region-scoped and account-less.
+        - PolicyName: BedrockTitanInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BedrockTitanV2InvokeModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
       Tags:
         - Key: Project
           Value: enceladus
