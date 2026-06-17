@@ -1829,6 +1829,9 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): only live CloudWatch Logs grant; preserve.
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
         - PolicyName: InvokeFeedPublisher
           PolicyDocument:
@@ -1840,6 +1843,22 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}:*"
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): restore DynamoDB read dropped by ENC-TSK-G43.
+        - PolicyName: G95RestoredGrants
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DynamoDBRead
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -2313,6 +2332,9 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): out-of-band projects-read grant; preserve.
+        - !Sub "arn:aws:iam::${AWS::AccountId}:policy/projects-read-policy"
       Policies:
         - PolicyName: SqsEventSource
           PolicyDocument:
@@ -2337,6 +2359,54 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): restore business grants dropped by ENC-TSK-G43.
+        # Analytics/CloudFront/SNS gated on IsProduction (prod-only pipeline).
+        - PolicyName: G95RestoredGrants
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DynamoDBRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              - Sid: S3MobileFeedsWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
+              - Sid: EventBridgePut
+                Effect: Allow
+                Action: events:PutEvents
+                Resource: "*"
+              - !If
+                - IsProduction
+                - Sid: S3AnalyticsSyncStageWrite
+                  Effect: Allow
+                  Action: s3:PutObject
+                  Resource: "arn:aws:s3:::devops-agentcli-compute/projects/sync-stage/*"
+                - !Ref AWS::NoValue
+              - !If
+                - IsProduction
+                - Sid: CloudFrontInvalidation
+                  Effect: Allow
+                  Action: cloudfront:CreateInvalidation
+                  Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/E2BOQXCW1TA6Y4"
+                - !Ref AWS::NoValue
+              - !If
+                - IsProduction
+                - Sid: SNSPublish
+                  Effect: Allow
+                  Action: sns:Publish
+                  Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-project-json-sync"
+                - !Ref AWS::NoValue
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -2386,6 +2456,18 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): restore SNS publish (prod-only pipeline).
+        - !If
+          - IsProduction
+          - PolicyName: G95RestoredGrants
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Sid: SNSPublish
+                  Effect: Allow
+                  Action: sns:Publish
+                  Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-project-json-sync"
+          - !Ref AWS::NoValue
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -2655,6 +2737,7 @@ Resources:
                 Action:
                   - sqs:SendMessage
                   - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-FeedPublishQueueArn
 
@@ -2943,6 +3026,7 @@ Resources:
                 Action:
                   - sqs:SendMessage
                   - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       Tags:
