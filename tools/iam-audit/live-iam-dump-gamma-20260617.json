@@ -1,0 +1,1459 @@
+{
+  "_meta": {
+    "env": "gamma",
+    "generated": "2026-06-17"
+  },
+  "roles": {
+    "devops-coordination-api-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "devops-coordination-api-inline-gamma"
+      ],
+      "inline_policies": {
+        "devops-coordination-api-inline-gamma": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": [
+                "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/devops-coordination-api-gamma*",
+                "arn:aws:logs:us-west-2:356364570033:log-group:/enceladus/mcp/server*",
+                "arn:aws:logs:us-west-2:356364570033:log-group:/enceladus/coordination/worker-runtime*"
+              ]
+            },
+            {
+              "Sid": "CoordinationTableAccess",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:Query",
+                "dynamodb:Scan"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/coordination-requests-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/coordination-requests-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "TrackerTableAccess",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:Query",
+                "dynamodb:Scan",
+                "dynamodb:DescribeTable"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "ProjectsTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:Query"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/projects-gamma"
+            },
+            {
+              "Sid": "GovernancePoliciesReadWrite",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:Query",
+                "dynamodb:Scan",
+                "dynamodb:DescribeTable"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/governance-policies-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/governance-policies-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "DocumentsTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/documents-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/documents-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "ComponentRegistryTableAccess",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:Query",
+                "dynamodb:Scan"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/component-registry-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/component-registry-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "GovernanceAndReferenceS3Read",
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListBucket"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net"
+            },
+            {
+              "Sid": "GovernanceAndReferenceS3Get",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject"
+              ],
+              "Resource": [
+                "arn:aws:s3:::jreese-net/governance/*",
+                "arn:aws:s3:::jreese-net/projects/*",
+                "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+              ]
+            },
+            {
+              "Sid": "GovernanceS3Write",
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject"
+              ],
+              "Resource": [
+                "arn:aws:s3:::jreese-net/governance/live/*",
+                "arn:aws:s3:::jreese-net/governance/history/*"
+              ]
+            },
+            {
+              "Sid": "S3HeadBucket",
+              "Effect": "Allow",
+              "Action": [
+                "s3:HeadBucket",
+                "s3:GetBucketLocation"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net"
+            },
+            {
+              "Sid": "SSMDispatch",
+              "Effect": "Allow",
+              "Action": [
+                "ssm:SendCommand",
+                "ssm:GetCommandInvocation",
+                "ssm:ListCommands",
+                "ssm:ListCommandInvocations",
+                "ssm:DescribeInstanceInformation"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "EC2FleetDispatch",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:DescribeInstances",
+                "ec2:DescribeLaunchTemplates",
+                "ec2:DescribeLaunchTemplateVersions",
+                "ec2:RunInstances",
+                "ec2:TerminateInstances",
+                "ec2:CreateTags"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "ProviderSecretsRead",
+              "Effect": "Allow",
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret"
+              ],
+              "Resource": "arn:aws:secretsmanager:us-west-2:356364570033:secret:devops/coordination/*"
+            },
+            {
+              "Sid": "ComponentEventsTopicPublish",
+              "Effect": "Allow",
+              "Action": [
+                "sns:Publish"
+              ],
+              "Resource": "arn:aws:sns:us-west-2:356364570033:enceladus-component-registry-events-gamma"
+            },
+            {
+              "Sid": "CognitoTerminalAuth",
+              "Effect": "Allow",
+              "Action": [
+                "cognito-idp:InitiateAuth"
+              ],
+              "Resource": "arn:aws:cognito-idp:us-east-1:356364570033:userpool/us-east-1_b2D0V3E1k"
+            },
+            {
+              "Sid": "CognitoOAuthClientManagement",
+              "Effect": "Allow",
+              "Action": [
+                "cognito-idp:CreateUserPoolClient",
+                "cognito-idp:DeleteUserPoolClient",
+                "cognito-idp:DescribeUserPoolClient",
+                "cognito-idp:UpdateUserPoolClient"
+              ],
+              "Resource": "arn:aws:cognito-idp:us-east-1:356364570033:userpool/us-east-1_b2D0V3E1k"
+            },
+            {
+              "Sid": "BedrockAgentLifecycle",
+              "Effect": "Allow",
+              "Action": [
+                "bedrock:CreateAgent",
+                "bedrock:GetAgent",
+                "bedrock:DeleteAgent",
+                "bedrock:PrepareAgent",
+                "bedrock:CreateAgentActionGroup",
+                "bedrock:GetAgentActionGroup",
+                "bedrock:DeleteAgentActionGroup",
+                "bedrock:CreateAgentAlias",
+                "bedrock:GetAgentAlias",
+                "bedrock:DeleteAgentAlias",
+                "bedrock:AssociateAgentKnowledgeBase",
+                "bedrock:DisassociateAgentKnowledgeBase"
+              ],
+              "Resource": "arn:aws:bedrock:us-west-2:356364570033:agent/*"
+            },
+            {
+              "Sid": "BedrockAgentInvoke",
+              "Effect": "Allow",
+              "Action": [
+                "bedrock:InvokeAgent"
+              ],
+              "Resource": "arn:aws:bedrock:us-west-2:356364570033:agent-alias/*"
+            },
+            {
+              "Sid": "BedrockPassAgentRole",
+              "Effect": "Allow",
+              "Action": [
+                "iam:PassRole"
+              ],
+              "Resource": "arn:aws:iam::356364570033:role/enceladus-bedrock-agent-execution-role-gamma",
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": "bedrock.amazonaws.com"
+                }
+              }
+            },
+            {
+              "Sid": "FleetHostPassRole",
+              "Effect": "Allow",
+              "Action": [
+                "iam:PassRole"
+              ],
+              "Resource": "arn:aws:iam::356364570033:role/*",
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": "ec2.amazonaws.com"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "devops-tracker-mutation-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "devops-tracker-mutation-inline-gamma"
+      ],
+      "inline_policies": {
+        "devops-tracker-mutation-inline-gamma": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "events:PutEvents",
+              "Resource": "arn:aws:events:us-west-2:356364570033:event-bus/default"
+            }
+          ]
+        }
+      }
+    },
+    "devops-document-api-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "devops-document-api-inline-gamma"
+      ],
+      "inline_policies": {
+        "devops-document-api-inline-gamma": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/devops-document-api-gamma*"
+            },
+            {
+              "Sid": "DynamoDBDocuments",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:Query",
+                "dynamodb:Scan"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/documents-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/documents-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "DynamoDBProjectsRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/projects-gamma"
+            },
+            {
+              "Sid": "DynamoDBTrackerRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "S3DocumentsObjectAccess",
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net/agent-documents/*"
+            },
+            {
+              "Sid": "S3ReferenceRead",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject"
+              ],
+              "Resource": [
+                "arn:aws:s3:::jreese-net/mobile/v1/reference/*",
+                "arn:aws:s3:::jreese-net/governance/live/*"
+              ]
+            },
+            {
+              "Sid": "S3ListPrefixes",
+              "Effect": "Allow",
+              "Action": "s3:ListBucket",
+              "Resource": "arn:aws:s3:::jreese-net",
+              "Condition": {
+                "StringLike": {
+                  "s3:prefix": [
+                    "agent-documents/*",
+                    "mobile/v1/reference/*",
+                    "governance/live/*"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "devops-project-service-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "devops-project-service-policy"
+      ],
+      "inline_policies": {
+        "devops-project-service-policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "ProjectsTableFullAccess",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:Query",
+                "dynamodb:Scan"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/projects-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/projects-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "TrackerTableLimitedWrite",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:GetItem",
+                "dynamodb:Query"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "S3ReferenceWrite",
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net/gamma/mobile/v1/reference/*"
+            },
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:*"
+            }
+          ]
+        }
+      }
+    },
+    "devops-feed-query-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "InvokeFeedPublisher"
+      ],
+      "inline_policies": {
+        "InvokeFeedPublisher": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Resource": [
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-feed-publisher-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-feed-publisher-gamma:*"
+              ],
+              "Effect": "Allow",
+              "Sid": "InvokeFeedPublisher"
+            }
+          ]
+        }
+      }
+    },
+    "devops-coordination-monitor-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "devops-coordination-monitor-api-gamma-policy"
+      ],
+      "inline_policies": {
+        "devops-coordination-monitor-api-gamma-policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/devops-coordination-monitor-api-gamma*"
+            },
+            {
+              "Sid": "CoordinationTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:Scan",
+                "dynamodb:GetItem"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/coordination-requests-gamma"
+            }
+          ]
+        }
+      }
+    },
+    "devops-deploy-intake-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "devops-deploy-intake-inline-gamma"
+      ],
+      "inline_policies": {
+        "devops-deploy-intake-inline-gamma": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/devops-deploy-intake-gamma*"
+            },
+            {
+              "Sid": "DeployTableAccess",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:Query"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "ProjectsTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:Query"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/projects-gamma"
+            },
+            {
+              "Sid": "S3ConfigAccess",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net/deploy-config/*"
+            },
+            {
+              "Sid": "SQSSendMessage",
+              "Effect": "Allow",
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueUrl"
+              ],
+              "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-deploy-queue-gamma.fifo"
+            },
+            {
+              "Sid": "InvokeDocPrepLambda",
+              "Effect": "Allow",
+              "Action": [
+                "lambda:InvokeFunction"
+              ],
+              "Resource": [
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-doc-prep-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-doc-prep-gamma:*"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "devops-deploy-orchestrator-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "CloudWatchLogs",
+        "devops-deploy-orchestrator-inline-gamma",
+        "SqsEventSource"
+      ],
+      "inline_policies": {
+        "CloudWatchLogs": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:*",
+              "Effect": "Allow",
+              "Sid": "Logs"
+            }
+          ]
+        },
+        "devops-deploy-orchestrator-inline-gamma": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/devops-deploy-orchestrator-gamma*"
+            },
+            {
+              "Sid": "DeployTableAccess",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:Query"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "ProjectsTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:Query"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/projects-gamma"
+            },
+            {
+              "Sid": "TrackerTableWorklog",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:UpdateItem"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma"
+            },
+            {
+              "Sid": "S3ConfigAccess",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net/deploy-config/*"
+            },
+            {
+              "Sid": "S3SourceRead",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:ListBucket"
+              ],
+              "Resource": [
+                "arn:aws:s3:::jreese-net",
+                "arn:aws:s3:::jreese-net/deploy-sources/*"
+              ]
+            },
+            {
+              "Sid": "CodeBuildStart",
+              "Effect": "Allow",
+              "Action": [
+                "codebuild:StartBuild"
+              ],
+              "Resource": "arn:aws:codebuild:us-west-2:356364570033:project/devops-ui-deploy-builder-gamma"
+            },
+            {
+              "Sid": "SQSConsumer",
+              "Effect": "Allow",
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes"
+              ],
+              "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-deploy-queue-gamma.fifo"
+            }
+          ]
+        },
+        "SqsEventSource": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes"
+              ],
+              "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-deploy-queue-gamma.fifo",
+              "Effect": "Allow",
+              "Sid": "ConsumeDeployQueue"
+            }
+          ]
+        }
+      }
+    },
+    "devops-deploy-finalize-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [],
+      "inline_policies": {}
+    },
+    "devops-deploy-decide-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "DeployDecideInline"
+      ],
+      "inline_policies": {
+        "DeployDecideInline": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:PutItem",
+                "dynamodb:Query"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma/index/*"
+              ],
+              "Effect": "Allow",
+              "Sid": "DynamoDBAccess"
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": [
+                "arn:aws:secretsmanager:us-west-2:356364570033:secret:devops/github-app/*"
+              ],
+              "Effect": "Allow",
+              "Sid": "SecretsManagerAccess"
+            },
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "*",
+              "Effect": "Allow",
+              "Sid": "CloudWatchLogs"
+            }
+          ]
+        }
+      }
+    },
+    "devops-deploy-parity-validator-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "DeployParityValidatorInline"
+      ],
+      "inline_policies": {
+        "DeployParityValidatorInline": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "LambdaReadAndFixEnv",
+              "Effect": "Allow",
+              "Action": [
+                "lambda:GetFunctionConfiguration",
+                "lambda:UpdateFunctionConfiguration"
+              ],
+              "Resource": [
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-deploy-intake-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-deploy-decide-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-deploy-finalize-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-deploy-orchestrator-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-graph-query-api-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:enceladus-mcp-code-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:enceladus-mcp-streamable-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-coordination-api-gamma",
+                "arn:aws:lambda:us-west-2:356364570033:function:devops-github-integration-gamma"
+              ]
+            },
+            {
+              "Sid": "DeployTableAccess",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:Query"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "SecretsManagerRead",
+              "Effect": "Allow",
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": [
+                "arn:aws:secretsmanager:us-west-2:356364570033:secret:devops/github-app/*"
+              ]
+            },
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+      }
+    },
+    "devops-reference-search-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "devops-reference-search-inline"
+      ],
+      "inline_policies": {
+        "devops-reference-search-inline": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/devops-reference-search-gamma*"
+            },
+            {
+              "Sid": "S3ReferenceRead",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+            }
+          ]
+        }
+      }
+    },
+    "devops-feed-publisher-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "CloudWatchLogs",
+        "SqsEventSource"
+      ],
+      "inline_policies": {
+        "CloudWatchLogs": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:*",
+              "Effect": "Allow",
+              "Sid": "Logs"
+            }
+          ]
+        },
+        "SqsEventSource": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes"
+              ],
+              "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-feed-publish-queue-gamma.fifo",
+              "Effect": "Allow",
+              "Sid": "ConsumeFeedQueue"
+            }
+          ]
+        }
+      }
+    },
+    "enceladus-governance-audit-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "CloudWatchLogs",
+        "DynamoDBStreamEventSource"
+      ],
+      "inline_policies": {
+        "CloudWatchLogs": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:*",
+              "Effect": "Allow",
+              "Sid": "Logs"
+            }
+          ]
+        },
+        "DynamoDBStreamEventSource": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+                "dynamodb:DescribeStream",
+                "dynamodb:ListStreams"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma/stream/2026-04-03T16:43:15.010",
+              "Effect": "Allow",
+              "Sid": "ConsumeTrackerStream"
+            }
+          ]
+        }
+      }
+    },
+    "devops-doc-prep-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [],
+      "inline_policies": {}
+    },
+    "enceladus-bedrock-actions-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "enceladus-bedrock-actions-inline-gamma"
+      ],
+      "inline_policies": {
+        "enceladus-bedrock-actions-inline-gamma": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/enceladus-bedrock-agent-actions-gamma*"
+            },
+            {
+              "Sid": "TrackerTableAccess",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:Query",
+                "dynamodb:Scan"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "ProjectsTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query",
+                "dynamodb:Scan"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/projects-gamma"
+            },
+            {
+              "Sid": "DocumentsTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query",
+                "dynamodb:Scan"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/documents-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/documents-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "CoordinationTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/coordination-requests-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/coordination-requests-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "DeploymentTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma"
+            },
+            {
+              "Sid": "GovernancePoliciesRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:Query",
+                "dynamodb:Scan"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/governance-policies-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/governance-policies-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "ComplianceTableWrite",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:PutItem"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/agent-compliance-violations-gamma"
+            },
+            {
+              "Sid": "S3ReadAccess",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:ListBucket"
+              ],
+              "Resource": [
+                "arn:aws:s3:::jreese-net",
+                "arn:aws:s3:::jreese-net/agent-documents/*",
+                "arn:aws:s3:::jreese-net/reference/*"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "devops-changelog-api-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "devops-changelog-api-gamma-policy"
+      ],
+      "inline_policies": {
+        "devops-changelog-api-gamma-policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/devops-changelog-api-gamma*"
+            },
+            {
+              "Sid": "DeployTableRead",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:Query"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-deployment-manager-gamma/index/*"
+              ]
+            },
+            {
+              "Sid": "S3VersionRead",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net/deploy-config/*"
+            }
+          ]
+        }
+      }
+    },
+    "auth-refresh-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [],
+      "inline_policies": {}
+    },
+    "devops-feed-pipe-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "PipeSourceDynamoDBStreams",
+        "PipeTargetSqs"
+      ],
+      "inline_policies": {
+        "PipeSourceDynamoDBStreams": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+                "dynamodb:DescribeStream",
+                "dynamodb:ListStreams"
+              ],
+              "Resource": [
+                "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma/stream/2026-04-03T16:43:15.010",
+                "arn:aws:dynamodb:us-west-2:356364570033:table/documents-gamma/stream/2026-04-03T16:43:15.022"
+              ],
+              "Effect": "Allow",
+              "Sid": "ReadTrackerAndDocumentsStreams"
+            }
+          ]
+        },
+        "PipeTargetSqs": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueUrl"
+              ],
+              "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-feed-publish-queue-gamma.fifo",
+              "Effect": "Allow",
+              "Sid": "WriteFeedPublishQueue"
+            }
+          ]
+        }
+      }
+    },
+    "devops-graph-sync-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "CloudWatchLogs",
+        "devops-graph-sync-inline",
+        "SqsEventSource"
+      ],
+      "inline_policies": {
+        "CloudWatchLogs": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:*",
+              "Effect": "Allow",
+              "Sid": "Logs"
+            }
+          ]
+        },
+        "devops-graph-sync-inline": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/devops-graph-sync-gamma*"
+            },
+            {
+              "Sid": "SecretsManagerNeo4j",
+              "Effect": "Allow",
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/neo4j/auradb-credentials*"
+            },
+            {
+              "Sid": "SQSGraphSyncQueue",
+              "Effect": "Allow",
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes"
+              ],
+              "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-graph-sync-queue-gamma.fifo"
+            },
+            {
+              "Sid": "BedrockTitanV2InvokeModel",
+              "Effect": "Allow",
+              "Action": [
+                "bedrock:InvokeModel"
+              ],
+              "Resource": [
+                "arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0"
+              ]
+            }
+          ]
+        },
+        "SqsEventSource": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes"
+              ],
+              "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-graph-sync-queue-gamma.fifo",
+              "Effect": "Allow",
+              "Sid": "ConsumeGraphSyncQueue"
+            }
+          ]
+        }
+      }
+    },
+    "devops-graph-query-api-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "devops-graph-query-api-inline"
+      ],
+      "inline_policies": {
+        "devops-graph-query-api-inline": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/devops-graph-query-api-gamma*"
+            },
+            {
+              "Sid": "SecretsManagerNeo4j",
+              "Effect": "Allow",
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/neo4j/auradb-credentials*"
+            },
+            {
+              "Sid": "BedrockTitanV2InvokeModel",
+              "Effect": "Allow",
+              "Action": [
+                "bedrock:InvokeModel"
+              ],
+              "Resource": "arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0"
+            }
+          ]
+        }
+      }
+    },
+    "enceladus-neo4j-backup-lambda-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "neo4j-backup-policy-gamma",
+        "Neo4jBackupPolicy"
+      ],
+      "inline_policies": {
+        "neo4j-backup-policy-gamma": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:*"
+            },
+            {
+              "Sid": "SecretsManagerNeo4j",
+              "Effect": "Allow",
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/neo4j/auradb-credentials*"
+            },
+            {
+              "Sid": "S3BackupWrite",
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net/neo4j-backups/*"
+            }
+          ]
+        },
+        "Neo4jBackupPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:*",
+              "Effect": "Allow",
+              "Sid": "CloudWatchLogs"
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/neo4j/auradb-credentials*",
+              "Effect": "Allow",
+              "Sid": "SecretsManagerNeo4j"
+            },
+            {
+              "Action": [
+                "s3:PutObject"
+              ],
+              "Resource": "arn:aws:s3:::jreese-net/gamma/neo4j-backups/*",
+              "Effect": "Allow",
+              "Sid": "S3BackupWrite"
+            }
+          ]
+        }
+      }
+    },
+    "enceladus-graph-health-metrics-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "GraphHealthMetricsPolicy"
+      ],
+      "inline_policies": {
+        "GraphHealthMetricsPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:us-west-2:356364570033:*",
+              "Effect": "Allow",
+              "Sid": "CloudWatchLogs"
+            },
+            {
+              "Action": [
+                "cloudwatch:PutMetricData"
+              ],
+              "Resource": "*",
+              "Effect": "Allow",
+              "Sid": "CloudWatchMetrics"
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/neo4j/auradb-credentials-gamma*",
+              "Effect": "Allow",
+              "Sid": "SecretsManagerNeo4j"
+            }
+          ]
+        }
+      }
+    },
+    "devops-graph-pipe-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "PipeSourceDynamoDBStream",
+        "PipeTargetSqs"
+      ],
+      "inline_policies": {
+        "PipeSourceDynamoDBStream": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+                "dynamodb:DescribeStream",
+                "dynamodb:ListStreams"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/devops-project-tracker-gamma/stream/2026-04-03T16:43:15.010",
+              "Effect": "Allow",
+              "Sid": "ReadTrackerStream"
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+                "dynamodb:DescribeStream",
+                "dynamodb:ListStreams"
+              ],
+              "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/documents-gamma/stream/2026-04-03T16:43:15.022",
+              "Effect": "Allow",
+              "Sid": "ReadDocumentsStream"
+            }
+          ]
+        },
+        "PipeTargetSqs": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueUrl"
+              ],
+              "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-graph-sync-queue-gamma.fifo",
+              "Effect": "Allow",
+              "Sid": "WriteGraphSyncQueue"
+            }
+          ]
+        }
+      }
+    },
+    "devops-env-drift-auditor-role-gamma": {
+      "exists": true,
+      "inline_policy_names": [
+        "env-drift-auditor-inline"
+      ],
+      "inline_policies": {
+        "env-drift-auditor-inline": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:*:*:*"
+            },
+            {
+              "Sid": "LambdaConfigRead",
+              "Effect": "Allow",
+              "Action": [
+                "lambda:GetFunctionConfiguration",
+                "lambda:ListFunctions"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
