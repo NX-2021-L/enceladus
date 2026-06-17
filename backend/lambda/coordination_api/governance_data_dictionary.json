@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-27.01",
-  "updated_at": "2026-04-27T18:55:00Z",
-  "last_change_summary": "ENC-FTR-098 / ENC-TSK-G43: register monitoring.mentions_drift_audit entity covering Unit 6 (daily sample-and-diff against live MENTIONS edge state). The audit shares the prose-field allowlist with graph_sync.mentions_extraction so live and audit paths cannot drift. Chained into the existing devops-parity-drift-daily EventBridge rule (no new infra). Threshold-breach emits ENC-ISS via tracker_api.",
+  "version": "2026-06-17.01",
+  "updated_at": "2026-06-17T00:55:00Z",
+  "last_change_summary": "ENC-PLN-046 (ENC-TSK-G97/G98/G99): graph_query_api hybrid-retrieval remediation. Keyword signal now tokenizes the query and scores per-token field-weighted CONTAINS so multi-word queries match (ENC-ISS-310); the anchored graph signal runs under a hard wall-clock deadline and degrades to graph_algorithm='timeout' instead of hanging the whole response (ENC-ISS-311); the graphsearch /health endpoint adds a functional per-signal readiness probe (vector/graph/keyword) surfaced through connection_health.graph_index.signals (ENC-ISS-312).",
   "owners": [
     "enceladus-platform"
   ],
@@ -3091,7 +3091,7 @@
       }
     },
     "tracker.graphsearch": {
-      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges. ENC-FTR-098 / ENC-TSK-G36: MENTIONS added to graph_query_api._ALLOWED_EDGE_TYPES so tracker.graphsearch queries with edge_types=['MENTIONS'] no longer reject at the API gate.",
+      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges. ENC-FTR-098 / ENC-TSK-G36: MENTIONS added to graph_query_api._ALLOWED_EDGE_TYPES so tracker.graphsearch queries with edge_types=['MENTIONS'] no longer reject at the API gate. ENC-PLN-046 hybrid-retrieval remediation: the keyword signal tokenizes multi-word queries and scores per-token field-weighted CONTAINS (ENC-ISS-310); the anchored graph signal is deadline-bounded (_GRAPH_SIGNAL_DEADLINE_S) and degrades to graph_algorithm='timeout' rather than timing out the response (ENC-ISS-311); the /health endpoint reports per-signal availability via a functional probe (ENC-ISS-312).",
       "fields": {
         "search_type": {
           "type": "enum",
