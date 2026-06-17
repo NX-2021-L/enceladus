@@ -3146,8 +3146,16 @@ Resources:
           ENCELADUS_COGNITO_DOMAIN: https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com
           MCP_AUDIT_CALLER_IDENTITY: devops-coordination-api-gamma
           MCP_SERVER_LOG_GROUP: /enceladus/mcp/server
-          # ENC-TSK-F63 AC-1: ENABLE_* env vars removed — feature flags now served by AppConfig.
-          # enceladus_shared.appconfig_flags.flag() polls localhost:2772 via the extension layer.
+          # ENC-TSK-F63 AC-1 / ENC-ISS-313 H02 audit: flags are migrating to AppConfig, but the
+          # AppConfig application/environment are not yet provisioned on this stack (IDs empty),
+          # so these ENABLE_* remain as the appconfig_flags.flag() env_fallback to keep gamma's
+          # live features on. AppConfig takes precedence automatically once populated.
+          ENABLE_CLAUDE_HEADLESS: "true"
+          ENABLE_COMPONENT_PROPOSAL: "true"
+          ENABLE_CONTEXT_NODES: "true"
+          ENABLE_HANDOFF_PRIMITIVE: "true"
+          ENABLE_LESSON_PRIMITIVE: "true"
+          ENABLE_TYPED_RELATIONSHIPS: "true"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
