@@ -163,16 +163,6 @@ jobs:
             fi
           done < <(jq -r '.functions[].function_name' infrastructure/lambda_workflow_manifest.json)
           if [ "${failed}" -eq 1 ]; then
-            echo "::warning::One or more Lambda functions have stub-sized code packages after CFN stack update. Full-stack deploy orchestration will restore all Lambdas."
+            echo "::warning::One or more Lambda functions have stub-sized code packages. Lambda code is managed out-of-band (matrix-build / _deploy.yml); this CFN workflow deploys config/IAM only and does not deploy or restore code."
           fi
-          echo "CodeSize validation complete. Full-stack orchestration follows."
-
-  # After CFN stack update, run full-stack deploy orchestration to restore
-  # any Lambdas that may have been overwritten with CFN ZipFile stubs.
-  # This closes the path-filter coverage gap from the Sev1 incident (ENC-TSK-1292).
-  full-stack-restore:
-    needs: deploy
-    uses: ./.github/workflows/deploy-orchestration.yml
-    with:
-      deploy_mode: "full-stack"
-    secrets: inherit
+          echo "CodeSize validation complete (informational only; Lambda code is deployed out-of-band via matrix-build / _deploy.yml, not by this CFN workflow)."
