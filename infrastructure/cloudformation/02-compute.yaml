@@ -160,6 +160,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
@@ -209,6 +211,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
@@ -250,6 +254,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
@@ -296,6 +302,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
@@ -421,6 +429,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
@@ -907,6 +917,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
