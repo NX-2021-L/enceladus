@@ -1428,12 +1428,30 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted the lambda-invoke grant).
+        - PolicyName: devops-coordination-api-bedrock-dispatch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeBedrockAgentAlias
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeAgent
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
+              - Sid: InvokeBedrockActionLambda
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-bedrock-agent-actions${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-bedrock-agent-actions${EnvironmentSuffix}:*"
         # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
         # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
         # proven to resolve identically to prod-live (EnvironmentSuffix='') and
         # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
-        - PolicyName: G95RestoredGrants
+        - PolicyName: devops-coordination-api-inline
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -1648,7 +1666,7 @@ Resources:
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
         # proven to resolve identically to prod-live (EnvironmentSuffix='') and
         # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
-        - PolicyName: G95RestoredGrants
+        - PolicyName: eventbridge-put-events
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -1686,7 +1704,7 @@ Resources:
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
         # proven to resolve identically to prod-live (EnvironmentSuffix='') and
         # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
-        - PolicyName: G95RestoredGrants
+        - PolicyName: devops-document-api-inline
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -1767,6 +1785,46 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted s3 reference write/delete).
+        - PolicyName: devops-project-service-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ProjectsTableFullAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
+              - Sid: TrackerTableLimitedWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: S3ReferenceWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
         # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
         # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
@@ -1844,7 +1902,7 @@ Resources:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}:*"
         # ENC-ISS-313 / ENC-TSK-G95 (H02): restore DynamoDB read dropped by ENC-TSK-G43.
-        - PolicyName: G95RestoredGrants
+        - PolicyName: devops-feed-query-dynamodb-read
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -1889,7 +1947,7 @@ Resources:
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
         # proven to resolve identically to prod-live (EnvironmentSuffix='') and
         # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
-        - PolicyName: G95RestoredGrants
+        - PolicyName: devops-coordination-monitor-api-policy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -1936,7 +1994,7 @@ Resources:
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
         # proven to resolve identically to prod-live (EnvironmentSuffix='') and
         # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
-        - PolicyName: G95RestoredGrants
+        - PolicyName: devops-deploy-intake-inline
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -2106,6 +2164,46 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted these grants).
+        - PolicyName: devops-deploy-finalize-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-deploy-finalize${EnvironmentSuffix}*"
+              - Sid: DeployTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+              - Sid: TrackerTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+              - Sid: ProjectsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              - Sid: VersionFileWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*/current-version.json"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -2292,7 +2390,7 @@ Resources:
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
         # proven to resolve identically to prod-live (EnvironmentSuffix='') and
         # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
-        - PolicyName: G95RestoredGrants
+        - PolicyName: devops-reference-search-inline
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -2493,6 +2591,47 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted these grants).
+        - PolicyName: devops-doc-prep-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-doc-prep${EnvironmentSuffix}*"
+              - Sid: DynamoDBProjects
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              - Sid: DynamoDBTracker
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: DynamoDBDocuments
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              - Sid: S3ReadDocs
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+                  - "arn:aws:s3:::jreese-net/agent-documents/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -2523,7 +2662,7 @@ Resources:
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
         # proven to resolve identically to prod-live (EnvironmentSuffix='') and
         # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
-        - PolicyName: G95RestoredGrants
+        - PolicyName: enceladus-bedrock-actions-inline
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -2628,7 +2767,7 @@ Resources:
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
         # proven to resolve identically to prod-live (EnvironmentSuffix='') and
         # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
-        - PolicyName: G95RestoredGrants
+        - PolicyName: devops-changelog-api-policy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -2679,6 +2818,15 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted the Cognito grant).
+        - PolicyName: cognito-refresh-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CognitoInitiateAuth
+                Effect: Allow
+                Action: cognito-idp:InitiateAuth
+                Resource: !Sub "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/${CognitoUserPoolId}"
         - PolicyName: SecretsManagerGitHubApp
           PolicyDocument:
             Version: '2012-10-17'
@@ -2895,7 +3043,7 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: Neo4jBackupPolicy
+        - PolicyName: neo4j-backup-policy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
