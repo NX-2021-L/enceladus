@@ -27,6 +27,7 @@ Environment variables:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -127,6 +128,17 @@ _secretsmanager = None
 _NEO4J_MAX_CONNECTION_LIFETIME_S = 300
 _NEO4J_CONNECTION_ACQUISITION_TIMEOUT_S = 120
 _NEO4J_MAX_CONNECTION_POOL_SIZE = 20
+
+# ENC-ISS-311 / ENC-TSK-G98: hard wall-clock budget for the anchored graph signal.
+# Per-query Aura Graph Analytics session creation (gds.graph.project {memory:'2GB'})
+# can exceed the synchronous read budget; bounding it here degrades the graph signal
+# to empty instead of timing out the whole hybrid response (RRF fuses whatever
+# signals return). The performant fix (pre-materialized projection) is a follow-up.
+_GRAPH_SIGNAL_DEADLINE_S = 8.0
+
+# ENC-ISS-312 / ENC-TSK-G99: canned inputs for the functional health probe.
+_HEALTH_PROBE_PROJECT = "enceladus"
+_HEALTH_PROBE_TOKEN = "governance"
 
 
 def _get_secretsmanager():
@@ -937,26 +949,42 @@ def _hybrid_keyword_ranks(
         if label:
             label_filter = f":{label}"
 
+    # ENC-ISS-310 / ENC-TSK-G97: tokenize the query instead of matching the whole
+    # phrase. The previous `field CONTAINS toLower($q)` over the entire query string
+    # only matched when a field contained the full phrase verbatim, so keyword recall
+    # collapsed to zero for multi-word topic queries. Split into tokens and score each
+    # node by per-token field-weighted CONTAINS (title 3 / intent 2 / description 1),
+    # summed across tokens so records matching more terms rank higher.
+    tokens: List[str] = []
+    _seen_tokens = set()
+    for _tok in query_text.lower().split():
+        _tok = _tok.strip()
+        if len(_tok) < 2 or _tok in _seen_tokens:
+            continue
+        _seen_tokens.add(_tok)
+        tokens.append(_tok)
+    if not tokens:
+        return []
+
     cypher = (
         f"MATCH (n{label_filter}) "
         "WHERE n.project_id = $project_id "
-        "AND ("
-        "  toLower(coalesce(n.title, '')) CONTAINS toLower($q) OR "
-        "  toLower(coalesce(n.intent, '')) CONTAINS toLower($q) OR "
-        "  toLower(coalesce(n.description, '')) CONTAINS toLower($q)"
-        ") "
-        "WITH n, "
-        "  CASE WHEN toLower(coalesce(n.title, '')) CONTAINS toLower($q) THEN 3.0 ELSE 0.0 END + "
-        "  CASE WHEN toLower(coalesce(n.intent, '')) CONTAINS toLower($q) THEN 2.0 ELSE 0.0 END + "
-        "  CASE WHEN toLower(coalesce(n.description, '')) CONTAINS toLower($q) THEN 1.0 ELSE 0.0 END "
-        "  AS score "
+        "AND ANY(t IN $tokens WHERE "
+        "  toLower(coalesce(n.title, '')) CONTAINS t "
+        "  OR toLower(coalesce(n.intent, '')) CONTAINS t "
+        "  OR toLower(coalesce(n.description, '')) CONTAINS t) "
+        "WITH n, reduce(s = 0.0, t IN $tokens | s "
+        "  + (CASE WHEN toLower(coalesce(n.title, '')) CONTAINS t THEN 3.0 ELSE 0.0 END) "
+        "  + (CASE WHEN toLower(coalesce(n.intent, '')) CONTAINS t THEN 2.0 ELSE 0.0 END) "
+        "  + (CASE WHEN toLower(coalesce(n.description, '')) CONTAINS t THEN 1.0 ELSE 0.0 END) "
+        ") AS score "
         "WHERE score > 0.0 "
         "RETURN n.record_id AS rid, score ORDER BY score DESC LIMIT $limit"
     )
     ranked: List[Dict[str, Any]] = []
     try:
         with driver.session() as session:
-            result = session.run(cypher, project_id=project_id, q=query_text, limit=top_n)
+            result = session.run(cypher, project_id=project_id, tokens=tokens, limit=top_n)
             for idx, rec in enumerate(result, start=1):
                 rid = rec.get("rid")
                 if not rid:
@@ -1150,21 +1178,45 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     graph_available = False
     graph_algorithm = "unavailable"
     if anchor_record_id:
-        if _check_gds_available(driver):
-            graph_ranks = _hybrid_graph_ranks_gds(
+        # ENC-ISS-311 / ENC-TSK-G98: the GDS path builds a per-query Aura Graph
+        # Analytics session (gds.graph.project {memory:'2GB'}) whose creation can
+        # blow past the synchronous read budget and hang the whole hybrid response.
+        # Run the graph signal under a hard wall-clock deadline; on timeout degrade
+        # to an empty graph signal (graph_algorithm='timeout') so vector+keyword
+        # still return via RRF. The worker thread is abandoned on timeout (shutdown
+        # wait=False) — the Bolt call finishes/errors in the background without
+        # blocking the handler.
+        def _graph_signal():
+            if _check_gds_available(driver):
+                gds_ranks = _hybrid_graph_ranks_gds(
+                    driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
+                )
+                if gds_ranks:
+                    return gds_ranks, "gds_pagerank"
+            cypher_ranks = _hybrid_graph_ranks_cypher_fallback(
                 driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
             )
-            if graph_ranks:
-                graph_algorithm = "gds_pagerank"
-                graph_available = True
-        # Fall back to Cypher if GDS unavailable OR returned empty.
-        if not graph_available:
-            graph_ranks = _hybrid_graph_ranks_cypher_fallback(
-                driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
+            if cypher_ranks:
+                return cypher_ranks, "cypher_fallback"
+            return [], "unavailable"
+
+        _gex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            graph_ranks, graph_algorithm = _gex.submit(_graph_signal).result(
+                timeout=_GRAPH_SIGNAL_DEADLINE_S
             )
-            if graph_ranks:
-                graph_algorithm = "cypher_fallback"
-                graph_available = True
+            graph_available = bool(graph_ranks)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "[WARNING] graph signal exceeded %.1fs deadline for anchor=%s — "
+                "degrading to vector+keyword", _GRAPH_SIGNAL_DEADLINE_S, anchor_record_id,
+            )
+            graph_ranks, graph_available, graph_algorithm = [], False, "timeout"
+        except Exception:
+            logger.exception("[ERROR] graph signal computation failed")
+            graph_ranks, graph_available, graph_algorithm = [], False, "unavailable"
+        finally:
+            _gex.shutdown(wait=False)
 
     # ---- Keyword signal ----------------------------------------------------
     keyword_ranks: List[Dict[str, Any]] = []
@@ -1381,7 +1433,14 @@ def _handle_search(event: Dict) -> Dict:
 
 
 def _handle_health(event: Dict) -> Dict:
-    """Handle GET /api/v1/tracker/graphsearch/health."""
+    """Handle GET /api/v1/tracker/graphsearch/health.
+
+    ENC-ISS-312 / ENC-TSK-G99: beyond the Bolt liveness ping, run a cheap
+    functional probe and report per-signal availability (vector/graph/keyword)
+    so a green health can no longer mask a dead retrieval pipeline — the failure
+    mode that hid the ENC-ISS-304 vector outage for weeks. Probes are wrapped
+    individually so one failing signal never fails the whole health response.
+    """
     driver = _get_neo4j_driver()
     if driver is None:
         return _response(200, {"status": "unavailable", "message": "Neo4j driver not initialized"})
@@ -1389,10 +1448,28 @@ def _handle_health(event: Dict) -> Dict:
     try:
         start = time.time()
         with driver.session() as session:
-            result = session.run("RETURN 1 AS health")
-            result.single()
+            session.run("RETURN 1 AS health").single()
+
+        signals = {"vector": False, "graph": False, "keyword": False}
+        # keyword: a known-common token must return at least one hit.
+        try:
+            kw = _hybrid_keyword_ranks(driver, _HEALTH_PROBE_PROJECT, _HEALTH_PROBE_TOKEN, top_n=1)
+            signals["keyword"] = bool(kw)
+        except Exception:
+            logger.warning("[WARNING] health keyword probe failed", exc_info=True)
+        # vector: the query-side embedding must be computable (module + Bedrock).
+        try:
+            signals["vector"] = _compute_query_embedding(_HEALTH_PROBE_TOKEN) is not None
+        except Exception:
+            logger.warning("[WARNING] health vector probe failed", exc_info=True)
+        # graph: GDS/AGA plugin reachable (cheap CALL gds.list; no projection build).
+        try:
+            signals["graph"] = _check_gds_available(driver)
+        except Exception:
+            logger.warning("[WARNING] health graph probe failed", exc_info=True)
+
         duration_ms = int((time.time() - start) * 1000)
-        return _response(200, {"status": "healthy", "response_ms": duration_ms})
+        return _response(200, {"status": "healthy", "response_ms": duration_ms, "signals": signals})
     except Exception as e:
         logger.warning("[WARNING] Graph health check failed: %s", e)
         return _response(200, {"status": "unavailable", "message": str(e)})
