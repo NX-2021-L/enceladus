@@ -44,7 +44,12 @@ Parameters:
     Default: https://jreese.net
   SharedLayerArn:
     Type: String
-    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:7
+    # ENC-TSK-H05: bumped :7 -> :10 to match the live/working prod layer. The F65 hotfix
+    # (2026-04-21) moved functions to enceladus-shared:10 (the version WITH appconfig_flags)
+    # out-of-band but never updated this default; the 2026-06-18 deploy then reset functions
+    # to :7 -> Runtime.ImportModuleError 'No module named enceladus_shared.appconfig_flags'
+    # (AXIS 2 of the Sev-1). Codifying :10 here prevents a default-driven re-incident.
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10
   # ENC-ISS-197: Referenced by deploy_decide Lambda env vars but were missing from Parameters
   GitHubAppId:
     Type: String
