@@ -44,7 +44,12 @@ Parameters:
     Default: https://jreese.net
   SharedLayerArn:
     Type: String
-    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:7
+    # ENC-TSK-H05: bumped :7 -> :10 to match the live/working prod layer. The F65 hotfix
+    # (2026-04-21) moved functions to enceladus-shared:10 (the version WITH appconfig_flags)
+    # out-of-band but never updated this default; the 2026-06-18 deploy then reset functions
+    # to :7 -> Runtime.ImportModuleError 'No module named enceladus_shared.appconfig_flags'
+    # (AXIS 2 of the Sev-1). Codifying :10 here prevents a default-driven re-incident.
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10
   # ENC-ISS-197: Referenced by deploy_decide Lambda env vars but were missing from Parameters
   GitHubAppId:
     Type: String
@@ -160,6 +165,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
@@ -209,6 +216,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
@@ -250,6 +259,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
@@ -296,6 +307,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
@@ -421,6 +434,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
@@ -907,6 +922,8 @@ Resources:
           - !Ref AWS::NoValue
       Environment:
         Variables:
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
@@ -1428,6 +1445,211 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted the lambda-invoke grant).
+        - PolicyName: devops-coordination-api-bedrock-dispatch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeBedrockAgentAlias
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeAgent
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
+              - Sid: InvokeBedrockActionLambda
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-bedrock-agent-actions${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-bedrock-agent-actions${EnvironmentSuffix}:*"
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: devops-coordination-api-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeBedrockAgentAlias
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeAgent
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-coordination-api${EnvironmentSuffix}*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/mcp/server*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/coordination/worker-runtime*"
+              - Sid: CoordinationTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}/index/*"
+              - Sid: TrackerTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: ProjectsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              - Sid: GovernancePoliciesReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}/index/*"
+              - Sid: DocumentsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              - Sid: ComponentRegistryTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/component-registry${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/component-registry${EnvironmentSuffix}/index/*"
+              - Sid: GovernanceAndReferenceS3Read
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+              - Sid: GovernanceAndReferenceS3Get
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - "arn:aws:s3:::jreese-net/governance/*"
+                  - "arn:aws:s3:::jreese-net/projects/*"
+                  - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+              - Sid: GovernanceS3Write
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - "arn:aws:s3:::jreese-net/governance/live/*"
+                  - "arn:aws:s3:::jreese-net/governance/history/*"
+              - Sid: S3HeadBucket
+                Effect: Allow
+                Action:
+                  - s3:HeadBucket
+                  - s3:GetBucketLocation
+                Resource: "arn:aws:s3:::jreese-net"
+              - Sid: SSMDispatch
+                Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommands
+                  - ssm:ListCommandInvocations
+                  - ssm:DescribeInstanceInformation
+                Resource: "*"
+              - Sid: EC2FleetDispatch
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeLaunchTemplates
+                  - ec2:DescribeLaunchTemplateVersions
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - ec2:CreateTags
+                Resource: "*"
+              - Sid: ProviderSecretsRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/coordination/*"
+              - Sid: ComponentEventsTopicPublish
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-component-registry-events${EnvironmentSuffix}"
+              - Sid: CognitoTerminalAuth
+                Effect: Allow
+                Action:
+                  - cognito-idp:InitiateAuth
+                Resource: !Sub "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/us-east-1_b2D0V3E1k"
+              - Sid: CognitoOAuthClientManagement
+                Effect: Allow
+                Action:
+                  - cognito-idp:CreateUserPoolClient
+                  - cognito-idp:DeleteUserPoolClient
+                  - cognito-idp:DescribeUserPoolClient
+                  - cognito-idp:UpdateUserPoolClient
+                Resource: !Sub "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/us-east-1_b2D0V3E1k"
+              - Sid: BedrockAgentLifecycle
+                Effect: Allow
+                Action:
+                  - bedrock:CreateAgent
+                  - bedrock:GetAgent
+                  - bedrock:DeleteAgent
+                  - bedrock:PrepareAgent
+                  - bedrock:CreateAgentActionGroup
+                  - bedrock:GetAgentActionGroup
+                  - bedrock:DeleteAgentActionGroup
+                  - bedrock:CreateAgentAlias
+                  - bedrock:GetAgentAlias
+                  - bedrock:DeleteAgentAlias
+                  - bedrock:AssociateAgentKnowledgeBase
+                  - bedrock:DisassociateAgentKnowledgeBase
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*"
+              - Sid: BedrockAgentInvoke
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeAgent
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
+              - Sid: BedrockPassAgentRole
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-bedrock-agent-execution-role${EnvironmentSuffix}"
+              - Sid: FleetHostPassRole
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1456,6 +1678,19 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: eventbridge-put-events
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1481,6 +1716,67 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: devops-document-api-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-document-api${EnvironmentSuffix}*"
+              - Sid: DynamoDBDocuments
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              - Sid: DynamoDBProjectsRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              - Sid: DynamoDBTrackerRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: S3DocumentsObjectAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: "arn:aws:s3:::jreese-net/agent-documents/*"
+              - Sid: S3ReferenceRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+                  - "arn:aws:s3:::jreese-net/governance/live/*"
+              - Sid: S3ListPrefixes
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1506,6 +1802,84 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted s3 reference write/delete).
+        - PolicyName: devops-project-service-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ProjectsTableFullAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
+              - Sid: TrackerTableLimitedWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: S3ReferenceWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: G95RestoredGrants
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ProjectsTableFullAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
+              - Sid: TrackerTableLimitedWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1530,6 +1904,9 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): only live CloudWatch Logs grant; preserve.
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
         - PolicyName: InvokeFeedPublisher
           PolicyDocument:
@@ -1541,6 +1918,22 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}:*"
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): restore DynamoDB read dropped by ENC-TSK-G43.
+        - PolicyName: devops-feed-query-dynamodb-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DynamoDBRead
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1566,6 +1959,28 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: devops-coordination-monitor-api-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-coordination-monitor-api${EnvironmentSuffix}*"
+              - Sid: CoordinationTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1591,6 +2006,58 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: devops-deploy-intake-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-deploy-intake${EnvironmentSuffix}*"
+              - Sid: DeployTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+              - Sid: ProjectsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              - Sid: S3ConfigAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+              - Sid: SQSSendMessage
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:devops-deploy-queue${EnvironmentSuffix}.fifo"
+              - Sid: InvokeDocPrepLambda
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-doc-prep${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-doc-prep${EnvironmentSuffix}:*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1616,6 +2083,56 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: G95RestoredGrants
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DeployTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+              - Sid: ProjectsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              - Sid: TrackerTableWorklog
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+              - Sid: S3ConfigAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
+              - Sid: S3SourceRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - "arn:aws:s3:::jreese-net"
+                  - "arn:aws:s3:::jreese-net/deploy-sources/*"
+              - Sid: CodeBuildStart
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                Resource: !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/devops-ui-deploy-builder${EnvironmentSuffix}"
         - PolicyName: SqsEventSource
           PolicyDocument:
             Version: '2012-10-17'
@@ -1664,6 +2181,46 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted these grants).
+        - PolicyName: devops-deploy-finalize-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-deploy-finalize${EnvironmentSuffix}*"
+              - Sid: DeployTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+              - Sid: TrackerTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+              - Sid: ProjectsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              - Sid: VersionFileWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*/current-version.json"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1845,6 +2402,27 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: devops-reference-search-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-reference-search${EnvironmentSuffix}*"
+              - Sid: S3ReferenceRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1869,6 +2447,9 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): out-of-band projects-read grant; preserve.
+        - !Sub "arn:aws:iam::${AWS::AccountId}:policy/projects-read-policy"
       Policies:
         - PolicyName: SqsEventSource
           PolicyDocument:
@@ -1893,6 +2474,54 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): restore business grants dropped by ENC-TSK-G43.
+        # Analytics/CloudFront/SNS gated on IsProduction (prod-only pipeline).
+        - PolicyName: G95RestoredGrants
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DynamoDBRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              - Sid: S3MobileFeedsWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
+              - Sid: EventBridgePut
+                Effect: Allow
+                Action: events:PutEvents
+                Resource: "*"
+              - !If
+                - IsProduction
+                - Sid: S3AnalyticsSyncStageWrite
+                  Effect: Allow
+                  Action: s3:PutObject
+                  Resource: "arn:aws:s3:::devops-agentcli-compute/projects/sync-stage/*"
+                - !Ref AWS::NoValue
+              - !If
+                - IsProduction
+                - Sid: CloudFrontInvalidation
+                  Effect: Allow
+                  Action: cloudfront:CreateInvalidation
+                  Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/E2BOQXCW1TA6Y4"
+                - !Ref AWS::NoValue
+              - !If
+                - IsProduction
+                - Sid: SNSPublish
+                  Effect: Allow
+                  Action: sns:Publish
+                  Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-project-json-sync"
+                - !Ref AWS::NoValue
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1942,6 +2571,18 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        # ENC-ISS-313 / ENC-TSK-G95 (H02): restore SNS publish (prod-only pipeline).
+        - !If
+          - IsProduction
+          - PolicyName: G95RestoredGrants
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Sid: SNSPublish
+                  Effect: Allow
+                  Action: sns:Publish
+                  Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-project-json-sync"
+          - !Ref AWS::NoValue
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1967,6 +2608,47 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted these grants).
+        - PolicyName: devops-doc-prep-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-doc-prep${EnvironmentSuffix}*"
+              - Sid: DynamoDBProjects
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              - Sid: DynamoDBTracker
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: DynamoDBDocuments
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              - Sid: S3ReadDocs
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+                  - "arn:aws:s3:::jreese-net/agent-documents/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -1992,6 +2674,86 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: enceladus-bedrock-actions-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-bedrock-agent-actions${EnvironmentSuffix}*"
+              - Sid: TrackerTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: ProjectsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              - Sid: DocumentsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              - Sid: CoordinationTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}/index/*"
+              - Sid: DeploymentTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
+              - Sid: GovernancePoliciesRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}/index/*"
+              - Sid: ComplianceTableWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-compliance-violations${EnvironmentSuffix}"
+              - Sid: S3ReadAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - "arn:aws:s3:::jreese-net"
+                  - "arn:aws:s3:::jreese-net/agent-documents/*"
+                  - "arn:aws:s3:::jreese-net/reference/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -2017,6 +2779,34 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
+        # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
+        # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
+        # proven to resolve identically to prod-live (EnvironmentSuffix='') and
+        # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        - PolicyName: devops-changelog-api-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-changelog-api${EnvironmentSuffix}*"
+              - Sid: DeployTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+              - Sid: S3VersionRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/deploy-config/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -2045,6 +2835,15 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
+        # ENC-TSK-H04 / ENC-ISS-313: codified from live IAM (template previously omitted the Cognito grant).
+        - PolicyName: cognito-refresh-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CognitoInitiateAuth
+                Effect: Allow
+                Action: cognito-idp:InitiateAuth
+                Resource: !Sub "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/${CognitoUserPoolId}"
         - PolicyName: SecretsManagerGitHubApp
           PolicyDocument:
             Version: '2012-10-17'
@@ -2103,6 +2902,7 @@ Resources:
                 Action:
                   - sqs:SendMessage
                   - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-FeedPublishQueueArn
 
@@ -2153,6 +2953,29 @@ Resources:
                   - appconfig:GetLatestConfiguration
                   - appconfig:StartConfigurationSession
                 Resource: "*"
+        # ENC-ISS-313 / ENC-TSK-G95: restore grants the tombstoned per-Lambda
+        # deploy.sh ensure_role() applied, dropped by the matrix-build migration
+        # (ENC-TSK-G43). graph_sync reads the Neo4j secret and writes Titan V2
+        # embeddings via backend/lambda/graph_sync/embedding.py invoke_titan_v2.
+        - PolicyName: SecretsManagerNeo4j
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerNeo4j
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+        - PolicyName: BedrockTitanInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BedrockTitanV2InvokeModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
       Tags:
         - Key: Project
           Value: enceladus
@@ -2196,6 +3019,30 @@ Resources:
                   - bedrock:InvokeModel
                 Resource:
                   - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+        # ENC-ISS-313 / ENC-TSK-G95: restore grants dropped by the deploy.sh
+        # tombstoning (ENC-TSK-G43). graph_query_api writes its own log group and
+        # reads the Neo4j secret for hybrid-retrieval. (Bedrock Titan grant above
+        # was added by ENC-TSK-G94.)
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: SecretsManagerNeo4j
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerNeo4j
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -2213,7 +3060,7 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: Neo4jBackupPolicy
+        - PolicyName: neo4j-backup-policy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -2344,6 +3191,7 @@ Resources:
                 Action:
                   - sqs:SendMessage
                   - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       Tags:
@@ -2463,8 +3311,16 @@ Resources:
           ENCELADUS_COGNITO_DOMAIN: https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com
           MCP_AUDIT_CALLER_IDENTITY: devops-coordination-api-gamma
           MCP_SERVER_LOG_GROUP: /enceladus/mcp/server
-          # ENC-TSK-F63 AC-1: ENABLE_* env vars removed — feature flags now served by AppConfig.
-          # enceladus_shared.appconfig_flags.flag() polls localhost:2772 via the extension layer.
+          # ENC-TSK-F63 AC-1 / ENC-ISS-313 H02 audit: flags are migrating to AppConfig, but the
+          # AppConfig application/environment are not yet provisioned on this stack (IDs empty),
+          # so these ENABLE_* remain as the appconfig_flags.flag() env_fallback to keep gamma's
+          # live features on. AppConfig takes precedence automatically once populated.
+          ENABLE_CLAUDE_HEADLESS: "true"
+          ENABLE_COMPONENT_PROPOSAL: "true"
+          ENABLE_CONTEXT_NODES: "true"
+          ENABLE_HANDOFF_PRIMITIVE: "true"
+          ENABLE_LESSON_PRIMITIVE: "true"
+          ENABLE_TYPED_RELATIONSHIPS: "true"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]

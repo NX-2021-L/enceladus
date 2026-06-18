@@ -88,6 +88,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          # ENC-TSK-H05: CoordinationInternalApiKey is a NoEcho param with Default "".
+          # `aws cloudformation deploy` has no UsePreviousValue, so any param NOT passed
+          # here resolves to its template default. If the internal key is not passed it
+          # becomes "" and the env is zeroed on every consumer Lambda, re-triggering the
+          # 2026-06-18 MCP-auth Sev-1 (ENC-LSN-053, DOC-ED50175387B8). Fail closed if the
+          # secret is missing rather than silently stripping the key.
+          if [ -z "${{ secrets.COORDINATION_INTERNAL_API_KEY }}" ]; then
+            echo "::error::COORDINATION_INTERNAL_API_KEY secret is empty — refusing to deploy (would strip the internal key; ENC-TSK-H05)"
+            exit 1
+          fi
+
           aws cloudformation deploy \
             --region "${AWS_REGION}" \
             --stack-name "${{ steps.params.outputs.stack_name }}" \
@@ -97,7 +108,8 @@ jobs:
             --s3-bucket enceladus-cfn-staging-us-west-2 \
             --s3-prefix 02-compute/ \
             --parameter-overrides \
-              DataStackName="${{ steps.params.outputs.data_stack_name }}"
+              DataStackName="${{ steps.params.outputs.data_stack_name }}" \
+              CoordinationInternalApiKey="${{ secrets.COORDINATION_INTERNAL_API_KEY }}"
 
       - name: Report stack events on failure
         if: failure() && steps.deploy.conclusion == 'failure'
