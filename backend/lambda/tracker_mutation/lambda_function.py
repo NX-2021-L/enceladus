@@ -45,6 +45,11 @@ import urllib.request
 from urllib.parse import unquote
 
 import boto3
+
+# ENC-TSK-H08 (F63): resolve feature flags from AppConfig with env-var fallback,
+# mirroring coordination_api. Requires the appconfig_flags submodule, present in
+# shared layer :10 (not :7) — see ENC-TSK-H08 AC-3.
+from enceladus_shared.appconfig_flags import flag as _appconfig_flag
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -137,7 +142,8 @@ CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 CHECKOUT_SERVICE_KEY = os.environ.get("CHECKOUT_SERVICE_KEY", "")
 MAX_NOTE_LENGTH = 2000
 # ENC-FTR-052: Governed Lesson Primitive — feature flag
-ENABLE_LESSON_PRIMITIVE = os.environ.get("ENABLE_LESSON_PRIMITIVE", "false").lower() == "true"
+# ENC-TSK-H08 (F63): AppConfig is the source of truth (env_fallback preserves legacy/local behavior)
+ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallback="ENABLE_LESSON_PRIMITIVE")
 
 # Valid record types and their closed/default statuses
 _RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "generation"}
