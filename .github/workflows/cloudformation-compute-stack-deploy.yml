@@ -109,7 +109,9 @@ jobs:
             --s3-prefix 02-compute/ \
             --parameter-overrides \
               DataStackName="${{ steps.params.outputs.data_stack_name }}" \
-              CoordinationInternalApiKey="${{ secrets.COORDINATION_INTERNAL_API_KEY }}"
+              CoordinationInternalApiKey="${{ secrets.COORDINATION_INTERNAL_API_KEY }}" \
+              AppConfigApplicationId="5t3sqte" \
+              AppConfigEnvironmentId="bnwj3lj"
 
       - name: Report stack events on failure
         if: failure() && steps.deploy.conclusion == 'failure'
