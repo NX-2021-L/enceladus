@@ -133,6 +133,30 @@ jobs:
           fi
           echo "✓ No unadopted out-of-band Lambdas — every live env-suffixed template function is managed by ${stack_name}."
 
+      - name: Pre-deploy health gate (ENC-FTR-102 env parity + ENC-PLN-020 — ENC-TSK-H20)
+        # ENC-TSK-H20 / ENC-PLN-048 Obj 3: run the sanctioned pre-deploy health gate
+        # BEFORE `aws cloudformation deploy`, so a deploy that would strip a deploy-critical
+        # env var (the H05/H09/ENC-ISS-369 strip class) fails THIS job and the deploy step
+        # never runs. Check 6 of the script is the FTR-102 env-parity gate
+        # (tools/env_parity_gate.py), registry-driven via env_drift_registry.json (ENC-TSK-H16).
+        # Closes the ENC-TSK-H05 AC-9 residual: tools/pre-deploy-health-gate.sh existed but was
+        # only referenced in coordination handoff templates, never wired into this workflow.
+        #
+        # AC2 (resolved-env parity reflects the actual deploy): --stack passes the SAME resolved
+        # stack name the deploy step uses (steps.params.outputs.stack_name), so the gate resolves
+        # the template under the identical EnvironmentSuffix (prod="" / gamma="-gamma"). The
+        # deploy's other --parameter-overrides supply NoEcho *values* (CoordinationInternalApiKey,
+        # EnceladusCognitoClientSecret, SharedLayerArn, AppConfig*) — !Ref values that do not
+        # change which env-var KEYS the parity gate evaluates; the empty-value strip class they
+        # guard against is covered by the deploy step's own inline NoEcho guards + Check 5.
+        # No `continue-on-error`: a non-zero exit is fail-closed and blocks the deploy.
+        run: |
+          set -euo pipefail
+          bash tools/pre-deploy-health-gate.sh \
+            --stack "${{ steps.params.outputs.stack_name }}" \
+            --template "${TEMPLATE_FILE}" \
+            --region "${AWS_REGION}"
+
       - name: Deploy Compute stack (02-compute)
         id: deploy
         run: |
