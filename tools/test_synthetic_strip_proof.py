@@ -8,9 +8,9 @@ tools/env_parity_gate.py actually FAILS (non-zero exit) when a deploy-critical
 required var is stripped from the real CloudFormation template, and PASSES
 (exit 0) against the current good 02-compute.yaml.
 
-It generalizes the single-var synthetic strip baked into
-tools/verify_internal_key_coverage.py (which exits non-zero when a consumer
-loses COORDINATION_INTERNAL_API_KEY) into a gate-driven proof over the two
+It supersedes the single-var synthetic strip that ENC-TSK-H05 baked into a
+standalone hard-coded coverage guard (retired in ENC-TSK-H21 once this
+gate-driven proof subsumed it) — a registry-driven proof over the two
 deploy-critical vars from the 2026-06-18 Sev-1 (ENC-LSN-053):
 COORDINATION_INTERNAL_API_KEY and SQS_QUEUE_URL.
 
