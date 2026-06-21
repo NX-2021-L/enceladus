@@ -89,11 +89,14 @@ jobs:
           set -euo pipefail
 
           # ENC-TSK-H05: CoordinationInternalApiKey is a NoEcho param with Default "".
-          # `aws cloudformation deploy` has no UsePreviousValue, so any param NOT passed
-          # here resolves to its template default. If the internal key is not passed it
-          # becomes "" and the env is zeroed on every consumer Lambda, re-triggering the
-          # 2026-06-18 MCP-auth Sev-1 (ENC-LSN-053, DOC-ED50175387B8). Fail closed if the
-          # secret is missing rather than silently stripping the key.
+          # `aws cloudformation deploy` REUSES a parameter's current stack value for any param
+          # not in --parameter-overrides; the template Default applies only when the stack has
+          # no stored value (a fresh stack or a newly added param). An empty/unset internal key
+          # therefore resolves to "" and the env is zeroed on every consumer Lambda, re-triggering
+          # the 2026-06-18 MCP-auth Sev-1 (ENC-LSN-053, DOC-ED50175387B8). Pass it explicitly and
+          # fail closed if the secret is missing rather than silently stripping the key.
+          # (ENC-TSK-H28 corrected the prior "no UsePreviousValue -> resolves to default" wording:
+          # reuse-of-stored-value is also why the SharedLayerArn=:7 stale param persisted below.)
           if [ -z "${{ secrets.COORDINATION_INTERNAL_API_KEY }}" ]; then
             echo "::error::COORDINATION_INTERNAL_API_KEY secret is empty — refusing to deploy (would strip the internal key; ENC-TSK-H05)"
             exit 1
@@ -111,6 +114,18 @@ jobs:
             exit 1
           fi
 
+          # ENC-TSK-H28 / ENC-ISS-385: SharedLayerArn must be passed explicitly too -- for the
+          # INVERSE reason to the NoEcho guards above. enceladus-shared:10 (== :7 + appconfig_flags)
+          # is the canonical pin; 02-compute.yaml's SharedLayerArn Default is :10 and all 23 fns
+          # !Ref it. But `aws cloudformation deploy` reuses the stack's stored param value for any
+          # un-passed param, and the deployed enceladus-compute stack stored SharedLayerArn=:7
+          # (stale/out-of-band). So every deploy reused :7, the :10 template Default was inert
+          # ("No changes to deploy" for layers), and 21/23 fns stayed on enceladus-shared:7 --
+          # blocking appconfig_flags fleet-wide (ENC-FTR-103) and ENC-TSK-H24 AC-1/AC-2. AXIS-2 of
+          # ENC-LSN-053 / DOC-ED50175387B8: a template Default is NOT a deployed value. Passing the
+          # canonical :10 ARN here forces the param so the heal moves live; the H24 gate
+          # (tools/verify_shared_layer_version.py) asserts this override stays == the canonical pin.
+
           aws cloudformation deploy \
             --region "${AWS_REGION}" \
             --stack-name "${{ steps.params.outputs.stack_name }}" \
@@ -124,7 +139,8 @@ jobs:
               CoordinationInternalApiKey="${{ secrets.COORDINATION_INTERNAL_API_KEY }}" \
               AppConfigApplicationId="5t3sqte" \
               AppConfigEnvironmentId="bnwj3lj" \
-              EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}"
+              EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" \
+              SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10"
 
       - name: Report stack events on failure
         if: failure() && steps.deploy.conclusion == 'failure'
