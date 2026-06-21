@@ -49,6 +49,10 @@ Parameters:
     # out-of-band but never updated this default; the 2026-06-18 deploy then reset functions
     # to :7 -> Runtime.ImportModuleError 'No module named enceladus_shared.appconfig_flags'
     # (AXIS 2 of the Sev-1). Codifying :10 here prevents a default-driven re-incident.
+    # ENC-TSK-H24: this Default is the canonical pin ENFORCED by
+    # tools/verify_shared_layer_version.py (pre-deploy gate). :10 == :7 + appconfig_flags
+    # (ENC-LSN-020 three-flag ABI). To change it, bump CANONICAL_SHARED_LAYER_ARN in that
+    # script too, or the layer-version parity gate fails the deploy.
     Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10
   # ENC-ISS-197: Referenced by deploy_decide Lambda env vars but were missing from Parameters
   GitHubAppId:
