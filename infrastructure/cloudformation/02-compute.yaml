@@ -3269,6 +3269,15 @@ Resources:
 
   EnceladusMcpCodeGammaFunction:
     Type: AWS::Lambda::Function
+    # ENC-TSK-H29 / ENC-ISS-386: FunctionName is a hardcoded literal (no ${EnvironmentSuffix}),
+    # so this resource maps to the SAME physical function in every stack that renders it. The
+    # prod stack (enceladus-compute, Environment=production) already owns enceladus-mcp-code-gamma;
+    # without this condition the gamma stack (enceladus-compute-gamma) also tries to CREATE it and
+    # AWS::EarlyValidation::ResourceExistenceCheck rejects the cross-stack name collision, blocking
+    # every gamma compute deploy. Gating on IsProduction keeps the function prod-owned (zero prod
+    # change) and stops gamma from contending for the name. The live gamma environment continues to
+    # use this function unchanged.
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       FunctionName: enceladus-mcp-code-gamma
