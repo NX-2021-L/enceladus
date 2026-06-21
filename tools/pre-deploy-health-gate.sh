@@ -14,9 +14,14 @@
 #   1. Captures current Lambda CodeSize/Architecture/Runtime snapshot
 #   2. Validates CFN template contains IsGamma conditionals (via verify_lambda_arch_parity.py)
 #   3. Validates EnvironmentSuffix parameter presence in template
-#   4. Warns operator about direct deploy risks
+#   4. Validates deploy scripts have no hardcoded runtime defaults
+#   5. Validates enceladus-shared layer is pinned to canonical (verify_shared_layer_version.py)
+#   6. Validates env-var parity — no out-of-band vars the deploy would strip (env_parity_gate.py)
+#   ...and warns operator about direct deploy risks
 #
 # Part of ENC-PLN-020 (Production Deploy Hardening) / ENC-FTR-068.
+# ENC-TSK-H24: Check 5 added — the enceladus-shared :7-vs-:10 layer-version parity gate.
+# ENC-PLN-048 / ENC-FTR-102: Check 6 added — env-var parity gate (H17 resolver + H18 fail-closed).
 
 set -euo pipefail
 
@@ -78,7 +83,7 @@ ERRORS=0
 SNAPSHOT_FILE="/tmp/pre-deploy-snapshot-${TIMESTAMP}.json"
 
 # --- Check 1: Capture Lambda snapshot ---
-echo "[CHECK 1/4] Capturing current Lambda state snapshot..."
+echo "[CHECK 1/6] Capturing current Lambda state snapshot..."
 
 if [[ ! -f "${MANIFEST}" ]]; then
     echo "[ERROR] Lambda workflow manifest not found: ${MANIFEST}"
@@ -123,7 +128,7 @@ fi
 
 # --- Check 2: Validate IsGamma conditionals ---
 echo ""
-echo "[CHECK 2/4] Validating CFN template architecture parity..."
+echo "[CHECK 2/6] Validating CFN template architecture parity..."
 
 if python3 "${REPO_ROOT}/tools/verify_lambda_arch_parity.py"; then
     echo "[PASS] CFN template uses IsGamma conditionals correctly"
@@ -134,7 +139,7 @@ fi
 
 # --- Check 3: Validate EnvironmentSuffix parameter ---
 echo ""
-echo "[CHECK 3/4] Validating EnvironmentSuffix parameter in template..."
+echo "[CHECK 3/6] Validating EnvironmentSuffix parameter in template..."
 
 if grep -q "EnvironmentSuffix" "${TEMPLATE_FILE}"; then
     echo "[PASS] Template contains EnvironmentSuffix parameter"
@@ -145,7 +150,7 @@ fi
 
 # --- Check 4: Validate deploy scripts ---
 echo ""
-echo "[CHECK 4/4] Validating deploy scripts via manifest..."
+echo "[CHECK 4/6] Validating deploy scripts via manifest..."
 
 # This is already done by verify_lambda_arch_parity.py, but we add a specific
 # check for hardcoded RUNTIME/ARCHITECTURE defaults without conditionals
@@ -156,6 +161,51 @@ if [[ -n "${HARDCODED_SCRIPTS}" ]]; then
     ERRORS=$((ERRORS + 1))
 else
     echo "[PASS] No deploy scripts with hardcoded python3.12 defaults"
+fi
+
+# --- Check 5: Validate enceladus-shared layer-version parity (ENC-TSK-H24) ---
+echo ""
+echo "[CHECK 5/6] Validating enceladus-shared layer-version pin (:7-vs-:10 gate)..."
+
+# Static checks (template Default + workflow --parameter-overrides override) are
+# fail-closed (no AWS creds needed). ENC-TSK-H28 added the workflow-override check that
+# closes the ENC-ISS-385 blind spot: `aws cloudformation deploy` reuses the stale stored
+# SharedLayerArn (:7) unless the workflow passes the canonical override, so a green template
+# Default alone never moved live. --live --regress-only opportunistically diffs the deployed
+# stack param + live get-function-configuration and fails ONLY on a regression (a function/
+# stack ABOVE canonical), TOLERATING a stale :7 here because THIS deploy is what heals it
+# (skips silently without creds). Post-deploy, reconcile with bare --live (fails on ANY
+# != canonical) to PROVE the :7->:10 heal landed -- see the tool docstring.
+if python3 "${REPO_ROOT}/tools/verify_shared_layer_version.py" "${TEMPLATE_FILE}" \
+        --live --regress-only --stack-name "${STACK_NAME}"; then
+    echo "[PASS] enceladus-shared template+workflow pinned to canonical; no live regression"
+else
+    echo "[FAIL] enceladus-shared layer-version parity violation (missing workflow override or live regression; would (re)introduce the :7-class incident, ENC-ISS-385 / ENC-LSN-053)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# --- Check 6: Validate environment-variable parity (ENC-PLN-048 / ENC-FTR-102) ---
+# Resolves the template's per-function Environment.Variables (evaluating
+# !Ref/--parameter-overrides, !Sub, !If/AWS::NoValue) and fails closed if any
+# deploy-critical required var (env_drift_registry.json) would be unset — the
+# exact H05/H09 "deploy would strip <var>" class. Waivers/advisory live in
+# tools/env_parity_waivers.json.
+echo ""
+echo "[CHECK 6/6] Validating env-var parity (no out-of-band vars the deploy would strip)..."
+
+# Infer EnvironmentSuffix from the stack name so gamma stacks resolve their -gamma env.
+PARITY_PARAMS=()
+case "${STACK_NAME}" in
+    *gamma*) PARITY_PARAMS+=(--parameter "EnvironmentSuffix=-gamma") ;;
+esac
+
+if python3 "${REPO_ROOT}/tools/env_parity_gate.py" \
+        --template "${TEMPLATE_FILE}" \
+        ${PARITY_PARAMS[@]+"${PARITY_PARAMS[@]}"}; then
+    echo "[PASS] All deploy-critical env vars are present in the template-resolved env"
+else
+    echo "[FAIL] Env parity gate found deploy-critical vars the deploy would strip (see above)"
+    ERRORS=$((ERRORS + 1))
 fi
 
 # --- Summary ---

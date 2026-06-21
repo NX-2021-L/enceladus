@@ -1,0 +1,480 @@
+{
+  "task": "ENC-TSK-G95",
+  "generated": "2026-06-17",
+  "findings": [
+    {
+      "role": "devops-coordination-api-lambda-role",
+      "logical_id": "CoordinationApiRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "devops-coordination-api-bedrock-dispatch",
+        "devops-coordination-api-inline"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [
+        "lambda:invokefunction"
+      ],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-tracker-mutation-lambda-role",
+      "logical_id": "TrackerMutationRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "eventbridge-put-events"
+      ],
+      "live_attached_managed": [
+        "arn:aws:iam::356364570033:policy/devops-tracker-dynamodb-policy",
+        "arn:aws:iam::356364570033:policy/projects-read-policy",
+        "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      ],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-document-api-lambda-role",
+      "logical_id": "DocumentApiRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "devops-document-api-inline"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-project-service-lambda-role",
+      "logical_id": "ProjectServiceRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "devops-project-service-policy"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [
+        "s3:deleteobject",
+        "s3:putobject"
+      ],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-feed-query-lambda-role",
+      "logical_id": "FeedQueryRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "devops-feed-query-dynamodb-read",
+        "InvokeFeedPublisher"
+      ],
+      "live_attached_managed": [
+        "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      ],
+      "actions_missing_in_cfn": [
+        "dynamodb:getitem",
+        "dynamodb:query",
+        "dynamodb:scan"
+      ],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-coordination-monitor-lambda-role",
+      "logical_id": "CoordinationMonitorRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "devops-coordination-monitor-api-policy"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-deploy-intake-lambda-role",
+      "logical_id": "DeployIntakeRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "devops-deploy-intake-inline"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-deploy-orchestrator-lambda-role",
+      "logical_id": "DeployOrchestratorRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 4,
+      "live_inline_policy_names": [
+        "CloudWatchLogs",
+        "devops-deploy-orchestrator-inline",
+        "SqsEventSource"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-deploy-finalize-lambda-role",
+      "logical_id": "DeployFinalizeRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 1,
+      "live_inline_policy_names": [
+        "devops-deploy-finalize-inline"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [
+        "dynamodb:getitem",
+        "dynamodb:putitem",
+        "dynamodb:query",
+        "dynamodb:scan",
+        "dynamodb:updateitem",
+        "logs:createloggroup",
+        "logs:createlogstream",
+        "logs:putlogevents",
+        "s3:putobject"
+      ],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-deploy-decide-lambda-role",
+      "logical_id": "DeployDecideRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "DeployDecideInline"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-deploy-parity-validator-role",
+      "logical_id": "DeployParityValidatorRole",
+      "status": "CFN_ONLY_NOT_LIVE",
+      "note": "Declared in CFN but does not exist live -> deploy CREATES role (ISS-252: iam:CreateRole).",
+      "cfn_actions": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession",
+        "cloudformation:describestackdriftdetectionstatus",
+        "cloudformation:detectstackdrift",
+        "dynamodb:getitem",
+        "dynamodb:putitem",
+        "dynamodb:query",
+        "dynamodb:updateitem",
+        "lambda:getfunctionconfiguration",
+        "lambda:listfunctions",
+        "lambda:listversionsbyfunction",
+        "lambda:updatefunctionconfiguration",
+        "logs:createloggroup",
+        "logs:createlogstream",
+        "logs:putlogevents",
+        "secretsmanager:getsecretvalue",
+        "sns:publish"
+      ]
+    },
+    {
+      "role": "devops-reference-search-lambda-role",
+      "logical_id": "ReferenceSearchRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "devops-reference-search-inline"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-feed-publisher-lambda-role",
+      "logical_id": "FeedPublisherRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 3,
+      "live_inline_policy_names": [
+        "CloudWatchLogs",
+        "devops-feed-publisher-policy",
+        "SqsEventSource"
+      ],
+      "live_attached_managed": [
+        "arn:aws:iam::356364570033:policy/projects-read-policy"
+      ],
+      "actions_missing_in_cfn": [
+        "cloudfront:createinvalidation",
+        "dynamodb:getitem",
+        "dynamodb:query",
+        "dynamodb:scan",
+        "events:putevents",
+        "s3:getobject",
+        "s3:putobject",
+        "sns:publish"
+      ],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "enceladus-governance-audit-role",
+      "logical_id": "GovernanceAuditRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 3,
+      "live_inline_policy_names": [
+        "CloudWatchLogs",
+        "DynamoDBStreamEventSource",
+        "governance-audit-policy"
+      ],
+      "live_attached_managed": [
+        "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      ],
+      "actions_missing_in_cfn": [
+        "sns:publish"
+      ],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-doc-prep-lambda-role",
+      "logical_id": "DocPrepRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 1,
+      "live_inline_policy_names": [
+        "devops-doc-prep-policy"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [
+        "dynamodb:getitem",
+        "dynamodb:query",
+        "logs:createloggroup",
+        "logs:createlogstream",
+        "logs:putlogevents",
+        "s3:getobject"
+      ],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "enceladus-bedrock-actions-lambda-role",
+      "logical_id": "BedrockActionsRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "enceladus-bedrock-actions-inline"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-changelog-api-lambda-role",
+      "logical_id": "ChangelogApiRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "devops-changelog-api-policy"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "auth-refresh-lambda-role",
+      "logical_id": "AuthRefreshRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "cognito-refresh-policy",
+        "secretsmanager-github-app"
+      ],
+      "live_attached_managed": [
+        "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      ],
+      "actions_missing_in_cfn": [
+        "cognito-idp:initiateauth"
+      ],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-feed-pipe-role",
+      "logical_id": "FeedPipeRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "allow-documents-stream-read",
+        "devops-feed-pipe-policy",
+        "PipeSourceDynamoDBStreams",
+        "PipeTargetSqs"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [
+        "sqs:getqueueattributes"
+      ],
+      "actions_extra_in_cfn": []
+    },
+    {
+      "role": "devops-graph-sync-lambda-role",
+      "logical_id": "GraphSyncRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 5,
+      "live_inline_policy_names": [
+        "CloudWatchLogs",
+        "devops-graph-sync-inline",
+        "SqsEventSource"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-graph-query-api-lambda-role",
+      "logical_id": "GraphQueryApiRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 4,
+      "live_inline_policy_names": [
+        "devops-graph-query-api-inline"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "enceladus-neo4j-backup-lambda-role",
+      "logical_id": "Neo4jBackupRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "neo4j-backup-policy"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "enceladus-graph-health-metrics-role",
+      "logical_id": "GraphHealthMetricsRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "enceladus-graph-health-metrics-policy"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    },
+    {
+      "role": "devops-graph-pipe-role",
+      "logical_id": "GraphPipeRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "devops-graph-pipe-policy",
+        "PipeSourceDynamoDBStream",
+        "PipeTargetSqs",
+        "ReadDocumentsStreamPolicy"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [
+        "sqs:getqueueattributes"
+      ],
+      "actions_extra_in_cfn": []
+    },
+    {
+      "role": "devops-env-drift-auditor-role",
+      "logical_id": "EnvDriftAuditorRole",
+      "status": "HAS_CFN_POLICIES",
+      "cfn_policy_count": 2,
+      "live_inline_policy_names": [
+        "env-drift-auditor-inline"
+      ],
+      "live_attached_managed": [],
+      "actions_missing_in_cfn": [],
+      "actions_extra_in_cfn": [
+        "appconfig:getconfiguration",
+        "appconfig:getlatestconfiguration",
+        "appconfig:startconfigurationsession"
+      ]
+    }
+  ]
+}

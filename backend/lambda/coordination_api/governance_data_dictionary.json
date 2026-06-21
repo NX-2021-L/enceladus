@@ -1,7 +1,7 @@
 {
-  "version": "2026-04-27.01",
-  "updated_at": "2026-04-27T18:55:00Z",
-  "last_change_summary": "ENC-FTR-098 / ENC-TSK-G43: register monitoring.mentions_drift_audit entity covering Unit 6 (daily sample-and-diff against live MENTIONS edge state). The audit shares the prose-field allowlist with graph_sync.mentions_extraction so live and audit paths cannot drift. Chained into the existing devops-parity-drift-daily EventBridge rule (no new infra). Threshold-breach emits ENC-ISS via tracker_api.",
+  "version": "2026-06-21.01",
+  "updated_at": "2026-06-21T09:31:58Z",
+  "last_change_summary": "ENC-PLN-048 Objective 2 (ENC-FTR-102, ENC-TSK-H17/H18/H19): added the deploy.env_parity_gate entity documenting the pre-deploy environment-variable parity gate — tools/cfn_env_resolver.py (CFN intrinsic env resolver), tools/env_parity_gate.py (fail-closed gate + waivers, wired as CHECK 6 in pre-deploy-health-gate.sh), tools/live_template_strip_detector.py, and the shared backend/lambda/env_drift_auditor/env_parity_core.py comparison core. Version bump also satisfies the path-triggered Governance Dictionary Guard on the env_drift_auditor lambda_function.py AC2 refactor (ENC-ISS-179).",
   "owners": [
     "enceladus-platform"
   ],
@@ -3091,7 +3091,7 @@
       }
     },
     "tracker.graphsearch": {
-      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges. ENC-FTR-098 / ENC-TSK-G36: MENTIONS added to graph_query_api._ALLOWED_EDGE_TYPES so tracker.graphsearch queries with edge_types=['MENTIONS'] no longer reject at the API gate.",
+      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges. ENC-FTR-098 / ENC-TSK-G36: MENTIONS added to graph_query_api._ALLOWED_EDGE_TYPES so tracker.graphsearch queries with edge_types=['MENTIONS'] no longer reject at the API gate. ENC-PLN-046 hybrid-retrieval remediation: the keyword signal tokenizes multi-word queries and scores per-token field-weighted CONTAINS (ENC-ISS-310); the anchored graph signal is deadline-bounded (_GRAPH_SIGNAL_DEADLINE_S) and degrades to graph_algorithm='timeout' rather than timing out the response (ENC-ISS-311); the /health endpoint reports per-signal availability via a functional probe (ENC-ISS-312).",
       "fields": {
         "search_type": {
           "type": "enum",
@@ -5143,6 +5143,31 @@
         "historical_precedent": {
           "type": "string",
           "definition": "ENC-ISS-213 (2026-04-12): devops-coordination-api-gamma Lambda shipped x86_64 pydantic_core wheels on an arm64 runtime despite the deploy.sh arch bifurcation from ENC-FTR-072 / ENC-ISS-224. Entire gamma MCP surface failed with 'No module named pydantic_core._pydantic_core'. Hot-fixed by ENC-TSK-D57; this guard is the structural prevention of recurrence."
+        }
+      }
+    },
+    "deploy.env_parity_gate": {
+      "description": "Pre-deploy environment-variable parity gate (ENC-PLN-048 Objective 2 / ENC-FTR-102). Resolves each CloudFormation Lambda's template Environment.Variables and fails closed if a deploy-critical required var (env_drift_auditor/env_drift_registry.json) would be unset, or if a var present live would be stripped by the deploy (the H05/H09 'deploy would strip <var>' class). The pre-deploy gate and the post-deploy env_drift_auditor share a single comparison core (env_parity_core) so they cannot diverge (ENC-TSK-H19 AC2).",
+      "fields": {
+        "cfn_env_resolver": {
+          "type": "string",
+          "definition": "tools/cfn_env_resolver.py (ENC-TSK-H17): a real CloudFormation intrinsic-function evaluator (Ref, Fn::Sub, Fn::If, Fn::Equals/Not/And/Or, Fn::Join/Select/GetAtt/ImportValue/FindInMap, plus the Conditions block) that resolves per-function Environment.Variables for infrastructure/cloudformation/02-compute.yaml given a parameter-overrides set, dropping any var that resolves to AWS::NoValue (the !If-unset case). Diffs resolved keys against the required-env registry. Replaces naive !Ref substitution, which false-flagged AppConfig !If vars as 'would be stripped'."
+        },
+        "fail_closed_gate": {
+          "type": "string",
+          "definition": "tools/env_parity_gate.py (ENC-TSK-H18): wraps the H17 resolver diff and exits non-zero with function+var+remediation for any missing deploy-critical var; exits zero when all are present. Invoked as CHECK 6 in tools/pre-deploy-health-gate.sh."
+        },
+        "waiver_mechanism": {
+          "type": "string",
+          "definition": "tools/env_parity_waivers.json (ENC-TSK-H18): documented, auditable per-(function,var) waivers that suppress a FAILURE but are still RECORDED in the report (never silent), plus an advisory_vars map (function name or '*' -> vars that WARN instead of FAIL). The committed file ships with zero active waivers so the gate stays honest."
+        },
+        "live_template_strip_detector": {
+          "type": "string",
+          "definition": "tools/live_template_strip_detector.py (ENC-TSK-H19): diffs live Lambda Environment.Variables (aws lambda get-function-configuration) against the H17 template-resolved env and flags any live-only var as 'deploy would strip <var> from <function>', classified critical (var is in the required-env registry) vs warning. Live fetch is pluggable (--live-env-file) for offline/CI/test runs."
+        },
+        "shared_comparison_core": {
+          "type": "string",
+          "definition": "backend/lambda/env_drift_auditor/env_parity_core.py (ENC-TSK-H19 AC2): the single source of env-comparison primitives (build_placeholders, classify_required, live_only_vars) imported by BOTH the env_drift_auditor Lambda (post-deploy required-var scan) and the pre-deploy strip detector, so pre- and post-deploy checks stay consistent by construction. Pure module with no import-time side effects."
         }
       }
     },

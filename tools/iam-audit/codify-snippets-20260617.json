@@ -1,0 +1,1137 @@
+{
+  "snippets": {
+    "devops-coordination-api-lambda-role": [
+      {
+        "Sid": "InvokeBedrockAgentAlias",
+        "Action": [
+          "bedrock:InvokeAgent"
+        ],
+        "Resource": [
+          "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
+        ],
+        "src_policy": "devops-coordination-api-bedrock-dispatch",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-coordination-api${EnvironmentSuffix}*",
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/mcp/server*",
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/coordination/worker-runtime*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "CoordinationTableAccess",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "TrackerTableAccess",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query",
+          "dynamodb:Scan",
+          "dynamodb:DescribeTable"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "ProjectsTableRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "GovernancePoliciesReadWrite",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan",
+          "dynamodb:DescribeTable"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "DocumentsTableRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "ComponentRegistryTableAccess",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/component-registry${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/component-registry${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "GovernanceAndReferenceS3Read",
+        "Action": [
+          "s3:ListBucket"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "GovernanceAndReferenceS3Get",
+        "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/governance/*",
+          "arn:aws:s3:::jreese-net/projects/*",
+          "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "GovernanceS3Write",
+        "Action": [
+          "s3:PutObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/governance/live/*",
+          "arn:aws:s3:::jreese-net/governance/history/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3HeadBucket",
+        "Action": [
+          "s3:HeadBucket",
+          "s3:GetBucketLocation"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "SSMDispatch",
+        "Action": [
+          "ssm:SendCommand",
+          "ssm:GetCommandInvocation",
+          "ssm:ListCommands",
+          "ssm:ListCommandInvocations",
+          "ssm:DescribeInstanceInformation"
+        ],
+        "Resource": [
+          "*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "EC2FleetDispatch",
+        "Action": [
+          "ec2:DescribeInstances",
+          "ec2:DescribeLaunchTemplates",
+          "ec2:DescribeLaunchTemplateVersions",
+          "ec2:RunInstances",
+          "ec2:TerminateInstances",
+          "ec2:CreateTags"
+        ],
+        "Resource": [
+          "*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "ProviderSecretsRead",
+        "Action": [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ],
+        "Resource": [
+          "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/coordination/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "ComponentEventsTopicPublish",
+        "Action": [
+          "sns:Publish"
+        ],
+        "Resource": [
+          "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-component-registry-events${EnvironmentSuffix}"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "CognitoTerminalAuth",
+        "Action": [
+          "cognito-idp:InitiateAuth"
+        ],
+        "Resource": [
+          "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/us-east-1_b2D0V3E1k"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "CognitoOAuthClientManagement",
+        "Action": [
+          "cognito-idp:CreateUserPoolClient",
+          "cognito-idp:DeleteUserPoolClient",
+          "cognito-idp:DescribeUserPoolClient",
+          "cognito-idp:UpdateUserPoolClient"
+        ],
+        "Resource": [
+          "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/us-east-1_b2D0V3E1k"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "BedrockAgentLifecycle",
+        "Action": [
+          "bedrock:CreateAgent",
+          "bedrock:GetAgent",
+          "bedrock:DeleteAgent",
+          "bedrock:PrepareAgent",
+          "bedrock:CreateAgentActionGroup",
+          "bedrock:GetAgentActionGroup",
+          "bedrock:DeleteAgentActionGroup",
+          "bedrock:CreateAgentAlias",
+          "bedrock:GetAgentAlias",
+          "bedrock:DeleteAgentAlias",
+          "bedrock:AssociateAgentKnowledgeBase",
+          "bedrock:DisassociateAgentKnowledgeBase"
+        ],
+        "Resource": [
+          "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "BedrockAgentInvoke",
+        "Action": [
+          "bedrock:InvokeAgent"
+        ],
+        "Resource": [
+          "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "BedrockPassAgentRole",
+        "Action": [
+          "iam:PassRole"
+        ],
+        "Resource": [
+          "arn:aws:iam::${AWS::AccountId}:role/enceladus-bedrock-agent-execution-role${EnvironmentSuffix}"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "FleetHostPassRole",
+        "Action": [
+          "iam:PassRole"
+        ],
+        "Resource": [
+          "arn:aws:iam::${AWS::AccountId}:role/*"
+        ],
+        "src_policy": "devops-coordination-api-inline",
+        "proven_dual_env": true
+      }
+    ],
+    "devops-tracker-mutation-lambda-role": [
+      {
+        "Sid": "",
+        "Action": [
+          "events:PutEvents"
+        ],
+        "Resource": [
+          "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+        ],
+        "src_policy": "eventbridge-put-events",
+        "proven_dual_env": true
+      }
+    ],
+    "devops-document-api-lambda-role": [
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-document-api${EnvironmentSuffix}*"
+        ],
+        "src_policy": "devops-document-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "DynamoDBDocuments",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-document-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "DynamoDBProjectsRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+        ],
+        "src_policy": "devops-document-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "DynamoDBTrackerRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-document-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3DocumentsObjectAccess",
+        "Action": [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:DeleteObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/agent-documents/*"
+        ],
+        "src_policy": "devops-document-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3ReferenceRead",
+        "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/mobile/v1/reference/*",
+          "arn:aws:s3:::jreese-net/governance/live/*"
+        ],
+        "src_policy": "devops-document-api-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3ListPrefixes",
+        "Action": [
+          "s3:ListBucket"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net"
+        ],
+        "src_policy": "devops-document-api-inline",
+        "proven_dual_env": true
+      }
+    ],
+    "devops-project-service-lambda-role": [
+      {
+        "Sid": "ProjectsTableFullAccess",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-project-service-policy",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "TrackerTableLimitedWrite",
+        "Action": [
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-project-service-policy",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        ],
+        "src_policy": "devops-project-service-policy",
+        "proven_dual_env": true
+      }
+    ],
+    "devops-coordination-monitor-lambda-role": [
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-coordination-monitor-api${EnvironmentSuffix}*"
+        ],
+        "src_policy": "devops-coordination-monitor-api-policy",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "CoordinationTableRead",
+        "Action": [
+          "dynamodb:Scan",
+          "dynamodb:GetItem"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}"
+        ],
+        "src_policy": "devops-coordination-monitor-api-policy",
+        "proven_dual_env": true
+      }
+    ],
+    "devops-deploy-intake-lambda-role": [
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-deploy-intake${EnvironmentSuffix}*"
+        ],
+        "src_policy": "devops-deploy-intake-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "DeployTableAccess",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-deploy-intake-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "ProjectsTableRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+        ],
+        "src_policy": "devops-deploy-intake-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3ConfigAccess",
+        "Action": [
+          "s3:GetObject",
+          "s3:PutObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/deploy-config/*"
+        ],
+        "src_policy": "devops-deploy-intake-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "SQSSendMessage",
+        "Action": [
+          "sqs:SendMessage",
+          "sqs:GetQueueUrl"
+        ],
+        "Resource": [
+          "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:devops-deploy-queue${EnvironmentSuffix}.fifo"
+        ],
+        "src_policy": "devops-deploy-intake-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "InvokeDocPrepLambda",
+        "Action": [
+          "lambda:InvokeFunction"
+        ],
+        "Resource": [
+          "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-doc-prep${EnvironmentSuffix}",
+          "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-doc-prep${EnvironmentSuffix}:*"
+        ],
+        "src_policy": "devops-deploy-intake-inline",
+        "proven_dual_env": true
+      }
+    ],
+    "devops-deploy-orchestrator-lambda-role": [
+      {
+        "Sid": "DeployTableAccess",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-deploy-orchestrator-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "ProjectsTableRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+        ],
+        "src_policy": "devops-deploy-orchestrator-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "TrackerTableWorklog",
+        "Action": [
+          "dynamodb:UpdateItem"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+        ],
+        "src_policy": "devops-deploy-orchestrator-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3ConfigAccess",
+        "Action": [
+          "s3:GetObject",
+          "s3:PutObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/deploy-config/*"
+        ],
+        "src_policy": "devops-deploy-orchestrator-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3SourceRead",
+        "Action": [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net",
+          "arn:aws:s3:::jreese-net/deploy-sources/*"
+        ],
+        "src_policy": "devops-deploy-orchestrator-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "CodeBuildStart",
+        "Action": [
+          "codebuild:StartBuild"
+        ],
+        "Resource": [
+          "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/devops-ui-deploy-builder${EnvironmentSuffix}"
+        ],
+        "src_policy": "devops-deploy-orchestrator-inline",
+        "proven_dual_env": true
+      }
+    ],
+    "devops-reference-search-lambda-role": [
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-reference-search${EnvironmentSuffix}*"
+        ],
+        "src_policy": "devops-reference-search-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3ReferenceRead",
+        "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
+        ],
+        "src_policy": "devops-reference-search-inline",
+        "proven_dual_env": true
+      }
+    ],
+    "enceladus-bedrock-actions-lambda-role": [
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-bedrock-agent-actions${EnvironmentSuffix}*"
+        ],
+        "src_policy": "enceladus-bedrock-actions-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "TrackerTableAccess",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "enceladus-bedrock-actions-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "ProjectsTableRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+        ],
+        "src_policy": "enceladus-bedrock-actions-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "DocumentsTableRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "enceladus-bedrock-actions-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "CoordinationTableRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/coordination-requests${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "enceladus-bedrock-actions-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "DeploymentTableRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
+        ],
+        "src_policy": "enceladus-bedrock-actions-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "GovernancePoliciesRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "enceladus-bedrock-actions-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "ComplianceTableWrite",
+        "Action": [
+          "dynamodb:PutItem"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-compliance-violations${EnvironmentSuffix}"
+        ],
+        "src_policy": "enceladus-bedrock-actions-inline",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3ReadAccess",
+        "Action": [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net",
+          "arn:aws:s3:::jreese-net/agent-documents/*",
+          "arn:aws:s3:::jreese-net/reference/*"
+        ],
+        "src_policy": "enceladus-bedrock-actions-inline",
+        "proven_dual_env": true
+      }
+    ],
+    "devops-changelog-api-lambda-role": [
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-changelog-api${EnvironmentSuffix}*"
+        ],
+        "src_policy": "devops-changelog-api-policy",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "DeployTableRead",
+        "Action": [
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}/index/*"
+        ],
+        "src_policy": "devops-changelog-api-policy",
+        "proven_dual_env": true
+      },
+      {
+        "Sid": "S3VersionRead",
+        "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/deploy-config/*"
+        ],
+        "src_policy": "devops-changelog-api-policy",
+        "proven_dual_env": true
+      }
+    ]
+  },
+  "needs_review": {
+    "devops-coordination-api-lambda-role": [
+      {
+        "Sid": "InvokeBedrockActionLambda",
+        "Action": [
+          "lambda:InvokeFunction"
+        ],
+        "Resource": [
+          "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-bedrock-agent-actions",
+          "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-bedrock-agent-actions:*"
+        ],
+        "src_policy": "devops-coordination-api-bedrock-dispatch",
+        "proven_dual_env": false
+      }
+    ],
+    "devops-project-service-lambda-role": [
+      {
+        "Sid": "S3ReferenceWrite",
+        "Action": [
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/gamma/mobile/v1/reference/*"
+        ],
+        "src_policy": "devops-project-service-policy",
+        "proven_dual_env": false
+      }
+    ],
+    "devops-feed-query-lambda-role": [
+      {
+        "Sid": "",
+        "Action": [
+          "dynamodb:Query",
+          "dynamodb:Scan",
+          "dynamodb:GetItem"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker/index/*",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects/index/*"
+        ],
+        "src_policy": "devops-feed-query-dynamodb-read",
+        "proven_dual_env": false
+      }
+    ],
+    "devops-deploy-finalize-lambda-role": [
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-deploy-finalize*"
+        ],
+        "src_policy": "devops-deploy-finalize-inline",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "DeployTableAccess",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager/index/*"
+        ],
+        "src_policy": "devops-deploy-finalize-inline",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "TrackerTableAccess",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker"
+        ],
+        "src_policy": "devops-deploy-finalize-inline",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "ProjectsTableRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects"
+        ],
+        "src_policy": "devops-deploy-finalize-inline",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "VersionFileWrite",
+        "Action": [
+          "s3:PutObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/deploy-config/*/current-version.json"
+        ],
+        "src_policy": "devops-deploy-finalize-inline",
+        "proven_dual_env": false
+      }
+    ],
+    "devops-feed-publisher-lambda-role": [
+      {
+        "Sid": "DynamoDBRead",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker/index/*",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents/index/*"
+        ],
+        "src_policy": "devops-feed-publisher-policy",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "S3MobileFeedsWrite",
+        "Action": [
+          "s3:PutObject",
+          "s3:GetObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/mobile/v1/*"
+        ],
+        "src_policy": "devops-feed-publisher-policy",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "S3AnalyticsSyncStageWrite",
+        "Action": [
+          "s3:PutObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::devops-agentcli-compute/projects/sync-stage/*"
+        ],
+        "src_policy": "devops-feed-publisher-policy",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "CloudFrontInvalidation",
+        "Action": [
+          "cloudfront:CreateInvalidation"
+        ],
+        "Resource": [
+          "arn:aws:cloudfront::${AWS::AccountId}:distribution/E2BOQXCW1TA6Y4"
+        ],
+        "src_policy": "devops-feed-publisher-policy",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "SNSPublish",
+        "Action": [
+          "sns:Publish"
+        ],
+        "Resource": [
+          "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-project-json-sync"
+        ],
+        "src_policy": "devops-feed-publisher-policy",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "EventBridgePut",
+        "Action": [
+          "events:PutEvents"
+        ],
+        "Resource": [
+          "*"
+        ],
+        "src_policy": "devops-feed-publisher-policy",
+        "proven_dual_env": false
+      }
+    ],
+    "enceladus-governance-audit-role": [
+      {
+        "Sid": "",
+        "Action": [
+          "sns:Publish"
+        ],
+        "Resource": [
+          "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-project-json-sync"
+        ],
+        "src_policy": "governance-audit-policy",
+        "proven_dual_env": false
+      }
+    ],
+    "devops-doc-prep-lambda-role": [
+      {
+        "Sid": "CloudWatchLogs",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-doc-prep*"
+        ],
+        "src_policy": "devops-doc-prep-policy",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "DynamoDBProjects",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects"
+        ],
+        "src_policy": "devops-doc-prep-policy",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "DynamoDBTracker",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker/index/*"
+        ],
+        "src_policy": "devops-doc-prep-policy",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "DynamoDBDocuments",
+        "Action": [
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "Resource": [
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents",
+          "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents/index/*"
+        ],
+        "src_policy": "devops-doc-prep-policy",
+        "proven_dual_env": false
+      },
+      {
+        "Sid": "S3ReadDocs",
+        "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": [
+          "arn:aws:s3:::jreese-net/mobile/v1/reference/*",
+          "arn:aws:s3:::jreese-net/agent-documents/*"
+        ],
+        "src_policy": "devops-doc-prep-policy",
+        "proven_dual_env": false
+      }
+    ],
+    "auth-refresh-lambda-role": [
+      {
+        "Sid": "",
+        "Action": [
+          "cognito-idp:InitiateAuth"
+        ],
+        "Resource": [
+          "arn:aws:cognito-idp:us-east-1:${AWS::AccountId}:userpool/us-east-1_b2D0V3E1k"
+        ],
+        "src_policy": "cognito-refresh-policy",
+        "proven_dual_env": false
+      }
+    ],
+    "devops-feed-pipe-role": [
+      {
+        "Sid": "SQSSend",
+        "Action": [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes"
+        ],
+        "Resource": [
+          "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:devops-feed-publish-queue.fifo"
+        ],
+        "src_policy": "devops-feed-pipe-policy",
+        "proven_dual_env": false
+      }
+    ],
+    "devops-graph-pipe-role": [
+      {
+        "Sid": "SQSSend",
+        "Action": [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes"
+        ],
+        "Resource": [
+          "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:devops-graph-sync-queue.fifo"
+        ],
+        "src_policy": "devops-graph-pipe-policy",
+        "proven_dual_env": false
+      }
+    ]
+  }
+}

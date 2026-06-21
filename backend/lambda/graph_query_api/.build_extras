@@ -1,0 +1,13 @@
+# ENC-TSK-G43: cross-Lambda module sharing manifest.
+# Each non-comment line is a repo-relative path to a single file; the build
+# step copies it to the function root so the Lambda can `import` it normally.
+# Honored by .github/workflows/_build.yml.
+#
+# ENC-ISS-304 / ENC-TSK-G94: graph_query_api's hybrid retrieval computes the
+# query-side embedding via `import embedding` (the canonical graph_sync helper,
+# ENC-TSK-B94). The tombstoned per-Lambda deploy.sh used to copy this file in;
+# the matrix-build migration dropped that step, so `import embedding` began
+# failing at runtime and the vector signal went dead (signal_availability.vector
+# = false on every query, despite the corpus being fully embedded). Declaring it
+# here restores packaging.
+backend/lambda/graph_sync/embedding.py
