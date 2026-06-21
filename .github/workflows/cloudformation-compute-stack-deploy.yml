@@ -99,6 +99,18 @@ jobs:
             exit 1
           fi
 
+          # ENC-TSK-H27 / ENC-ISS-383: EnceladusCognitoClientSecret is likewise a NoEcho param
+          # with Default "". The gamma MCP function (enceladus-mcp-code-gamma) carries the live
+          # 52-char Cognito client secret OUT-OF-BAND in ENCELADUS_COGNITO_CLIENT_SECRET, which
+          # 02-compute.yaml resolves from this param; a full-env deploy that does not pass it
+          # resolves the var to "" and zeroes the secret, breaking the gamma OAuth-direct path
+          # (ENC-TSK-F74 / ENC-ISS-279). Same NoEcho value-strip class as ENC-LSN-053 — the
+          # key-specific H05 guard above does not catch it. Fail closed rather than strip it.
+          if [ -z "${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" ]; then
+            echo "::error::ENCELADUS_COGNITO_CLIENT_SECRET secret is empty — refusing to deploy (would strip the gamma Cognito client secret; ENC-TSK-H27 / ENC-ISS-383)"
+            exit 1
+          fi
+
           aws cloudformation deploy \
             --region "${AWS_REGION}" \
             --stack-name "${{ steps.params.outputs.stack_name }}" \
@@ -111,7 +123,8 @@ jobs:
               DataStackName="${{ steps.params.outputs.data_stack_name }}" \
               CoordinationInternalApiKey="${{ secrets.COORDINATION_INTERNAL_API_KEY }}" \
               AppConfigApplicationId="5t3sqte" \
-              AppConfigEnvironmentId="bnwj3lj"
+              AppConfigEnvironmentId="bnwj3lj" \
+              EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}"
 
       - name: Report stack events on failure
         if: failure() && steps.deploy.conclusion == 'failure'
