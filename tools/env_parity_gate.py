@@ -7,14 +7,18 @@ H17 resolver/diff engine (tools/cfn_env_resolver.py) with fail-closed behavior:
   * Exits NON-ZERO if any deploy-critical required var would be unset by the
     template-resolved env (the H05/H09 "deploy would strip <var>" class).
   * Prints function + var + remediation for every finding.
-  * Advisory vars WARN without failing (configurable per-function or via "*").
+  * Advisory vars WARN without failing. The deploy-critical/advisory split is
+    read from the env_drift_registry.json per-var classification (ENC-TSK-H16),
+    NOT a separate advisory list in the waivers file (AC2: single source).
   * A documented, auditable waiver suppresses a specific (function, var) FAILURE
     — but the waiver is still RECORDED in the report. Waivers are never silent,
     so the gate cannot be quietly bypassed.
 
 Single diff implementation: this gate does NOT re-diff. It consumes
 cfn_env_resolver.diff_required so pre-deploy and the resolver stay consistent
-(ENC-TSK-H17/H19 AC2 — no divergent second implementation).
+(ENC-TSK-H17/H19 AC2 — no divergent second implementation). The classification
+likewise comes from cfn_env_resolver's diff output (registry-sourced), so the
+gate never re-derives whether a var is deploy-critical (ENC-TSK-H16 AC2).
 
 Usage:
   python3 tools/env_parity_gate.py \
@@ -35,6 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cfn_env_resolver as resolver  # noqa: E402
+import env_parity_core as core  # noqa: E402  (single source of registry classification — ENC-TSK-H16)
 
 CRITICAL = "critical"
 ADVISORY = "advisory"
@@ -45,9 +50,14 @@ _DEFAULT_WAIVERS = _REPO_ROOT / "tools" / "env_parity_waivers.json"
 
 
 def load_waivers(path: Optional[Path]) -> Dict[str, Any]:
-    """Load the waiver/advisory config. Missing file -> empty (fail-closed)."""
+    """Load the waiver config: documented (function, var) failure suppressions.
+
+    Missing file -> empty (fail-closed). ENC-TSK-H16: the deploy-critical/advisory
+    classification is NOT loaded here anymore — it lives in env_drift_registry.json
+    (single source). The waivers file carries only risk-accepted suppressions.
+    """
     if path is None or not Path(path).exists():
-        return {"waivers": {}, "advisory": {}}
+        return {"waivers": {}}
     data = json.loads(Path(path).read_text())
     waivers: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for entry in data.get("waivers", []) or []:
@@ -55,16 +65,7 @@ def load_waivers(path: Optional[Path]) -> Dict[str, Any]:
         var = entry.get("var")
         if fn and var and not str(fn).startswith("EXAMPLE"):
             waivers[(fn, var)] = entry
-    advisory: Dict[str, set] = {}
-    for fn, vars_ in (data.get("advisory_vars", {}) or {}).items():
-        if fn.startswith("_"):
-            continue
-        advisory[fn] = set(vars_ or [])
-    return {"waivers": waivers, "advisory": advisory}
-
-
-def _is_advisory(fn: str, var: str, advisory: Dict[str, set]) -> bool:
-    return var in advisory.get(fn, set()) or var in advisory.get("*", set())
+    return {"waivers": waivers}
 
 
 def _remediation(fn: str, var: str) -> str:
@@ -83,10 +84,16 @@ def run_gate(
     waivers_cfg: Dict[str, Any],
     region: str = resolver.DEFAULT_REGION,
 ) -> Dict[str, Any]:
-    """Resolve template env, diff vs required-env, classify each missing var."""
+    """Resolve template env, diff vs required-env, classify each missing var.
+
+    Classification precedence per missing var: a documented waiver wins (WAIVED,
+    recorded not silent); otherwise the registry's per-var classification decides
+    advisory (WARN) vs deploy-critical (FAIL). The advisory signal is read from the
+    resolver diff's ``classification`` map (registry-sourced, ENC-TSK-H16) — the
+    gate keeps no advisory list of its own.
+    """
     report = resolver.resolve_and_diff(template_path, overrides, registry_path, region=region)
     waivers = waivers_cfg["waivers"]
-    advisory = waivers_cfg["advisory"]
 
     findings: List[Dict[str, Any]] = []
     counts = {CRITICAL: 0, ADVISORY: 0, WAIVED: 0}
@@ -94,11 +101,12 @@ def run_gate(
         d = report["diff"][fn_name]
         if not d["has_registry_entry"]:
             continue  # only registry-governed functions are gated
+        classification = d.get("classification", {})
         for var in d["missing"]:
             if (fn_name, var) in waivers:
                 klass = WAIVED
                 detail = waivers[(fn_name, var)]
-            elif _is_advisory(fn_name, var, advisory):
+            elif classification.get(var) == core.ADVISORY:
                 klass = ADVISORY
                 detail = None
             else:

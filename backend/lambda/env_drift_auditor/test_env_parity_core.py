@@ -52,6 +52,56 @@ def test_live_only_vars():
     assert core.live_only_vars({}, {"A": "1"}) == []
 
 
+# --- ENC-TSK-H16: registry entry shape + classification --------------------
+def test_required_vars_dict_and_list_and_none():
+    assert core.required_vars({"A": "deploy-critical", "B": "advisory"}) == ["A", "B"]
+    assert core.required_vars(["A", "B"]) == ["A", "B"]  # legacy flat list
+    assert core.required_vars(None) == []
+
+
+def test_required_vars_rejects_bad_type():
+    try:
+        core.required_vars(42)
+    except TypeError:
+        return
+    raise AssertionError("expected TypeError for non-dict/list entry")
+
+
+def test_classification_of_dict_list_and_default():
+    entry = {"A": "deploy-critical", "B": "advisory"}
+    assert core.classification_of(entry, "A") == core.DEPLOY_CRITICAL
+    assert core.classification_of(entry, "B") == core.ADVISORY
+    # var absent from a dict entry -> fail-closed default (deploy-critical)
+    assert core.classification_of(entry, "Z") == core.DEPLOY_CRITICAL
+    # unknown classification string -> fail-closed default
+    assert core.classification_of({"A": "wat"}, "A") == core.DEPLOY_CRITICAL
+    # legacy list entry -> every var deploy-critical
+    assert core.classification_of(["A"], "A") == core.DEPLOY_CRITICAL
+
+
+def test_is_deploy_critical():
+    entry = {"A": "deploy-critical", "B": "advisory"}
+    assert core.is_deploy_critical(entry, "A") is True
+    assert core.is_deploy_critical(entry, "B") is False
+    assert core.is_deploy_critical(["A"], "A") is True  # legacy = critical
+
+
+def test_critical_and_advisory_partition():
+    entry = {"A": "deploy-critical", "B": "advisory", "C": "deploy-critical"}
+    assert core.critical_vars(entry) == ["A", "C"]
+    assert core.advisory_vars(entry) == ["B"]
+    # legacy list: all critical, none advisory
+    assert core.critical_vars(["A", "B"]) == ["A", "B"]
+    assert core.advisory_vars(["A", "B"]) == []
+
+
+def test_classification_map():
+    entry = {"A": "deploy-critical", "B": "advisory"}
+    assert core.classification_map(entry) == {"A": "deploy-critical", "B": "advisory"}
+    assert core.classification_map(["A"]) == {"A": "deploy-critical"}
+    assert core.classification_map(None) == {}
+
+
 # --- AC2: env_drift_auditor delegates to the shared core --------------------
 class _StubExceptions:
     class ResourceNotFoundException(Exception):
