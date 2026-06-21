@@ -92,48 +92,46 @@ jobs:
           # `aws cloudformation deploy` plans it as an Add, and AWS::EarlyValidation::ResourceExistenceCheck
           # rejects the ENTIRE change set ("resource already exists") at change-set creation — silently
           # wedging every deploy to this stack (gamma sat broken ~2 months this way). The failure mode is
-          # opaque (it names no resource), so detect it here and fail closed with the exact remediation.
-          # Precise signal: a template-managed function that exists live but carries NO
-          # aws:cloudformation:stack-name tag is owned by no stack => it will collide. Functions owned by
-          # ANY stack (incl. the intentionally prod-owned enceladus-mcp-code-gamma) are tagged and skipped.
+          # opaque (it names no resource), so detect it here and fail closed with the remediation.
+          #
+          # Signal uses ONLY perms the privileged CFN deploy role reliably holds: cloudformation
+          # ListStackResources (the stack's own managed Lambda set) + lambda:GetFunction (live existence).
+          # It deliberately does NOT read resource tags — the OIDC role lacks lambda:ListTags, and the
+          # first cut of this guard relied on tags and produced a false-positive that failed the prod
+          # deploy (every function read as untagged => "orphan"). Only !Sub "...${EnvironmentSuffix}"
+          # FunctionNames are checked; literal cross-environment names (e.g. enceladus-mcp-code-gamma,
+          # intentionally prod-owned and gated by Condition: IsProduction) are out of scope here.
           stack_name="${{ steps.params.outputs.stack_name }}"
           suffix="${ENVIRONMENT_SUFFIX}"
-          # Derive the function names THIS template actually declares — literal FunctionNames plus
-          # !Sub "...${EnvironmentSuffix}" rendered with the active suffix. Deliberately NOT the
-          # matrix-build manifest (lambda_workflow_manifest.json), which is a superset that also lists
-          # functions owned by other stacks (checkout-service, mcp-streamable, …) and would false-positive.
-          # The grep drops !Ref/!GetAtt-style FunctionName references (Permissions, EventSourceMappings).
-          template_fns=$(grep -E '^[[:space:]]*FunctionName:' "${TEMPLATE_FILE}" \
-            | sed -E 's/.*FunctionName:[[:space:]]*//; s/!Sub[[:space:]]*//; s/"//g' \
+          managed=$(aws cloudformation list-stack-resources --stack-name "${stack_name}" --region "${AWS_REGION}" \
+            --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" \
+            --output text 2>/dev/null | tr '\t' '\n' | sort -u)
+          if [ -z "${managed}" ]; then
+            echo "::warning::Could not read the managed Lambda set for ${stack_name} (new/empty stack or API error) — skipping orphan guard (fail open)."
+            exit 0
+          fi
+          tfns=$(grep -E '^[[:space:]]*FunctionName:[[:space:]]*!Sub' "${TEMPLATE_FILE}" \
+            | sed -E 's/.*!Sub[[:space:]]*//; s/"//g' \
             | sed -E "s/\\\$\{EnvironmentSuffix\}/${suffix}/g" \
             | grep -E '^[A-Za-z0-9._-]+$' | sort -u)
           orphans=()
           while IFS= read -r fn; do
             [ -z "${fn}" ] && continue
-            arn=$(aws lambda get-function --function-name "${fn}" --region "${AWS_REGION}" \
-              --query 'Configuration.FunctionArn' --output text 2>/dev/null || echo "")
-            [ -z "${arn}" ] && continue   # not live => CFN will create it fresh; no collision
-            owner=$(aws lambda list-tags --resource "${arn}" --region "${AWS_REGION}" \
-              --query 'Tags."aws:cloudformation:stack-name"' --output text 2>/dev/null || echo "None")
-            # A template-declared function that is live but owned by no stack will collide on Add.
-            # Functions owned by ANY stack (incl. the intentionally prod-owned enceladus-mcp-code-gamma)
-            # are tagged and correctly skipped.
-            if [ "${owner}" = "None" ] || [ -z "${owner}" ]; then
-              orphans+=("${fn}")
-            fi
-          done <<< "${template_fns}"
+            aws lambda get-function --function-name "${fn}" --region "${AWS_REGION}" >/dev/null 2>&1 || continue  # not live => CFN creates fresh
+            grep -qxF "${fn}" <<< "${managed}" || orphans+=("${fn}")
+          done <<< "${tfns}"
           if [ "${#orphans[@]}" -gt 0 ]; then
-            echo "::error::Unadopted out-of-band Lambda(s) detected — live but owned by no CloudFormation stack."
-            echo "::error::This deploy to ${stack_name} would fail AWS::EarlyValidation::ResourceExistenceCheck. Offending function(s):"
+            echo "::error::Unadopted out-of-band Lambda(s) detected — live but NOT managed by ${stack_name}."
+            echo "::error::This deploy would fail AWS::EarlyValidation::ResourceExistenceCheck. Offending function(s):"
             printf '::error::  - %s\n' "${orphans[@]}"
             echo "::error::Remediate by IMPORTING them into ${stack_name} before re-running:"
-            echo "::error::  1) aws cloudformation create-change-set --change-set-type IMPORT --stack-name ${stack_name} \\"
-            echo "::error::       --resources-to-import <manifest> --template-url <s3 template> --parameters <UsePreviousValue + new> --capabilities CAPABILITY_NAMED_IAM"
-            echo "::error::  2) aws cloudformation execute-change-set --stack-name ${stack_name} --change-set-name <name>"
+            echo "::error::  aws cloudformation create-change-set --change-set-type IMPORT --stack-name ${stack_name} \\"
+            echo "::error::    --resources-to-import <manifest> --template-url <s3 template> --parameters <UsePreviousValue + new> --capabilities CAPABILITY_NAMED_IAM"
+            echo "::error::  aws cloudformation execute-change-set --stack-name ${stack_name} --change-set-name <name>"
             echo "::error::Full procedure: ENC-TSK-H29 / ENC-ISS-386 worklog."
             exit 1
           fi
-          echo "✓ No unadopted out-of-band Lambdas — all live template functions are stack-owned (or will be created fresh)."
+          echo "✓ No unadopted out-of-band Lambdas — every live env-suffixed template function is managed by ${stack_name}."
 
       - name: Deploy Compute stack (02-compute)
         id: deploy
