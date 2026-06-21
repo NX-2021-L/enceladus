@@ -55,7 +55,7 @@ def test_critical_missing_fails():
         tmp = Path(d)
         tpl = _write(tmp, "t.yaml", SYNTH_TEMPLATE)
         reg = _registry(tmp, {"fn-a": ["PRESENT", "NEEDED"], "fn-b": ["PRESENT"]})
-        result = gate.run_gate(tpl, {}, reg, {"waivers": {}, "advisory": {}})
+        result = gate.run_gate(tpl, {}, reg, {"waivers": {}})
         assert result["failed"] is True
         crit = [f for f in result["findings"] if f["classification"] == gate.CRITICAL]
         assert len(crit) == 1
@@ -70,7 +70,6 @@ def test_waiver_suppresses_but_records():
         reg = _registry(tmp, {"fn-a": ["PRESENT", "NEEDED"]})
         cfg = {
             "waivers": {("fn-a", "NEEDED"): {"reason": "intentional", "owner": "io", "review_by": "2026-12-31"}},
-            "advisory": {},
         }
         result = gate.run_gate(tpl, {}, reg, cfg)
         assert result["failed"] is False  # waived -> no critical
@@ -80,26 +79,34 @@ def test_waiver_suppresses_but_records():
 
 
 def test_advisory_warns_without_failing():
+    # ENC-TSK-H16: advisory is read from the registry per-var classification, not
+    # a cfg advisory list. A missing advisory var WARNs; the gate does not fail.
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         tpl = _write(tmp, "t.yaml", SYNTH_TEMPLATE)
-        reg = _registry(tmp, {"fn-a": ["PRESENT", "OPTIONAL"]})
-        cfg = {"waivers": {}, "advisory": {"fn-a": {"OPTIONAL"}}}
-        result = gate.run_gate(tpl, {}, reg, cfg)
+        reg = _registry(tmp, {"fn-a": {"PRESENT": "deploy-critical", "OPTIONAL": "advisory"}})
+        result = gate.run_gate(tpl, {}, reg, {"waivers": {}})
         assert result["failed"] is False
         adv = [f for f in result["findings"] if f["classification"] == gate.ADVISORY]
         assert len(adv) == 1 and adv[0]["var"] == "OPTIONAL"
 
 
-def test_advisory_wildcard():
+def test_mixed_entry_critical_fails_advisory_warns():
+    # ENC-TSK-H16: in one dict entry, a missing deploy-critical var FAILS while a
+    # missing advisory var only WARNs — both surfaced, single registry source.
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         tpl = _write(tmp, "t.yaml", SYNTH_TEMPLATE)
-        reg = _registry(tmp, {"fn-a": ["PRESENT", "OPTIONAL"]})
-        cfg = {"waivers": {}, "advisory": {"*": {"OPTIONAL"}}}
-        result = gate.run_gate(tpl, {}, reg, cfg)
-        assert result["failed"] is False
+        reg = _registry(
+            tmp,
+            {"fn-a": {"PRESENT": "deploy-critical", "NEEDED": "deploy-critical", "OPTIONAL": "advisory"}},
+        )
+        result = gate.run_gate(tpl, {}, reg, {"waivers": {}})
+        assert result["failed"] is True
+        assert result["counts"][gate.CRITICAL] == 1
         assert result["counts"][gate.ADVISORY] == 1
+        crit = [f for f in result["findings"] if f["classification"] == gate.CRITICAL]
+        assert crit[0]["var"] == "NEEDED"
 
 
 def test_all_present_passes():
@@ -107,7 +114,7 @@ def test_all_present_passes():
         tmp = Path(d)
         tpl = _write(tmp, "t.yaml", SYNTH_TEMPLATE)
         reg = _registry(tmp, {"fn-a": ["PRESENT"], "fn-b": ["PRESENT", "ALSO"]})
-        result = gate.run_gate(tpl, {}, reg, {"waivers": {}, "advisory": {}})
+        result = gate.run_gate(tpl, {}, reg, {"waivers": {}})
         assert result["failed"] is False
         assert result["findings"] == []
 
@@ -118,7 +125,7 @@ def test_untracked_function_not_gated():
         tpl = _write(tmp, "t.yaml", SYNTH_TEMPLATE)
         # fn-b not in registry -> not gated even though it has extra var.
         reg = _registry(tmp, {"fn-a": ["PRESENT"]})
-        result = gate.run_gate(tpl, {}, reg, {"waivers": {}, "advisory": {}})
+        result = gate.run_gate(tpl, {}, reg, {"waivers": {}})
         assert all(f["function"] != "fn-b" for f in result["findings"])
 
 
@@ -134,6 +141,9 @@ def test_load_waivers_filters_example_entries():
                         {"function": "EXAMPLE-x", "var": "Y", "reason": "doc"},
                         {"function": "fn-a", "var": "NEEDED", "reason": "real", "owner": "io"},
                     ],
+                    # ENC-TSK-H16: advisory_vars is no longer read from this file
+                    # (classification lives in the registry). A stale key here must
+                    # be ignored, not crash the loader.
                     "advisory_vars": {"_comment": "x", "fn-a": ["OPT"]},
                 }
             ),
@@ -141,7 +151,7 @@ def test_load_waivers_filters_example_entries():
         cfg = gate.load_waivers(wf)
         assert ("fn-a", "NEEDED") in cfg["waivers"]
         assert ("EXAMPLE-x", "Y") not in cfg["waivers"]
-        assert cfg["advisory"]["fn-a"] == {"OPT"}
+        assert "advisory" not in cfg  # classification no longer sourced here
 
 
 def test_main_exit_code_nonzero_on_critical():

@@ -187,9 +187,10 @@ fi
 # --- Check 6: Validate environment-variable parity (ENC-PLN-048 / ENC-FTR-102) ---
 # Resolves the template's per-function Environment.Variables (evaluating
 # !Ref/--parameter-overrides, !Sub, !If/AWS::NoValue) and fails closed if any
-# deploy-critical required var (env_drift_registry.json) would be unset — the
-# exact H05/H09 "deploy would strip <var>" class. Waivers/advisory live in
-# tools/env_parity_waivers.json.
+# deploy-critical required var would be unset — the exact H05/H09 "deploy would
+# strip <var>" class. ENC-TSK-H16: the required vars AND their deploy-critical/
+# advisory classification are the single source in env_drift_registry.json;
+# tools/env_parity_waivers.json carries only risk-accepted failure suppressions.
 echo ""
 echo "[CHECK 6/6] Validating env-var parity (no out-of-band vars the deploy would strip)..."
 

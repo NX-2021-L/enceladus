@@ -25,7 +25,10 @@ from typing import Any, Dict, List, Tuple
 import boto3
 
 # ENC-TSK-H19: shared comparison core — single source for pre- and post-deploy.
-from env_parity_core import build_placeholders, classify_required
+# ENC-TSK-H16: critical_vars/advisory_vars read the per-var deploy-critical vs
+# advisory classification from the same core, so the auditor and the pre-deploy
+# gate split the registry the same way (no second copy).
+from env_parity_core import build_placeholders, classify_required, critical_vars, advisory_vars
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -138,8 +141,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     drift_count = 0
     ok_count = 0
+    advisory_drift_count = 0
 
-    for fn_name, required in REGISTRY.get("lambdas", {}).items():
+    for fn_name, spec in REGISTRY.get("lambdas", {}).items():
+        # ENC-TSK-H16: P0 drift issues fire only for deploy-critical vars. Advisory
+        # vars are reported but never file a P0 — the pre-deploy gate WARNs on them
+        # too, so the post-deploy auditor and the gate classify the registry the
+        # same way. critical_vars/advisory_vars also accept legacy flat-list entries
+        # (every var deploy-critical), so pre-H16 registries behave unchanged.
+        required = critical_vars(spec)
         status, drift = _audit_lambda(lambda_client, fn_name, required)
         entry: Dict[str, Any] = {"lambda": fn_name, "status": status}
         if drift:
@@ -151,6 +161,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             drift_count += 1
         else:
             ok_count += 1
+
+        advisory = advisory_vars(spec)
+        if advisory:
+            # Report-only: surface advisory misses without filing a P0 issue.
+            _, adv_drift = _audit_lambda(lambda_client, fn_name, advisory)
+            if adv_drift:
+                entry["advisory_drift"] = adv_drift
+                advisory_drift_count += 1
         results.append(entry)
 
     summary = {
@@ -158,8 +176,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ok": ok_count,
         "drift": drift_count,
+        "advisory_drift": advisory_drift_count,
         "total": ok_count + drift_count,
         "results": results,
     }
-    logger.info("env_drift_auditor run complete: ok=%d drift=%d", ok_count, drift_count)
+    logger.info(
+        "env_drift_auditor run complete: ok=%d drift=%d advisory_drift=%d",
+        ok_count, drift_count, advisory_drift_count,
+    )
     return summary

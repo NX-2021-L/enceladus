@@ -16,6 +16,19 @@ now live here, so the pre-deploy detector reuses exactly the same primitives
 rather than re-deriving them. Post-deploy and pre-deploy stay consistent by
 construction.
 
+ENC-TSK-H16 (ENC-PLN-048 Objective 1, parent ENC-TSK-H11): this module is also
+the SINGLE interpreter of the env_drift_registry.json ``lambdas`` entry shape and
+its per-var deploy-critical/advisory classification. Every consumer — the H17
+resolver/diff, the H18 pre-deploy gate, the H19 strip detector, and the
+post-deploy auditor — reads the registry through ``required_vars`` /
+``classification_of`` here instead of re-deriving the shape, so the classification
+has exactly one source of truth (AC2: "single source, no second copy"). Two entry
+shapes are accepted per function:
+
+  * dict (canonical, H16): ``{"VAR": "deploy-critical" | "advisory", ...}``
+  * list (legacy):         ``["VAR", ...]`` — every var treated as deploy-critical
+    (the fail-closed default).
+
 Pure module: no environment reads, no AWS calls, no side effects at import time
 (unlike lambda_function.py, which reads os.environ at import) — so it is safe to
 import from CLI tools and unit tests.
@@ -78,3 +91,66 @@ def live_only_vars(live_env: Dict[str, str], template_env: Dict[str, str]) -> Li
     -unset var is not mistaken for a live-only var.
     """
     return sorted(set(live_env or {}) - set(template_env or {}))
+
+
+# ---------------------------------------------------------------------------
+# Registry entry shape + per-var classification (ENC-TSK-H16)
+# ---------------------------------------------------------------------------
+# A function's env_drift_registry.json "lambdas" entry declares its required env
+# vars. H16 adds a per-var classification while keeping the legacy flat-list form
+# working. These helpers are the ONLY place that interprets the entry shape, so
+# the resolver, gate, strip detector, and auditor never re-derive it (AC2).
+
+DEPLOY_CRITICAL = "deploy-critical"
+ADVISORY = "advisory"
+VALID_CLASSIFICATIONS = (DEPLOY_CRITICAL, ADVISORY)
+# Anything not explicitly classified (legacy list entry, unknown value) is
+# treated as deploy-critical: the gate fails closed and the auditor files a P0.
+DEFAULT_CLASSIFICATION = DEPLOY_CRITICAL
+
+
+def required_vars(entry: Any) -> List[str]:
+    """All required env-var names for a function's registry entry.
+
+    Accepts the canonical dict form ``{"VAR": classification}`` (returns its keys)
+    or the legacy list form ``["VAR", ...]``. ``None`` (no entry) yields ``[]``.
+    """
+    if entry is None:
+        return []
+    if isinstance(entry, dict):
+        return list(entry.keys())
+    if isinstance(entry, (list, tuple)):
+        return list(entry)
+    raise TypeError(f"unsupported registry entry type: {type(entry).__name__}")
+
+
+def classification_of(entry: Any, var: str) -> str:
+    """Classification of a single var: ``deploy-critical`` or ``advisory``.
+
+    Legacy list entries, unknown classification strings, and vars absent from a
+    dict entry all resolve to ``deploy-critical`` (the fail-closed default).
+    """
+    if isinstance(entry, dict):
+        value = entry.get(var, DEFAULT_CLASSIFICATION)
+        return value if value in VALID_CLASSIFICATIONS else DEFAULT_CLASSIFICATION
+    return DEFAULT_CLASSIFICATION
+
+
+def is_deploy_critical(entry: Any, var: str) -> bool:
+    """True if ``var`` is deploy-critical for this entry (gate fails closed)."""
+    return classification_of(entry, var) == DEPLOY_CRITICAL
+
+
+def critical_vars(entry: Any) -> List[str]:
+    """Required vars classified deploy-critical (gate FAIL / auditor P0 set)."""
+    return [v for v in required_vars(entry) if is_deploy_critical(entry, v)]
+
+
+def advisory_vars(entry: Any) -> List[str]:
+    """Required vars classified advisory (gate WARN / auditor report-only set)."""
+    return [v for v in required_vars(entry) if not is_deploy_critical(entry, v)]
+
+
+def classification_map(entry: Any) -> Dict[str, str]:
+    """``{var: classification}`` for every required var in the entry."""
+    return {v: classification_of(entry, v) for v in required_vars(entry)}

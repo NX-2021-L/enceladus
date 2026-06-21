@@ -52,6 +52,20 @@ def test_live_only_nonrequired_is_warning():
     assert len(warn) == 1 and warn[0]["var"] == "MANUAL_DEBUG_FLAG"
 
 
+def test_advisory_required_live_only_is_warning():
+    # ENC-TSK-H16: a live-only var that is REQUIRED but classified advisory WARNs
+    # (not FAIL) — the same split the H18 gate applies. A deploy-critical live-only
+    # var still FAILs, so the detector fails overall.
+    template = {"fn": {"resolved_env": {"A": "1"}}}
+    live = {"fn": {"A": "1", "OPT": "x", "KEY": "y"}}
+    required_map = {"fn": {"A": "deploy-critical", "OPT": "advisory", "KEY": "deploy-critical"}}
+    result = det.detect(template, live, required_map)
+    assert result["failed"] is True  # KEY (deploy-critical) is live-only
+    by_var = {f["var"]: f["classification"] for f in result["findings"]}
+    assert by_var["OPT"] == det.WARNING
+    assert by_var["KEY"] == det.CRITICAL
+
+
 def test_function_not_live_is_skipped():
     template = {"fn-a": {"resolved_env": {"A": "1"}}, "fn-b": {"resolved_env": {"B": "1"}}}
     live = {"fn-a": {"A": "1"}}  # fn-b not deployed

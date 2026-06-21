@@ -12,11 +12,12 @@ template-resolved env is flagged:
 
 — the exact H05/H09 failure signature — BEFORE merge/deploy.
 
-Classification:
-  * critical : the live-only var is a REQUIRED var (env_drift_registry.json).
-    A deploy that strips it reproduces the incident class -> gate FAILS.
-  * warning  : the live-only var is not in the registry (extra / out-of-band but
-    not declared deploy-critical) -> reported, does not fail the gate.
+Classification (ENC-TSK-H16 — registry-sourced, same split as the H18 gate):
+  * critical : the live-only var is a DEPLOY-CRITICAL required var
+    (env_drift_registry.json). A deploy that strips it reproduces the incident
+    class -> detector FAILS.
+  * warning  : the live-only var is classified advisory in the registry, or is
+    not in the registry at all (extra / out-of-band) -> reported, does not fail.
 
 AC2 (no divergent second implementation): the live-vs-template comparison uses
 backend/lambda/env_drift_auditor/env_parity_core.live_only_vars — the same module
@@ -52,14 +53,16 @@ WARNING = "warning"
 def detect(
     template_envs: Dict[str, Dict[str, Any]],
     live_envs: Dict[str, Dict[str, str]],
-    required_map: Dict[str, List[str]],
+    required_map: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Pure comparison: for each function present in BOTH the template and live,
     flag vars that are live-only (the deploy would strip them).
 
     template_envs: {fn: {"resolved_env": {...}}} (H17 output) or {fn: {...env...}}.
     live_envs:     {fn: {var: value}} live Environment.Variables.
-    required_map:  {fn: [required vars]} from env_drift_registry.json.
+    required_map:  {fn: entry} from env_drift_registry.json — entry is the
+                   {VAR: classification} dict (H16) or a legacy [VAR, ...] list;
+                   both are read via env_parity_core (no shape re-derivation).
     """
     findings: List[Dict[str, Any]] = []
     counts = {CRITICAL: 0, WARNING: 0}
@@ -70,16 +73,24 @@ def detect(
         if fn_name not in live_envs:
             skipped.append(fn_name)  # not deployed live (nothing to strip)
             continue
-        required = set(required_map.get(fn_name, []))
+        entry = required_map.get(fn_name)
+        required = set(env_parity_core.required_vars(entry))
         for var in env_parity_core.live_only_vars(live_envs[fn_name], template_env):
-            klass = CRITICAL if var in required else WARNING
+            is_req = var in required
+            # ENC-TSK-H16: stripping a DEPLOY-CRITICAL required var reproduces the
+            # incident class (FAIL). Advisory required vars and out-of-band/
+            # non-registry vars only WARN — same split the H18 gate applies.
+            if is_req and env_parity_core.is_deploy_critical(entry, var):
+                klass = CRITICAL
+            else:
+                klass = WARNING
             counts[klass] += 1
             findings.append(
                 {
                     "function": fn_name,
                     "var": var,
                     "classification": klass,
-                    "required": var in required,
+                    "required": is_req,
                     "message": f"deploy would strip {var} from {fn_name}",
                 }
             )
