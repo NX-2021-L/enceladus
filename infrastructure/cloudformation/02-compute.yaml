@@ -444,6 +444,12 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DEPLOY_REGION: !Ref AWS::Region
+          # ENC-TSK-H26 / ENC-ISS-283: deploy-critical out-of-band var. A full 02-compute
+          # replace would strip the live value (ENC-LSN-053), leaving deploy-intake unable
+          # to enqueue deploy triggers. Codified from the canonical 01-data DeployQueueUrl
+          # export, mirroring the DeployQueueArn import used by DeployOrchestratorSqsTrigger.
+          SQS_QUEUE_URL: !ImportValue
+            Fn::Sub: ${DataStackName}-DeployQueueUrl
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
           CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
