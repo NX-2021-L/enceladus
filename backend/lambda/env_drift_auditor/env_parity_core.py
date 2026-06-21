@@ -36,6 +36,7 @@ import from CLI tools and unit tests.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, List, Optional, Sequence
 
 # Values that count as "not really set" (drift), independent of any registry.
@@ -154,3 +155,62 @@ def advisory_vars(entry: Any) -> List[str]:
 def classification_map(entry: Any) -> Dict[str, str]:
     """``{var: classification}`` for every required var in the entry."""
     return {v: classification_of(entry, v) for v in required_vars(entry)}
+
+
+# ---------------------------------------------------------------------------
+# Drift-issue dedup signature (ENC-TSK-H10)
+# ---------------------------------------------------------------------------
+# env_drift_auditor runs hourly. Before H10 it POSTed a NEW P0 issue every run
+# for the SAME unresolved drift — ENC-ISS-369..379 were 11 byte-identical P0s,
+# one per hour, for ONE finding — because it assumed a tracker-side dedup guard
+# that does not exist. These helpers give each finding a stable identity so the
+# auditor can recognize an already-open issue and bump it instead of re-filing.
+# The signature is the dedup key AC-1 requires; it travels in the issue TITLE via
+# sig_token() because the tracker create API persists only a fixed field
+# whitelist (an arbitrary top-level field would be silently dropped) and the
+# title round-trips through the create -> list path the auditor queries.
+
+
+def drift_signature(fn_name: str, missing_vars: Sequence[str]) -> str:
+    """Stable content hash identifying a drift finding by (lambda, missing-var set).
+
+    Order- and duplicate-independent: built from the sorted unique var set, so the
+    same persistent drift always hashes to the same value regardless of the order
+    ``classify_required`` happened to emit the rows in (the ``frozenset(missing_vars)``
+    dedup key from the ENC-TSK-H10 design). 12 hex chars (48 bits) is ample to keep
+    the handful of live (function, missing-var-set) findings distinct without
+    bloating the issue title.
+    """
+    canonical = fn_name + "\n" + "\n".join(sorted(set(missing_vars)))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def sig_token(signature: str) -> str:
+    """The machine-matchable marker embedded in a drift issue's title.
+
+    Carried in the title (a whitelisted, always-returned field) so a later auditor
+    run can recognize its own prior issue from a plain ``type=issue&status=open``
+    listing without depending on any custom-field round-trip.
+    """
+    return f"[sig:{signature}]"
+
+
+def find_signature_match(open_issues: Sequence[Dict[str, Any]], signature: str) -> Optional[str]:
+    """Return the bare id of the first OPEN issue carrying ``signature``, else None.
+
+    Pure decision half of the auditor's idempotency (ENC-TSK-H10 AC-2): given the
+    records a ``type=issue&status=open`` query returned, find one whose title carries
+    ``sig_token(signature)``. The auditor bumps that issue rather than filing a new
+    one. Prefers ``item_id`` (the bare ENC-ISS-NNN the ``/log`` route path wants) and
+    falls back to the segment after ``#`` in ``record_id``.
+    """
+    token = sig_token(signature)
+    for issue in open_issues:
+        if token in str(issue.get("title", "")):
+            bare = issue.get("item_id") or issue.get("id")
+            if not bare:
+                rid = str(issue.get("record_id", ""))
+                bare = rid.split("#", 1)[1] if "#" in rid else rid
+            if bare:
+                return bare
+    return None
