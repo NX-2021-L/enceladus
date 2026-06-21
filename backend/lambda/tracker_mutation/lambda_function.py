@@ -45,6 +45,18 @@ import urllib.request
 from urllib.parse import unquote
 
 import boto3
+
+# ENC-TSK-H08 (F63): resolve feature flags from AppConfig with env-var fallback,
+# mirroring coordination_api. The appconfig_flags submodule ships only in shared
+# layer :10. ENC-TSK-H28: import defensively so a function still on :7 (e.g. gamma
+# pending the layer heal, ENC-ISS-197) degrades to the env-var fallback instead of
+# ImportError-bricking the whole Lambda at module load (ENC-LSN-053 resilience class).
+try:
+    from enceladus_shared.appconfig_flags import flag as _appconfig_flag
+except ImportError:  # layer :7 lacks appconfig_flags — fall back to a direct env read
+    def _appconfig_flag(name, *, env_fallback=None, default=False):
+        raw = os.environ.get(env_fallback, "") if env_fallback else ""
+        return raw.strip().lower() == "true" if raw != "" else bool(default)
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -137,7 +149,8 @@ CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 CHECKOUT_SERVICE_KEY = os.environ.get("CHECKOUT_SERVICE_KEY", "")
 MAX_NOTE_LENGTH = 2000
 # ENC-FTR-052: Governed Lesson Primitive — feature flag
-ENABLE_LESSON_PRIMITIVE = os.environ.get("ENABLE_LESSON_PRIMITIVE", "false").lower() == "true"
+# ENC-TSK-H08 (F63): AppConfig is the source of truth (env_fallback preserves legacy/local behavior)
+ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallback="ENABLE_LESSON_PRIMITIVE")
 
 # Valid record types and their closed/default statuses
 _RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "generation"}
