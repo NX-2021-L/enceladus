@@ -5212,7 +5212,7 @@
       }
     },
     "appconfig.feature_flags": {
-      "description": "AppConfig-based boolean feature flag contract (ENC-TSK-F63 AC-1). The enceladus_shared.appconfig_flags.flag() helper resolves flags via the AppConfig Lambda extension (localhost:2772, TTL 45 s) with env-var fallback for local dev. Replaces direct ENABLE_* env var reads in coordination_api and mcp-server. Extension layer ARN is arch-specific (x86 / arm64) and attached to all 24 prod Lambdas via HasAppConfigLayer CFN condition.",
+      "description": "AppConfig-based boolean feature flag contract (ENC-TSK-F63 AC-1). The enceladus_shared.appconfig_flags.flag() helper resolves flags via the AppConfig Lambda extension (localhost:2772, TTL 45 s) with env-var fallback for local dev. Replaces direct ENABLE_* env var reads in coordination_api, mcp-server, and (ENC-TSK-H08) tracker_mutation, which now resolves enable_lesson_primitive via appconfig_flags.flag() instead of a direct os.environ read. Extension layer ARN is arch-specific (x86 / arm64) and attached to all 24 prod Lambdas via HasAppConfigLayer CFN condition; the appconfig_flags submodule is present only in shared layer :10, so consumers must run on :10 (ENC-TSK-H08 AC-3).",
       "fields": {
         "flag_name": {
           "type": "string",
