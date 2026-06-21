@@ -41,6 +41,15 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+# ENC-TSK-H16: env_parity_core is the single interpreter of the registry entry
+# shape + per-var deploy-critical/advisory classification. Add its dir to
+# sys.path so this resolver (and the gate/detector that import it) reads the
+# classification from one place instead of re-deriving it (AC2: no second copy).
+_CORE_DIR = str(Path(__file__).resolve().parents[1] / "backend" / "lambda" / "env_drift_auditor")
+if _CORE_DIR not in sys.path:
+    sys.path.insert(0, _CORE_DIR)
+import env_parity_core as core  # noqa: E402
+
 
 # --- AWS::NoValue sentinel -------------------------------------------------
 # A node that resolves to this is treated as "not set" and dropped from its
@@ -320,7 +329,14 @@ def resolve_function_envs(template: Dict[str, Any], ctx: ResolveContext) -> Dict
     return result
 
 
-def load_required_env(registry_path: Path) -> Dict[str, List[str]]:
+def load_required_env(registry_path: Path) -> Dict[str, Any]:
+    """Load the registry's per-function required-env map.
+
+    Values are either the canonical ENC-TSK-H16 ``{VAR: classification}`` object or
+    a legacy ``[VAR, ...]`` list. Callers must interpret the shape via
+    env_parity_core (``required_vars`` / ``classification_of``) rather than assuming
+    a list — that keeps shape interpretation in one place (AC2).
+    """
     with open(registry_path) as fh:
         registry = json.load(fh)
     return registry.get("lambdas", {})
@@ -328,23 +344,30 @@ def load_required_env(registry_path: Path) -> Dict[str, List[str]]:
 
 def diff_required(
     resolved: Dict[str, Dict[str, Any]],
-    required_map: Dict[str, List[str]],
+    required_map: Dict[str, Any],
 ) -> Dict[str, Dict[str, Any]]:
     """Per-function diff of resolved template env keys vs the required-env registry.
 
-    missing  = required vars not present in the template-resolved env (would fail
-               the parity gate — the deploy would not set a var the handler needs).
+    missing         = required vars not present in the template-resolved env (the
+                      deploy would not set a var the handler needs).
+    classification  = {var: 'deploy-critical'|'advisory'} for every required var,
+                      read from the registry via env_parity_core (ENC-TSK-H16). The
+                      H18 gate uses this to decide FAIL (deploy-critical) vs WARN
+                      (advisory) — no separate advisory list (AC2: single source).
     """
     report: Dict[str, Dict[str, Any]] = {}
     for fn_name, info in resolved.items():
         keys = set(info["resolved_env"])
-        required = required_map.get(fn_name, [])
+        has_entry = fn_name in required_map
+        entry = required_map.get(fn_name)
+        required = core.required_vars(entry) if has_entry else []
         report[fn_name] = {
             "logical_id": info["logical_id"],
-            "has_registry_entry": fn_name in required_map,
+            "has_registry_entry": has_entry,
             "required": sorted(required),
             "resolved_keys": sorted(keys),
             "missing": sorted(set(required) - keys),
+            "classification": core.classification_map(entry) if has_entry else {},
         }
     return report
 

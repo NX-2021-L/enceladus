@@ -1,5 +1,22 @@
 {
-  "_doc": "ENC-ISS-283 REQUIRED_ENV registry. Maps Lambda function name to the list of env vars that MUST be set and non-empty at runtime. Derived from three prod incidents in Apr 2026 where env vars silently went missing across deploys. Extend by adding entries — the auditor will pick them up on next scheduled run.",
+  "_doc": "ENC-ISS-283 REQUIRED_ENV registry. Maps each Lambda function name to the env vars that MUST be set and non-empty at runtime, each with a deploy-critical/advisory classification. Derived from three prod incidents in Apr 2026 (and the 2026-06 ENC-ISS-369 SQS_QUEUE_URL recurrence) where env vars silently went missing across full-env CFN deploys. ENC-TSK-H16 (ENC-PLN-048 Obj 1): this file is the SINGLE canonical required-env + classification source — consumed by the pre-deploy env-parity gate (tools/cfn_env_resolver.py + tools/env_parity_gate.py + tools/live_template_strip_detector.py, ENC-FTR-102) AND the post-deploy env_drift_auditor (backend/lambda/env_drift_auditor/lambda_function.py). No second copy: classification lives here, not in tools/env_parity_waivers.json. Extend by adding entries — both the gate and the auditor pick them up. Entry-shape interpretation lives in backend/lambda/env_drift_auditor/env_parity_core.py.",
+  "_schema": {
+    "version": "2026-06-21-h16",
+    "format": "lambdas.<function_name> maps to an object {ENV_VAR: classification}. classification is one of: 'deploy-critical' or 'advisory'.",
+    "classifications": {
+      "deploy-critical": "The CFN template MUST set this var. Pre-deploy gate FAILS CLOSED if the template-resolved env would not set it (the var would be stripped on the next full-env deploy — the ENC-LSN-053 / ENC-ISS-369 class). Post-deploy auditor files a P0 drift issue if it is missing or placeholder on the live function.",
+      "advisory": "Pre-deploy gate WARNS (does not fail) if the template would not set it; post-deploy auditor reports it without filing a P0. Use for conditionally-set vars the template may legitimately leave unset for a given parameter set — e.g. APPCONFIG_* gated by HasAppConfigLayer (!If -> AWS::NoValue), where the appconfig extension degrades to env fallback when absent."
+    },
+    "default_classification": "deploy-critical",
+    "legacy_form": "A function may still map to a flat list [\"VAR\", ...]; every var in a list entry is treated as deploy-critical (the fail-closed default). New entries should use the {VAR: classification} object form.",
+    "example": {
+      "EXAMPLE-some-function": {
+        "REQUIRED_TABLE": "deploy-critical",
+        "APPCONFIG_APPLICATION": "advisory"
+      }
+    },
+    "provenance": "Deploy-critical vars and coverage gaps surfaced by the ENC-TSK-H15 coverage matrix (DOC-0C7E8AEF512E, ENC-PLN-048 Obj 1 child 1.1): COORDINATION_INTERNAL_API_KEY is deploy-critical on all 10 of its compute-stack consumers (it was the 2026-06-18 Sev-1 strip casualty, ENC-TSK-H04/H05); SQS_QUEUE_URL is deploy-critical on devops-deploy-intake (ENC-ISS-369, templated by ENC-TSK-H26). Out-of-band functions with no FunctionName in any CFN template (checkout_service, deploy_capability_auditor) are NOT added — they are not subject to the compute-stack strip (H15 waiver)."
+  },
   "_policy": {
     "scan_interval": "hourly",
     "on_drift_action": "create_tracker_issue",
@@ -8,72 +25,85 @@
     "issue_project_id": "enceladus"
   },
   "lambdas": {
-    "devops-deploy-intake": [
-      "COORDINATION_INTERNAL_API_KEY",
-      "DEPLOY_TABLE",
-      "PROJECTS_TABLE",
-      "SQS_QUEUE_URL"
-    ],
-    "devops-graph-query-api": [
-      "COORDINATION_INTERNAL_API_KEY",
-      "NEO4J_SECRET_NAME",
-      "COGNITO_USER_POOL_ID",
-      "COGNITO_CLIENT_ID"
-    ],
-    "devops-github-integration": [
-      "COORDINATION_INTERNAL_API_KEY",
-      "DEPLOY_TABLE",
-      "ALLOWED_REPOS",
-      "GITHUB_APP_ID",
-      "GITHUB_INSTALLATION_ID"
-    ],
-    "devops-document-api": [
-      "DOCUMENTS_TABLE",
-      "COGNITO_USER_POOL_ID",
-      "COGNITO_CLIENT_ID"
-    ],
-    "devops-coordination-api": [
-      "COORDINATION_INTERNAL_API_KEY",
-      "TRACKER_TABLE",
-      "PROJECTS_TABLE",
-      "COGNITO_USER_POOL_ID",
-      "COGNITO_CLIENT_ID"
-    ],
-    "devops-deploy-decide": [
-      "COGNITO_USER_POOL_ID",
-      "COGNITO_CLIENT_ID",
-      "DEPLOY_TABLE",
-      "ALLOWED_REPOS",
-      "GITHUB_APP_ID",
-      "GITHUB_INSTALLATION_ID"
-    ],
-    "devops-deploy-finalize": [
-      "DEPLOY_TABLE",
-      "PROJECTS_TABLE",
-      "TRACKER_TABLE",
-      "CONFIG_BUCKET"
-    ],
-    "devops-tracker-mutation-api": [
-      "DYNAMODB_TABLE",
-      "PROJECTS_TABLE",
-      "COORDINATION_INTERNAL_API_KEY"
-    ],
-    "enceladus-mcp-code": [
-      "TRACKER_TABLE",
-      "PROJECTS_TABLE",
-      "DOCUMENTS_TABLE",
-      "COORDINATION_INTERNAL_API_KEY",
-      "ENCELADUS_COGNITO_USER_POOL_ID",
-      "ENCELADUS_COGNITO_CLIENT_ID"
-    ],
-    "enceladus-mcp-code-gamma": [
-      "TRACKER_TABLE",
-      "PROJECTS_TABLE",
-      "DOCUMENTS_TABLE",
-      "COORDINATION_INTERNAL_API_KEY",
-      "ENCELADUS_COGNITO_USER_POOL_ID",
-      "ENCELADUS_COGNITO_CLIENT_ID",
-      "ENCELADUS_COGNITO_CLIENT_SECRET"
-    ]
+    "devops-deploy-intake": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
+      "DEPLOY_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "SQS_QUEUE_URL": "deploy-critical"
+    },
+    "devops-graph-query-api": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
+      "NEO4J_SECRET_NAME": "deploy-critical",
+      "COGNITO_USER_POOL_ID": "deploy-critical",
+      "COGNITO_CLIENT_ID": "deploy-critical"
+    },
+    "devops-github-integration": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
+      "DEPLOY_TABLE": "deploy-critical",
+      "ALLOWED_REPOS": "deploy-critical",
+      "GITHUB_APP_ID": "deploy-critical",
+      "GITHUB_INSTALLATION_ID": "deploy-critical"
+    },
+    "devops-document-api": {
+      "DOCUMENTS_TABLE": "deploy-critical",
+      "COGNITO_USER_POOL_ID": "deploy-critical",
+      "COGNITO_CLIENT_ID": "deploy-critical",
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-coordination-api": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
+      "TRACKER_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "COGNITO_USER_POOL_ID": "deploy-critical",
+      "COGNITO_CLIENT_ID": "deploy-critical"
+    },
+    "devops-changelog-api": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-deploy-decide": {
+      "COGNITO_USER_POOL_ID": "deploy-critical",
+      "COGNITO_CLIENT_ID": "deploy-critical",
+      "DEPLOY_TABLE": "deploy-critical",
+      "ALLOWED_REPOS": "deploy-critical",
+      "GITHUB_APP_ID": "deploy-critical",
+      "GITHUB_INSTALLATION_ID": "deploy-critical"
+    },
+    "devops-deploy-finalize": {
+      "DEPLOY_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "TRACKER_TABLE": "deploy-critical",
+      "CONFIG_BUCKET": "deploy-critical"
+    },
+    "devops-deploy-parity-validator": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-env-drift-auditor": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-project-service": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-tracker-mutation-api": {
+      "DYNAMODB_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "enceladus-mcp-code": {
+      "TRACKER_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "DOCUMENTS_TABLE": "deploy-critical",
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
+      "ENCELADUS_COGNITO_USER_POOL_ID": "deploy-critical",
+      "ENCELADUS_COGNITO_CLIENT_ID": "deploy-critical"
+    },
+    "enceladus-mcp-code-gamma": {
+      "TRACKER_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "DOCUMENTS_TABLE": "deploy-critical",
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
+      "ENCELADUS_COGNITO_USER_POOL_ID": "deploy-critical",
+      "ENCELADUS_COGNITO_CLIENT_ID": "deploy-critical",
+      "ENCELADUS_COGNITO_CLIENT_SECRET": "deploy-critical"
+    }
   }
 }

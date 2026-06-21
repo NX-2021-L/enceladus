@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-21.02",
-  "updated_at": "2026-06-21T10:40:00Z",
-  "last_change_summary": "ENC-TSK-G45 + ENC-TSK-G12 (PR #483, ENC-FTR-077): rewrote the top-20 code-mode search/execute tool descriptions in tools/enceladus-mcp-server/server.py to pure Diataxis Reference (DOC-E88C197AE0F3 RULE-06) and added the canonical typed handoff mandate schema (goal/constraints/prior_findings/tools_allowed/output_schema/budget_tokens; tools/enceladus-mcp-server/handoff_mandate.py) wired strict:true into the dispatch-plan generator. No tracker/field schema changes; version bump satisfies the path-triggered Governance Dictionary Guard for the server.py tool-surface change.",
+  "version": "2026-06-21.03",
+  "updated_at": "2026-06-21T12:33:34Z",
+  "last_change_summary": "ENC-TSK-H16 (PR #510, ENC-PLN-048 Obj 1 / ENC-FTR-102): made backend/lambda/env_drift_auditor/env_drift_registry.json the single canonical required-env + deploy-critical/advisory classification source consumed by both the pre-deploy env-parity gate and the post-deploy env_drift_auditor (removed the advisory_vars second copy from tools/env_parity_waivers.json). Touched backend/lambda/env_drift_auditor/lambda_function.py (advisory-aware scan). No tracker/field/governed-entity schema changes; this version bump satisfies the path-triggered Governance Dictionary Guard (backend/lambda/*/lambda_function.py glob).",
   "owners": [
     "enceladus-platform"
   ],

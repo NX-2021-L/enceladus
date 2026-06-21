@@ -149,6 +149,33 @@ def test_diff_required_surfaces_missing_keys():
     diff = r.diff_required(resolved, {"fn-x": ["A", "B"]})
     assert diff["fn-x"]["missing"] == ["B"]
     assert diff["fn-x"]["has_registry_entry"] is True
+    # ENC-TSK-H16: legacy flat-list entry -> every var classified deploy-critical.
+    assert diff["fn-x"]["classification"] == {"A": "deploy-critical", "B": "deploy-critical"}
+
+
+def test_diff_required_surfaces_classification_dict_form():
+    # ENC-TSK-H16: a dict-form registry entry surfaces per-var classification in
+    # the diff so the H18 gate can split FAIL (deploy-critical) vs WARN (advisory)
+    # without re-deriving it.
+    resolved = {"fn-x": {"logical_id": "X", "resolved_env": {"A": "1"}}}
+    diff = r.diff_required(
+        resolved, {"fn-x": {"A": "deploy-critical", "B": "advisory", "C": "deploy-critical"}}
+    )
+    assert diff["fn-x"]["missing"] == ["B", "C"]
+    assert diff["fn-x"]["classification"] == {
+        "A": "deploy-critical",
+        "B": "advisory",
+        "C": "deploy-critical",
+    }
+    assert diff["fn-x"]["has_registry_entry"] is True
+
+
+def test_diff_required_no_entry_has_empty_classification():
+    resolved = {"fn-y": {"logical_id": "Y", "resolved_env": {"A": "1"}}}
+    diff = r.diff_required(resolved, {})  # fn-y not in registry
+    assert diff["fn-y"]["has_registry_entry"] is False
+    assert diff["fn-y"]["missing"] == []
+    assert diff["fn-y"]["classification"] == {}
 
 
 def test_secret_params_redacted_in_report():
