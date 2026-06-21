@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-21.01",
-  "updated_at": "2026-06-21T09:31:58Z",
-  "last_change_summary": "ENC-PLN-048 Objective 2 (ENC-FTR-102, ENC-TSK-H17/H18/H19): added the deploy.env_parity_gate entity documenting the pre-deploy environment-variable parity gate — tools/cfn_env_resolver.py (CFN intrinsic env resolver), tools/env_parity_gate.py (fail-closed gate + waivers, wired as CHECK 6 in pre-deploy-health-gate.sh), tools/live_template_strip_detector.py, and the shared backend/lambda/env_drift_auditor/env_parity_core.py comparison core. Version bump also satisfies the path-triggered Governance Dictionary Guard on the env_drift_auditor lambda_function.py AC2 refactor (ENC-ISS-179).",
+  "version": "2026-06-21.02",
+  "updated_at": "2026-06-21T10:40:00Z",
+  "last_change_summary": "ENC-TSK-G45 + ENC-TSK-G12 (PR #483, ENC-FTR-077): rewrote the top-20 code-mode search/execute tool descriptions in tools/enceladus-mcp-server/server.py to pure Diataxis Reference (DOC-E88C197AE0F3 RULE-06) and added the canonical typed handoff mandate schema (goal/constraints/prior_findings/tools_allowed/output_schema/budget_tokens; tools/enceladus-mcp-server/handoff_mandate.py) wired strict:true into the dispatch-plan generator. No tracker/field schema changes; version bump satisfies the path-triggered Governance Dictionary Guard for the server.py tool-surface change.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5418,6 +5418,11 @@
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
   "change_log": [
+    {
+      "version": "2026-06-21.02",
+      "date": "2026-06-21",
+      "summary": "ENC-TSK-G45 + ENC-TSK-G12 (PR #483): Diataxis Reference rewrite of the top-20 code-mode tool descriptions + canonical typed handoff mandate schema (handoff_mandate.py, strict:true dispatch generator). server.py tool-surface change; version bump required by the CI governance-dictionary guard."
+    },
     {
       "version": "2026-04-23.01",
       "date": "2026-04-23",
