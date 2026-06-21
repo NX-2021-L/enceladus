@@ -167,13 +167,20 @@ fi
 echo ""
 echo "[CHECK 5/6] Validating enceladus-shared layer-version pin (:7-vs-:10 gate)..."
 
-# Template-mode is fail-closed (no AWS creds needed). Add --live opportunistically:
-# it diffs against live get-function-configuration and fails only on a regression
-# (template would move a function to a LOWER version), skipping silently without creds.
-if python3 "${REPO_ROOT}/tools/verify_shared_layer_version.py" "${TEMPLATE_FILE}" --live; then
-    echo "[PASS] enceladus-shared pinned to canonical version; no live regression"
+# Static checks (template Default + workflow --parameter-overrides override) are
+# fail-closed (no AWS creds needed). ENC-TSK-H28 added the workflow-override check that
+# closes the ENC-ISS-385 blind spot: `aws cloudformation deploy` reuses the stale stored
+# SharedLayerArn (:7) unless the workflow passes the canonical override, so a green template
+# Default alone never moved live. --live --regress-only opportunistically diffs the deployed
+# stack param + live get-function-configuration and fails ONLY on a regression (a function/
+# stack ABOVE canonical), TOLERATING a stale :7 here because THIS deploy is what heals it
+# (skips silently without creds). Post-deploy, reconcile with bare --live (fails on ANY
+# != canonical) to PROVE the :7->:10 heal landed -- see the tool docstring.
+if python3 "${REPO_ROOT}/tools/verify_shared_layer_version.py" "${TEMPLATE_FILE}" \
+        --live --regress-only --stack-name "${STACK_NAME}"; then
+    echo "[PASS] enceladus-shared template+workflow pinned to canonical; no live regression"
 else
-    echo "[FAIL] enceladus-shared layer-version parity violation (would re-introduce the :7-class incident, ENC-LSN-053)"
+    echo "[FAIL] enceladus-shared layer-version parity violation (missing workflow override or live regression; would (re)introduce the :7-class incident, ENC-ISS-385 / ENC-LSN-053)"
     ERRORS=$((ERRORS + 1))
 fi
 
