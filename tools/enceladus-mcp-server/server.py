@@ -3443,7 +3443,7 @@ async def list_tools() -> list[Tool]:
         # --- Tracker CRUD (6.4.3) ---
         Tool(
             name="tracker_get",
-            description="Get a single tracker record (task, issue, or feature) by ID.",
+            description="Returns a single tracker record (task, issue, or feature) by ID.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3462,9 +3462,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="tracker_validation_rules",
             description=(
-                "Preflight tracker edit rules for a record before calling tracker_set. "
-                "Returns allowed status transitions, required transition_evidence fields, "
-                "checkout/provider requirements, and dictionary-backed field guidance."
+                "Returns the edit rules for a tracker record: allowed status transitions, "
+                "required transition_evidence fields per transition, checkout and provider "
+                "requirements, and dictionary-backed field guidance."
             ),
             inputSchema={
                 "type": "object",
@@ -3497,7 +3497,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_list",
-            description="List tracker records for a project. Filter by type and/or status. Paginated (default 25).",
+            description="Returns tracker records for a project, filterable by type and status. Paginated (default 25).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3545,7 +3545,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_set",
-            description="Set a field on a tracker record. Task status→use advance_task_status. Task worklogs→use append_worklog.",
+            description="Sets a non-lifecycle field on a tracker record. Task status and task worklog fields are governed by separate tools and are rejected here.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3588,7 +3588,7 @@ async def list_tools() -> list[Tool]:
                         "type": "object",
                         "description": (
                             "Evidence for gated status transitions (ENC-FTR-022). "
-                            "NOTE: Task status transitions must use advance_task_status tool. "
+                            "Task status transitions are not performed through this tool. "
                             "Any revert: {revert_reason}."
                         ),
                     },
@@ -3598,7 +3598,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_log",
-            description="Append worklog to an issue or feature. For tasks, use append_worklog (checkout required).",
+            description="Appends a worklog entry to an issue or feature record. Task worklogs are governed by a separate tool and are rejected here.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3632,7 +3632,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_create",
-            description="Create a new tracker record (task, issue, or feature) in a project.",
+            description="Creates a new tracker record (task, issue, or feature) in a project.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3761,10 +3761,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="tracker_set_acceptance_evidence",
             description=(
-                "Set evidence on a specific acceptance criterion of a feature or task record. "
-                "Part of the governed evidence handshake: features cannot be completed and "
-                "tasks cannot be closed until ALL structured acceptance criteria have "
-                "evidence and evidence_acceptance=true (ENC-FTR-048)."
+                "Sets evidence on one acceptance criterion (by index) of a feature or task record. "
+                "A task closes and a feature completes only when every acceptance criterion carries "
+                "evidence with evidence_acceptance=true (ENC-FTR-048)."
             ),
             inputSchema={
                 "type": "object",
@@ -3814,7 +3813,7 @@ async def list_tools() -> list[Tool]:
         # --- Documents (6.3) ---
         Tool(
             name="documents_search",
-            description="Search for documents by project, keyword, related item, title, document_subtype, or subtypepattern (ENC-FTR-078 AC-17).",
+            description="Returns documents matching a project, keyword, related item, title, document_subtype, or subtype pattern (ENC-FTR-078 AC-17).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3851,7 +3850,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="documents_get",
-            description="Get a document by its DOC-ID, including content from S3.",
+            description="Returns a document by DOC-ID, including its content from S3.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3870,7 +3869,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="documents_list",
-            description="List documents for a project. Paginated (default 25).",
+            description="Returns documents for a project. Paginated (default 25).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3893,8 +3892,8 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="documents_put",
             description=(
-                "Create a new document via Enceladus document API. "
-                "Uses the same backend service as direct API writes."
+                "Creates a new document through the Enceladus document API "
+                "(the same backend service as direct API writes)."
             ),
             inputSchema={
                 "type": "object",
@@ -4058,8 +4057,8 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="documents_patch",
             description=(
-                "Update an existing document via Enceladus document API. "
-                "Uses the same backend service as direct API writes."
+                "Updates an existing document through the Enceladus document API "
+                "(the same backend service as direct API writes)."
             ),
             inputSchema={
                 "type": "object",
@@ -4263,9 +4262,9 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="reference_search",
             description=(
-                "Search a project reference document and return matched snippets "
-                "with line numbers, section context, and surrounding lines. "
-                "Avoids downloading the full reference document."
+                "Returns snippets of a project reference document that match a query, each with "
+                "line numbers, section context, and surrounding lines. Does not return the full "
+                "document."
             ),
             inputSchema={
                 "type": "object",
@@ -4463,9 +4462,8 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="deploy_submit",
             description=(
-                "Submit a deployment request. Returns request_id and projected_next_version. "
-                "Major/minor deploys require release notes via documents_put (guidance returned in response). "
-                "Patch deploys have no release notes requirement."
+                "Submits a deployment request and returns request_id and projected_next_version. "
+                "Major and minor deploys require release notes; patch deploys do not."
             ),
             inputSchema={
                 "type": "object",
@@ -4801,9 +4799,8 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="governance_get",
             description=(
-                "Read a governance file by name and return its content. "
-                "Use to load governance://agents.md and other governance resources "
-                "during session bootstrap without requiring direct S3 access."
+                "Returns the content of a governance file by name (e.g. 'agents.md', "
+                "'agents/lifecycle-primer.md') read from the governance store."
             ),
             inputSchema={
                 "type": "object",
@@ -4855,7 +4852,7 @@ async def list_tools() -> list[Tool]:
         # --- System ---
         Tool(
             name="connection_health",
-            description="Test connectivity to DynamoDB, S3, and compute governance hash. Use at session start.",
+            description="Reports connectivity to DynamoDB and S3 and returns the computed governance hash.",
             inputSchema={"type": "object", "properties": {}},
         ),
         # --- Dispatch Plan Generation (6.1.2) ---
@@ -5020,8 +5017,8 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="checkout_task",
             description=(
-                "Check out a task and advance to in-progress. REQUIRED before coding. "
-                "Set task.components via tracker_set before checkout (required for agent advances)."
+                "Checks out a task and advances it to in-progress. Requires task.components to be "
+                "set; agent-initiated checkout is rejected when components are unset."
             ),
             inputSchema={
                 "type": "object",
@@ -5075,14 +5072,12 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="advance_task_status",
             description=(
-                "Advance a task's status through the lifecycle arc (the ONLY way to change task status). "
-                "Lifecycle: open→in-progress→coding-complete→committed→pr→merged-main→deploy-init→deploy-success→closed. "
-                "Each transition may require transition_evidence. Use tracker_validation_rules to preflight. "
-                "Requires task checkout and task.components set via tracker_set. "
-                "ENC-ISS-106: Parent tasks (those with non-empty subtask_ids) cannot advance from "
-                "coding-complete onward unless all direct children have reached at least the target status. "
-                "Children at 'closed' satisfy any stage. Advance children before the parent. "
-                "Query governance_dictionary(entity='checkout_service') for full gate specs per transition_type."
+                "Advances a task's status along the lifecycle arc; the only tool that changes task status. "
+                "Arc: open→in-progress→coding-complete→committed→pr→merged-main→deploy-init→deploy-success→closed. "
+                "Transitions may require transition_evidence and a matching task checkout with task.components set. "
+                "Parent tasks (non-empty subtask_ids) cannot advance from coding-complete onward until every "
+                "direct child has reached at least the target status; children at 'closed' satisfy any stage "
+                "(ENC-ISS-106)."
             ),
             inputSchema={
                 "type": "object",
@@ -5108,7 +5103,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "transition_evidence": {
                         "type": "object",
-                        "description": "Evidence for gated transitions. Use tracker_validation_rules to see required fields for each status.",
+                        "description": "Evidence for gated transitions; required fields vary by target status.",
                     },
                     "pr_id": {
                         "type": "integer",
@@ -5124,7 +5119,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="append_worklog",
-            description="Append worklog to a checked-out task. For issues/features use tracker_log.",
+            description="Appends a worklog entry to a checked-out task. Issue and feature worklogs are governed by a separate tool and are rejected here.",
             inputSchema={
                 "type": "object",
                 "properties": {
