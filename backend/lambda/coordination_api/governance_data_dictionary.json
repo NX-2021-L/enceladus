@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-21.03",
-  "updated_at": "2026-06-21T12:33:34Z",
-  "last_change_summary": "ENC-TSK-H16 (PR #510, ENC-PLN-048 Obj 1 / ENC-FTR-102): made backend/lambda/env_drift_auditor/env_drift_registry.json the single canonical required-env + deploy-critical/advisory classification source consumed by both the pre-deploy env-parity gate and the post-deploy env_drift_auditor (removed the advisory_vars second copy from tools/env_parity_waivers.json). Touched backend/lambda/env_drift_auditor/lambda_function.py (advisory-aware scan). No tracker/field/governed-entity schema changes; this version bump satisfies the path-triggered Governance Dictionary Guard (backend/lambda/*/lambda_function.py glob).",
+  "version": "2026-06-21.04",
+  "updated_at": "2026-06-21T15:13:24Z",
+  "last_change_summary": "ENC-TSK-H10 (ENC-PLN-048 / ENC-FTR-102): made backend/lambda/env_drift_auditor idempotent. It now computes a (lambda, missing-var-set) content-hash signature (env_parity_core.drift_signature), queries open issues for that signature before filing, and bumps the existing P0 via a worklog instead of POSTing a duplicate. Stops the hourly byte-identical P0 storm (ENC-ISS-369..379) the old code caused by assuming a tracker-side dedup guard that does not exist. Touched backend/lambda/env_drift_auditor/lambda_function.py. No tracker/field/governed-entity schema changes; this version bump satisfies the path-triggered Governance Dictionary Guard (backend/lambda/*/lambda_function.py glob). Live S3 governance store sync is a post-merge product-lead handoff.",
   "owners": [
     "enceladus-platform"
   ],
