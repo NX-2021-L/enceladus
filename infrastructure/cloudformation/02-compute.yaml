@@ -440,6 +440,11 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           DEPLOY_REGION: !Ref AWS::Region
+          # ENC-TSK-H09: restore SQS_QUEUE_URL — stripped by a post-2026-02-24 CFN full-env replace
+          # (same drift class as the PLN-047 COORDINATION_INTERNAL_API_KEY Sev-1). !Sub construction
+          # mirrors the deploy-queue ARN idiom elsewhere in this file; gamma-correct via
+          # ${EnvironmentSuffix}, no hardcoded account/region. Resolves to the canonical manifest value.
+          SQS_QUEUE_URL: !Sub "https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/devops-deploy-queue${EnvironmentSuffix}.fifo"
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           CONFIG_BUCKET: !Ref S3Bucket
           CONFIG_PREFIX: !Sub "${S3EnvPrefix}deploy-config"
