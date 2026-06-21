@@ -1,0 +1,534 @@
+{
+ "advance_task_status": {
+  "description": "Advance a task's status through the lifecycle arc (the ONLY way to change task status). Lifecycle: open\u2192in-progress\u2192coding-complete\u2192committed\u2192pr\u2192merged-main\u2192deploy-init\u2192deploy-success\u2192closed. Each transition may require transition_evidence. Use tracker_validation_rules to preflight. Requires task checkout and task.components set via tracker_set. ENC-ISS-106: Parent tasks (those with non-empty subtask_ids) cannot advance from coding-complete onward unless all direct children have reached at least the target status. Children at 'closed' satisfy any stage. Advance children before the parent. Query governance_dictionary(entity='checkout_service') for full gate specs per transition_type.",
+  "params": [
+   "record_id",
+   "target_status",
+   "provider",
+   "governance_hash",
+   "transition_evidence",
+   "pr_id",
+   "merged_at"
+  ]
+ },
+ "append_worklog": {
+  "description": "Append worklog to a checked-out task. For issues/features use tracker_log.",
+  "params": [
+   "record_id",
+   "description",
+   "provider",
+   "governance_hash"
+  ]
+ },
+ "changelog_history": {
+  "description": "Fetch deployment history for a project. Returns version, change_type, changes[], deployed_at. Filterable by change_type.",
+  "params": [
+   "project_id",
+   "limit",
+   "change_type"
+  ]
+ },
+ "changelog_history_all": {
+  "description": "Fetch deployment history across multiple projects. Returns merged time-sorted deploy records.",
+  "params": [
+   "projects",
+   "limit",
+   "change_type"
+  ]
+ },
+ "changelog_version": {
+  "description": "Fetch the current deployed version for a project. Reads S3 deploy-config/{project_id}/current-version.json and returns {project_id, version, deployed_at, spec_id}. Use this to display the active version of any Enceladus project.",
+  "params": [
+   "project_id"
+  ]
+ },
+ "check_document_policy": {
+  "description": "Evaluate document-storage governance policy for a proposed write. Returns allow/deny with reasons and writes an audit event.",
+  "params": [
+   "operation",
+   "storage_target",
+   "file_name",
+   "project_id",
+   "provider",
+   "coordination_request_id",
+   "dispatch_id"
+  ]
+ },
+ "checkout_task": {
+  "description": "Check out a task and advance to in-progress. REQUIRED before coding. Set task.components via tracker_set before checkout (required for agent advances).",
+  "params": [
+   "record_id",
+   "active_agent_session_id",
+   "governance_hash",
+   "coordination_request_id"
+  ]
+ },
+ "connection_health": {
+  "description": "Test connectivity to DynamoDB, S3, and compute governance hash. Use at session start.",
+  "params": []
+ },
+ "coordination": {
+  "description": "Compact coordination/orchestration surface for capabilities, request inspection, dispatch-plan generation, and managed-session auth helpers.",
+  "params": [
+   "action",
+   "arguments"
+  ]
+ },
+ "coordination_capabilities": {
+  "description": "Get current coordination service capabilities, provider status, and execution modes.",
+  "params": []
+ },
+ "coordination_cognito_session": {
+  "description": "Create a Cognito-authenticated cookie bundle for terminal diagnostics against protected Enceladus PWA routes.",
+  "params": [
+   "target_origin",
+   "include_set_cookie_headers",
+   "include_tokens"
+  ]
+ },
+ "coordination_request_get": {
+  "description": "Get the current state of a coordination request by ID.",
+  "params": [
+   "request_id"
+  ]
+ },
+ "deploy_history": {
+  "description": "List recent deployments for a project.",
+  "params": [
+   "project_id",
+   "limit"
+  ]
+ },
+ "deploy_history_list": {
+  "description": "List recent deployments for a project. Preferred v0.3 capability name.",
+  "params": [
+   "project_id",
+   "limit"
+  ]
+ },
+ "deploy_pending_requests": {
+  "description": "List all pending (not yet included in a spec) deployment requests for a project.",
+  "params": [
+   "project_id",
+   "limit"
+  ]
+ },
+ "deploy_state_get": {
+  "description": "Get the current deployment state (ACTIVE/PAUSED) for a project.",
+  "params": [
+   "project_id"
+  ]
+ },
+ "deploy_state_set": {
+  "description": "Set the deployment state (ACTIVE or PAUSED) for a project.",
+  "params": [
+   "project_id",
+   "state",
+   "reason"
+  ]
+ },
+ "deploy_status": {
+  "description": "Get the status of a specific deployment spec by its SPEC-ID.",
+  "params": [
+   "project_id",
+   "spec_id"
+  ]
+ },
+ "deploy_status_get": {
+  "description": "Get the status of a specific deployment spec by its SPEC-ID. Preferred v0.3 capability name.",
+  "params": [
+   "project_id",
+   "spec_id"
+  ]
+ },
+ "deploy_submit": {
+  "description": "Submit a deployment request. Returns request_id and projected_next_version. Major/minor deploys require release notes via documents_put (guidance returned in response). Patch deploys have no release notes requirement.",
+  "params": [
+   "project_id",
+   "change_type",
+   "deployment_type",
+   "summary",
+   "changes",
+   "related_record_ids",
+   "files_changed",
+   "auto_trigger",
+   "submitted_by",
+   "pr_id",
+   "merged_at",
+   "pr_owner",
+   "pr_repo",
+   "github_config",
+   "non_ui_config",
+   "source_artifact_s3_key",
+   "governance_hash"
+  ]
+ },
+ "deploy_trigger": {
+  "description": "Manually trigger the deploy orchestration pipeline through the deploy intake API. Use when requests are pending but the pipeline wasn't triggered automatically.",
+  "params": [
+   "project_id"
+  ]
+ },
+ "dispatch_plan_dry_run": {
+  "description": "Generate a dispatch-plan without a real coordination request. Useful for previewing what the heuristics would produce for a given set of outcomes.",
+  "params": [
+   "project_id",
+   "outcomes",
+   "preferred_provider"
+  ]
+ },
+ "dispatch_plan_generate": {
+  "description": "Generate a dispatch-plan for a coordination request. Accepts optional dispatch_plan_override to bypass auto-generation.",
+  "params": [
+   "request_id",
+   "dispatch_plan_override"
+  ]
+ },
+ "documents_get": {
+  "description": "Get a document by its DOC-ID, including content from S3.",
+  "params": [
+   "document_id",
+   "include_content"
+  ]
+ },
+ "documents_list": {
+  "description": "List documents for a project. Paginated (default 25).",
+  "params": [
+   "project_id",
+   "page_size",
+   "cursor"
+  ]
+ },
+ "documents_patch": {
+  "description": "Update an existing document via Enceladus document API. Uses the same backend service as direct API writes.",
+  "params": [
+   "document_id",
+   "title",
+   "content",
+   "append_content",
+   "description",
+   "keywords",
+   "related_items",
+   "status",
+   "file_name",
+   "document_subtype",
+   "subtypepattern",
+   "full_description",
+   "claude_description",
+   "agentskills_manifest",
+   "agentskills_spec_version",
+   "runtime_variants",
+   "source_record_id",
+   "handoff_status",
+   "prerequisite_state",
+   "verification_criteria",
+   "action_checklist",
+   "expires_at",
+   "source_incident_id",
+   "coe_status",
+   "plan_anchor_id",
+   "wave_status",
+   "informed_by",
+   "document_maturity_state",
+   "governance_hash"
+  ]
+ },
+ "documents_put": {
+  "description": "Create a new document via Enceladus document API. Uses the same backend service as direct API writes.",
+  "params": [
+   "project_id",
+   "title",
+   "content",
+   "description",
+   "keywords",
+   "related_items",
+   "file_name",
+   "document_subtype",
+   "confirm_subtype",
+   "subtypepattern",
+   "full_description",
+   "claude_description",
+   "agentskills_manifest",
+   "agentskills_spec_version",
+   "runtime_variants",
+   "source_record_id",
+   "handoff_status",
+   "prerequisite_state",
+   "verification_criteria",
+   "action_checklist",
+   "expires_at",
+   "source_incident_id",
+   "coe_status",
+   "plan_anchor_id",
+   "wave_status",
+   "informed_by",
+   "document_maturity_state",
+   "governance_hash"
+  ]
+ },
+ "documents_search": {
+  "description": "Search for documents by project, keyword, related item, title, document_subtype, or subtypepattern (ENC-FTR-078 AC-17).",
+  "params": [
+   "project_id",
+   "keyword",
+   "related",
+   "title",
+   "document_subtype",
+   "subtypepattern"
+  ]
+ },
+ "execute": {
+  "description": "Governed workflow runner for ordered mutation or lifecycle steps. Each step resolves through existing MCP/HTTP handlers, supports dry_run, and returns per-step status with resolved underlying calls.",
+  "params": [
+   "dry_run",
+   "steps"
+  ]
+ },
+ "get_architecture_excerpts": {
+  "description": "Return architecture documentation excerpts for specific domains. Maps component registry domains to architecture source files and returns only matched sections with heading metadata. Use this instead of loading full architecture docs when only one or two domains are relevant. Supports 30+ domain aliases: compute, data, dynamodb, lambda, api, governance, security, auth, cognito, frontend, pwa, cloudfront, deploy, monitoring, mcp, coordination, infrastructure, cloudformation, and more.",
+  "params": [
+   "project_id",
+   "domains",
+   "max_excerpt_tokens"
+  ]
+ },
+ "get_code_map": {
+  "description": "Get a code navigation map for a project by querying the component registry. Returns component source_paths and domain-to-file mappings. Use domain param to filter to a specific domain (e.g., 'auth', 'routing').",
+  "params": [
+   "project_id",
+   "domain"
+  ]
+ },
+ "get_compact_context": {
+  "description": "Budgeted composite context assembly that reuses existing issue-context, codemap, architecture, document, governance, and project helpers while preserving raw codemap payloads. ENC-TSK-B92: when `query` or `anchor_record_id` is supplied the response additionally includes a `hybrid_retrieval` section containing records ranked by Reciprocal Rank Fusion over three signals (vector cosine via HNSW, graph Personalized PageRank / Cypher fallback, keyword title/intent/description match). Backward-compatible: callers who do not pass `query`/`anchor_record_id` receive the legacy context shape unchanged.",
+  "params": [
+   "mode",
+   "record_id",
+   "project_id",
+   "document_id",
+   "domain",
+   "domains",
+   "max_tokens",
+   "history_limit",
+   "query",
+   "anchor_record_id",
+   "top_n",
+   "include_below_threshold",
+   "record_type",
+   "include_code_map",
+   "include_governance",
+   "include_related_documents",
+   "include_hybrid_retrieval"
+  ]
+ },
+ "get_issue_context": {
+  "description": "Composite context retrieval for a tracker record. Bundles record core fields, relationship graph, component source paths, domain architecture excerpts, and recent history into a single response. Replaces 4-5 sequential tool calls. For issues with a location_hint, auto-resolves to matching components via fuzzy matching. Use include_* flags to control which sections are returned.",
+  "params": [
+   "record_id",
+   "include_components",
+   "include_architecture",
+   "include_recent_history",
+   "history_limit",
+   "max_tokens"
+  ]
+ },
+ "github_create_issue": {
+  "description": "Create a GitHub issue in a repository via the Enceladus GitHub integration. The issue is created through the registered GitHub App. Optionally links the issue back to an Enceladus tracker record.",
+  "params": [
+   "owner",
+   "repo",
+   "title",
+   "body",
+   "labels",
+   "record_id",
+   "project_id"
+  ]
+ },
+ "github_projects_list": {
+  "description": "List GitHub Projects v2 boards for an organization, including field definitions and option IDs. Use to discover project_id (node ID) for github_projects_sync.",
+  "params": [
+   "org",
+   "include_closed"
+  ]
+ },
+ "github_projects_sync": {
+  "description": "Add a GitHub issue to a GitHub Projects v2 board and optionally set Status and Priority fields. Requires the issue to already exist. Use github_create_issue first if needed.",
+  "params": [
+   "owner",
+   "repo",
+   "issue_number",
+   "issue_url",
+   "project_id",
+   "status",
+   "priority"
+  ]
+ },
+ "governance_dictionary": {
+  "description": "Query governance data dictionary. No args=compact index; entity=full schema; entity+field=definition; entity+field+value=enum validation.",
+  "params": [
+   "entity",
+   "field",
+   "value"
+  ]
+ },
+ "governance_get": {
+  "description": "Read a governance file by name and return its content. Use to load governance://agents.md and other governance resources during session bootstrap without requiring direct S3 access.",
+  "params": [
+   "file_name"
+  ]
+ },
+ "governance_hash": {
+  "description": "Compute and return the SHA-256 governance hash of loaded governance files.",
+  "params": []
+ },
+ "governance_update": {
+  "description": "Update a governance resource with automatic version archival. Archives the current version to governance/history/ before writing the new content to governance/live/. Returns the new governance hash.",
+  "params": [
+   "file_name",
+   "content",
+   "change_summary",
+   "governance_hash"
+  ]
+ },
+ "projects_get": {
+  "description": "Get details for a specific project by name.",
+  "params": [
+   "project_name"
+  ]
+ },
+ "projects_list": {
+  "description": "List all projects. Optionally filter by status or active flag.",
+  "params": [
+   "status",
+   "active"
+  ]
+ },
+ "reference_search": {
+  "description": "Search a project reference document and return matched snippets with line numbers, section context, and surrounding lines. Avoids downloading the full reference document.",
+  "params": [
+   "project_id",
+   "query",
+   "regex",
+   "case_sensitive",
+   "context_lines",
+   "max_results",
+   "section"
+  ]
+ },
+ "release_task": {
+  "description": "Release the checkout on a tracker task. Call when the session is ending or work is complete. For completed work, prefer advance_task_status to closed instead.",
+  "params": [
+   "record_id",
+   "provider",
+   "governance_hash"
+  ]
+ },
+ "search": {
+  "description": "Compact read-only discovery surface over governed Enceladus resources. Use action + arguments to access project, tracker, document, deploy, changelog, governance, reference, and health lookups.",
+  "params": [
+   "action",
+   "arguments"
+  ]
+ },
+ "tracker_create": {
+  "description": "Create a new tracker record (task, issue, or feature) in a project.",
+  "params": [
+   "project_id",
+   "record_type",
+   "title",
+   "priority",
+   "related",
+   "acceptance_criteria",
+   "user_story",
+   "evidence",
+   "category",
+   "transition_type",
+   "intent",
+   "primary_task",
+   "hypothesis",
+   "technical_notes",
+   "location_hint",
+   "governance_hash",
+   "coordination_request_id",
+   "dispatch_id",
+   "provider"
+  ]
+ },
+ "tracker_get": {
+  "description": "Get a single tracker record (task, issue, or feature) by ID.",
+  "params": [
+   "record_id",
+   "include_history"
+  ]
+ },
+ "tracker_list": {
+  "description": "List tracker records for a project. Filter by type and/or status. Paginated (default 25).",
+  "params": [
+   "project_id",
+   "record_type",
+   "status",
+   "page_size",
+   "cursor"
+  ]
+ },
+ "tracker_log": {
+  "description": "Append worklog to an issue or feature. For tasks, use append_worklog (checkout required).",
+  "params": [
+   "record_id",
+   "description",
+   "governance_hash",
+   "coordination_request_id",
+   "dispatch_id",
+   "provider"
+  ]
+ },
+ "tracker_pending_updates": {
+  "description": "List tracker records with pending update notes. Supports single project or all projects.",
+  "params": [
+   "project_id",
+   "all"
+  ]
+ },
+ "tracker_set": {
+  "description": "Set a field on a tracker record. Task status\u2192use advance_task_status. Task worklogs\u2192use append_worklog.",
+  "params": [
+   "record_id",
+   "field",
+   "value",
+   "governance_hash",
+   "coordination_request_id",
+   "coordination",
+   "dispatch_id",
+   "provider",
+   "transition_evidence"
+  ]
+ },
+ "tracker_set_acceptance_evidence": {
+  "description": "Set evidence on a specific acceptance criterion of a feature or task record. Part of the governed evidence handshake: features cannot be completed and tasks cannot be closed until ALL structured acceptance criteria have evidence and evidence_acceptance=true (ENC-FTR-048).",
+  "params": [
+   "record_id",
+   "criterion_index",
+   "evidence",
+   "evidence_acceptance",
+   "governance_hash",
+   "coordination_request_id",
+   "dispatch_id",
+   "provider"
+  ]
+ },
+ "tracker_validation_rules": {
+  "description": "Preflight tracker edit rules for a record before calling tracker_set. Returns allowed status transitions, required transition_evidence fields, checkout/provider requirements, and dictionary-backed field guidance.",
+  "params": [
+   "record_id",
+   "target_status",
+   "provider",
+   "include_dictionary"
+  ]
+ },
+ "validate_commit_complete": {
+  "description": "Validate a commit-complete-id (CCI-xxx) token issued by the checkout service. Returns validity + associated task_id. Used by GitHub Actions pr-commit-gate to verify PRs contain a valid CCI.",
+  "params": [
+   "cci_id"
+  ]
+ }
+}

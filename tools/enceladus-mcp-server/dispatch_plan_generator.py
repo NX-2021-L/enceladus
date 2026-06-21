@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import sys
 import urllib.parse
 import urllib.request
 import uuid
@@ -36,6 +37,15 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("dispatch_plan_generator")
+
+# Canonical typed handoff mandate (ENC-TSK-G12). Path-tolerant import so this resolves
+# whether dispatch_plan_generator is imported normally (tools dir on sys.path) or
+# spec-loaded by coordination_api from a resolved file path.
+try:  # pragma: no cover - import shim
+    import handoff_mandate
+except ModuleNotFoundError:  # pragma: no cover - import shim
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import handoff_mandate
 
 # ---------------------------------------------------------------------------
 # Constants — mirror server.py for consistency
@@ -1110,6 +1120,11 @@ def build_dispatch_plan(
                 "auth_method": "token",
                 "token_ttl_minutes": CALLBACK_TOKEN_TTL_MINUTES,
             },
+            # ENC-TSK-G12: the subagent-invocation tool is the canonical typed handoff
+            # mandate, enforced by strict-schema constrained decoding so the orchestrator
+            # never emits a malformed/undersized mandate (no JSON parse-and-retry cycles).
+            "subagent_invocation_tool": handoff_mandate.mandate_tool_definition(strict=True),
+            "output_config": {"format": handoff_mandate.mandate_output_format(strict=True)},
         }
 
         if feed_sub:

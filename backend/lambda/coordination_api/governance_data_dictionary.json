@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-17.01",
-  "updated_at": "2026-06-17T00:55:00Z",
-  "last_change_summary": "ENC-PLN-046 (ENC-TSK-G97/G98/G99): graph_query_api hybrid-retrieval remediation. Keyword signal now tokenizes the query and scores per-token field-weighted CONTAINS so multi-word queries match (ENC-ISS-310); the anchored graph signal runs under a hard wall-clock deadline and degrades to graph_algorithm='timeout' instead of hanging the whole response (ENC-ISS-311); the graphsearch /health endpoint adds a functional per-signal readiness probe (vector/graph/keyword) surfaced through connection_health.graph_index.signals (ENC-ISS-312).",
+  "version": "2026-06-21.02",
+  "updated_at": "2026-06-21T10:40:00Z",
+  "last_change_summary": "ENC-TSK-G45 + ENC-TSK-G12 (PR #483, ENC-FTR-077): rewrote the top-20 code-mode search/execute tool descriptions in tools/enceladus-mcp-server/server.py to pure Diataxis Reference (DOC-E88C197AE0F3 RULE-06) and added the canonical typed handoff mandate schema (goal/constraints/prior_findings/tools_allowed/output_schema/budget_tokens; tools/enceladus-mcp-server/handoff_mandate.py) wired strict:true into the dispatch-plan generator. No tracker/field schema changes; version bump satisfies the path-triggered Governance Dictionary Guard for the server.py tool-surface change.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5146,6 +5146,31 @@
         }
       }
     },
+    "deploy.env_parity_gate": {
+      "description": "Pre-deploy environment-variable parity gate (ENC-PLN-048 Objective 2 / ENC-FTR-102). Resolves each CloudFormation Lambda's template Environment.Variables and fails closed if a deploy-critical required var (env_drift_auditor/env_drift_registry.json) would be unset, or if a var present live would be stripped by the deploy (the H05/H09 'deploy would strip <var>' class). The pre-deploy gate and the post-deploy env_drift_auditor share a single comparison core (env_parity_core) so they cannot diverge (ENC-TSK-H19 AC2).",
+      "fields": {
+        "cfn_env_resolver": {
+          "type": "string",
+          "definition": "tools/cfn_env_resolver.py (ENC-TSK-H17): a real CloudFormation intrinsic-function evaluator (Ref, Fn::Sub, Fn::If, Fn::Equals/Not/And/Or, Fn::Join/Select/GetAtt/ImportValue/FindInMap, plus the Conditions block) that resolves per-function Environment.Variables for infrastructure/cloudformation/02-compute.yaml given a parameter-overrides set, dropping any var that resolves to AWS::NoValue (the !If-unset case). Diffs resolved keys against the required-env registry. Replaces naive !Ref substitution, which false-flagged AppConfig !If vars as 'would be stripped'."
+        },
+        "fail_closed_gate": {
+          "type": "string",
+          "definition": "tools/env_parity_gate.py (ENC-TSK-H18): wraps the H17 resolver diff and exits non-zero with function+var+remediation for any missing deploy-critical var; exits zero when all are present. Invoked as CHECK 6 in tools/pre-deploy-health-gate.sh."
+        },
+        "waiver_mechanism": {
+          "type": "string",
+          "definition": "tools/env_parity_waivers.json (ENC-TSK-H18): documented, auditable per-(function,var) waivers that suppress a FAILURE but are still RECORDED in the report (never silent), plus an advisory_vars map (function name or '*' -> vars that WARN instead of FAIL). The committed file ships with zero active waivers so the gate stays honest."
+        },
+        "live_template_strip_detector": {
+          "type": "string",
+          "definition": "tools/live_template_strip_detector.py (ENC-TSK-H19): diffs live Lambda Environment.Variables (aws lambda get-function-configuration) against the H17 template-resolved env and flags any live-only var as 'deploy would strip <var> from <function>', classified critical (var is in the required-env registry) vs warning. Live fetch is pluggable (--live-env-file) for offline/CI/test runs."
+        },
+        "shared_comparison_core": {
+          "type": "string",
+          "definition": "backend/lambda/env_drift_auditor/env_parity_core.py (ENC-TSK-H19 AC2): the single source of env-comparison primitives (build_placeholders, classify_required, live_only_vars) imported by BOTH the env_drift_auditor Lambda (post-deploy required-var scan) and the pre-deploy strip detector, so pre- and post-deploy checks stay consistent by construction. Pure module with no import-time side effects."
+        }
+      }
+    },
     "deploy.parity_validator": {
       "description": "ENC-FTR-091 / ENC-TSK-F87 \u2014 v3-v4 Deploy Parity Validator Lambda. Autonomous cycle per PR: pre-merge DM env health + fixes, DPL inspection, function_name_map gap detection, CodeSha256 drift detection. Post-merge: GH Deployments API poll. Post-deploy: patches readiness DOC.",
       "fields": {
@@ -5393,6 +5418,11 @@
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
   "change_log": [
+    {
+      "version": "2026-06-21.02",
+      "date": "2026-06-21",
+      "summary": "ENC-TSK-G45 + ENC-TSK-G12 (PR #483): Diataxis Reference rewrite of the top-20 code-mode tool descriptions + canonical typed handoff mandate schema (handoff_mandate.py, strict:true dispatch generator). server.py tool-surface change; version bump required by the CI governance-dictionary guard."
+    },
     {
       "version": "2026-04-23.01",
       "date": "2026-04-23",

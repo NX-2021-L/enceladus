@@ -1,0 +1,17 @@
+{
+  "_doc": "Documented, auditable waivers for the pre-deploy env parity gate (ENC-TSK-H18, ENC-PLN-048, ENC-FTR-102). A waiver suppresses a specific (function, var) FAILURE so an intentional, justified out-of-band variable does not block a deploy. Waivers are NEVER silent: every waived finding is still printed and recorded in the gate report. To accept a risk, add an entry with a real reason, owner, and review_by date; remove the entry to re-arm the gate for that var. Entries whose function name starts with 'EXAMPLE' are ignored by the loader (documentation only).",
+  "_remediation_preferred": "The preferred fix is NOT a waiver but template remediation: add the missing var to the function's Environment.Variables in infrastructure/cloudformation/02-compute.yaml (referencing the deploy parameter that supplies it) so CloudFormation sets it and the next deploy cannot strip the live value.",
+  "waivers": [
+    {
+      "function": "EXAMPLE-devops-some-lambda",
+      "var": "EXAMPLE_OPTIONAL_VAR",
+      "reason": "Documentation-only example. Replace with a real, justified waiver. Set intentionally out-of-band; template remediation tracked on ENC-ISS-XXX.",
+      "owner": "io",
+      "review_by": "2026-12-31"
+    }
+  ],
+  "advisory_vars": {
+    "_comment": "Map a function name (or '*' for all functions) to a list of vars that should WARN instead of FAIL when missing from the template-resolved env. Use sparingly — advisory means 'not deploy-critical'.",
+    "*": []
+  }
+}
