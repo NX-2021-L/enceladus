@@ -40,8 +40,7 @@ fleet-wide. Supersedes the ENC-TSK-D22 layer-ABI parity-gate intent for the V3 l
 
 CHECKS
 -----------------------------------------------------------------------------
-Static mode (default; no AWS creds -- safe for CI, mirrors
-verify_internal_key_coverage.py):
+Static mode (default; no AWS creds -- safe for CI, fail-closed):
   1. The SharedLayerArn parameter Default == CANONICAL_SHARED_LAYER_ARN.
   2. No resource hardcodes a DIFFERENT enceladus-shared:N ARN literal (every
      consumer must inherit via !Ref SharedLayerArn, or pin the canonical version).
