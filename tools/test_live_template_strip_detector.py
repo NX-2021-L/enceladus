@@ -2,16 +2,19 @@
 """Tests for tools/live_template_strip_detector.py — ENC-TSK-H19.
 
 Covers the live-vs-template comparison + classification, the baseline
-(live subset of template -> zero strip risk), and the end-to-end proof that
+(live subset of template -> zero strip risk), the end-to-end proof that
 template vars correctly resolved by H17 (incl. AppConfig !If vars) are NOT
-false-flagged as live-only.
+false-flagged as live-only, and (ENC-TSK-H33) the CLI process-exit parity:
+main() returns rc=2 on a live-only deploy-critical var and rc=0 on a subset.
 
     python3 tools/test_live_template_strip_detector.py
 """
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -107,6 +110,76 @@ def test_run_with_injected_provider():
     result = det.run(TEMPLATE, {}, REGISTRY, live_env_provider=provider)
     msgs = [f["message"] for f in result["findings"]]
     assert "deploy would strip BOGUS_LIVE_ONLY from devops-coordination-api" in msgs
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-H33 — CLI process-exit parity with the env-parity gate.
+#
+# The detect()/run() tests above assert on result dicts; they never exercise the
+# CLI's process exit code. These two drive the entrypoint main() end-to-end via
+# the OFFLINE --live-env-file path and assert the returned exit code, mirroring
+# tools/test_env_parity_gate.py::test_main_exit_code_nonzero_on_critical
+# (fail-closed CLI contract). No boto3 / no AWS — --live-env-file only, against a
+# synthetic template + registry so the cases stay stable regardless of the real
+# 02-compute.yaml / env_drift_registry.json.
+# ---------------------------------------------------------------------------
+
+_SYNTH_TEMPLATE = """
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  A:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: fn-a
+      Environment:
+        Variables:
+          PRESENT: ok
+  B:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: fn-b
+      Environment:
+        Variables:
+          PRESENT: ok
+          ALSO: ok
+"""
+
+
+def _write(tmp: Path, name: str, content: str) -> Path:
+    p = tmp / name
+    p.write_text(content)
+    return p
+
+
+def test_main_exit_code_nonzero_on_critical():
+    # A live-only DEPLOY-CRITICAL required var (fn-a.NEEDED — present live, absent
+    # from the template-resolved env) must make the CLI exit rc=2 — the same
+    # fail-closed contract test_env_parity_gate asserts for the gate.
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        tpl = _write(tmp, "t.yaml", _SYNTH_TEMPLATE)
+        reg = _write(tmp, "registry.json", json.dumps({"lambdas": {"fn-a": ["PRESENT", "NEEDED"]}}))
+        live = _write(tmp, "live.json", json.dumps({"fn-a": {"PRESENT": "ok", "NEEDED": "live-secret"}}))
+        rc = det.main(
+            ["--template", str(tpl), "--registry", str(reg),
+             "--live-env-file", str(live), "--format", "json"]
+        )
+        assert rc == 2
+
+
+def test_main_exit_code_zero_on_live_subset():
+    # When the live env is a SUBSET of the template-resolved env there are no
+    # live-only vars (zero strip risk) -> the CLI exits rc=0.
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        tpl = _write(tmp, "t.yaml", _SYNTH_TEMPLATE)
+        reg = _write(tmp, "registry.json", json.dumps({"lambdas": {"fn-a": ["PRESENT", "NEEDED"]}}))
+        live = _write(tmp, "live.json", json.dumps({"fn-a": {"PRESENT": "ok"}}))
+        rc = det.main(
+            ["--template", str(tpl), "--registry", str(reg),
+             "--live-env-file", str(live), "--format", "json"]
+        )
+        assert rc == 0
 
 
 def _run_all() -> int:
