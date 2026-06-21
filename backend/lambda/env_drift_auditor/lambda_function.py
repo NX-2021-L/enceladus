@@ -24,6 +24,9 @@ from typing import Any, Dict, List, Tuple
 
 import boto3
 
+# ENC-TSK-H19: shared comparison core — single source for pre- and post-deploy.
+from env_parity_core import build_placeholders, classify_required
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -42,10 +45,9 @@ _REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "env_drift_registry.jso
 with open(_REGISTRY_PATH) as _f:
     REGISTRY = json.load(_f)
 
-PLACEHOLDER_VALUES = set(
-    REGISTRY.get("_policy", {}).get("placeholder_values_that_count_as_drift", [])
-    + ["", "CHANGE_ME", "TODO", "REPLACE_", "REPLACE_WITH_", "null", "None"]
-)
+# ENC-TSK-H19 AC2: placeholder set now built by the shared env_parity_core so the
+# pre-deploy strip detector and this post-deploy auditor cannot diverge.
+PLACEHOLDER_VALUES = build_placeholders(REGISTRY.get("_policy", {}))
 
 
 def _audit_lambda(lambda_client: Any, fn_name: str, required: List[str]) -> Tuple[str, List[Dict[str, Any]]]:
@@ -59,13 +61,8 @@ def _audit_lambda(lambda_client: Any, fn_name: str, required: List[str]) -> Tupl
         return "error", [{"var": None, "reason": f"aws error: {exc!s}"}]
 
     env_vars: Dict[str, str] = (cfg.get("Environment") or {}).get("Variables", {}) or {}
-    drift: List[Dict[str, Any]] = []
-    for var in required:
-        val = env_vars.get(var)
-        if val is None:
-            drift.append({"var": var, "reason": "missing"})
-        elif val in PLACEHOLDER_VALUES or val.startswith("REPLACE_"):
-            drift.append({"var": var, "reason": f"placeholder value: {val!r}"})
+    # ENC-TSK-H19 AC2: delegate to the shared comparison core (no divergent impl).
+    drift = classify_required(required, env_vars, PLACEHOLDER_VALUES)
     if drift:
         return "drift", drift
     return "ok", []
