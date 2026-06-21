@@ -134,6 +134,107 @@ def test_env_drift_auditor_uses_shared_core():
     assert {d["var"] for d in drift} == {"MISSING_ONE"}
 
 
+# --- ENC-TSK-H10: drift-issue dedup signature -------------------------------
+def test_drift_signature_stable_and_order_independent():
+    # Same (lambda, missing-var SET) -> same signature regardless of var order
+    # or duplicates (the frozenset(missing_vars) dedup key).
+    a = core.drift_signature("devops-fn", ["B", "A"])
+    b = core.drift_signature("devops-fn", ["A", "B"])
+    c = core.drift_signature("devops-fn", ["A", "B", "B", "A"])
+    assert a == b == c
+    # Different missing-var set -> different signature.
+    assert core.drift_signature("devops-fn", ["A"]) != a
+    # Different lambda -> different signature.
+    assert core.drift_signature("devops-other", ["A", "B"]) != a
+    # 12 hex chars.
+    assert len(a) == 12 and all(ch in "0123456789abcdef" for ch in a)
+
+
+def test_sig_token_format():
+    assert core.sig_token("abc123") == "[sig:abc123]"
+
+
+def test_find_signature_match_by_title_token():
+    sig = core.drift_signature("devops-fn", ["A", "B"])
+    issues = [
+        {"item_id": "ENC-ISS-001", "title": "[auto-drift] other thing [sig:deadbeef0000]"},
+        {"item_id": "ENC-ISS-002", "title": f"[auto-drift] devops-fn missing X {core.sig_token(sig)}"},
+    ]
+    assert core.find_signature_match(issues, sig) == "ENC-ISS-002"
+    # No carrier -> no match.
+    assert core.find_signature_match([{"item_id": "ENC-ISS-003", "title": "unrelated"}], sig) is None
+    # record_id fallback when item_id is absent.
+    rid_only = [{"record_id": "issue#ENC-ISS-004", "title": f"x {core.sig_token(sig)}"}]
+    assert core.find_signature_match(rid_only, sig) == "ENC-ISS-004"
+
+
+def test_find_signature_match_idempotency_core():
+    """Pure AC-2 core (no boto3/network): once an issue carrying the signature is
+    open, a repeat finding matches it, so the auditor bumps instead of filing."""
+    sig = core.drift_signature("devops-fn", ["A", "B"])
+    open_issues: list = []
+    # First run: nothing open yet -> no match -> auditor would FILE.
+    assert core.find_signature_match(open_issues, sig) is None
+    # Simulate the filed issue now being open (title carries the token).
+    open_issues.append({
+        "item_id": "ENC-ISS-T1",
+        "title": f"[auto-drift] devops-fn missing required env vars: A, B {core.sig_token(sig)}",
+        "status": "open",
+    })
+    # Second run, same finding (even with vars discovered in a different order) ->
+    # matches the open issue -> auditor BUMPS, files nothing new.
+    assert core.find_signature_match(open_issues, core.drift_signature("devops-fn", ["B", "A"])) == "ENC-ISS-T1"
+
+
+def test_auditor_idempotent_dedup_bumps_not_refiles():
+    """AC-2 (ENC-TSK-H10) at the orchestrator level: a repeat run against unresolved
+    drift creates ZERO new issues — it bumps the existing one. Only the network I/O
+    is stubbed; the real _handle_drift_finding + drift_signature + find_signature_match
+    make the decision."""
+    os.environ.setdefault("COORDINATION_INTERNAL_API_KEY", "test-key")
+    try:
+        import lambda_function as lf  # noqa: E402
+    except Exception as exc:  # boto3 missing locally etc. — pure test above still proves AC-2
+        print(f"  SKIP test_auditor_idempotent_dedup_bumps_not_refiles ({exc})")
+        return
+
+    open_issues: list = []  # simulated tracker OPEN-issue store
+    counters = {"filed": 0, "bumped": 0}
+
+    def fake_fetch_open_issues():
+        return list(open_issues)
+
+    def fake_file(fn_name, drift, run_id, signature):
+        counters["filed"] += 1
+        open_issues.append({
+            "item_id": f"ENC-ISS-T{counters['filed']}",
+            "title": f"[auto-drift] {fn_name} missing required env vars: X {core.sig_token(signature)}",
+            "status": "open",
+        })
+        return {"status": 201, "filed": True, "signature": signature}
+
+    def fake_bump(issue_id, fn_name, run_id, now):
+        counters["bumped"] += 1
+        return {"status": 200, "deduped": True, "issue_id": issue_id}
+
+    saved = (lf._fetch_open_issues, lf._file_drift_issue, lf._bump_drift_issue, lf.DRY_RUN)
+    lf._fetch_open_issues = fake_fetch_open_issues
+    lf._file_drift_issue = fake_file
+    lf._bump_drift_issue = fake_bump
+    lf.DRY_RUN = False
+    try:
+        drift = [{"var": "COORDINATION_INTERNAL_API_KEY", "reason": "missing"}]
+        lf._handle_drift_finding("devops-some-fn", drift, "run-1")
+        r2 = lf._handle_drift_finding("devops-some-fn", drift, "run-2")
+    finally:
+        (lf._fetch_open_issues, lf._file_drift_issue, lf._bump_drift_issue, lf.DRY_RUN) = saved
+
+    assert counters["filed"] == 1, f"expected exactly 1 file, got {counters['filed']}"
+    assert counters["bumped"] == 1, f"expected exactly 1 bump, got {counters['bumped']}"
+    assert len(open_issues) == 1, "repeat run must not create a new issue record"
+    assert r2.get("deduped") is True
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
