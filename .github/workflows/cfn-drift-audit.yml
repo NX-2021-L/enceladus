@@ -54,6 +54,15 @@ jobs:
               || true
           fi
           echo "=== Drift Report ==="
+          # The audit invocations above are guarded with `|| true` so that a
+          # detected-drift exit code does not abort the step. But a hard crash
+          # (e.g. resolve_api_id ambiguity) leaves no report behind. Surface
+          # that explicitly instead of letting `cat` fail with an opaque
+          # "No such file or directory" under `set -e` (ENC-TSK-H36).
+          if [[ ! -s /tmp/cfn-drift-report.json ]]; then
+            echo "::error::audit_cfn_drift.py produced no drift report — the audit script failed (see traceback above)."
+            exit 1
+          fi
           cat /tmp/cfn-drift-report.json
 
           any_drift=$(python3 -c "
