@@ -140,6 +140,26 @@ _GRAPH_SIGNAL_DEADLINE_S = 8.0
 _HEALTH_PROBE_PROJECT = "enceladus"
 _HEALTH_PROBE_TOKEN = "governance"
 
+# ENC-FTR-101 (Option B) — pre-materialized standing projection config.
+# DOC-6EFD5DB32CD8 Rev 11/14 + io field guide DOC-D4CB8048798B. When
+# GDS_STANDING_PROJECTION_PREFIX is unset the feature is OFF and every warm-path
+# call returns immediately, so the request path behaves exactly as before
+# (per-query gds.graph.project then Cypher proxy under the deadline). When set,
+# an out-of-band refresher (_handle_refresh_projection, EventBridge-scheduled)
+# maintains a single standing named projection that the request path queries
+# warm. GDS_WEIGHT_PROPERTY selects the relationship weight used by pageRank
+# ('weight' today; flips to 'flow_weight' once ENC-FTR-108 writes adaptive
+# weights into the slot this projection initializes to 1.0).
+_GDS_STANDING_PROJECTION_PREFIX = os.environ.get("GDS_STANDING_PROJECTION_PREFIX", "").strip()
+_GDS_SESSION_MEMORY = os.environ.get("GDS_SESSION_MEMORY", "2GB").strip() or "2GB"
+_GDS_WEIGHT_PROPERTY = os.environ.get("GDS_WEIGHT_PROPERTY", "weight").strip() or "weight"
+_GDS_FLOW_WEIGHT_PROPERTY = "flow_weight"
+_GDS_PROJECTION_META_LABEL = "GdsProjectionMeta"
+try:
+    _GDS_PROJECTION_MAX_AGE_S = int(os.environ.get("GDS_PROJECTION_MAX_AGE_S", "3600"))
+except (TypeError, ValueError):
+    _GDS_PROJECTION_MAX_AGE_S = 3600
+
 
 def _get_secretsmanager():
     global _secretsmanager
@@ -919,6 +939,251 @@ def _hybrid_graph_ranks_cypher_fallback(
     return ranked
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-101 (Option B) — pre-materialized standing projection
+# ---------------------------------------------------------------------------
+# DOC-6EFD5DB32CD8 Rev 11/14 + io field guide DOC-D4CB8048798B. _hybrid_graph_
+# ranks_gds provisions a fresh Aura Graph Analytics session (gds.graph.project
+# {memory:'2GB'}) on every anchored request (~50s p95). Option B maintains ONE
+# standing named projection refreshed OUT OF BAND (single writer:
+# _handle_refresh_projection on an EventBridge schedule) so the request path only
+# reattaches and runs gds.pageRank.stream against the warm projection.
+#
+# Defensive contract: the request path NEVER projects. When the projection is
+# unconfigured / missing / errors, the warm path returns [] and the caller falls
+# back to the existing per-query path (then the Cypher proxy) under the
+# _GRAPH_SIGNAL_DEADLINE_S budget. No regression when GDS_STANDING_PROJECTION_
+# PREFIX is unset.
+
+
+def _standing_projection_name(project_id: str) -> str:
+    """Stable per-project standing-projection name, or '' when the feature is
+    unconfigured (GDS_STANDING_PROJECTION_PREFIX unset)."""
+    if not _GDS_STANDING_PROJECTION_PREFIX:
+        return ""
+    return f"{_GDS_STANDING_PROJECTION_PREFIX}_{project_id}".replace("-", "_").lower()
+
+
+def _hybrid_graph_ranks_gds_warm(
+    driver,
+    project_id: str,
+    anchor_record_id: str,
+    top_n: int,
+) -> List[Dict[str, Any]]:
+    """Personalized PageRank against the PRE-MATERIALIZED standing projection
+    (ENC-FTR-101 Option B). Read-only: reattaches and runs gds.pageRank.stream
+    against a projection built out of band — it NEVER calls gds.graph.project,
+    so it cannot hit the per-query AGA session-creation cost nor the
+    FlightRuntimeException same-graph-name race. Returns [] (so the caller falls
+    back to the per-query path) when the projection is unconfigured, absent, or
+    on any error. Never raises.
+    """
+    graph_name = _standing_projection_name(project_id)
+    if not graph_name:
+        return []
+    ranked: List[Dict[str, Any]] = []
+    try:
+        with driver.session() as session:
+            exists_rec = session.run(
+                "CALL gds.graph.exists($name) YIELD exists RETURN exists",
+                name=graph_name,
+            ).single()
+            if not exists_rec or not exists_rec.get("exists"):
+                return []
+
+            anchor_rec = session.run(
+                "MATCH (a) WHERE a.record_id = $rid AND a.project_id = $project_id "
+                "RETURN id(a) AS nodeId LIMIT 1",
+                rid=anchor_record_id,
+                project_id=project_id,
+            ).single()
+            if anchor_rec is None or anchor_rec.get("nodeId") is None:
+                return []
+
+            # Mirror _hybrid_graph_ranks_gds' two-step resolution: stream raw
+            # (nodeId, score) from the projection, then resolve record_ids via a
+            # follow-up MATCH on the main DB (gds.util.asNode is unsupported under
+            # the AGA Sessions surface and the projection carries no record_id).
+            stream_result = session.run(
+                """
+                CALL gds.pageRank.stream(
+                    $name,
+                    {
+                        sourceNodes: [$anchorId],
+                        dampingFactor: $damping,
+                        maxIterations: $maxIter,
+                        relationshipWeightProperty: $weightProp
+                    }
+                )
+                YIELD nodeId, score
+                RETURN nodeId, score
+                ORDER BY score DESC
+                LIMIT $limit
+                """,
+                name=graph_name,
+                anchorId=anchor_rec["nodeId"],
+                damping=PPR_DAMPING_FACTOR,
+                maxIter=PPR_MAX_ITERATIONS,
+                weightProp=_GDS_WEIGHT_PROPERTY,
+                limit=top_n,
+            )
+            node_rows = [(r.get("nodeId"), float(r.get("score") or 0.0)) for r in stream_result]
+            if not node_rows:
+                return []
+
+            node_ids = [nid for nid, _ in node_rows if nid is not None]
+            rid_map: Dict[int, str] = {}
+            if node_ids:
+                resolved = session.run(
+                    "MATCH (n) WHERE id(n) IN $node_ids "
+                    "RETURN id(n) AS nodeId, n.record_id AS rid",
+                    node_ids=node_ids,
+                )
+                for rec in resolved:
+                    rid = rec.get("rid")
+                    nid = rec.get("nodeId")
+                    if rid and nid is not None:
+                        rid_map[nid] = rid
+            rank_counter = 0
+            for nid, score in node_rows:
+                rid = rid_map.get(nid)
+                if not rid or rid == anchor_record_id:
+                    continue
+                rank_counter += 1
+                ranked.append({"record_id": rid, "score": score, "rank": rank_counter})
+    except Exception as exc:
+        logger.warning(
+            "[WARNING] warm standing-projection PPR failed for %s — falling back: %s",
+            graph_name, exc,
+        )
+        return []
+    return ranked
+
+
+def _refresh_standing_projection(driver, project_id: str) -> Dict[str, Any]:
+    """(Re)build the standing named projection for one project (ENC-FTR-101
+    Option B, single writer). Invoked OUT OF BAND by _handle_refresh_projection
+    — never from the request path — so the FlightRuntimeException
+    'already a job running' same-graph-name race (DOC-D4CB8048798B, Concurrency
+    Hazards) cannot occur. Drops any prior projection of the same name, projects
+    the project's nodes/edges with BOTH a per-type 'weight' and a flow_weight=1.0
+    slot (ENC-FTR-101 AC-5), then stamps a GdsProjectionMeta marker carrying the
+    last-refresh epoch for staleness telemetry (AC-3). Never raises.
+    """
+    graph_name = _standing_projection_name(project_id)
+    if not graph_name:
+        return {"refreshed": False, "reason": "GDS_STANDING_PROJECTION_PREFIX unset", "project_id": project_id}
+
+    weight_case_parts = [f"WHEN '{etype}' THEN {w}" for etype, w in GRAPH_EDGE_WEIGHTS.items()]
+    weight_case_sql = (
+        "CASE type(r) " + " ".join(weight_case_parts) + f" ELSE {GRAPH_FALLBACK_DEFAULT_WEIGHT} END"
+    )
+    edge_union = "|".join(list(GRAPH_EDGE_WEIGHTS.keys()))
+    result: Dict[str, Any] = {"project_id": project_id, "graph_name": graph_name}
+    try:
+        with driver.session() as session:
+            # Drop any prior projection of this name (idempotent rebuild). Meta
+            # marker nodes are excluded from the projection node set below.
+            session.run(
+                "CALL gds.graph.exists($name) YIELD exists "
+                "WITH exists WHERE exists "
+                "CALL gds.graph.drop($name) YIELD graphName RETURN graphName",
+                name=graph_name,
+            ).consume()
+
+            proj = session.run(
+                f"""
+                MATCH (src) WHERE src.project_id = $project_id AND NOT src:{_GDS_PROJECTION_META_LABEL}
+                OPTIONAL MATCH (src)-[r:{edge_union}]->(tgt)
+                WHERE tgt IS NOT NULL AND tgt.project_id = $project_id
+                WITH gds.graph.project(
+                    $name,
+                    src,
+                    tgt,
+                    {{relationshipProperties: {{weight: {weight_case_sql}, {_GDS_FLOW_WEIGHT_PROPERTY}: 1.0}}}},
+                    {{memory: $memory}}
+                ) AS g
+                RETURN g.graphName AS graphName, g.nodeCount AS nodeCount, g.relationshipCount AS relationshipCount
+                """,
+                name=graph_name,
+                project_id=project_id,
+                memory=_GDS_SESSION_MEMORY,
+            ).single()
+            if proj is not None:
+                result["node_count"] = proj.get("nodeCount")
+                result["relationship_count"] = proj.get("relationshipCount")
+
+            # Stamp the last-refresh marker for staleness telemetry (AC-3).
+            session.run(
+                f"MERGE (m:{_GDS_PROJECTION_META_LABEL} {{name: $name}}) "
+                f"SET m.last_refresh = datetime(), m.last_refresh_epoch_ms = timestamp(), "
+                f"m.weight_property = $weight_prop",
+                name=graph_name,
+                weight_prop=_GDS_WEIGHT_PROPERTY,
+            ).consume()
+        result["refreshed"] = True
+        logger.info(
+            "[SUCCESS] ENC-FTR-101 standing projection %s refreshed (nodes=%s, rels=%s)",
+            graph_name, result.get("node_count"), result.get("relationship_count"),
+        )
+    except Exception as exc:
+        logger.exception("[ERROR] standing projection refresh failed for %s", graph_name)
+        result["refreshed"] = False
+        result["error"] = str(exc)
+    return result
+
+
+def _standing_projection_status(driver, project_id: str) -> Dict[str, Any]:
+    """Standing-projection existence + last-refresh age for health/observability
+    (ENC-FTR-101 AC-3). Never raises."""
+    graph_name = _standing_projection_name(project_id)
+    status: Dict[str, Any] = {"configured": bool(graph_name), "name": graph_name or None}
+    if not graph_name:
+        return status
+    try:
+        with driver.session() as session:
+            exists_rec = session.run(
+                "CALL gds.graph.exists($name) YIELD exists RETURN exists",
+                name=graph_name,
+            ).single()
+            status["exists"] = bool(exists_rec and exists_rec.get("exists"))
+            meta = session.run(
+                f"MATCH (m:{_GDS_PROJECTION_META_LABEL} {{name: $name}}) "
+                f"RETURN m.last_refresh AS last_refresh, m.last_refresh_epoch_ms AS lr_ms, "
+                f"timestamp() AS now_ms",
+                name=graph_name,
+            ).single()
+            if meta and meta.get("lr_ms") is not None:
+                lr = meta.get("last_refresh")
+                status["last_refresh"] = str(lr) if lr is not None else None
+                age = max(0, int((meta.get("now_ms") - meta.get("lr_ms")) // 1000))
+                status["age_seconds"] = age
+                status["stale"] = age > _GDS_PROJECTION_MAX_AGE_S
+            else:
+                status["last_refresh"] = None
+                status["stale"] = True
+            status["max_age_seconds"] = _GDS_PROJECTION_MAX_AGE_S
+    except Exception as exc:
+        logger.warning("[WARNING] standing projection status probe failed: %s", exc)
+        status["error"] = str(exc)
+    return status
+
+
+def _handle_refresh_projection(event: Dict) -> Dict[str, Any]:
+    """Out-of-band standing-projection refresh entrypoint (ENC-FTR-101 Option B).
+    Invoked by an EventBridge scheduled rule or a direct Lambda invoke (single
+    writer); NOT exposed on the public API Gateway route. Refreshes
+    event['project_ids'] (list) or event['project_id'] (str), defaulting to the
+    health-probe project.
+    """
+    driver = _ensure_live_driver(_get_neo4j_driver())
+    if driver is None:
+        return {"ok": False, "error": "neo4j driver unavailable after rebuild attempt"}
+    project_ids = event.get("project_ids") or [event.get("project_id") or _HEALTH_PROBE_PROJECT]
+    results = [_refresh_standing_projection(driver, pid) for pid in project_ids]
+    return {"ok": all(r.get("refreshed") for r in results), "results": results}
+
+
 def _hybrid_keyword_ranks(
     driver,
     project_id: str,
@@ -1187,6 +1452,15 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         # wait=False) — the Bolt call finishes/errors in the background without
         # blocking the handler.
         def _graph_signal():
+            # ENC-FTR-101 (Option B): try the warm standing projection first
+            # (reattach + gds.pageRank.stream; no per-query projection build). On
+            # miss/unconfigured/error it returns [] and we fall back to the
+            # per-query path, then the Cypher proxy — all under the deadline.
+            warm_ranks = _hybrid_graph_ranks_gds_warm(
+                driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
+            )
+            if warm_ranks:
+                return warm_ranks, "gds_pagerank"
             if _check_gds_available(driver):
                 gds_ranks = _hybrid_graph_ranks_gds(
                     driver, project_id, anchor_record_id, top_n=HYBRID_SIGNAL_TOP_N,
@@ -1468,8 +1742,22 @@ def _handle_health(event: Dict) -> Dict:
         except Exception:
             logger.warning("[WARNING] health graph probe failed", exc_info=True)
 
+        # ENC-FTR-101 (Option B): standing-projection existence + staleness (AC-3).
+        # Bounded + observable so a stale/missing warm projection is visible here
+        # while the request path still degrades gracefully to the deadline path.
+        graph_projection = {"configured": bool(_GDS_STANDING_PROJECTION_PREFIX)}
+        try:
+            graph_projection = _standing_projection_status(driver, _HEALTH_PROBE_PROJECT)
+        except Exception:
+            logger.warning("[WARNING] health standing-projection probe failed", exc_info=True)
+
         duration_ms = int((time.time() - start) * 1000)
-        return _response(200, {"status": "healthy", "response_ms": duration_ms, "signals": signals})
+        return _response(200, {
+            "status": "healthy",
+            "response_ms": duration_ms,
+            "signals": signals,
+            "graph_projection": graph_projection,
+        })
     except Exception as e:
         logger.warning("[WARNING] Graph health check failed: %s", e)
         return _response(200, {"status": "unavailable", "message": str(e)})
@@ -1481,6 +1769,16 @@ def _handle_health(event: Dict) -> Dict:
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """API Gateway v2 proxy handler."""
+    # ENC-FTR-101 (Option B): out-of-band standing-projection refresh. EventBridge
+    # scheduled events / direct invokes carry action='refresh_projection' (and lack
+    # the API Gateway requestContext), so detect them before the HTTP routing below.
+    if isinstance(event, dict) and (
+        event.get("action") == "refresh_projection"
+        or event.get("detail-type") == "Scheduled Event"
+        or event.get("source") == "aws.events"
+    ):
+        return _handle_refresh_projection(event)
+
     method = event.get("requestContext", {}).get("http", {}).get("method", "GET")
     path = event.get("rawPath", "")
 
