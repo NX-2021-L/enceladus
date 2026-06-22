@@ -106,6 +106,39 @@ def test_audit_report_has_expected_shape(tmp_path, monkeypatch, mod):
     assert report["eventbridge_rules"]["cfn_only"] == []
 
 
+def test_resolve_api_id_drops_gamma_sibling(monkeypatch, mod):
+    """prod + gamma siblings both match the prefix filter; resolver must
+    deterministically return the production ApiId (ENC-TSK-H36)."""
+    apis = {
+        "Items": [
+            {"Name": "devops-tracker-api", "ApiId": "prod123"},
+            {"Name": "devops-tracker-api-gamma", "ApiId": "gamma456"},
+        ]
+    }
+    monkeypatch.setattr(mod, "_aws_json", lambda cmd: apis)
+    assert mod.resolve_api_id("enceladus-") == "prod123"
+
+
+def test_resolve_api_id_still_raises_on_genuine_ambiguity(monkeypatch, mod):
+    """Two genuine (non-env-suffixed) prod candidates remain ambiguous and
+    must still raise so the operator passes --api-id explicitly."""
+    apis = {
+        "Items": [
+            {"Name": "devops-tracker-api", "ApiId": "a1"},
+            {"Name": "devops-checkout-api", "ApiId": "a2"},
+        ]
+    }
+    monkeypatch.setattr(mod, "_aws_json", lambda cmd: apis)
+    with pytest.raises(RuntimeError, match="Multiple API Gateway v2 APIs match"):
+        mod.resolve_api_id("enceladus-")
+
+
+def test_resolve_api_id_single_match(monkeypatch, mod):
+    apis = {"Items": [{"Name": "devops-tracker-api", "ApiId": "only1"}]}
+    monkeypatch.setattr(mod, "_aws_json", lambda cmd: apis)
+    assert mod.resolve_api_id("enceladus-") == "only1"
+
+
 def test_audit_no_drift(tmp_path, monkeypatch, mod):
     _write_cfn_template(
         tmp_path,

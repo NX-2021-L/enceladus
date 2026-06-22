@@ -59,6 +59,19 @@ def live_apigw_routes(api_id: str) -> Set[str]:
     return {item["RouteKey"] for item in (data or {}).get("Items", [])}
 
 
+# Non-production environment siblings (e.g. devops-tracker-api-gamma) share
+# the production name prefix but are NOT the audit target. The audit compares
+# live routes against the CFN templates that declare the *production* stack, so
+# these env-suffixed APIs are dropped when disambiguating. Without this, the
+# creation of a gamma sibling makes resolve_api_id ambiguous and the daily
+# CFN Drift Audit workflow fails (ENC-TSK-H36).
+_ENV_SUFFIXES = ("-gamma", "-beta", "-staging", "-dev", "-test")
+
+
+def _is_env_sibling(name: str) -> bool:
+    return any(name.endswith(suffix) for suffix in _ENV_SUFFIXES)
+
+
 def resolve_api_id(stack_prefix: str) -> str:
     data = _aws_json([
         "aws", "apigatewayv2", "get-apis",
@@ -76,7 +89,12 @@ def resolve_api_id(stack_prefix: str) -> str:
             f"pass --api-id explicitly."
         )
     if len(candidates) > 1:
-        names = [c["Name"] for c in candidates]
+        # Prefer production APIs by dropping env-suffixed siblings. If exactly
+        # one production candidate remains the ambiguity is resolved.
+        prod = [c for c in candidates if not _is_env_sibling(c.get("Name", ""))]
+        if len(prod) == 1:
+            return prod[0]["ApiId"]
+        names = [c["Name"] for c in (prod or candidates)]
         raise RuntimeError(
             f"Multiple API Gateway v2 APIs match: {names}. "
             f"Pass --api-id explicitly."
