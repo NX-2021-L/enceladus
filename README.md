@@ -154,3 +154,5 @@ Enceladus is source-available under the [PolyForm Noncommercial License 1.0.0](L
 - **Commercial use requires a separate license** — production deployment, integration into a paid product or service, SaaS offerings, or use as revenue-generating infrastructure all require a negotiated commercial agreement.
 
 For commercial licensing inquiries, contact **me@jreese.net**.
+
+Third-party dependencies redistributed in Enceladus's built and deployed artifacts retain their own licenses; see [`NOTICE`](NOTICE) for the dependency license audit and required attributions. PolyForm-NC applies to Enceladus's first-party code and does not override those notices.
