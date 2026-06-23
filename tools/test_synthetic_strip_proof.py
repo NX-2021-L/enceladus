@@ -217,21 +217,39 @@ def test_gamma_twin_governance_catches_strip():
         assert any(f["function"].endswith("-gamma") for f in result["findings"])
 
 
-def test_gds_prefix_is_advisory_on_gamma_not_failing():
-    """ENC-TSK-H54 AC0.3 reconciliation: GDS_STANDING_PROJECTION_PREFIX is
-    IsProduction-gated (02-compute.yaml L1047 -> AWS::NoValue on gamma) and is
-    registered ADVISORY on devops-graph-query-api-gamma. On the GOOD template
-    under the gamma params it must surface as an advisory WARN (visible gap) but
-    NOT fail the gate — it becomes deploy-critical only after ENC-TSK-H56 sets it
-    on gamma."""
+def test_gds_prefix_deploy_critical_on_gamma():
+    """ENC-TSK-H56: GDS_STANDING_PROJECTION_PREFIX is now SET on gamma (02-compute.yaml
+    sets it unconditionally, no longer IsProduction-gated) and registered DEPLOY-CRITICAL
+    on devops-graph-query-api-gamma. Two assertions:
+      (1) On the GOOD template under the gamma params it is PRESENT, so it is neither a
+          critical nor an advisory finding, and the gate passes.
+      (2) Stripping it makes the gate FAIL CLOSED (rc=2) under the gamma params, attributed
+          to devops-graph-query-api-gamma — the protection prod's standing projection relies
+          on now also guards gamma (supersedes the H54 advisory-on-gamma reconciliation)."""
+    GDS = "GDS_STANDING_PROJECTION_PREFIX"
+    # (1) present on the good gamma render -> no finding, gate passes.
     result = gate.run_gate(TEMPLATE, {"Environment": "gamma", "EnvironmentSuffix": "-gamma"},
                            REGISTRY, gate.load_waivers(WAIVERS))
     assert result["failed"] is False, "good gamma template must pass"
-    adv = [f for f in result["findings"]
-           if f["classification"] == gate.ADVISORY
-           and f["function"] == "devops-graph-query-api-gamma"
-           and f["var"] == "GDS_STANDING_PROJECTION_PREFIX"]
-    assert len(adv) == 1, f"expected GDS_STANDING_PROJECTION_PREFIX advisory on gamma; got {result['findings']}"
+    assert not [f for f in result["findings"]
+                if f["function"] == "devops-graph-query-api-gamma" and f["var"] == GDS], \
+        f"{GDS} should be present (no finding) on the good gamma render; got {result['findings']}"
+    # (2) stripping it fails the gate closed on gamma, attributed to the gamma function.
+    real = TEMPLATE.read_text()
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        waivers = _empty_waivers(tmp)
+        stripped, removed = _strip_var(real, GDS)
+        assert removed > 0, f"strip of {GDS} was a no-op — template format changed?"
+        tpl = _write(tmp, "stripped_gds.yaml", stripped)
+        rc = _run_main(tpl, waivers, overrides=GAMMA_OVERRIDES)
+        assert rc == 2, f"gate did NOT fail closed when {GDS} stripped on gamma (rc={rc})"
+        res2 = gate.run_gate(tpl, {"Environment": "gamma", "EnvironmentSuffix": "-gamma"},
+                             REGISTRY, gate.load_waivers(None))
+        crit = [f for f in res2["findings"]
+                if f["classification"] == gate.CRITICAL
+                and f["function"] == "devops-graph-query-api-gamma" and f["var"] == GDS]
+        assert len(crit) == 1, f"expected {GDS} critical finding on gamma; got {res2['findings']}"
 
 
 def _run_all() -> int:

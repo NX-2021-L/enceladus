@@ -1042,9 +1042,18 @@ Resources:
           # f"{prefix}_{project_id}" lowercased with dashes->underscores
           # (e.g. gds_standing_enceladus). Codified here — NOT set out-of-band — so the
           # next compute deploy does not strip it (ENC-LSN-053 strip-class drift).
-          # Prod-only: gamma uses a separate AuraDB and its compute deploy is blocked
-          # (ENC-ISS-197), so the feature stays dormant there (AWS::NoValue omits the key).
-          GDS_STANDING_PROJECTION_PREFIX: !If [IsProduction, "gds_standing", !Ref "AWS::NoValue"]
+          # ENC-TSK-H56: now enabled on gamma too. The old IsProduction gate kept this
+          # prod-only because gamma had no populated graph and (per the stale comment) a
+          # blocked compute deploy. Both no longer hold: gamma has its own populated AuraDB
+          # (ENC-TSK-H55: 5,290 nodes) and a working compute deploy (ENC-TSK-H54; the
+          # ENC-ISS-197 block was prod-side and is resolved). Set unconditionally so both
+          # environments (Environment AllowedValues = production|gamma) resolve a non-empty
+          # prefix. Gamma's projection lives in its separate gamma AuraDB and is materialized
+          # ON-DEMAND via an ephemeral Aura Graph Analytics session (no always-warm cost;
+          # ENC-PLN-050 cost guard). H54 registered this var ADVISORY on the -gamma function
+          # because the template did not set it; H56 makes the template set it and upgrades
+          # the env_drift_registry.json entry to deploy-critical.
+          GDS_STANDING_PROJECTION_PREFIX: "gds_standing"
       Tags:
         - Key: Project
           Value: enceladus
