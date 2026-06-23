@@ -1,4 +1,4 @@
-# ENC-TSK-636 Host-v2 Codex Proof Runbook
+# How to prove host v2 works with Codex
 
 This runbook defines the reproducible validation flow for proving Codex works in an EC2 host-v2 SSH session.
 

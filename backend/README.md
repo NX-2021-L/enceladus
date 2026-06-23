@@ -56,7 +56,7 @@ All auth-checking Lambda functions MUST parse cookies from BOTH sources:
 
 Failure to parse both causes auth failures with modern API Gateway versions (see DVP-ISS-071).
 
-See `JWT_AUTHENTICATION_FORENSICS.md` for complete prevention framework.
+See [`docs/explanation/jwt-authentication-forensics.md`](../docs/explanation/jwt-authentication-forensics.md) for the complete prevention framework.
 
 ## Deployment Policy
 

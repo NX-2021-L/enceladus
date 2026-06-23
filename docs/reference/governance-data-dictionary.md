@@ -22,23 +22,8 @@ Backends:
 - Primary owner: Enceladus platform engineering
 - Secondary owner: Coordination API maintainers
 
-## Update Workflow
-1. Update governed schema/enum behavior in code.
-2. Update `governance_data_dictionary.json` in the same change.
-3. Ensure `Governance Dictionary Guard` workflow passes.
-4. Deploy coordination API (`api-mcp-backend-deploy.yml`).
-5. Validate endpoint results for affected entities/fields.
-
 ## Merge/Deploy Enforcement
 - CI fail-closed guard:
   - Workflow: `.github/workflows/governance-dictionary-guard.yml`
   - Script: `tools/check_governance_dictionary_sync.py`
-- If schema-affecting files change without dictionary updates, CI fails and merge/deploy must not proceed.
-
-## Backward Compatibility Policy
-- Prefer additive changes.
-- Do not remove enum values or tighten required constraints without a migration plan.
-- When breaking changes are necessary:
-  - record migration strategy in feature/task worklog,
-  - update dictionary definitions and usage guidance,
-  - coordinate deploy sequencing across dependent clients.
+- If schema-affecting files change without dictionary updates, CI fails and merge/deploy is blocked.

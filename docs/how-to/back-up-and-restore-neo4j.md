@@ -1,4 +1,4 @@
-# Neo4j AuraDB Backup & Restore Procedures
+# How to back up and restore Neo4j
 
 ## Overview
 
