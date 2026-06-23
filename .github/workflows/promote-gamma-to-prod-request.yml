@@ -43,12 +43,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15   # ENC-TSK-H58: +gate warm-projection latency budget
     steps:
-      # ENC-TSK-H58: check out so the validation gate (tools/) + the compute
-      # template (env-parity check) are available at the promoted SHA.
-      - name: Checkout (promoted gamma SHA)
+      # ENC-TSK-H58: check out the DEFAULT branch (main), where the gate tooling
+      # lives. A workflow_run job runs from main and github.sha already points at
+      # main's HEAD, so the default checkout (no ref) gets tools/gamma_validation_gate.sh
+      # + the env-parity tooling + template. Do NOT check out the promoted head_sha:
+      # v4/main is FORKED (PLN-006 fork-mode, sync-main-to-v4main disabled) and does
+      # NOT carry the gate script — checking it out would break the gate on every run.
+      # The gate probes the LIVE gamma environment, so it does not need the deployed tree.
+      - name: Checkout gate tooling (default branch / main)
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
