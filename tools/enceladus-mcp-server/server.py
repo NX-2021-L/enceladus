@@ -1718,15 +1718,25 @@ def _normalize_legacy_error_payload(
                 if key in {"success", "error", "error_envelope"}:
                     continue
                 merged_details.setdefault(key, value)
-            return {
-                "success": False,
-                "error": message,
-                "error_envelope": {
+            # ENC-TSK-H50 (ENC-ISS-142 gate #2): preserve any additional structured
+            # fields the upstream service attached to its error_envelope — notably the
+            # checkout-service escalation fields failure_classification and
+            # recommended_next_actions (ENC-TSK-H49) — instead of flattening to the
+            # canonical four keys. Start from the incoming envelope so unknown/future
+            # keys survive the MCP boundary, then overlay the normalized fields.
+            normalized_envelope = dict(envelope)
+            normalized_envelope.update(
+                {
                     "code": code,
                     "message": message,
                     "retryable": retryable,
                     "details": merged_details,
-                },
+                }
+            )
+            return {
+                "success": False,
+                "error": message,
+                "error_envelope": normalized_envelope,
                 **merged_details,
             }
         existing = response_body.get("error")
