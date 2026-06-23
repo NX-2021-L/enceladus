@@ -5,6 +5,17 @@ name: Promote v4-gamma success to v3-prod request
 # the v3-prod GitHub Environment's required-reviewer rule and pauses until
 # io approves. The approval click is the cutover toggle: stop approving =>
 # v4 work stays in gamma without any workflow rewiring.
+#
+# ENC-TSK-H58: a successful gamma DEPLOY is necessary but NOT sufficient to offer
+# promotion. Before dispatching the prod request we run the GAMMA VALIDATION GATE
+# (tools/gamma_validation_gate.sh) — a runtime probe of the live gamma environment:
+# smoke (ingress 200) + graph-probe (the full hybrid trio is live and PPR-ranked:
+# graph_algorithm=gds_pagerank after warming the on-demand standing projection) +
+# env-parity (no deploy-critical gamma var the next compute deploy would strip).
+# The gate is FAIL-CLOSED: a red gate fails this job, so the dispatch step never
+# runs and promotion is not offered. Promotion itself stays human-approved (the
+# v3-prod Environment required-reviewer gate) — the gate only makes it AVAILABLE.
+# Bound to ENC-LSN-039 (pre-probe gamma before prod handoffs).
 
 on:
   workflow_run:
@@ -14,10 +25,14 @@ on:
 permissions:
   actions: write
   contents: read
+  id-token: write   # ENC-TSK-H58: OIDC for the gamma validation gate's AWS calls
 
 concurrency:
   group: promote-gamma-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
 
 jobs:
   promote:
@@ -26,8 +41,30 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'v4/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15   # ENC-TSK-H58: +gate warm-projection latency budget
     steps:
+      # ENC-TSK-H58: check out so the validation gate (tools/) + the compute
+      # template (env-parity check) are available at the promoted SHA.
+      - name: Checkout (promoted gamma SHA)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ENC-TSK-H58: THE validation gate. Fail-closed — no continue-on-error, so a
+      # red gate fails the job and the dispatch step below never runs. The gate
+      # warms the on-demand gamma standing projection, then asserts smoke + the
+      # full hybrid trio (graph_algorithm=gds_pagerank) + env-parity.
+      - name: Gamma validation gate (smoke + graph-probe + env-parity)
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: bash tools/gamma_validation_gate.sh --region "${AWS_REGION}"
+
       - name: Dispatch v3-prod deploy request
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -36,11 +73,10 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          echo "Gamma success run=$GAMMA_RUN_ID sha=$SHA — dispatching v3-prod request"
+          echo "Gamma validation gate GREEN. Run=$GAMMA_RUN_ID sha=$SHA — dispatching v3-prod request"
 
-          # gh api is used here (not gh workflow run) because there's no
-          # checkout in this job and gh workflow run requires a local git
-          # context. Workflow ID 263796502 = Deploy Lambda Artifacts (Gen2).
+          # Workflow ID 263796502 = Deploy Lambda Artifacts (Gen2). The dispatch
+          # hits the v3-prod Environment's required-reviewer rule and pauses for io.
           gh api -X POST \
             "/repos/$REPO/actions/workflows/263796502/dispatches" \
             -f ref=main \
