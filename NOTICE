@@ -1,0 +1,198 @@
+# NOTICE — Third-Party Software Attributions
+
+Enceladus is source-available under the **PolyForm Noncommercial License 1.0.0**
+(see [`LICENSE`](LICENSE)). That license governs Enceladus's own first-party
+source code. It does **not** override the licenses of the third-party
+dependencies that Enceladus redistributes as part of its built and deployed
+artifacts. This file preserves the copyright and permission notices those
+dependencies require.
+
+This NOTICE was produced by the dependency license audit tracked in
+**ENC-TSK-H73** (fast-follow to the PolyForm activation in ENC-TSK-H72;
+covers the deferred ENC-TSK-B68 criteria #3 and #4).
+
+---
+
+## Scope of redistribution
+
+Enceladus does not commit third-party source into this repository. Third-party
+code is redistributed only inside built/deployed artifacts:
+
+- **Python backend** — runtime dependencies are installed (`pip`) into the
+  AWS Lambda deployment packages and the shared Lambda layer, and are therefore
+  redistributed in those artifacts.
+- **Frontend PWA** — production dependencies are bundled by Vite into the
+  shipped `frontend/ui/dist/` assets and are therefore redistributed in the
+  served application.
+
+Frontend **devDependencies** (Vite, TypeScript, ESLint, Vitest, Tailwind
+tooling, `@types/*`, Testing Library, jsdom, globals) are build- and test-time
+tooling only. They are not present in any shipped artifact and so carry no
+redistribution-notice obligation; they are excluded from the attributions below.
+
+---
+
+## License conflict assessment
+
+**Result: zero conflicts** between PolyForm Noncommercial License 1.0.0 (applied
+to Enceladus first-party code) and the licenses of all redistributed
+dependencies.
+
+Every redistributed dependency is licensed under a **permissive** license (MIT,
+ISC, BSD-3-Clause, Apache-2.0) or a **file-level weak-copyleft** license
+(MPL-2.0, used unmodified). Rationale:
+
+- **Permissive licenses (MIT / ISC / BSD-3-Clause / Apache-2.0)** place no
+  restriction on the license of the larger combined work; their only obligation
+  is preservation of copyright/permission notices (and, for Apache-2.0,
+  propagation of any upstream `NOTICE` content and statement of changes). They
+  do not conflict with PolyForm-NC.
+- **MPL-2.0 (`certifi`)** is file-level copyleft. It permits distributing a
+  "Larger Work" under different terms (MPL-2.0 §3.3) provided the MPL-covered
+  files themselves remain under MPL-2.0 with source available. `certifi` is used
+  unmodified and its source is publicly available upstream, so bundling it
+  alongside PolyForm-NC code creates no conflict.
+- **No strong copyleft** (GPL / LGPL / AGPL) dependency is redistributed, so no
+  copyleft relicensing obligation is imposed on the combined work.
+
+The sole obligation arising from the audit is **notice preservation**, satisfied
+by this file together with the per-package LICENSE/NOTICE files retained inside
+each distributed dependency.
+
+---
+
+## Python backend dependencies (redistributed in Lambda artifacts)
+
+| Package | License | Copyright holder |
+| --- | --- | --- |
+| `anyio` | MIT | © Alex Grönholm |
+| `boto3` | Apache License 2.0 | © Amazon.com, Inc. or its affiliates |
+| `certifi` | MPL-2.0 | © Kenneth Reitz; bundled CA roots © Mozilla Foundation |
+| `cryptography` | Apache-2.0 OR BSD-3-Clause | © The Python Cryptographic Authority and individual contributors |
+| `mcp` (Model Context Protocol SDK) | MIT | © Anthropic, PBC and MCP contributors |
+| `neo4j` (Python driver) | Apache License 2.0 | © Neo4j, Inc. |
+| `PyJWT` | MIT | © José Padilla |
+
+## Frontend dependencies (redistributed in the PWA bundle)
+
+| Package | License | Copyright holder |
+| --- | --- | --- |
+| `react` | MIT | © Meta Platforms, Inc. and affiliates |
+| `react-dom` | MIT | © Meta Platforms, Inc. and affiliates |
+| `@tanstack/react-query` | MIT | © Tanner Linsley |
+| `react-router-dom` | MIT | © Remix Software, Inc. |
+| `react-markdown` | MIT | © Espen Hovlandsdal |
+| `react-syntax-highlighter` | MIT | © Conor Hastings |
+| `react-window` | MIT | © Brian Vaughn |
+| `lucide-react` | ISC | © Lucide Contributors (derived from Feather icons, MIT © Cole Bemis) |
+
+### Transitive dependencies
+
+The shipped artifacts also include transitive dependencies of the packages above
+(e.g. `botocore`, `jmespath`, `s3transfer`, `urllib3` via `boto3`; `cffi`,
+`pycparser` via `cryptography`; `sniffio`, `idna` via `anyio`; `httpx`,
+`httpcore`, `h11`, `starlette`, `pydantic`, `sse-starlette` via `mcp`;
+`prismjs`/`refractor`, `highlight.js` via `react-syntax-highlighter`). These are
+licensed under the same permissive classes (MIT / BSD / Apache-2.0 / ISC / PSF),
+reach the identical zero-conflict conclusion, and ship with their own
+LICENSE/NOTICE files inside each installed package distribution.
+
+---
+
+## Required license texts
+
+### MIT License
+
+Applies to: `anyio`, `mcp`, `PyJWT`, `react`, `react-dom`,
+`@tanstack/react-query`, `react-router-dom`, `react-markdown`,
+`react-syntax-highlighter`, `react-window` (and the original Feather icons
+underlying `lucide-react`). Each retains its own copyright line as listed above.
+
+```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### ISC License
+
+Applies to: `lucide-react`.
+
+```
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+```
+
+### BSD 3-Clause License
+
+Applies to: `cryptography` (offered under Apache-2.0 OR BSD-3-Clause).
+
+```
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### Apache License 2.0
+
+Applies to: `boto3`, `neo4j`, `cryptography` (offered under Apache-2.0 OR
+BSD-3-Clause). The full text is at <https://www.apache.org/licenses/LICENSE-2.0>
+and is reproduced in each package's distribution. Per §4, the above copyright
+attributions are retained and any upstream `NOTICE` content is preserved within
+the respective package distributions. Enceladus does not modify these packages.
+
+### Mozilla Public License 2.0
+
+Applies to: `certifi`. The full text is at <https://mozilla.org/MPL/2.0/> and is
+reproduced in the package distribution. `certifi` is used unmodified; its source
+form remains available from the upstream project as required by MPL-2.0 §3.
+
+---
+
+*Generated for ENC-TSK-H73. To regenerate the audit, enumerate the union of
+`backend/lambda/*/requirements.txt` runtime dependencies and
+`frontend/ui/package.json` production `dependencies`, then map each to its SPDX
+license. Frontend devDependencies are excluded as non-redistributed build
+tooling.*
