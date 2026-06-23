@@ -1036,6 +1036,15 @@ Resources:
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
+          # ENC-FTR-101 Option B / ENC-TSK-H37: activates the standing GDS projection.
+          # A non-empty prefix turns on the warm read path (_hybrid_graph_ranks_gds_warm)
+          # and the out-of-band refresher; projection name resolves to
+          # f"{prefix}_{project_id}" lowercased with dashes->underscores
+          # (e.g. gds_standing_enceladus). Codified here — NOT set out-of-band — so the
+          # next compute deploy does not strip it (ENC-LSN-053 strip-class drift).
+          # Prod-only: gamma uses a separate AuraDB and its compute deploy is blocked
+          # (ENC-ISS-197), so the feature stays dormant there (AWS::NoValue omits the key).
+          GDS_STANDING_PROJECTION_PREFIX: !If [IsProduction, "gds_standing", !Ref "AWS::NoValue"]
       Tags:
         - Key: Project
           Value: enceladus
@@ -1195,6 +1204,38 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GraphHealthMetricsSchedule.Arn
+
+  # ---------------------------------------------------------------------------
+  # ENC-FTR-101 Option B (ENC-TSK-H37): standing-projection out-of-band refresh
+  # Keeps the named GDS projection warm so anchored hybrid PPR runs
+  # gds.pageRank.stream against a standing projection instead of provisioning a
+  # ~58s session per request. The refresh handler keys off Input.action; the
+  # feature itself is gated by GDS_STANDING_PROJECTION_PREFIX on the function
+  # (an unset prefix makes the refresh a graceful no-op). Cadence bounds the
+  # AC-3 staleness window; ~58s cold build leaves ample headroom at 30m.
+  # Prod-only to match the validated target (DOC-B46C9EF2444D, exit 0).
+  # ---------------------------------------------------------------------------
+  StandingProjectionRefreshSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsProduction
+    Properties:
+      Name: !Sub "enceladus-standing-projection-refresh${EnvironmentSuffix}"
+      Description: "ENC-FTR-101 Option B: refresh the standing GDS projection for graph_query_api hybrid PPR."
+      ScheduleExpression: rate(30 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt GraphQueryApiFunction.Arn
+          Id: standing-projection-refresh
+          Input: '{"action":"refresh_projection","project_ids":["enceladus"]}'
+
+  StandingProjectionRefreshPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsProduction
+    Properties:
+      FunctionName: !Ref GraphQueryApiFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StandingProjectionRefreshSchedule.Arn
 
   GraphConnectivityAlarm:
     Type: AWS::CloudWatch::Alarm
