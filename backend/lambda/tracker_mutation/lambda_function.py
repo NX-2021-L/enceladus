@@ -4280,6 +4280,8 @@ _RELATIONSHIP_TYPES = frozenset({
     "designs", "designed-by",
     "implements", "implemented-by",
     "deploys", "deployed-by",
+    # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship.
+    "pathway-traversed", "traversed-by",
 })
 
 _INVERSE_PAIRS: Dict[str, str] = {
@@ -4313,6 +4315,8 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "designs": "designed-by", "designed-by": "designs",
     "implements": "implemented-by", "implemented-by": "implements",
     "deploys": "deployed-by", "deployed-by": "deploys",
+    # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship.
+    "pathway-traversed": "traversed-by", "traversed-by": "pathway-traversed",
 }
 
 _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
@@ -4351,6 +4355,9 @@ _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
     # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships
     "dispatches":         {"asymmetric": True, "irreflexive": True, "transitive": False},
     "dispatched-by":      {"asymmetric": True, "irreflexive": True, "transitive": False},
+    # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship.
+    "pathway-traversed":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "traversed-by":       {"asymmetric": True, "irreflexive": True, "transitive": False},
 }
 
 # Domain/range constraints: {relationship_type: {source_types, target_types}}
@@ -4394,6 +4401,10 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     # ENC-TSK-960 / ENC-TSK-C36: Coordination dispatch typed relationships.
     "dispatches":         {"source": None, "target": frozenset({"task"})},
     "dispatched-by":      {"source": frozenset({"task"}), "target": None},
+    # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship. Endpoints
+    # can be any governed record type (intent/anchor -> result node), so unconstrained.
+    "pathway-traversed":  {"source": None, "target": None},
+    "traversed-by":       {"source": None, "target": None},
 }
 
 _TRANSITIVE_TYPES = frozenset(

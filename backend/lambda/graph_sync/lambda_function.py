@@ -1001,6 +1001,10 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     "implemented-by": "IMPLEMENTED_BY",               # Task -> Component
     "deploys": "DEPLOYS",                              # Component -> Task
     "deployed-by": "DEPLOYED_BY",                     # Task -> Component
+    # ENC-FTR-082 Phase A / AC-6 (OGTM): Pathway-telemetry traversal edge. Labels
+    # must stay byte-identical to graph_query_api _ALLOWED_EDGE_TYPES (ENC-ISS-178).
+    "pathway-traversed": "PATHWAY_TRAVERSED",          # observed retrieval traversal
+    "traversed-by": "TRAVERSED_BY",                    # inverse
 }
 
 

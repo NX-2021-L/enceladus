@@ -35,7 +35,9 @@
       "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
       "NEO4J_SECRET_NAME": "deploy-critical",
       "COGNITO_USER_POOL_ID": "deploy-critical",
-      "COGNITO_CLIENT_ID": "deploy-critical"
+      "COGNITO_CLIENT_ID": "deploy-critical",
+      "PATHWAY_TELEMETRY_BUCKET": "advisory",
+      "PATHWAY_TELEMETRY_PREFIX": "advisory"
     },
     "devops-github-integration": {
       "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
