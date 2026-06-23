@@ -145,3 +145,12 @@ must not bypass APIs with direct DynamoDB reads/writes.
 - Policy doc: `docs/mcp-api-boundary-governance.md`
 - CI guard: `.github/workflows/mcp-api-boundary-guard.yml`
 - Guard script: `tools/check_mcp_api_boundary.py`
+
+## License
+
+Enceladus is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+
+- **Noncommercial use is permitted** — education, academic and nonprofit research, personal study, experimentation, and other noncommercial purposes as defined by the license.
+- **Commercial use requires a separate license** — production deployment, integration into a paid product or service, SaaS offerings, or use as revenue-generating infrastructure all require a negotiated commercial agreement.
+
+For commercial licensing inquiries, contact **me@jreese.net**.
