@@ -157,7 +157,7 @@
       "lambda_dir": "backend/lambda/stale_checkout_monitor",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/stale_checkout_monitor/deploy.sh",
-      "cfn_managed": false
+      "cfn_managed": true
     },
     {
       "function_name": "enceladus-mcp-code",
