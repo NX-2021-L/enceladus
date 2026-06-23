@@ -289,5 +289,71 @@ class TestCodeOnMainEvidenceValidator(unittest.TestCase):
         self.assertIn("40-char hex", reason)
 
 
+class FailureClassificationTests(unittest.TestCase):
+    """ENC-TSK-H49 / ENC-ISS-142: every blocked-transition envelope carries a
+    machine-readable failure_classification + a recommended_next_actions array."""
+
+    def _envelope(self, status, **kw):
+        resp = checkout_service._error(status, "boom", **kw)
+        return json.loads(resp["body"])["error_envelope"]
+
+    def test_invalid_input_is_deterministic_governance(self):
+        env = self._envelope(400)
+        self.assertEqual(env["failure_classification"], "deterministic-governance")
+        self.assertTrue(env["recommended_next_actions"])
+        self.assertIn("validation_rules", " ".join(env["recommended_next_actions"]))
+
+    def test_conflict_is_deterministic_governance(self):
+        self.assertEqual(
+            self._envelope(409)["failure_classification"], "deterministic-governance"
+        )
+
+    def test_permission_denied_is_human_override(self):
+        env = self._envelope(403)
+        self.assertEqual(env["failure_classification"], "human-override-required")
+        self.assertTrue(env["recommended_next_actions"])
+
+    def test_internal_error_is_transient(self):
+        self.assertEqual(self._envelope(500)["failure_classification"], "transient")
+
+    def test_explicit_override_wins(self):
+        env = self._envelope(400, failure_classification="external-dependency")
+        self.assertEqual(env["failure_classification"], "external-dependency")
+        self.assertTrue(env["recommended_next_actions"])
+
+    def test_unknown_override_is_ignored(self):
+        # An override outside the canonical set falls back to code/status mapping.
+        env = self._envelope(400, failure_classification="bogus")
+        self.assertEqual(env["failure_classification"], "deterministic-governance")
+
+    def test_domain_code_classified(self):
+        env = self._envelope(400, code="COMPONENT_MISCONFIGURED")
+        self.assertEqual(env["failure_classification"], "human-override-required")
+
+    def test_classification_always_in_canonical_set(self):
+        for status in (400, 401, 403, 404, 409, 500):
+            self.assertIn(
+                self._envelope(status)["failure_classification"],
+                checkout_service.FAILURE_CLASSIFICATIONS,
+            )
+
+    def test_backward_compatible_details_preserved(self):
+        # New fields coexist with existing details (AC#3 backward-compat).
+        env = self._envelope(
+            400, details={"required_fields": ["x"], "valid_next_statuses": ["y"]}
+        )
+        self.assertEqual(env["details"]["required_fields"], ["x"])
+        self.assertEqual(env["details"]["valid_next_statuses"], ["y"])
+        self.assertIn("failure_classification", env)
+        self.assertIn("recommended_next_actions", env)
+
+    def test_real_checkout_block_carries_classification(self):
+        # Integration: a real blocked checkout (missing session id) is classified.
+        resp = checkout_service._handle_checkout("enceladus", "ENC-TSK-840", {})
+        env = json.loads(resp["body"])["error_envelope"]
+        self.assertEqual(env["failure_classification"], "deterministic-governance")
+        self.assertTrue(env["recommended_next_actions"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -331,6 +331,71 @@ def _response(status: int, body: Any, extra_headers: Optional[dict] = None) -> d
     }
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-H49 / ENC-ISS-142: machine-readable failure classification.
+# Every blocked-transition envelope carries a `failure_classification` and a
+# `recommended_next_actions` array so agents can escalate with concrete operator
+# actions instead of guessing. Consumed by the agents.md "Escalation Protocol".
+# ---------------------------------------------------------------------------
+FAILURE_CLASSIFICATIONS = (
+    "transient",
+    "deterministic-governance",
+    "external-dependency",
+    "human-override-required",
+)
+
+# Map known error codes to a canonical classification. Codes not listed fall
+# back by HTTP status family (see _failure_classification).
+_CLASSIFICATION_BY_CODE = {
+    "INVALID_INPUT": "deterministic-governance",
+    "CONFLICT": "deterministic-governance",
+    "NOT_FOUND": "deterministic-governance",
+    "RESERVED_FIELD": "deterministic-governance",
+    "component_lifecycle_blocked": "deterministic-governance",
+    "GATE_CONDITION_UNMET": "deterministic-governance",
+    "PERMISSION_DENIED": "human-override-required",
+    "component_not_approved": "human-override-required",
+    "component_rejected": "human-override-required",
+    "COMPONENT_MISCONFIGURED": "human-override-required",
+    "INTERNAL_ERROR": "transient",
+}
+
+_RECOMMENDED_NEXT_ACTIONS = {
+    "deterministic-governance": [
+        "Re-run tracker.validation_rules(record_id, target_status, provider) for the exact required evidence and allowed next statuses.",
+        "Correct the governed inputs (set components/transition_type before checkout; supply the missing transition_evidence; satisfy the subtask gate), then retry once.",
+        "If the block persists, escalate per the agents.md Escalation Protocol (L2) -- never reshape governed state to bypass the gate.",
+    ],
+    "human-override-required": [
+        "This action is outside agent authority. Surface to io: use the PWA user_initiated (Cognito) path, or have io approve/remediate the component.",
+        "Do not retry against the Cognito/authority guard.",
+        "Escalate per the agents.md Escalation Protocol (L2/L3) with the exact failing operation and a proposed operator action.",
+    ],
+    "external-dependency": [
+        "The failure originates from an external dependency (e.g. GitHub API, Cognito). Check the upstream service status.",
+        "Retry after recovery within the bounded retry budget (3 attempts; 1s/4s/16s backoff).",
+        "If it persists, escalate per the agents.md Escalation Protocol (L2).",
+    ],
+    "transient": [
+        "Transient/internal error. Retry with exponential backoff (3 attempts; 1s/4s/16s).",
+        "If it persists after the retry budget, escalate per the agents.md Escalation Protocol.",
+    ],
+}
+
+
+def _failure_classification(
+    code: Optional[str], status: int, override: Optional[str]
+) -> str:
+    """Classify a blocked-transition failure (ENC-TSK-H49). An explicit override
+    wins (e.g. call sites that know a failure is an external dependency); else map
+    by error code; else fall back by HTTP status family."""
+    if override in FAILURE_CLASSIFICATIONS:
+        return override
+    if code in _CLASSIFICATION_BY_CODE:
+        return _CLASSIFICATION_BY_CODE[code]
+    return "transient" if status >= 500 else "deterministic-governance"
+
+
 def _error(
     status: int,
     message: str,
@@ -338,6 +403,7 @@ def _error(
     code: Optional[str] = None,
     retryable: Optional[bool] = None,
     details: Optional[Dict[str, Any]] = None,
+    failure_classification: Optional[str] = None,
 ) -> dict:
     details = dict(details or {})
     if not code:
@@ -357,6 +423,8 @@ def _error(
             code = "INTERNAL_ERROR"
     if retryable is None:
         retryable = status >= 500
+    classification = _failure_classification(code, status, failure_classification)
+    recommended_next_actions = _RECOMMENDED_NEXT_ACTIONS.get(classification, [])
     body: Dict[str, Any] = {
         "success": False,
         "error": message,
@@ -364,6 +432,8 @@ def _error(
             "code": code,
             "message": message,
             "retryable": retryable,
+            "failure_classification": classification,
+            "recommended_next_actions": recommended_next_actions,
             "details": details,
         },
     }

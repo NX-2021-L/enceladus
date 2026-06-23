@@ -516,6 +516,15 @@
           "type": "boolean",
           "definition": "Whether the caller can retry unchanged input or must first correct the request."
         },
+        "failure_classification": {
+          "type": "enum",
+          "enum": ["transient", "deterministic-governance", "external-dependency", "human-override-required"],
+          "definition": "ENC-TSK-H49 / ENC-ISS-142: machine-readable category of a blocked-transition failure so agents route to the correct Escalation Protocol response instead of guessing. Derived in checkout_service._failure_classification from the error code (with an HTTP status-family fallback) or an explicit per-call override. transient = retry with backoff; deterministic-governance = correct governed inputs then escalate L2; external-dependency = upstream (GitHub/Cognito) retry; human-override-required = needs io / Cognito / PWA action. Present on every checkout_service error envelope; other emitters may adopt it incrementally."
+        },
+        "recommended_next_actions": {
+          "type": "array",
+          "definition": "ENC-TSK-H49 / ENC-ISS-142: ordered operator-facing next actions keyed to failure_classification, consumed by the agents.md Escalation Protocol. checkout_service supplies a default action list per classification (checkout_service._RECOMMENDED_NEXT_ACTIONS)."
+        },
         "details": {
           "type": "object",
           "definition": "Self-correcting context for the next attempt. Standard keys: required_fields (list), allowed_values (dict), evidence_schema (dict), strictness_rank (list), example_fix (dict with tool+arguments). Post-D56 additions: allowed_plan_transitions (dict), plan_terminal_statuses (list), token_type/token_purpose/prerequisite_call (CAI/CCI), lesson_gate_requirements (dict), ogtm_compliance_template (dict with 4 requirements + evidence template), dpl_record_id_format/dpl_ddb_key_schema/dpl_label_conventions (GMF/DPL), governed_rules (list of rule strings)."
