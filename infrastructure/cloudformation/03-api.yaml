@@ -187,6 +187,38 @@ Resources:
       PayloadFormatVersion: '2.0'
 
   # ---------------------------------------------------------------------------
+  # Graph Query API — graphsearch ingress (ENC-TSK-H57 / ENC-PLN-050)
+  # Codifies the graphsearch routes that exist live-but-uncodified on prod
+  # (API 8nkzqkmxqc, out-of-band drift) so that (a) gamma gets a governed HTTP
+  # path to its OWN graph — closing gap #1, where gamma graphsearch 404s and the
+  # graph is reachable only via direct Lambda invoke — and (b) the eventual prod
+  # promotion is a no-op delta against prod's real contract rather than a
+  # behaviour change. EnvironmentSuffix routes to the per-env Lambda
+  # (devops-graph-query-api / devops-graph-query-api-gamma), each of which holds
+  # its own NEO4J_SECRET_NAME and therefore reaches the correct graph.
+  # Mirrors the prod integration exactly: AWS_PROXY POST, payload 2.0.
+  # ---------------------------------------------------------------------------
+  GraphQueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # Grants the HTTP API permission to invoke the graph-query Lambda for the
+  # graphsearch path only. Mirrors the prod live resource policy statement
+  # (Sid allow-apigw-8nkzqkmxqc-graphsearch); CFN assigns its own statement id.
+  GraphQueryApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/api/v1/tracker/graphsearch*"
+
+  # ---------------------------------------------------------------------------
   # Routes — Coordination API
   # ---------------------------------------------------------------------------
 
@@ -346,6 +378,32 @@ Resources:
       ApiId: !Ref HttpApi
       RouteKey: PATCH /api/v1/tracker/{projectId}/{recordType}/{recordId}
       Target: !Sub integrations/${TrackerMutationIntegration}
+
+  # graphsearch ingress routes (ENC-TSK-H57) — mirror prod API 8nkzqkmxqc
+  # exactly: GET + OPTIONS on /graphsearch and GET on /graphsearch/health, all
+  # AuthorizationType NONE, all targeting GraphQueryIntegration. /graphsearch
+  # serves neighbors/keyword/path/hybrid queries; /graphsearch/health is the
+  # governed graph_index + graph_projection health probe (closes AC3.2).
+  RouteGraphSearch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/graphsearch
+      Target: !Sub integrations/${GraphQueryIntegration}
+
+  RouteGraphSearchHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/graphsearch/health
+      Target: !Sub integrations/${GraphQueryIntegration}
+
+  RouteGraphSearchOptions:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/graphsearch
+      Target: !Sub integrations/${GraphQueryIntegration}
 
   # ---------------------------------------------------------------------------
   # Routes — Document API
