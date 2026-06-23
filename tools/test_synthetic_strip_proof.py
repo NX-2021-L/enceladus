@@ -49,8 +49,23 @@ TARGET_VARS = ["COORDINATION_INTERNAL_API_KEY", "SQS_QUEUE_URL"]
 
 # Canonical deploy parameter-override sets (prod uses the "" default; gamma uses
 # -gamma). The gate must pass under each, proving the good template is correct
-# for every sanctioned deploy target.
-OVERRIDE_SETS = [[], ["EnvironmentSuffix="], ["EnvironmentSuffix=-gamma"]]
+# for every sanctioned deploy target. ENC-TSK-H54: the gamma set now also pins
+# Environment=gamma so IsProduction=false — the real gamma deploy's parameters
+# (the prior ["EnvironmentSuffix=-gamma"]-only set left Environment at its
+# "production" default, masking the IsProduction-gated GDS_STANDING_PROJECTION_PREFIX).
+GAMMA_OVERRIDES = ["Environment=gamma", "EnvironmentSuffix=-gamma"]
+OVERRIDE_SETS = [[], ["EnvironmentSuffix="], ["EnvironmentSuffix=-gamma"], GAMMA_OVERRIDES]
+
+# ENC-TSK-H54 (ENC-PLN-050 P0): gamma parity coverage. Before H54 the registry
+# was keyed only by prod function names, so a -gamma-rendered deploy matched no
+# entry and the gate skipped every gamma function. These prove the gate now
+# catches a strip on a gamma function. ENCELADUS_COGNITO_CLIENT_SECRET is a
+# genuinely gamma-only deploy-critical var (only enceladus-mcp-code-gamma
+# requires it; no prod twin does). devops-coordination-api-gamma is one of the
+# H54-added twins that had NO registry entry before this task.
+GAMMA_ONLY_VAR = "ENCELADUS_COGNITO_CLIENT_SECRET"
+GAMMA_TWIN_FN = "devops-coordination-api-gamma"
+GAMMA_TWIN_VAR = "COORDINATION_INTERNAL_API_KEY"
 
 
 def _strip_var(text: str, var: str):
@@ -154,6 +169,69 @@ def test_sqs_strip_attributes_the_right_function():
                 if f["classification"] == gate.CRITICAL and f["var"] == "SQS_QUEUE_URL"]
         assert len(hits) == 1, f"expected one SQS_QUEUE_URL critical finding; got {hits}"
         assert hits[0]["function"] == "devops-deploy-intake", hits[0]["function"]
+
+
+def test_gamma_only_var_strip_fails():
+    """ENC-TSK-H54 AC0.2 (gamma-only var coverage): stripping
+    ENCELADUS_COGNITO_CLIENT_SECRET — a deploy-critical var that ONLY a -gamma
+    registry entry (enceladus-mcp-code-gamma) requires — makes the gate fail
+    closed (rc=2) under the gamma parameter-override set, attributed to the gamma
+    function. The good template passes under the same overrides."""
+    real = TEMPLATE.read_text()
+    # good template passes under the real gamma params (sanity).
+    assert _run_main(TEMPLATE, WAIVERS, GAMMA_OVERRIDES) == 0
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        waivers = _empty_waivers(tmp)
+        stripped, removed = _strip_var(real, GAMMA_ONLY_VAR)
+        assert removed > 0, f"strip of {GAMMA_ONLY_VAR} was a no-op — template format changed?"
+        tpl = _write(tmp, "stripped_gamma_only.yaml", stripped)
+        rc = _run_main(tpl, waivers, overrides=GAMMA_OVERRIDES)
+        assert rc == 2, f"gate did NOT fail closed when gamma-only {GAMMA_ONLY_VAR} stripped (rc={rc})"
+        result = gate.run_gate(tpl, {"Environment": "gamma", "EnvironmentSuffix": "-gamma"},
+                               REGISTRY, gate.load_waivers(None))
+        hits = [f for f in result["findings"]
+                if f["classification"] == gate.CRITICAL and f["var"] == GAMMA_ONLY_VAR]
+        assert any(f["function"] == "enceladus-mcp-code-gamma" for f in hits), \
+            f"{GAMMA_ONLY_VAR} strip not attributed to enceladus-mcp-code-gamma; got {hits}"
+
+
+def test_gamma_twin_governance_catches_strip():
+    """ENC-TSK-H54 AC0.2: a deploy-critical strip on a gamma twin that had NO
+    registry entry before H54 is now caught under the gamma override set. Proves
+    the registry expansion closed the 'gamma silently rots' gap (DOC-A07B553431FD):
+    the same strip on devops-coordination-api-gamma produced ZERO findings before
+    this task because the function was unregistered."""
+    real = TEMPLATE.read_text()
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        stripped, _ = _strip_var(real, GAMMA_TWIN_VAR)
+        tpl = _write(tmp, "stripped_twin.yaml", stripped)
+        result = gate.run_gate(tpl, {"Environment": "gamma", "EnvironmentSuffix": "-gamma"},
+                               REGISTRY, gate.load_waivers(None))
+        crit = [f for f in result["findings"]
+                if f["classification"] == gate.CRITICAL and f["function"] == GAMMA_TWIN_FN
+                and f["var"] == GAMMA_TWIN_VAR]
+        assert len(crit) == 1, f"expected {GAMMA_TWIN_FN}::{GAMMA_TWIN_VAR} critical finding; got {result['findings']}"
+        # And at least one finding must be on a -gamma function (gamma governance).
+        assert any(f["function"].endswith("-gamma") for f in result["findings"])
+
+
+def test_gds_prefix_is_advisory_on_gamma_not_failing():
+    """ENC-TSK-H54 AC0.3 reconciliation: GDS_STANDING_PROJECTION_PREFIX is
+    IsProduction-gated (02-compute.yaml L1047 -> AWS::NoValue on gamma) and is
+    registered ADVISORY on devops-graph-query-api-gamma. On the GOOD template
+    under the gamma params it must surface as an advisory WARN (visible gap) but
+    NOT fail the gate — it becomes deploy-critical only after ENC-TSK-H56 sets it
+    on gamma."""
+    result = gate.run_gate(TEMPLATE, {"Environment": "gamma", "EnvironmentSuffix": "-gamma"},
+                           REGISTRY, gate.load_waivers(WAIVERS))
+    assert result["failed"] is False, "good gamma template must pass"
+    adv = [f for f in result["findings"]
+           if f["classification"] == gate.ADVISORY
+           and f["function"] == "devops-graph-query-api-gamma"
+           and f["var"] == "GDS_STANDING_PROJECTION_PREFIX"]
+    assert len(adv) == 1, f"expected GDS_STANDING_PROJECTION_PREFIX advisory on gamma; got {result['findings']}"
 
 
 def _run_all() -> int:
