@@ -381,12 +381,13 @@ jobs:
               with _print_lock:
                   print(msg, file=(sys.stderr if err else sys.stdout), flush=True)
 
-          def deploy_one(fn, version_id):
-              """Per-function pipeline: download artifact, update code, publish version,
+          def deploy_one(fn, mapped_name, version_id):
+              """Per-target pipeline: download artifact, update code, publish version,
               kick off CodeDeploy canary (or fall back to direct alias). Returns:
                 {'fn', 'mapped_name', 'status', 'dep_id'?, 'error'?}
-              status in {'codedeploy', 'direct', 'skip', 'error'}."""
-              mapped_name = fn_map.get(fn)
+              status in {'codedeploy', 'direct', 'skip', 'error'}.
+              ENC-ISS-398: mapped_name is passed explicitly so one shared build artifact
+              (fn) can fan out to multiple target functions from a comma-list map value."""
               if not mapped_name:
                   log(f'[skip] {fn}  (not in function_name_map)')
                   return {'fn': fn, 'status': 'skip'}
@@ -525,20 +526,34 @@ jobs:
           # ============================================================
           # PARALLEL KICKOFF — 8-worker pool
           # ============================================================
-          targets = sorted(version_ids.items())
-          log(f'Kicking off {len(targets)} Lambda updates with 8-worker pool...')
-          t_kickoff = time.time()
+          # ENC-ISS-398: expand each built artifact (fn) into one deploy unit per target
+          # function. A function_name_map value may be a comma-separated list (e.g.
+          # checkout_service -> 'enceladus-checkout-service-gamma,...-auto-gamma') so one
+          # shared artifact updates several Lambda functions. Single-name values produce
+          # exactly one unit and behave identically to the prior 1:1 mapping.
           deployments = []  # list of (fn, mapped_name, dep_id)
           errors = []
           skipped = []
+          deploy_units = []  # list of (fn, mapped_name, version_id)
+          for fn, vid in sorted(version_ids.items()):
+              names = [n.strip() for n in (fn_map.get(fn) or '').split(',') if n.strip()]
+              if not names:
+                  log(f'[skip] {fn}  (not in function_name_map)')
+                  skipped.append(fn)
+                  continue
+              for mapped_name in names:
+                  deploy_units.append((fn, mapped_name, vid))
+          log(f'Kicking off {len(deploy_units)} Lambda updates with 8-worker pool...')
+          t_kickoff = time.time()
           with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-              futures = {pool.submit(deploy_one, fn, vid): fn for fn, vid in targets}
+              futures = {pool.submit(deploy_one, fn, mapped_name, vid): (fn, mapped_name)
+                         for fn, mapped_name, vid in deploy_units}
               for fut in concurrent.futures.as_completed(futures):
                   try:
                       result = fut.result()
                   except Exception as e:
-                      fn = futures[fut]
-                      log(f'::error::worker exception on {fn}: {e}', err=True)
+                      fn, mapped_name = futures[fut]
+                      log(f'::error::worker exception on {fn} -> {mapped_name}: {e}', err=True)
                       errors.append(fn)
                       continue
                   fn = result['fn']

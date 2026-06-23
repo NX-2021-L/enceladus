@@ -58,7 +58,7 @@ function_name_map:
   auth_refresh: auth-refresh-gamma
   bedrock_agent_actions: enceladus-bedrock-agent-actions-gamma
   changelog_api: devops-changelog-api-gamma
-  checkout_service: enceladus-checkout-service-auto-gamma
+  checkout_service: enceladus-checkout-service-gamma,enceladus-checkout-service-auto-gamma
   coordination_api: devops-coordination-api-gamma
   coordination_monitor_api: devops-coordination-monitor-api-gamma
   deploy_decide: devops-deploy-decide-gamma
