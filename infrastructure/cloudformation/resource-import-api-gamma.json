@@ -1,0 +1,8 @@
+[
+  {"ResourceType":"AWS::ApiGatewayV2::Stage","LogicalResourceId":"ApiDefaultStage","ResourceIdentifier":{"ApiId":"hi0dzmvqrc","StageName":"$default"}},
+  {"ResourceType":"AWS::ApiGatewayV2::Route","LogicalResourceId":"RouteComponentsAddEdge","ResourceIdentifier":{"ApiId":"hi0dzmvqrc","RouteId":"sj35b5h"}},
+  {"ResourceType":"AWS::ApiGatewayV2::Route","LogicalResourceId":"RouteComponentsRemoveEdge","ResourceIdentifier":{"ApiId":"hi0dzmvqrc","RouteId":"l4firt2"}},
+  {"ResourceType":"AWS::ApiGatewayV2::Route","LogicalResourceId":"RouteComponentsDeprecate","ResourceIdentifier":{"ApiId":"hi0dzmvqrc","RouteId":"irvhawj"}},
+  {"ResourceType":"AWS::ApiGatewayV2::Route","LogicalResourceId":"RouteComponentsRestore","ResourceIdentifier":{"ApiId":"hi0dzmvqrc","RouteId":"ek3cpd0"}},
+  {"ResourceType":"AWS::ApiGatewayV2::Route","LogicalResourceId":"RouteComponentsRevert","ResourceIdentifier":{"ApiId":"hi0dzmvqrc","RouteId":"ugv0wfl"}}
+]
