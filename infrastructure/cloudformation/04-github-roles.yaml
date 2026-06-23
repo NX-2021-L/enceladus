@@ -94,6 +94,12 @@ Resources:
                   - apigateway:PUT
                   - apigateway:PATCH
                   - apigateway:DELETE
+                  # ENC-TSK-H64: CFn tags stages with stack tags on create; the
+                  # 2026-04-28 ApiDefaultStage CREATE_FAILED was an apigateway:TagResource
+                  # AccessDenied (not CreateStage). Required for the deploy role to
+                  # manage the gamma $default stage going forward.
+                  - apigateway:TagResource
+                  - apigateway:UntagResource
                 Resource:
                   - !Sub "arn:aws:apigateway:us-west-2::/*"
 
