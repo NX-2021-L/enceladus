@@ -28,10 +28,12 @@ Environment variables:
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import logging
 import os
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs
 
@@ -160,6 +162,28 @@ try:
 except (TypeError, ValueError):
     _GDS_PROJECTION_MAX_AGE_S = 3600
 
+# ENC-FTR-082 Phase A (AC-1): raw pathway-telemetry sink. When PATHWAY_TELEMETRY_BUCKET
+# is set (Wave 2 CFN grants s3:PutObject + injects the env vars) each hybrid call
+# appends one JSONL object under s3://{bucket}/{prefix}/wave_id=<wid>/<ts>-<uuid>.jsonl.
+# Until then the emitter degrades to a structured CloudWatch log line
+# ('PATHWAY_TELEMETRY {json}') via the already-granted logs:PutLogEvents — so the
+# Wave-1 code deploy is safe before the IAM/env wave lands. It never raises into the
+# request path.
+PATHWAY_TELEMETRY_BUCKET = os.environ.get("PATHWAY_TELEMETRY_BUCKET", "").strip()
+PATHWAY_TELEMETRY_PREFIX = (
+    os.environ.get("PATHWAY_TELEMETRY_PREFIX", "pathway-telemetry").strip()
+    or "pathway-telemetry"
+)
+# Bounded wall-clock budget for the supplementary edge-reconstruction walk (AC-1
+# edges_traversed / AC-10 edge_participation). Smaller than the graph-signal budget
+# so telemetry can never add the full _GRAPH_SIGNAL_DEADLINE_S to a response again.
+try:
+    _PATHWAY_EDGE_DEADLINE_S = float(os.environ.get("PATHWAY_EDGE_DEADLINE_S", "2.0"))
+except (TypeError, ValueError):
+    _PATHWAY_EDGE_DEADLINE_S = 2.0
+
+_s3 = None
+
 
 def _get_secretsmanager():
     global _secretsmanager
@@ -172,6 +196,26 @@ def _get_secretsmanager():
             config=Config(retries={"max_attempts": 3, "mode": "standard"}),
         )
     return _secretsmanager
+
+
+def _get_s3():
+    """Lazy S3 client for the AC-1 pathway-telemetry sink. Tight timeouts + a single
+    attempt so a slow/unavailable S3 cannot materially extend the hybrid response;
+    the caller (_emit_pathway_telemetry) catches and suppresses all errors."""
+    global _s3
+    if _s3 is None:
+        import boto3
+        from botocore.config import Config
+        _s3 = boto3.client(
+            "s3",
+            region_name=SECRETS_REGION,
+            config=Config(
+                connect_timeout=1,
+                read_timeout=2,
+                retries={"max_attempts": 1, "mode": "standard"},
+            ),
+        )
+    return _s3
 
 
 def _get_neo4j_credentials() -> Dict[str, str]:
@@ -376,6 +420,15 @@ _ALLOWED_EDGE_TYPES = frozenset({
     # | 'backfill' | 'audit_recompute'), extracted_from_field. See dictionary
     # entity graph_sync.mentions_extraction for the full extraction contract.
     "MENTIONS",
+    # ENC-FTR-082 Phase A / AC-6 (OGTM): Pathway-telemetry traversal edge.
+    # Registered for traversability (tracker.graphsearch edge_types=['PATHWAY_TRAVERSED'])
+    # but deliberately NOT added to GRAPH_EDGE_WEIGHTS — a telemetry edge must not
+    # perturb hybrid retrieval scoring in Phase A (the weighted overlay is AC-2).
+    # Materialized via the ENC-FTR-049 relationship-record path and projected by
+    # graph_sync RELATIONSHIP_TYPE_TO_EDGE_LABEL; labels must stay byte-identical
+    # across both lambdas (ENC-ISS-178).
+    "PATHWAY_TRAVERSED",
+    "TRAVERSED_BY",
 })
 
 
@@ -1370,6 +1423,160 @@ def _apply_fsrs_t3_filter(
     return filtered
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-082 Phase A — Pathway telemetry (AC-1), edge participation (AC-10)
+# ---------------------------------------------------------------------------
+
+# Edge types eligible for pathway reconstruction: the same weighted topology the
+# graph signal walks — NOT the telemetry edges themselves (PATHWAY_TRAVERSED is
+# intentionally absent from GRAPH_EDGE_WEIGHTS so it is never reconstructed here).
+_PATHWAY_WALK_EDGE_UNION = "|".join(GRAPH_EDGE_WEIGHTS.keys())
+
+
+def _derive_intent_signature(query_text: str, anchor_record_id: str,
+                             record_type: Optional[str]) -> str:
+    """Deterministic intent fingerprint for AC-1 telemetry when the caller does not
+    supply an explicit intent_signature. Stable across identical retrieval intents
+    so ENC-FTR-108 can cluster pathways by intent."""
+    norm = "\n".join([
+        (query_text or "").strip().lower(),
+        (anchor_record_id or "").strip().upper(),
+        (record_type or "").strip().lower(),
+    ])
+    return "sha256:" + hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+
+def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids):
+    """AC-1 (edges_traversed + node_sequence) and AC-10 (edge_participation).
+
+    The hybrid graph signal (GDS pageRank / warm projection) returns ranked nodes
+    only — no edges. To honestly surface which graph edges participated in producing
+    the result set, run one bounded shortestPath walk from the anchor to each
+    resolved result node over the weighted edge topology and reconstruct the
+    relationships. Bounded by _PATHWAY_EDGE_DEADLINE_S in a worker thread; returns
+    empty structures on missing anchor / timeout / any error and NEVER raises into
+    the request path or perturbs the already-computed RRF result.
+
+    Returns: (edges_traversed, edge_participation, node_sequence)
+    """
+    if not anchor_record_id or not result_rids:
+        return [], [], ([anchor_record_id] if anchor_record_id else [])
+
+    result_set = set(result_rids)
+
+    def _walk():
+        cypher = (
+            "MATCH (anchor {record_id: $rid, project_id: $pid}) "
+            "MATCH (target) WHERE target.record_id IN $rids AND target.project_id = $pid "
+            f"MATCH path = shortestPath((anchor)-[:{_PATHWAY_WALK_EDGE_UNION}*1..3]-(target)) "
+            "UNWIND relationships(path) AS rel "
+            "WITH DISTINCT elementId(rel) AS edge_id, type(rel) AS etype, "
+            "     startNode(rel).record_id AS s, endNode(rel).record_id AS e "
+            "RETURN edge_id, etype, s, e"
+        )
+        rows = []
+        with driver.session() as session:
+            res = session.run(cypher, rid=anchor_record_id, pid=project_id,
+                              rids=list(result_rids))
+            for r in res:
+                rows.append((r["edge_id"], r["etype"], r["s"], r["e"]))
+        return rows
+
+    _pex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        rows = _pex.submit(_walk).result(timeout=_PATHWAY_EDGE_DEADLINE_S)
+    except concurrent.futures.TimeoutError:
+        logger.warning(
+            "[WARNING] pathway edge reconstruction exceeded %.1fs for anchor=%s — "
+            "emitting empty edge telemetry", _PATHWAY_EDGE_DEADLINE_S, anchor_record_id,
+        )
+        return [], [], [anchor_record_id]
+    except Exception:
+        logger.warning("[WARNING] pathway edge reconstruction failed", exc_info=True)
+        return [], [], [anchor_record_id]
+    finally:
+        _pex.shutdown(wait=False)
+
+    edges_traversed: List[Dict[str, Any]] = []
+    participation: Dict[str, Dict[str, Any]] = {}
+    node_sequence: List[str] = [anchor_record_id]
+    seen_nodes = {anchor_record_id}
+    for edge_id, etype, s, e in rows:
+        edges_traversed.append({"edge_id": edge_id, "type": etype, "start": s, "end": e})
+        outcome = "hit" if (s in result_set or e in result_set) else "traversed"
+        agg = participation.get(edge_id)
+        if agg is None:
+            participation[edge_id] = {
+                "edge_id": edge_id,
+                "traversal_count": 1,
+                "retrieval_outcome": outcome,
+            }
+        else:
+            agg["traversal_count"] += 1
+            if outcome == "hit":
+                agg["retrieval_outcome"] = "hit"
+        for rid in (s, e):
+            if rid and rid not in seen_nodes:
+                seen_nodes.add(rid)
+                node_sequence.append(rid)
+
+    return edges_traversed, list(participation.values()), node_sequence
+
+
+def _build_pathway_telemetry_record(*, wave_id, intent_signature, project_id,
+                                    anchor_record_id, node_sequence, edges_traversed,
+                                    edge_participation, result_count, graph_algorithm,
+                                    signal_availability) -> Dict[str, Any]:
+    """Assemble the AC-1 raw telemetry record (also carries the AC-10 edge
+    participation list). This field set IS the ENC-FTR-108 AC-4 input contract."""
+    return {
+        "schema": "enceladus.pathway.telemetry.v1",
+        "wave_id": wave_id or "unassigned",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "intent_signature": intent_signature,
+        "project_id": project_id,
+        "anchor_record_id": anchor_record_id or None,
+        "node_sequence": node_sequence,
+        "edges_traversed": edges_traversed,
+        "edge_participation": edge_participation,
+        "outcome": {
+            "result_count": result_count,
+            "graph_algorithm": graph_algorithm,
+            "signal_availability": signal_availability,
+        },
+    }
+
+
+def _emit_pathway_telemetry(record: Dict[str, Any]) -> None:
+    """AC-1 sink. Append one JSONL telemetry object to S3 partitioned by wave_id
+    when PATHWAY_TELEMETRY_BUCKET is configured; otherwise emit a structured
+    CloudWatch log line (logs:PutLogEvents is already granted). Fully defensive —
+    never raises into the request path."""
+    try:
+        line = json.dumps(record, default=str)
+        if PATHWAY_TELEMETRY_BUCKET:
+            try:
+                wid = str(record.get("wave_id") or "unassigned").replace("/", "_") or "unassigned"
+                key = (
+                    f"{PATHWAY_TELEMETRY_PREFIX}/wave_id={wid}/"
+                    f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex}.jsonl"
+                )
+                _get_s3().put_object(
+                    Bucket=PATHWAY_TELEMETRY_BUCKET,
+                    Key=key,
+                    Body=line.encode("utf-8"),
+                    ContentType="application/x-ndjson",
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "[WARNING] pathway telemetry S3 put failed (%s); CloudWatch fallback", exc,
+                )
+        logger.info("PATHWAY_TELEMETRY %s", line)
+    except Exception:
+        logger.exception("[ERROR] pathway telemetry emit failed (suppressed)")
+
+
 def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     """Phase 1 hybrid retrieval: vector + graph + keyword fused via RRF.
 
@@ -1403,6 +1610,14 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         top_n = 20
     top_n = max(1, min(top_n, 50))
     include_below_threshold = str(params.get("include_below_threshold", "")).lower() == "true"
+
+    # ENC-FTR-082 Phase A (AC-1): optional pathway-telemetry provenance. Backward
+    # compatible — both default to empty; intent_signature is derived deterministically
+    # when absent so every hybrid call carries a stable intent fingerprint.
+    wave_id = str(params.get("wave_id", "")).strip()
+    intent_signature = str(params.get("intent_signature", "")).strip()
+    if not intent_signature:
+        intent_signature = _derive_intent_signature(query_text, anchor_record_id, record_type_filter)
 
     # At least one of query or anchor_record_id is required.
     if not query_text and not anchor_record_id:
@@ -1515,18 +1730,31 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         signals["keyword"] = keyword_ranks
 
     if not signals:
+        _sig_avail = {
+            "vector": vector_available,
+            "graph": graph_available,
+            "keyword": keyword_available,
+        }
+        # AC-1: emit telemetry even for zero-result retrievals (no edges/nodes).
+        _emit_pathway_telemetry(_build_pathway_telemetry_record(
+            wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
+            anchor_record_id=anchor_record_id, node_sequence=[], edges_traversed=[],
+            edge_participation=[], result_count=0, graph_algorithm=graph_algorithm,
+            signal_availability=_sig_avail,
+        ))
         return {
             "nodes": [],
             "edges": [],
             "paths": [],
+            "edge_participation": [],
+            "pathway": {
+                "node_sequence": [], "edge_count": 0,
+                "intent_signature": intent_signature, "wave_id": wave_id or "unassigned",
+            },
             "summary": "No signals returned candidates. "
                        "(vector=0, graph=0, keyword=0) — try a broader query or verify anchor is in the graph.",
             "query_cypher": "hybrid/no-signals",
-            "signal_availability": {
-                "vector": vector_available,
-                "graph": graph_available,
-                "keyword": keyword_available,
-            },
+            "signal_availability": _sig_avail,
             "graph_algorithm": graph_algorithm,
             "rrf_k": RRF_K,
         }
@@ -1571,23 +1799,50 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # Trim to final top_n after T3 suppression.
     nodes = nodes[:top_n]
 
+    # ENC-FTR-082 Phase A (AC-1 edges_traversed/node_sequence, AC-10 participation):
+    # reconstruct the graph edges connecting the anchor to the resolved result set.
+    # Bounded + fully degradable; never perturbs `nodes`/RRF above.
+    result_rids = [n.get("record_id") for n in nodes if n.get("record_id")]
+    edges_traversed, edge_participation, node_sequence = _reconstruct_pathway_edges(
+        driver, project_id, anchor_record_id, result_rids,
+    )
+
     summary = (
         f"Hybrid: {len(nodes)} nodes "
         f"(vector={len(vector_ranks)}, graph={len(graph_ranks)}, keyword={len(keyword_ranks)}; "
         f"graph_algo={graph_algorithm}; embedded={embedding_covered}/{len(top_fused)})"
     )
 
+    _sig_avail = {
+        "vector": vector_available,
+        "graph": graph_available,
+        "keyword": keyword_available,
+    }
+
+    # AC-1: emit the raw pathway-telemetry record (S3 append log when configured,
+    # else CloudWatch fallback). Carries the AC-10 edge_participation list.
+    _emit_pathway_telemetry(_build_pathway_telemetry_record(
+        wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
+        anchor_record_id=anchor_record_id, node_sequence=node_sequence,
+        edges_traversed=edges_traversed, edge_participation=edge_participation,
+        result_count=len(nodes), graph_algorithm=graph_algorithm,
+        signal_availability=_sig_avail,
+    ))
+
     return {
         "nodes": nodes,
-        "edges": [],
+        "edges": edges_traversed,
         "paths": [],
+        "edge_participation": edge_participation,
+        "pathway": {
+            "node_sequence": node_sequence,
+            "edge_count": len(edges_traversed),
+            "intent_signature": intent_signature,
+            "wave_id": wave_id or "unassigned",
+        },
         "summary": summary,
         "query_cypher": "hybrid/multi-signal-rrf",
-        "signal_availability": {
-            "vector": vector_available,
-            "graph": graph_available,
-            "keyword": keyword_available,
-        },
+        "signal_availability": _sig_avail,
         "graph_algorithm": graph_algorithm,
         "rrf_k": RRF_K,
         "embedding_coverage_sample": {
@@ -1692,6 +1947,7 @@ def _handle_search(event: Dict) -> Dict:
         "duration_ms": duration_ms,
     }
     # ENC-TSK-B92: hybrid-specific observability fields passed through verbatim.
+    # ENC-FTR-082 Phase A: edge_participation (AC-10) + pathway summary (AC-1).
     for hybrid_key in (
         "signal_availability",
         "graph_algorithm",
@@ -1700,6 +1956,8 @@ def _handle_search(event: Dict) -> Dict:
         "per_node_fusion",
         "fsrs_t3_threshold",
         "include_below_threshold",
+        "edge_participation",
+        "pathway",
     ):
         if hybrid_key in result:
             response_body[hybrid_key] = result[hybrid_key]
