@@ -31,10 +31,9 @@
 | Repository structure | [operations.md](architecture/operations.md) | 14.1 |
 | Keyword index | [operations.md](architecture/operations.md) | 15 |
 
-### For Agents: Fastest Path
-1. Query the **component registry** via `get_code_map(project_id)` for source_paths first.
-2. Use the **Component Index** below to find the right section number.
-3. Use `reference_search(project_id, query="[SECTION X.Y]")` to read specific sections.
+### Addressing sections
+
+Sections are addressable by their `[SECTION X.Y]` tags and resolvable via reference search; the Component Index below maps capabilities to section numbers, and per-component source paths are available from the code map.
 
 ---
 
