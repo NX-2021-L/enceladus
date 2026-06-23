@@ -153,6 +153,13 @@
       "cfn_managed": false
     },
     {
+      "function_name": "enceladus-stale-checkout-monitor",
+      "lambda_dir": "backend/lambda/stale_checkout_monitor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/stale_checkout_monitor/deploy.sh",
+      "cfn_managed": true
+    },
+    {
       "function_name": "enceladus-mcp-code",
       "lambda_dir": "backend/lambda/mcp_code",
       "workflow_file": ".github/workflows/_deploy.yml",

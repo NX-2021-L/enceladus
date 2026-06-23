@@ -1,0 +1,2 @@
+# ENC-TSK-H51 stale_checkout_monitor — no third-party deps.
+# boto3 is provided by the Lambda runtime; stdlib covers the rest.

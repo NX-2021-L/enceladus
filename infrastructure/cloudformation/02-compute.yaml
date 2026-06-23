@@ -1144,6 +1144,102 @@ Resources:
           Value: env-drift-auditor
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-H51 / ENC-ISS-142 gate #3: Stale-Checkout Monitor (Escalation Protocol).
+  # Read-only scheduled detector; emits stale_checkout_signal CloudWatch log lines for
+  # long-held checkouts + stale in-progress tasks. Code managed out-of-band (matrix-build
+  # / _deploy.yml). ACTIVATION (this block + first deploy) is a privileged compute-stack
+  # deploy step, gamma only per DOC-499FA089EC30.
+  # NOTE: PROJECTS_TABLE + the IAM table ARN default to "projects" (the shared tracker
+  # table); CONFIRM the gamma projects-table name at deploy time before applying.
+  # ---------------------------------------------------------------------------
+  StaleCheckoutMonitorFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-stale-checkout-monitor${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 120
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt StaleCheckoutMonitorRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          PROJECTS_TABLE: projects
+          STALE_CHECKOUT_THRESHOLD_MINUTES: "240"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: stale-checkout-monitor
+
+  StaleCheckoutMonitorRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-stale-checkout-monitor-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: stale-checkout-monitor-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Sid: ProjectsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects/index/*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: stale-checkout-monitor
+
+  StaleCheckoutMonitorSchedule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-stale-checkout-monitor-schedule${EnvironmentSuffix}"
+      ScheduleExpression: rate(30 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StaleCheckoutMonitorFunction.Arn
+          Id: stale-checkout-monitor-target
+
+  StaleCheckoutMonitorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StaleCheckoutMonitorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StaleCheckoutMonitorSchedule.Arn
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-C10: Graph Health Metrics Lambda (CloudWatch proxy path)
   # ---------------------------------------------------------------------------
 
