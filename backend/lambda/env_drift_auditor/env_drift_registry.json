@@ -15,7 +15,8 @@
         "APPCONFIG_APPLICATION": "advisory"
       }
     },
-    "provenance": "Deploy-critical vars and coverage gaps surfaced by the ENC-TSK-H15 coverage matrix (DOC-0C7E8AEF512E, ENC-PLN-048 Obj 1 child 1.1): COORDINATION_INTERNAL_API_KEY is deploy-critical on all 10 of its compute-stack consumers (it was the 2026-06-18 Sev-1 strip casualty, ENC-TSK-H04/H05); SQS_QUEUE_URL is deploy-critical on devops-deploy-intake (ENC-ISS-369, templated by ENC-TSK-H26). Out-of-band functions with no FunctionName in any CFN template (checkout_service, deploy_capability_auditor) are NOT added — they are not subject to the compute-stack strip (H15 waiver)."
+    "provenance": "Deploy-critical vars and coverage gaps surfaced by the ENC-TSK-H15 coverage matrix (DOC-0C7E8AEF512E, ENC-PLN-048 Obj 1 child 1.1): COORDINATION_INTERNAL_API_KEY is deploy-critical on all 10 of its compute-stack consumers (it was the 2026-06-18 Sev-1 strip casualty, ENC-TSK-H04/H05); SQS_QUEUE_URL is deploy-critical on devops-deploy-intake (ENC-ISS-369, templated by ENC-TSK-H26). Out-of-band functions with no FunctionName in any CFN template (checkout_service, deploy_capability_auditor) are NOT added — they are not subject to the compute-stack strip (H15 waiver).",
+    "gamma_parity_provenance": "ENC-TSK-H54 (ENC-PLN-050 P0, feature ENC-FTR-062, gamma stack completion): the registry was keyed only by PROD function names, so a compute deploy rendered under EnvironmentSuffix=-gamma produced -gamma function names that matched NO registry entry — the pre-deploy gate (env_parity_gate.py L102 'has_registry_entry' skip) and the post-deploy auditor BOTH silently skipped every gamma function except the lone enceladus-mcp-code-gamma entry. That is exactly why gamma rotted unobserved for ~2.5 months (DOC-A07B553431FD). H54 mirrors each registry-governed prod function rendered in 02-compute.yaml to its <fn>-gamma twin so the existing FTR-102 machinery enforces gamma parity on every future gamma compute deploy. Each gamma deploy-critical var was verified present+nonempty on the live gamma function before registration (no env_drift_auditor P0-storm risk; ENC-ISS-369 class). GDS_STANDING_PROJECTION_PREFIX is registered ADVISORY (not deploy-critical) on devops-graph-query-api-gamma because 02-compute.yaml L1047 gates it on IsProduction (!Ref Environment=production) → it resolves to AWS::NoValue on gamma BY DESIGN until ENC-TSK-H56 provisions on-demand AGA GDS-PPR for gamma; advisory makes the gap a persistent WARN (visible) without failing gamma deploys. PATHWAY_TELEMETRY_{BUCKET,PREFIX} mirror prod's advisory classification (owned by ENC-TSK-H44, unset on prod AND gamma). ENABLE_LESSON_PRIMITIVE drift (live-set on prod, unset on gamma) is intentionally NOT registered here: it is an out-of-band flag the template never sets, so it is not a template-parity/strip-class var — its codification belongs to ENC-TSK-H16 / ENC-FTR-103 (AppConfig), not the FTR-102 template-side gate. devops-github-integration and prod enceladus-mcp-code are NOT rendered in 02-compute.yaml, so their gamma twins are out of this gate's scope."
   },
   "_policy": {
     "scan_interval": "hourly",
@@ -106,6 +107,65 @@
       "ENCELADUS_COGNITO_USER_POOL_ID": "deploy-critical",
       "ENCELADUS_COGNITO_CLIENT_ID": "deploy-critical",
       "ENCELADUS_COGNITO_CLIENT_SECRET": "deploy-critical"
+    },
+    "devops-changelog-api-gamma": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-coordination-api-gamma": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
+      "TRACKER_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "COGNITO_USER_POOL_ID": "deploy-critical",
+      "COGNITO_CLIENT_ID": "deploy-critical"
+    },
+    "devops-deploy-decide-gamma": {
+      "COGNITO_USER_POOL_ID": "deploy-critical",
+      "COGNITO_CLIENT_ID": "deploy-critical",
+      "DEPLOY_TABLE": "deploy-critical",
+      "ALLOWED_REPOS": "deploy-critical",
+      "GITHUB_APP_ID": "deploy-critical",
+      "GITHUB_INSTALLATION_ID": "deploy-critical"
+    },
+    "devops-deploy-finalize-gamma": {
+      "DEPLOY_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "TRACKER_TABLE": "deploy-critical",
+      "CONFIG_BUCKET": "deploy-critical"
+    },
+    "devops-deploy-intake-gamma": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
+      "DEPLOY_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "SQS_QUEUE_URL": "deploy-critical"
+    },
+    "devops-deploy-parity-validator-gamma": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-document-api-gamma": {
+      "DOCUMENTS_TABLE": "deploy-critical",
+      "COGNITO_USER_POOL_ID": "deploy-critical",
+      "COGNITO_CLIENT_ID": "deploy-critical",
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-env-drift-auditor-gamma": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-graph-query-api-gamma": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical",
+      "NEO4J_SECRET_NAME": "deploy-critical",
+      "COGNITO_USER_POOL_ID": "deploy-critical",
+      "COGNITO_CLIENT_ID": "deploy-critical",
+      "PATHWAY_TELEMETRY_BUCKET": "advisory",
+      "PATHWAY_TELEMETRY_PREFIX": "advisory",
+      "GDS_STANDING_PROJECTION_PREFIX": "advisory"
+    },
+    "devops-project-service-gamma": {
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
+    },
+    "devops-tracker-mutation-api-gamma": {
+      "DYNAMODB_TABLE": "deploy-critical",
+      "PROJECTS_TABLE": "deploy-critical",
+      "COORDINATION_INTERNAL_API_KEY": "deploy-critical"
     }
   }
 }
