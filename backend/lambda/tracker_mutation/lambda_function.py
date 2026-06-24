@@ -152,6 +152,68 @@ MAX_NOTE_LENGTH = 2000
 # ENC-TSK-H08 (F63): AppConfig is the source of truth (env_fallback preserves legacy/local behavior)
 ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallback="ENABLE_LESSON_PRIMITIVE")
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-H46 / B63 Phase 2A — Lifecycle Service extraction.
+# When enable_lifecycle_service_extraction is ON, the standalone Lifecycle Service is the SOLE
+# authority for transition_type_matrix validation, STRICTNESS_RANK enforcement, and subtask gates
+# on task status transitions. Invocation is synchronous and FAIL-CLOSED: any invoke failure rejects
+# the transition (no inline fallback). The inline validators below are retained ONLY as the
+# flag-OFF rollback path (ENC-TSK-H46 AC #3). Flag is read at request time so an AppConfig toggle
+# takes effect (and rolls back) without a redeploy.
+# ---------------------------------------------------------------------------
+LIFECYCLE_SERVICE_FUNCTION = os.environ.get("LIFECYCLE_SERVICE_FUNCTION", "")
+_lambda_client = None
+
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client(
+            "lambda",
+            region_name=DYNAMODB_REGION,
+            config=Config(
+                retries={"max_attempts": 2, "mode": "standard"},
+                read_timeout=5,
+                connect_timeout=2,
+            ),
+        )
+    return _lambda_client
+
+
+def _lifecycle_service_enabled() -> bool:
+    """Read the AppConfig flag at request time (independent toggle + rollback, ENC-TSK-H46 AC #3)."""
+    return _appconfig_flag("enable_lifecycle_service_extraction", env_fallback="ENABLE_LIFECYCLE_SERVICE")
+
+
+def _invoke_lifecycle_service(payload: dict):
+    """Synchronously invoke the Lifecycle Service and return its verdict dict, or None on ANY
+    failure (function not configured, invoke error, FunctionError, malformed verdict). Returning
+    None signals the caller to FAIL CLOSED — there is no inline fallback when the flag is ON
+    (ENC-TSK-H46 AC #2)."""
+    fn = LIFECYCLE_SERVICE_FUNCTION
+    if not fn:
+        logger.error("[H46] LIFECYCLE_SERVICE_FUNCTION not configured; failing closed")
+        return None
+    try:
+        resp = _get_lambda_client().invoke(
+            FunctionName=fn,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        if resp.get("FunctionError"):
+            logger.error("[H46] Lifecycle Service FunctionError=%s", resp.get("FunctionError"))
+            return None
+        body = resp.get("Payload")
+        raw = body.read() if hasattr(body, "read") else body
+        verdict = json.loads(raw)
+        if not isinstance(verdict, dict) or "allow" not in verdict:
+            logger.error("[H46] Lifecycle Service returned malformed verdict: %r", verdict)
+            return None
+        return verdict
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[H46] Lifecycle Service invoke failed: %s", exc)
+        return None
+
 # Valid record types and their closed/default statuses
 _RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "generation"}
 _CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived", "plan": "complete", "generation": "archived"}
@@ -3249,7 +3311,46 @@ def _handle_update_field(
 
         # Enforce valid transitions — forward + revert (ENC-FTR-022)
         is_revert = False
-        if current_status != new_lower:
+        _lifecycle_owned = False
+        # ENC-TSK-H46 / B63 Phase 2A: when the flag is ON, the Lifecycle Service is the SOLE
+        # authority for transition_type_matrix validation, STRICTNESS_RANK, and subtask gates on
+        # task status transitions. FAIL-CLOSED — an invoke failure rejects the transition; the
+        # inline validators below run only as the flag-OFF rollback path (zero inline fallback).
+        if record_type == "task" and current_status != new_lower and _lifecycle_service_enabled():
+            _lc_verdict = _invoke_lifecycle_service({
+                "action": "validate_transition",
+                "project_id": project_id,
+                "record_type": record_type,
+                "record_id": record_id,
+                "current_status": current_status,
+                "target_status": new_lower,
+                "transition_type": (item_data.get("transition_type") or "github_pr_deploy").strip().lower(),
+                "transition_evidence": transition_evidence,
+                "components": item_data.get("components") or [],
+                "subtask_ids": item_data.get("subtask_ids") or [],
+                "is_checkout_service_request": _is_checkout_service_request(event),
+            })
+            if _lc_verdict is None:
+                return _error(
+                    503,
+                    "Lifecycle Service unavailable; transition rejected (fail-closed, ENC-TSK-H46). "
+                    "Retry shortly, or disable the enable_lifecycle_service_extraction flag to fall "
+                    "back to inline validation.",
+                    code="LIFECYCLE_SERVICE_UNAVAILABLE",
+                    retryable=True,
+                )
+            if not _lc_verdict.get("allow"):
+                _lc_err = _lc_verdict.get("error") or {}
+                return _error(
+                    int(_lc_err.get("status", 400) or 400),
+                    _lc_err.get("message", "Lifecycle Service rejected the transition."),
+                    code=_lc_err.get("code", "INVALID_INPUT"),
+                    **(_lc_err.get("details") or {}),
+                )
+            is_revert = bool(_lc_verdict.get("is_revert"))
+            _lifecycle_owned = True
+
+        if not _lifecycle_owned and current_status != new_lower:
             type_transitions = _VALID_TRANSITIONS.get(record_type, {})
             valid_next = type_transitions.get(current_status, set())
             revert_targets = _REVERT_TRANSITIONS.get(record_type, {}).get(current_status, set())
@@ -3408,7 +3509,7 @@ def _handle_update_field(
                     expected_format="transition_evidence.commit_sha validated against GitHub",
                 )
 
-        if not is_revert and record_type == "task" and new_lower == "merged-main" \
+        if not _lifecycle_owned and not is_revert and record_type == "task" and new_lower == "merged-main" \
                 and not _is_checkout_service_request(event):
             # ENC-ISS-095: Skip merge_evidence requirement for checkout-service requests.
             # The checkout service validates pr_id + merged_at via GitHub API before writing;
@@ -3426,7 +3527,7 @@ def _handle_update_field(
                     expected_format="transition_evidence.merge_evidence (non-empty string)",
                 )
 
-        if not is_revert and record_type == "task" and new_lower == "deploy-success":
+        if not _lifecycle_owned and not is_revert and record_type == "task" and new_lower == "deploy-success":
             # ENC-FTR-059: Matrix-driven deploy evidence validation (v{MATRIX_VERSION}).
             # Replaces hardcoded if/else branching with registry lookup.
             task_transition_type = (item_data.get("transition_type") or "github_pr_deploy").strip().lower()
@@ -3459,7 +3560,7 @@ def _handle_update_field(
                         ),
                     )
 
-        if not is_revert and record_type == "task" and new_lower == "closed" and current_status == "deploy-success":
+        if not _lifecycle_owned and not is_revert and record_type == "task" and new_lower == "closed" and current_status == "deploy-success":
             live_validation_evidence = transition_evidence.get("live_validation_evidence", "").strip()
             if not live_validation_evidence:
                 return _tracker_field_validation_error(

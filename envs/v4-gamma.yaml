@@ -85,3 +85,4 @@ function_name_map:
   deploy_parity_validator: devops-deploy-parity-validator-gamma
   mcp_code: enceladus-mcp-code-gamma
   mcp_streamable: enceladus-mcp-streamable-gamma
+  lifecycle_service: enceladus-lifecycle-service-gamma
