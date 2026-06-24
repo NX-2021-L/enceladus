@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-23.01",
-  "updated_at": "2026-06-23T01:45:00Z",
-  "last_change_summary": "ENC-FTR-082 Phase A (ENC-PLN-049): registered the PATHWAY_TRAVERSED/TRAVERSED_BY edge type (AC-6 OGTM) across graph_query_api _ALLOWED_EDGE_TYPES, graph_sync RELATIONSHIP_TYPE_TO_EDGE_LABEL, and the four tracker_mutation relationship registries (_RELATIONSHIP_TYPES, _INVERSE_PAIRS, _OWL_CHARACTERISTICS, _DOMAIN_RANGE_CONSTRAINTS); added raw pathway telemetry (AC-1; one JSONL object per hybrid call to an S3 append-log partitioned by wave_id, degrading to a CloudWatch log line until the Wave-2 IAM/env CFN change) and the per-edge edge_participation output (AC-10; the ENC-FTR-108 AC-4 input contract) to graph_query_api hybrid retrieval, plus optional wave_id/intent_signature graphsearch params; added the tracker.pathway_traversed and graph_query_api.pathway_telemetry dictionary entities. Touched backend/lambda/graph_query_api/lambda_function.py, backend/lambda/graph_sync/lambda_function.py, backend/lambda/tracker_mutation/lambda_function.py. Live S3 governance store sync is a post-merge product-lead handoff. Prior change — ENC-TSK-H35 (ENC-FTR-101 / ENC-PLN-006, Option B): pre-materialized standing Neo4j Aura Graph Analytics projection for hybrid-retrieval Personalized PageRank. graph_query_api gains an env-gated (GDS_STANDING_PROJECTION_PREFIX) warm read path that runs gds.pageRank.stream against a standing named projection refreshed out-of-band by a single-writer action=refresh_projection invoke, with a hard fallback to the existing per-query projection then the cypher proxy under _GRAPH_SIGNAL_DEADLINE_S (no regression when unset); the standing projection carries weight + flow_weight=1.0 relationship properties (flow_weight is the ENC-FTR-108 adaptive-weight slot) and /health gains a graph_projection staleness block. Updated the tracker.graphsearch entity description accordingly. Touched backend/lambda/graph_query_api/lambda_function.py. No tracker/field schema changes; this version bump satisfies the path-triggered Governance Dictionary Guard (backend/lambda/*/lambda_function.py glob). Live S3 governance store sync is a post-merge product-lead handoff. Reconciliation context: DOC-6EFD5DB32CD8 Rev 14 (F36 closed ENC-ISS-268 via Bolt-pool resilience, not session reuse; session reuse is ENC-ISS-271, open).",
+  "version": "2026-06-24.01",
+  "updated_at": "2026-06-24T01:34:00Z",
+  "last_change_summary": "ENC-TSK-H96 (ENC-PLN-054): registered the appconfig.flag_lifecycle entity governing the lifecycle of AppConfig-resolved boolean feature flags. Companion to the existing appconfig.feature_flags entity (which governs the resolution contract): flag_lifecycle catalogs every known governed flag with name, env_fallback, consumer lambdas, governing record, owner, intended_lifetime stage (experimental/stable/permanent/retired/env_var_only), and notes; declares the FLAG FLIP / FLAG ADDITION / FLAG RETIREMENT operational protocols by pointer to the AppConfig Flag Operation Runbook docstore document. Citing ENC-LSN-031 — a flag flip is the real deploy event, carrying the union of every latent bug merged behind the flag since its inception. Live S3 governance store sync is a post-merge product-lead handoff. Prior change — ENC-FTR-082 Phase A (ENC-PLN-049): registered the PATHWAY_TRAVERSED/TRAVERSED_BY edge type (AC-6 OGTM) across graph_query_api _ALLOWED_EDGE_TYPES, graph_sync RELATIONSHIP_TYPE_TO_EDGE_LABEL, and the four tracker_mutation relationship registries (_RELATIONSHIP_TYPES, _INVERSE_PAIRS, _OWL_CHARACTERISTICS, _DOMAIN_RANGE_CONSTRAINTS); added raw pathway telemetry (AC-1; one JSONL object per hybrid call to an S3 append-log partitioned by wave_id, degrading to a CloudWatch log line until the Wave-2 IAM/env CFN change) and the per-edge edge_participation output (AC-10; the ENC-FTR-108 AC-4 input contract) to graph_query_api hybrid retrieval, plus optional wave_id/intent_signature graphsearch params; added the tracker.pathway_traversed and graph_query_api.pathway_telemetry dictionary entities. Touched backend/lambda/graph_query_api/lambda_function.py, backend/lambda/graph_sync/lambda_function.py, backend/lambda/tracker_mutation/lambda_function.py.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5285,6 +5285,147 @@
             "default"
           ],
           "usage_guidance": "Flag() resolution is: 1) AppConfig HTTP poll (localhost:2772, cached); 2) env_fallback env var if AppConfig unreachable; 3) default. Callers must not read ENABLE_* vars directly \u2014 always call flag()."
+        }
+      }
+    },
+    "appconfig.flag_lifecycle": {
+      "description": "ENC-TSK-H96 (ENC-PLN-054): governance contract for the lifecycle of every AppConfig-resolved boolean feature flag in Enceladus. Companion to appconfig.feature_flags (which governs the resolution contract via appconfig_flags.flag()): flag_lifecycle declares the FLAG FLIP / FLAG ADDITION / FLAG RETIREMENT operational protocols and catalogs every governed flag with name, env_fallback, consumer Lambdas, governing record, owner, intended_lifetime stage, and notes. The protocols are authoritative for any agent or human operator touching the AppConfig configuration profile or any consumer Lambda's flag-gated code. Operationalizes ENC-LSN-031 \u2014 a flag flip IS the real deploy event (11h ENABLE_COMPONENT_PROPOSAL outage, DOC-733D76F4849B, three latent bugs co-activated at flip). Full protocol detail in the AppConfig Flag Operation Runbook (DOC-9572462BE22F).",
+      "governing_task": "ENC-TSK-H96",
+      "governing_plan": "ENC-PLN-054",
+      "governing_feature": "ENC-FTR-103",
+      "runbook_document": "DOC-9572462BE22F",
+      "deployment_policy_document": "DOC-0824AA2FBF18",
+      "operating_lessons": ["ENC-LSN-031", "ENC-LSN-053", "ENC-LSN-017"],
+      "fields": {
+        "flag_name": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "usage_guidance": "snake_case key in the AppConfig JSON configuration profile (e.g. 'enable_lesson_primitive'). Must match the appconfig.feature_flags.flag_name resolution key and the JSON Schema embedded in infrastructure/cloudformation/06-feature-flags.yaml."
+        },
+        "env_fallback": {
+          "type": "string",
+          "usage_guidance": "Upper-snake-case ENABLE_* environment variable name used by appconfig_flags.flag() when the AppConfig extension is unreachable. Mirrors appconfig.feature_flags.env_fallback. Stale env_fallback vars on Lambda CFN templates after FLAG RETIREMENT are a deploy-strip risk per ENC-LSN-053 \u2014 audit and remove."
+        },
+        "consumer_lambdas": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "usage_guidance": "Every Lambda function (and the tools/enceladus-mcp-server module) that invokes appconfig_flags.flag(\"<flag_name>\", ...). Used as the pre-op enumeration source for the FLAG FLIP, FLAG ADDITION, and FLAG RETIREMENT protocols. Verified at op time via `rg --no-heading -n '_appconfig_flag\\(\"<flag_name>\"' backend/lambda tools/enceladus-mcp-server`."
+        },
+        "governing_record": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^ENC-(FTR|TSK|PLN)-[A-Z0-9]+$"
+          },
+          "usage_guidance": "The feature (ENC-FTR-*), task (ENC-TSK-*), or plan (ENC-PLN-*) that motivated the flag's existence. Populated at FLAG ADDITION time, never retroactively. Flags without a governing record are an anti-pattern per the AppConfig Flag Operation Runbook \u00a78."
+        },
+        "owner": {
+          "type": "string",
+          "usage_guidance": "Team or role responsible for the flag's lifecycle decisions (FLAG FLIP requests, FLAG RETIREMENT timing). Owners reach io for prod approval; coordination-lead can approve gamma flips for experimental flags."
+        },
+        "intended_lifetime": {
+          "type": "enum",
+          "enum": [
+            "experimental",
+            "stable",
+            "permanent",
+            "retired",
+            "env_var_only"
+          ],
+          "usage_guidance": "Stage of the flag's intended lifecycle. experimental: short-lived gate for a feature in incubation, carries an explicit retirement candidate task. stable: long-lived gate for capabilities that may be rolled forward or rolled back operationally. permanent: operational policy that outlives any single feature (rare; requires io justification in the addition PR). retired: flag removed from the AppConfig profile and all consumer code; entry preserved here for historical traceability. env_var_only: legacy direct os.environ read that has not migrated to appconfig_flags.flag() \u2014 a migration debt item, not a governed lifecycle state. See appconfig.flag_lifecycle.intended_lifetime_stages for definitions."
+        },
+        "notes": {
+          "type": "string",
+          "usage_guidance": "Free-form notes: rollout history, retirement plan, known consumer drift, links to incident COEs. One-line summary preferred; longer rationale belongs in the governing record."
+        }
+      },
+      "intended_lifetime_stages": {
+        "experimental": "Short-lived gate for a feature under active incubation. Default for new flags. MUST cite an explicit retirement candidate task in the addition record. Allowed at false in prod and either true or false in gamma; first true-in-prod flip follows the FLAG FLIP protocol after gamma exercise. Coordination-lead may approve gamma flips; io must approve any prod flip.",
+        "stable": "Long-lived runtime control that may be flipped operationally to roll a capability forward or roll it back. Survives multiple feature additions. Retirement requires io approval and a justification recorded in the retirement task. All flips (gamma or prod) require io approval per the runbook.",
+        "permanent": "Operational policy that outlives any single feature flagged behind it. RARE. Requires explicit io justification in the addition PR description. Never retired through the FLAG RETIREMENT protocol \u2014 first downgrade to stable via governance amendment.",
+        "retired": "Flag has been removed from the AppConfig configuration profile and from all consumer Lambda code. Entry retained in this catalog with retired_at timestamp for historical traceability. New flag with the same name MUST NOT reuse a retired entry without a fresh addition record.",
+        "env_var_only": "Legacy direct os.environ read in a consumer Lambda that has not yet migrated to appconfig_flags.flag(). NOT a true AppConfig flag; cannot be flipped without a Lambda redeploy. Migration to a real AppConfig flag follows the FLAG ADDITION protocol with the existing env var name as env_fallback."
+      },
+      "protocols": {
+        "flag_flip": "Change an existing flag value without a Lambda redeploy. Pre-op probe (\u00a73.1), pre-op worklog entry (\u00a73.2), io approval (\u00a73.3 for prod), execution via aws appconfig start-deployment with the Linear or AllAtOnce strategy (\u00a73.4), post-op verification within 10 minutes (\u00a73.5), post-op worklog entry (\u00a73.6). Per AppConfig Flag Operation Runbook (DOC-9572462BE22F) \u00a73.",
+        "flag_addition": "Introduce a new flag with first DEPLOYED value of false in all environments. Pre-op design (\u00a74.1), pre-op worklog (\u00a74.2), io approval via PR review gate (\u00a74.3), post-addition verification (\u00a74.4), post-addition worklog (\u00a74.5), same-PR governance_data_dictionary.json update (\u00a74.6). Per AppConfig Flag Operation Runbook (DOC-9572462BE22F) \u00a74.",
+        "flag_retirement": "Remove a flag once its gated path is universally enabled or removed. Preconditions \u00a75.1 (30d stable, zero consumer reads, governing retirement task). Pre-op worklog (\u00a75.2), io approval for stable (\u00a75.3), execution (\u00a75.4), post-retirement worklog (\u00a75.5). permanent flags NEVER retired through this protocol. Per AppConfig Flag Operation Runbook (DOC-9572462BE22F) \u00a75."
+      },
+      "flags": {
+        "enable_lesson_primitive": {
+          "flag_name": "enable_lesson_primitive",
+          "env_fallback": "ENABLE_LESSON_PRIMITIVE",
+          "consumer_lambdas": ["devops-coordination-api", "enceladus-mcp-code", "enceladus-mcp-streamable", "devops-tracker-mutation-api"],
+          "governing_record": "ENC-FTR-052",
+          "owner": "knowledge-graph",
+          "intended_lifetime": "stable",
+          "notes": "Gates governed Lesson primitive CRUD (lesson record create/list/get) across coordination_api, mcp-server, and tracker_mutation. tracker_mutation migrated to appconfig_flags.flag() in ENC-TSK-H08. Currently true in prod; flips would impact ENC-FTR-103 live-flag-flip proof."
+        },
+        "enable_handoff_primitive": {
+          "flag_name": "enable_handoff_primitive",
+          "env_fallback": "ENABLE_HANDOFF_PRIMITIVE",
+          "consumer_lambdas": ["enceladus-mcp-code", "enceladus-mcp-streamable"],
+          "governing_record": "ENC-FTR-061",
+          "owner": "governance-lead",
+          "intended_lifetime": "stable",
+          "notes": "Gates handoff document subtype actions plus the four COE/wave docstore subtype actions (ENC-FTR-077). Registered in _EXECUTE_ACTIONS only when true; default false."
+        },
+        "enable_component_proposal": {
+          "flag_name": "enable_component_proposal",
+          "env_fallback": "ENABLE_COMPONENT_PROPOSAL",
+          "consumer_lambdas": ["devops-coordination-api", "enceladus-mcp-code", "enceladus-mcp-streamable"],
+          "governing_record": "ENC-FTR-076",
+          "owner": "governance-lead",
+          "intended_lifetime": "stable",
+          "notes": "Gates 9 component-* actions (propose/approve/reject/add_edge/remove_edge/advance/deprecate/restore/revert). Source of the canonical ENC-LSN-031 incident: an 11h outage on 2026-04-16 when three latent bugs co-activated at flip (DOC-733D76F4849B). Default off in prod, on in gamma."
+        },
+        "enable_typed_relationships": {
+          "flag_name": "enable_typed_relationships",
+          "env_fallback": "ENABLE_TYPED_RELATIONSHIPS",
+          "consumer_lambdas": ["enceladus-mcp-code", "enceladus-mcp-streamable"],
+          "governing_record": "ENC-FTR-049",
+          "owner": "governance-lead",
+          "intended_lifetime": "stable",
+          "notes": "Gates typed relationship MCP actions (rel# DynamoDB items + Neo4j MERGE projections). Companion to ENC-FTR-076 component edges."
+        },
+        "enable_context_nodes": {
+          "flag_name": "enable_context_nodes",
+          "env_fallback": "ENABLE_CONTEXT_NODES",
+          "consumer_lambdas": ["enceladus-mcp-code", "enceladus-mcp-streamable"],
+          "governing_record": "ENC-FTR-050",
+          "owner": "retrieval-lead",
+          "intended_lifetime": "experimental",
+          "notes": "Gates Context Node primitive for mathematically-optimized context assembly (greedy knapsack packing). Read by feed_query record extensions when active. Retirement candidate is the v4 retrieval cutover task once hybrid retrieval (ENC-TSK-B92) supersedes."
+        },
+        "enable_claude_headless": {
+          "flag_name": "enable_claude_headless",
+          "env_fallback": "ENABLE_CLAUDE_HEADLESS",
+          "consumer_lambdas": ["devops-coordination-api"],
+          "governing_record": "ENC-PLN-006",
+          "owner": "coordination-lead",
+          "intended_lifetime": "experimental",
+          "notes": "Gates Claude headless host-v2 dispatch mode in coordination_api dispatch_ssm. Read in lambda_function.py, handlers.py, and decomposition.py. Retirement candidate is the Claude Agent SDK migration."
+        },
+        "enable_mcp_governance_prompt": {
+          "flag_name": "enable_mcp_governance_prompt",
+          "env_fallback": "ENABLE_MCP_GOVERNANCE_PROMPT",
+          "consumer_lambdas": ["devops-coordination-api"],
+          "governing_record": "ENC-PLN-006",
+          "owner": "coordination-lead",
+          "intended_lifetime": "permanent",
+          "notes": "Controls dispatch-time governance prompt injection. Default true (the only flag in the catalog defaulting true) because dispatched agents without the governance prompt are out-of-spec. Permanent: io justified the classification because the prompt-injection switch is operational policy, not feature-gated code."
+        },
+        "enable_gmf_gate": {
+          "flag_name": "enable_gmf_gate",
+          "env_fallback": "ENABLE_GMF_GATE",
+          "consumer_lambdas": ["devops-github-integration"],
+          "governing_record": "DOC-63420302EF65",
+          "owner": "deployment-lead",
+          "intended_lifetime": "env_var_only",
+          "notes": "Legacy direct os.environ read in github_integration._handle_pull_request_event(). NOT a true AppConfig flag yet \u2014 cannot be flipped without a Lambda redeploy. Migration to appconfig_flags.flag() is a candidate follow-up task; current behaviour preserves dormant-by-default semantics for the Generational Metabolism Framework PR gate."
         }
       }
     },
