@@ -109,6 +109,28 @@ KNOWN_COMPONENTS = [
         },
     },
     {
+        "component_id": "comp-lifecycle-service",
+        "component_name": "Lifecycle Service Lambda",
+        "project_id": "enceladus",
+        "category": "lambda",
+        "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
+        "description": "Enceladus Lifecycle Service Lambda (B63 Phase 2A / ENC-TSK-H46) — authoritative owner of transition_type_matrix validation, STRICTNESS_RANK enforcement, subtask gates, and the per-cell gate_class taxonomy (ENC-FTR-111 scaffold). Synchronously invoked by tracker_mutation behind the enable_lifecycle_service_extraction feature flag (fail-closed).",
+        "github_repo": "NX-2021-L/enceladus",
+        "status": "active",
+        "source_paths": {
+            "primary": "backend/lambda/lifecycle_service/lambda_function.py",
+            "directory": "backend/lambda/lifecycle_service/",
+            "workflow": ".github/workflows/_deploy.yml",
+            "deploy_script": "backend/lambda/lifecycle_service/deploy.sh",
+            "related": [
+                "backend/lambda/lifecycle_service/transition_type_matrix.py",
+                "backend/lambda/shared_layer/",
+            ],
+            "architecture_sections": ["4.17"],
+        },
+    },
+    {
         "component_id": "comp-coordination-api",
         "component_name": "Coordination API Lambda",
         "project_id": "enceladus",

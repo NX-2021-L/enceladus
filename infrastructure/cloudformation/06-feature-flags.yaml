@@ -72,7 +72,8 @@ Resources:
                 "enable_handoff_primitive":   { "type": "boolean" },
                 "enable_lesson_primitive":    { "type": "boolean" },
                 "enable_typed_relationships": { "type": "boolean" },
-                "enable_mcp_governance_prompt": { "type": "boolean" }
+                "enable_mcp_governance_prompt": { "type": "boolean" },
+                "enable_lifecycle_service_extraction": { "type": "boolean" }
               },
               "additionalProperties": false,
               "required": [
