@@ -239,6 +239,37 @@ def _infer_label_from_id(record_id: str) -> str:
     return ID_PREFIX_TO_LABEL.get(type_code, "")
 
 
+# ENC-TSK-C72 / ENC-ISS-191: candidate DynamoDB attribute names a task's parent
+# reference may be stored under. `parent` is the canonical name written by
+# tracker_mutation._handle_create_record (ENC-FTR-056 hierarchical sub-task
+# path) and tracker_mutation tracker.set (field='parent'); the alternative
+# names are tolerated as a defense-in-depth read-side compatibility shim for
+# any historically-mixed records imported from legacy paths so the CHILD_OF
+# projection cannot silently zero out again if a legacy writer slips in.
+TASK_PARENT_ATTRIBUTE_CANDIDATES: Tuple[str, ...] = (
+    "parent",
+    "parent_task_id",
+    "parent_id",
+)
+
+
+def _extract_task_parent_id(record: Dict[str, Any]) -> str:
+    """Return the bare parent task ID from a tracker record, or '' if none.
+
+    Reads the canonical `parent` attribute first; falls back to the
+    historically-mixed `parent_task_id` / `parent_id` aliases so legacy
+    records still project CHILD_OF. The first non-empty candidate wins.
+    """
+    for key in TASK_PARENT_ATTRIBUTE_CANDIDATES:
+        raw = record.get(key)
+        if raw is None:
+            continue
+        parent_id = _bare_id(str(raw).strip())
+        if parent_id:
+            return parent_id
+    return ""
+
+
 # Properties to copy from DynamoDB record to Neo4j node
 NODE_PROPERTIES = [
     "record_id", "project_id", "title", "status", "priority",
@@ -265,6 +296,14 @@ def _collect_placeholder_target_refs(record: Dict[str, Any]) -> Set[PlaceholderR
     """
     refs: Set[PlaceholderRef] = set()
     record_type = str(record.get("record_type") or "").strip()
+
+    if record_type == "task":
+        # ENC-TSK-C72: CHILD_OF emission MERGEs a placeholder parent Task so
+        # the edge lands across the projection race window. Register the
+        # placeholder ref so MODIFY/REMOVE prune cleans it up when the parent
+        # link is detached and no other edges keep the placeholder alive.
+        parent_id = _extract_task_parent_id(record)
+        _add_placeholder_ref(refs, "Task", parent_id)
 
     if record_type == "plan":
         for objective_id in record.get("objectives_set", []) or []:
@@ -438,15 +477,29 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             rid=record_id, pid=project_id,
         )
 
-    # CHILD_OF -> parent Task
-    parent = _bare_id(record.get("parent", ""))
-    if parent and record_type == "task":
-        tx.run(
-            "MATCH (child:Task), (parent:Task) "
-            "WHERE child.record_id = $child_id AND parent.record_id = $parent_id "
-            "MERGE (child)-[:CHILD_OF]->(parent)",
-            child_id=record_id, parent_id=parent,
-        )
+    # CHILD_OF -> parent Task (ENC-TSK-C72 / ENC-ISS-191)
+    # Read parent from the canonical `parent` attribute with read-side
+    # compatibility for legacy `parent_task_id` / `parent_id` aliases, and
+    # MERGE a label-correct placeholder parent Task before MERGEing the edge
+    # so CHILD_OF lands even when the parent has not yet been projected
+    # (mirrors the ENC-TSK-E01 / ENC-TSK-E06 placeholder pattern used for
+    # PLAN_CONTAINS / typed relationships). The prior Cartesian MATCH
+    # silently produced zero rows when the parent node was absent, which is
+    # the projection gap ENC-ISS-191 observed across all probed anchors.
+    if record_type == "task":
+        parent = _extract_task_parent_id(record)
+        if parent:
+            tx.run(
+                "MERGE (p:Task {record_id: $parent_id}) "
+                "ON CREATE SET p.is_placeholder = true",
+                parent_id=parent,
+            )
+            tx.run(
+                "MATCH (child:Task), (parent:Task) "
+                "WHERE child.record_id = $child_id AND parent.record_id = $parent_id "
+                "MERGE (child)-[:CHILD_OF]->(parent)",
+                child_id=record_id, parent_id=parent,
+            )
 
     # RELATED_TO from related_task_ids (single directed edge, not bidirectional)
     for related_id in record.get("related_task_ids", []) or []:
