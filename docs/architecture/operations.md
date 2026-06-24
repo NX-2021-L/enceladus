@@ -41,7 +41,7 @@ Each Lambda has `backend/lambda/{function_name}/deploy.sh` that:
 3. Updates Lambda function via AWS CLI
 4. Validates deployment
 
-**Critical:** Never build Lambda packages on macOS. Use `--platform manylinux2014_x86_64 --only-binary=:all:` for compiled dependencies.
+Lambda packages with compiled dependencies are built with `--platform manylinux2014_x86_64 --only-binary=:all:`; macOS-built binaries do not load on the Linux runtime. See [how to build Lambda packages for the Linux runtime](../how-to/build-lambda-packages-for-linux.md).
 
 ## [SECTION 9.3] Parity Audit
 
@@ -322,19 +322,4 @@ GitHub-primary model:
 3. Workflow calls `documents_patch` via deployment API to update the docstore mirror
 4. Docstore version stays in sync with the repo version
 
-## Future Automation (Recommended)
-Add to `.github/workflows/`:
-```yaml
-name: sync-architecture-doc
-on:
-  push:
-    branches: [main]
-    paths: ['docs/ARCHITECTURE.md']
-jobs:
-  sync:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Sync to docstore
-        run: python tools/sync_architecture_doc.py
-```
+This sync is implemented as `.github/workflows/sync-architecture-doc.yml`; see [repository operations](../reference/repository-operations.md).
