@@ -1863,12 +1863,53 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      # ENC-ISS-401: CloudWatch Logs (CreateLogGroup/CreateLogStream/PutLogEvents). The
+      # G95 codification below captured this role's INLINE policies from the live IAM dump
+      # but missed its ATTACHED managed policies (logs + DynamoDB + projects). On gamma the
+      # role is created fresh by this template, so those grants were absent and the Lambda
+      # failed every request with 500 'Database read failed' (and had no log group).
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
         # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
         # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
         # ENC-TSK-G43), codified here from the live IAM dump. Each statement is
         # proven to resolve identically to prod-live (EnvironmentSuffix='') and
         # gamma-live (EnvironmentSuffix='-gamma'). See tools/iam-audit/.
+        # ENC-ISS-401: the DynamoDB + projects grants below were ATTACHED managed
+        # policies on prod-live (devops-tracker-dynamodb-policy, projects-read-policy)
+        # which are scoped to PROD table ARNs — so they are codified inline here with
+        # EnvironmentSuffix instead, resolving to the correct per-env table on gamma too.
+        - PolicyName: tracker-dynamodb
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TrackerTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+        - PolicyName: projects-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ProjectsRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
         - PolicyName: eventbridge-put-events
           PolicyDocument:
             Version: '2012-10-17'
