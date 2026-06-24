@@ -54,7 +54,7 @@ MAX_DEPTH = 5
 MAX_RESULTS = 100
 QUERY_TIMEOUT_SECONDS = 10
 
-VALID_SEARCH_TYPES = {"traversal", "neighbors", "path", "keyword", "hybrid"}
+VALID_SEARCH_TYPES = {"traversal", "neighbors", "path", "keyword", "hybrid", "vector_read"}
 
 # ---------------------------------------------------------------------------
 # ENC-TSK-B92 Phase 1 hybrid retrieval constants
@@ -181,6 +181,19 @@ try:
     _PATHWAY_EDGE_DEADLINE_S = float(os.environ.get("PATHWAY_EDGE_DEADLINE_S", "2.0"))
 except (TypeError, ValueError):
     _PATHWAY_EDGE_DEADLINE_S = 2.0
+
+# ENC-TSK-H89 (ENC-FTR-082 AC-12): governed bulk vector-read path config. A
+# dedicated, strip-EXEMPT pagination over the n.embedding corpus for downstream
+# correlation analysis (ENC-TSK-H34 AC-1). Latency-bounded by its own wall-clock
+# deadline + server-side SKIP/LIMIT so a large page can never extend or perturb
+# the hybrid retrieval request path. The hybrid path keeps stripping embeddings
+# (_query_hybrid); ONLY this path returns the raw vector.
+try:
+    _VECTOR_READ_DEADLINE_S = float(os.environ.get("VECTOR_READ_DEADLINE_S", "10.0"))
+except (TypeError, ValueError):
+    _VECTOR_READ_DEADLINE_S = 10.0
+_VECTOR_READ_DEFAULT_LIMIT = 200
+_VECTOR_READ_MAX_LIMIT = 1000
 
 _s3 = None
 
@@ -1861,12 +1874,153 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
 _EMBEDDING_PROPERTY = "embedding"
 
 
+def _query_vector_read(driver, project_id: str, params: Dict) -> Dict:
+    """ENC-TSK-H89 / ENC-FTR-082 AC-12 — governed bulk vector-read over the
+    n.embedding corpus.
+
+    A dedicated, strip-EXEMPT, paginated read of node embeddings for downstream
+    correlation analysis (ENC-TSK-H34 AC-1). This is the ONLY graphsearch path
+    that returns the raw n.embedding vector; the hybrid retrieval path
+    (_query_hybrid) keeps stripping it (lambda_function.py:1785-1788). The read is
+    latency-bounded by a dedicated wall-clock deadline and server-side SKIP/LIMIT
+    pagination so a large page can never extend or perturb the hybrid request
+    path. Backward compatible: this handler is only reached for
+    search_type=vector_read, so the hybrid/other paths are unchanged.
+
+    Query parameters:
+      project_id    (required; validated by _handle_search)
+      offset        Pagination cursor; default 0.
+      limit         Page size; default 200, clamped to [1, 1000].
+      record_type   Optional label filter (task/issue/feature/plan/lesson/document).
+
+    Response contract:
+      {
+        "nodes":   [{record_id, record_type, embedding:[...float]}],
+        "edges":   [], "paths": [],
+        "pagination": {offset, limit, returned, next_offset|null, has_more},
+        "embedding_property": "embedding",
+        "embedding_dim": <int|null>,
+        "summary": "...",
+        "query_cypher": "vector_read/paginated",
+      }
+    """
+    # ---- Parse + clamp pagination -----------------------------------------
+    try:
+        offset = int(params.get("offset", 0))
+    except (TypeError, ValueError):
+        offset = 0
+    offset = max(0, offset)
+    try:
+        limit = int(params.get("limit", _VECTOR_READ_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = _VECTOR_READ_DEFAULT_LIMIT
+    limit = max(1, min(limit, _VECTOR_READ_MAX_LIMIT))
+
+    record_type_filter = params.get("record_type") or None
+
+    # Reuse the live-pool guard so a frozen container's half-open Bolt socket
+    # cannot stall this read (mirrors _query_hybrid).
+    driver = _ensure_live_driver(driver)
+    if driver is None:
+        return {"error": "neo4j driver unavailable after rebuild attempt"}
+
+    # Optional single-label scope; otherwise read across the embedded corpus.
+    label_clause = ""
+    if record_type_filter:
+        label = str(record_type_filter).capitalize()
+        if label not in LABEL_VECTOR_INDEXES:
+            valid = ", ".join(sorted(k.lower() for k in LABEL_VECTOR_INDEXES))
+            return {"error": f"record_type must be one of: {valid}"}
+        label_clause = f":{label}"
+
+    # Stable record_id ordering => deterministic SKIP/LIMIT pages across calls.
+    # Fetch limit+1 to detect has_more without a second round-trip.
+    cypher = (
+        f"MATCH (n{label_clause}) "
+        f"WHERE n.project_id = $project_id AND n.{_EMBEDDING_PROPERTY} IS NOT NULL "
+        f"RETURN n.record_id AS record_id, labels(n) AS labels, "
+        f"n.{_EMBEDDING_PROPERTY} AS embedding "
+        "ORDER BY n.record_id "
+        "SKIP $offset LIMIT $limit"
+    )
+
+    def _read():
+        rows: List[Dict[str, Any]] = []
+        with driver.session() as session:
+            result = session.run(
+                cypher,
+                project_id=project_id,
+                offset=offset,
+                limit=limit + 1,
+            )
+            for rec in result:
+                rid = rec.get("record_id")
+                if not rid:
+                    continue
+                labels = rec.get("labels") or []
+                embedding = rec.get("embedding")
+                rows.append({
+                    "record_id": rid,
+                    "record_type": labels[0].lower() if labels else "",
+                    _EMBEDDING_PROPERTY: list(embedding) if embedding is not None else None,
+                })
+        return rows
+
+    # Latency-bound the read on a worker thread; abandon on timeout so a slow
+    # page can never hang the handler (mirrors the hybrid graph-signal pattern).
+    _vex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        rows = _vex.submit(_read).result(timeout=_VECTOR_READ_DEADLINE_S)
+    except concurrent.futures.TimeoutError:
+        logger.warning(
+            "[WARNING] vector_read exceeded %.1fs deadline (offset=%s limit=%s) — reduce limit",
+            _VECTOR_READ_DEADLINE_S, offset, limit,
+        )
+        return {"error": f"vector_read exceeded {_VECTOR_READ_DEADLINE_S:.0f}s deadline; reduce limit"}
+    except Exception:
+        logger.exception("[ERROR] vector_read query failed (offset=%s limit=%s)", offset, limit)
+        return {"error": "vector_read query failed"}
+    finally:
+        _vex.shutdown(wait=False)
+
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    next_offset = offset + limit if has_more else None
+    embedding_dim = (
+        len(page[0][_EMBEDDING_PROPERTY])
+        if page and page[0].get(_EMBEDDING_PROPERTY) is not None
+        else None
+    )
+
+    return {
+        "nodes": page,
+        "edges": [],
+        "paths": [],
+        "pagination": {
+            "offset": offset,
+            "limit": limit,
+            "returned": len(page),
+            "next_offset": next_offset,
+            "has_more": has_more,
+        },
+        "embedding_property": _EMBEDDING_PROPERTY,
+        "embedding_dim": embedding_dim,
+        "summary": (
+            f"Vector-read: {len(page)} nodes "
+            f"(offset={offset}, limit={limit}, has_more={str(has_more).lower()}; "
+            f"dim={embedding_dim}; record_type={record_type_filter or 'all'})"
+        ),
+        "query_cypher": "vector_read/paginated",
+    }
+
+
 SEARCH_HANDLERS = {
     "traversal": _query_traversal,
     "neighbors": _query_neighbors,
     "path": _query_path,
     "keyword": _query_keyword,
     "hybrid": _query_hybrid,
+    "vector_read": _query_vector_read,
 }
 
 

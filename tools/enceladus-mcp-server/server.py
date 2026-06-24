@@ -7537,6 +7537,8 @@ if ENABLE_COMPONENT_PROPOSAL:
 
 # ENC-FTR-058 / ENC-TSK-A97 / ENC-TSK-C09: Plan action aliases in code-mode surface
 _SEARCH_ACTIONS["plan.objectives_status"] = {"tool": "plan_objectives_status"}
+# ENC-TSK-H89 / ENC-FTR-082 AC-12: governed bulk vector-read action
+_SEARCH_ACTIONS["graph_query.vector_read"] = {"tool": "graph_query_vector_read"}
 _EXECUTE_ACTIONS["plan.create"] = {"tool": "tracker_create", "requires_governance_hash": True}
 _EXECUTE_ACTIONS["plan.checkout"] = {"tool": "plan_checkout", "requires_governance_hash": True}
 _EXECUTE_ACTIONS["plan.advance"] = {"tool": "plan_advance", "requires_governance_hash": True}
@@ -8885,10 +8887,37 @@ async def _tracker_graphsearch(args: dict) -> list[TextContent]:
     for key in ("anchor_record_id", "top_n", "include_below_threshold"):
         if args.get(key) is not None:
             query_params[key] = args[key]
+    # ENC-TSK-H89 (ENC-FTR-082 AC-12): bulk vector-read pagination passthrough
+    # (search_type=vector_read). offset/limit reach the dedicated strip-exempt
+    # corpus read in graph_query_api; no effect on the other search types.
+    for key in ("offset", "limit"):
+        if args.get(key) is not None:
+            query_params[key] = args[key]
 
     resp = _graph_query_api_request(query=query_params)
     if resp.get("error"):
         return _result_text(resp)
+    return _result_text(resp)
+
+
+async def _graph_query_vector_read(args: dict) -> list[TextContent]:
+    """ENC-TSK-H89 / ENC-FTR-082 AC-12 — governed bulk vector-read over the
+    n.embedding corpus. Self-describing alias for the graph_query_api
+    search_type=vector_read path: returns paginated {record_id, record_type,
+    embedding} for downstream correlation analysis (ENC-TSK-H34 AC-1). The hybrid
+    retrieval path keeps stripping embeddings; ONLY this dedicated read returns
+    the raw vector."""
+    project_id = args.get("project_id")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+    query_params: Dict[str, Any] = {
+        "search_type": "vector_read",
+        "project_id": project_id,
+    }
+    for key in ("offset", "limit", "record_type"):
+        if args.get(key) is not None:
+            query_params[key] = args[key]
+    resp = _graph_query_api_request(query=query_params)
     return _result_text(resp)
 
 
@@ -10101,6 +10130,8 @@ _TOOL_HANDLERS = {
     "github_projects_list": _github_projects_list,
     # ENC-FTR-047: Graph search
     "tracker_graphsearch": _tracker_graphsearch,
+    # ENC-TSK-H89 / ENC-FTR-082 AC-12: governed bulk vector-read
+    "graph_query_vector_read": _graph_query_vector_read,
     # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
     "tracker_manifest": _tracker_manifest,
     "tracker_get_acs": _tracker_get_acs,
