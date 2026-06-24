@@ -761,7 +761,23 @@ def _hybrid_vector_ranks(
     Returns a list of {record_id, score, label, rank} dicts sorted by score
     desc. Each label contributes up to k_per_label candidates; duplicates
     (same record_id across labels) are kept by highest score.
+
+    ENC-TSK-I03 (ENC-FTR-082 AC-2 retry): when the correlation-aware encoding is
+    enabled (a valid h92.v1 transform W loads), HNSW recall still uses the RAW
+    query embedding, then every candidate is RE-SCORED symmetrically by
+    cosine(W·q, W·emb) — the de-correlating transform applied to BOTH sides — so a
+    near-duplicate's distinctive residual decides rank. Disabled (or transform
+    absent / dim-mismatch) => the HNSW cosine score is used unchanged, so the
+    Cypher and the ranking are byte-identical to the pre-encoding behavior.
     """
+    # Load the transform ONCE. When the encoding is off this returns (None, None)
+    # immediately, rerank stays False, and the hot path is byte-identical.
+    rerank_W, rerank_dim = _load_correlation_transform()
+    rerank = rerank_W is not None and rerank_dim == len(query_embedding)
+    wq = _transform_unit(query_embedding, rerank_W, rerank_dim) if rerank else None
+    if rerank and wq is None:
+        rerank = False  # degenerate transformed query — fall back to HNSW score
+
     # Scope to a single label when record_type is set.
     if record_type_filter:
         label = record_type_filter.capitalize()
@@ -769,6 +785,7 @@ def _hybrid_vector_ranks(
     else:
         labels_to_query = list(LABEL_VECTOR_INDEXES.keys())
 
+    emb_return = f", node.{_EMBEDDING_PROPERTY} AS embedding" if rerank else ""
     by_rid: Dict[str, Dict[str, Any]] = {}
     for label in labels_to_query:
         index_name = LABEL_VECTOR_INDEXES[label]
@@ -776,7 +793,7 @@ def _hybrid_vector_ranks(
             "CALL db.index.vector.queryNodes($index_name, $k, $query_embedding) "
             "YIELD node, score "
             "WHERE node.project_id = $project_id "
-            "RETURN node.record_id AS rid, score, labels(node) AS labels"
+            f"RETURN node.record_id AS rid, score, labels(node) AS labels{emb_return}"
         )
         try:
             with driver.session() as session:
@@ -792,6 +809,13 @@ def _hybrid_vector_ranks(
                     if not rid:
                         continue
                     score = float(rec.get("score") or 0.0)
+                    if rerank:
+                        # Symmetric re-score: cosine of the unit-normalized
+                        # W·q and W·emb. Falls back to the HNSW score if this
+                        # candidate's embedding is absent/degenerate.
+                        we = _transform_unit(rec.get("embedding"), rerank_W, rerank_dim)
+                        if we is not None:
+                            score = sum(a * b for a, b in zip(wq, we))
                     prev = by_rid.get(rid)
                     if prev is None or score > prev["score"]:
                         by_rid[rid] = {
@@ -1670,12 +1694,12 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     if query_text:
         query_embedding = _compute_query_embedding(query_text)
         if query_embedding is not None:
-            # ENC-TSK-H92 (ENC-FTR-082 AC-2): flag-gated correlation-aware encoding.
-            # Apply the offline-fit pseudoinverse-style de-correlating transform to
-            # the query embedding before the HNSW search so the vector signal favors
-            # the distinctive component of near-duplicate pairs (reduced Hebbian
-            # crosstalk). No-op when disabled => byte-identical hybrid retrieval.
-            query_embedding = _apply_correlation_encoding(query_embedding)
+            # ENC-TSK-I03 (ENC-FTR-082 AC-2 retry): the RAW query drives HNSW
+            # recall; the flag-gated correlation-aware encoding is applied
+            # SYMMETRICALLY as a candidate re-rank inside _hybrid_vector_ranks
+            # (cosine(W·q, W·emb)), not as a query-side pre-HNSW transform — the
+            # query-side variant (ENC-TSK-H92) measured net-negative (precision@1
+            # -0.9%) because it compared W·q against an un-transformed index.
             vector_ranks = _hybrid_vector_ranks(
                 driver,
                 project_id,
@@ -1927,28 +1951,25 @@ def _load_correlation_transform():
     return W, dim
 
 
-def _apply_correlation_encoding(embedding):
-    """ENC-TSK-H92 (ENC-FTR-082 AC-2): apply the de-correlating transform to an
-    embedding on the retrieval path. No-op — returns the input unchanged — when the
-    encoding is disabled, the transform is unavailable, or the dimension does not
-    match, guaranteeing byte-identical hybrid retrieval when off. Pure-Python
-    matrix-vector (W @ v) + L2 renormalization; no numpy in the Lambda runtime."""
-    if not _CORRELATION_ENCODING_ENABLED or embedding is None:
-        return embedding
-    W, dim = _load_correlation_transform()
-    if W is None or dim != len(embedding):
-        return embedding
-    transformed = [0.0] * dim
+def _transform_unit(vec, W, dim):
+    """ENC-TSK-I03 (ENC-FTR-082 AC-2 retry): pure-Python W·vec then L2-normalize to
+    a unit vector; returns None on a missing/degenerate input. Used by the
+    symmetric vector re-rank in _hybrid_vector_ranks for BOTH the query and each
+    candidate embedding, so cosine(W·q, W·emb) reduces to a dot product of the two
+    returned unit vectors. Assumes W is a loaded dim×dim matrix; no numpy."""
+    if vec is None or len(vec) != dim:
+        return None
+    out = [0.0] * dim
     for i in range(dim):
         row = W[i]
         acc = 0.0
         for j in range(dim):
-            acc += row[j] * embedding[j]
-        transformed[i] = acc
-    norm = sum(x * x for x in transformed) ** 0.5
+            acc += row[j] * vec[j]
+        out[i] = acc
+    norm = sum(x * x for x in out) ** 0.5
     if norm <= 0.0:
-        return embedding
-    return [x / norm for x in transformed]
+        return None
+    return [x / norm for x in out]
 
 
 def _query_vector_read(driver, project_id: str, params: Dict) -> Dict:
@@ -2189,6 +2210,13 @@ def _handle_search(event: Dict) -> Dict:
         "include_below_threshold",
         "edge_participation",
         "pathway",
+        # ENC-TSK-I03 / ENC-ISS-404: vector_read pagination + embedding metadata
+        # must survive the response envelope so --source gamma can paginate. They
+        # were dropped here, leaving has_more only inside the summary string and
+        # the gamma reader stuck on page 1 (200 of 2899 nodes).
+        "pagination",
+        "embedding_property",
+        "embedding_dim",
     ):
         if hybrid_key in result:
             response_body[hybrid_key] = result[hybrid_key]
