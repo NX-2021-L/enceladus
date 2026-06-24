@@ -195,6 +195,21 @@ except (TypeError, ValueError):
 _VECTOR_READ_DEFAULT_LIMIT = 200
 _VECTOR_READ_MAX_LIMIT = 1000
 
+# ENC-TSK-H92 (ENC-FTR-082 AC-2): flag-gated correlation-aware (pseudoinverse-
+# style) encoding. OFF by default => byte-identical hybrid retrieval. When
+# CORRELATION_ENCODING_ENABLED is truthy AND a transform artifact is configured,
+# the offline-fit de-correlating transform W (tools/fit_encoding_h92.py, fit from
+# the ENC-TSK-H91 high-correlation pairs) at CORRELATION_ENCODING_TRANSFORM_URI
+# (local path or s3://) is applied to the query embedding before the HNSW vector
+# search, suppressing the shared directions of near-duplicate pairs (reduced
+# Hebbian crosstalk). No numpy in-Lambda — a pure-Python matrix-vector product.
+_CORRELATION_ENCODING_ENABLED = (
+    os.environ.get("CORRELATION_ENCODING_ENABLED", "").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+_CORRELATION_ENCODING_TRANSFORM_URI = os.environ.get("CORRELATION_ENCODING_TRANSFORM_URI", "").strip()
+_correlation_transform_cache: Dict[str, Any] = {"loaded": False, "W": None, "dim": None}
+
 _s3 = None
 
 
@@ -1655,6 +1670,12 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     if query_text:
         query_embedding = _compute_query_embedding(query_text)
         if query_embedding is not None:
+            # ENC-TSK-H92 (ENC-FTR-082 AC-2): flag-gated correlation-aware encoding.
+            # Apply the offline-fit pseudoinverse-style de-correlating transform to
+            # the query embedding before the HNSW search so the vector signal favors
+            # the distinctive component of near-duplicate pairs (reduced Hebbian
+            # crosstalk). No-op when disabled => byte-identical hybrid retrieval.
+            query_embedding = _apply_correlation_encoding(query_embedding)
             vector_ranks = _hybrid_vector_ranks(
                 driver,
                 project_id,
@@ -1872,6 +1893,62 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
 # without forcing an import at module load time (deploy packages the helper at
 # the top level, so the import is deferred to _compute_query_embedding).
 _EMBEDDING_PROPERTY = "embedding"
+
+
+def _load_correlation_transform():
+    """ENC-TSK-H92: lazy-load the offline-fit de-correlating transform W (h92.v1
+    artifact). Returns (W, dim) or (None, None), cached after the first attempt.
+    Fully defensive — any failure disables the encoding (returns None) and is
+    logged, never raised into the request path."""
+    if not _CORRELATION_ENCODING_ENABLED or not _CORRELATION_ENCODING_TRANSFORM_URI:
+        return None, None
+    if _correlation_transform_cache["loaded"]:
+        return _correlation_transform_cache["W"], _correlation_transform_cache["dim"]
+    W = None
+    dim = None
+    try:
+        uri = _CORRELATION_ENCODING_TRANSFORM_URI
+        if uri.startswith("s3://"):
+            bucket, _, key = uri[5:].partition("/")
+            body = _get_s3().get_object(Bucket=bucket, Key=key)["Body"].read()
+            artifact = json.loads(body)
+        else:
+            with open(uri, "r", encoding="utf-8") as fh:
+                artifact = json.load(fh)
+        W = artifact.get("W")
+        dim = int(artifact.get("dim") or (len(W) if W else 0))
+        if not W or dim <= 0 or len(W) != dim:
+            logger.warning("[WARNING] correlation transform malformed; encoding disabled")
+            W, dim = None, None
+    except Exception:
+        logger.exception("[ERROR] correlation transform load failed; encoding disabled")
+        W, dim = None, None
+    _correlation_transform_cache.update({"loaded": True, "W": W, "dim": dim})
+    return W, dim
+
+
+def _apply_correlation_encoding(embedding):
+    """ENC-TSK-H92 (ENC-FTR-082 AC-2): apply the de-correlating transform to an
+    embedding on the retrieval path. No-op — returns the input unchanged — when the
+    encoding is disabled, the transform is unavailable, or the dimension does not
+    match, guaranteeing byte-identical hybrid retrieval when off. Pure-Python
+    matrix-vector (W @ v) + L2 renormalization; no numpy in the Lambda runtime."""
+    if not _CORRELATION_ENCODING_ENABLED or embedding is None:
+        return embedding
+    W, dim = _load_correlation_transform()
+    if W is None or dim != len(embedding):
+        return embedding
+    transformed = [0.0] * dim
+    for i in range(dim):
+        row = W[i]
+        acc = 0.0
+        for j in range(dim):
+            acc += row[j] * embedding[j]
+        transformed[i] = acc
+    norm = sum(x * x for x in transformed) ** 0.5
+    if norm <= 0.0:
+        return embedding
+    return [x / norm for x in transformed]
 
 
 def _query_vector_read(driver, project_id: str, params: Dict) -> Dict:
