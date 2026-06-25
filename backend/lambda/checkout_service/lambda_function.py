@@ -1544,6 +1544,11 @@ STATUS_RANK: dict = {
     "deploy-init": 6,
     "deploy-success": 7,
     "closed": 8,
+    # ENC-TSK-I07 (Dedup P3): `superseded` is an alternate terminal state (soft
+    # duplicate collapse, DOC-DF651F07D5C2 §7). Same rank as `closed` so a
+    # superseded child satisfies any subtask gate and a superseded task is
+    # treated as furthest-along/terminal (non-advanceable).
+    "superseded": 8,
 }
 
 #: ENC-ISS-106: Minimum status rank at which the subtask gate activates.
