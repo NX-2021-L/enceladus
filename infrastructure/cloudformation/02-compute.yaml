@@ -3599,6 +3599,17 @@ Resources:
           ENCELADUS_COGNITO_DOMAIN: https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com
           MCP_AUDIT_CALLER_IDENTITY: devops-coordination-api-gamma
           MCP_SERVER_LOG_GROUP: /enceladus/mcp/server
+          # ENC-ISS-410 / ENC-TSK-I14: gamma backend bases. The MCP front-end (server.py)
+          # proxies the coordination, tracker, and graph planes to these hosts; if unset it
+          # falls back to hardcoded prod defaults (https://jreese.net/... and the prod
+          # graphsearch APIGW), which silently routes the 'gamma' connector's tracker+graph
+          # planes to the PROD corpus (the ENC-ISS-410 misroute). Round-1/round-2 set these
+          # live on enceladus-mcp-streamable-gamma; codified here so they survive a stack
+          # deploy. All three resolve to the gamma gateway (enceladus-gamma.jreese.net) and
+          # are values verified against the live function on 2026-06-25.
+          ENCELADUS_COORDINATION_API_URL: https://enceladus-gamma.jreese.net/api/v1
+          ENCELADUS_TRACKER_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker
+          ENCELADUS_GRAPH_QUERY_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch
           # ENC-TSK-F63 AC-1 / ENC-ISS-313 H02 audit: flags are migrating to AppConfig, but the
           # AppConfig application/environment are not yet provisioned on this stack (IDs empty),
           # so these ENABLE_* remain as the appconfig_flags.flag() env_fallback to keep gamma's
