@@ -472,6 +472,22 @@ def _validate_pillar_scores(raw_pillar_scores, record_type="lesson"):
 EVENT_BUS = os.environ.get("EVENT_BUS", "default")
 EVENT_SOURCE = "enceladus.tracker"
 EVENT_DETAIL_TYPE_REOPENED = "record.status.reopened"
+# ENC-FTR-111 / ENC-TSK-H83: Artifact-Genesis telemetry for an auto_walk_opt_out latch
+# (feeds ENC-TSK-B66 / the T5 ARC_WALK telemetry consumer).
+EVENT_DETAIL_TYPE_OPT_OUT_LATCHED = "record.auto_walk_opt_out.latched"
+
+# ENC-FTR-111 / ENC-TSK-H83 — Universal Arc-Walker circuit breaker.
+# Reserved write_source identity the (future, FTR-111 Phase 1 core / T4) arc-walker writes under.
+# The walker may observe a latched circuit breaker, but is STRUCTURALLY forbidden from CLEARING it.
+ARC_WALKER_ACTOR = "system:arc-walker"
+
+# Task lifecycle ordinal ranks — mirror of lifecycle_service.STATUS_RANK / checkout_service.
+# Used to classify a human task transition as non-forward (regression). 'coding-updates' is the
+# deploy-success re-entry case and has no forward rank; it is handled explicitly.
+_TASK_STATUS_RANK: Dict[str, int] = {
+    "open": 0, "in-progress": 1, "coding-complete": 2, "committed": 3, "pr": 4,
+    "merged-main": 5, "deploy-init": 6, "deploy-success": 7, "closed": 8,
+}
 
 # Type segment mapping for SK construction
 _TYPE_SEG_TO_SK_PREFIX = {"task": "task", "issue": "issue", "feature": "feature", "lesson": "lesson", "plan": "plan"}
@@ -1437,6 +1453,83 @@ def _emit_reopen_event(project_id, record_type, record_id, previous_status, new_
 
 
 # ---------------------------------------------------------------------------
+# ENC-FTR-111 / ENC-TSK-H83 — Universal Arc-Walker circuit breaker (auto_walk_opt_out)
+# ---------------------------------------------------------------------------
+def _coerce_bool(val: Any) -> bool:
+    """Coerce a JSON/string/numeric/bool input to a real Python bool (for DynamoDB BOOL storage).
+    MCP/JSON callers may send the string 'false', which is truthy if stored verbatim."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    return str(val).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _is_human_request(claims: Optional[Dict]) -> bool:
+    """A human (Cognito) request, as opposed to an internal-key / agent request. ENC-TSK-H83:
+    the auto_walk_opt_out latch fires only on human-initiated non-forward transitions."""
+    return bool(claims) and claims.get("auth_mode") != "internal-key"
+
+
+def _human_actor(claims: Optional[Dict]) -> str:
+    """Best-effort human identity for audit attribution."""
+    if not claims:
+        return "unknown_user"
+    return claims.get("cognito:username") or claims.get("sub") or "unknown_user"
+
+
+def _is_task_non_forward(current_status: str, target_status: str) -> Tuple[bool, str]:
+    """ENC-TSK-H83: classify a task status change as non-forward. Returns (is_non_forward, reason).
+    A regression is a backward move by ordinal rank; 'coding-updates' is the deploy-success
+    re-entry case (it has no forward rank). Same-status and forward moves return (False, '')."""
+    cur = (current_status or "").strip().lower()
+    tgt = (target_status or "").strip().lower()
+    if not tgt or tgt == cur:
+        return False, ""
+    if tgt == "coding-updates":
+        return True, "coding-updates re-entry"
+    cur_rank = _TASK_STATUS_RANK.get(cur)
+    tgt_rank = _TASK_STATUS_RANK.get(tgt)
+    if cur_rank is not None and tgt_rank is not None and tgt_rank < cur_rank:
+        return True, "regression"
+    return False, ""
+
+
+def _opt_out_latch_history_entry(now: str, latched_by: str, from_status: str,
+                                 to_status: str, reason: str) -> Dict:
+    """Build the Artifact-Genesis history entry recorded on an auto_walk_opt_out latch (AC-2/AC-4).
+    No silent mutations: every latch is accompanied by this governed audit entry."""
+    msg = (
+        f"[ARC-WALKER][OPT-OUT-LATCH] auto_walk_opt_out latched true: human {latched_by} "
+        f"non-forward transition {from_status or '?'} -> {to_status} ({reason}). The Universal "
+        f"Arc-Walker (ENC-FTR-111) will not auto-advance this record until the latch is cleared."
+    )
+    return {"M": {
+        "timestamp": _ser_s(now), "status": _ser_s("worklog"),
+        "description": _ser_s(msg),
+    }}
+
+
+def _emit_opt_out_latch_event(project_id: str, record_type: str, record_id: str,
+                              from_status: str, to_status: str, reason: str,
+                              latched_by: str) -> None:
+    """Emit the Artifact-Genesis telemetry event for an auto_walk_opt_out latch (best-effort)."""
+    detail = {
+        "project_id": project_id, "record_type": record_type, "record_id": record_id,
+        "event": "auto_walk_opt_out_latched", "advanced_by": ARC_WALKER_ACTOR,
+        "latched_by": latched_by, "trigger": reason,
+        "from_status": from_status, "to_status": to_status, "latched_at": _now_z(),
+    }
+    try:
+        _get_events().put_events(Entries=[{
+            "Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE_OPT_OUT_LATCHED,
+            "Detail": json.dumps(detail), "EventBusName": EVENT_BUS,
+        }])
+    except Exception as exc:
+        logger.error("opt_out latch event emit failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
 
@@ -1964,6 +2057,11 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
             "description": _ser_s(f"Created via tracker API{note_suffix}: {title}"),
         }}]},
     }
+    # ENC-FTR-111 / ENC-TSK-H83: the auto_walk_opt_out circuit breaker exists on
+    # task/issue/feature/plan and defaults false. An explicit create-time value
+    # (MCP denylist passthrough) is honored and coerced to a real BOOL.
+    if record_type in ("task", "issue", "feature", "plan"):
+        item["auto_walk_opt_out"] = {"BOOL": _coerce_bool(body.get("auto_walk_opt_out", False))}
     if coordination_request_id:
         item["coordination_request_id"] = _ser_s(coordination_request_id)
     if description:
@@ -2829,6 +2927,16 @@ def _apply_user_initiated_advance(
     }}
     evidence_json = json.dumps(enriched_evidence, separators=(",", ":"))
 
+    # ENC-FTR-111 / ENC-TSK-H83: a human non-forward transition (regression or coding-updates
+    # re-entry) auto-latches the auto_walk_opt_out circuit breaker and records an Artifact-Genesis
+    # audit entry. This is the human path for tasks; the arc-walker can never clear the result.
+    cur_status_nf = (item_data.get("status") or "").strip().lower()
+    latch_nf, latch_reason = _is_task_non_forward(cur_status_nf, new_lower)
+    hentry_list = [history_entry]
+    if latch_nf:
+        hentry_list.append(_opt_out_latch_history_entry(
+            now, cognito_user, cur_status_nf, new_lower, latch_reason))
+
     # ENC-TSK-F41 / DOC-546B896390EA §5: even on the Cognito user-initiated
     # human-override path, closed_count must be incremented when the target
     # status is 'closed'. Atomic with the status SET so the FTR-076 v2 DESIGNS
@@ -2839,23 +2947,31 @@ def _apply_user_initiated_advance(
         "sync_version = if_not_exists(sync_version, :zero) + :one, "
         "history = list_append(if_not_exists(history, :empty), :hentry)"
     )
+    if latch_nf:
+        ui_update_expr += ", auto_walk_opt_out = :optout"
     if new_lower == "closed":
         ui_update_expr += " ADD closed_count :one"
+    ui_attr_values = {
+        ":val": _ser_value(new_lower), ":now": _ser_s(now),
+        ":note": _ser_s(note_text), ":te": _ser_s(evidence_json),
+        ":zero": {"N": "0"}, ":one": {"N": "1"},
+        ":hentry": {"L": hentry_list}, ":empty": {"L": []},
+    }
+    if latch_nf:
+        ui_attr_values[":optout"] = {"BOOL": True}
     try:
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
             UpdateExpression=ui_update_expr,
             ExpressionAttributeNames={"#fld": "status"},
-            ExpressionAttributeValues={
-                ":val": _ser_value(new_lower), ":now": _ser_s(now),
-                ":note": _ser_s(note_text), ":te": _ser_s(evidence_json),
-                ":zero": {"N": "0"}, ":one": {"N": "1"},
-                ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
-            },
+            ExpressionAttributeValues=ui_attr_values,
         )
     except Exception as exc:
         logger.error("user_initiated status update failed: %s", exc)
         return _error(500, "Database write failed.")
+    if latch_nf:
+        _emit_opt_out_latch_event(
+            project_id, record_type, record_id, cur_status_nf, new_lower, latch_reason, cognito_user)
 
     # Step 3: Restore or release checkout (borrow-and-restore)
     if new_lower == "closed":
@@ -2934,6 +3050,10 @@ def _handle_update_field(
 
     field = body.get("field", "").strip()
     value = body.get("value", "")
+    # ENC-FTR-111 / ENC-TSK-H83: holds a latch-context dict when a human-initiated non-forward
+    # transition of an issue/feature/plan must auto-latch auto_walk_opt_out (applied at the
+    # generic write below). Task human reverts are latched in _apply_user_initiated_advance.
+    _optout_latch: Optional[Dict[str, str]] = None
     if not field:
         return _tracker_field_validation_error(
             "Field 'field' is required (or use 'action' for PWA mutations).",
@@ -3117,6 +3237,25 @@ def _handle_update_field(
                 expected_format="array of tracker record IDs",
             )
         value = normalized_ids
+
+    # ENC-FTR-111 / ENC-TSK-H83: auto_walk_opt_out is a real boolean (coerce string inputs), and
+    # the Universal Arc-Walker can NEVER clear the circuit breaker. A clear (set false) originating
+    # from the reserved arc-walker write_source is rejected; humans/agents may set or clear freely.
+    if field == "auto_walk_opt_out":
+        value = _coerce_bool(value)
+        if value is False:
+            _ws_guard = _normalize_write_source(body)
+            _actor = str(_ws_guard.get("provider", "")).strip().lower()
+            _chan = str(_ws_guard.get("channel", "")).strip().lower()
+            if ARC_WALKER_ACTOR in (_actor, _chan):
+                return _error(
+                    403,
+                    "The Universal Arc-Walker (system:arc-walker) cannot clear auto_walk_opt_out. "
+                    "The circuit breaker is cleared only by an explicit human or agent "
+                    "tracker.set(field='auto_walk_opt_out', value=false). (ENC-FTR-111 AC-2 / ENC-TSK-H83)",
+                    code="ARC_WALKER_OPT_OUT_IMMUTABLE",
+                    field=field,
+                )
 
     ddb = _get_ddb()
     key = _build_key(project_id, record_type, record_id)
@@ -3403,6 +3542,16 @@ def _handle_update_field(
                     allowed_values=sorted(valid_next),
                     governed_rules=transition_governed_rules,
                 )
+
+        # --- ENC-FTR-111 / ENC-TSK-H83: auto_walk_opt_out latch on human non-forward transition ---
+        # Issue/feature/plan human-initiated reverts latch the circuit breaker here (the generic
+        # write below applies it + emits the Artifact-Genesis record). Task human reverts go through
+        # _apply_user_initiated_advance; agent/MCP transitions (internal-key) never latch.
+        if record_type in ("issue", "feature", "plan") and is_revert and _is_human_request(claims):
+            _optout_latch = {
+                "from": current_status, "to": new_lower,
+                "reason": "regression", "by": _human_actor(claims),
+            }
 
         # --- ENC-ISS-155: Plan completion gate ---
         # When setting a plan to 'complete', validate all objectives_set entries
@@ -3815,6 +3964,16 @@ def _handle_update_field(
     if extra_sets:
         update_expr += ", " + ", ".join(extra_sets)
 
+    # ENC-FTR-111 / ENC-TSK-H83: apply the auto_walk_opt_out latch (set true + Artifact-Genesis
+    # history entry) atomically with the human non-forward transition of an issue/feature/plan.
+    _hentry_list = [history_entry]
+    if _optout_latch is not None:
+        update_expr += ", auto_walk_opt_out = :optout"
+        _hentry_list.append(_opt_out_latch_history_entry(
+            now, _optout_latch["by"], _optout_latch["from"],
+            _optout_latch["to"], _optout_latch["reason"],
+        ))
+
     # ENC-TSK-F41 / DOC-546B896390EA §5: atomically increment closed_count on
     # every task->closed transition. The ADD action is appended to the same
     # UpdateExpression as the status SET, so the counter and the state transition
@@ -3828,8 +3987,10 @@ def _handle_update_field(
         ":val": _ser_value(value), ":now": _ser_s(now),
         ":note": _ser_s(note_text), ":wsrc": _build_write_source(body),
         ":zero": {"N": "0"}, ":one": {"N": "1"},
-        ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
+        ":hentry": {"L": _hentry_list}, ":empty": {"L": []},
     }
+    if _optout_latch is not None:
+        attr_values[":optout"] = {"BOOL": True}
     attr_values.update(extra_vals)
 
     try:
@@ -3842,6 +4003,13 @@ def _handle_update_field(
     except Exception as exc:
         logger.error("update_item failed: %s", exc)
         return _error(500, "Database write failed.")
+
+    # ENC-FTR-111 / ENC-TSK-H83: emit the Artifact-Genesis telemetry event after the latch commits.
+    if _optout_latch is not None:
+        _emit_opt_out_latch_event(
+            project_id, record_type, record_id,
+            _optout_latch["from"], _optout_latch["to"], _optout_latch["reason"], _optout_latch["by"],
+        )
 
     result: Dict[str, Any] = {
         "success": True, "record_id": record_id,
