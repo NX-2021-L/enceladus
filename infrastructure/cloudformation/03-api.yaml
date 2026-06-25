@@ -348,6 +348,156 @@ Resources:
       Target: !Sub integrations/${TrackerMutationIntegration}
 
   # ---------------------------------------------------------------------------
+  # Gamma tracker plane — full mutation + read route set (ENC-ISS-410 / ENC-TSK-I14)
+  #
+  # The 'enceladus gamma' MCP front-end (enceladus-mcp-streamable-gamma) proxies
+  # every tracker read+write to ENCELADUS_TRACKER_API_BASE =
+  # https://enceladus-gamma.jreese.net/api/v1/tracker. ENC-ISS-410 round-1 (write)
+  # and round-2 (read) added the full tracker mutation+read route set on
+  # devops-tracker-api-gamma (hi0dzmvqrc), wired to the devops-tracker-mutation-api
+  # **:live** alias (so the gamma supersession / I07 generalized domain is reachable
+  # instead of the prod pre-I07 backend). Those were live console edits and drift on
+  # the next gamma stack deploy — codified here so they survive.
+  #
+  # Condition: IsGamma keeps prod (EnvironmentSuffix="") untouched: prod's equivalent
+  # tracker-mutation routes are provisioned out-of-band by the per-Lambda deploy
+  # scripts (same pattern as the Changelog / GitHub / Checkout-task notes below), so
+  # adding them unconditionally would collide on a prod deploy. DeletionPolicy: Retain
+  # protects the live routes during IMPORT adoption into enceladus-api-gamma.
+  # The two PATCH routes above already target devops-tracker-mutation-api-gamma (bare,
+  # bssof7u) via TrackerMutationIntegration and match the live gamma gateway — left
+  # unchanged.
+  # ---------------------------------------------------------------------------
+
+  TrackerMutationGammaLiveIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:live"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # Typed relationship edges (incl. ENC-TSK-I07 superseded-by) — POST / GET / DELETE
+  RouteTrackerRelationshipCreateGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  RouteTrackerRelationshipGetGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  RouteTrackerRelationshipDeleteGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Create record (POST {recordType})
+  RouteTrackerCreateRecordGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Worklog append
+  RouteTrackerLogGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/log
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Acceptance evidence
+  RouteTrackerAcceptanceEvidenceGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Checkout — POST (acquire) / DELETE (release)
+  RouteTrackerCheckoutGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  RouteTrackerCheckoutReleaseGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # Checkout extend
+  RouteTrackerExtendGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # GET single record (also serves validation_rules + plan-get on the same Lambda)
+  RouteTrackerGetRecordGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # GET list by project
+  RouteTrackerListGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # GET pending PWA updates
+  RouteTrackerPendingUpdatesGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/pending-updates
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
+  # ---------------------------------------------------------------------------
   # Routes — Document API
   # ---------------------------------------------------------------------------
 
@@ -623,6 +773,58 @@ Resources:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/checkout/{project}/plan/{planId}/status
       Target: !Sub integrations/${CheckoutServiceIntegration}
+
+  # ---------------------------------------------------------------------------
+  # Graph Query API → graphsearch ingress (ENC-TSK-H57 / ENC-PLN-050)
+  # Added gamma-first by ENC-TSK-H64 and live on enceladus-api-gamma; reconciled
+  # into the canonical template here (ENC-TSK-I14) so a gamma stack deploy no longer
+  # DELETES the gamma graph plane. Condition: IsGamma — prod (EnvironmentSuffix="")
+  # serves graphsearch out-of-band; gating keeps prod untouched. EnvironmentSuffix
+  # resolves the integration to devops-graph-query-api-gamma (the gamma AuraDB).
+  # Logical IDs match the deployed enceladus-api-gamma stack (in-place update).
+  # ---------------------------------------------------------------------------
+  GraphQueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  GraphQueryApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/api/v1/tracker/graphsearch*"
+
+  RouteGraphSearch:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/graphsearch
+      Target: !Sub integrations/${GraphQueryIntegration}
+
+  RouteGraphSearchHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/graphsearch/health
+      Target: !Sub integrations/${GraphQueryIntegration}
+
+  RouteGraphSearchOptions:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/graphsearch
+      Target: !Sub integrations/${GraphQueryIntegration}
 
 Outputs:
   ApiEndpoint:
