@@ -243,6 +243,9 @@ def _infer_label_from_id(record_id: str) -> str:
 NODE_PROPERTIES = [
     "record_id", "project_id", "title", "status", "priority",
     "category", "updated_at", "created_at",
+    # ENC-TSK-I07 (Dedup P3): canonical pointer on a superseded node, so
+    # retrieval/triage can exclude superseded records and surface the survivor.
+    "superseded_by",
 ]
 
 
@@ -414,10 +417,14 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
     if not label or not record_id:
         return
 
-    # Remove all outgoing relationships so we can re-create from current state
+    # Remove all outgoing relationships so we can re-create from current state.
+    # ENC-TSK-I07 (Dedup P3): preserve the SUPERSEDED_BY tombstone so a superseded
+    # node is never transiently orphaned from its canonical between reconciles.
+    # The tombstone is removed only when its `superseded-by` rel-record is archived
+    # (un-supersession) via _delete_relationship_edge.
     tx.run(
         f"MATCH (n:{label}) WHERE n.record_id = $rid "
-        "OPTIONAL MATCH (n)-[r]->() DELETE r",
+        "OPTIONAL MATCH (n)-[r]->() WHERE type(r) <> 'SUPERSEDED_BY' DELETE r",
         rid=record_id,
     )
     # Also remove incoming RELATED_TO since we'll re-create from current state
@@ -438,6 +445,15 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             rid=record_id, pid=project_id,
         )
 
+    # ENC-TSK-I07 (Dedup P3): a superseded record is retired from the active
+    # graph — its field-derived edges are NOT re-projected. Only BELONGS_TO
+    # (audit membership) and the preserved SUPERSEDED_BY tombstone remain.
+    # Inbound field edges from other records are redirected onto the canonical
+    # when those records reconcile (the coalesce redirect below). Reversible:
+    # un-supersession clears status, and B's next reconcile re-creates its edges.
+    if record.get("status") == "superseded":
+        return
+
     # CHILD_OF -> parent Task
     parent = _bare_id(record.get("parent", ""))
     if parent and record_type == "task":
@@ -448,38 +464,51 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
             child_id=record_id, parent_id=parent,
         )
 
-    # RELATED_TO from related_task_ids (single directed edge, not bidirectional)
+    # RELATED_TO from related_task_ids (single directed edge, not bidirectional).
+    # ENC-TSK-I07 (Dedup P3): redirect onto the canonical when the target is
+    # superseded (coalesce over the in-graph SUPERSEDED_BY tombstone), so inbound
+    # field edges migrate to the survivor without mutating this record's stored
+    # ids — idempotent and reversible (target un-supersede restores the direct
+    # edge on next reconcile). The tgt<>a guard drops degenerate self-loops.
     for related_id in record.get("related_task_ids", []) or []:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
         tx.run(
-            f"MATCH (a:{label}), (b:Task) "
-            "WHERE a.record_id = $aid AND b.record_id = $bid "
-            "MERGE (a)-[:RELATED_TO]->(b)",
+            f"MATCH (a:{label}) WHERE a.record_id = $aid "
+            "MATCH (b:Task) WHERE b.record_id = $bid "
+            "OPTIONAL MATCH (b)-[:SUPERSEDED_BY]->(canon) "
+            "WITH a, coalesce(canon, b) AS tgt WHERE tgt.record_id <> a.record_id "
+            "MERGE (a)-[:RELATED_TO]->(tgt)",
             aid=record_id, bid=related_id,
         )
 
-    # RELATED_TO from related_issue_ids + ADDRESSES (Task->Issue)
+    # RELATED_TO from related_issue_ids + ADDRESSES (Task->Issue) — with the same
+    # ENC-TSK-I07 canonical redirect on superseded targets.
     for related_id in record.get("related_issue_ids", []) or []:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:
             continue
         tx.run(
-            f"MATCH (a:{label}), (b:Issue) "
-            "WHERE a.record_id = $aid AND b.record_id = $bid "
-            "MERGE (a)-[:RELATED_TO]->(b)",
+            f"MATCH (a:{label}) WHERE a.record_id = $aid "
+            "MATCH (b:Issue) WHERE b.record_id = $bid "
+            "OPTIONAL MATCH (b)-[:SUPERSEDED_BY]->(canon) "
+            "WITH a, coalesce(canon, b) AS tgt WHERE tgt.record_id <> a.record_id "
+            "MERGE (a)-[:RELATED_TO]->(tgt)",
             aid=record_id, bid=related_id,
         )
         if record_type == "task":
             tx.run(
-                "MATCH (t:Task), (i:Issue) "
-                "WHERE t.record_id = $tid AND i.record_id = $iid "
-                "MERGE (t)-[:ADDRESSES]->(i)",
+                "MATCH (t:Task) WHERE t.record_id = $tid "
+                "MATCH (i:Issue) WHERE i.record_id = $iid "
+                "OPTIONAL MATCH (i)-[:SUPERSEDED_BY]->(canon) "
+                "WITH t, coalesce(canon, i) AS tgt WHERE tgt.record_id <> t.record_id "
+                "MERGE (t)-[:ADDRESSES]->(tgt)",
                 tid=record_id, iid=related_id,
             )
 
     # RELATED_TO from related_feature_ids + IMPLEMENTS (Task->Feature)
+    # (features are not supersedable, so no canonical redirect is needed here)
     for related_id in record.get("related_feature_ids", []) or []:
         related_id = _bare_id(related_id) if related_id else ""
         if not related_id:

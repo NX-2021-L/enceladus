@@ -748,6 +748,10 @@ def _hybrid_vector_ranks(
             "CALL db.index.vector.queryNodes($index_name, $k, $query_embedding) "
             "YIELD node, score "
             "WHERE node.project_id = $project_id "
+            # ENC-TSK-I07 (Dedup P3): exclude superseded duplicates from the vector
+            # recall signal so a twin no longer competes with its canonical — the
+            # central precision@1 fix (DOC-DF651F07D5C2 §3).
+            "AND node.superseded_by IS NULL "
             "RETURN node.record_id AS rid, score, labels(node) AS labels"
         )
         try:
@@ -1363,6 +1367,13 @@ def _fetch_nodes_by_record_ids(
         return {}
     cypher = (
         "MATCH (n) WHERE n.project_id = $project_id "
+        # ENC-TSK-I07 (Dedup P3): retire superseded records from active retrieval.
+        # A superseded duplicate must not surface alongside (or compete for
+        # precision@1 with) its canonical. `superseded_by` is set only on
+        # superseded nodes (graph_sync NODE_PROPERTIES); audit access is via a
+        # direct record fetch, not retrieval. Reversible: un-supersession clears
+        # the property and the node becomes retrieval-eligible again.
+        "AND n.superseded_by IS NULL "
         "AND n.record_id IN $rids RETURN n"
     )
     out: Dict[str, Dict[str, Any]] = {}

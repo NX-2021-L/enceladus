@@ -4431,6 +4431,15 @@ def _handle_acceptance_evidence(project_id: str, record_type: str, record_id: st
     if item_data.get("record_type") not in ("feature", "task"):
         return _error(400, f"acceptance-evidence only applies to features and tasks. This is a {item_data.get('record_type')}.")
 
+    # ENC-TSK-I07 (Dedup P3): evidence freeze. A superseded record's accepted
+    # acceptance-evidence is preserved-on-B and immutable (DOC-DF651F07D5C2 §7).
+    # This also enforces the evidence-orphan invariant: B cannot gain evidence
+    # after being collapsed into the canonical. Un-supersede first to edit again.
+    if item_data.get("status") == "superseded":
+        return _error(409,
+            f"Record '{record_id}' is superseded (evidence frozen). "
+            "Acceptance evidence is immutable on a superseded record; un-supersede first.")
+
     ac_list = item_data.get("acceptance_criteria", [])
     if not ac_list:
         return _error(400, f"Record '{record_id}' has no acceptance_criteria.")
@@ -4661,8 +4670,13 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     # teaches: any record type -> lesson (inverse).
     "learned-from":       {"source": frozenset({"lesson"}), "target": None},
     "teaches":            {"source": None, "target": frozenset({"lesson"})},
-    "supersedes":         {"source": frozenset({"lesson"}), "target": frozenset({"lesson"})},
-    "superseded-by":      {"source": frozenset({"lesson"}), "target": frozenset({"lesson"})},
+    # ENC-TSK-I07 (Dedup P3): generalized from lesson-only to {lesson, issue, task}
+    # so the supersession primitive (DOC-DF651F07D5C2 §7) covers duplicate
+    # issue/issue and task/task collapse. Same-type + same-project is enforced by
+    # the supersede operation guard (_supersede_precheck), not the domain/range
+    # layer, because the OWL constraint only bounds endpoint record types.
+    "supersedes":         {"source": frozenset({"lesson", "issue", "task"}), "target": frozenset({"lesson", "issue", "task"})},
+    "superseded-by":      {"source": frozenset({"lesson", "issue", "task"}), "target": frozenset({"lesson", "issue", "task"})},
     # ENC-FTR-061 / ENC-TSK-C36: Handoff typed relationships. Targets are document IDs
     # in practice; documents are not a tracker record type so target is unconstrained.
     "hands-off":          {"source": None, "target": None},
@@ -4816,6 +4830,20 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
     if err:
         return _error(409, err)
 
+    # ENC-TSK-I07 (Dedup P3): supersession rides on the `superseded-by` edge.
+    # Guard BEFORE creating the tombstone so we never leave a half-applied state
+    # (idempotent re-supersede into the same canonical short-circuits to 200).
+    _supersede_ctx = None
+    if (relationship_type == "superseded-by"
+            and source_type in _SUPERSEDABLE_TYPES
+            and target_type in _SUPERSEDABLE_TYPES):
+        _pre = _supersede_precheck(project_id, source_id, target_id)
+        if "error" in _pre:
+            return _error(_pre["status"], _pre["error"])
+        if _pre.get("idempotent"):
+            return _response(200, _pre["result"])
+        _supersede_ctx = _pre
+
     inverse_type = _INVERSE_PAIRS[relationship_type]
     now = dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -4876,7 +4904,7 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
             return _error(500, f"Transaction failed: {exc}")
         raise
 
-    return _response(201, {
+    _resp_body = {
         "success": True,
         "forward_edge": forward_sk,
         "inverse_edge": inverse_sk,
@@ -4888,7 +4916,13 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
         "reason": reason,
         "provenance": provenance,
         "created_at": now,
-    })
+    }
+    # ENC-TSK-I07: the `superseded-by` tombstone now exists — apply side-effects
+    # (idempotent edge migration onto the canonical + transition B to `superseded`).
+    if _supersede_ctx is not None:
+        _resp_body["supersession"] = _apply_supersession(
+            project_id, source_id, target_id, _supersede_ctx, body)
+    return _response(201, _resp_body)
 
 
 def _handle_archive_relationship(project_id: str, params: Dict) -> Dict:
@@ -4952,12 +4986,21 @@ def _handle_archive_relationship(project_id: str, params: Dict) -> Dict:
                           f"from {source_id} to {target_id}.")
         raise
 
-    return _response(200, {
+    _arch_body = {
         "success": True,
         "archived_forward": forward_sk,
         "archived_inverse": inverse_sk,
         "archived_at": now,
-    })
+    }
+    # ENC-TSK-I07: archiving a `superseded-by` edge un-supersedes the source —
+    # restores its pre-supersession status, retrieval/triage eligibility, and
+    # migrated edges (§7 reversibility).
+    if (relationship_type == "superseded-by"
+            and _record_type_from_id(source_id) in _SUPERSEDABLE_TYPES):
+        _rev = _revert_supersession(project_id, source_id, {})
+        if _rev:
+            _arch_body["unsupersession"] = _rev
+    return _response(200, _arch_body)
 
 
 def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
@@ -5052,6 +5095,262 @@ def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
         ).decode()
 
     return _response(200, response_body)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-I07 (Dedup P3): Supersession primitive — DOC-DF651F07D5C2 §7
+# ---------------------------------------------------------------------------
+# Soft, reversible, non-destructive collapse of a duplicate record B into a
+# canonical A. The operation rides on the typed `superseded-by` edge: creating
+# B-[superseded-by]->A between two same-type, same-project issue/task records
+# triggers supersession; archiving that edge reverts it. `superseded` is reached
+# ONLY through this operation (never the generic status-PATCH path), which
+# guarantees the tombstone edge + idempotent edge migration + evidence freeze
+# happen atomically with the status transition. Records are preserved for audit
+# (closed-not-deleted semantics); only B's active participation is retired.
+
+_SUPERSEDABLE_TYPES = frozenset({"issue", "task"})
+
+
+def _accepted_evidence_count(item_data: Dict) -> int:
+    """Number of acceptance_criteria entries with evidence_acceptance=true."""
+    n = 0
+    for ac in item_data.get("acceptance_criteria", []) or []:
+        if isinstance(ac, dict) and ac.get("evidence_acceptance"):
+            n += 1
+    return n
+
+
+def _supersede_precheck(project_id: str, b_id: str, a_id: str) -> Dict:
+    """Guard supersession before any write (DOC-DF651F07D5C2 §4.0/§4.3/§7).
+
+    Returns a context dict on success ({_b_data,_a_data,_type,_prev_status}),
+    {"error": msg, "status": code} to reject, or {"idempotent": True, "result": ...}
+    when B is already superseded into the same canonical (no-op success).
+    """
+    b_type = _record_type_from_id(b_id)
+    a_type = _record_type_from_id(a_id)
+    if b_type not in _SUPERSEDABLE_TYPES or a_type not in _SUPERSEDABLE_TYPES:
+        return {"error": f"Supersession applies to issue/task records only (got {b_type} -> {a_type}).", "status": 400}
+    if b_type != a_type:
+        return {"error": f"Supersession requires same record_type (got {b_type} superseded-by {a_type}); cross-type is a category error (§4.0).", "status": 400}
+    b_raw = _get_record_raw(project_id, b_type, b_id)
+    if b_raw is None:
+        return {"error": f"Superseded record not found: {b_id}", "status": 404}
+    a_raw = _get_record_raw(project_id, a_type, a_id)
+    if a_raw is None:
+        return {"error": f"Canonical record not found: {a_id}", "status": 404}
+    b_data = _deser_item(b_raw)
+    a_data = _deser_item(a_raw)
+    if (a_data.get("project_id") or project_id) != (b_data.get("project_id") or project_id):
+        return {"error": "Supersession requires same project (cross-project is a category error, §4.0).", "status": 400}
+    if a_data.get("status") == "superseded":
+        return {"error": f"Canonical {a_id} is itself superseded (into {a_data.get('superseded_by')}); choose the surviving canonical.", "status": 409}
+    cur = b_data.get("status")
+    if cur == "superseded":
+        existing = str(b_data.get("superseded_by") or "").upper()
+        if existing == a_id:
+            return {"idempotent": True, "result": {
+                "success": True, "idempotent": True,
+                "superseded_id": b_id, "canonical_id": a_id,
+                "note": "already superseded into canonical",
+            }}
+        return {"error": f"{b_id} is already superseded into {existing}; un-supersede before re-targeting.", "status": 409}
+    # Evidence-orphan guard (§4.3/§7): B must hold no accepted acceptance-evidence
+    # the canonical lacks. Conservative count proxy; issues carry no
+    # acceptance_criteria so this is a no-op for issue/issue collapse.
+    if _accepted_evidence_count(b_data) > _accepted_evidence_count(a_data):
+        return {"error": (f"Evidence-orphan conflict: {b_id} holds more accepted acceptance-evidence than "
+                          f"canonical {a_id}. Route to human adjudication (T-MID) rather than mechanical "
+                          f"supersession (§4.3)."), "status": 409}
+    return {"_b_data": b_data, "_a_data": a_data, "_type": b_type, "_prev_status": cur or "open"}
+
+
+def _put_relationship_pair_idempotent(project_id: str, source_id: str, target_id: str,
+                                      rel_type: str, reason: str, body: Dict) -> bool:
+    """MERGE-create a forward+inverse typed edge. Returns True if newly created,
+    False if it already existed (idempotent). Skips re-validation: callers pass
+    endpoints already proven valid (same record_type as the migrated-from node)."""
+    inverse_type = _INVERSE_PAIRS.get(rel_type)
+    if not inverse_type:
+        return False
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    forward_sk = f"rel#{source_id}#{rel_type}#{target_id}"
+    inverse_sk = f"rel#{target_id}#{inverse_type}#{source_id}"
+    ws = body.get("write_source", {}) if body else {}
+
+    def _item(sk: str, rtype: str, src: str, tgt: str, is_inv: bool) -> Dict:
+        return {
+            "project_id": _ser_s(project_id), "record_id": _ser_s(sk),
+            "record_type": _ser_s("relationship"), "relationship_type": _ser_s(rtype),
+            "source_id": _ser_s(src), "target_id": _ser_s(tgt),
+            "weight": {"N": "1.0"}, "confidence": {"N": "1.0"},
+            "reason": _ser_s(reason), "provenance": _ser_s("migration"),
+            "is_inverse": {"BOOL": is_inv}, "canonical_edge_id": _ser_s(forward_sk),
+            "created_at": _ser_s(now), "updated_at": _ser_s(now),
+            "write_source": _ser_value(ws) if ws else _ser_value({}),
+        }
+
+    try:
+        _get_ddb().transact_write_items(TransactItems=[
+            {"Put": {"TableName": DYNAMODB_TABLE, "Item": _item(forward_sk, rel_type, source_id, target_id, False),
+                     "ConditionExpression": "attribute_not_exists(record_id)"}},
+            {"Put": {"TableName": DYNAMODB_TABLE, "Item": _item(inverse_sk, inverse_type, target_id, source_id, True),
+                     "ConditionExpression": "attribute_not_exists(record_id)"}},
+        ])
+        return True
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "TransactionCanceledException":
+            return False  # already exists -> idempotent no-op
+        raise
+
+
+def _unarchive_relationship_edge(project_id: str, source_id: str, target_id: str, rel_type: str) -> bool:
+    """Reverse _handle_archive_relationship: clear status=archived on forward+inverse
+    so graph_sync re-projects the edge (rel_status != 'archived' -> upsert)."""
+    inverse_type = _INVERSE_PAIRS.get(rel_type)
+    if not inverse_type:
+        return False
+    forward_sk = f"rel#{source_id}#{rel_type}#{target_id}"
+    inverse_sk = f"rel#{target_id}#{inverse_type}#{source_id}"
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    try:
+        _get_ddb().transact_write_items(TransactItems=[
+            {"Update": {"TableName": DYNAMODB_TABLE,
+                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(forward_sk)},
+                        "UpdateExpression": "REMOVE #st SET unarchived_at = :now",
+                        "ExpressionAttributeNames": {"#st": "status"},
+                        "ExpressionAttributeValues": {":now": _ser_s(now)},
+                        "ConditionExpression": "attribute_exists(record_id)"}},
+            {"Update": {"TableName": DYNAMODB_TABLE,
+                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(inverse_sk)},
+                        "UpdateExpression": "REMOVE #st SET unarchived_at = :now",
+                        "ExpressionAttributeNames": {"#st": "status"},
+                        "ExpressionAttributeValues": {":now": _ser_s(now)},
+                        "ConditionExpression": "attribute_exists(record_id)"}},
+        ])
+        return True
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "TransactionCanceledException":
+            return False
+        raise
+
+
+def _migrate_typed_edges(project_id: str, b_id: str, a_id: str, body: Dict) -> List[Dict]:
+    """Re-point B's typed relationship edges onto canonical A, idempotently (§7).
+
+    Every active typed edge incident to B is stored as an item with SK prefix
+    `rel#{B}#` (B is the source endpoint of that stored item — both the forward
+    edges B originates and the inverse legs of edges that target B). For each,
+    create the A-equivalent (A as source, same rel_type, same other endpoint) if
+    absent, then soft-archive the B edge. Idempotent and order-free. The
+    superseded-by/supersedes tombstone is never migrated; edges whose other
+    endpoint is the canonical are skipped (no self-loop). Returns descriptors for
+    reversibility bookkeeping (stored on B.superseded_migrated_edges)."""
+    ddb = _get_ddb()
+    migrated: List[Dict] = []
+    resp = ddb.query(
+        TableName=DYNAMODB_TABLE,
+        KeyConditionExpression="project_id = :pid AND begins_with(record_id, :pfx)",
+        ExpressionAttributeValues={":pid": _ser_s(project_id), ":pfx": _ser_s(f"rel#{b_id}#")},
+    )
+    for raw in resp.get("Items", []):
+        rec = _deser_item(raw)
+        if rec.get("record_type") != "relationship":
+            continue
+        if rec.get("status") == "archived":
+            continue
+        rtype = rec.get("relationship_type", "")
+        if rtype in ("superseded-by", "supersedes"):
+            continue  # never migrate the tombstone itself
+        other = str(rec.get("target_id", "")).upper()
+        if not other or other == a_id or other == b_id:
+            continue
+        created = _put_relationship_pair_idempotent(
+            project_id, a_id, other, rtype, f"edge migrated from superseded {b_id} (ENC-TSK-I07)", body)
+        _handle_archive_relationship(project_id, {
+            "source_id": b_id, "target_id": other, "relationship_type": rtype})
+        migrated.append({"rel_type": rtype, "other_id": other, "created_on_canonical": created})
+    return migrated
+
+
+def _apply_supersession(project_id: str, b_id: str, a_id: str, ctx: Dict, body: Dict) -> Dict:
+    """Execute supersession side-effects after the `superseded-by` tombstone exists.
+    Migrates B's other typed edges onto A, then transitions B to the terminal
+    `superseded` state with provenance fields for reversibility. Evidence freeze is
+    implicit: _handle_acceptance_evidence rejects writes while status==superseded."""
+    b_type = ctx["_type"]
+    prev_status = ctx["_prev_status"]
+    now = _now_z()
+    migrated = _migrate_typed_edges(project_id, b_id, a_id, body)
+    note = f"Superseded into {a_id}{_write_source_note_suffix(body)}"
+    hist = {"M": {"timestamp": _ser_s(now), "status": _ser_s("superseded"), "description": _ser_s(note)}}
+    _get_ddb().update_item(
+        TableName=DYNAMODB_TABLE, Key=_build_key(project_id, b_type, b_id),
+        UpdateExpression=(
+            "SET #st = :superseded, superseded_by = :canon, superseded_at = :now, "
+            "pre_supersession_status = if_not_exists(pre_supersession_status, :prev), "
+            "superseded_migrated_edges = :migrated, "
+            "updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+            "sync_version = if_not_exists(sync_version, :zero) + :one, "
+            "history = list_append(if_not_exists(history, :empty), :h)"
+        ),
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={
+            ":superseded": _ser_s("superseded"), ":canon": _ser_s(a_id), ":now": _ser_s(now),
+            ":prev": _ser_s(prev_status), ":migrated": _ser_value(migrated),
+            ":note": _ser_s(note), ":wsrc": _build_write_source(body),
+            ":zero": {"N": "0"}, ":one": {"N": "1"}, ":empty": {"L": []}, ":h": {"L": [hist]},
+        },
+    )
+    return {
+        "superseded_id": b_id, "canonical_id": a_id, "record_type": b_type,
+        "migrated_edges": migrated, "migrated_edge_count": len(migrated),
+        "superseded_at": now, "pre_supersession_status": prev_status, "reversible": True,
+    }
+
+
+def _revert_supersession(project_id: str, b_id: str, body: Dict) -> Optional[Dict]:
+    """Reverse supersession: restore B's eligibility/status (§7 reversibility).
+    Un-archives B's migrated edges (restoring B's neighborhood) and restores B's
+    pre-supersession status. The canonical's gained edges are intentionally left
+    in place (a coherence gain costly to safely un-merge — documented asymmetry,
+    tracked as an I07 follow-on). Returns a summary, or None if B is not superseded."""
+    b_type = _record_type_from_id(b_id)
+    if b_type not in _SUPERSEDABLE_TYPES:
+        return None
+    b_raw = _get_record_raw(project_id, b_type, b_id)
+    if b_raw is None:
+        return None
+    b_data = _deser_item(b_raw)
+    if b_data.get("status") != "superseded":
+        return None
+    prev = b_data.get("pre_supersession_status") or "open"
+    now = _now_z()
+    restored: List[Dict] = []
+    for m in b_data.get("superseded_migrated_edges", []) or []:
+        rtype = m.get("rel_type") if isinstance(m, dict) else None
+        other = m.get("other_id") if isinstance(m, dict) else None
+        if rtype and other and _unarchive_relationship_edge(project_id, b_id, str(other), str(rtype)):
+            restored.append({"rel_type": rtype, "other_id": other})
+    note = f"Un-superseded (restored to {prev}){_write_source_note_suffix(body)}"
+    hist = {"M": {"timestamp": _ser_s(now), "status": _ser_s(prev), "description": _ser_s(note)}}
+    _get_ddb().update_item(
+        TableName=DYNAMODB_TABLE, Key=_build_key(project_id, b_type, b_id),
+        UpdateExpression=(
+            "SET #st = :prev, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+            "sync_version = if_not_exists(sync_version, :zero) + :one, "
+            "history = list_append(if_not_exists(history, :empty), :h) "
+            "REMOVE superseded_by, superseded_at, pre_supersession_status, superseded_migrated_edges"
+        ),
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={
+            ":prev": _ser_s(prev), ":now": _ser_s(now), ":note": _ser_s(note),
+            ":wsrc": _build_write_source(body),
+            ":zero": {"N": "0"}, ":one": {"N": "1"}, ":empty": {"L": []}, ":h": {"L": [hist]},
+        },
+    )
+    return {"unsuperseded_id": b_id, "restored_status": prev, "restored_edges": restored, "unsuperseded_at": now}
 
 
 # ---------------------------------------------------------------------------

@@ -165,6 +165,9 @@ STATUS_RANK: Dict[str, int] = {
     "deploy-init": 6,
     "deploy-success": 7,
     "closed": 8,
+    # ENC-TSK-I07 (Dedup P3): `superseded` alternate terminal (mirror of
+    # checkout_service STATUS_RANK). Same rank as `closed`.
+    "superseded": 8,
 }
 _SUBTASK_GATE_MIN_RANK: int = STATUS_RANK["coding-complete"]  # 2
 
