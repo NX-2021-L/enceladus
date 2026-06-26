@@ -8,6 +8,7 @@ on:
       - 'tools/package_lambda_artifact.sh'
       - 'tools/check_lambda_pyjwt_requirements.py'
       - 'infrastructure/lambda_workflow_manifest.json'
+      - '.github/workflows/build-lambda-artifacts.yml'
   push:
     branches: [main]
     paths:
@@ -15,6 +16,7 @@ on:
       - 'tools/package_lambda_artifact.sh'
       - 'tools/check_lambda_pyjwt_requirements.py'
       - 'infrastructure/lambda_workflow_manifest.json'
+      - '.github/workflows/build-lambda-artifacts.yml'
   workflow_call:
     outputs:
       artifact_prefix:
@@ -29,7 +31,7 @@ jobs:
   setup-matrix:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.parse.outputs.matrix }}
+      functions: ${{ steps.parse.outputs.functions }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,11 +42,19 @@ jobs:
       - name: Parse manifest into matrix
         id: parse
         run: |
-          matrix=$(jq -c '{include: [.functions[] | {function_name: .function_name, lambda_dir: .lambda_dir, package_extra_files: (.package_extra_files // "")}]}' \
+          # Emit a bare JSON array of per-function objects so `function` can be a
+          # real matrix dimension below. The previous `{include: [...]}` shape
+          # collapsed under GitHub Actions matrix-merge semantics: include entries
+          # share no key with the base arch_tag dimension, so each was merged into
+          # the 2 arch combinations and later functions overwrote earlier ones,
+          # leaving only the LAST manifest function building (ENC-ISS-402).
+          # package_extra_files is joined to a comma-separated string here because
+          # tools/package_lambda_artifact.sh parses its 4th arg with IFS=','.
+          functions=$(jq -c '[.functions[] | {function_name: .function_name, lambda_dir: .lambda_dir, package_extra_files: ((.package_extra_files // []) | join(","))}]' \
             infrastructure/lambda_workflow_manifest.json)
-          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
-          echo "Parsed matrix:" >&2
-          echo "${matrix}" | jq . >&2
+          echo "functions=${functions}" >> "$GITHUB_OUTPUT"
+          echo "Parsed functions:" >&2
+          echo "${functions}" | jq . >&2
 
   build:
     needs: setup-matrix
@@ -52,8 +62,9 @@ jobs:
     strategy:
       max-parallel: 10
       matrix:
+        # Full cross-product: every function builds for every arch (2 x N jobs).
         arch_tag: [x86_64-py311, arm64-py312]
-        include: ${{ fromJson(needs.setup-matrix.outputs.matrix).include }}
+        function: ${{ fromJson(needs.setup-matrix.outputs.functions) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,10 +78,10 @@ jobs:
         id: package
         run: |
           zip_path=$(bash tools/package_lambda_artifact.sh \
-            "${{ matrix.function_name }}" \
-            "${{ matrix.lambda_dir }}" \
+            "${{ matrix.function.function_name }}" \
+            "${{ matrix.function.lambda_dir }}" \
             "${{ matrix.arch_tag }}" \
-            "${{ matrix.package_extra_files }}")
+            "${{ matrix.function.package_extra_files }}")
           echo "zip_path=${zip_path}" >> "$GITHUB_OUTPUT"
 
       - name: Derive expected architecture
@@ -90,7 +101,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lambda-${{ matrix.function_name }}-${{ matrix.arch_tag }}
+          name: lambda-${{ matrix.function.function_name }}-${{ matrix.arch_tag }}
           path: ${{ steps.package.outputs.zip_path }}
           retention-days: 7
 
