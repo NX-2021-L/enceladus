@@ -48,21 +48,38 @@ jobs:
           # share no key with the base arch_tag dimension, so each was merged into
           # the 2 arch combinations and later functions overwrote earlier ones,
           # leaving only the LAST manifest function building (ENC-ISS-402).
+          #
+          # Only include functions this workflow can actually package: those with a
+          # backend/lambda/<dir>/lambda_function.py. Out-of-band Lambdas such as
+          # enceladus-mcp-code / enceladus-mcp-streamable (deployed via
+          # tools/enceladus-mcp-server, no lambda_function.py) have no handler here,
+          # and packaging them would hard-fail tools/package_lambda_artifact.sh.
+          #
           # package_extra_files is joined to a comma-separated string here because
           # tools/package_lambda_artifact.sh parses its 4th arg with IFS=','.
-          functions=$(jq -c '[.functions[] | {function_name: .function_name, lambda_dir: .lambda_dir, package_extra_files: ((.package_extra_files // []) | join(","))}]' \
+          present=$(find backend/lambda -maxdepth 2 -name lambda_function.py \
+            | sed -E 's|/lambda_function\.py$||' | jq -R . | jq -cs .)
+          functions=$(jq -c --argjson present "$present" \
+            '[.functions[]
+               | select(.lambda_dir as $d | ($present | index($d)) != null)
+               | {function_name: .function_name, lambda_dir: .lambda_dir, package_extra_files: ((.package_extra_files // []) | join(","))}]' \
             infrastructure/lambda_workflow_manifest.json)
           echo "functions=${functions}" >> "$GITHUB_OUTPUT"
-          echo "Parsed functions:" >&2
+          echo "Included $(echo "${functions}" | jq 'length') packageable functions of $(jq '.functions | length' infrastructure/lambda_workflow_manifest.json) in manifest." >&2
+          echo "Skipped (no lambda_function.py — built out-of-band):" >&2
+          jq -r --argjson present "$present" '.functions[] | select(.lambda_dir as $d | ($present | index($d)) == null) | "  - \(.function_name) (\(.lambda_dir))"' infrastructure/lambda_workflow_manifest.json >&2
           echo "${functions}" | jq . >&2
 
   build:
     needs: setup-matrix
     runs-on: ubuntu-latest
     strategy:
+      # Don't let one function's packaging failure cancel the other 50+ jobs and
+      # wipe every artifact — each function builds and uploads independently.
+      fail-fast: false
       max-parallel: 10
       matrix:
-        # Full cross-product: every function builds for every arch (2 x N jobs).
+        # Full cross-product: every packageable function builds for every arch.
         arch_tag: [x86_64-py311, arm64-py312]
         function: ${{ fromJson(needs.setup-matrix.outputs.functions) }}
     steps:
