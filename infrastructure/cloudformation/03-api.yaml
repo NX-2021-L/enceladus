@@ -624,6 +624,61 @@ Resources:
       RouteKey: GET /api/v1/checkout/{project}/plan/{planId}/status
       Target: !Sub integrations/${CheckoutServiceIntegration}
 
+  # ---------------------------------------------------------------------------
+  # Graph Query API -> graphsearch ingress (ENC-TSK-H57 / ENC-PLN-050 / ENC-ISS-394 / ENC-TSK-I15)
+  # These routes + integration exist LIVE out-of-band on BOTH prod (API 8nkzqkmxqc)
+  # and gamma (API hi0dzmvqrc) and are adopted into their stacks via CFN
+  # resource-import (gamma: ENC-TSK-I14; prod: ENC-TSK-I15). Environment-agnostic
+  # (NO Condition) so prod (EnvironmentSuffix="") renders + MANAGES them, durably
+  # ending the ENC-ISS-394 route-tier drift; "${EnvironmentSuffix}" resolves the
+  # integration to devops-graph-query-api (prod) or devops-graph-query-api-gamma.
+  # DeletionPolicy: Retain so a template/stack divergence can never DELETE the live
+  # graph ingress (ENC-LSN-053 strip class, one tier up at the API-route layer).
+  # Logical IDs MUST match the imported physical resources (do not rename).
+  # ---------------------------------------------------------------------------
+  GraphQueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  GraphQueryApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/api/v1/tracker/graphsearch*"
+
+  RouteGraphSearch:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/graphsearch
+      Target: !Sub integrations/${GraphQueryIntegration}
+
+  RouteGraphSearchHealth:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/graphsearch/health
+      Target: !Sub integrations/${GraphQueryIntegration}
+
+  RouteGraphSearchOptions:
+    Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/graphsearch
+      Target: !Sub integrations/${GraphQueryIntegration}
+
 Outputs:
   ApiEndpoint:
     Value: !GetAtt HttpApi.ApiEndpoint
