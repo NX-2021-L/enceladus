@@ -3393,6 +3393,64 @@ Resources:
         - Key: Environment
           Value: gamma
 
+  # ---------------------------------------------------------------------------
+  # ENC-ISS-306 / ENC-TSK-I24: Adopt the prod enceladus-mcp-code QUALIFIED `live`
+  # Lambda Function URL so the Sev1-safe (alias-qualified) public surface for
+  # mcp.jreese.net is stack-managed and cannot be silently deleted.
+  #
+  # WHY this resource exists (ENC-ISS-306): the function also has an UNqualified
+  # Function URL (Qualifier=NONE -> $LATEST). When CloudFront E3IRO1VSMFENCC
+  # (mcp.jreese.net) points its origin at that unqualified URL, any
+  # update-function-code is an instant prod traffic switch -> the 2026-04-25 Sev1.
+  # The fix repoints CloudFront to the QUALIFIED `live` URL (this resource ->
+  # alias `live` -> a published version) and DELETES the unqualified URL. This
+  # resource codifies the good qualified URL so it survives + cannot drift away.
+  #
+  # ADOPTED OUT-OF-BAND (import-first, like EnceladusMcpCodeGammaFunction above):
+  # the physical Function URL already exists (udal3ytbj4ndsxre3yq26qnfoa0jxnaq...).
+  # It is brought under management via `create-change-set --change-set-type IMPORT`
+  # (see resource-import-mcp-code-url-iss306.json) BEFORE any normal compute
+  # deploy. NOTE: the ENC-ISS-386 orphan guard only scans AWS::Lambda::Function,
+  # so a normal deploy of this Url before import fails closed at
+  # AWS::EarlyValidation::ResourceExistenceCheck (non-destructive). Import first.
+  #
+  # Literal prod-only name (Condition: IsProduction) — the gamma stack owns
+  # enceladus-mcp-code-gamma separately, so this must not render there.
+  #
+  # DeletionPolicy/UpdateReplacePolicy: Retain — never delete/replace the live
+  # prod URL from a stack op (CloudFront origin depends on its domain).
+  #
+  # The `live` ALIAS is deliberately NOT codified here: AWS::Lambda::Alias requires
+  # FunctionVersion, which ops moves on every mcp-code promotion; a CFN-pinned
+  # version would revert prod to a stale version on the next compute deploy
+  # (the ENC-ISS-313 / PLN-047 CFN-stomp class). The Url references the alias by
+  # name ("live") and the alias stays operationally managed.
+  # ---------------------------------------------------------------------------
+  EnceladusMcpCodeLiveFunctionUrl:
+    Type: AWS::Lambda::Url
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TargetFunctionArn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-code"
+      Qualifier: live
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowCredentials: true
+        AllowHeaders:
+          - content-type
+          - authorization
+          - accept
+          - mcp-session-id
+        AllowMethods:
+          - "*"
+        AllowOrigins:
+          - "https://claude.ai"
+        ExposeHeaders:
+          - mcp-session-id
+        MaxAge: 86400
+
 Outputs:
   CoordinationApiFunctionArn:
     Value: !GetAtt CoordinationApiFunction.Arn
