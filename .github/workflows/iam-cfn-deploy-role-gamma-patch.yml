@@ -1,0 +1,88 @@
+name: IAM CFN Deploy Role — Gamma DDB/SNS Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "Grant DynamoDB+SNS gamma permissions to CFN deploy role (04-github-roles stale)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with gamma DynamoDB and SNS permissions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy — gamma DynamoDB + SNS bootstrap
+        run: |
+          set -euo pipefail
+          cat > /tmp/gamma-ddb-sns-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "GammaDynamoDBBootstrap",
+                "Effect": "Allow",
+                "Action": [
+                  "dynamodb:CreateTable",
+                  "dynamodb:DescribeTable",
+                  "dynamodb:UpdateTable",
+                  "dynamodb:DeleteTable",
+                  "dynamodb:TagResource",
+                  "dynamodb:UntagResource",
+                  "dynamodb:ListTagsOfResource",
+                  "dynamodb:DescribeTimeToLive",
+                  "dynamodb:UpdateTimeToLive",
+                  "dynamodb:DescribeContinuousBackups",
+                  "dynamodb:UpdateContinuousBackups"
+                ],
+                "Resource": "arn:aws:dynamodb:us-west-2:356364570033:table/*-gamma"
+              },
+              {
+                "Sid": "GammaSNSBootstrap",
+                "Effect": "Allow",
+                "Action": [
+                  "sns:CreateTopic",
+                  "sns:GetTopicAttributes",
+                  "sns:SetTopicAttributes",
+                  "sns:DeleteTopic",
+                  "sns:TagResource",
+                  "sns:UntagResource",
+                  "sns:ListTagsForResource",
+                  "sns:Subscribe",
+                  "sns:Unsubscribe",
+                  "sns:GetSubscriptionAttributes"
+                ],
+                "Resource": "arn:aws:sns:us-west-2:356364570033:enceladus-*-gamma"
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-gamma-ddb-sns-v1" \
+            --policy-document "file:///tmp/gamma-ddb-sns-policy.json"
+
+      - name: Verify inline policy attached
+        run: |
+          aws iam get-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-gamma-ddb-sns-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table
