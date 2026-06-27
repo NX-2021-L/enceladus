@@ -72,6 +72,7 @@ function_name_map:
   feed_query: devops-feed-query-api-gamma
   github_integration: devops-github-integration-gamma
   governance_audit: enceladus-governance-audit-gamma
+  governance_drift_check: devops-governance-drift-check-gamma
   graph_health_metrics: enceladus-graph-health-metrics-gamma
   graph_query_api: devops-graph-query-api-gamma
   graph_sync: devops-graph-sync-gamma
