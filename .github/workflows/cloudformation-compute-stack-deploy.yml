@@ -158,6 +158,38 @@ jobs:
             --template "${TEMPLATE_FILE}" \
             --region "${AWS_REGION}"
 
+      - name: Clean up orphaned SNS topics (pre-deploy idempotency guard)
+        run: |
+          set -euo pipefail
+          # When a previous 01-data deploy fails mid-flight and CFN rolls back with
+          # DeletionPolicy:Retain, new SNS topics can be left untracked by the stack.
+          # A subsequent deploy fails: "Topic creation failed because the topic already exists."
+          # Delete any such topics that are NOT currently tracked by the data stack so CFN
+          # can create them cleanly. Delete-topic is idempotent on a missing ARN.
+          stack_name="${{ steps.params.outputs.data_stack_name }}"
+          account="356364570033"
+          region="${AWS_REGION}"
+          suffix="${ENVIRONMENT_SUFFIX}"
+          # Topics the data stack template would CREATE — if suffix is empty this runs only
+          # for production; for gamma suffix="-gamma" and the pattern matches exactly.
+          candidate_topics=(
+            "arn:aws:sns:${region}:${account}:enceladus-component-registry-events${suffix}"
+          )
+          tracked_arns=$(aws cloudformation list-stack-resources \
+            --stack-name "${stack_name}" \
+            --region "${region}" \
+            --query "StackResourceSummaries[?ResourceType=='AWS::SNS::Topic'].PhysicalResourceId" \
+            --output text 2>/dev/null || echo "")
+          for arn in "${candidate_topics[@]}"; do
+            if echo "${tracked_arns}" | grep -qF "${arn}"; then
+              echo "Topic tracked by stack, skipping: ${arn}"
+            else
+              echo "Deleting orphaned (untracked) SNS topic: ${arn}"
+              aws sns delete-topic --topic-arn "${arn}" --region "${region}" \
+                2>&1 | grep -v "NotFound\|does not exist" || true
+            fi
+          done
+
       - name: Deploy Data stack (01-data)
         run: |
           set -euo pipefail
