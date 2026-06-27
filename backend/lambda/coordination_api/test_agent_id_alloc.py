@@ -167,5 +167,187 @@ class MintingTest(unittest.TestCase):
         self.assertIsNone(alloc.get_session("ENC-SES-404"))
 
 
+@mock_aws
+class AgentMutationTest(unittest.TestCase):
+    """ENC-TSK-I38: tests for claim_session, retire_session, list_*, find_agent_type."""
+
+    def setUp(self):
+        self.ddb = boto3.client("dynamodb", region_name="us-west-2")
+        for table, key in (
+            (config.AGENT_SESSIONS_TABLE, "session_id"),
+            (config.AGENT_TYPES_TABLE, "agent_type_id"),
+        ):
+            self.ddb.create_table(
+                TableName=table,
+                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
+                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
+        patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _mint_session(self, **kw):
+        return alloc.mint_session_id(
+            agent_type_id=kw.get("agent_type_id", "ENC-AGT-001"),
+            runtime=kw.get("runtime", "cc-desktop"),
+            status=kw.get("status", "allocated"),
+        )
+
+    def _mint_type(self, **kw):
+        return alloc.mint_agent_type_id(
+            surface=kw.get("surface", "Claude Desktop"),
+            model=kw.get("model", "claude-sonnet-4-6"),
+            cost_tier=kw.get("cost_tier", "standard"),
+        )
+
+    # -- claim_session ---------------------------------------------------
+
+    def test_claim_allocated_session(self):
+        sid = self._mint_session()["session_id"]
+        item = alloc.claim_session(sid)
+        self.assertEqual(item["status"], "claimed")
+        self.assertTrue(item["claimed_at"])
+        persisted = alloc.get_session(sid)
+        self.assertEqual(persisted["status"], "claimed")
+
+    def test_claim_with_matching_lineage(self):
+        sid = self._mint_session(agent_type_id="ENC-AGT-007")["session_id"]
+        item = alloc.claim_session(sid, expected_agent_type_id="ENC-AGT-007")
+        self.assertEqual(item["status"], "claimed")
+
+    def test_claim_rejects_lineage_mismatch(self):
+        sid = self._mint_session(agent_type_id="ENC-AGT-001")["session_id"]
+        with self.assertRaises(ValueError):
+            alloc.claim_session(sid, expected_agent_type_id="ENC-AGT-999")
+
+    def test_claim_already_claimed_raises(self):
+        sid = self._mint_session(status="claimed")["session_id"]
+        with self.assertRaises(ValueError):
+            alloc.claim_session(sid)
+
+    def test_claim_missing_session_raises(self):
+        with self.assertRaises(ValueError):
+            alloc.claim_session("ENC-SES-404")
+
+    def test_claim_empty_session_id_raises(self):
+        with self.assertRaises(ValueError):
+            alloc.claim_session("")
+
+    # -- retire_session --------------------------------------------------
+
+    def test_retire_from_allocated(self):
+        sid = self._mint_session(status="allocated")["session_id"]
+        item = alloc.retire_session(sid)
+        self.assertEqual(item["status"], "retired")
+
+    def test_retire_from_claimed(self):
+        sid = self._mint_session(status="claimed")["session_id"]
+        item = alloc.retire_session(sid)
+        self.assertEqual(item["status"], "retired")
+
+    def test_retire_already_retired_raises(self):
+        sid = self._mint_session(status="allocated")["session_id"]
+        alloc.retire_session(sid)
+        with self.assertRaises(ValueError):
+            alloc.retire_session(sid)
+
+    def test_retire_missing_session_raises(self):
+        with self.assertRaises(ValueError):
+            alloc.retire_session("ENC-SES-404")
+
+    def test_retire_empty_session_id_raises(self):
+        with self.assertRaises(ValueError):
+            alloc.retire_session("")
+
+    # -- list_sessions ---------------------------------------------------
+
+    def test_list_sessions_excludes_counter_rows(self):
+        self._mint_session()
+        self._mint_session()
+        sessions = alloc.list_sessions()
+        ids = [s["session_id"] for s in sessions]
+        self.assertNotIn("counter#ENC-SES", ids)
+        self.assertIn("ENC-SES-001", ids)
+        self.assertIn("ENC-SES-002", ids)
+        self.assertEqual(len(sessions), 2)
+
+    def test_list_sessions_filter_by_status(self):
+        self._mint_session(status="allocated")
+        self._mint_session(status="claimed")
+        allocated = alloc.list_sessions(status="allocated")
+        self.assertEqual(len(allocated), 1)
+        self.assertEqual(allocated[0]["status"], "allocated")
+        claimed = alloc.list_sessions(status="claimed")
+        self.assertEqual(len(claimed), 1)
+
+    def test_list_sessions_filter_by_agent_type_id(self):
+        self._mint_session(agent_type_id="ENC-AGT-001")
+        self._mint_session(agent_type_id="ENC-AGT-002")
+        results = alloc.list_sessions(agent_type_id="ENC-AGT-001")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["agent_type_id"], "ENC-AGT-001")
+
+    def test_list_sessions_empty_table(self):
+        self.assertEqual(alloc.list_sessions(), [])
+
+    # -- list_agent_types ------------------------------------------------
+
+    def test_list_agent_types_excludes_counter_rows(self):
+        self._mint_type()
+        self._mint_type(model="claude-opus-4-8")
+        types = alloc.list_agent_types()
+        ids = [t["agent_type_id"] for t in types]
+        self.assertNotIn("counter#ENC-AGT", ids)
+        self.assertEqual(len(types), 2)
+
+    def test_list_agent_types_filter_by_status(self):
+        self._mint_type()
+        # Can't create deprecated via mint directly, so update manually
+        self.ddb.update_item(
+            TableName=config.AGENT_TYPES_TABLE,
+            Key={"agent_type_id": {"S": "ENC-AGT-001"}},
+            UpdateExpression="SET #st = :dep",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={":dep": {"S": "deprecated"}},
+        )
+        self._mint_type(model="claude-opus-4-8")
+        deprecated = alloc.list_agent_types(status="deprecated")
+        self.assertEqual(len(deprecated), 1)
+        active = alloc.list_agent_types(status="active")
+        self.assertEqual(len(active), 1)
+
+    def test_list_agent_types_empty_table(self):
+        self.assertEqual(alloc.list_agent_types(), [])
+
+    # -- find_agent_type (idempotent type.register) ----------------------
+
+    def test_find_agent_type_returns_existing(self):
+        self._mint_type(surface="Claude Desktop", model="claude-sonnet-4-6")
+        found = alloc.find_agent_type(surface="Claude Desktop", model="claude-sonnet-4-6")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["model"], "claude-sonnet-4-6")
+
+    def test_find_agent_type_returns_none_for_missing(self):
+        result = alloc.find_agent_type(surface="Claude Desktop", model="nonexistent-model")
+        self.assertIsNone(result)
+
+    def test_find_agent_type_prefers_active_over_deprecated(self):
+        # Mint two entries for same surface+model (simulating a stale + fresh pair)
+        self._mint_type(surface="s", model="m")
+        self._mint_type(surface="s", model="m")
+        # Deprecate first
+        self.ddb.update_item(
+            TableName=config.AGENT_TYPES_TABLE,
+            Key={"agent_type_id": {"S": "ENC-AGT-001"}},
+            UpdateExpression="SET #st = :dep",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={":dep": {"S": "deprecated"}},
+        )
+        found = alloc.find_agent_type(surface="s", model="m")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["status"], "active")
+
+
 if __name__ == "__main__":
     unittest.main()

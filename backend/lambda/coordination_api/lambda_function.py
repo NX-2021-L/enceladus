@@ -86,6 +86,13 @@ try:
 except Exception:
     _CERT_BUNDLE = None
 
+try:
+    import agent_id_alloc as _agent_alloc  # ENC-TSK-I38: agent.* identity actions
+    _AGENT_ALLOC_AVAILABLE = True
+except ImportError:
+    _agent_alloc = None  # type: ignore[assignment]
+    _AGENT_ALLOC_AVAILABLE = False
+
 
 def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
     """Return deduplicated, non-empty key values from scalar/csv env sources."""
@@ -115,6 +122,8 @@ def _first_nonempty_env(*names: str) -> str:
 # Configuration
 # ---------------------------------------------------------------------------
 
+AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
+AGENT_TYPES_TABLE = os.environ.get("AGENT_TYPES_TABLE", "agent-types")
 COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests")
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
@@ -13572,6 +13581,154 @@ def _handle_chat_message(
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-I38 — Agent identity handlers (agent.*)
+# ---------------------------------------------------------------------------
+
+def _agent_alloc_unavailable() -> Dict[str, Any]:
+    return _error(503, "agent_id_alloc module not available in this deployment")
+
+
+def _handle_agent_session_register(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/sessions — mint a new ENC-SES-NNN session."""
+    if not _AGENT_ALLOC_AVAILABLE:
+        return _agent_alloc_unavailable()
+    body = _json_body(event) or {}
+    if body.get("session_id"):
+        return _error(400, "session_id must not be provided — ids are minted server-side (ENC-TSK-B99)", retryable=False)
+    agent_type_id = str(body.get("agent_type_id") or "").strip()
+    runtime = str(body.get("runtime") or "").strip()
+    parent_session_id = str(body.get("parent_session_id") or "root").strip()
+    status = str(body.get("status") or "allocated").strip()
+    if not agent_type_id:
+        return _error(400, "agent_type_id is required", retryable=False)
+    if not runtime:
+        return _error(400, "runtime is required", retryable=False)
+    if status not in _agent_alloc.SESSION_STATUSES:
+        return _error(400, f"status must be one of {list(_agent_alloc.SESSION_STATUSES)}", retryable=False)
+    try:
+        item = _agent_alloc.mint_session_id(
+            agent_type_id=agent_type_id,
+            runtime=runtime,
+            parent_session_id=parent_session_id,
+            status=status,
+            caller_payload=body,
+        )
+    except _agent_alloc.CallerSuppliedIdError as exc:
+        return _error(400, str(exc), retryable=False)
+    except _agent_alloc.IdAllocationError as exc:
+        logger.exception("[ERROR] mint_session_id failed: %s", exc)
+        return _error(500, "Failed to allocate session id — see Lambda logs")
+    return _response(201, {"session": item})
+
+
+def _handle_agent_session_claim(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/sessions/claim — flip allocated → claimed."""
+    if not _AGENT_ALLOC_AVAILABLE:
+        return _agent_alloc_unavailable()
+    body = _json_body(event) or {}
+    session_id = str(body.get("session_id") or "").strip()
+    expected_agent_type_id = str(body.get("expected_agent_type_id") or "").strip() or None
+    if not session_id:
+        return _error(400, "session_id is required", retryable=False)
+    try:
+        item = _agent_alloc.claim_session(session_id, expected_agent_type_id=expected_agent_type_id)
+    except ValueError as exc:
+        return _error(400, str(exc), retryable=False)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] claim_session failed: %s", exc)
+        return _error(500, "DynamoDB error during session claim")
+    return _response(200, {"session": item})
+
+
+def _handle_agent_session_list(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/agents/sessions — live session directory."""
+    if not _AGENT_ALLOC_AVAILABLE:
+        return _agent_alloc_unavailable()
+    params = event.get("queryStringParameters") or {}
+    status = str(params.get("status") or "").strip() or None
+    agent_type_id = str(params.get("agent_type_id") or "").strip() or None
+    if status and status not in _agent_alloc.SESSION_STATUSES:
+        return _error(400, f"status must be one of {list(_agent_alloc.SESSION_STATUSES)}", retryable=False)
+    try:
+        sessions = _agent_alloc.list_sessions(status=status, agent_type_id=agent_type_id)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] list_sessions failed: %s", exc)
+        return _error(500, "Failed to list sessions")
+    return _response(200, {"sessions": sessions, "count": len(sessions)})
+
+
+def _handle_agent_session_retire(
+    session_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/sessions/{id}/retire — graceful close."""
+    if not _AGENT_ALLOC_AVAILABLE:
+        return _agent_alloc_unavailable()
+    if not session_id:
+        return _error(400, "session_id is required", retryable=False)
+    try:
+        item = _agent_alloc.retire_session(session_id)
+    except ValueError as exc:
+        return _error(400, str(exc), retryable=False)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] retire_session failed: %s", exc)
+        return _error(500, "DynamoDB error during session retire")
+    return _response(200, {"session": item})
+
+
+def _handle_agent_type_list(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/agents/types — agent-type directory."""
+    if not _AGENT_ALLOC_AVAILABLE:
+        return _agent_alloc_unavailable()
+    params = event.get("queryStringParameters") or {}
+    status = str(params.get("status") or "").strip() or None
+    if status and status not in _agent_alloc.AGENT_TYPE_STATUSES:
+        return _error(400, f"status must be one of {list(_agent_alloc.AGENT_TYPE_STATUSES)}", retryable=False)
+    try:
+        types = _agent_alloc.list_agent_types(status=status)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] list_agent_types failed: %s", exc)
+        return _error(500, "Failed to list agent types")
+    return _response(200, {"agent_types": types, "count": len(types)})
+
+
+def _handle_agent_type_register(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/types — idempotent agent-type registration."""
+    if not _AGENT_ALLOC_AVAILABLE:
+        return _agent_alloc_unavailable()
+    body = _json_body(event) or {}
+    if body.get("agent_type_id"):
+        return _error(400, "agent_type_id must not be provided — ids are minted server-side (ENC-TSK-B99)", retryable=False)
+    surface = str(body.get("surface") or "").strip()
+    model = str(body.get("model") or "").strip()
+    cost_tier = str(body.get("cost_tier") or "").strip()
+    if not surface:
+        return _error(400, "surface is required", retryable=False)
+    if not model:
+        return _error(400, "model is required", retryable=False)
+    if not cost_tier:
+        return _error(400, "cost_tier is required", retryable=False)
+    try:
+        existing = _agent_alloc.find_agent_type(surface=surface, model=model)
+        if existing:
+            return _response(200, {"agent_type": existing, "created": False})
+        item = _agent_alloc.mint_agent_type_id(
+            surface=surface,
+            model=model,
+            cost_tier=cost_tier,
+            caller_payload=body,
+        )
+    except _agent_alloc.CallerSuppliedIdError as exc:
+        return _error(400, str(exc), retryable=False)
+    except _agent_alloc.IdAllocationError as exc:
+        logger.exception("[ERROR] mint_agent_type_id failed: %s", exc)
+        return _error(500, "Failed to allocate agent type id — see Lambda logs")
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] agent_type register DDB error: %s", exc)
+        return _error(500, "DynamoDB error during agent type registration")
+    return _response(201, {"agent_type": item, "created": True})
+
+
+# ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
 
@@ -13808,5 +13965,34 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if method == "POST" and match_session_msg:
         session_id = match_session_msg.group(1)
         return _handle_chat_message(event, session_id, claims or {})
+
+    # --- ENC-TSK-I38: Agent identity routes ---
+
+    # GET /api/v1/coordination/agents/sessions
+    if method == "GET" and path == "/api/v1/coordination/agents/sessions":
+        return _handle_agent_session_list(event)
+
+    # POST /api/v1/coordination/agents/sessions
+    if method == "POST" and path == "/api/v1/coordination/agents/sessions":
+        return _handle_agent_session_register(event, claims or {})
+
+    # POST /api/v1/coordination/agents/sessions/claim
+    if method == "POST" and path == "/api/v1/coordination/agents/sessions/claim":
+        return _handle_agent_session_claim(event, claims or {})
+
+    # POST /api/v1/coordination/agents/sessions/{id}/retire
+    match_session_retire = re.fullmatch(
+        r"/api/v1/coordination/agents/sessions/([A-Za-z0-9_\-]+)/retire", path
+    )
+    if method == "POST" and match_session_retire:
+        return _handle_agent_session_retire(match_session_retire.group(1), event, claims or {})
+
+    # GET /api/v1/coordination/agents/types
+    if method == "GET" and path == "/api/v1/coordination/agents/types":
+        return _handle_agent_type_list(event)
+
+    # POST /api/v1/coordination/agents/types
+    if method == "POST" and path == "/api/v1/coordination/agents/types":
+        return _handle_agent_type_register(event, claims or {})
 
     return _error(404, f"Unsupported route: {method} {path}")
