@@ -158,35 +158,70 @@ jobs:
             --template "${TEMPLATE_FILE}" \
             --region "${AWS_REGION}"
 
-      - name: Clean up orphaned SNS topics (pre-deploy idempotency guard)
+      - name: Clean up orphaned data-stack resources (pre-deploy idempotency guard)
         run: |
           set -euo pipefail
-          # When a previous 01-data deploy fails mid-flight and CFN rolls back with
-          # DeletionPolicy:Retain, new SNS topics can be left untracked by the stack.
-          # A subsequent deploy fails: "Topic creation failed because the topic already exists."
-          # Delete any such topics that are NOT currently tracked by the data stack so CFN
-          # can create them cleanly. Delete-topic is idempotent on a missing ARN.
+          # When a previous 01-data CFN update creates resources then rolls back with
+          # DeletionPolicy:Retain, those resources are left untracked by the stack.
+          # The next deploy fails at changeset creation (AWS::EarlyValidation::ResourceExistenceCheck)
+          # because the resource exists but is not managed by the stack.
+          # This step deletes any such orphaned resources before the deploy so CFN can CREATE them.
           stack_name="${{ steps.params.outputs.data_stack_name }}"
           account="356364570033"
           region="${AWS_REGION}"
           suffix="${ENVIRONMENT_SUFFIX}"
-          # Topics the data stack template would CREATE — if suffix is empty this runs only
-          # for production; for gamma suffix="-gamma" and the pattern matches exactly.
+
+          # --- SNS topics ---
           candidate_topics=(
             "arn:aws:sns:${region}:${account}:enceladus-component-registry-events${suffix}"
           )
-          tracked_arns=$(aws cloudformation list-stack-resources \
-            --stack-name "${stack_name}" \
-            --region "${region}" \
+          tracked_sns=$(aws cloudformation list-stack-resources \
+            --stack-name "${stack_name}" --region "${region}" \
             --query "StackResourceSummaries[?ResourceType=='AWS::SNS::Topic'].PhysicalResourceId" \
             --output text 2>/dev/null || echo "")
           for arn in "${candidate_topics[@]}"; do
-            if echo "${tracked_arns}" | grep -qF "${arn}"; then
-              echo "Topic tracked by stack, skipping: ${arn}"
+            if echo "${tracked_sns}" | grep -qF "${arn}"; then
+              echo "SNS topic tracked by stack, skipping: ${arn}"
             else
-              echo "Deleting orphaned (untracked) SNS topic: ${arn}"
-              aws sns delete-topic --topic-arn "${arn}" --region "${region}" \
-                2>&1 | grep -v "NotFound\|does not exist" || true
+              echo "Deleting orphaned SNS topic: ${arn}"
+              aws sns delete-topic --topic-arn "${arn}" --region "${region}" 2>/dev/null || true
+            fi
+          done
+
+          # --- DynamoDB tables (new tables added by ENC-TSK-I27/I28 that can be orphaned) ---
+          candidate_tables=(
+            "governance-version${suffix}"
+            "agent-sessions${suffix}"
+            "agent-types${suffix}"
+          )
+          tracked_tables=$(aws cloudformation list-stack-resources \
+            --stack-name "${stack_name}" --region "${region}" \
+            --query "StackResourceSummaries[?ResourceType=='AWS::DynamoDB::Table'].PhysicalResourceId" \
+            --output text 2>/dev/null || echo "")
+          for table in "${candidate_tables[@]}"; do
+            if echo "${tracked_tables}" | grep -qF "${table}"; then
+              echo "DynamoDB table tracked by stack, skipping: ${table}"
+            else
+              # Only delete if the table actually exists and DeletionProtection is off
+              status=$(aws dynamodb describe-table --table-name "${table}" \
+                --region "${region}" \
+                --query "Table.TableStatus" --output text 2>/dev/null || echo "NOT_FOUND")
+              if [ "${status}" = "NOT_FOUND" ]; then
+                echo "Table does not exist: ${table} — nothing to delete"
+              else
+                protect=$(aws dynamodb describe-table --table-name "${table}" \
+                  --region "${region}" \
+                  --query "Table.DeletionProtectionEnabled" --output text 2>/dev/null || echo "false")
+                if [ "${protect}" = "True" ] || [ "${protect}" = "true" ]; then
+                  echo "::warning::Table ${table} has DeletionProtection=true — skipping delete, manual import required"
+                else
+                  echo "Deleting orphaned DynamoDB table: ${table} (status=${status})"
+                  aws dynamodb delete-table --table-name "${table}" --region "${region}" 2>&1 || true
+                  # Wait for table to be deleted before proceeding
+                  aws dynamodb wait table-not-exists --table-name "${table}" --region "${region}" 2>/dev/null || true
+                  echo "Table ${table} deleted."
+                fi
+              fi
             fi
           done
 
