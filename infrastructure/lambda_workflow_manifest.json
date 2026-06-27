@@ -217,6 +217,12 @@
       "lambda_dir": "backend/lambda/recompute_governance",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/recompute_governance/deploy.sh"
+    },
+    {
+      "function_name": "devops-governance-drift-check",
+      "lambda_dir": "backend/lambda/governance_drift_check",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/governance_drift_check/deploy.sh"
     }
   ]
 }
