@@ -39,7 +39,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import urllib.parse
 import urllib.request
 from urllib.parse import unquote
@@ -5354,11 +5354,312 @@ def _revert_supersession(project_id: str, b_id: str, body: Dict) -> Optional[Dic
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-I08 (Dedup P4): io-approval-gated tier-review surface.
+#
+# Promotes the offline I05 detector (clusters) + I06 certainty model (per-pair
+# verdicts) into a LIVE governed approval surface. It PROPOSES; io APPROVES.
+# Two ops on POST /{project}/dedup-review:
+#   op=propose  — pure, mutation-free tier derivation (any authenticated caller).
+#   op=approve  — io-Cognito-only; executes soft supersession by reusing the I07
+#                 `superseded-by` primitive. The agent/internal-key path is
+#                 rejected (never self-authorizes). See DOC-DF651F07D5C2 §5/§7/§8.
+#
+# NO auto-merge here: T-HIGH (certificate-certified) is deferred to ENC-TSK-I09's
+# flag-gated arc-walker and is never actioned by this surface.
+# ---------------------------------------------------------------------------
+
+# Tier ladder boundaries (DOC-DF651F07D5C2 §5). T-MID floor and the review/distinct
+# boundary are parameters; defaults match the design doc and I06's review_prob.
+_DEDUP_TAU_MID = 0.95          # calibrated_prob >= tau_mid (cert not passed) -> T-MID
+_DEDUP_REVIEW_FLOOR = 0.50     # calibrated_prob >= review_floor -> at least T-LOW; below -> distinct
+_DEDUP_TIER_RANK = {"T-LOW": 1, "T-MID": 2, "T-HIGH": 3}
+_DEDUP_ACTIONABLE_TIERS = ("T-HIGH", "T-MID", "T-LOW")
+
+
+def _dedup_pair_key(a: str, b: str) -> Tuple[str, str]:
+    """Orientation-stable pair key (uppercased, a <= b) — matches I05 edges and
+    I06 verdict pair keys so a verdict joins to a cluster's (canonical, member) pair."""
+    a2, b2 = str(a).strip().upper(), str(b).strip().upper()
+    return (a2, b2) if a2 <= b2 else (b2, a2)
+
+
+def _dedup_pair_tier(verdict: Optional[Dict], tau_mid: float, review_floor: float) -> str:
+    """Map one I06 verdict to the design-doc tier ladder (DOC-DF651F07D5C2 §5).
+
+    certificate passed (or I06 tier 'auto-merge')      -> T-HIGH  (I09's domain)
+    calibrated_prob >= tau_mid                          -> T-MID
+    calibrated_prob >= review_floor                     -> T-LOW
+    else / no verdict (I06 is the tiering authority)    -> distinct  (not surfaced)
+    """
+    if not verdict:
+        return "distinct"
+    cert = verdict.get("certificate") or {}
+    if cert.get("passed") is True or verdict.get("tier") == "auto-merge":
+        return "T-HIGH"
+    prob = verdict.get("calibrated_prob")
+    if prob is None:
+        return "distinct"
+    try:
+        prob = float(prob)
+    except (TypeError, ValueError):
+        return "distinct"
+    if prob >= tau_mid:
+        return "T-MID"
+    if prob >= review_floor:
+        return "T-LOW"
+    return "distinct"
+
+
+def _dedup_cluster_tier(duplicate_tiers: Sequence[str]) -> Optional[str]:
+    """Conservative (least-confident) tier across a cluster's surfaced duplicates.
+    Any T-LOW member pulls the whole cluster to T-LOW; all-T-MID-or-better with at
+    least one T-MID -> T-MID; all T-HIGH -> T-HIGH. Returns None if none surfaced."""
+    ranks = [_DEDUP_TIER_RANK[t] for t in duplicate_tiers if t in _DEDUP_TIER_RANK]
+    if not ranks:
+        return None
+    return {1: "T-LOW", 2: "T-MID", 3: "T-HIGH"}[min(ranks)]
+
+
+def _dedup_homogeneous(record_ids: Sequence[str]) -> Tuple[bool, Optional[str]]:
+    """Hard-floor type check (§4.0): all ids must resolve to a single record_type
+    from their ENC-<TYPE>- prefix. Returns (is_homogeneous, the_type_or_None).
+    Same-project is enforced per-pair downstream by _supersede_precheck (needs DDB)."""
+    types = {_record_type_from_id(str(r)) for r in record_ids if str(r).strip()}
+    if len(types) == 1:
+        return True, next(iter(types))
+    return False, None
+
+
+def _dedup_build_proposal(cluster: Dict, verdict_index: Dict[Tuple[str, str], Dict],
+                          tau_mid: float, review_floor: float) -> Dict:
+    """Build one tiered proposal from an I05 cluster + the I06 verdict index.
+
+    Cross-type clusters are never surfaced (hard floor). Per-duplicate tiers are
+    derived from each (canonical, duplicate) verdict; 'distinct' duplicates are
+    dropped. The cluster tier determines the approval granularity offered to io:
+      T-MID  -> 'plan'       (io approves the whole-cluster plan)
+      T-LOW  -> 'per-record' (io approves the whole cluster OR a selected subset)
+      T-HIGH -> 'deferred'   (ENC-TSK-I09 auto-merge; NOT actionable here)
+    """
+    cluster_id = cluster.get("cluster_id")
+    rtype = cluster.get("record_type")
+    project_id = cluster.get("project_id")
+    canonical = str(cluster.get("canonical", "")).strip().upper()
+    members = [str(m).strip().upper() for m in (cluster.get("members") or []) if str(m).strip()]
+
+    if not canonical or canonical not in members:
+        return {"cluster_id": cluster_id, "record_type": rtype, "project_id": project_id,
+                "excluded": True, "reason": "cluster missing a canonical member"}
+
+    homo, htype = _dedup_homogeneous(members)
+    if not homo or htype not in _SUPERSEDABLE_TYPES:
+        # Cross-type, or a type supersession does not apply to: never surfaced (§4.0).
+        return {"cluster_id": cluster_id, "record_type": rtype, "project_id": project_id,
+                "excluded": True,
+                "reason": f"hard-floor excluded (record_type={htype or 'mixed'} not a same-type "
+                          f"supersedable cluster; §4.0)"}
+
+    dup_entries: List[Dict] = []
+    for d in members:
+        if d == canonical:
+            continue
+        v = verdict_index.get(_dedup_pair_key(canonical, d))
+        tier = _dedup_pair_tier(v, tau_mid, review_floor)
+        dup_entries.append({
+            "record_id": d,
+            "tier": tier,
+            "calibrated_prob": (v or {}).get("calibrated_prob"),
+            "cosine": ((v or {}).get("signals") or {}).get("cosine"),
+            "certificate_passed": bool(((v or {}).get("certificate") or {}).get("passed")),
+        })
+
+    surfaced = [e for e in dup_entries if e["tier"] in _DEDUP_ACTIONABLE_TIERS]
+    dropped = [e["record_id"] for e in dup_entries if e["tier"] == "distinct"]
+    cluster_tier = _dedup_cluster_tier([e["tier"] for e in surfaced])
+
+    if cluster_tier == "T-MID":
+        actionable, granularity, defer_to = True, "plan", None
+    elif cluster_tier == "T-LOW":
+        actionable, granularity, defer_to = True, "per-record", None
+    elif cluster_tier == "T-HIGH":
+        actionable, granularity, defer_to = False, "deferred", "ENC-TSK-I09"
+    else:
+        actionable, granularity, defer_to = False, "none", None
+
+    return {
+        "cluster_id": cluster_id,
+        "record_type": rtype,
+        "project_id": project_id,
+        "canonical": canonical,
+        "cluster_tier": cluster_tier,
+        "actionable": actionable,
+        "granularity": granularity,
+        "defer_to": defer_to,
+        "duplicates": surfaced,
+        "dropped_distinct": dropped,
+        "excluded": False,
+    }
+
+
+def _handle_dedup_propose(project_id: str, body: Dict) -> Dict:
+    """op=propose: pure, mutation-free tier derivation over I05 clusters + I06 verdicts."""
+    clusters = body.get("clusters")
+    if not isinstance(clusters, list):
+        return _error(400, "Field 'clusters' (list of I05 cluster objects) is required.")
+    verdicts = body.get("verdicts") or []
+    if not isinstance(verdicts, list):
+        return _error(400, "Field 'verdicts' must be a list of I06 verdict objects.")
+    try:
+        tau_mid = float(body.get("tau_mid", _DEDUP_TAU_MID))
+        review_floor = float(body.get("review_floor", _DEDUP_REVIEW_FLOOR))
+    except (TypeError, ValueError):
+        return _error(400, "tau_mid and review_floor must be numeric.")
+    if not (0.0 <= review_floor <= tau_mid <= 1.0):
+        return _error(400, "Require 0 <= review_floor <= tau_mid <= 1.")
+
+    vindex: Dict[Tuple[str, str], Dict] = {}
+    for v in verdicts:
+        a, b = v.get("a"), v.get("b")
+        if a and b:
+            vindex[_dedup_pair_key(a, b)] = v
+
+    proposals = [_dedup_build_proposal(c, vindex, tau_mid, review_floor) for c in clusters]
+    counts = {"T-MID": 0, "T-LOW": 0, "T-HIGH_deferred": 0, "excluded": 0, "not_actionable": 0}
+    for p in proposals:
+        if p.get("excluded"):
+            counts["excluded"] += 1
+        elif p.get("cluster_tier") == "T-MID":
+            counts["T-MID"] += 1
+        elif p.get("cluster_tier") == "T-LOW":
+            counts["T-LOW"] += 1
+        elif p.get("cluster_tier") == "T-HIGH":
+            counts["T-HIGH_deferred"] += 1
+        else:
+            counts["not_actionable"] += 1
+
+    return _response(200, {
+        "success": True,
+        "project_id": project_id,
+        "tau_mid": tau_mid,
+        "review_floor": review_floor,
+        "proposal_count": len(proposals),
+        "counts": counts,
+        "proposals": proposals,
+        "note": ("Propose-only (mutation-free). Cross-type/cross-project clusters are never "
+                 "surfaced. T-HIGH is deferred to ENC-TSK-I09 auto-merge and not actionable here. "
+                 "Approve T-MID (whole-cluster plan) or T-LOW (whole-or-per-record) via op=approve "
+                 "(io Cognito session only)."),
+    })
+
+
+def _handle_dedup_approve(project_id: str, body: Dict, claims: Optional[Dict]) -> Dict:
+    """op=approve: io-Cognito-gated execution of soft supersession (§7/§8).
+
+    The agent/internal-key path is rejected — this surface records io's approval
+    signal and only then writes. Each approved duplicate is superseded into the
+    canonical by reusing the I07 `superseded-by` primitive (precheck + idempotent
+    edge migration + evidence freeze + reversibility). Per-record failures (e.g.
+    an evidence-orphan 409) are surfaced for human adjudication, never auto-forced.
+    """
+    # io-approval gate — never let the agent/internal-key self-authorize a merge.
+    if not _is_human_request(claims):
+        return _error(403, "Dedup supersession approval requires io Cognito authority (PWA session). "
+                           "The internal-key/agent path cannot self-authorize a merge "
+                           "(ENC-TSK-I08 io-gate; DOC-DF651F07D5C2 §8).")
+
+    canonical_id = str(body.get("canonical_id", "")).strip().upper()
+    superseded_ids = body.get("superseded_ids")
+    tier = str(body.get("tier", "")).strip().upper()
+    cluster_id = str(body.get("cluster_id", "")).strip()
+
+    if not canonical_id:
+        return _error(400, "Field 'canonical_id' is required.")
+    if not isinstance(superseded_ids, list) or not superseded_ids:
+        return _error(400, "Field 'superseded_ids' (non-empty list) is required.")
+    superseded_ids = [str(s).strip().upper() for s in superseded_ids if str(s).strip()]
+    if not superseded_ids:
+        return _error(400, "superseded_ids contained no usable record ids.")
+    if canonical_id in superseded_ids:
+        return _error(400, "canonical_id must not appear in superseded_ids.")
+    if len(set(superseded_ids)) != len(superseded_ids):
+        return _error(400, "superseded_ids must be unique.")
+    # I08 actions only T-MID / T-LOW. T-HIGH auto-merge is ENC-TSK-I09 (flag-gated).
+    if tier not in ("T-MID", "T-LOW"):
+        return _error(400, "Field 'tier' must be 'T-MID' or 'T-LOW'. T-HIGH auto-merge is "
+                           "ENC-TSK-I09's flag-gated arc-walker, not actionable via this surface.")
+    # Hard floor: never act on a cross-type set (§4.0). Same-project is enforced
+    # per-pair by _supersede_precheck (which reads the records).
+    homo, htype = _dedup_homogeneous([canonical_id] + superseded_ids)
+    if not homo:
+        return _error(400, "Cross-type supersession is a category error (§4.0): canonical and every "
+                           "superseded_id must share record_type. Nothing actioned.")
+    if htype not in _SUPERSEDABLE_TYPES:
+        return _error(400, f"Supersession applies to {sorted(_SUPERSEDABLE_TYPES)} records only "
+                           f"(got {htype}).")
+
+    approver = _human_actor(claims)
+    reason_extra = str(body.get("reason", "")).strip()
+    write_source = body.get("write_source", {})
+
+    results: List[Dict] = []
+    superseded_count = 0
+    for b_id in superseded_ids:
+        reason = (f"io-approved dedup supersession (ENC-TSK-I08; tier={tier}"
+                  + (f"; cluster={cluster_id}" if cluster_id else "")
+                  + f"; approver={approver})")
+        if reason_extra:
+            reason = f"{reason}. {reason_extra}"
+        resp = _handle_create_relationship(project_id, {
+            "source_id": b_id,
+            "target_id": canonical_id,
+            "relationship_type": "superseded-by",
+            "reason": reason,
+            "provenance": "human",
+            "write_source": write_source,
+        })
+        status_code = resp.get("statusCode")
+        try:
+            payload = json.loads(resp.get("body") or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        ok = status_code in (200, 201)
+        if ok:
+            superseded_count += 1
+        results.append({
+            "superseded_id": b_id,
+            "status_code": status_code,
+            "ok": ok,
+            "idempotent": bool(payload.get("idempotent") or (payload.get("supersession") or {}).get("idempotent")),
+            "supersession": payload.get("supersession"),
+            "detail": payload.get("error"),
+        })
+
+    return _response(200, {
+        "success": True,
+        "project_id": project_id,
+        "canonical_id": canonical_id,
+        "cluster_id": cluster_id or None,
+        "tier": tier,
+        "approved_by": approver,
+        "requested_count": len(superseded_ids),
+        "superseded_count": superseded_count,
+        "rejected_count": len(superseded_ids) - superseded_count,
+        "results": results,
+        "note": ("Soft, reversible supersession via the ENC-TSK-I07 superseded-by op "
+                 "(idempotent edge migration + evidence freeze). Per-record failures "
+                 "(e.g. evidence-orphan 409) are surfaced for human adjudication, not forced."),
+    })
+
+
+# ---------------------------------------------------------------------------
 # Path parsing & routing
 # ---------------------------------------------------------------------------
 
 # Route patterns — order matters (most specific first)
 _RE_PENDING_UPDATES = re.compile(r"^(?:/api/v1/tracker)?/pending-updates$")
+_RE_DEDUP_REVIEW = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/dedup-review$"
+)
 _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/relationship$"
 )
@@ -5394,6 +5695,34 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         if auth_err:
             return auth_err
         return _handle_pending_updates(query_params)
+
+    # --- Route: dedup tier-review surface (ENC-TSK-I08) ---
+    m_dedup = _RE_DEDUP_REVIEW.match(path)
+    if m_dedup:
+        project_id = m_dedup.group("project")
+        if method != "POST":
+            return _error(405, "Method not allowed on /dedup-review. Use POST with op=propose|approve.")
+        try:
+            body = json.loads(event.get("body") or "{}")
+        except (ValueError, TypeError):
+            return _error(400, "Invalid JSON body.")
+        op = str(body.get("op", "")).strip().lower()
+        # propose is mutation-free (read scope); approve writes (write scope) AND is
+        # additionally io-Cognito-gated inside _handle_dedup_approve.
+        scopes = ["tracker:write"] if op == "approve" else ["tracker:read"]
+        claims, auth_err = _authenticate(event, scopes)
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        _normalize_write_source(body, claims)
+        if op == "propose":
+            return _handle_dedup_propose(project_id, body)
+        elif op == "approve":
+            return _handle_dedup_approve(project_id, body, claims)
+        else:
+            return _error(400, "Field 'op' must be 'propose' or 'approve'.")
 
     # --- Route: typed relationship edges (ENC-FTR-049) ---
     m_rel = _RE_RELATIONSHIP.match(path)
