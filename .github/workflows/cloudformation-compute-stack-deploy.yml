@@ -6,6 +6,7 @@ on:
       - main
       - 'v4/**'
     paths:
+      - "infrastructure/cloudformation/01-data.yaml"
       - "infrastructure/cloudformation/02-compute.yaml"
       - ".github/workflows/cloudformation-compute-stack-deploy.yml"
   workflow_dispatch:
@@ -156,6 +157,29 @@ jobs:
             --stack "${{ steps.params.outputs.stack_name }}" \
             --template "${TEMPLATE_FILE}" \
             --region "${AWS_REGION}"
+
+      - name: Deploy Data stack (01-data)
+        run: |
+          set -euo pipefail
+          # Deploy the data stack first so cross-stack exports (e.g. GovernanceVersionTableArn)
+          # exist before 02-compute is deployed. Uses previous values for all params not
+          # overridden here; EnvironmentSuffix and Environment are derived from the branch.
+          environment="${ENVIRONMENT_SUFFIX:+-gamma}"
+          environment="${environment:-production}"
+          # ENVIRONMENT_SUFFIX is "-gamma" or "". 'production' when empty.
+          [ -n "${ENVIRONMENT_SUFFIX}" ] && environment="gamma" || environment="production"
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.data_stack_name }}" \
+            --template-file infrastructure/cloudformation/01-data.yaml \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 01-data/ \
+            --parameter-overrides \
+              EnvironmentSuffix="${ENVIRONMENT_SUFFIX}" \
+              Environment="${environment}" \
+              DynamoDBRegion="${AWS_REGION}"
 
       - name: Deploy Compute stack (02-compute)
         id: deploy
