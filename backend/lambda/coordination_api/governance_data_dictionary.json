@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-27.01",
-  "updated_at": "2026-06-27T03:10:00Z",
-  "last_change_summary": "ENC-TSK-I34: widened tracker REST router project-segment regexes from [a-z0-9_-]+ to [a-zA-Z0-9_-]+ in backend/lambda/tracker_mutation/lambda_function.py — no tracker field or schema changes; this version bump satisfies the path-triggered Governance Dictionary Guard (backend/lambda/*/lambda_function.py glob). Live S3 governance store sync is a post-merge product-lead handoff. Prior: ENC-TSK-I03 (ENC-FTR-082 AC-2 retry / ENC-PLN-052): the ENC-TSK-H92 query-side encoding measured not_met (precision@1 -0.9%); replaced it with a SYMMETRIC vector re-rank — HNSW recall uses the raw query, then candidates are re-scored by cosine(W*q, W*emb) in _hybrid_vector_ranks (transform W unchanged, applied to BOTH sides via _transform_unit); removed the query-side _apply_correlation_encoding. Also fixed ENC-ISS-404: _handle_search now passes vector_read pagination/embedding_property/embedding_dim through the response envelope (previously dropped, leaving has_more only in the summary string). Touched backend/lambda/graph_query_api/lambda_function.py. ENC-TSK-H92 (ENC-FTR-082 AC-2 / ENC-PLN-052): added flag-gated correlation-aware (pseudoinverse-style) encoding on the hybrid-retrieval vector path — OFF by default (byte-identical), applying an offline-fit de-correlating transform W (tools/fit_encoding_h92.py, fit from the ENC-TSK-H91 high-correlation pairs) to the query embedding before the HNSW search; added env flags CORRELATION_ENCODING_ENABLED / CORRELATION_ENCODING_TRANSFORM_URI and the graph_query_api.correlation_encoding dictionary entity. No new edge type (OGTM N/A). Touched backend/lambda/graph_query_api/lambda_function.py. ENC-TSK-H89 (ENC-FTR-082 AC-12 / ENC-PLN-052): added a governed bulk vector-read path (search_type=vector_read) over the n.embedding corpus in backend/lambda/graph_query_api/lambda_function.py — strip-EXEMPT (the hybrid path keeps stripping at :1785-1788), latency-bounded (_VECTOR_READ_DEADLINE_S) + server-side SKIP/LIMIT pagination; wired the MCP code-mode action graph_query.vector_read plus a tracker.graphsearch offset/limit passthrough in tools/enceladus-mcp-server/server.py; added the graph_query_api.vector_read dictionary entity and the vector_read (and hybrid) search_type enum values. No new edge type (OGTM N/A). Touched backend/lambda/graph_query_api/lambda_function.py and tools/enceladus-mcp-server/server.py. Live S3 governance store sync is a post-merge product-lead handoff. Prior: ENC-TSK-C72 (ENC-ISS-191): graph_sync CHILD_OF projection fix - placeholder-MERGE for unprojected parent nodes plus read-side parent-attribute alias shim (parent/parent_task_id/parent_id). No tracker/field schema change; this version bump satisfies the path-triggered Governance Dictionary Guard (backend/lambda/*/lambda_function.py glob). Live S3 governance store sync is a post-merge product-lead handoff. Prior change — ENC-FTR-082 Phase A (ENC-PLN-049): registered the PATHWAY_TRAVERSED/TRAVERSED_BY edge type (AC-6 OGTM) across graph_query_api _ALLOWED_EDGE_TYPES, graph_sync RELATIONSHIP_TYPE_TO_EDGE_LABEL, and the four tracker_mutation relationship registries (_RELATIONSHIP_TYPES, _INVERSE_PAIRS, _OWL_CHARACTERISTICS, _DOMAIN_RANGE_CONSTRAINTS); added raw pathway telemetry (AC-1; one JSONL object per hybrid call to an S3 append-log partitioned by wave_id, degrading to a CloudWatch log line until the Wave-2 IAM/env CFN change) and the per-edge edge_participation output (AC-10; the ENC-FTR-108 AC-4 input contract) to graph_query_api hybrid retrieval, plus optional wave_id/intent_signature graphsearch params; added the tracker.pathway_traversed and graph_query_api.pathway_telemetry dictionary entities. Touched backend/lambda/graph_query_api/lambda_function.py, backend/lambda/graph_sync/lambda_function.py, backend/lambda/tracker_mutation/lambda_function.py. Live S3 governance store sync is a post-merge product-lead handoff. Prior change — ENC-TSK-H35 (ENC-FTR-101 / ENC-PLN-006, Option B): pre-materialized standing Neo4j Aura Graph Analytics projection for hybrid-retrieval Personalized PageRank. graph_query_api gains an env-gated (GDS_STANDING_PROJECTION_PREFIX) warm read path that runs gds.pageRank.stream against a standing named projection refreshed out-of-band by a single-writer action=refresh_projection invoke, with a hard fallback to the existing per-query projection then the cypher proxy under _GRAPH_SIGNAL_DEADLINE_S (no regression when unset); the standing projection carries weight + flow_weight=1.0 relationship properties (flow_weight is the ENC-FTR-108 adaptive-weight slot) and /health gains a graph_projection staleness block. Updated the tracker.graphsearch entity description accordingly. Touched backend/lambda/graph_query_api/lambda_function.py. No tracker/field schema changes; this version bump satisfies the path-triggered Governance Dictionary Guard (backend/lambda/*/lambda_function.py glob). Live S3 governance store sync is a post-merge product-lead handoff. Reconciliation context: DOC-6EFD5DB32CD8 Rev 14 (F36 closed ENC-ISS-268 via Bolt-pool resilience, not session reuse; session reuse is ENC-ISS-271, open).",
+  "version": "2026-06-27.02",
+  "updated_at": "2026-06-27T04:08:55Z",
+  "last_change_summary": "ENC-TSK-I37 / ENC-FTR-117 (Agent ID v3): documented two new governed stores — coordination.agent_session (ENC-SES-NNN session-allocation store) and coordination.agent_type (ENC-AGT-NNN agent-type directory) — provisioned in 01-data.yaml, minted server-side by coordination_api/agent_id_alloc.py. Property sets are value-identical to the intended v4 node schemas (DOC-05C45B438FC1). Also added AGENT_SESSIONS_TABLE/AGENT_TYPES_TABLE config constants (config.py) — the change that trips this guard. No existing field/schema changes.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5519,6 +5519,77 @@
           "definition": "h92.v1: {version:'h92.v1', dim:int, alpha:float, rank:int, W:[[float]*dim]*dim, fit_meta:{corpus_size, correlated_set_size, num_pairs, energy_captured, top_singular_values}, pairs_source, generated_at}. W is the D x D de-correlating map applied as q' = normalize(W @ q)."
         }
       }
+    },
+    "coordination.agent_session": {
+      "description": "ENC-TSK-I37 / ENC-FTR-117 (Agent ID v3). Session-allocation store (DynamoDB table agent-sessions${EnvironmentSuffix}) keyed by a server-minted ENC-SES-NNN; one row per governed agent session. Monotonic single-assignment: a minted, claimed, or retired id is never reissued (sessions retire, they do not recycle). v3 flat store; the property set is value-identical to the intended v4 session node so v4 promotion is a backfill, not a reshape (binding release gate, DOC-05C45B438FC1). Minted server-side by coordination_api (agent_id_alloc.py) reusing tracker_mutation's discipline; callers never supply an id (ENC-TSK-B99). The monotonic counter is a reserved 'counter#ENC-SES' sentinel row in the same table (excluded from v4 node backfill). No new graph node/edge in v3 (OGTM N/A). The coordination(action=agent.*) MCP surface is ENC-TSK-I38; the active_agent_session_id value-swap is ENC-TSK-I40.",
+      "fields": {
+        "session_id": {
+          "type": "string",
+          "definition": "Server-minted ENC-SES-NNN (partition key). base-36 monotonic sequence (ENC-FTR-056 discipline). Never caller-supplied (ENC-TSK-B99 ID Boundary Rule)."
+        },
+        "agent_type_id": {
+          "type": "string",
+          "definition": "Foreign key to coordination.agent_type (ENC-AGT-NNN) — the agent type this session is typed as."
+        },
+        "parent_session_id": {
+          "type": "string",
+          "definition": "ENC-SES-NNN of the dispatching parent session, or 'root' for a self-allocated (ad-hoc) session."
+        },
+        "runtime": {
+          "type": "string",
+          "definition": "Session runtime/surface descriptor (e.g. 'cc-desktop-opus48')."
+        },
+        "created_at": {
+          "type": "string",
+          "definition": "ISO 8601 UTC mint timestamp."
+        },
+        "claimed_at": {
+          "type": "string",
+          "definition": "ISO 8601 UTC claim timestamp; empty until claimed. A pre-allocated (dispatched) session stays 'allocated' with empty claimed_at until the child claims it (ENC-TSK-I38)."
+        },
+        "status": {
+          "type": "enum",
+          "enum": [
+            "allocated",
+            "claimed",
+            "retired"
+          ],
+          "definition": "Session lifecycle. allocated -> claimed (allocated-to-claimed flip on claim) -> retired. A self-allocated session is minted directly as claimed. Append-only; retire never recycles the id."
+        }
+      }
+    },
+    "coordination.agent_type": {
+      "description": "ENC-TSK-I37 / ENC-FTR-117 (Agent ID v3). Agent-type directory (DynamoDB table agent-types${EnvironmentSuffix}) keyed by a server-minted ENC-AGT-NNN; one durable row per surface-and-model tuple (e.g. Claude Desktop / Opus 4.8). Low-volume controlled vocabulary, not a per-session record. Property set value-identical to the intended v4 agent-type node (DOC-05C45B438FC1). Minted server-side by coordination_api (agent_id_alloc.py); callers never supply an id (ENC-TSK-B99). The monotonic counter is a reserved 'counter#ENC-AGT' sentinel row. Agent-type nodes are the retrieval-eligible half of the Agent ID model; selection telemetry (usage_count) supports cheapest-sufficient agent-type choice.",
+      "fields": {
+        "agent_type_id": {
+          "type": "string",
+          "definition": "Server-minted ENC-AGT-NNN (partition key). base-36 monotonic sequence. Never caller-supplied (ENC-TSK-B99)."
+        },
+        "surface": {
+          "type": "string",
+          "definition": "Agent surface (e.g. Claude Desktop, Claude Code Terminal, Cursor Cloud, Codex, Bedrock)."
+        },
+        "model": {
+          "type": "string",
+          "definition": "Model (e.g. Opus 4.8, Sonnet 4.6, Haiku 4.5)."
+        },
+        "cost_tier": {
+          "type": "string",
+          "definition": "Relative cost tier, used for the power-versus-cost agent-type selection decision."
+        },
+        "status": {
+          "type": "enum",
+          "enum": [
+            "active",
+            "deprecated"
+          ],
+          "definition": "active, or deprecated when the underlying model is superseded."
+        },
+        "usage_count": {
+          "type": "integer",
+          "definition": "Server-incremented count of sessions of this agent type. Observed telemetry (earned-precision), not a hand-maintained fit assertion."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -5537,6 +5608,11 @@
       "version": "2026-04-22.01",
       "date": "2026-04-22",
       "summary": "ENC-TSK-F99: no schema changes — version bump required by CI guard for lambda_function.py modification (ENC-ISS-300 _get_task_record scan fix)"
+    },
+    {
+      "version": "2026-06-27.02",
+      "date": "2026-06-27",
+      "summary": "ENC-TSK-I37 / ENC-FTR-117: add coordination.agent_session and coordination.agent_type entities (Agent ID v3 governed stores); v3 property sets value-identical to v4 node schemas per DOC-05C45B438FC1. Repo-file edit only — S3/DDB governance sync is a product-lead post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }
