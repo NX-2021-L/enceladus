@@ -36,7 +36,7 @@ ENC-TSK-I40. The allocator is dormant until I38 wires an invocation path.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -49,11 +49,18 @@ __all__ = [
     "AGENT_TYPE_ID_PREFIX",
     "SESSION_STATUSES",
     "AGENT_TYPE_STATUSES",
+    "SESSION_NODE_PROPERTIES",
+    "AGENT_TYPE_NODE_PROPERTIES",
     "encode_seq",
     "mint_session_id",
     "mint_agent_type_id",
     "get_session",
     "get_agent_type",
+    "claim_session",
+    "retire_session",
+    "list_sessions",
+    "list_agent_types",
+    "find_agent_type",
     "IdAllocationError",
     "CallerSuppliedIdError",
 ]
@@ -317,3 +324,212 @@ def get_agent_type(agent_type_id: str) -> Optional[Dict[str, Any]]:
         ConsistentRead=True,
     ).get("Item")
     return _deserialize(raw) if raw else None
+
+
+# ---------------------------------------------------------------------------
+# Session lifecycle mutations — ENC-TSK-I38
+# ---------------------------------------------------------------------------
+
+def claim_session(
+    session_id: str,
+    *,
+    expected_agent_type_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Flip an allocated session to claimed (allocated → claimed, append-only).
+
+    Validates: session exists, current status is 'allocated', and optionally
+    enforces parent-lineage by comparing agent_type_id against
+    ``expected_agent_type_id``. Returns the updated session item.
+
+    Raises ValueError when the session is missing, already past 'allocated',
+    or when the agent_type_id lineage check fails.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+
+    ddb = _get_ddb()
+    now = _now_z()
+    condition = "#st = :allocated"
+    expr_names: Dict[str, str] = {"#st": "status"}
+    expr_values: Dict[str, Any] = {
+        ":claimed": _serialize("claimed"),
+        ":allocated": _serialize("allocated"),
+        ":now": _serialize(now),
+    }
+    if expected_agent_type_id:
+        condition = "#st = :allocated AND agent_type_id = :exp_agt"
+        expr_values[":exp_agt"] = _serialize(expected_agent_type_id)
+
+    try:
+        resp = ddb.update_item(
+            TableName=AGENT_SESSIONS_TABLE,
+            Key={"session_id": _serialize(session_id)},
+            UpdateExpression="SET #st = :claimed, claimed_at = :now",
+            ConditionExpression=condition,
+            ExpressionAttributeNames=expr_names,
+            ExpressionAttributeValues=expr_values,
+            ReturnValues="ALL_NEW",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            existing = get_session(session_id)
+            if existing is None:
+                raise ValueError(f"Session {session_id!r} not found") from exc
+            if existing.get("status") != "allocated":
+                raise ValueError(
+                    f"Session {session_id!r} is not claimable: status={existing.get('status')!r}"
+                ) from exc
+            raise ValueError(
+                f"Session {session_id!r} agent_type_id lineage mismatch "
+                f"(expected {expected_agent_type_id!r})"
+            ) from exc
+        raise
+
+    updated = _deserialize(resp.get("Attributes", {}))
+    logger.info("[INFO] Claimed session %s", session_id)
+    return updated
+
+
+def retire_session(session_id: str) -> Dict[str, Any]:
+    """Flip a session to retired from any live state (allocated or claimed → retired).
+
+    Append-only: once retired a session cannot be un-retired. Returns the
+    updated session item.
+
+    Raises ValueError when the session is missing or already retired.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.update_item(
+            TableName=AGENT_SESSIONS_TABLE,
+            Key={"session_id": _serialize(session_id)},
+            UpdateExpression="SET #st = :retired",
+            ConditionExpression="#st = :allocated OR #st = :claimed",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":retired": _serialize("retired"),
+                ":allocated": _serialize("allocated"),
+                ":claimed": _serialize("claimed"),
+            },
+            ReturnValues="ALL_NEW",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            existing = get_session(session_id)
+            if existing is None:
+                raise ValueError(f"Session {session_id!r} not found") from exc
+            if existing.get("status") == "retired":
+                raise ValueError(f"Session {session_id!r} is already retired") from exc
+            raise ValueError(
+                f"Session {session_id!r} cannot be retired from status={existing.get('status')!r}"
+            ) from exc
+        raise
+
+    updated = _deserialize(resp.get("Attributes", {}))
+    logger.info("[INFO] Retired session %s", session_id)
+    return updated
+
+
+# ---------------------------------------------------------------------------
+# Directory reads — paginated scans (ENC-TSK-I38)
+# ---------------------------------------------------------------------------
+
+def list_sessions(
+    *,
+    status: Optional[str] = None,
+    agent_type_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return all session nodes, excluding counter# sentinel rows.
+
+    Accepts optional ``status`` and ``agent_type_id`` filters. Results are
+    returned in DynamoDB scan order (unordered within a page).
+    """
+    ddb = _get_ddb()
+    filter_parts = ["NOT begins_with(session_id, :ctr_pfx)"]
+    expr_names: Dict[str, str] = {}
+    expr_values: Dict[str, Any] = {":ctr_pfx": _serialize("counter#")}
+
+    if status:
+        filter_parts.append("#st = :status")
+        expr_names["#st"] = "status"
+        expr_values[":status"] = _serialize(status)
+    if agent_type_id:
+        filter_parts.append("agent_type_id = :agt")
+        expr_values[":agt"] = _serialize(agent_type_id)
+
+    kwargs: Dict[str, Any] = {
+        "TableName": AGENT_SESSIONS_TABLE,
+        "FilterExpression": " AND ".join(filter_parts),
+        "ExpressionAttributeValues": expr_values,
+    }
+    if expr_names:
+        kwargs["ExpressionAttributeNames"] = expr_names
+
+    items: List[Dict[str, Any]] = []
+    scan = ddb.scan(**kwargs)
+    items.extend([_deserialize(r) for r in scan.get("Items", [])])
+    while scan.get("LastEvaluatedKey"):
+        scan = ddb.scan(**kwargs, ExclusiveStartKey=scan["LastEvaluatedKey"])
+        items.extend([_deserialize(r) for r in scan.get("Items", [])])
+    return items
+
+
+def list_agent_types(*, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return all agent-type nodes, excluding counter# sentinel rows.
+
+    Accepts an optional ``status`` filter (``"active"`` or ``"deprecated"``).
+    """
+    ddb = _get_ddb()
+    filter_parts = ["NOT begins_with(agent_type_id, :ctr_pfx)"]
+    expr_names: Dict[str, str] = {}
+    expr_values: Dict[str, Any] = {":ctr_pfx": _serialize("counter#")}
+
+    if status:
+        filter_parts.append("#st = :status")
+        expr_names["#st"] = "status"
+        expr_values[":status"] = _serialize(status)
+
+    kwargs: Dict[str, Any] = {
+        "TableName": AGENT_TYPES_TABLE,
+        "FilterExpression": " AND ".join(filter_parts),
+        "ExpressionAttributeValues": expr_values,
+    }
+    if expr_names:
+        kwargs["ExpressionAttributeNames"] = expr_names
+
+    items: List[Dict[str, Any]] = []
+    scan = ddb.scan(**kwargs)
+    items.extend([_deserialize(r) for r in scan.get("Items", [])])
+    while scan.get("LastEvaluatedKey"):
+        scan = ddb.scan(**kwargs, ExclusiveStartKey=scan["LastEvaluatedKey"])
+        items.extend([_deserialize(r) for r in scan.get("Items", [])])
+    return items
+
+
+def find_agent_type(*, surface: str, model: str) -> Optional[Dict[str, Any]]:
+    """Scan AGENT_TYPES_TABLE for a node matching surface + model.
+
+    Returns the first active match (preferring active over deprecated), or
+    None if no match exists. Used by agent.type.register for idempotency:
+    if a type already exists for this surface/model pair, return it rather
+    than minting a duplicate.
+    """
+    ddb = _get_ddb()
+    scan = ddb.scan(
+        TableName=AGENT_TYPES_TABLE,
+        FilterExpression=(
+            "surface = :surface AND model = :model "
+            "AND NOT begins_with(agent_type_id, :ctr_pfx)"
+        ),
+        ExpressionAttributeValues={
+            ":surface": _serialize(surface),
+            ":model": _serialize(model),
+            ":ctr_pfx": _serialize("counter#"),
+        },
+    )
+    items = [_deserialize(r) for r in scan.get("Items", [])]
+    active = [i for i in items if i.get("status") == "active"]
+    return active[0] if active else (items[0] if items else None)
