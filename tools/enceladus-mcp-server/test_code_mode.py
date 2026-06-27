@@ -212,3 +212,29 @@ def test_execute_dry_run_resolves_without_calling_mutation_handler():
     assert payload["step_results"][0]["status"] == "dry_run"
     assert payload["underlying_calls"][0]["tool"] == "tracker_set"
     assert calls["tracker_set"] == 0
+
+
+def test_canonical_governance_hash_ddb_reads_same_record_as_coordination_api():
+    """ENC-TSK-I29 / AC#1: the MCP write-validation path resolves the governance
+    hash from the same canonical governance-version record the coordination API
+    serves -- same table, same record id, consistent read."""
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+
+    captured = {}
+
+    class _FakeDdb:
+        def get_item(self, TableName=None, Key=None, ConsistentRead=None, **_kwargs):
+            captured["TableName"] = TableName
+            captured["Key"] = Key
+            captured["ConsistentRead"] = ConsistentRead
+            return {"Item": {"governance_hash": {"S": "e" * 64}}}
+
+    with patch.object(server, "_get_ddb", return_value=_FakeDdb()):
+        result = server._get_canonical_governance_hash_ddb()
+
+    assert result == "e" * 64
+    assert captured["TableName"] == server.GOVERNANCE_VERSION_TABLE
+    assert captured["Key"] == {"version_id": {"S": server.GOVERNANCE_VERSION_RECORD_ID}}
+    assert captured["ConsistentRead"] is True
+    # Aligned to the coordination API's canonical record identity.
+    assert server.GOVERNANCE_VERSION_RECORD_ID == "governance-version-current"
