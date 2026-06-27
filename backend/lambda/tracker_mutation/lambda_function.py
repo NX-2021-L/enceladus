@@ -5661,19 +5661,19 @@ _RE_DEDUP_REVIEW = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/dedup-review$"
 )
 _RE_RELATIONSHIP = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/relationship$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/relationship$"
 )
 _RE_RECORD_SUB = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
 )
 _RE_RECORD = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)$"
 )
 _RE_TYPE_COLLECTION = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)$"
 )
 _RE_PROJECT = re.compile(
-    r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)$"
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)$"
 )
 
 
