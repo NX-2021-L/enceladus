@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-27.05",
+  "version": "2026-06-27.06",
   "updated_at": "2026-06-27T20:02:00Z",
-  "last_change_summary": "ENC-TSK-I53 / ENC-FTR-116: recompute_governance Lambda now unwraps the SNS-relay Notification envelope (S3 → SNS us-west-1 → Lambda us-west-2) so real governance/live/* ObjectCreated events recompute the canonical version record; previously every real event failed KeyError 's3' because Lambda-protocol SNS cannot use raw message delivery. No data-dictionary schema change — bump satisfies the path-triggered Governance Dictionary Guard on lambda_function.py edits.",
+  "last_change_summary": "ENC-TSK-I53 / ENC-FTR-116: recompute_governance Lambda now unwraps the SNS-relay Notification envelope (S3 → SNS us-west-1 → Lambda us-west-2) so real governance/live/* ObjectCreated events recompute the canonical version record; previously every real event failed KeyError 's3' because Lambda-protocol SNS cannot use raw message delivery. No data-dictionary schema change — bump satisfies the path-triggered Governance Dictionary Guard on lambda_function.py edits. Follows ENC-TSK-I32 (governance drift-detection backstop, governance_drift_check.handler).",
   "owners": [
     "enceladus-platform"
   ],
@@ -5612,10 +5612,36 @@
           "definition": "GOVERNANCE_VERSION_TABLE: governance-version or governance-version-gamma. GOVERNANCE_VERSION_RECORD_ID: governance-version-current (constant)."
         }
       }
+    },
+    "governance_drift_check.handler": {
+      "description": "ENC-TSK-I32 / ENC-FTR-116: scheduled drift-detection backstop Lambda (governance_drift_check). Reads the canonical governance-version DDB record and independently recomputes the §4.3 bundle hash from live S3 object checksums. Emits GovernanceVersionDrift CloudWatch metric (1.0=drift, 0.0=agree) and SNS alert on mismatch, failed recompute, or missing record.",
+      "fields": {
+        "drift_metric": {
+          "type": "object",
+          "definition": "CloudWatch metric GovernanceVersionDrift in namespace Enceladus/Governance. 1.0 = drift detected or recompute failed; 0.0 = canonical record agrees with live S3. CloudWatch alarm fires on 1.0. DRIFT_METRIC_NAMESPACE env var (default: Enceladus/Governance)."
+        },
+        "sns_alert": {
+          "type": "object",
+          "definition": "SNS notification (GOVERNANCE_ALERT_SNS_ARN env var) published when drift is detected, recompute fails, or the canonical record is missing. Same topic as governance_audit anomaly alerts."
+        },
+        "read_only_invariant": {
+          "type": "object",
+          "definition": "This Lambda NEVER writes the canonical governance-version record (sole-writer = devops-recompute-governance, I28) and never writes to governance/live/* (recursion safety). It is a read-only auditor."
+        },
+        "env_vars": {
+          "type": "object",
+          "definition": "GOVERNANCE_VERSION_TABLE (default: governance-version), GOVERNANCE_S3_BUCKET (default: jreese-net), DRIFT_METRIC_NAMESPACE (default: Enceladus/Governance), GOVERNANCE_ALERT_SNS_ARN."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
   "change_log": [
+    {
+      "version": "2026-06-27.05",
+      "date": "2026-06-27",
+      "summary": "ENC-TSK-I32 / ENC-FTR-116 Wave 2: governance drift-detection backstop — governance_drift_check Lambda added (read-only scheduled auditor comparing canonical DDB vs. live S3 §4.3 hash). New entity: governance_drift_check.handler. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
     {
       "version": "2026-06-27.01",
       "date": "2026-06-27",

@@ -3723,6 +3723,210 @@ Resources:
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
 
+  # ENC-TSK-I32 / ENC-FTR-116: governance drift-detection backstop.
+  # Scheduled Argo/FIM-style reconcile — recomputes the §4.3 bundle hash from
+  # live S3 and compares it against the canonical governance-version record.
+  # Read-only (never writes the record or governance/live/*); emits a
+  # CloudWatch metric + SNS alert on disagreement or recompute failure.
+  GovernanceDriftCheckFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-governance-drift-check${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt GovernanceDriftCheckRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          GOVERNANCE_VERSION_TABLE: !Sub "governance-version${EnvironmentSuffix}"
+          GOVERNANCE_S3_BUCKET: jreese-net
+          DRIFT_METRIC_NAMESPACE: Enceladus/Governance
+          GOVERNANCE_ALERT_SNS_ARN: !ImportValue
+            Fn::Sub: ${DataStackName}-DeadLetterTopicArn
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance
+
+  GovernanceDriftCheckRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-governance-drift-check-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3GovernanceRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadGovernanceLiveObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:HeadObject
+                  - s3:GetObjectAttributes
+                Resource: "arn:aws:s3:::jreese-net/governance/live/*"
+              - Sid: ListGovernanceLivePrefix
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+                Condition:
+                  StringLike:
+                    "s3:prefix": "governance/live/*"
+        - PolicyName: GovernanceVersionDDBRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read-only: drift check NEVER writes the canonical record (I28
+              # reserves writes to the recompute role alone).
+              - Sid: ReadCanonicalRecord
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-GovernanceVersionTableArn
+        - PolicyName: DriftTelemetry
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EmitDriftMetric
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "cloudwatch:namespace": Enceladus/Governance
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  # SNS publish to the existing dead-letter/alert topic for drift alerts.
+  GovernanceDriftCheckSnsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "governance-drift-check-sns-publish${EnvironmentSuffix}"
+      Roles:
+        - !Ref GovernanceDriftCheckRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublishDriftAlert
+            Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !ImportValue
+              Fn::Sub: ${DataStackName}-DeadLetterTopicArn
+
+  # Hourly schedule — the FIM-style backstop cadence (recompute already keeps
+  # the record warm on every write; this catches lost events / silent drift).
+  GovernanceDriftCheckSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "devops-governance-drift-check${EnvironmentSuffix}"
+      Description: Hourly governance-version drift reconcile (ENC-TSK-I32).
+      ScheduleExpression: "rate(1 hour)"
+      State: ENABLED
+      Targets:
+        - Id: GovernanceDriftCheckTarget
+          Arn: !GetAtt GovernanceDriftCheckFunction.Arn
+
+  GovernanceDriftCheckSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GovernanceDriftCheckFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GovernanceDriftCheckSchedule.Arn
+
+  # Drift alarm — fires when the canonical record disagrees with live S3.
+  GovernanceVersionDriftAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-governance-version-drift${EnvironmentSuffix}"
+      AlarmDescription: >-
+        Canonical governance-version record disagrees with live S3 checksums
+        (ENC-ISS-390 backstop). The drift-check Lambda emits
+        GovernanceVersionDrift=1 on hash mismatch, a missing record, or a
+        failed recompute from live S3.
+      Namespace: Enceladus/Governance
+      MetricName: GovernanceVersionDrift
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # Recompute-failure alarm — the canonical record cannot rotate if the
+  # storage-event recompute Lambda is erroring.
+  RecomputeGovernanceErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-recompute-governance-errors${EnvironmentSuffix}"
+      AlarmDescription: >-
+        The recompute-governance Lambda is failing; canonical governance-version
+        record may be stale relative to live S3 (ENC-ISS-390 backstop).
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RecomputeGovernanceFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # The drift-checker itself failing is a blind-spot — alarm on its errors too.
+  GovernanceDriftCheckErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-governance-drift-check-errors${EnvironmentSuffix}"
+      AlarmDescription: >-
+        The governance drift-check Lambda is failing; drift detection is blind
+        until it recovers (ENC-TSK-I32).
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref GovernanceDriftCheckFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
 Outputs:
   CoordinationApiFunctionArn:
     Value: !GetAtt CoordinationApiFunction.Arn
