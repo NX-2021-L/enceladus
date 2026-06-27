@@ -73,10 +73,17 @@ jobs:
           lambda_arn="arn:aws:lambda:${region}:${account}:function:${fn}"
           entry_id="GovernanceLiveRecompute${SUFFIX//-/}"
 
-          # Fetch current notification config into a temp file (preserves other notifications)
+          # Fetch current notification config into a temp file (preserves other notifications).
+          # The CLI returns empty string (not "{}") when no notifications exist, so we check
+          # the file size and write an explicit empty config if the output was empty.
           aws s3api get-bucket-notification-configuration \
             --bucket "${bucket}" --region "${region}" \
-            > /tmp/s3-notify-current.json 2>/dev/null || echo '{}' > /tmp/s3-notify-current.json
+            > /tmp/s3-notify-current.json 2>/dev/null || true
+          if [ ! -s /tmp/s3-notify-current.json ]; then
+            echo '{}' > /tmp/s3-notify-current.json
+          fi
+          echo "Current config:"
+          cat /tmp/s3-notify-current.json
 
           # Build the new LambdaFunctionConfigurations entry in a temp file
           cat > /tmp/s3-notify-new.json <<JSON
