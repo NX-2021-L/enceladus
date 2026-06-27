@@ -32,6 +32,26 @@ def _make_s3_event(key: str, sequencer: str = "AAAA", version_id: str = "v1") ->
     }
 
 
+def _make_sns_wrapped_event(key: str, sequencer: str = "AAAA", version_id: str = "v1") -> dict:
+    """S3 -> SNS -> Lambda delivery: the S3 event is a JSON string in Sns.Message.
+
+    This is the real cross-region relay shape (governance bucket us-west-1, Lambda
+    us-west-2). ENC-ISS-390 e2e.
+    """
+    inner = _make_s3_event(key, sequencer=sequencer, version_id=version_id)
+    return {
+        "Records": [
+            {
+                "EventSource": "aws:sns",
+                "Sns": {
+                    "Type": "Notification",
+                    "Message": json.dumps(inner),
+                },
+            }
+        ]
+    }
+
+
 def _stub_canonical(monkeypatch, files=None):
     """Monkeypatch _list_canonical_files + _get_file_checksum + _read_governance_revision."""
     if files is None:
@@ -185,3 +205,40 @@ def test_bundle_hash_matches_spec():
     expected = h.hexdigest()
 
     assert mod._compute_bundle_hash(entries) == expected
+
+
+def test_sns_wrapped_event_is_unwrapped_and_processed(monkeypatch):
+    """S3 -> SNS -> Lambda: the wrapped S3 event must be unwrapped and written."""
+    _stub_canonical(monkeypatch)
+    monkeypatch.setattr(mod, "_read_current_record", lambda: None)
+
+    written = {}
+    monkeypatch.setattr(
+        mod,
+        "_cas_write",
+        lambda *, governance_revision, governance_hash, generation, file_entries, source_event, expected_cas: (
+            written.update({"generation": generation, "seq": source_event.get("s3_sequencer")}) or True
+        ),
+    )
+
+    mod.handler(_make_sns_wrapped_event("governance/live/agents.md", sequencer="SNSSEQ1"), None)
+
+    assert written["generation"] == 1
+    assert written["seq"] == "SNSSEQ1"
+
+
+def test_malformed_sns_message_returns_without_write(monkeypatch):
+    """A non-JSON / Records-less SNS message is handled gracefully (no crash, no write)."""
+    _stub_canonical(monkeypatch)
+
+    cas_calls = []
+    monkeypatch.setattr(mod, "_cas_write", lambda **kwargs: cas_calls.append(kwargs) or True)
+    monkeypatch.setattr(mod, "_read_current_record", lambda: None)
+
+    bad = {"Records": [{"EventSource": "aws:sns", "Sns": {"Message": "not-json"}}]}
+    mod.handler(bad, None)  # must not raise
+
+    empty = {"Records": [{"EventSource": "aws:sns", "Sns": {"Message": json.dumps({"Records": []})}}]}
+    mod.handler(empty, None)  # must not raise
+
+    assert not cas_calls, "malformed/empty SNS messages must not produce a DDB write"

@@ -223,6 +223,21 @@ def handler(event: dict, context: Any) -> None:
         return
 
     record = records[0]
+    # Cross-region relay (ENC-ISS-390 e2e): the governance bucket lives in
+    # us-west-1 and cannot invoke this Lambda (us-west-2) directly, so S3
+    # ObjectCreated events are fanned out through an SNS topic. SNS wraps the
+    # S3 event as a JSON string in record["Sns"]["Message"]. Unwrap it so the
+    # handler sees the raw S3 event shape whether delivery is direct or via SNS.
+    if "Sns" in record:
+        try:
+            inner_records = json.loads(record["Sns"]["Message"]).get("Records", [])
+        except (KeyError, ValueError, TypeError) as exc:
+            logger.error("Failed to unwrap SNS-wrapped S3 event: %s", exc)
+            return
+        if not inner_records:
+            logger.info("SNS message carried no S3 Records; nothing to do")
+            return
+        record = inner_records[0]
     s3_obj = record["s3"]["object"]
     trigger_key: str = s3_obj["key"]
     trigger_version_id: str = s3_obj.get("versionId", "")
