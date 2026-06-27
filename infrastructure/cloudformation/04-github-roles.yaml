@@ -522,6 +522,9 @@ Resources:
                   - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/devops-project-tracker"
                   - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/projects"
                   - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/documents"
+                  # ENC-TSK-I28: deny-by-default — sole writer is RecomputeGovernanceRole (ENC-TSK-I27)
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-version"
+                  - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/governance-version-gamma"
               - Sid: DenyGovernedS3Writes
                 Effect: Deny
                 Action:
