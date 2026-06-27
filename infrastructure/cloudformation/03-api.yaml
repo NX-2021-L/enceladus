@@ -408,6 +408,17 @@ Resources:
       RouteKey: DELETE /api/v1/tracker/{projectId}/relationship
       Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
 
+  # Dedup tier-review surface (ENC-TSK-I08 / FTR-115 P4) — POST op=propose|approve.
+  # Makes the deploy-success dedup-review Lambda HTTP-reachable on v4-gamma.
+  RouteTrackerDedupReviewGamma:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/dedup-review
+      Target: !Sub integrations/${TrackerMutationGammaLiveIntegration}
+
   # Create record (POST {recordType})
   RouteTrackerCreateRecordGamma:
     Type: AWS::ApiGatewayV2::Route
