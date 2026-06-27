@@ -33,6 +33,8 @@ def _first_nonempty_env(*names: str) -> str:
     return ""
 
 __all__ = [
+    "AGENT_SESSIONS_TABLE",
+    "AGENT_TYPES_TABLE",
     "ANTHROPIC_API_BASE_URL",
     "ANTHROPIC_API_KEY_SECRET_ID",
     "ANTHROPIC_API_STREAM_TIMEOUT_SECONDS",
@@ -170,6 +172,11 @@ COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
+# Agent ID v3 identity stores (ENC-TSK-I37 / ENC-FTR-117). Defaults are the prod table
+# names (no suffix); gamma sets AGENT_SESSIONS_TABLE/AGENT_TYPES_TABLE to the "-gamma"
+# names. The allocator (agent_id_alloc.py) is dormant until the agent.* surface (I38).
+AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
+AGENT_TYPES_TABLE = os.environ.get("AGENT_TYPES_TABLE", "agent-types")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
