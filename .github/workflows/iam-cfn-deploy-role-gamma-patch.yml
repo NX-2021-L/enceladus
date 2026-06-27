@@ -66,7 +66,8 @@ jobs:
                   "sns:ListTagsForResource",
                   "sns:Subscribe",
                   "sns:Unsubscribe",
-                  "sns:GetSubscriptionAttributes"
+                  "sns:GetSubscriptionAttributes",
+                  "sns:ListSubscriptionsByTopic"
                 ],
                 "Resource": "arn:aws:sns:us-west-2:356364570033:enceladus-*-gamma"
               },
