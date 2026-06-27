@@ -192,6 +192,71 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
 
         self.assertEqual(result, "c" * 64)
 
+    # --- ENC-TSK-I29: connection_health authority cutover + docstore fallback removal ---
+
+    @staticmethod
+    def _fake_ddb_with_canonical(hash_value):
+        """DDB stub whose governance-version record returns hash_value."""
+        class _FakeDdb:
+            def get_item(self, TableName=None, Key=None, ConsistentRead=None, **_kwargs):
+                # Assert the canonical record is read consistently by id.
+                assert ConsistentRead is True, "canonical read must be ConsistentRead"
+                assert Key == {"version_id": {"S": coordination_lambda.GOVERNANCE_VERSION_RECORD_ID}}
+                if hash_value is None:
+                    return {}
+                return {"Item": {"governance_hash": {"S": hash_value}}}
+
+        return _FakeDdb()
+
+    def test_compute_governance_hash_local_prefers_canonical_ddb(self):
+        """AC#1: the served value is the canonical governance-version record's hash."""
+        mcp_module = MagicMock()  # must never be consulted when DDB resolves
+        with patch.object(
+            coordination_lambda, "_get_ddb",
+            return_value=self._fake_ddb_with_canonical("a" * 64),
+        ), patch.object(
+            coordination_lambda, "_load_mcp_server_module", mcp_module,
+        ):
+            result = coordination_lambda._compute_governance_hash_local()
+
+        self.assertEqual(result, "a" * 64)
+        mcp_module.assert_not_called()
+
+    def test_compute_governance_hash_local_live_s3_is_the_tiebreak(self):
+        """AC#3: when the canonical DDB warm value is absent, live-derived-from-S3 wins."""
+        class _FakeMcpServer:
+            def _compute_governance_hash(self, force_refresh=False):
+                return "b" * 64
+
+        with patch.object(
+            coordination_lambda, "_get_ddb",
+            return_value=self._fake_ddb_with_canonical(None),  # canonical record missing/empty
+        ), patch.object(
+            coordination_lambda, "_load_mcp_server_module",
+            return_value=_FakeMcpServer(),
+        ):
+            result = coordination_lambda._compute_governance_hash_local()
+
+        self.assertEqual(result, "b" * 64)
+
+    def test_compute_governance_hash_local_never_serves_docstore_fallback(self):
+        """AC#2: with both authoritative sources down, no frozen docstore value is served."""
+        docstore = MagicMock(return_value="f" * 64)  # the formerly-silent stale path
+        with patch.object(
+            coordination_lambda, "_get_ddb",
+            side_effect=RuntimeError("ddb down"),
+        ), patch.object(
+            coordination_lambda, "_load_mcp_server_module",
+            side_effect=RuntimeError("mcp down"),
+        ), patch.object(
+            coordination_lambda, "_compute_governance_hash_docstore_fallback", docstore,
+        ):
+            result = coordination_lambda._compute_governance_hash_local()
+
+        # Empty string propagates as GOVERNANCE_STALE rather than a silently-wrong hash.
+        self.assertEqual(result, "")
+        docstore.assert_not_called()
+
     def test_build_ssm_commands_uses_idempotent_mcp_profile_bootstrap(self):
         request = {
             "request_id": "CRQ-MCP001",
@@ -960,11 +1025,18 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         parsed = coordination_lambda._parse_mcp_result(content)
         self.assertEqual(parsed, {"success": True})
 
+    # ENC-TSK-I29: pin the governance hash so this test exercises decomposition
+    # helpers hermetically rather than depending on ambient hash resolution
+    # (the old docstore-empty deterministic fallback was removed by I29).
     @patch.object(coordination_lambda, "_load_project_meta")
     @patch.object(coordination_lambda, "_append_tracker_history")
     @patch.object(coordination_lambda, "_create_tracker_record_auto")
+    @patch.object(
+        coordination_lambda, "_compute_governance_hash_local", return_value="d" * 64
+    )
     def test_decomposition_uses_tracker_helpers_with_metadata(
         self,
+        mock_compute_governance_hash_local,
         mock_create_tracker_record_auto,
         mock_append_tracker_history,
         mock_load_project_meta,
