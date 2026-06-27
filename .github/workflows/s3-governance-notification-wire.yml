@@ -71,16 +71,17 @@ jobs:
           region="us-west-2"
           account="356364570033"
           lambda_arn="arn:aws:lambda:${region}:${account}:function:${fn}"
+          entry_id="GovernanceLiveRecompute${SUFFIX//-/}"
 
-          # Fetch current notification config (preserves other notifications)
-          current=$(aws s3api get-bucket-notification-configuration \
-            --bucket "${bucket}" --region "${region}" 2>/dev/null \
-            || echo '{}')
+          # Fetch current notification config into a temp file (preserves other notifications)
+          aws s3api get-bucket-notification-configuration \
+            --bucket "${bucket}" --region "${region}" \
+            > /tmp/s3-notify-current.json 2>/dev/null || echo '{}' > /tmp/s3-notify-current.json
 
-          # Build the new LambdaFunctionConfigurations entry
-          new_entry=$(cat <<JSON
+          # Build the new LambdaFunctionConfigurations entry in a temp file
+          cat > /tmp/s3-notify-new.json <<JSON
           {
-            "Id": "GovernanceLiveRecompute${SUFFIX//-/}",
+            "Id": "${entry_id}",
             "LambdaFunctionArn": "${lambda_arn}",
             "Events": ["s3:ObjectCreated:*"],
             "Filter": {
@@ -92,26 +93,29 @@ jobs:
             }
           }
           JSON
-          )
 
-          # Merge: remove any existing entry with same Id, then append the new one
-          merged=$(echo "${current}" | python3 -c "
+          # Merge: remove existing entry with same Id, append new one
+          python3 - /tmp/s3-notify-current.json /tmp/s3-notify-new.json /tmp/s3-notify-merged.json <<'PYEOF'
           import json, sys
-          cfg = json.load(sys.stdin)
-          new = json.loads(sys.stdin.buffer.read())
+          current_path, new_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open(current_path) as f:
+              cfg = json.load(f)
+          with open(new_path) as f:
+              new = json.load(f)
           existing = cfg.get('LambdaFunctionConfigurations', [])
           existing = [e for e in existing if e.get('Id') != new['Id']]
           existing.append(new)
           cfg['LambdaFunctionConfigurations'] = existing
-          print(json.dumps(cfg, indent=2))
-          " <<< "${new_entry}")
+          with open(out_path, 'w') as f:
+              json.dump(cfg, f, indent=2)
+          print(f"Merged: {len(existing)} LambdaFunctionConfiguration(s)")
+          PYEOF
 
-          echo "Applying notification config:"
-          echo "${merged}" | python3 -c "import json,sys; d=json.load(sys.stdin); print('LambdaFunctionConfigurations:', len(d.get('LambdaFunctionConfigurations',[])))"
+          cat /tmp/s3-notify-merged.json
 
           aws s3api put-bucket-notification-configuration \
             --bucket "${bucket}" \
-            --notification-configuration "${merged}" \
+            --notification-configuration "file:///tmp/s3-notify-merged.json" \
             --region "${region}"
 
           echo "S3 notification wired: ${bucket}/governance/live/* → ${lambda_arn}"
