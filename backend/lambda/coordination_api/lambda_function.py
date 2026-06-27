@@ -121,6 +121,9 @@ PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 COMPONENTS_TABLE = os.environ.get("COMPONENTS_TABLE", "component-registry")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 GOVERNANCE_POLICIES_TABLE = os.environ.get("GOVERNANCE_POLICIES_TABLE", "governance-policies")
+# ENC-TSK-I27 / ENC-FTR-116: canonical governance-version record written by devops-recompute-governance.
+GOVERNANCE_VERSION_TABLE = os.environ.get("GOVERNANCE_VERSION_TABLE", "governance-version")
+GOVERNANCE_VERSION_RECORD_ID = "governance-version-current"
 AUTH_TOKENS_TABLE = os.environ.get("AUTH_TOKENS_TABLE", GOVERNANCE_POLICIES_TABLE)
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
@@ -1498,12 +1501,50 @@ def _parse_mcp_result(result: Any) -> Dict[str, Any]:
     return {"result": data}
 
 
-def _compute_governance_hash_local() -> str:
-    """Compute hash from the MCP governance source (S3-backed) with fallback.
+def _get_canonical_governance_hash_ddb() -> str:
+    """Read governance_hash from the canonical governance-version DDB record (ENC-TSK-I27).
 
-    Keep coordination API hash aligned with MCP tool/resource reads to avoid
-    false GOVERNANCE_STALE rejections.
+    This record is the single authoritative source written by devops-recompute-governance Lambda,
+    which derives the hash from live S3 checksums (HeadObject). It is always consistent with
+    live S3 state and never returns a stale frozen hash after a governance/live/* change.
     """
+    ddb = _get_ddb()
+    resp = ddb.get_item(
+        TableName=GOVERNANCE_VERSION_TABLE,
+        Key={"version_id": {"S": GOVERNANCE_VERSION_RECORD_ID}},
+        ConsistentRead=True,
+    )
+    item = resp.get("Item", {})
+    h = str((item.get("governance_hash") or {}).get("S", "")).strip()
+    if not h:
+        raise RuntimeError(
+            f"Canonical governance-version record missing or empty "
+            f"(table={GOVERNANCE_VERSION_TABLE}, key={GOVERNANCE_VERSION_RECORD_ID})"
+        )
+    return h
+
+
+def _compute_governance_hash_local() -> str:
+    """Read governance hash from authoritative sources (ENC-TSK-I29).
+
+    Resolution order:
+      1) Canonical governance-version DDB record (devops-recompute-governance output;
+         always live S3-consistent; never a frozen stale value).
+      2) Direct S3 recomputation via MCP server module (live-derived; tie-breaks if DDB
+         temporarily behind).
+
+    The docstore-catalog fallback is intentionally removed: it could silently serve a
+    frozen hash after a governance/live/* change, violating the complete-mediation
+    guarantee (DOC-63420302EF65 §2.3). If both sources fail, callers receive "" which
+    propagates as GOVERNANCE_STALE rather than a silently wrong hash.
+    """
+    try:
+        return _get_canonical_governance_hash_ddb()
+    except Exception as exc:
+        logger.warning(
+            "Canonical governance-version DDB unavailable; falling back to live S3 computation: %s", exc
+        )
+
     try:
         module = _load_mcp_server_module()
         compute = getattr(module, "_compute_governance_hash", None)
@@ -1516,12 +1557,18 @@ def _compute_governance_hash_local() -> str:
             if text:
                 return text
     except Exception as exc:
-        logger.warning("MCP-backed governance hash failed; falling back to docstore: %s", exc)
+        logger.warning("MCP-backed live S3 governance hash computation failed: %s", exc)
 
-    return _compute_governance_hash_docstore_fallback()
+    logger.error("All governance hash sources failed (canonical DDB + MCP S3); returning empty hash")
+    return ""
 
 
 def _compute_governance_hash_docstore_fallback() -> str:
+    """Deprecated: reads from docstore DDB scan (stale after live S3 changes). No longer called.
+
+    Retained for any external callers or tests that reference it directly.
+    Use _get_canonical_governance_hash_ddb() or _compute_governance_hash_local() instead.
+    """
     ddb = _get_ddb()
     resp = ddb.query(
         TableName=DOCUMENTS_TABLE,

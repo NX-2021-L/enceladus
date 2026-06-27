@@ -158,6 +158,9 @@ GOVERNANCE_RESOURCE_BODY_TTL_SECONDS = float(
 )
 S3_GOVERNANCE_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_PREFIX", "governance/live")
 S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("ENCELADUS_S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
+# ENC-TSK-I27 / ENC-FTR-116: canonical governance-version record written by devops-recompute-governance.
+GOVERNANCE_VERSION_TABLE = os.environ.get("GOVERNANCE_VERSION_TABLE", "governance-version")
+GOVERNANCE_VERSION_RECORD_ID = "governance-version-current"
 
 COORDINATION_API_BASE = os.environ.get(
     "ENCELADUS_COORDINATION_API_BASE",
@@ -1498,13 +1501,36 @@ _governance_hash_api_cache_at: float = 0.0
 _GOVERNANCE_HASH_API_TTL = 60.0  # seconds
 
 
+def _get_canonical_governance_hash_ddb() -> str:
+    """Read governance_hash from the canonical governance-version DDB record (ENC-TSK-I27).
+
+    Uses GOVERNANCE_VERSION_TABLE env var (default: "governance-version"). Bypasses HTTP
+    entirely — valid even when coordination API is unreachable.
+    """
+    ddb = _get_ddb()
+    resp = ddb.get_item(
+        TableName=GOVERNANCE_VERSION_TABLE,
+        Key={"version_id": {"S": GOVERNANCE_VERSION_RECORD_ID}},
+        ConsistentRead=True,
+    )
+    item = resp.get("Item", {})
+    h = str((item.get("governance_hash") or {}).get("S", "")).strip()
+    if not h:
+        raise RuntimeError(
+            f"Canonical governance-version record missing or empty "
+            f"(table={GOVERNANCE_VERSION_TABLE}, key={GOVERNANCE_VERSION_RECORD_ID})"
+        )
+    return h
+
+
 def _get_governance_hash_via_api() -> str:
     """Fetch governance hash from HTTP API with short TTL cache.
 
-    Resolution order:
-      1) governance API /hash (authoritative)
-      2) health API governance_hash (auth-safe fallback)
-      3) local computation from governance resources
+    Resolution order (ENC-TSK-I29):
+      1) governance API /hash (canonical DDB-backed after I29 coordination_api cutover)
+      2) health API governance_hash (auth-safe HTTP fallback)
+      3) canonical governance-version DDB direct read (bypasses HTTP entirely)
+      4) local computation from S3 catalog (last resort; no docstore path)
     """
     global _governance_hash_api_cache, _governance_hash_api_cache_at
     now = time.time()
@@ -1535,7 +1561,15 @@ def _get_governance_hash_via_api() -> str:
     except Exception:
         pass
 
-    # Final fallback to local computation.
+    # Canonical DDB direct read — bypasses HTTP auth and coordination API dependency.
+    try:
+        h = _get_canonical_governance_hash_ddb()
+        if h:
+            return _cache_and_return(h)
+    except Exception:
+        pass
+
+    # Final fallback: local S3 catalog computation (no docstore path).
     return _compute_governance_hash()
 
 
