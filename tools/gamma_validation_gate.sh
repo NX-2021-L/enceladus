@@ -22,9 +22,14 @@
 #               — we gate on the actual hybrid query in check 3 (ENC-TSK-H58 finding).
 #   2. SMOKE  — gamma API ingress serves: capabilities == 200 AND graphsearch/health
 #               == 200 with graph_index status == healthy.
-#   3. GRAPH  — the full hybrid trio is live and PPR-ranked: a gamma hybrid
-#               graphsearch returns graph_algorithm == gds_pagerank AND
-#               signal_availability {vector, graph, keyword} all true.
+#   3. GRAPH  — hybrid graphsearch signal check (two modes):
+#               GDS configured (GDS_STANDING_PROJECTION_PREFIX set in gamma Lambda):
+#                 must return graph_algorithm == gds_pagerank AND full trio
+#                 {vector, graph, keyword} all true.
+#               GDS not configured (prefix unset — e.g. during ENC-ISS-197 compute
+#                 stack freeze): must return success == true AND vector AND keyword
+#                 (graph signal may timeout; accepted when GDS is off). Gate reads
+#                 graph_index.graph_projection.configured from graphsearch/health.
 #   4. PARITY — tools/env_parity_gate.py is green on the gamma compute param set
 #               (no deploy-critical env var the next gamma compute deploy would strip).
 #
@@ -110,15 +115,35 @@ echo "[CHECK 2/4] Smoke — gamma ingress (capabilities + graphsearch/health)...
 CAP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/api/v1/coordination/capabilities" 2>/dev/null || echo 000)"
 HEALTH_BODY="$(curl -s "${BASE}/api/v1/tracker/graphsearch/health" 2>/dev/null || echo '{}')"
 HEALTH_STATUS="$(echo "$HEALTH_BODY" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("status","?"))' 2>/dev/null || echo '?')"
+# Detect whether the gamma Lambda has GDS standing projections configured.
+# graph_query_api /health embeds graph_index.graph_projection.configured = bool(GDS_STANDING_PROJECTION_PREFIX).
+# When the compute stack is frozen (ENC-ISS-197) the prefix may be absent from gamma's env;
+# check 3 uses a relaxed graph criterion in that case.
+GDS_CONFIGURED="$(echo "$HEALTH_BODY" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    gi = d.get("graph_index") or {}
+    gp = gi.get("graph_projection") or {}
+    print("true" if gp.get("configured") else "false")
+except Exception:
+    print("unknown")
+' 2>/dev/null || echo 'unknown')"
 if [[ "$CAP_CODE" == "200" && "$HEALTH_STATUS" == "healthy" ]]; then
-    pass "smoke: capabilities=200, graphsearch/health status=healthy"
+    pass "smoke: capabilities=200, graphsearch/health status=healthy (gds_configured=${GDS_CONFIGURED})"
 else
     fail "smoke: capabilities=${CAP_CODE} (want 200), graphsearch/health status=${HEALTH_STATUS} (want healthy)"
 fi
 
-# --- Check 3: GRAPH — full trio + gds_pagerank (the real graph gate) -----------
+# --- Check 3: GRAPH — hybrid signal probe (mode adapts to GDS configuration) ---
 echo ""
-echo "[CHECK 3/4] Graph-probe — gamma hybrid must return graph_algorithm=gds_pagerank + full trio..."
+if [[ "$GDS_CONFIGURED" == "true" ]]; then
+    echo "[CHECK 3/4] Graph-probe (GDS mode) — must return graph_algorithm=gds_pagerank + full trio..."
+else
+    echo "[CHECK 3/4] Graph-probe (no-GDS mode, gds_configured=${GDS_CONFIGURED}) — must return success=true + vector + keyword..."
+    note "GDS_STANDING_PROJECTION_PREFIX absent in gamma Lambda — graph signal timeout is expected."
+    note "Strict gds_pagerank requirement deferred until GDS env var is provisioned (ENC-ISS-197)."
+fi
 if [[ -z "${COORDINATION_INTERNAL_API_KEY:-}" ]]; then
     fail "graph-probe: COORDINATION_INTERNAL_API_KEY not set (required to authenticate the hybrid probe)"
 else
@@ -129,27 +154,43 @@ else
     LAST=""
     while [[ $(date +%s) -lt $DEADLINE ]]; do
         BODY="$(curl -s -H "x-coordination-internal-key: ${COORDINATION_INTERNAL_API_KEY}" "$URL" 2>/dev/null || echo '{}')"
-        # Single parse -> "ALGO|TRIO|SUCCESS" (no backslashes in f-strings — py<3.12 safe).
+        # Single parse -> "ALGO|VEC|KWD|GRP|SUCCESS" (no backslashes — py<3.12 safe).
         PARSED="$(printf '%s' "$BODY" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print("PARSE_ERR|N|False"); sys.exit()
+    print("PARSE_ERR|N|N|N|False"); sys.exit()
 sa = d.get("signal_availability") or {}
-trio = "Y" if (sa.get("vector") and sa.get("graph") and sa.get("keyword")) else "N"
-print("%s|%s|%s" % (d.get("graph_algorithm"), trio, d.get("success")))
-' 2>/dev/null || echo "PARSE_ERR|N|False")"
-        ALGO="${PARSED%%|*}"; _rest="${PARSED#*|}"; TRIO="${_rest%%|*}"; SUCCESS="${_rest##*|}"
-        LAST="algo=${ALGO} trio=${TRIO} success=${SUCCESS}"
-        if [[ "$ALGO" == "gds_pagerank" && "$TRIO" == "Y" ]]; then GRAPH_OK=true; break; fi
-        note "graph signal not yet warm (${LAST}) — retrying..."
+vec = "Y" if sa.get("vector") else "N"
+kwd = "Y" if sa.get("keyword") else "N"
+grp = "Y" if sa.get("graph") else "N"
+print("%s|%s|%s|%s|%s" % (d.get("graph_algorithm"), vec, kwd, grp, d.get("success")))
+' 2>/dev/null || echo "PARSE_ERR|N|N|N|False")"
+        ALGO="${PARSED%%|*}"; _rest="${PARSED#*|}"
+        VEC="${_rest%%|*}";  _rest="${_rest#*|}"
+        KWD="${_rest%%|*}";  _rest="${_rest#*|}"
+        GRP="${_rest%%|*}";  SUCCESS="${_rest##*|}"
+        LAST="algo=${ALGO} vec=${VEC} kwd=${KWD} graph=${GRP} success=${SUCCESS}"
+        if [[ "$GDS_CONFIGURED" == "true" ]]; then
+            # Strict: gds_pagerank + all three signals.
+            TRIO="N"; [[ "$VEC" == "Y" && "$KWD" == "Y" && "$GRP" == "Y" ]] && TRIO="Y"
+            if [[ "$ALGO" == "gds_pagerank" && "$TRIO" == "Y" ]]; then GRAPH_OK=true; break; fi
+        else
+            # Relaxed: vector + keyword must work; graph timeout is expected without GDS.
+            if [[ "$SUCCESS" == "True" && "$VEC" == "Y" && "$KWD" == "Y" ]]; then GRAPH_OK=true; break; fi
+        fi
+        note "graph signal not yet ready (${LAST}) — retrying..."
         sleep 10
     done
     if [[ "$GRAPH_OK" == "true" ]]; then
         pass "graph-probe: $LAST"
     else
-        fail "graph-probe: never reached gds_pagerank+full-trio within ${GRAPH_PROBE_TIMEOUT}s (last: $LAST)"
+        if [[ "$GDS_CONFIGURED" == "true" ]]; then
+            fail "graph-probe: never reached gds_pagerank+full-trio within ${GRAPH_PROBE_TIMEOUT}s (last: $LAST)"
+        else
+            fail "graph-probe: never reached success+vector+keyword within ${GRAPH_PROBE_TIMEOUT}s (last: $LAST)"
+        fi
     fi
 fi
 

@@ -673,5 +673,86 @@ class TaskCreateTransitionTypeTests(unittest.TestCase):
         fake_ddb.put_item.assert_not_called()
 
 
+class JreeseGPTRouteTests(unittest.TestCase):
+    """ENC-TSK-I34: project names with uppercase letters (e.g. jreeseGPT) must
+    match all tracker route regexes.  Prior to the fix the project segment was
+    restricted to [a-z0-9_-]+ which silently excluded mixed-case names."""
+
+    def test_re_project_matches_jreesegpt(self):
+        m = tracker_mutation._RE_PROJECT.match("/api/v1/tracker/jreeseGPT")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("project"), "jreeseGPT")
+
+    def test_re_project_matches_bare_path(self):
+        m = tracker_mutation._RE_PROJECT.match("/jreeseGPT")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("project"), "jreeseGPT")
+
+    def test_re_record_matches_feature(self):
+        m = tracker_mutation._RE_RECORD.match("/api/v1/tracker/jreeseGPT/feature/JGP-FTR-201")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("project"), "jreeseGPT")
+        self.assertEqual(m.group("type"), "feature")
+        self.assertEqual(m.group("id"), "JGP-FTR-201")
+
+    def test_re_record_matches_task(self):
+        m = tracker_mutation._RE_RECORD.match("/api/v1/tracker/jreeseGPT/task/JGP-TSK-210")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("project"), "jreeseGPT")
+        self.assertEqual(m.group("id"), "JGP-TSK-210")
+
+    def test_re_type_collection_matches(self):
+        m = tracker_mutation._RE_TYPE_COLLECTION.match("/api/v1/tracker/jreeseGPT/task")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("project"), "jreeseGPT")
+
+    def test_re_record_sub_matches_log(self):
+        m = tracker_mutation._RE_RECORD_SUB.match(
+            "/api/v1/tracker/jreeseGPT/task/JGP-TSK-210/log"
+        )
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("project"), "jreeseGPT")
+        self.assertEqual(m.group("sub"), "log")
+
+    def test_re_relationship_matches(self):
+        m = tracker_mutation._RE_RELATIONSHIP.match("/api/v1/tracker/jreeseGPT/relationship")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("project"), "jreeseGPT")
+
+    @patch.object(tracker_mutation, "_validate_project_exists", return_value=None)
+    @patch.object(tracker_mutation, "_verify_token", return_value={"sub": "user1", "scope": "tracker:read"})
+    @patch.object(tracker_mutation, "_handle_list_records")
+    def test_list_route_reaches_handler_not_404(self, mock_list, _mock_verify, _mock_proj):
+        """GET /api/v1/tracker/jreeseGPT must reach _handle_list_records, not return 404."""
+        mock_list.return_value = {"statusCode": 200, "body": "[]", "headers": {}}
+        path = "/api/v1/tracker/jreeseGPT"
+        event = {
+            "requestContext": {"http": {"method": "GET", "path": path}},
+            "headers": {"cookie": "enceladus_id_token=valid-jwt", "host": "example.com"},
+            "rawPath": path,
+            "queryStringParameters": {},
+        }
+        resp = tracker_mutation.lambda_handler(event, None)
+        self.assertNotEqual(resp["statusCode"], 404)
+        mock_list.assert_called_once_with("jreeseGPT", {})
+
+    @patch.object(tracker_mutation, "_validate_project_exists", return_value=None)
+    @patch.object(tracker_mutation, "_verify_token", return_value={"sub": "user1", "scope": "tracker:read"})
+    @patch.object(tracker_mutation, "_handle_get_record")
+    def test_get_record_route_reaches_handler_not_404(self, mock_get, _mock_verify, _mock_proj):
+        """GET /api/v1/tracker/jreeseGPT/feature/JGP-FTR-201 must reach _handle_get_record."""
+        mock_get.return_value = {"statusCode": 200, "body": "{}", "headers": {}}
+        path = "/api/v1/tracker/jreeseGPT/feature/JGP-FTR-201"
+        event = {
+            "requestContext": {"http": {"method": "GET", "path": path}},
+            "headers": {"cookie": "enceladus_id_token=valid-jwt", "host": "example.com"},
+            "rawPath": path,
+            "queryStringParameters": {},
+        }
+        resp = tracker_mutation.lambda_handler(event, None)
+        self.assertNotEqual(resp["statusCode"], 404)
+        mock_get.assert_called_once_with("jreeseGPT", "feature", "JGP-FTR-201")
+
+
 if __name__ == "__main__":
     unittest.main()

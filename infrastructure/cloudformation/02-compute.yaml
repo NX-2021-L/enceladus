@@ -183,6 +183,9 @@ Resources:
           ENCELADUS_MCP_INTERFACE_MODE: code
           DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
+          # ENC-TSK-I37 / ENC-FTR-117: Agent ID v3 identity stores (server-side allocator path)
+          AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
+          AGENT_TYPES_TABLE: !Sub "agent-types${EnvironmentSuffix}"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -1601,6 +1604,18 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/component-registry${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/component-registry${EnvironmentSuffix}/index/*"
+              # ENC-TSK-I37 / ENC-FTR-117: Agent ID v3 identity stores (server-side allocator path)
+              - Sid: AgentIdStoresAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-types${EnvironmentSuffix}"
               - Sid: GovernanceAndReferenceS3Read
                 Effect: Allow
                 Action:
