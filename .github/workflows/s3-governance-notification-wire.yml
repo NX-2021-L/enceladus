@@ -1,4 +1,4 @@
-name: Wire S3 governance/live notification to recompute Lambda (I28)
+name: Wire S3 governance/live notification via SNS → Lambda (I28)
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
         description: "Why this wiring is being applied"
         type: string
         required: false
-        default: "Wire S3 governance/live ObjectCreated to devops-recompute-governance Lambda (ENC-TSK-I28)"
+        default: "Wire S3 governance/live/* via SNS → devops-recompute-governance Lambda (ENC-TSK-I28)"
 
 permissions:
   contents: read
@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   wire-notification:
-    name: Wire S3 → Lambda notification for governance/live/*
+    name: Wire S3 → SNS → Lambda for governance/live/*
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -33,18 +33,54 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Add Lambda invoke permission for S3
+      - name: Set SNS topic policy (allow S3 to publish)
         env:
           SUFFIX: ${{ github.event.inputs.environment_suffix }}
         run: |
           set -euo pipefail
-          fn="devops-recompute-governance${SUFFIX}"
-          bucket="jreese-net"
           account="356364570033"
           region="us-west-2"
-          stmt="S3GovernanceLiveNotify${SUFFIX//-/}"
+          bucket="jreese-net"
+          topic_arn="arn:aws:sns:${region}:${account}:enceladus-component-registry-events${SUFFIX}"
 
-          # Idempotent: remove existing statement if present, then re-add
+          cat > /tmp/sns-policy.json <<JSON
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "AllowS3GovernanceLivePublish",
+                "Effect": "Allow",
+                "Principal": {"Service": "s3.amazonaws.com"},
+                "Action": "SNS:Publish",
+                "Resource": "${topic_arn}",
+                "Condition": {
+                  "ArnLike": {"aws:SourceArn": "arn:aws:s3:::${bucket}"},
+                  "StringEquals": {"aws:SourceAccount": "${account}"}
+                }
+              }
+            ]
+          }
+          JSON
+
+          aws sns set-topic-attributes \
+            --topic-arn "${topic_arn}" \
+            --attribute-name Policy \
+            --attribute-value "$(cat /tmp/sns-policy.json)" \
+            --region "${region}"
+
+          echo "SNS policy set: s3.amazonaws.com → ${topic_arn}"
+
+      - name: Add Lambda invoke permission for SNS
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          account="356364570033"
+          region="us-west-2"
+          fn="devops-recompute-governance${SUFFIX}"
+          topic_arn="arn:aws:sns:${region}:${account}:enceladus-component-registry-events${SUFFIX}"
+          stmt="SNSGovernanceLiveNotify${SUFFIX//-/}"
+
           aws lambda remove-permission \
             --function-name "${fn}" \
             --statement-id "${stmt}" \
@@ -54,39 +90,62 @@ jobs:
             --function-name "${fn}" \
             --statement-id "${stmt}" \
             --action lambda:InvokeFunction \
-            --principal s3.amazonaws.com \
-            --source-arn "arn:aws:s3:::${bucket}" \
-            --source-account "${account}" \
+            --principal sns.amazonaws.com \
+            --source-arn "${topic_arn}" \
             --region "${region}"
 
-          echo "Lambda permission added: s3.amazonaws.com → ${fn}"
+          echo "Lambda permission added: sns.amazonaws.com → ${fn}"
 
-      - name: Merge S3 notification configuration
+      - name: Subscribe Lambda to SNS topic
         env:
           SUFFIX: ${{ github.event.inputs.environment_suffix }}
         run: |
           set -euo pipefail
-          fn="devops-recompute-governance${SUFFIX}"
-          bucket="jreese-net"
-          lambda_region="us-west-2"
           account="356364570033"
-          lambda_arn="arn:aws:lambda:${lambda_region}:${account}:function:${fn}"
+          region="us-west-2"
+          topic_arn="arn:aws:sns:${region}:${account}:enceladus-component-registry-events${SUFFIX}"
+          lambda_arn="arn:aws:lambda:${region}:${account}:function:devops-recompute-governance${SUFFIX}"
+
+          existing=$(aws sns list-subscriptions-by-topic \
+            --topic-arn "${topic_arn}" \
+            --region "${region}" \
+            --query "Subscriptions[?Protocol=='lambda' && Endpoint=='${lambda_arn}'].SubscriptionArn" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "${existing}" ] && [ "${existing}" != "None" ] && [ "${existing}" != "" ]; then
+            echo "Subscription already exists: ${existing}"
+          else
+            sub_arn=$(aws sns subscribe \
+              --topic-arn "${topic_arn}" \
+              --protocol lambda \
+              --notification-endpoint "${lambda_arn}" \
+              --region "${region}" \
+              --query "SubscriptionArn" \
+              --output text)
+            echo "SNS subscription created: ${sub_arn}"
+          fi
+
+      - name: Wire S3 → SNS notification
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          account="356364570033"
+          bucket="jreese-net"
+          region="us-west-2"
+          topic_arn="arn:aws:sns:${region}:${account}:enceladus-component-registry-events${SUFFIX}"
           entry_id="GovernanceLiveRecompute${SUFFIX//-/}"
 
-          # Determine the bucket's region — S3 notification API must be called against
-          # the bucket region, not the Lambda region. Cross-region Lambda notifications
-          # are supported since 2023 within the same AWS partition.
+          # S3 PutBucketNotificationConfiguration must target the bucket's region.
+          # The SNS topic is in us-west-2; cross-region S3→SNS is supported by AWS.
           bucket_region=$(aws s3api get-bucket-location \
             --bucket "${bucket}" --query "LocationConstraint" --output text 2>/dev/null \
             | sed 's/None/us-east-1/')
           if [ -z "${bucket_region}" ] || [ "${bucket_region}" = "None" ]; then
             bucket_region="us-east-1"
           fi
-          echo "Bucket region: ${bucket_region}, Lambda region: ${lambda_region}"
+          echo "Bucket region: ${bucket_region}, SNS region: ${region}"
 
-          # Fetch current notification config into a temp file (preserves other notifications).
-          # The CLI returns empty string (not "{}") when no notifications exist, so we check
-          # the file size and write an explicit empty config if the output was empty.
           aws s3api get-bucket-notification-configuration \
             --bucket "${bucket}" --region "${bucket_region}" \
             > /tmp/s3-notify-current.json 2>/dev/null || true
@@ -96,11 +155,10 @@ jobs:
           echo "Current config:"
           cat /tmp/s3-notify-current.json
 
-          # Build the new LambdaFunctionConfigurations entry in a temp file
           cat > /tmp/s3-notify-new.json <<JSON
           {
             "Id": "${entry_id}",
-            "LambdaFunctionArn": "${lambda_arn}",
+            "TopicArn": "${topic_arn}",
             "Events": ["s3:ObjectCreated:*"],
             "Filter": {
               "Key": {
@@ -112,7 +170,6 @@ jobs:
           }
           JSON
 
-          # Merge: remove existing entry with same Id, append new one
           python3 - /tmp/s3-notify-current.json /tmp/s3-notify-new.json /tmp/s3-notify-merged.json <<'PYEOF'
           import json, sys
           current_path, new_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -120,13 +177,13 @@ jobs:
               cfg = json.load(f)
           with open(new_path) as f:
               new = json.load(f)
-          existing = cfg.get('LambdaFunctionConfigurations', [])
+          existing = cfg.get('TopicConfigurations', [])
           existing = [e for e in existing if e.get('Id') != new['Id']]
           existing.append(new)
-          cfg['LambdaFunctionConfigurations'] = existing
+          cfg['TopicConfigurations'] = existing
           with open(out_path, 'w') as f:
               json.dump(cfg, f, indent=2)
-          print(f"Merged: {len(existing)} LambdaFunctionConfiguration(s)")
+          print(f"Merged: {len(existing)} TopicConfiguration(s)")
           PYEOF
 
           cat /tmp/s3-notify-merged.json
@@ -136,19 +193,30 @@ jobs:
             --notification-configuration "file:///tmp/s3-notify-merged.json" \
             --region "${bucket_region}"
 
-          echo "S3 notification wired: ${bucket} (${bucket_region})/governance/live/* → ${lambda_arn} (${lambda_region})"
+          echo "S3 notification wired: ${bucket}/governance/live/* → SNS ${topic_arn}"
 
-      - name: Verify notification applied
+      - name: Verify wiring
         env:
           SUFFIX: ${{ github.event.inputs.environment_suffix }}
         run: |
-          fn="devops-recompute-governance${SUFFIX}"
+          account="356364570033"
           bucket="jreese-net"
+          region="us-west-2"
+          topic_arn="arn:aws:sns:${region}:${account}:enceladus-component-registry-events${SUFFIX}"
           bucket_region=$(aws s3api get-bucket-location \
             --bucket "${bucket}" --query "LocationConstraint" --output text 2>/dev/null \
             | sed 's/None/us-east-1/')
           [ -z "${bucket_region}" ] || [ "${bucket_region}" = "None" ] && bucket_region="us-east-1"
+
+          echo "=== S3 TopicConfigurations ==="
           aws s3api get-bucket-notification-configuration \
             --bucket "${bucket}" --region "${bucket_region}" \
-            --query "LambdaFunctionConfigurations[?contains(LambdaFunctionArn, '${fn}')].[Id,LambdaFunctionArn,Events[0]]" \
-            --output table
+            --query "TopicConfigurations[?contains(TopicArn, 'component-registry')].[Id,TopicArn,Events[0]]" \
+            --output table || true
+
+          echo "=== SNS Lambda Subscriptions ==="
+          aws sns list-subscriptions-by-topic \
+            --topic-arn "${topic_arn}" \
+            --region "${region}" \
+            --query "Subscriptions[?Protocol=='lambda'].[Protocol,Endpoint,SubscriptionArn]" \
+            --output table || true
