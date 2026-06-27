@@ -361,6 +361,63 @@ Resources:
           Value: governance
 
   # ---------------------------------------------------------------------------
+  # Agent ID v3 identity stores (ENC-TSK-I37 / ENC-FTR-117)
+  # Flat allocation stores fronted by coordination_api. Item property sets are
+  # value-identical to the intended v4 node property schemas so v4 promotion is a
+  # backfill, not a reshape (binding release gate — DOC-05C45B438FC1). Each table
+  # also holds its monotonic allocation counter as a reserved "counter#" sentinel
+  # row (tracker_mutation discipline); node backfill filters that key out.
+  # ---------------------------------------------------------------------------
+
+  # Session-allocation store, keyed ENC-SES-NNN.
+  # Node properties: agent_type_id, parent_session_id, runtime, created_at,
+  # claimed_at, status. Counter row: session_id = "counter#ENC-SES".
+  AgentSessionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "agent-sessions${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [IsProduction, true, false]
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+        - Key: Feature
+          Value: ENC-FTR-117
+
+  # Agent-type directory, keyed ENC-AGT-NNN.
+  # Node properties: surface, model, cost_tier, status, usage_count.
+  # Counter row: agent_type_id = "counter#ENC-AGT".
+  AgentTypesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "agent-types${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [IsProduction, true, false]
+      AttributeDefinitions:
+        - AttributeName: agent_type_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: agent_type_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+        - Key: Feature
+          Value: ENC-FTR-117
+
+  # ---------------------------------------------------------------------------
   # SQS Queues
   # ---------------------------------------------------------------------------
 
@@ -574,3 +631,20 @@ Outputs:
     Value: !Ref ComponentRegistryEventsTopic
     Export:
       Name: !Sub ${AWS::StackName}-ComponentRegistryEventsTopicArn
+  # Agent ID v3 identity stores (ENC-TSK-I37 / ENC-FTR-117)
+  AgentSessionsTableName:
+    Value: !Ref AgentSessionsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-AgentSessionsTable
+  AgentSessionsTableArn:
+    Value: !GetAtt AgentSessionsTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AgentSessionsTableArn
+  AgentTypesTableName:
+    Value: !Ref AgentTypesTable
+    Export:
+      Name: !Sub ${AWS::StackName}-AgentTypesTable
+  AgentTypesTableArn:
+    Value: !GetAtt AgentTypesTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AgentTypesTableArn
