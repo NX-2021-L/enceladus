@@ -497,6 +497,52 @@ Resources:
         - Key: Component
           Value: coordination
 
+  # Agent ID v3 identity stores (ENC-TSK-I37 / ENC-FTR-117)
+  AgentSessionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "agent-sessions${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [IsProduction, true, false]
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+        - Key: Feature
+          Value: ENC-FTR-117
+
+  # Agent-type directory, keyed ENC-AGT-NNN.
+  # Node properties: surface, model, cost_tier, status, usage_count.
+  # Counter row: agent_type_id = "counter#ENC-AGT".
+  AgentTypesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "agent-types${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [IsProduction, true, false]
+      AttributeDefinitions:
+        - AttributeName: agent_type_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: agent_type_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+        - Key: Feature
+          Value: ENC-FTR-117
+
   # ENC-TSK-I27 / ENC-FTR-116 Wave 2: canonical governance-version record.
   # Single-item table (version_id = "governance-version-current") written exclusively
   # by the recompute-governance Lambda (IAM sole-writer enforced by I28).
