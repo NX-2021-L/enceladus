@@ -1,4 +1,4 @@
-name: IAM CFN Deploy Role — Gamma DDB/SNS Patch
+name: IAM CFN Deploy Role — Gamma DDB/SNS/SQS Patch
 
 on:
   workflow_dispatch:
@@ -28,10 +28,10 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Apply inline policy — gamma DynamoDB + SNS bootstrap
+      - name: Apply inline policy — gamma DynamoDB + SNS + SQS bootstrap
         run: |
           set -euo pipefail
-          cat > /tmp/gamma-ddb-sns-policy.json <<'JSON'
+          cat > /tmp/gamma-ddb-sns-sqs-policy.json <<'JSON'
           {
             "Version": "2012-10-17",
             "Statement": [
@@ -69,6 +69,20 @@ jobs:
                   "sns:GetSubscriptionAttributes"
                 ],
                 "Resource": "arn:aws:sns:us-west-2:356364570033:enceladus-*-gamma"
+              },
+              {
+                "Sid": "GammaSQSBootstrap",
+                "Effect": "Allow",
+                "Action": [
+                  "sqs:GetQueueAttributes",
+                  "sqs:GetQueueUrl",
+                  "sqs:ListQueueTags",
+                  "sqs:CreateQueue",
+                  "sqs:SetQueueAttributes",
+                  "sqs:TagQueue",
+                  "sqs:UntagQueue"
+                ],
+                "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-*-gamma*"
               }
             ]
           }
@@ -77,7 +91,7 @@ jobs:
           aws iam put-role-policy \
             --role-name "enceladus-cloudformation-deploy-github-role" \
             --policy-name "enceladus-cfn-deploy-gamma-ddb-sns-v1" \
-            --policy-document "file:///tmp/gamma-ddb-sns-policy.json"
+            --policy-document "file:///tmp/gamma-ddb-sns-sqs-policy.json"
 
       - name: Verify inline policy attached
         run: |
