@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-27.05",
-  "updated_at": "2026-06-27T08:10:00Z",
-  "last_change_summary": "ENC-TSK-I32 / ENC-FTR-116 Wave 2: governance drift-detection backstop (governance_drift_check Lambda) — reads canonical DDB + live S3 checksums, emits GovernanceVersionDrift CloudWatch metric and SNS alert on mismatch. Read-only; never writes canonical record. New entity: governance_drift_check.handler.",
+  "version": "2026-06-27.06",
+  "updated_at": "2026-06-27T20:02:00Z",
+  "last_change_summary": "ENC-TSK-I53 / ENC-FTR-116: recompute_governance Lambda now unwraps the SNS-relay Notification envelope (S3 → SNS us-west-1 → Lambda us-west-2) so real governance/live/* ObjectCreated events recompute the canonical version record; previously every real event failed KeyError 's3' because Lambda-protocol SNS cannot use raw message delivery. No data-dictionary schema change — bump satisfies the path-triggered Governance Dictionary Guard on lambda_function.py edits. Follows ENC-TSK-I32 (governance drift-detection backstop, governance_drift_check.handler).",
   "owners": [
     "enceladus-platform"
   ],
