@@ -1,0 +1,127 @@
+name: Wire S3 governance/live notification to recompute Lambda (I28)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_suffix:
+        description: "Environment suffix: '-gamma' or '' (production)"
+        type: string
+        required: false
+        default: "-gamma"
+      reason:
+        description: "Why this wiring is being applied"
+        type: string
+        required: false
+        default: "Wire S3 governance/live ObjectCreated to devops-recompute-governance Lambda (ENC-TSK-I28)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  wire-notification:
+    name: Wire S3 → Lambda notification for governance/live/*
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Add Lambda invoke permission for S3
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          fn="devops-recompute-governance${SUFFIX}"
+          bucket="jreese-net"
+          account="356364570033"
+          region="us-west-2"
+          stmt="S3GovernanceLiveNotify${SUFFIX//-/}"
+
+          # Idempotent: remove existing statement if present, then re-add
+          aws lambda remove-permission \
+            --function-name "${fn}" \
+            --statement-id "${stmt}" \
+            --region "${region}" 2>/dev/null || echo "Statement not present, adding fresh."
+
+          aws lambda add-permission \
+            --function-name "${fn}" \
+            --statement-id "${stmt}" \
+            --action lambda:InvokeFunction \
+            --principal s3.amazonaws.com \
+            --source-arn "arn:aws:s3:::${bucket}" \
+            --source-account "${account}" \
+            --region "${region}"
+
+          echo "Lambda permission added: s3.amazonaws.com → ${fn}"
+
+      - name: Merge S3 notification configuration
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          set -euo pipefail
+          fn="devops-recompute-governance${SUFFIX}"
+          bucket="jreese-net"
+          region="us-west-2"
+          account="356364570033"
+          lambda_arn="arn:aws:lambda:${region}:${account}:function:${fn}"
+
+          # Fetch current notification config (preserves other notifications)
+          current=$(aws s3api get-bucket-notification-configuration \
+            --bucket "${bucket}" --region "${region}" 2>/dev/null \
+            || echo '{}')
+
+          # Build the new LambdaFunctionConfigurations entry
+          new_entry=$(cat <<JSON
+          {
+            "Id": "GovernanceLiveRecompute${SUFFIX//-/}",
+            "LambdaFunctionArn": "${lambda_arn}",
+            "Events": ["s3:ObjectCreated:*"],
+            "Filter": {
+              "Key": {
+                "FilterRules": [
+                  {"Name": "prefix", "Value": "governance/live/"}
+                ]
+              }
+            }
+          }
+          JSON
+          )
+
+          # Merge: remove any existing entry with same Id, then append the new one
+          merged=$(echo "${current}" | python3 -c "
+          import json, sys
+          cfg = json.load(sys.stdin)
+          new = json.loads(sys.stdin.buffer.read())
+          existing = cfg.get('LambdaFunctionConfigurations', [])
+          existing = [e for e in existing if e.get('Id') != new['Id']]
+          existing.append(new)
+          cfg['LambdaFunctionConfigurations'] = existing
+          print(json.dumps(cfg, indent=2))
+          " <<< "${new_entry}")
+
+          echo "Applying notification config:"
+          echo "${merged}" | python3 -c "import json,sys; d=json.load(sys.stdin); print('LambdaFunctionConfigurations:', len(d.get('LambdaFunctionConfigurations',[])))"
+
+          aws s3api put-bucket-notification-configuration \
+            --bucket "${bucket}" \
+            --notification-configuration "${merged}" \
+            --region "${region}"
+
+          echo "S3 notification wired: ${bucket}/governance/live/* → ${lambda_arn}"
+
+      - name: Verify notification applied
+        env:
+          SUFFIX: ${{ github.event.inputs.environment_suffix }}
+        run: |
+          fn="devops-recompute-governance${SUFFIX}"
+          aws s3api get-bucket-notification-configuration \
+            --bucket jreese-net --region us-west-2 \
+            --query "LambdaFunctionConfigurations[?contains(LambdaFunctionArn, '${fn}')].[Id,LambdaFunctionArn,Events[0]]" \
+            --output table
