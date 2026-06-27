@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-27.02",
-  "updated_at": "2026-06-27T04:08:55Z",
-  "last_change_summary": "ENC-TSK-I37 / ENC-FTR-117 (Agent ID v3): documented two new governed stores — coordination.agent_session (ENC-SES-NNN session-allocation store) and coordination.agent_type (ENC-AGT-NNN agent-type directory) — provisioned in 01-data.yaml, minted server-side by coordination_api/agent_id_alloc.py. Property sets are value-identical to the intended v4 node schemas (DOC-05C45B438FC1). Also added AGENT_SESSIONS_TABLE/AGENT_TYPES_TABLE config constants (config.py) — the change that trips this guard. No existing field/schema changes.",
+  "version": "2026-06-27.03",
+  "updated_at": "2026-06-27T14:00:00Z",
+  "last_change_summary": "ENC-TSK-I27 / ENC-FTR-116 Wave 2: added governance.version_record (canonical DDB record schema for devops-recompute-governance Lambda) and recompute_governance.event_handler (S3-triggered Lambda contract: trigger, canonical file set, dedup, CAS guard, recursion invariant, env vars). Required by governance-dictionary-guard for backend/lambda/recompute_governance/lambda_function.py addition.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5588,6 +5588,75 @@
         "usage_count": {
           "type": "integer",
           "definition": "Server-incremented count of sessions of this agent type. Observed telemetry (earned-precision), not a hand-maintained fit assertion."
+        }
+      }
+    },
+    "governance.version_record": {
+      "description": "Canonical governance-version DDB record written exclusively by the recompute-governance Lambda (ENC-TSK-I27 / ENC-FTR-116 Wave 2). Single-item table keyed on version_id='governance-version-current'. Provides the authoritative governance_hash for connection_health validation (replaces the stale docstore-fallback path fixed in I29).",
+      "fields": {
+        "version_id": {
+          "type": "string",
+          "enum": [
+            "governance-version-current"
+          ],
+          "usage_guidance": "Partition key. Always 'governance-version-current' — single-item canonical record."
+        },
+        "governance_revision": {
+          "type": "string",
+          "usage_guidance": "Governance revision string (e.g. '2026-06-27.01') extracted from governance/live/agents.md §13."
+        },
+        "governance_hash": {
+          "type": "string",
+          "usage_guidance": "Lowercase hex SHA-256 bundle root hash per §4.3: sha256 over lex-sorted (URI+newline+checksum_hex+newline) pairs."
+        },
+        "generation": {
+          "type": "integer",
+          "usage_guidance": "Monotonically increasing counter. Incremented on every successful write. Value stored in cas_version for CAS locking."
+        },
+        "cas_version": {
+          "type": "integer",
+          "usage_guidance": "Optimistic lock version matching generation. PutItem ConditionExpression='cas_version = :expected' guards concurrent writes."
+        },
+        "files": {
+          "type": "string",
+          "usage_guidance": "JSON array [{uri, s3_key, s3_version_id, checksum_sha256_hex}] lex-sorted by URI. Canonical set: governance://agents.md + governance://agents/**."
+        },
+        "source_event": {
+          "type": "string",
+          "usage_guidance": "JSON {s3_sequencer, trigger_s3_key, trigger_version_id}. Used for dedup: same s3_sequencer = idempotent no-op."
+        },
+        "updated_at": {
+          "type": "string",
+          "usage_guidance": "ISO 8601 UTC timestamp of last write."
+        }
+      }
+    },
+    "recompute_governance.event_handler": {
+      "description": "Contract for the devops-recompute-governance Lambda (ENC-TSK-I27). Triggered by S3 ObjectCreated on governance/live/* prefix. Computes §4.3 bundle root hash and writes the canonical governance-version DDB record. Recursion-safe: writes only to DDB, never back to S3.",
+      "fields": {
+        "trigger": {
+          "type": "object",
+          "definition": "S3 ObjectCreated on jreese-net/governance/live/*. Fires on direct PUTs and CompleteMultipartUpload."
+        },
+        "canonical_file_set": {
+          "type": "object",
+          "definition": "governance/live/agents.md + all objects under governance/live/agents/. Sorted lexicographically by governance:// URI."
+        },
+        "dedup_key": {
+          "type": "string",
+          "usage_guidance": "s3_sequencer from the triggering S3 record. Same sequencer as current DDB record = idempotent no-op."
+        },
+        "cas_guard": {
+          "type": "object",
+          "definition": "PutItem with ConditionExpression='cas_version = :expected'. ConditionalCheckFailedException = lost race; returns without error."
+        },
+        "recursion_invariant": {
+          "type": "object",
+          "definition": "Lambda only writes to DDB (governance-version table). Never calls S3 PutObject — prevents ObjectCreated loops."
+        },
+        "env_vars": {
+          "type": "object",
+          "definition": "GOVERNANCE_VERSION_TABLE: table name (governance-version or governance-version-gamma). AWS_REGION: us-west-2."
         }
       }
     }
