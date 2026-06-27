@@ -183,6 +183,8 @@ Resources:
           ENCELADUS_MCP_INTERFACE_MODE: code
           DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
+          # ENC-FTR-116 / ENC-TSK-I29: canonical governance-version DDB record.
+          GOVERNANCE_VERSION_TABLE: !Sub "governance-version${EnvironmentSuffix}"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -3582,6 +3584,8 @@ Resources:
           DOCUMENTS_TABLE: documents-gamma
           GOVERNANCE_POLICIES_TABLE: governance-policies-gamma
           GOVERNANCE_DICTIONARY_POLICY_ID: governance_data_dictionary
+          # ENC-FTR-116 / ENC-TSK-I29: canonical governance-version DDB record.
+          GOVERNANCE_VERSION_TABLE: governance-version-gamma
           DYNAMODB_REGION: us-west-2
           SECRETS_REGION: us-west-2
           S3_BUCKET: jreese-net
