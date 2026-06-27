@@ -1,0 +1,134 @@
+name: DDB — Add DeploymentManagerTable GSIs (gamma)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this operation is needed"
+        type: string
+        required: false
+        default: "Add missing GSIs to devops-deployment-manager-gamma (blocked 01-data CFN deploy)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  add-gsis:
+    name: Add status-created, generation-created, target-created GSIs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Check existing GSIs
+        run: |
+          echo "=== Current GSIs on devops-deployment-manager-gamma ==="
+          aws dynamodb describe-table \
+            --table-name devops-deployment-manager-gamma \
+            --region us-west-2 \
+            --query 'Table.GlobalSecondaryIndexes[*].{Name:IndexName,Status:IndexStatus}' \
+            --output table
+
+      - name: Add status-created-index GSI
+        run: |
+          set -euo pipefail
+          # Skip if already exists
+          existing=$(aws dynamodb describe-table --table-name devops-deployment-manager-gamma \
+            --region us-west-2 --query "Table.GlobalSecondaryIndexes[?IndexName=='status-created-index'].IndexName" \
+            --output text 2>/dev/null || echo "")
+          if [ -n "${existing}" ]; then
+            echo "status-created-index already exists, skipping."
+          else
+            aws dynamodb update-table \
+              --table-name devops-deployment-manager-gamma \
+              --region us-west-2 \
+              --attribute-definitions \
+                AttributeName=status,AttributeType=S \
+                AttributeName=created_at,AttributeType=S \
+              --global-secondary-index-updates '[{"Create":{"IndexName":"status-created-index","KeySchema":[{"AttributeName":"status","KeyType":"HASH"},{"AttributeName":"created_at","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]'
+            echo "Waiting for status-created-index to become ACTIVE..."
+            aws dynamodb wait table-exists --table-name devops-deployment-manager-gamma --region us-west-2
+            # Poll until GSI is ACTIVE
+            for i in $(seq 1 60); do
+              status=$(aws dynamodb describe-table --table-name devops-deployment-manager-gamma \
+                --region us-west-2 \
+                --query "Table.GlobalSecondaryIndexes[?IndexName=='status-created-index'].IndexStatus" \
+                --output text 2>/dev/null || echo "UNKNOWN")
+              echo "  status-created-index: ${status}"
+              [ "${status}" = "ACTIVE" ] && break
+              sleep 10
+            done
+          fi
+
+      - name: Add generation-created-index GSI
+        run: |
+          set -euo pipefail
+          existing=$(aws dynamodb describe-table --table-name devops-deployment-manager-gamma \
+            --region us-west-2 --query "Table.GlobalSecondaryIndexes[?IndexName=='generation-created-index'].IndexName" \
+            --output text 2>/dev/null || echo "")
+          if [ -n "${existing}" ]; then
+            echo "generation-created-index already exists, skipping."
+          else
+            aws dynamodb update-table \
+              --table-name devops-deployment-manager-gamma \
+              --region us-west-2 \
+              --attribute-definitions \
+                AttributeName=generation_id,AttributeType=S \
+                AttributeName=created_at,AttributeType=S \
+              --global-secondary-index-updates '[{"Create":{"IndexName":"generation-created-index","KeySchema":[{"AttributeName":"generation_id","KeyType":"HASH"},{"AttributeName":"created_at","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]'
+            echo "Waiting for generation-created-index to become ACTIVE..."
+            for i in $(seq 1 60); do
+              status=$(aws dynamodb describe-table --table-name devops-deployment-manager-gamma \
+                --region us-west-2 \
+                --query "Table.GlobalSecondaryIndexes[?IndexName=='generation-created-index'].IndexStatus" \
+                --output text 2>/dev/null || echo "UNKNOWN")
+              echo "  generation-created-index: ${status}"
+              [ "${status}" = "ACTIVE" ] && break
+              sleep 10
+            done
+          fi
+
+      - name: Add target-created-index GSI
+        run: |
+          set -euo pipefail
+          existing=$(aws dynamodb describe-table --table-name devops-deployment-manager-gamma \
+            --region us-west-2 --query "Table.GlobalSecondaryIndexes[?IndexName=='target-created-index'].IndexName" \
+            --output text 2>/dev/null || echo "")
+          if [ -n "${existing}" ]; then
+            echo "target-created-index already exists, skipping."
+          else
+            aws dynamodb update-table \
+              --table-name devops-deployment-manager-gamma \
+              --region us-west-2 \
+              --attribute-definitions \
+                AttributeName=final_target,AttributeType=S \
+                AttributeName=created_at,AttributeType=S \
+              --global-secondary-index-updates '[{"Create":{"IndexName":"target-created-index","KeySchema":[{"AttributeName":"final_target","KeyType":"HASH"},{"AttributeName":"created_at","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]'
+            echo "Waiting for target-created-index to become ACTIVE..."
+            for i in $(seq 1 60); do
+              status=$(aws dynamodb describe-table --table-name devops-deployment-manager-gamma \
+                --region us-west-2 \
+                --query "Table.GlobalSecondaryIndexes[?IndexName=='target-created-index'].IndexStatus" \
+                --output text 2>/dev/null || echo "UNKNOWN")
+              echo "  target-created-index: ${status}"
+              [ "${status}" = "ACTIVE" ] && break
+              sleep 10
+            done
+          fi
+
+      - name: Verify all GSIs active
+        run: |
+          echo "=== Final GSI state ==="
+          aws dynamodb describe-table \
+            --table-name devops-deployment-manager-gamma \
+            --region us-west-2 \
+            --query 'Table.GlobalSecondaryIndexes[*].{Name:IndexName,Status:IndexStatus}' \
+            --output table
