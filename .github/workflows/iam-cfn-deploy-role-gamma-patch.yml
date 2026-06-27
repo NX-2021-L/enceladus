@@ -88,6 +88,7 @@ jobs:
                 "Sid": "S3GovernanceBucketNotification",
                 "Effect": "Allow",
                 "Action": [
+                  "s3:GetBucketLocation",
                   "s3:GetBucketNotification",
                   "s3:PutBucketNotification",
                   "s3:GetBucketNotificationConfiguration",
