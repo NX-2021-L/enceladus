@@ -68,16 +68,27 @@ jobs:
           set -euo pipefail
           fn="devops-recompute-governance${SUFFIX}"
           bucket="jreese-net"
-          region="us-west-2"
+          lambda_region="us-west-2"
           account="356364570033"
-          lambda_arn="arn:aws:lambda:${region}:${account}:function:${fn}"
+          lambda_arn="arn:aws:lambda:${lambda_region}:${account}:function:${fn}"
           entry_id="GovernanceLiveRecompute${SUFFIX//-/}"
+
+          # Determine the bucket's region — S3 notification API must be called against
+          # the bucket region, not the Lambda region. Cross-region Lambda notifications
+          # are supported since 2023 within the same AWS partition.
+          bucket_region=$(aws s3api get-bucket-location \
+            --bucket "${bucket}" --query "LocationConstraint" --output text 2>/dev/null \
+            | sed 's/None/us-east-1/')
+          if [ -z "${bucket_region}" ] || [ "${bucket_region}" = "None" ]; then
+            bucket_region="us-east-1"
+          fi
+          echo "Bucket region: ${bucket_region}, Lambda region: ${lambda_region}"
 
           # Fetch current notification config into a temp file (preserves other notifications).
           # The CLI returns empty string (not "{}") when no notifications exist, so we check
           # the file size and write an explicit empty config if the output was empty.
           aws s3api get-bucket-notification-configuration \
-            --bucket "${bucket}" --region "${region}" \
+            --bucket "${bucket}" --region "${bucket_region}" \
             > /tmp/s3-notify-current.json 2>/dev/null || true
           if [ ! -s /tmp/s3-notify-current.json ]; then
             echo '{}' > /tmp/s3-notify-current.json
@@ -123,16 +134,21 @@ jobs:
           aws s3api put-bucket-notification-configuration \
             --bucket "${bucket}" \
             --notification-configuration "file:///tmp/s3-notify-merged.json" \
-            --region "${region}"
+            --region "${bucket_region}"
 
-          echo "S3 notification wired: ${bucket}/governance/live/* → ${lambda_arn}"
+          echo "S3 notification wired: ${bucket} (${bucket_region})/governance/live/* → ${lambda_arn} (${lambda_region})"
 
       - name: Verify notification applied
         env:
           SUFFIX: ${{ github.event.inputs.environment_suffix }}
         run: |
           fn="devops-recompute-governance${SUFFIX}"
+          bucket="jreese-net"
+          bucket_region=$(aws s3api get-bucket-location \
+            --bucket "${bucket}" --query "LocationConstraint" --output text 2>/dev/null \
+            | sed 's/None/us-east-1/')
+          [ -z "${bucket_region}" ] || [ "${bucket_region}" = "None" ] && bucket_region="us-east-1"
           aws s3api get-bucket-notification-configuration \
-            --bucket jreese-net --region us-west-2 \
+            --bucket "${bucket}" --region "${bucket_region}" \
             --query "LambdaFunctionConfigurations[?contains(LambdaFunctionArn, '${fn}')].[Id,LambdaFunctionArn,Events[0]]" \
             --output table
