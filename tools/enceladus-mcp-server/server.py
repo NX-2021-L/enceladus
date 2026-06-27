@@ -2699,12 +2699,33 @@ def _governance_uri_from_file_name(file_name: str) -> Optional[str]:
     name = str(file_name or "").strip()
     if not name:
         return None
-    if name == "agents.md":
+    # ENC-TSK-I30: the legacy nested key ``agents/agents.md`` is an alias of the
+    # canonical top-level ``agents.md`` — both resolve to ``governance://agents.md``
+    # so the content-hash input (``_governance_catalog_from_s3``) and the resource
+    # read path (``read_resource``) never bind ``governance://agents.md`` to divergent
+    # bytes, and no phantom ``governance://agents/agents.md`` URI is created.
+    if name in ("agents.md", "agents/agents.md"):
         return "governance://agents.md"
     if name.startswith("agents/"):
         return f"governance://{name}"
     if name == "governance_data_dictionary.json":
         return "governance://governance_data_dictionary.json"
+    return None
+
+
+def _governance_canonical_rel_for_uri(uri_text: str) -> Optional[str]:
+    """ENC-TSK-I30: the single canonical S3 rel-path for a governance URI.
+
+    Used to deterministically resolve governance catalog collisions — notably the
+    top-level ``agents.md`` versus the legacy ``agents/agents.md`` alias — so that
+    ``_governance_catalog_from_s3`` and ``read_resource`` resolve the identical
+    canonical key for ``governance://agents.md`` (no last-writer-wins dedup mask).
+    """
+    uri = str(uri_text or "").strip()
+    if uri == "governance://agents.md":
+        return "agents.md"
+    if uri.startswith("governance://"):
+        return uri.replace("governance://", "", 1)
     return None
 
 
@@ -2747,6 +2768,30 @@ def _governance_catalog_from_s3() -> Dict[str, Dict[str, Any]]:
 
         last_modified = obj.get("LastModified")
         updated_at = last_modified.isoformat() if hasattr(last_modified, "isoformat") else str(last_modified or "")
+
+        # ENC-TSK-I30: deterministic canonical-key precedence. Multiple S3 keys can
+        # resolve to one governance URI (the top-level ``agents.md`` and the legacy
+        # ``agents/agents.md`` alias both map to ``governance://agents.md``). Resolve
+        # to the canonical key instead of last-writer-wins so the hash input matches
+        # the bytes ``read_resource`` serves, independent of S3 listing order.
+        existing = catalog.get(uri)
+        if existing is not None:
+            canonical_rel = _governance_canonical_rel_for_uri(uri)
+            existing_rel = str(existing.get("file_name") or "")
+            incoming_is_canonical = rel_path == canonical_rel and existing_rel != canonical_rel
+            if not incoming_is_canonical:
+                if existing_rel != rel_path:
+                    logger.warning(
+                        "[GOV-I30] governance URI %s resolved from multiple S3 keys "
+                        "(keeping %s, ignoring %s)",
+                        uri, existing_rel, rel_path,
+                    )
+                continue
+            logger.warning(
+                "[GOV-I30] governance URI %s resolved from multiple S3 keys "
+                "(replacing %s with canonical %s)",
+                uri, existing_rel, rel_path,
+            )
 
         catalog[uri] = {
             "file_name": rel_path,
@@ -2860,6 +2905,12 @@ def _governance_s3_keys_from_uri(uri_text: str) -> List[str]:
     uri = str(uri_text or "").strip()
     if uri == "governance://agents.md":
         prefix = S3_GOVERNANCE_PREFIX.rstrip("/")
+        # ENC-TSK-I30: canonical key FIRST. ``read_resource`` returns the first key
+        # that exists, so the top-level ``agents.md`` must precede the legacy
+        # ``agents/agents.md`` alias. This is the same canonical key that
+        # ``_governance_catalog_from_s3`` binds to ``governance://agents.md``, so the
+        # bytes served by ``governance.get('agents.md')`` equal the bytes the content
+        # hash folds in (no dedup mask).
         return [
             f"{prefix}/agents.md",
             f"{prefix}/agents/agents.md",
