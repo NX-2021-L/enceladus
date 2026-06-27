@@ -3878,6 +3878,38 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GovernanceDriftCheckSchedule.Arn
 
+  # ENC-TSK-I58 / ENC-ISS-421 (durable fix #2): hourly recompute backstop.
+  # The S3 governance/live/* -> recompute relay is wired for gamma only (the relay
+  # SNS topic + bucket notification are out-of-band, us-west-1), so the PROD canonical
+  # governance-version record would otherwise freeze at the manual backfill seed and go
+  # stale on the next agents.md change (the drift-check Lambda only ALARMS, it never
+  # writes). This schedule invokes the recompute (the I28 sole-writer) hourly with a
+  # synthetic governance/live/agents.md S3 event so it recomputes the bundle hash from
+  # live S3 and refreshes the canonical record. Empty sequencer intentionally bypasses
+  # the recompute's exact-sequencer dedup (handler: `prev_seq and prev_seq == seq`), so
+  # every scheduled tick recomputes. Hourly latency is acceptable for a backstop and
+  # matches the GovernanceDriftCheckSchedule cadence above. Templated -> prod and gamma
+  # (gamma keeps its event-driven path; this is an additional safety net there).
+  RecomputeGovernanceSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "devops-recompute-governance-backstop${EnvironmentSuffix}"
+      Description: Hourly governance-version recompute backstop (ENC-TSK-I58 / ENC-ISS-421).
+      ScheduleExpression: "rate(1 hour)"
+      State: ENABLED
+      Targets:
+        - Id: RecomputeGovernanceBackstopTarget
+          Arn: !GetAtt RecomputeGovernanceFunction.Arn
+          Input: '{"Records":[{"eventSource":"aws:scheduled-backstop","s3":{"object":{"key":"governance/live/agents.md","sequencer":"","versionId":""}}}]}'
+
+  RecomputeGovernanceSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RecomputeGovernanceFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RecomputeGovernanceSchedule.Arn
+
   # Drift alarm — fires when the canonical record disagrees with live S3.
   GovernanceVersionDriftAlarm:
     Type: AWS::CloudWatch::Alarm
