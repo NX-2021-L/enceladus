@@ -1,0 +1,7 @@
+[
+  {
+    "ResourceType": "AWS::Lambda::Url",
+    "LogicalResourceId": "EnceladusMcpCodeLiveFunctionUrl",
+    "ResourceIdentifier": { "FunctionArn": "arn:aws:lambda:us-west-2:356364570033:function:enceladus-mcp-code:live" }
+  }
+]
