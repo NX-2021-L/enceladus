@@ -1,0 +1,148 @@
+name: Governance Prod Backstop — io-exception (DOC-BF41B5E0108C)
+
+# ENC-TSK-I59 / ENC-ISS-421 durable fix #2 (prod), under io prod-exception DOC-BF41B5E0108C.
+#
+# v3-prod is frozen (DOC-499FA089EC30). io granted a NARROW, self-relocking exception to make
+# durable the two governance-hash-path hot-fixes applied during the ENC-ISS-421 P0:
+#   1. governance-version READ grant for the prod coordination_api role, and
+#   2. an hourly EventBridge BACKSTOP that refreshes the prod canonical governance-version record
+#      (the prod recompute is otherwise unwired; the gamma S3->recompute relay does not serve prod).
+#
+# This workflow is SURGICAL + ADD-ONLY: it creates a dedicated named inline policy + a new
+# EventBridge rule/permission against the EXISTING prod role and EXISTING prod recompute Lambda
+# (by name/ARN). It does NOT redeploy the enceladus-compute stack and does NOT modify/replace/
+# remove any existing prod resource, except retiring the unauthorized incident stopgap statement
+# from devops-coordination-api-inline (explicitly authorized by DOC-BF41B5E0108C). Mirrors
+# iam-coordination-api-gamma-govversion-grant.yml. Manual dispatch only; requires confirmation.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type the exception doc id to confirm a prod-exception apply"
+        type: string
+        required: true
+        default: ""
+      reason:
+        description: "Why this is being applied"
+        type: string
+        required: false
+        default: "ENC-TSK-I59 / ENC-ISS-421: durable prod governance-version read grant + recompute backstop under DOC-BF41B5E0108C"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  ACCOUNT: "356364570033"
+  PROD_ROLE: devops-coordination-api-lambda-role
+  GRANT_POLICY: enceladus-coordination-api-prod-govversion-read-v1
+  RECOMPUTE_FN: devops-recompute-governance
+  BACKSTOP_RULE: devops-recompute-governance-backstop
+
+jobs:
+  apply:
+    name: Apply prod governance-hash backstop (io-exception)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Gate on explicit confirmation
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.confirm }}" != "DOC-BF41B5E0108C" ]; then
+            echo "::error::Refusing to run: confirm input must equal the exception doc id DOC-BF41B5E0108C (v3-prod is frozen; DOC-499FA089EC30)."
+            exit 1
+          fi
+          echo "Confirmed prod-exception DOC-BF41B5E0108C."
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: 1) Governance-version READ grant (dedicated named policy, add-only)
+        run: |
+          set -euo pipefail
+          cat > /tmp/gov-version-read-policy.json <<JSON
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "GovernanceVersionTableRead",
+                "Effect": "Allow",
+                "Action": ["dynamodb:GetItem", "dynamodb:Query"],
+                "Resource": ["arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT}:table/governance-version"]
+              }
+            ]
+          }
+          JSON
+          aws iam put-role-policy \
+            --role-name "${PROD_ROLE}" \
+            --policy-name "${GRANT_POLICY}" \
+            --policy-document "file:///tmp/gov-version-read-policy.json"
+          echo "Applied ${GRANT_POLICY} to ${PROD_ROLE}."
+
+      - name: 2) Recompute BACKSTOP — EventBridge rule + target + permission (add-only)
+        run: |
+          set -euo pipefail
+          rule_arn=$(aws events put-rule \
+            --name "${BACKSTOP_RULE}" \
+            --schedule-expression "rate(1 hour)" \
+            --state ENABLED \
+            --description "Hourly governance-version recompute backstop (ENC-TSK-I59 / ENC-ISS-421, io-exception DOC-BF41B5E0108C)" \
+            --query 'RuleArn' --output text)
+          echo "Rule: ${rule_arn}"
+          aws events put-targets \
+            --rule "${BACKSTOP_RULE}" \
+            --targets "Id=RecomputeGovernanceBackstopTarget,Arn=arn:aws:lambda:${AWS_REGION}:${ACCOUNT}:function:${RECOMPUTE_FN},Input={\"Records\":[{\"eventSource\":\"aws:scheduled-backstop\",\"s3\":{\"object\":{\"key\":\"governance/live/agents.md\",\"sequencer\":\"\",\"versionId\":\"\"}}}]}"
+          # Idempotent permission add (ignore if it already exists).
+          aws lambda add-permission \
+            --function-name "${RECOMPUTE_FN}" \
+            --statement-id RecomputeBackstopScheduleInvoke \
+            --action lambda:InvokeFunction \
+            --principal events.amazonaws.com \
+            --source-arn "${rule_arn}" 2>/dev/null || echo "permission already present"
+          echo "Backstop wired."
+
+      - name: 3) Retire the incident stopgap from devops-coordination-api-inline (authorized cleanup)
+        run: |
+          set -euo pipefail
+          # Confirm the dedicated grant is live BEFORE removing the stopgap, so the read is never lost.
+          aws iam get-role-policy --role-name "${PROD_ROLE}" --policy-name "${GRANT_POLICY}" >/dev/null
+          doc=$(aws iam get-role-policy --role-name "${PROD_ROLE}" --policy-name "devops-coordination-api-inline" --query 'PolicyDocument' --output json)
+          echo "${doc}" > /tmp/inline.json
+          # Drop ONLY the ad-hoc GovernanceVersionRead statement; leave everything else byte-identical.
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/inline.json'))
+          before=len(d['Statement'])
+          d['Statement']=[s for s in d['Statement'] if s.get('Sid')!='GovernanceVersionRead']
+          after=len(d['Statement'])
+          json.dump(d, open('/tmp/inline_new.json','w'))
+          print(f"inline statements {before} -> {after} (removed {before-after} GovernanceVersionRead)")
+          assert before-after in (0,1), "unexpected statement delta"
+          PY
+          if ! diff -q /tmp/inline.json /tmp/inline_new.json >/dev/null; then
+            aws iam put-role-policy --role-name "${PROD_ROLE}" --policy-name "devops-coordination-api-inline" --policy-document file:///tmp/inline_new.json
+            echo "Retired ad-hoc GovernanceVersionRead stopgap."
+          else
+            echo "No stopgap present; nothing to retire."
+          fi
+
+      - name: 4) Verify (grant live, backstop enabled, stopgap gone)
+        run: |
+          set -euo pipefail
+          aws iam get-role-policy --role-name "${PROD_ROLE}" --policy-name "${GRANT_POLICY}" \
+            --query '{policy:PolicyName,stmt:PolicyDocument.Statement[0].Action}' --output json
+          aws events describe-rule --name "${BACKSTOP_RULE}" --query '{rule:Name,state:State,sched:ScheduleExpression}' --output json
+          aws events list-targets-by-rule --rule "${BACKSTOP_RULE}" --query 'Targets[0].{id:Id,arn:Arn}' --output json
+          leftover=$(aws iam get-role-policy --role-name "${PROD_ROLE}" --policy-name "devops-coordination-api-inline" \
+            --query "length(PolicyDocument.Statement[?Sid=='GovernanceVersionRead'])" --output text)
+          echo "inline GovernanceVersionRead remaining (expect 0): ${leftover}"
+          [ "${leftover}" = "0" ] || { echo "::error::stopgap not retired"; exit 1; }
+          echo "[OK] prod governance-hash backstop applied and verified."
