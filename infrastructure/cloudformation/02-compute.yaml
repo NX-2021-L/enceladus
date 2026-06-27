@@ -3851,7 +3851,7 @@ Resources:
   GovernanceDriftCheckSchedule:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub "governance-drift-check${EnvironmentSuffix}"
+      Name: !Sub "devops-governance-drift-check${EnvironmentSuffix}"
       Description: Hourly governance-version drift reconcile (ENC-TSK-I32).
       ScheduleExpression: "rate(1 hour)"
       State: ENABLED
