@@ -1,5 +1,5 @@
 {
-  "version": "2026-06-27.06",
+  "version": "2026-06-27.07",
   "updated_at": "2026-06-27T20:02:00Z",
   "last_change_summary": "ENC-TSK-I53 / ENC-FTR-116: recompute_governance Lambda now unwraps the SNS-relay Notification envelope (S3 → SNS us-west-1 → Lambda us-west-2) so real governance/live/* ObjectCreated events recompute the canonical version record; previously every real event failed KeyError 's3' because Lambda-protocol SNS cannot use raw message delivery. No data-dictionary schema change — bump satisfies the path-triggered Governance Dictionary Guard on lambda_function.py edits. Follows ENC-TSK-I32 (governance drift-detection backstop, governance_drift_check.handler).",
   "owners": [
@@ -332,6 +332,48 @@
           "default": false,
           "definition": "ENC-FTR-111 / ENC-TSK-H83 (Universal Arc-Walker Phase 1 circuit breaker). When true, the Universal Arc-Walker MUST NOT auto-advance this record across any lifecycle gate. Default false. The tracker_mutation write path auto-latches this true on any human-initiated non-forward transition (a regression / backward status move, or -- for tasks -- a coding-updates re-entry) and emits an Artifact-Genesis audit record (a history entry plus an EventBridge 'record.auto_walk_opt_out.latched' event). The arc-walker can never clear it (ENC-FTR-111 AC-2).",
           "usage_guidance": "Settable and clearable by humans or agents via execute tracker.set(field='auto_walk_opt_out', value=true|false); a 'true'/'false' string is coerced to a real DynamoDB BOOL. Auto-latched true by the write path on human-initiated non-forward transitions; no manual action required. The arc-walker (write_source provider/channel 'system:arc-walker') is forbidden from clearing it: tracker_mutation rejects walker-origin attempts to set it false with HTTP 403. Cleared only by an explicit non-walker tracker.set to false."
+        },
+        "superseded_by": {
+          "type": "string",
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-TSK-I07 (Dedup P3 supersession primitive). Canonical record id (same type, same project) that supersedes this record. Set by the supersession operation when a superseded-by typed edge is created; cleared on un-supersession. Read-only to clients — tracker_mutation rejects PATCH attempts to set it (ID boundary / write_source guard). See tracker.relationship.supersession_operation and DOC-DF651F07D5C2 §7.",
+          "usage_guidance": "Read-only. Populated only when status=superseded. Pairs with superseded_at / pre_supersession_status / superseded_migrated_edges."
+        },
+        "superseded_at": {
+          "type": "string",
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "ENC-TSK-I07: ISO8601 UTC timestamp when this record was superseded. Server-written by the supersession op; cleared on un-supersession. Read-only to clients.",
+          "usage_guidance": "Read-only. Present only while status=superseded."
+        },
+        "pre_supersession_status": {
+          "type": "string",
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-TSK-I07: the record's lifecycle status immediately before supersession, captured so un-supersession can restore it (reversibility). Server-written; read-only to clients.",
+          "usage_guidance": "Read-only. The reversible un-supersession op restores this status and the record's retrieval/triage eligibility."
+        },
+        "superseded_migrated_edges": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-TSK-I07: list of edges migrated from this record onto the canonical (superseding) record during supersession. Each entry: {rel_type, other_id, created_on_canonical(bool)}. Drives idempotent re-pointing (no duplicate edges on the canonical) and exact rollback on un-supersession. Server-written; read-only to clients.",
+          "usage_guidance": "Read-only. Populated only when status=superseded."
         }
       }
     },
@@ -425,6 +467,48 @@
           "default": false,
           "definition": "ENC-FTR-111 / ENC-TSK-H83 (Universal Arc-Walker Phase 1 circuit breaker). When true, the Universal Arc-Walker MUST NOT auto-advance this record across any lifecycle gate. Default false. The tracker_mutation write path auto-latches this true on any human-initiated non-forward transition (a regression / backward status move, or -- for tasks -- a coding-updates re-entry) and emits an Artifact-Genesis audit record (a history entry plus an EventBridge 'record.auto_walk_opt_out.latched' event). The arc-walker can never clear it (ENC-FTR-111 AC-2).",
           "usage_guidance": "Settable and clearable by humans or agents via execute tracker.set(field='auto_walk_opt_out', value=true|false); a 'true'/'false' string is coerced to a real DynamoDB BOOL. Auto-latched true by the write path on human-initiated non-forward transitions; no manual action required. The arc-walker (write_source provider/channel 'system:arc-walker') is forbidden from clearing it: tracker_mutation rejects walker-origin attempts to set it false with HTTP 403. Cleared only by an explicit non-walker tracker.set to false."
+        },
+        "superseded_by": {
+          "type": "string",
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-TSK-I07 (Dedup P3 supersession primitive). Canonical record id (same type, same project) that supersedes this record. Set by the supersession operation when a superseded-by typed edge is created; cleared on un-supersession. Read-only to clients — tracker_mutation rejects PATCH attempts to set it (ID boundary / write_source guard). See tracker.relationship.supersession_operation and DOC-DF651F07D5C2 §7.",
+          "usage_guidance": "Read-only. Populated only when status=superseded. Pairs with superseded_at / pre_supersession_status / superseded_migrated_edges."
+        },
+        "superseded_at": {
+          "type": "string",
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "constraints": {
+            "format": "ISO 8601 datetime"
+          },
+          "definition": "ENC-TSK-I07: ISO8601 UTC timestamp when this record was superseded. Server-written by the supersession op; cleared on un-supersession. Read-only to clients.",
+          "usage_guidance": "Read-only. Present only while status=superseded."
+        },
+        "pre_supersession_status": {
+          "type": "string",
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-TSK-I07: the record's lifecycle status immediately before supersession, captured so un-supersession can restore it (reversibility). Server-written; read-only to clients.",
+          "usage_guidance": "Read-only. The reversible un-supersession op restores this status and the record's retrieval/triage eligibility."
+        },
+        "superseded_migrated_edges": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "required": false,
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-TSK-I07: list of edges migrated from this record onto the canonical (superseding) record during supersession. Each entry: {rel_type, other_id, created_on_canonical(bool)}. Drives idempotent re-pointing (no duplicate edges on the canonical) and exact rollback on un-supersession. Server-written; read-only to clients.",
+          "usage_guidance": "Read-only. Populated only when status=superseded."
         }
       }
     },
@@ -4616,6 +4700,53 @@
         "telemetry_schema": {
           "type": "string",
           "definition": "enceladus.pathway.telemetry.v1"
+        }
+      }
+    },
+    "graph_query_api.vector_read": {
+      "description": "ENC-TSK-H89 / ENC-FTR-082 AC-12: governed bulk vector-read over the Neo4j n.embedding corpus. A dedicated graphsearch handler (search_type=vector_read) in backend/lambda/graph_query_api/lambda_function.py that returns paginated {record_id, record_type, embedding} rows. This is the ONLY path that returns the raw embedding vector — the hybrid retrieval path (_query_hybrid) keeps stripping n.embedding (lambda_function.py:1785-1788); the strip-exemption applies solely here. Latency-bounded by a dedicated wall-clock deadline (_VECTOR_READ_DEADLINE_S, default 10s) plus server-side SKIP/LIMIT pagination so a large page can never extend or perturb the hybrid request path. Exposed on the MCP code-mode read surface via search(action='graph_query.vector_read', arguments={project_id, offset, limit, record_type?}) and equivalently via the documented passthrough search(action='tracker.graphsearch', arguments={search_type:'vector_read', project_id, offset, limit}). Consumed by the ENC-TSK-H91 cosine-correlation analysis (ENC-TSK-H34 AC-1). No new edge type (OGTM N/A). Gamma-validated per the deploy-target invariant (DOC-6EFD5DB32CD8); raw-vector prod exposure deferred to the io-gated v4->prod cutover.",
+      "fields": {
+        "offset": {
+          "type": "integer",
+          "definition": "Pagination cursor (rows to SKIP). Default 0.",
+          "constraints": {
+            "min": 0,
+            "default": 0
+          }
+        },
+        "limit": {
+          "type": "integer",
+          "definition": "Page size (rows to return). Clamped server-side to [1, 1000].",
+          "constraints": {
+            "min": 1,
+            "max": 1000,
+            "default": 200
+          }
+        },
+        "record_type": {
+          "type": "string",
+          "definition": "Optional label scope (task/issue/feature/plan/lesson/document). Omit to read across the whole embedded corpus."
+        },
+        "response_envelope": {
+          "type": "object",
+          "definition": "{nodes: [{record_id, record_type, embedding:[float,...]}], edges: [], paths: [], pagination: {offset, limit, returned, next_offset|null, has_more}, embedding_property: 'embedding', embedding_dim: int|null, summary: string, query_cypher: 'vector_read/paginated'}."
+        }
+      }
+    },
+    "graph_query_api.correlation_encoding": {
+      "description": "ENC-TSK-H92 / ENC-FTR-082 AC-2: flag-gated correlation-aware (pseudoinverse-style) encoding on the hybrid-retrieval vector path. OFF by default => byte-identical hybrid retrieval. When CORRELATION_ENCODING_ENABLED is truthy AND CORRELATION_ENCODING_TRANSFORM_URI points to an h92.v1 transform artifact (local path or s3://), graph_query_api re-scores the HNSW vector candidates SYMMETRICALLY by cosine(W*q, W*emb) in _hybrid_vector_ranks (the raw query drives HNSW recall; the de-correlating map W is applied to BOTH the query and each candidate embedding via _transform_unit), so a near-duplicate's distinctive residual decides rank. ENC-TSK-I03 supersedes the ENC-TSK-H92 query-side variant (W applied to the query only, before HNSW), which measured not_met (precision@1 -0.9%) because it compared W*q against an un-transformed index. W is fit OFFLINE by tools/fit_encoding_h92.py from the ENC-TSK-H91 high-correlation pair set (W = I - alpha*sum_k v_k v_k^T over the top right-singular vectors of the correlated pattern matrix; eigenvalues in [1-alpha,1]); the Lambda applies it as a pure-Python matrix-vector product (no numpy in-runtime) then L2-renormalizes. Backward compatible and bounded: disabled, malformed-artifact, or dimension-mismatch all fall back to the untransformed embedding (no RRF-ordering regression when off). No new Neo4j edge type is introduced (OGTM N/A, satisfies ENC-TSK-H34 AC-4). Efficacy (>=5% precision@1 lift) is re-measured by the ENC-TSK-H94 harness against gamma after the ENC-TSK-I03 re-rank deploy (the H92 query-side variant measured -0.9%). Per-candidate W*emb is a pure-Python dense matrix-vector product, so the re-rank adds measurable latency on the (flag-gated, measurement-time) vector path; a low-rank V-factored artifact would cut it if it is ever promoted past measurement. Gamma-validated per the deploy-target invariant (DOC-6EFD5DB32CD8).",
+      "fields": {
+        "CORRELATION_ENCODING_ENABLED": {
+          "type": "env_flag",
+          "definition": "Truthy (1/true/yes/on) enables the encoding apply on the vector path. Default unset => OFF => byte-identical hybrid retrieval. Activated at the ENC-TSK-H93 gamma deploy."
+        },
+        "CORRELATION_ENCODING_TRANSFORM_URI": {
+          "type": "string",
+          "definition": "Local path or s3:// URI of the h92.v1 transform artifact produced by tools/fit_encoding_h92.py. Loaded lazily + cached; any load failure disables the encoding defensively."
+        },
+        "transform_artifact": {
+          "type": "object",
+          "definition": "h92.v1: {version:'h92.v1', dim:int, alpha:float, rank:int, W:[[float]*dim]*dim, fit_meta:{corpus_size, correlated_set_size, num_pairs, energy_captured, top_singular_values}, pairs_source, generated_at}. W is the D x D de-correlating map applied as q' = normalize(W @ q)."
         }
       }
     },
