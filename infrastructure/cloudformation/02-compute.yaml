@@ -1718,6 +1718,17 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}/index/*"
+              # ENC-TSK-I57 / ENC-ISS-421: read the canonical governance-version record (ENC-TSK-I27/I29).
+              # The Lambda env sets GOVERNANCE_VERSION_TABLE and _compute_governance_hash_local() reads it;
+              # without this grant the prod role gets AccessDenied -> empty governance_hash -> global mutation block.
+              # ${EnvironmentSuffix} covers prod ("") and gamma ("-gamma"), superseding the one-shot gamma grant workflow.
+              - Sid: GovernanceVersionRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-version${EnvironmentSuffix}"
               - Sid: DocumentsTableRead
                 Effect: Allow
                 Action:
