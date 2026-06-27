@@ -158,6 +158,29 @@ jobs:
             --template "${TEMPLATE_FILE}" \
             --region "${AWS_REGION}"
 
+      - name: Clean up orphaned SNS topics (pre-deploy idempotency guard)
+        run: |
+          set -euo pipefail
+          # When a previous 01-data deploy fails mid-flight and CFN rolls back with
+          # DeletionPolicy:Retain, new SNS topics can be left untracked by the stack.
+          # A subsequent deploy fails: "Topic creation failed because the topic already exists."
+          # Delete such orphans before deploying so CFN can create them cleanly.
+          suffix="${ENVIRONMENT_SUFFIX}"
+          stack_name="${{ steps.params.outputs.data_stack_name }}"
+          tracked=$(aws cloudformation list-stack-resources --stack-name "${stack_name}" \
+            --region "${AWS_REGION}" \
+            --query "StackResourceSummaries[?ResourceType=='AWS::SNS::Topic'].PhysicalResourceId" \
+            --output text 2>/dev/null | tr '\t' '\n' | grep . || echo "")
+          all_gamma_topics=$(aws sns list-topics --region "${AWS_REGION}" \
+            --query "Topics[*].TopicArn" --output text | tr '\t' '\n' \
+            | grep "enceladus-.*${suffix}$" || true)
+          for arn in ${all_gamma_topics}; do
+            if [ -z "${tracked}" ] || ! grep -qF "${arn}" <<< "${tracked}"; then
+              echo "Deleting orphaned (untracked) SNS topic: ${arn}"
+              aws sns delete-topic --topic-arn "${arn}" --region "${AWS_REGION}" || echo "Warning: could not delete ${arn}"
+            fi
+          done
+
       - name: Deploy Data stack (01-data)
         run: |
           set -euo pipefail
