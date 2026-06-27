@@ -106,6 +106,22 @@ jobs:
                   "lambda:GetPolicy"
                 ],
                 "Resource": "arn:aws:lambda:us-west-2:356364570033:function:devops-recompute-governance*"
+              },
+              {
+                "Sid": "SNSGovernanceRelayUSWest1",
+                "Effect": "Allow",
+                "Action": [
+                  "sns:CreateTopic",
+                  "sns:GetTopicAttributes",
+                  "sns:SetTopicAttributes",
+                  "sns:DeleteTopic",
+                  "sns:TagResource",
+                  "sns:Subscribe",
+                  "sns:Unsubscribe",
+                  "sns:GetSubscriptionAttributes",
+                  "sns:ListSubscriptionsByTopic"
+                ],
+                "Resource": "arn:aws:sns:us-west-1:356364570033:enceladus-*-gamma"
               }
             ]
           }
