@@ -554,6 +554,28 @@ Resources:
         - Key: Component
           Value: coordination
 
+  # ENC-TSK-I27 / ENC-FTR-116 Wave 2: canonical governance-version record.
+  # Single-item table (version_id = "governance-version-current") written exclusively
+  # by the recompute-governance Lambda (IAM sole-writer enforced by I28).
+  # Single-region only — Global Tables degrade optimistic locking (CAS on cas_version).
+  GovernanceVersionTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "governance-version${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: version_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: version_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance
+
 Outputs:
   CoordinationTableName:
     Value: !Ref CoordinationRequestsTable
@@ -648,3 +670,12 @@ Outputs:
     Value: !GetAtt AgentTypesTable.Arn
     Export:
       Name: !Sub ${AWS::StackName}-AgentTypesTableArn
+  # ENC-TSK-I27 / ENC-FTR-116 Wave 2: governance-version canonical record table
+  GovernanceVersionTableName:
+    Value: !Ref GovernanceVersionTable
+    Export:
+      Name: !Sub ${AWS::StackName}-GovernanceVersionTable
+  GovernanceVersionTableArn:
+    Value: !GetAtt GovernanceVersionTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-GovernanceVersionTableArn
