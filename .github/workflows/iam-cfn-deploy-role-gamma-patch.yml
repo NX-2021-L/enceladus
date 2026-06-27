@@ -83,6 +83,27 @@ jobs:
                   "sqs:UntagQueue"
                 ],
                 "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-*-gamma*"
+              },
+              {
+                "Sid": "S3GovernanceBucketNotification",
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetBucketNotification",
+                  "s3:PutBucketNotification",
+                  "s3:GetBucketNotificationConfiguration",
+                  "s3:PutBucketNotificationConfiguration"
+                ],
+                "Resource": "arn:aws:s3:::jreese-net"
+              },
+              {
+                "Sid": "LambdaGovernancePermission",
+                "Effect": "Allow",
+                "Action": [
+                  "lambda:AddPermission",
+                  "lambda:RemovePermission",
+                  "lambda:GetPolicy"
+                ],
+                "Resource": "arn:aws:lambda:us-west-2:356364570033:function:devops-recompute-governance*"
               }
             ]
           }
