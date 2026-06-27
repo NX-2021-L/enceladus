@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-27.03",
-  "updated_at": "2026-06-27T05:00:00Z",
-  "last_change_summary": "ENC-TSK-I27+I28 / ENC-FTR-116 Wave 2: document governance.version_record (canonical DDB record, sole-writer=RecomputeGovernanceRole) and recompute_governance.event_handler (S3 ObjectCreated Lambda contract).",
+  "version": "2026-06-27.04",
+  "updated_at": "2026-06-27T08:00:00Z",
+  "last_change_summary": "ENC-TSK-I29 / ENC-FTR-116 Wave 2: governance hash cutover — canonical DDB-primary resolution in coordination_api (_compute_governance_hash_local) and enceladus-mcp-server (_get_governance_hash_via_api). Docstore-catalog fallback removed from call chain in both. New entities: coordination_api.governance_hash_resolution, mcp_server.governance_hash_resolution.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5564,6 +5564,52 @@
         "env_vars": {
           "type": "object",
           "definition": "GOVERNANCE_VERSION_TABLE: table name (governance-version or governance-version-gamma). AWS_REGION: us-west-2."
+        }
+      }
+    },
+    "coordination_api.governance_hash_resolution": {
+      "description": "Hash resolution chain in coordination_api._compute_governance_hash_local() after the ENC-TSK-I29 docstore-fallback cutover. Primary: canonical governance-version DDB GetItem (GOVERNANCE_VERSION_TABLE, key=governance-version-current). Secondary: live S3 recomputation via MCP server module. Docstore-catalog fallback removed — it could silently return a frozen hash after a governance/live/* change, violating the complete-mediation guarantee (DOC-63420302EF65 §2.3). Empty string returned and propagated as GOVERNANCE_STALE on total failure of both sources.",
+      "fields": {
+        "primary_source": {
+          "type": "object",
+          "definition": "dynamodb.get_item on GOVERNANCE_VERSION_TABLE (governance-version or governance-version-gamma). ConsistentRead=True. Returns governance_hash string from the governance-version-current record. Raises RuntimeError when record is missing or governance_hash attribute is empty."
+        },
+        "secondary_source": {
+          "type": "object",
+          "definition": "MCP server module _compute_governance_hash(force_refresh=True). Reads directly from S3 governance/live/ prefix. Only invoked when primary_source raises."
+        },
+        "removed_fallback": {
+          "type": "object",
+          "definition": "_compute_governance_hash_docstore_fallback() is DEPRECATED and removed from call chain as of I29. Function body retained for external test compatibility only. It scanned DOCUMENTS_TABLE for governance-keyword documents — stale by design because DDB updates lagged S3 writes by up to TTL window (previously up to 5 min)."
+        },
+        "env_vars": {
+          "type": "object",
+          "definition": "GOVERNANCE_VERSION_TABLE: governance-version or governance-version-gamma (injected via CFN 02-compute.yaml EnvironmentSuffix sub). GOVERNANCE_VERSION_RECORD_ID: governance-version-current (constant)."
+        }
+      }
+    },
+    "mcp_server.governance_hash_resolution": {
+      "description": "Hash resolution chain in enceladus-mcp-server._get_governance_hash_via_api() after the ENC-TSK-I29 cutover. Four-tier resolution with 60s TTL cache.",
+      "fields": {
+        "tier_1_api_hash": {
+          "type": "object",
+          "definition": "coordination API GET /hash endpoint. After I29 lands, the API's _compute_governance_hash_local() returns the canonical DDB value, so tier 1 is transitively canonical. TTL: 60s (GOVERNANCE_HASH_API_TTL)."
+        },
+        "tier_2_health_api": {
+          "type": "object",
+          "definition": "coordination API health endpoint governance_hash field. Auth-safe fallback for environments where the /hash endpoint requires internal API key."
+        },
+        "tier_3_canonical_ddb": {
+          "type": "object",
+          "definition": "_get_canonical_governance_hash_ddb(): same DDB read as coordination_api primary. Bypasses HTTP entirely — valid when coordination API is unreachable. GOVERNANCE_VERSION_TABLE env var (default: governance-version). New in ENC-TSK-I29."
+        },
+        "tier_4_s3_catalog": {
+          "type": "object",
+          "definition": "_compute_governance_hash(force_refresh=True): reads from _governance_catalog() (S3 governance/live/ prefix primary, docstore scan fallback ONLY when S3 is empty). Last resort — no longer the primary docstore path."
+        },
+        "env_vars": {
+          "type": "object",
+          "definition": "GOVERNANCE_VERSION_TABLE: governance-version or governance-version-gamma. GOVERNANCE_VERSION_RECORD_ID: governance-version-current (constant)."
         }
       }
     }
