@@ -86,3 +86,4 @@ function_name_map:
   mcp_code: enceladus-mcp-code-gamma
   mcp_streamable: enceladus-mcp-streamable-gamma
   lifecycle_service: enceladus-lifecycle-service-gamma
+  recompute_governance: devops-recompute-governance-gamma

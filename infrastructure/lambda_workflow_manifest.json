@@ -211,6 +211,12 @@
       "lambda_dir": "backend/lambda/deploy_parity_validator",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/deploy_parity_validator/deploy.sh"
+    },
+    {
+      "function_name": "devops-recompute-governance",
+      "lambda_dir": "backend/lambda/recompute_governance",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/recompute_governance/deploy.sh"
     }
   ]
 }

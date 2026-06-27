@@ -3632,6 +3632,93 @@ Resources:
         - Key: Environment
           Value: gamma
 
+  # ENC-TSK-I27 / ENC-FTR-116 Wave 2: recompute-governance Lambda.
+  # Triggered by S3 ObjectCreated on governance/live/*; writes canonical
+  # governance-version DDB record. IAM sole-writer grant (I28).
+  RecomputeGovernanceFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-recompute-governance${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt RecomputeGovernanceRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          GOVERNANCE_VERSION_TABLE: !Sub "governance-version${EnvironmentSuffix}"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance
+
+  RecomputeGovernanceRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-recompute-governance-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3GovernanceRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadGovernanceLiveObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:HeadObject
+                  - s3:GetObjectAttributes
+                Resource: "arn:aws:s3:::jreese-net/governance/live/*"
+              - Sid: ListGovernanceLivePrefix
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+                Condition:
+                  StringLike:
+                    "s3:prefix": "governance/live/*"
+        - PolicyName: GovernanceVersionDDBWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteCanonicalRecord
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-GovernanceVersionTableArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
 Outputs:
   CoordinationApiFunctionArn:
     Value: !GetAtt CoordinationApiFunction.Arn
