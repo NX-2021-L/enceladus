@@ -133,6 +133,16 @@ _REPO_URL_PATTERN = re.compile(r"^https?://[^\s]+$")
 _VALID_CREATE_STATUSES = {"planning", "development", "active_production"}
 _ALL_STATUSES = _VALID_CREATE_STATUSES | {"closed", "archived"}
 
+# ENC-TSK-H84 / ENC-FTR-111: per-project deploy_policy. ci_triggered means deploys are kicked
+# off by CI on merge (the Universal Arc-Walker may mechanically auto-walk deploy-init, ruling
+# O-2); manual means a human/external actor triggers the deploy (the walker must not auto-walk).
+# Default ci_triggered. Existing/absent values read as the default (the seeded baseline) — see
+# _enrich_project and the lifecycle_service deploy-init gate.
+DEPLOY_POLICY_CI_TRIGGERED = "ci_triggered"
+DEPLOY_POLICY_MANUAL = "manual"
+_VALID_DEPLOY_POLICIES = {DEPLOY_POLICY_CI_TRIGGERED, DEPLOY_POLICY_MANUAL}
+_DEFAULT_DEPLOY_POLICY = DEPLOY_POLICY_CI_TRIGGERED
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -439,10 +449,18 @@ def _compute_days_since_active(project_id: str) -> Optional[int]:
 
 
 def _enrich_project(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Add days_since_active to a project dict."""
+    """Add days_since_active to a project dict and normalize deploy_policy.
+
+    ENC-TSK-H84 / ENC-FTR-111: read-time defaulting seeds the effective deploy_policy for every
+    existing/legacy project that predates the field (including enceladus) to ci_triggered, and
+    coerces any unrecognized stored value back to the default. This keeps GET/LIST consumers and
+    the lifecycle_service deploy-init gate consistent even before the physical backfill
+    (tools/seed_deploy_policy.py) materializes the attribute on the DynamoDB record."""
     pid = item.get("project_id", "")
     days = _compute_days_since_active(pid)
     item["days_since_active"] = days
+    policy = str(item.get("deploy_policy") or "").strip().lower()
+    item["deploy_policy"] = policy if policy in _VALID_DEPLOY_POLICIES else _DEFAULT_DEPLOY_POLICY
     return item
 
 
@@ -477,11 +495,17 @@ def _validate_create_input(body: Dict) -> Tuple[Optional[Dict], Optional[str]]:
             repo = None
         elif len(repo) > 2048 or not _REPO_URL_PATTERN.match(repo):
             errors.append("repo: when provided, must be a valid http(s) URL up to 2048 characters")
+    # ENC-TSK-H84: optional deploy_policy enum, defaulting to ci_triggered.
+    deploy_policy = (body.get("deploy_policy") or _DEFAULT_DEPLOY_POLICY)
+    deploy_policy = str(deploy_policy).strip().lower()
+    if deploy_policy not in _VALID_DEPLOY_POLICIES:
+        errors.append(f"deploy_policy: must be one of {sorted(_VALID_DEPLOY_POLICIES)}")
     if errors:
         return None, "; ".join(errors)
     return {
         "name": name, "prefix": prefix, "summary": summary,
         "status": status, "parent": parent, "repo": repo,
+        "deploy_policy": deploy_policy,
     }, None
 
 
@@ -527,6 +551,7 @@ def _handle_create(body: Dict, claims: Dict) -> Dict:
     status = data["status"]
     parent = data["parent"]
     repo = data["repo"]
+    deploy_policy = data["deploy_policy"]
     now = _now_z()
     created_by = claims.get("sub", "unknown")
 
@@ -589,6 +614,9 @@ def _handle_create(body: Dict, claims: Dict) -> Dict:
         "path": {"S": path},
         "summary": {"S": summary},
         "status": {"S": status},
+        # ENC-TSK-H84 / ENC-FTR-111: persist deploy_policy at create so new projects carry it
+        # explicitly; existing projects rely on the read-time default in _enrich_project.
+        "deploy_policy": {"S": deploy_policy},
         "created_at": {"S": now},
         "updated_at": {"S": now},
         "created_by": {"S": created_by},
@@ -669,6 +697,7 @@ def _handle_create(body: Dict, claims: Dict) -> Dict:
         "summary": summary,
         "status": status,
         "parent": parent,
+        "deploy_policy": deploy_policy,
         "created_at": now,
         "updated_at": now,
         "created_by": created_by,

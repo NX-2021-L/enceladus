@@ -11,6 +11,10 @@ standalone, synchronously-invoked Lambda. The service is the authoritative owner
      coding-complete+ until every child has reached at least that stage.
   4. gate_class taxonomy              — ENC-FTR-111 scaffold (born-inside, consumed by the
      Universal Arc-Walker; this service does NOT implement the walker).
+  5. deploy-init auto-walk gating     — ENC-TSK-H84 / ENC-FTR-111 AC-5: the `evaluate_auto_walk`
+     action reads the project's deploy_policy (projects table) and applies ruling O-2 — deploy-init
+     is auto-walkable only on ci_triggered projects. The walker (FTR-111) consumes this verdict;
+     this service owns the read + the policy decision, not the walk loop itself.
 
 Scope boundary (ENC-TSK-H46, io-confirmed tracker_mutation-only):
   - EXTERNAL verifications that hit third-party APIs (the `committed` GitHub commit-exists check
@@ -56,6 +60,7 @@ from transition_type_matrix import (
     STRICTNESS_RANK,
     VALID_TRANSITION_TYPES,
     get_gate_class,
+    is_auto_walkable_class,
 )
 
 logger = logging.getLogger()
@@ -69,6 +74,19 @@ LIFECYCLE_SERVICE_VERSION = "1.0.0"  # ENC-TSK-H46
 DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE", "devops-project-tracker")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 COMPONENTS_TABLE = os.environ.get("COMPONENTS_TABLE", "component-registry")
+# ENC-TSK-H84 / ENC-FTR-111: the projects table carries the per-project deploy_policy the
+# Universal Arc-Walker reads to gate deploy-init auto-walk (ruling O-2).
+PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+
+# ENC-TSK-H84 / ENC-FTR-111 AC-5 — project deploy_policy enum (mirrors the project_service +
+# governance-dictionary contract). ci_triggered: deploys are kicked off by CI on merge, so the
+# system can mechanically auto-walk deploy-init. manual: a human/external actor triggers the
+# deploy, so the walker must NOT auto-advance deploy-init. Existing/absent values read as the
+# ci_triggered default (the seeded baseline — see project_service + tools/seed_deploy_policy.py).
+DEPLOY_POLICY_CI_TRIGGERED = "ci_triggered"
+DEPLOY_POLICY_MANUAL = "manual"
+VALID_DEPLOY_POLICIES = frozenset({DEPLOY_POLICY_CI_TRIGGERED, DEPLOY_POLICY_MANUAL})
+DEFAULT_DEPLOY_POLICY = DEPLOY_POLICY_CI_TRIGGERED
 
 _ddb_client = None
 
@@ -752,9 +770,103 @@ def validate_components_transition_type(req: dict) -> dict:
     return _allow(required_transition_type=required)
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-H84 / ENC-FTR-111 AC-5 — deploy_policy-gated deploy-init auto-walk (ruling O-2).
+#
+# The gate_class taxonomy (transition_type_matrix) classifies deploy-init as MECHANICAL, which
+# is the only Phase-1 auto-walkable class. Ruling O-2 (DOC-078C57FC1BE6 §3) adds a runtime
+# qualifier: deploy-init is mechanical ONLY on ci_triggered projects — on manual projects a
+# human/external actor owns the deploy trigger, so the Universal Arc-Walker must not synthesize
+# the advance. This service is the authoritative reader of that project field for the walker.
+# ---------------------------------------------------------------------------
+def _get_project_deploy_policy(project_id: str) -> str:
+    """Return the project's deploy_policy enum, defaulting to ci_triggered.
+
+    Mirrors deploy_orchestrator._get_project_deploy_mode (ENC-ISS-102 precedent): a missing
+    record, missing field, or unrecognized value all degrade to the ci_triggered seeded default
+    so an unseeded/legacy project never blocks the mechanical deploy-init walk. Fail-open WARN on
+    a DynamoDB read error for the same reason."""
+    pid = (project_id or "").strip()
+    if not pid:
+        return DEFAULT_DEPLOY_POLICY
+    try:
+        resp = _ddb().get_item(
+            TableName=PROJECTS_TABLE,
+            Key={"project_id": {"S": pid}},
+            ProjectionExpression="deploy_policy",
+        )
+        item = resp.get("Item") or {}
+        val = (item.get("deploy_policy", {}).get("S") or "").strip().lower()
+        if val in VALID_DEPLOY_POLICIES:
+            return val
+        return DEFAULT_DEPLOY_POLICY
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[FTR-111] Failed to read deploy_policy for project '%s'; defaulting to '%s'",
+            pid, DEFAULT_DEPLOY_POLICY, exc_info=True,
+        )
+        return DEFAULT_DEPLOY_POLICY
+
+
+def evaluate_auto_walk(req: dict) -> dict:
+    """ENC-FTR-111 AC-5 — decide whether the Universal Arc-Walker may auto-advance a task across
+    a (transition_type, target_status) gate.
+
+    Eligibility derives SOLELY from the gate_class taxonomy (DOC-078C57FC1BE6 §7.2 — never from
+    whether the gate's evidence contract happens to be empty). The `mechanical` class is the only
+    Phase-1 auto-walkable class.
+
+    Ruling O-2 runtime qualifier: the `deploy-init` gate is mechanical, but auto-walkable only on
+    ci_triggered projects. On manual projects the deploy is human/externally triggered, so the
+    walker MUST NOT auto-advance — even though the static class is mechanical.
+
+    Required: target_status. Optional: transition_type (default github_pr_deploy), project_id
+    (required for a meaningful deploy-init decision). Returns a verdict dict the walker consumes.
+    """
+    transition_type = (req.get("transition_type") or "github_pr_deploy").strip().lower()
+    target_status = (req.get("target_status") or "").strip().lower()
+    project_id = (req.get("project_id") or "").strip()
+
+    gate_class = get_gate_class(transition_type, target_status)
+    auto_walkable = is_auto_walkable_class(gate_class)
+    reason: Optional[str] = None
+    deploy_policy: Optional[str] = None
+
+    if target_status == "deploy-init":
+        deploy_policy = _get_project_deploy_policy(project_id)
+        if auto_walkable and deploy_policy != DEPLOY_POLICY_CI_TRIGGERED:
+            # Ruling O-2: manual projects gate out of the mechanical auto-walk.
+            auto_walkable = False
+            reason = (
+                f"deploy-init auto-walk blocked (ruling O-2): project '{project_id or '<unknown>'}' "
+                f"deploy_policy='{deploy_policy}'. Only ci_triggered projects auto-walk deploy-init; "
+                "manual projects require a human/external deploy trigger."
+            )
+        elif auto_walkable:
+            reason = (
+                f"deploy-init auto-walk permitted (ruling O-2): project "
+                f"'{project_id or '<unknown>'}' deploy_policy='{deploy_policy}'."
+            )
+
+    out = {
+        "auto_walkable": auto_walkable,
+        "gate_class": gate_class,
+        "transition_type": transition_type,
+        "target_status": target_status,
+        "matrix_version": MATRIX_VERSION,
+        "lifecycle_service_version": LIFECYCLE_SERVICE_VERSION,
+    }
+    if deploy_policy is not None:
+        out["deploy_policy"] = deploy_policy
+    if reason is not None:
+        out["reason"] = reason
+    return out
+
+
 _ACTIONS = {
     "validate_transition": validate_transition,
     "validate_components_transition_type": validate_components_transition_type,
+    "evaluate_auto_walk": evaluate_auto_walk,
     "health": lambda req: {"ok": True, "service": "lifecycle_service",
                            "version": LIFECYCLE_SERVICE_VERSION, "matrix_version": MATRIX_VERSION},
 }

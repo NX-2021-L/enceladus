@@ -135,6 +135,70 @@ def test_gate_class_carried_in_verdict():
     assert v["allow"] is True and v["gate_class"] == "mechanical", v
 
 
+# --- deploy_policy-gated deploy-init auto-walk (ENC-TSK-H84 / FTR-111 AC-5, ruling O-2) ------
+def _stub_deploy_policy(policy_by_pid, default=None):
+    """Monkeypatch the projects-table read so tests stay pure (no AWS)."""
+    def _fake_get_item(**kw):
+        pid = kw["Key"]["project_id"]["S"]
+        val = policy_by_pid.get(pid, default)
+        if val is None:
+            return {}  # no record / no field -> reader applies its ci_triggered default
+        return {"Item": {"deploy_policy": {"S": val}}}
+    lf._ddb = lambda: type("D", (), {"get_item": staticmethod(_fake_get_item)})()  # type: ignore
+
+
+def test_deploy_init_auto_walk_ci_triggered_permitted():
+    _stub_deploy_policy({"enceladus": "ci_triggered"})
+    v = lf.evaluate_auto_walk({"transition_type": "github_pr_deploy",
+                               "target_status": "deploy-init", "project_id": "enceladus"})
+    assert v["auto_walkable"] is True, v
+    assert v["gate_class"] == "mechanical", v
+    assert v["deploy_policy"] == "ci_triggered", v
+
+
+def test_deploy_init_auto_walk_manual_blocked():
+    _stub_deploy_policy({"enceladus": "manual"})
+    v = lf.evaluate_auto_walk({"transition_type": "github_pr_deploy",
+                               "target_status": "deploy-init", "project_id": "enceladus"})
+    assert v["auto_walkable"] is False, v
+    assert v["gate_class"] == "mechanical", v  # static class unchanged; O-2 is a runtime qualifier
+    assert v["deploy_policy"] == "manual", v
+    assert "ruling O-2" in v["reason"], v
+
+
+def test_deploy_init_unseeded_project_defaults_ci_triggered():
+    # No record / no field -> the reader's ci_triggered default keeps the mechanical walk open.
+    _stub_deploy_policy({}, default=None)
+    v = lf.evaluate_auto_walk({"transition_type": "github_pr_deploy",
+                               "target_status": "deploy-init", "project_id": "brand-new"})
+    assert v["auto_walkable"] is True and v["deploy_policy"] == "ci_triggered", v
+
+
+def test_deploy_init_unknown_policy_value_defaults_ci_triggered():
+    _stub_deploy_policy({"enceladus": "garbage-value"})
+    v = lf.evaluate_auto_walk({"transition_type": "github_pr_deploy",
+                               "target_status": "deploy-init", "project_id": "enceladus"})
+    assert v["auto_walkable"] is True and v["deploy_policy"] == "ci_triggered", v
+
+
+def test_evaluate_auto_walk_non_deploy_init_ignores_policy():
+    # deploy_policy only gates deploy-init; other gates derive purely from gate_class.
+    # `pr` is external-fact (ruling O-1) -> never auto-walkable, regardless of policy.
+    v_pr = lf.evaluate_auto_walk({"transition_type": "github_pr_deploy", "target_status": "pr"})
+    assert v_pr["auto_walkable"] is False and v_pr["gate_class"] == "external-fact", v_pr
+    assert "deploy_policy" not in v_pr, v_pr
+    # coding-complete is the attestation floor -> never auto-walkable.
+    v_cc = lf.evaluate_auto_walk({"transition_type": "github_pr_deploy", "target_status": "coding-complete"})
+    assert v_cc["auto_walkable"] is False and v_cc["gate_class"] == "attestation", v_cc
+
+
+def test_evaluate_auto_walk_dispatch_via_handler():
+    _stub_deploy_policy({"enceladus": "manual"})
+    v = lf.lambda_handler({"action": "evaluate_auto_walk", "transition_type": "github_pr_deploy",
+                           "target_status": "deploy-init", "project_id": "enceladus"}, None)
+    assert v["auto_walkable"] is False and v["deploy_policy"] == "manual", v
+
+
 # --- dispatch ----------------------------------------------------------------
 def test_handler_unknown_action():
     v = lf.lambda_handler({"action": "frobnicate"}, None)
