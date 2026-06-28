@@ -2059,7 +2059,7 @@ Resources:
                   - s3:PutObject
                   - s3:GetObject
                   - s3:DeleteObject
-                Resource: "arn:aws:s3:::jreese-net/agent-documents/*"
+                Resource: !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
               # ENC-TSK-I70 / ENC-TSK-I62: env-prefix-aware so the gamma stack can read its
               # own gamma/governance/live + gamma/mobile/v1/reference objects. Was hardcoded to
               # the unprefixed prod paths, so the gamma governance sync 500'd on s3:GetObject
@@ -2960,7 +2960,7 @@ Resources:
                   - s3:GetObject
                 Resource:
                   - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
-                  - "arn:aws:s3:::jreese-net/agent-documents/*"
+                  - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -3064,7 +3064,7 @@ Resources:
                   - s3:ListBucket
                 Resource:
                   - "arn:aws:s3:::jreese-net"
-                  - "arn:aws:s3:::jreese-net/agent-documents/*"
+                  - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
                   - "arn:aws:s3:::jreese-net/reference/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
