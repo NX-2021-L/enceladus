@@ -239,6 +239,52 @@ Resources:
       RouteKey: POST /api/v1/coordination/mcp
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # Agent Identity routes (ENC-TSK-I38 / ENC-TSK-I39)
+  # Lambda code lives in coordination_api. Routes missing from APIGW caused 404
+  # despite successful Lambda deploy (I38 shipped code but not CFN routes).
+
+  RouteCoordinationAgentSessionList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/agents/sessions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationAgentSessionRegister:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationAgentSessionClaim:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions/claim
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationAgentSessionRetire:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions/{sessionId}/retire
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationAgentTypeList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/agents/types
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteCoordinationAgentTypeRegister:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/types
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   # Component Registry routes (ENC-FTR-041)
   RouteComponentsList:
     Type: AWS::ApiGatewayV2::Route
