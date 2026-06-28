@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-27.04",
-  "updated_at": "2026-06-27T14:00:00Z",
-  "last_change_summary": "ENC-TSK-I27 / ENC-FTR-116 Wave 2: added governance.version_record (canonical DDB record schema for devops-recompute-governance Lambda) and recompute_governance.event_handler (S3-triggered Lambda contract: trigger, canonical file set, dedup, CAS guard, recursion invariant, env vars). Required by governance-dictionary-guard for backend/lambda/recompute_governance/lambda_function.py addition.",
+  "version": "2026-06-27.05",
+  "updated_at": "2026-06-28T01:02:00Z",
+  "last_change_summary": "ENC-TSK-I40 / ENC-FTR-117: added checkout_service.session_id_validation entity documenting the _resolve_agent_session_id() stamping integration point and ENC-SES-NNN format enforcement at checkout.task and checkout.plan. Required by governance-dictionary-guard for checkout_service/lambda_function.py modification.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5794,6 +5794,25 @@
           "definition": "Response: true if a new ENC-AGT-NNN was minted; false if the existing entry was returned."
         }
       }
+    },
+    "checkout_service.session_id_validation": {
+      "description": "Session ID validation contract in the checkout service Lambda (ENC-TSK-I40 / ENC-FTR-117). Both _handle_checkout (task checkout) and _handle_plan_checkout (plan checkout) validate active_agent_session_id via _resolve_agent_session_id() before writing any state. Only server-minted ENC-SES-NNN values (issued by coordination_api.agent_id_alloc.mint_session_id via the agent.register action, live since ENC-TSK-I38) are accepted. Improvised strings are rejected with HTTP 400.",
+      "fields": {
+        "active_agent_session_id": {
+          "type": "string",
+          "constraints": {
+            "pattern": "^ENC-SES-[0-9A-Z]+$",
+            "source": "Must be obtained via agent.register MCP action (coordination_api.mint_session_id)"
+          },
+          "definition": "Server-minted agent session ID. Format: ENC-SES-{SEQ} where SEQ is a base-36 uppercase alphanumeric sequence issued by coordination_api. Improvised strings (e.g. cc-desktop-sonnet46-enc-tsk-NNN) are rejected with 400 INVALID_INPUT.",
+          "usage_guidance": "Call coordination(action=agent.register) to obtain a valid ENC-SES-NNN before calling checkout.task or checkout.plan. The returned session_id is the value to pass as active_agent_session_id."
+        },
+        "_resolve_agent_session_id": {
+          "type": "function",
+          "definition": "Named stamping integration point in checkout_service/lambda_function.py. Returns (session_id, None) on success or (None, error_message) on failure. V4 rebind: replace this function body to add an existence check against the v4 identity service. Callers (_handle_checkout, _handle_plan_checkout) read only the (session_id, error) pair and are not reshaped by the rebind.",
+          "isolation_note": "ENC-TSK-I40 AC-2 isolation deliverable. V4 drift-risk surface."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -5817,6 +5836,11 @@
       "version": "2026-06-27.02",
       "date": "2026-06-27",
       "summary": "ENC-TSK-I37 / ENC-FTR-117: add coordination.agent_session and coordination.agent_type entities (Agent ID v3 governed stores); v3 property sets value-identical to v4 node schemas per DOC-05C45B438FC1. Repo-file edit only \u2014 S3/DDB governance sync is a product-lead post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-06-27.05",
+      "date": "2026-06-28",
+      "summary": "ENC-TSK-I40 / ENC-FTR-117: added checkout_service.session_id_validation entity (active_agent_session_id ENC-SES-NNN constraint, _resolve_agent_session_id V4 rebind surface). Version bump required by governance-dictionary-guard for checkout_service/lambda_function.py edit."
     }
   ]
 }

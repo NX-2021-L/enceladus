@@ -135,7 +135,7 @@ class CheckoutHandlerCOMPONENT_MISCONFIGUREDTests(unittest.TestCase):
             response = checkout_service._handle_checkout(
                 "enceladus",
                 "ENC-TSK-FAKE",
-                {"active_agent_session_id": "test-session"},
+                {"active_agent_session_id": "ENC-SES-001"},
             )
 
         self.assertEqual(response["statusCode"], 500)

@@ -76,7 +76,7 @@ class CheckoutLifecycleGateAllStatusesTests(unittest.TestCase):
     def _call_checkout(self, lifecycle_status):
         cid = f"comp-{lifecycle_status.replace('-', '_')}"
         task = _make_task([cid])
-        body = {"active_agent_session_id": "test-agent-session"}
+        body = {"active_agent_session_id": "ENC-SES-001"}
         with mock.patch.object(checkout_lambda, "_get_task", return_value=(200, task)), \
              mock.patch.object(checkout_lambda._ddb, "get_item",
                                side_effect=_ddb_lifecycle_side_effect({cid: lifecycle_status})):
@@ -111,7 +111,7 @@ class CheckoutLifecycleGateAllStatusesTests(unittest.TestCase):
         """proposed 400 body must contain the component_id for operator diagnosis."""
         cid = "comp-proposed"
         task = _make_task([cid])
-        body = {"active_agent_session_id": "test-agent-session"}
+        body = {"active_agent_session_id": "ENC-SES-001"}
         with mock.patch.object(checkout_lambda, "_get_task", return_value=(200, task)), \
              mock.patch.object(checkout_lambda._ddb, "get_item",
                                side_effect=_ddb_lifecycle_side_effect({cid: "proposed"})):
@@ -130,7 +130,7 @@ class CheckoutLifecycleGateAllStatusesTests(unittest.TestCase):
         """deprecated 400 body must contain the component_id for operator diagnosis."""
         cid = "comp-deprecated"
         task = _make_task([cid])
-        body = {"active_agent_session_id": "test-agent-session"}
+        body = {"active_agent_session_id": "ENC-SES-001"}
         with mock.patch.object(checkout_lambda, "_get_task", return_value=(200, task)), \
              mock.patch.object(checkout_lambda._ddb, "get_item",
                                side_effect=_ddb_lifecycle_side_effect({cid: "deprecated"})):
@@ -215,7 +215,7 @@ class CheckoutLifecycleGateAllStatusesTests(unittest.TestCase):
     def test_mixed_proposed_and_approved_blocks(self):
         """If any component is proposed (BLOCKED), checkout is blocked even if others are permitted."""
         task = _make_task(["comp-approved", "comp-proposed"])
-        body = {"active_agent_session_id": "test-agent-session"}
+        body = {"active_agent_session_id": "ENC-SES-001"}
         with mock.patch.object(checkout_lambda, "_get_task", return_value=(200, task)), \
              mock.patch.object(checkout_lambda._ddb, "get_item",
                                side_effect=_ddb_lifecycle_side_effect({
@@ -228,7 +228,7 @@ class CheckoutLifecycleGateAllStatusesTests(unittest.TestCase):
     def test_mixed_archived_and_approved_returns_404(self):
         """If any component is archived (OPAQUE), checkout returns 404."""
         task = _make_task(["comp-approved", "comp-archived"])
-        body = {"active_agent_session_id": "test-agent-session"}
+        body = {"active_agent_session_id": "ENC-SES-001"}
         with mock.patch.object(checkout_lambda, "_get_task", return_value=(200, task)), \
              mock.patch.object(checkout_lambda._ddb, "get_item",
                                side_effect=_ddb_lifecycle_side_effect({
@@ -241,7 +241,7 @@ class CheckoutLifecycleGateAllStatusesTests(unittest.TestCase):
     def test_task_without_components_not_blocked(self):
         """Task with no components in the registry is not blocked by the lifecycle gate."""
         task = _make_task([])
-        body = {"active_agent_session_id": "test-agent-session"}
+        body = {"active_agent_session_id": "ENC-SES-001"}
         with mock.patch.object(checkout_lambda, "_get_task", return_value=(200, task)):
             resp = checkout_lambda._handle_checkout("enceladus", "ENC-TSK-TEST", body)
         # Should not be blocked by the lifecycle gate (may fail for other reasons).
