@@ -991,6 +991,36 @@ def _serialize_list(items: List[str]) -> Dict:
     return {"L": [{"S": s} for s in items]}
 
 
+def _extract_provenance_fields(body: Dict) -> Dict[str, Any]:
+    """Validate + serialize the optional HCE/GDMP provenance fields.
+
+    ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-065. Shared by PUT and PATCH so the
+    persisted shape stays identical. Returns {"item_fields": {...}} on success
+    (only keys actually present in `body` are returned) or {"error": msg}.
+    """
+    out: Dict[str, Dict] = {}
+    for list_field in ("informed_by", "consolidated_from"):
+        if list_field in body:
+            val = body[list_field]
+            if not isinstance(val, list):
+                return {"error": f"'{list_field}' must be an array of record IDs."}
+            cleaned = [str(v).strip() for v in val[:MAX_RELATED_ITEMS] if str(v).strip()]
+            out[list_field] = _serialize_list(cleaned)
+    if "proposed_by" in body:
+        proposer = str(body["proposed_by"]).strip()
+        if proposer:
+            out["proposed_by"] = {"S": proposer}
+    if "fsrs_initial_stability" in body:
+        try:
+            s0 = float(body["fsrs_initial_stability"])
+        except (TypeError, ValueError):
+            return {"error": "'fsrs_initial_stability' must be numeric."}
+        if s0 < 0:
+            return {"error": "'fsrs_initial_stability' must be non-negative."}
+        out["fsrs_initial_stability"] = {"N": str(s0)}
+    return {"item_fields": out}
+
+
 def _deserialize_list(attr: Dict) -> List[str]:
     if not attr or "L" not in attr:
         return []
@@ -2005,6 +2035,18 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
         "record_type": {"S": "document"},
     }
 
+    # ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-065: provenance fields used by the
+    # Handoff Consolidation Engine and GDMP. All optional and additive:
+    #   informed_by         -> GDMP ancestral context (INFORMED_BY edges)
+    #   consolidated_from   -> HCE source handoffs (CONSOLIDATED_FROM edges)
+    #   proposed_by         -> HCE proposer record (PROPOSED_BY edge)
+    #   fsrs_initial_stability -> FSRS-6 S_0 derived from recurrence (AC-5)
+    # graph_sync projects the edge fields; the Document API only persists them.
+    _provenance = _extract_provenance_fields(body)
+    if _provenance.get("error"):
+        return _error(400, _provenance["error"])
+    item.update(_provenance["item_fields"])
+
     # Add handoff-specific fields to DynamoDB item
     if handoff_fields:
         item["source_record_id"] = {"S": handoff_fields["source_record_id"]}
@@ -2291,6 +2333,20 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     if "description" in body:
         expr_parts.append("description = :desc")
         attr_values[":desc"] = {"S": str(body["description"]).strip()[:MAX_DESCRIPTION_LENGTH]}
+
+    # ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-065: provenance field patches. The HCE
+    # GDMP Stage 2 path PATCHes informed_by alongside document_maturity_state to
+    # advance compliant -> contextualized; consolidated_from / proposed_by /
+    # fsrs_initial_stability are set at candidate creation but patchable for
+    # backfill. Reuses the shared validator so PUT and PATCH stay in lockstep.
+    _provenance_patch = _extract_provenance_fields(body)
+    if _provenance_patch.get("error"):
+        return _error(400, _provenance_patch["error"])
+    for _pfield, _pval in _provenance_patch["item_fields"].items():
+        _alias = f"#prov_{_pfield}"
+        attr_names[_alias] = _pfield
+        expr_parts.append(f"{_alias} = :{_pfield}")
+        attr_values[f":{_pfield}"] = _pval
 
     if "related_items" in body:
         items = body["related_items"]
