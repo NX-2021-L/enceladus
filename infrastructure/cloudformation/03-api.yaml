@@ -218,6 +218,16 @@ Resources:
       RouteKey: POST /api/v1/coordination/requests/{requestId}/callback
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ADE Component C: Cursor Cloud Agents completion webhook. Authenticated via
+  # Cursor HMAC-SHA256 signature (X-Webhook-Signature), verified inside the
+  # coordination API Lambda. Integrated to the same CoordinationApiIntegration.
+  RouteCursorWebhook:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/cursor/webhook
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   RouteCoordinationCapabilities:
     Type: AWS::ApiGatewayV2::Route
     Properties:

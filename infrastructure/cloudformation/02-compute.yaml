@@ -85,6 +85,19 @@ Parameters:
       Previous COORDINATION_INTERNAL_API_KEY value used during dual-accept rotation windows
       (ENC-ISS-276). Populates COORDINATION_INTERNAL_API_KEY_PREVIOUS env var on downstream
       consumers. Empty default is expected after each rotation cycle completes.
+  # ADE Component C: shared secret for verifying Cursor Cloud Agents completion
+  # webhook signatures (HMAC-SHA256 over the raw body). NoEcho; supplied at deploy
+  # time via --parameter-overrides. Mirrors the CoordinationInternalApiKey pattern.
+  CursorWebhookSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Shared secret used by the coordination API Lambda to verify the X-Webhook-Signature
+      HMAC-SHA256 header on POST /api/v1/cursor/webhook (ADE Component C). Populates the
+      CURSOR_WEBHOOK_SECRET env var. Kept out of the repo; injected at deploy/IMPORT via
+      --parameter-overrides. io must populate this from the value configured in the Cursor
+      Cloud Agents webhook settings.
   # ENC-TSK-F74 / ENC-ISS-279: Cognito client secret required by enceladus-mcp-code-gamma
   # (and future prod twin) for OAuth-direct flows. NoEcho; supplied via --parameter-overrides
   # at deploy/IMPORT time.
@@ -182,6 +195,8 @@ Resources:
           CORS_ORIGIN: !Ref CorsOrigin
           ENCELADUS_MCP_INTERFACE_MODE: code
           DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
+          # ADE Component C: Cursor webhook HMAC verification secret (POST /api/v1/cursor/webhook)
+          CURSOR_WEBHOOK_SECRET: !Ref CursorWebhookSecret
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
           # ENC-FTR-116 / ENC-TSK-I29: canonical governance-version DDB record.
           GOVERNANCE_VERSION_TABLE: !Sub "governance-version${EnvironmentSuffix}"
