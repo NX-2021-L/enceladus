@@ -8,6 +8,9 @@ on:
       - 'tools/package_lambda_artifact.sh'
       - 'tools/check_lambda_pyjwt_requirements.py'
       - 'infrastructure/lambda_workflow_manifest.json'
+      - 'tools/enceladus-mcp-server/server.py'
+      - 'tools/enceladus-mcp-server/manifest_projection.py'
+      - 'tools/enceladus-mcp-server/dispatch_plan_generator.py'
       - '.github/workflows/build-lambda-artifacts.yml'
   push:
     branches: [main]
@@ -16,6 +19,9 @@ on:
       - 'tools/package_lambda_artifact.sh'
       - 'tools/check_lambda_pyjwt_requirements.py'
       - 'infrastructure/lambda_workflow_manifest.json'
+      - 'tools/enceladus-mcp-server/server.py'
+      - 'tools/enceladus-mcp-server/manifest_projection.py'
+      - 'tools/enceladus-mcp-server/dispatch_plan_generator.py'
       - '.github/workflows/build-lambda-artifacts.yml'
   workflow_call:
     outputs:
@@ -122,8 +128,52 @@ jobs:
           path: ${{ steps.package.outputs.zip_path }}
           retention-days: 7
 
+  # ---------------------------------------------------------------------------
+  # BUILD-MCP-CODE — packages enceladus-mcp-code from tools/enceladus-mcp-server/
+  # (ENC-TSK-I39). See _build.yml build-mcp-code for rationale.
+  # ---------------------------------------------------------------------------
+  build-mcp-code:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Package enceladus-mcp-code
+        run: |
+          set -euo pipefail
+          BUILD=$(mktemp -d)
+          cp tools/enceladus-mcp-server/server.py              "$BUILD/"
+          cp tools/enceladus-mcp-server/manifest_projection.py "$BUILD/"
+          cp tools/enceladus-mcp-server/dispatch_plan_generator.py "$BUILD/"
+          cp backend/lambda/shared_layer/python/enceladus_shared/appconfig_flags.py "$BUILD/"
+          python -m pip install \
+            --platform manylinux2014_x86_64 \
+            --implementation cp \
+            --python-version 3.11 \
+            --only-binary=:all: \
+            --upgrade \
+            --target "$BUILD" \
+            -r backend/lambda/mcp_code/requirements.txt \
+            --quiet
+          ZIP="/tmp/enceladus-mcp-code.zip"
+          (cd "$BUILD" && zip -qrX "$ZIP" .)
+          echo "zip_path=${ZIP}" >> "$GITHUB_OUTPUT"
+        id: package
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-enceladus-mcp-code-x86_64-py311
+          path: /tmp/enceladus-mcp-code.zip
+          retention-days: 7
+
   upload-artifacts:
-    needs: build
+    needs: [build, build-mcp-code]
     # Upload on push to main (standalone) or when called via workflow_call (from deploy-orchestration)
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
