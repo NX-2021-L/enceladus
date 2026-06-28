@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-28.05",
-  "updated_at": "2026-06-28T12:41:27Z",
-  "last_change_summary": "ENC-TSK-I09 (Dedup P5) reconciled with ENC-TSK-H84 (Arc-Walker Phase 1) on merge to v4/main (PRs #625/#624). Adds tracker.dedup_auto_merge: the MECHANICAL arc-walker auto-merge surface for certificate-certified T-HIGH duplicate pairs (POST /{project}/dedup-review op=auto-merge, tracker:write) gated by four io-sovereignty rails — enable_dedup_auto_merge flag (dark/shadow default), dedup_auto_merge_kill_switch (instant halt), per-pair certificate precision-LCB>=0.999 against the chosen canonical (no transitive chain-drag), and the auto_walk_opt_out latch that demotes a record to ATTESTATION on any io walk-back — plus the record.dedup.auto_merged EventBridge audit feed. Updates tracker.task.status / tracker.issue.status 'superseded' notes (T-HIGH auto-merge no longer deferred). Retains the H84 project_service.deploy_policy entity added at version .04. Version 2026-06-28.04 -> 2026-06-28.05.",
+  "version": "2026-06-28.06",
+  "updated_at": "2026-06-28T13:30:00Z",
+  "last_change_summary": "ENC-TSK-I10 (Dedup P6) adds monitoring.dedup_convergence_probe: the duplicate-dedup telemetry & convergence probe (DOC-DF651F07D5C2 \u00a710). The daily graph_health_metrics Lambda publishes five governed signals to CloudWatch namespace Enceladus/DedupConvergence (stock / precision@1 recovery proxy vs 0.3727 baseline / new-duplicate flow / same-type duplicate-graph LCC percolation->1 / production auto-merge walk-back-rate model-health loop that re-enters shadow on a (1-floor) breach), and graph_query_api gains a read-only search_type='dedup_convergence' snapshot surface. PRIOR: ENC-TSK-I09 (Dedup P5) reconciled with ENC-TSK-H84 (Arc-Walker Phase 1) on merge to v4/main (PRs #625/#624). Adds tracker.dedup_auto_merge: the MECHANICAL arc-walker auto-merge surface for certificate-certified T-HIGH duplicate pairs (POST /{project}/dedup-review op=auto-merge, tracker:write) gated by four io-sovereignty rails — enable_dedup_auto_merge flag (dark/shadow default), dedup_auto_merge_kill_switch (instant halt), per-pair certificate precision-LCB>=0.999 against the chosen canonical (no transitive chain-drag), and the auto_walk_opt_out latch that demotes a record to ATTESTATION on any io walk-back — plus the record.dedup.auto_merged EventBridge audit feed. Updates tracker.task.status / tracker.issue.status 'superseded' notes (T-HIGH auto-merge no longer deferred). Retains the H84 project_service.deploy_policy entity added at version .04. Version 2026-06-28.04 -> 2026-06-28.05.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5013,6 +5013,37 @@
           "type": "string",
           "definition": "CloudWatch metric name for per-function code size.",
           "usage_guidance": "Fixed value: LambdaCodeSize. Dimension: FunctionName."
+        }
+      }
+    },
+    "monitoring.dedup_convergence_probe": {
+      "description": "ENC-TSK-I10 (Dedup P6) duplicate-dedup telemetry & convergence probe (DOC-DF651F07D5C2 \u00a710). The daily-scheduled graph_health_metrics Lambda (comp-graph-health-metrics) computes the duplicate-track convergence signals over the live Neo4j projection and publishes them as governed CloudWatch metrics under the Enceladus/DedupConvergence namespace (ProjectId dimension). The same computation is exposed on demand as a read-only graph_query_api (comp-graph-query-api) graphsearch surface, search_type='dedup_convergence' (search(action='tracker.graphsearch', arguments={search_type:'dedup_convergence', project_id, cosine_threshold?, flow_window_days?, vector_top_k?})), which returns the four graph-derived signals under result.convergence and never mutates. The heavy math lives in the pure backend/lambda/graph_query_api/dedup_convergence.py module (union-find connected-components/LCC, flow windowing, precision@1 recovery proxy, walk-back model-health loop) and is packaged into the probe via .build_extras (the graph_sync/embedding.py cross-Lambda sharing precedent). No new Neo4j edge type is introduced (OGTM N/A): the probe reads existing node properties (embedding, superseded_by, created_at) and the ENC-TSK-B90 per-label HNSW vector indexes.",
+      "fields": {
+        "signals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "The five governed convergence signals (CloudWatch metric names under Enceladus/DedupConvergence). Stock: DuplicatePairStock (same-type same-project pairs at cosine >= DEDUP_COSINE_THRESHOLD). Precision@1 recovery: Precision1RecoveryProxy + Precision1RecoveryEstimate with Precision1Baseline (0.3727) and RecallCeiling (0.8242) reference metrics. Flow: NewDuplicateFlow (pairs whose newer endpoint was created within DEDUP_FLOW_WINDOW_DAYS). Percolation: DuplicateLCCSize (largest-connected-component of the same-type duplicate graph; -> 1 at convergence since isolated records are size-1 components) + NonTrivialComponentCount + EmbeddedRecordCount. Walk-back model-health loop: AutoMergeWalkBackRate + AutoMergeCount + WalkBackCount + WalkBackRateBreachedFloor.",
+          "usage_guidance": "Read via CloudWatch GetMetricStatistics on namespace Enceladus/DedupConvergence, or via the graph_query_api search_type='dedup_convergence' read surface for an on-demand snapshot (result.convergence)."
+        },
+        "precision_at_1_recovery_proxy": {
+          "type": "string",
+          "definition": "The labeled self-retrieval eval (DOC-4F1F5B99AAED, precision@1=0.3727 / recall ceiling 0.8242) is not reproducible inside a scheduled Lambda, so the probe emits a live recovery proxy: the fraction of embedded same-type records that have NO surviving near-duplicate twin (cosine >= threshold) among non-superseded peers.",
+          "usage_guidance": "Climbs toward 1.0 as duplicate twins are superseded (the I07 retrieval exclusion removes them from competition), tracking the same convergence quantity the eval measures. Precision1RecoveryEstimate maps the proxy onto the baseline->ceiling band for graphing."
+        },
+        "walk_back_model_health": {
+          "type": "object",
+          "definition": "The production auto-merge walk-back rate is the live certificate-precision estimate (DOC-DF651F07D5C2 \u00a710). walk_back_rate = WalkBackCount / AutoMergeCount over DEDUP_WALKBACK_WINDOW_DAYS; the certificate is miscalibrated and the loop must re-enter shadow when the rate breaches (1 - DEDUP_PRECISION_FLOOR) (WalkBackRateBreachedFloor=1.0).",
+          "usage_guidance": "The probe reads the AutoMergeCount/WalkBackCount audit counters back from CloudWatch (DEDUP_AUDIT_NAMESPACE). These counters are emitted by the dedup auto-merge / un-supersession-walk-back path (tracker.dedup_auto_merge) when io enables MECHANICAL T-HIGH auto-walk; auto-merge is flag-gated DARK (enable_dedup_auto_merge off) until the certificate precision floor is certified (\u00a713/\u00a74.3), so the live walk-back rate is 0 / shadow until then."
+        },
+        "config_env_vars": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "graph_health_metrics environment configuration for the dedup probe: DEDUP_NAMESPACE (default Enceladus/DedupConvergence), DEDUP_AUDIT_NAMESPACE, DEDUP_COSINE_THRESHOLD (0.95), DEDUP_PRECISION_FLOOR (0.999), DEDUP_FLOW_WINDOW_DAYS (7), DEDUP_WALKBACK_WINDOW_DAYS (30), DEDUP_VECTOR_TOP_K (25).",
+          "usage_guidance": "Defined in infrastructure/cloudformation/02-compute.yaml on GraphHealthMetricsFunction. The role gains cloudwatch:GetMetricStatistics/GetMetricData (in addition to the existing PutMetricData) to read the walk-back counters."
         }
       }
     },
