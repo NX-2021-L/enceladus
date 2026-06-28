@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-28.01",
-  "updated_at": "2026-06-28T03:01:00Z",
-  "last_change_summary": "ENC-TSK-I64 / ENC-TSK-I62: v3-prod landing of the governance-sync hardening — devops-document-api _sync_governance_documents propagates a governance_data_dictionary.json sync into the governance-policies record (discrete version + updated_at + dictionary_json blob), eliminating the manual aws dynamodb update-item (ENC-TSK-I61 gap). Paired CFN: DocumentApiRole +dynamodb:GetItem/UpdateItem on governance-policies, DocumentApiFunction +GOVERNANCE_POLICIES_TABLE. Gamma-verified (ENC-TSK-I63). Bump satisfies the path-triggered Governance Dictionary Guard on lambda_function.py edits.",
+  "version": "2026-06-28.02",
+  "updated_at": "2026-06-28T03:52:10Z",
+  "last_change_summary": "ENC-TSK-I71 / ENC-FTR-117 AC#8: agent-session TTL idle-sweep backstop. New coordination.agent_session_idle_sweep entity documents the scheduled EventBridge reaper (AgentSessionIdleSweepSchedule, rate(1 hour)) that flips sessions left allocated/claimed past AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS to 'retired' via the same append-only conditional UpdateItem as agent.retire — deliberately NOT DynamoDB native TTL, which would hard-delete and violate the append-only retire model from ENC-TSK-I38. Completes FTR-117 AC#8 (append-only storage + explicit agent.retire + idle-sweep backstop). Bump satisfies the path-triggered Governance Dictionary Guard on coordination_api lambda_function.py/config.py edits.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5749,6 +5749,27 @@
         }
       }
     },
+    "coordination.agent_session_idle_sweep": {
+      "description": "ENC-TSK-I71 / ENC-FTR-117 AC#8. Scheduled idle-sweep backstop that reaps abandoned agent sessions. The AgentSessionIdleSweepSchedule EventBridge rule (infrastructure/cloudformation/02-compute.yaml, rate(1 hour)) invokes the coordination_api Lambda with Input {\"action\":\"agent_session_idle_sweep\"}; lambda_handler dispatches to _handle_agent_session_idle_sweep, which calls agent_id_alloc.sweep_idle_sessions. Sessions left in a live status (allocated or claimed) whose last lifecycle transition (claimed_at, else created_at) is older than AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS are flipped to 'retired' via the SAME append-only conditional UpdateItem used by agent.retire (#st = :allocated OR #st = :claimed -> retired). Third leg of FTR-117 AC#8 (append-only storage + explicit agent.retire + TTL idle-sweep backstop). Deliberately NOT DynamoDB native TTL: native TTL hard-deletes and would violate the append-only retire model from ENC-TSK-I38. Idempotent — already-retired sessions are excluded by the live-status scan filter, and a candidate concurrently retired between scan and update is skipped. Not an HTTP route (no auth/claims); invoked only by EventBridge.",
+      "fields": {
+        "AGENT_SESSIONS_IDLE_SWEEP_ENABLED": {
+          "type": "boolean",
+          "definition": "Env var (config.py + lambda_function.py), default true. Master enable flag; when false the handler short-circuits and reaps nothing."
+        },
+        "AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS": {
+          "type": "integer",
+          "definition": "Env var (config.py + lambda_function.py), default 86400 (24h). A live session whose last lifecycle transition is older than this is reaped. Operator-configurable per ENC-TSK-I71 AC#2."
+        },
+        "action": {
+          "type": "string",
+          "definition": "EventBridge Input discriminator. Fixed value 'agent_session_idle_sweep' routes lambda_handler to the sweep. Optional idle_threshold_seconds and dry_run keys in the Input override the configured defaults for an ad-hoc invoke."
+        },
+        "summary": {
+          "type": "object",
+          "definition": "Return value (CloudWatch only — no HTTP envelope): {enabled, dry_run, idle_threshold_seconds, cutoff, scanned_live, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped}."
+        }
+      }
+    },
     "agent.type.list": {
       "description": "ENC-TSK-I38 / ENC-FTR-117. Request/response contract for GET /api/v1/coordination/agents/types (coordination action agent.type.list). Agent-type directory scan, excluding counter# sentinel rows. v4-SEAM facade.",
       "fields": {
@@ -5841,6 +5862,11 @@
       "version": "2026-06-27.05",
       "date": "2026-06-28",
       "summary": "ENC-TSK-I40 / ENC-FTR-117: added checkout_service.session_id_validation entity (active_agent_session_id ENC-SES-NNN constraint, _resolve_agent_session_id V4 rebind surface). Version bump required by governance-dictionary-guard for checkout_service/lambda_function.py edit."
+    },
+    {
+      "version": "2026-06-28.02",
+      "date": "2026-06-28",
+      "summary": "ENC-TSK-I71 / ENC-FTR-117 AC#8: add coordination.agent_session_idle_sweep entity (scheduled EventBridge backstop reaping abandoned allocated/claimed sessions to 'retired' via append-only flip — NOT native DynamoDB TTL; AGENT_SESSIONS_IDLE_SWEEP_ENABLED + AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS config). Version bump required by governance-dictionary-guard for coordination_api lambda_function.py/config.py edits."
     }
   ]
 }

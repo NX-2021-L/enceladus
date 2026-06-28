@@ -5,6 +5,7 @@ Verifies the four task acceptance criteria server-side against real DynamoDB sem
 enforced minting with no caller-supplied ids (AC#2), and the persisted property sets being
 value-identical to the intended v4 node schemas (AC#3, the binding release gate).
 """
+import datetime as dt
 import os
 import unittest
 from unittest import mock
@@ -347,6 +348,163 @@ class AgentMutationTest(unittest.TestCase):
         found = alloc.find_agent_type(surface="s", model="m")
         self.assertIsNotNone(found)
         self.assertEqual(found["status"], "active")
+
+
+@mock_aws
+class IdleSweepTest(unittest.TestCase):
+    """ENC-TSK-I71: scheduled idle-sweep backstop (ENC-FTR-117 AC#8).
+
+    The append-only flip path (allocated/claimed -> retired) and idempotency are exercised
+    against real DynamoDB semantics via moto. Idleness is controlled deterministically by
+    injecting ``now`` rather than sleeping.
+    """
+
+    def setUp(self):
+        self.ddb = boto3.client("dynamodb", region_name="us-west-2")
+        for table, key in (
+            (config.AGENT_SESSIONS_TABLE, "session_id"),
+            (config.AGENT_TYPES_TABLE, "agent_type_id"),
+        ):
+            self.ddb.create_table(
+                TableName=table,
+                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
+                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
+        patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # An instant well after every session is minted, so freshly-minted sessions read as
+        # idle against a positive threshold.
+        self._future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)
+
+    def _mint(self, **kw):
+        return alloc.mint_session_id(
+            agent_type_id=kw.get("agent_type_id", "ENC-AGT-001"),
+            runtime=kw.get("runtime", "cc-desktop"),
+            status=kw.get("status", "allocated"),
+        )
+
+    # -- AC#1: allocated/claimed idle sessions are reaped to retired ---------
+
+    def test_sweep_retires_idle_allocated_session(self):
+        sid = self._mint(status="allocated")["session_id"]
+        summary = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertIn(sid, summary["retired"])
+        self.assertEqual(alloc.get_session(sid)["status"], "retired")
+
+    def test_sweep_retires_idle_claimed_session(self):
+        sid = self._mint(status="claimed")["session_id"]
+        summary = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertIn(sid, summary["retired"])
+        self.assertEqual(alloc.get_session(sid)["status"], "retired")
+
+    # -- AC#1: fresh sessions within the threshold are left alone ------------
+
+    def test_sweep_leaves_fresh_sessions_untouched(self):
+        sid = self._mint(status="claimed")["session_id"]
+        # now() ~ mint time; a 24h threshold means the session is not yet idle.
+        summary = alloc.sweep_idle_sessions(idle_threshold_seconds=86400)
+        self.assertEqual(summary["candidate_count"], 0)
+        self.assertEqual(summary["retired_count"], 0)
+        self.assertEqual(alloc.get_session(sid)["status"], "claimed")
+
+    def test_sweep_keys_off_claimed_at_not_created_at(self):
+        # Idleness is measured from the LAST lifecycle transition (claimed_at), not from
+        # creation. A long-existing session that was only just (re)claimed must NOT be
+        # reaped — this guards against a regression that keys off created_at alone.
+        sid = self._mint(status="claimed")["session_id"]
+        fresh = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.ddb.update_item(
+            TableName=config.AGENT_SESSIONS_TABLE,
+            Key={"session_id": {"S": sid}},
+            UpdateExpression="SET created_at = :old, claimed_at = :fresh",
+            ExpressionAttributeValues={
+                ":old": {"S": "2000-01-01T00:00:00Z"},  # ancient creation
+                ":fresh": {"S": fresh},                  # but claimed just now
+            },
+        )
+        now_soon = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)
+        summary = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=now_soon)
+        self.assertEqual(summary["candidate_count"], 0)
+        self.assertEqual(alloc.get_session(sid)["status"], "claimed")
+
+    # -- AC#2: idempotent — already-retired sessions are skipped -------------
+
+    def test_sweep_is_idempotent_and_skips_already_retired(self):
+        sid = self._mint(status="allocated")["session_id"]
+        first = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+        self.assertEqual(first["retired_count"], 1)
+        # Second run: the now-retired session is excluded from the live-status scan, so it
+        # is neither re-scanned nor re-retired — no duplicate state change.
+        second = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+        self.assertEqual(second["scanned_live"], 0)
+        self.assertEqual(second["candidate_count"], 0)
+        self.assertEqual(second["retired_count"], 0)
+        self.assertEqual(alloc.get_session(sid)["status"], "retired")
+
+    # -- AC#2: nothing is deleted (append-only) -----------------------------
+
+    def test_sweep_never_deletes_rows(self):
+        self._mint(status="allocated")
+        self._mint(status="claimed")
+        alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+        rows = self.ddb.scan(TableName=config.AGENT_SESSIONS_TABLE)["Items"]
+        ids = sorted(r["session_id"]["S"] for r in rows)
+        # Both node rows AND the counter sentinel survive — only the status flipped.
+        self.assertEqual(ids, ["ENC-SES-001", "ENC-SES-002", "counter#ENC-SES"])
+        nodes = [r for r in rows if not r["session_id"]["S"].startswith("counter#")]
+        self.assertTrue(all(r["status"]["S"] == "retired" for r in nodes))
+
+    # -- AC#2: the idle threshold is configurable ---------------------------
+
+    def test_sweep_threshold_is_configurable(self):
+        sid = self._mint(status="claimed")["session_id"]
+        now_1h = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1, minutes=1)
+        # A 2-hour threshold: the ~1h-old session is NOT yet idle.
+        wide = alloc.sweep_idle_sessions(idle_threshold_seconds=7200, now=now_1h)
+        self.assertEqual(wide["retired_count"], 0)
+        self.assertEqual(alloc.get_session(sid)["status"], "claimed")
+        # A 30-minute threshold: the same session IS idle and gets reaped.
+        tight = alloc.sweep_idle_sessions(idle_threshold_seconds=1800, now=now_1h)
+        self.assertEqual(tight["retired_count"], 1)
+        self.assertEqual(alloc.get_session(sid)["status"], "retired")
+
+    # -- dry_run reports candidates without mutating ------------------------
+
+    def test_sweep_dry_run_reports_without_mutating(self):
+        sid = self._mint(status="allocated")["session_id"]
+        summary = alloc.sweep_idle_sessions(
+            idle_threshold_seconds=3600, now=self._future, dry_run=True
+        )
+        self.assertTrue(summary["dry_run"])
+        self.assertEqual(summary["candidate_count"], 1)
+        self.assertIn(sid, summary["candidate_ids"])
+        self.assertEqual(summary["retired_count"], 0)
+        # Untouched on disk.
+        self.assertEqual(alloc.get_session(sid)["status"], "allocated")
+
+    # -- the counter sentinel row is never a candidate ----------------------
+
+    def test_sweep_ignores_counter_row(self):
+        self._mint(status="allocated")  # also creates counter#ENC-SES
+        summary = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+        self.assertNotIn("counter#ENC-SES", summary["candidate_ids"])
+        self.assertNotIn("counter#ENC-SES", summary["retired"])
+        counter = self.ddb.get_item(
+            TableName=config.AGENT_SESSIONS_TABLE,
+            Key={"session_id": {"S": "counter#ENC-SES"}},
+        ).get("Item")
+        self.assertIsNotNone(counter)
+
+    # -- input validation ---------------------------------------------------
+
+    def test_sweep_rejects_invalid_threshold(self):
+        for bad in (-1, True, "3600", 3.5):
+            with self.assertRaises(ValueError):
+                alloc.sweep_idle_sessions(idle_threshold_seconds=bad, now=self._future)
 
 
 if __name__ == "__main__":

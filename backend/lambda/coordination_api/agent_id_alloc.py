@@ -36,13 +36,25 @@ ENC-TSK-I40. The allocator is dormant until I38 wires an invocation path.
 """
 from __future__ import annotations
 
+import datetime as dt
+import json
 from typing import Any, Dict, List, Mapping, Optional
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from config import AGENT_SESSIONS_TABLE, AGENT_TYPES_TABLE, logger
+from config import (
+    AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS,
+    AGENT_SESSIONS_TABLE,
+    AGENT_TYPES_TABLE,
+    logger,
+)
 from aws_clients import _get_ddb
 from serialization import _deserialize, _now_z, _serialize
+
+# Shared timestamp format — identical to serialization._now_z(); session timestamps
+# (created_at / claimed_at) are written with this format, so the idle-sweep renders its
+# cutoff the same way and compares lexicographically (a correct chronological compare).
+_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 __all__ = [
     "SESSION_ID_PREFIX",
@@ -58,6 +70,7 @@ __all__ = [
     "get_agent_type",
     "claim_session",
     "retire_session",
+    "sweep_idle_sessions",
     "list_sessions",
     "list_agent_types",
     "find_agent_type",
@@ -431,6 +444,123 @@ def retire_session(session_id: str) -> Dict[str, Any]:
     updated = _deserialize(resp.get("Attributes", {}))
     logger.info("[INFO] Retired session %s", session_id)
     return updated
+
+
+# ---------------------------------------------------------------------------
+# Idle-sweep backstop — ENC-TSK-I71 (ENC-FTR-117 AC#8)
+# ---------------------------------------------------------------------------
+
+def _idle_reference(item: Mapping[str, Any]) -> str:
+    """Return the timestamp marking a session's last lifecycle transition.
+
+    For a claimed session that is ``claimed_at``; for an allocated (never-claimed) session
+    it is ``created_at``. There is no separate heartbeat attribute, so the most recent
+    lifecycle event stands in as the clock against which idleness is measured.
+    """
+    return str(item.get("claimed_at") or item.get("created_at") or "")
+
+
+def sweep_idle_sessions(
+    *,
+    idle_threshold_seconds: int = AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS,
+    now: Optional[dt.datetime] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Reap abandoned sessions: flip live sessions (allocated/claimed) idle past the
+    threshold to ``retired``.
+
+    This is the TTL idle-sweep backstop of ENC-FTR-117 AC#8 — the third leg after
+    append-only storage (ENC-TSK-I37) and explicit ``agent.retire`` (ENC-TSK-I38). It is a
+    backstop for sessions whose agent died or hung without calling ``agent.retire``.
+
+    Idleness is measured from the session's last lifecycle transition (``_idle_reference``):
+    a session is a candidate when that timestamp is strictly older than
+    ``now - idle_threshold_seconds``.
+
+    Append-only and idempotent by construction:
+
+      * Each candidate is retired through ``retire_session`` — the SAME conditional
+        ``UpdateItem`` (``#st = :allocated OR #st = :claimed`` -> ``retired``) used by
+        ``agent.retire``. Nothing is ever deleted; this is deliberately NOT DynamoDB native
+        TTL (native TTL hard-deletes and would violate the append-only retire model).
+      * Already-retired sessions never enter the candidate set (the scan filters to live
+        statuses), so re-running produces no duplicate state changes.
+      * A candidate concurrently retired between scan and update fails the conditional check
+        and is recorded under ``skipped`` rather than erroring the whole sweep.
+
+    Args:
+        idle_threshold_seconds: age past which a live session is considered abandoned.
+        now: reference instant (defaults to current UTC); injectable for testing.
+        dry_run: when True, report candidates without mutating any session.
+
+    Returns a summary dict (counts + ids).
+    """
+    if isinstance(idle_threshold_seconds, bool) or not isinstance(idle_threshold_seconds, int):
+        raise ValueError(
+            f"idle_threshold_seconds must be an int, got {type(idle_threshold_seconds).__name__}"
+        )
+    if idle_threshold_seconds < 0:
+        raise ValueError(f"idle_threshold_seconds must be >= 0, got {idle_threshold_seconds}")
+
+    now_dt = now or dt.datetime.now(dt.timezone.utc)
+    cutoff = (now_dt - dt.timedelta(seconds=idle_threshold_seconds)).strftime(_TS_FORMAT)
+
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {
+        "TableName": AGENT_SESSIONS_TABLE,
+        "FilterExpression": (
+            "NOT begins_with(session_id, :ctr_pfx) "
+            "AND (#st = :allocated OR #st = :claimed)"
+        ),
+        "ExpressionAttributeNames": {"#st": "status"},
+        "ExpressionAttributeValues": {
+            ":ctr_pfx": _serialize("counter#"),
+            ":allocated": _serialize("allocated"),
+            ":claimed": _serialize("claimed"),
+        },
+    }
+
+    scanned_live = 0
+    candidate_ids: List[str] = []
+    scan = ddb.scan(**scan_kwargs)
+    while True:
+        for raw in scan.get("Items", []):
+            item = _deserialize(raw)
+            scanned_live += 1
+            ref = _idle_reference(item)
+            if ref and ref < cutoff:
+                candidate_ids.append(item["session_id"])
+        last_key = scan.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan = ddb.scan(ExclusiveStartKey=last_key, **scan_kwargs)
+
+    retired: List[str] = []
+    skipped: List[Dict[str, str]] = []
+    if not dry_run:
+        for sid in candidate_ids:
+            try:
+                retire_session(sid)
+                retired.append(sid)
+            except ValueError as exc:
+                # Concurrently retired/transitioned between scan and update — idempotent skip.
+                skipped.append({"session_id": sid, "reason": str(exc)})
+
+    summary: Dict[str, Any] = {
+        "enabled": True,
+        "dry_run": dry_run,
+        "idle_threshold_seconds": idle_threshold_seconds,
+        "cutoff": cutoff,
+        "scanned_live": scanned_live,
+        "candidate_count": len(candidate_ids),
+        "candidate_ids": candidate_ids,
+        "retired_count": len(retired),
+        "retired": retired,
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+    }
+    logger.info("[INFO] Agent-session idle-sweep: %s", json.dumps(summary, default=str))
+    return summary
 
 
 # ---------------------------------------------------------------------------
