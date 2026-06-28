@@ -201,3 +201,74 @@ jobs:
           path: /tmp/manifest-${{ matrix.arch }}.json
           retention-days: 30
           if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # BUILD-MCP-CODE — packages enceladus-mcp-code from tools/enceladus-mcp-server/
+  # (ENC-TSK-I39). server.py is the Lambda handler (Handler: server.lambda_handler)
+  # with deps bundled in-zip (no SharedLayer). x86_64/py311 only — matches the prod
+  # and gamma Lambda runtime. The matrix build skips mcp_code (no lambda_function.py).
+  # ---------------------------------------------------------------------------
+  build-mcp-code:
+    name: build-mcp-code (x86_64-py3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo at requested SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/GitHubActions-Build-Role
+          aws-region: us-west-2
+
+      - name: Package enceladus-mcp-code
+        id: package
+        env:
+          SHA: ${{ inputs.commit_sha }}
+          BUCKET: ${{ inputs.artifact_bucket }}
+          PREFIX: ${{ inputs.artifact_key_prefix }}
+        run: |
+          set -euo pipefail
+          BUILD=$(mktemp -d)
+
+          # Handler and local runtime modules (server.py is the Lambda entry point).
+          cp tools/enceladus-mcp-server/server.py              "$BUILD/"
+          cp tools/enceladus-mcp-server/manifest_projection.py "$BUILD/"
+          cp tools/enceladus-mcp-server/dispatch_plan_generator.py "$BUILD/"
+          # appconfig_flags fallback: server.py imports enceladus_shared.appconfig_flags
+          # (SharedLayer) with a local-file try/except fallback for environments where
+          # the layer is absent. Copy the file so the fallback resolves cleanly.
+          cp backend/lambda/shared_layer/python/enceladus_shared/appconfig_flags.py "$BUILD/"
+
+          # Install dependencies (x86_64 / py3.11 — must match enceladus-mcp-code runtime).
+          python -m pip install \
+            --platform manylinux2014_x86_64 \
+            --implementation cp \
+            --python-version 3.11 \
+            --only-binary=:all: \
+            --upgrade \
+            --target "$BUILD" \
+            -r backend/lambda/mcp_code/requirements.txt \
+            --quiet
+
+          # Zip (matches Lambda handler expectation: server.lambda_handler).
+          ZIP="/tmp/mcp_code-${SHA}.zip"
+          (cd "$BUILD" && zip -qrX "$ZIP" .)
+
+          KEY="${PREFIX}/x86_64-py3.11/mcp_code-${SHA}.zip"
+          put_out=$(aws s3api put-object \
+            --bucket "$BUCKET" \
+            --key "$KEY" \
+            --body "$ZIP" \
+            --content-type application/zip \
+            --output json)
+          version_id=$(echo "$put_out" | python -c 'import sys,json; print(json.load(sys.stdin)["VersionId"])')
+          echo "version_id=${version_id}" >> "$GITHUB_OUTPUT"
+          echo "Uploaded s3://${BUCKET}/${KEY} VersionId=${version_id}"

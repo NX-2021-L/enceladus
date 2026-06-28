@@ -196,6 +196,10 @@ jobs:
           mapfile -t FNS < <(find backend/lambda -maxdepth 2 -name lambda_function.py \
             | sed -E 's|backend/lambda/([^/]+)/lambda_function.py|\1|' | sort -u)
 
+          # mcp_code (enceladus-mcp-code) has no lambda_function.py — it is packaged
+          # by _build.yml build-mcp-code from tools/enceladus-mcp-server/ (ENC-TSK-I39).
+          FNS+=("mcp_code")
+
           echo "Probing ${#FNS[@]} Lambda functions for SHA=${SHA}, arch=${ARCH}-py${PY}"
 
           MISSING=()
