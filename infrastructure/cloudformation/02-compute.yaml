@@ -2060,13 +2060,17 @@ Resources:
                   - s3:GetObject
                   - s3:DeleteObject
                 Resource: "arn:aws:s3:::jreese-net/agent-documents/*"
+              # ENC-TSK-I70 / ENC-TSK-I62: env-prefix-aware so the gamma stack can read its
+              # own gamma/governance/live + gamma/mobile/v1/reference objects. Was hardcoded to
+              # the unprefixed prod paths, so the gamma governance sync 500'd on s3:GetObject
+              # (AccessDenied). No-op for prod (S3EnvPrefix is empty there).
               - Sid: S3ReferenceRead
                 Effect: Allow
                 Action:
                   - s3:GetObject
                 Resource:
-                  - "arn:aws:s3:::jreese-net/mobile/v1/reference/*"
-                  - "arn:aws:s3:::jreese-net/governance/live/*"
+                  - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}mobile/v1/reference/*"
+                  - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}governance/live/*"
               - Sid: S3ListPrefixes
                 Effect: Allow
                 Action:
