@@ -961,6 +961,33 @@ def _delete_token(token_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-I40: Agent session ID validation — stamping integration point
+# ---------------------------------------------------------------------------
+
+_SES_ID_RE = re.compile(r"^ENC-SES-[0-9A-Z]+$")
+
+
+def _resolve_agent_session_id(raw_id: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Validate and return the server-minted agent session ID.
+
+    ENC-TSK-I40 stamping integration point. V4 rebind: replace this function
+    body to add an existence check against the v4 identity service without
+    reshaping any caller. The caller reads only (session_id, error).
+
+    Returns (session_id, None) on success, (None, error_message) on failure.
+    """
+    ses_id = (str(raw_id) if raw_id else "").strip()
+    if not ses_id:
+        return None, "active_agent_session_id is required in request body"
+    if not _SES_ID_RE.match(ses_id):
+        return None, (
+            f"active_agent_session_id must be a server-minted ENC-SES-NNN "
+            f"(obtained via agent.register); got: {ses_id!r}"
+        )
+    return ses_id, None
+
+
+# ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
 
@@ -981,11 +1008,11 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
     treat checkout_count as read-only. It feeds the FTR-076 v2 IMPLEMENTS edge
     immutability gate (designed->development requires checkout_count >= 1).
     """
-    provider = (body.get("active_agent_session_id") or "").strip()
-    if not provider:
+    provider, ses_err = _resolve_agent_session_id(body.get("active_agent_session_id"))
+    if ses_err:
         return _validation_error(
             400,
-            "active_agent_session_id is required in request body",
+            ses_err,
             task_id=task_id,
             target_status="in-progress",
             required_fields=["active_agent_session_id"],
@@ -2964,11 +2991,11 @@ def _plan_validation_error(
 
 def _handle_plan_checkout(project_id: str, plan_id: str, body: dict) -> dict:
     """POST .../checkout — Check out a plan and advance drafted→started."""
-    provider = (body.get("active_agent_session_id") or "").strip()
-    if not provider:
+    provider, ses_err = _resolve_agent_session_id(body.get("active_agent_session_id"))
+    if ses_err:
         return _plan_validation_error(
             400,
-            "active_agent_session_id is required in request body",
+            ses_err,
             plan_id=plan_id,
             required_fields=["active_agent_session_id"],
             example_fix=_example_plan_checkout_fix(plan_id),

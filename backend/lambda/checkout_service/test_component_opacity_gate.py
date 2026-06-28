@@ -55,7 +55,7 @@ def _ddb_lifecycle_side_effect(component_lifecycle_map):
 class CheckoutOpacityGateTests(unittest.TestCase):
 
     def _call_checkout(self, components, lifecycle_map):
-        body = {"active_agent_session_id": "test-agent-session"}
+        body = {"active_agent_session_id": "ENC-SES-001"}
         task = _make_task(components)
         with mock.patch.object(checkout_lambda, "_get_task", return_value=(200, task)), \
              mock.patch.object(checkout_lambda._ddb, "get_item",
@@ -114,7 +114,7 @@ class CheckoutOpacityGateTests(unittest.TestCase):
                                return_value=(200, {})), \
              mock.patch.object(checkout_lambda, "_get_task",
                                return_value=(200, _make_task(["comp-approved"]))):
-            body = {"active_agent_session_id": "test-agent-session"}
+            body = {"active_agent_session_id": "ENC-SES-001"}
             resp = checkout_lambda._handle_checkout("enceladus", "ENC-TSK-TEST", body)
         # Must not be blocked by the opacity gate (200 or pass-through)
         self.assertNotEqual(resp["statusCode"], 404)
@@ -135,7 +135,7 @@ class CheckoutOpacityGateTests(unittest.TestCase):
                                        return_value=(200, {})), \
                      mock.patch.object(checkout_lambda, "_get_task",
                                        return_value=(200, _make_task([f"comp-{ls}"]))):
-                    body = {"active_agent_session_id": "test-agent-session"}
+                    body = {"active_agent_session_id": "ENC-SES-001"}
                     resp = checkout_lambda._handle_checkout(
                         "enceladus", "ENC-TSK-TEST", body
                     )
