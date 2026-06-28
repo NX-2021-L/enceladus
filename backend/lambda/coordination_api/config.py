@@ -33,6 +33,8 @@ def _first_nonempty_env(*names: str) -> str:
     return ""
 
 __all__ = [
+    "AGENT_SESSIONS_IDLE_SWEEP_ENABLED",
+    "AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS",
     "AGENT_SESSIONS_TABLE",
     "AGENT_TYPES_TABLE",
     "ANTHROPIC_API_BASE_URL",
@@ -177,6 +179,17 @@ DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 # names. The allocator (agent_id_alloc.py) is dormant until the agent.* surface (I38).
 AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
 AGENT_TYPES_TABLE = os.environ.get("AGENT_TYPES_TABLE", "agent-types")
+# ENC-TSK-I71 / ENC-FTR-117 AC#8: scheduled idle-sweep backstop for abandoned agent
+# sessions. A session left in a live status (allocated/claimed) past the threshold is
+# reaped to 'retired' via an append-only status flip — NOT native DynamoDB TTL, which
+# hard-deletes and would violate the append-only retire model established in ENC-TSK-I38.
+# The threshold is operator-configurable; the sweep can be disabled via the enable flag.
+AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
+)
+AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS = int(
+    os.environ.get("AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS", "86400")
+)
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")

@@ -124,6 +124,13 @@ def _first_nonempty_env(*names: str) -> str:
 
 AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
 AGENT_TYPES_TABLE = os.environ.get("AGENT_TYPES_TABLE", "agent-types")
+# ENC-TSK-I71 / ENC-FTR-117 AC#8: scheduled idle-sweep backstop config (mirrors config.py).
+AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
+)
+AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS = int(
+    os.environ.get("AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS", "86400")
+)
 COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests")
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
@@ -13675,6 +13682,46 @@ def _handle_agent_session_retire(
     return _response(200, {"session": item})
 
 
+def _handle_agent_session_idle_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Scheduled backstop reaper for abandoned agent sessions (ENC-TSK-I71 / ENC-FTR-117 AC#8).
+
+    Invoked by the AgentSessionIdleSweepSchedule EventBridge rule, NOT an HTTP route — there
+    is no API Gateway envelope, auth, or claims on this path. Flips sessions left in a live
+    status (allocated/claimed) past the configured idle threshold to 'retired' via the
+    append-only conditional update in agent_id_alloc.sweep_idle_sessions (NOT a delete; NOT
+    native DynamoDB TTL). Returns a plain summary dict for CloudWatch.
+    """
+    if not _AGENT_ALLOC_AVAILABLE:
+        logger.error("[ERROR] idle-sweep invoked but agent_id_alloc module unavailable")
+        return {"enabled": False, "reason": "agent_id_alloc_unavailable", "retired_count": 0}
+    if not AGENT_SESSIONS_IDLE_SWEEP_ENABLED:
+        logger.info("[INFO] idle-sweep skipped — AGENT_SESSIONS_IDLE_SWEEP_ENABLED is false")
+        return {"enabled": False, "reason": "disabled", "retired_count": 0}
+    # The schedule delivers the rule's Input JSON verbatim; allow an optional per-invoke
+    # threshold/dry_run override, else fall back to the configured default.
+    raw_threshold = event.get("idle_threshold_seconds")
+    try:
+        threshold = (
+            int(raw_threshold)
+            if raw_threshold is not None
+            else AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS
+        )
+    except (TypeError, ValueError):
+        return {"enabled": True, "error": "idle_threshold_seconds must be an integer", "retired_count": 0}
+    dry_run = bool(event.get("dry_run", False))
+    try:
+        summary = _agent_alloc.sweep_idle_sessions(
+            idle_threshold_seconds=threshold, dry_run=dry_run
+        )
+    except ValueError as exc:
+        return {"enabled": True, "error": str(exc), "retired_count": 0}
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] idle-sweep DynamoDB failure: %s", exc)
+        return {"enabled": True, "error": "DynamoDB error during idle-sweep", "retired_count": 0}
+    logger.info("[SUCCESS] idle-sweep retired %d session(s)", summary.get("retired_count", 0))
+    return summary
+
+
 def _handle_agent_type_list(event: Dict[str, Any]) -> Dict[str, Any]:
     """GET /api/v1/coordination/agents/types — agent-type directory."""
     if not _AGENT_ALLOC_AVAILABLE:
@@ -13744,6 +13791,12 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     ):
         logger.info("[INFO] EventBridge callback event received")
         return _handle_eventbridge_callback(event)
+
+    # --- ENC-TSK-I71: scheduled agent-session idle-sweep (ENC-FTR-117 AC#8) ---
+    # The AgentSessionIdleSweepSchedule rule delivers its Input JSON verbatim as the event.
+    if event.get("action") == "agent_session_idle_sweep":
+        logger.info("[INFO] Scheduled agent-session idle-sweep invoked")
+        return _handle_agent_session_idle_sweep(event)
 
     # --- v0.3: SQS callback ingestion ---
     # SQS events have 'Records' with 'eventSource' = 'aws:sqs'.
