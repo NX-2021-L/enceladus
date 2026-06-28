@@ -16,6 +16,7 @@ The reasoning behind the system. Start here if you want to know *what was built 
 - [Governance as architecture](explanation/governance-as-architecture.md) — the central thesis: governance is the primary structure of the system, not a layer on top of it.
 - [The extended mind](explanation/extended-mind.md) — why the agents are given an external, ontological memory, and what that buys them.
 - [The v4 graph and hybrid retrieval](explanation/v4-graph-and-hybrid-retrieval.md) — the design of durable recall across vector, graph, and keyword signals.
+- [The Handoff Consolidation Engine](explanation/handoff-consolidation-engine.md) — the hippocampal-replay analog that consolidates recurring Handoff patterns into proposed Lessons (HCE + GDMP provenance + FSRS-6).
 - [About the MCP API boundary](explanation/about-the-mcp-api-boundary.md) — why tool handlers must go through service APIs and never touch the database directly.
 - [A governance incident, retrospected](explanation/governance-incident-2026-02-27.md) — what a real production incident taught the system about its own guardrails.
 - [JWT authentication forensics](explanation/jwt-authentication-forensics.md) — the analysis of a silent cross-platform build failure, and the prevention framework that came out of it.
