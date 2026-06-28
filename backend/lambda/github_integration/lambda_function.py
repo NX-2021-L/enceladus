@@ -1901,6 +1901,61 @@ def _handle_validate_commit(event: Dict, claims: Dict) -> Dict:
         return _error(502, f"GitHub API error ({exc.code})")
 
 
+def _handle_compare_main(event: Dict, claims: Dict) -> Dict:
+    """GET /api/v1/github/commits/compare-main?owner=X&repo=Y&sha=Z
+
+    ENC-TSK-H85 / ENC-FTR-111 Phase 1: confirm that a commit SHA is an ancestor of (or identical to)
+    the repository's default `main` branch. The Universal Arc-Walker's code_only|closed leg reuses
+    the commit_sha the agent already supplied at `committed` and asks this system-run GitHub compare
+    whether it is on main — a mechanical external-fact check, not a human attestation
+    (DOC-078C57FC1BE6 §3.1). Mirrors the checkout_service `_validate_code_on_main_evidence` contract
+    (ENC-ISS-161): compare base=sha head=main; status 'ahead' (main has commits sha does not) or
+    'identical' (sha IS main HEAD) both mean sha is an ancestor of main.
+    """
+    qs = event.get("queryStringParameters") or {}
+    owner = (qs.get("owner") or "").strip()
+    repo = (qs.get("repo") or "").strip()
+    sha = (qs.get("sha") or "").strip()
+
+    if not owner or not repo or not sha:
+        return _error(400, "Required query params: owner, repo, sha")
+    if not re.match(r"^[0-9a-f]{40}$", sha.lower()):
+        return _response(200, {"valid": False, "sha": sha, "reason": "sha_not_40_hex"})
+
+    full_repo = f"{owner}/{repo}"
+    if full_repo not in ALLOWED_REPOS:
+        return _error(403, f"Repository not allowed: {full_repo}")
+
+    token = _get_installation_token()
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/compare/{sha}...main"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            compare_status = data.get("status", "")
+            is_ancestor = compare_status in ("ahead", "identical")
+            return _response(200, {
+                "valid": is_ancestor,
+                "sha": sha,
+                "status": compare_status,
+                "reason": "" if is_ancestor else f"not_ancestor_of_main:{compare_status or 'unknown'}",
+            })
+    except urllib.error.HTTPError as exc:
+        if exc.code in (404, 422):
+            return _response(200, {"valid": False, "sha": sha, "reason": "compare_not_found"})
+        body = exc.read().decode("utf-8", errors="replace")[:500]
+        logger.error("GitHub compare-main API error %s: %s", exc.code, body)
+        return _error(502, f"GitHub API error ({exc.code})")
+
+
 # ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
@@ -1927,6 +1982,8 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         return _handle_sync_to_project(event, claims)
     elif method == "GET" and "/github/projects" in path:
         return _handle_list_projects(event, claims)
+    elif method == "GET" and "/github/commits/compare-main" in path:
+        return _handle_compare_main(event, claims)
     elif method == "GET" and "/github/commits/validate" in path:
         return _handle_validate_commit(event, claims)
     elif method == "POST" and "/github/issues" in path:
