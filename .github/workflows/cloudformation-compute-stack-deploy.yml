@@ -305,7 +305,15 @@ jobs:
               AppConfigApplicationId="5t3sqte" \
               AppConfigEnvironmentId="bnwj3lj" \
               EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" \
-              SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10"
+              SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10" \
+              CursorWebhookSecret="${{ secrets.CURSOR_WEBHOOK_SECRET }}"
+              # ADE Component C (ENC-FTR-118): pass the Cursor webhook HMAC secret as a NoEcho
+              # param so `aws cloudformation deploy` does not reuse/zero it (same value-strip class
+              # as ENC-LSN-053). No hard empty-guard here on purpose: an unset secret resolves to
+              # "" and the handler fails CLOSED (rejects all webhooks) — secure default — so an
+              # un-set secret never wedges unrelated gamma compute deploys. Set the GitHub Actions
+              # secret CURSOR_WEBHOOK_SECRET (= the value configured in Cursor's webhook settings)
+              # before relying on the /api/v1/cursor/webhook route.
 
       - name: Report stack events on failure
         if: failure() && steps.deploy.conclusion == 'failure'

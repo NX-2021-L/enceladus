@@ -132,6 +132,11 @@ GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 # ENC-TSK-729: push-on-write sync — Lambda name for async document store refresh
 DOCUMENT_API_LAMBDA_NAME = os.environ.get("DOCUMENT_API_LAMBDA_NAME", "devops-document-api")
+# ADE Component C: shared secret used to verify Cursor Cloud Agents completion
+# webhook signatures (HMAC-SHA256 over the raw body). Sourced via SSM/Secrets
+# param in CFN (see infrastructure/cloudformation/02-compute.yaml). Empty default
+# means signature verification fails closed.
+CURSOR_WEBHOOK_SECRET = os.environ.get("CURSOR_WEBHOOK_SECRET", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "jreese-net")
 S3_GOVERNANCE_PREFIX = os.environ.get("S3_GOVERNANCE_PREFIX", "governance/live")
 S3_GOVERNANCE_HISTORY_PREFIX = os.environ.get("S3_GOVERNANCE_HISTORY_PREFIX", "governance/history")
@@ -12551,6 +12556,160 @@ def _trigger_governance_doc_sync_push(file_name: str, content_hash: str) -> None
         )
 
 
+# ---------------------------------------------------------------------------
+# ADE Component C: Cursor Cloud Agents completion webhook
+#   Route: POST /api/v1/cursor/webhook
+#   Pure logic lives in cursor_webhook.py; this section only wires the real
+#   side-effecting dependencies (document create, issue create, governance hash)
+#   and delegates to cursor_webhook.handle().
+# ---------------------------------------------------------------------------
+
+_CURSOR_WEBHOOK_MODULE = None
+
+
+def _load_cursor_webhook_module():
+    """Load the cursor_webhook sibling module (mirrors _load_mcp_server_module).
+
+    Tries a normal import first (Lambda packages siblings flat), then falls back
+    to a file-path spec load so the monolith works regardless of sys.path.
+    """
+    global _CURSOR_WEBHOOK_MODULE
+    if _CURSOR_WEBHOOK_MODULE is not None:
+        return _CURSOR_WEBHOOK_MODULE
+
+    try:
+        import cursor_webhook as _cw  # type: ignore
+
+        _CURSOR_WEBHOOK_MODULE = _cw
+        return _CURSOR_WEBHOOK_MODULE
+    except ModuleNotFoundError:
+        pass
+
+    module_path = pathlib.Path(__file__).with_name("cursor_webhook.py")
+    spec = importlib.util.spec_from_file_location("coordination_cursor_webhook", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load cursor_webhook module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _CURSOR_WEBHOOK_MODULE = module
+    return _CURSOR_WEBHOOK_MODULE
+
+
+def _cursor_create_document_via_api(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a document via the SAME internal mechanism existing code uses.
+
+    Invokes the document API Lambda (DOCUMENT_API_LAMBDA_NAME) synchronously with
+    a synthetic API Gateway v2 event, authenticating service-to-service via the
+    X-Coordination-Internal-Key header (same key the MCP/document tier uses).
+    Returns the parsed response body, which contains the server-assigned
+    'document_id' (IDs are never predicted — read from the response).
+    """
+    fn_name = DOCUMENT_API_LAMBDA_NAME
+    if not fn_name:
+        raise RuntimeError("DOCUMENT_API_LAMBDA_NAME not configured")
+
+    body = {
+        "project_id": GOVERNANCE_PROJECT_ID,
+        **payload,
+    }
+    headers = {"Content-Type": "application/json"}
+    internal_key = (COORDINATION_INTERNAL_API_KEY or "").strip()
+    if internal_key:
+        headers["X-Coordination-Internal-Key"] = internal_key
+
+    invoke_event = {
+        "version": "2.0",
+        "routeKey": "PUT /api/v1/documents",
+        "rawPath": "/api/v1/documents",
+        "requestContext": {"http": {"method": "PUT", "path": "/api/v1/documents"}},
+        "httpMethod": "PUT",
+        "headers": headers,
+        "isBase64Encoded": False,
+        "body": json.dumps(body),
+    }
+
+    resp = _get_lambda_client().invoke(
+        FunctionName=fn_name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(invoke_event).encode("utf-8"),
+    )
+    raw = resp.get("Payload")
+    payload_text = raw.read().decode("utf-8") if raw is not None else ""
+    envelope = json.loads(payload_text) if payload_text else {}
+    if resp.get("FunctionError"):
+        raise RuntimeError(f"document API invoke error: {envelope}")
+
+    status_code = int(envelope.get("statusCode") or 0)
+    inner_raw = envelope.get("body")
+    inner: Dict[str, Any] = {}
+    if isinstance(inner_raw, str) and inner_raw:
+        try:
+            inner = json.loads(inner_raw)
+        except json.JSONDecodeError:
+            inner = {}
+    elif isinstance(inner_raw, dict):
+        inner = inner_raw
+
+    if status_code not in (200, 201) or not inner.get("document_id"):
+        raise RuntimeError(
+            f"document API returned status={status_code} body={inner or inner_raw}"
+        )
+    return inner
+
+
+def _cursor_create_issue(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a tracker issue via the SAME internal mechanism existing handlers use.
+
+    Mirrors _decompose_and_create_tracker_artifacts: resolves project prefix and
+    calls _create_tracker_record_auto(record_type='issue'). The server assigns
+    the record id (returned). The spec's 'technical_notes' content is folded into
+    the issue description because _create_tracker_record_auto persists a
+    'description' (not a separate technical_notes attribute).
+    """
+    project_id = GOVERNANCE_PROJECT_ID
+    meta = _load_project_meta(project_id)
+    governance_hash = str(payload.get("governance_hash") or "")
+
+    hypothesis = str(payload.get("hypothesis") or "")
+    technical_notes = str(payload.get("technical_notes") or "")
+    description_parts = [hypothesis]
+    if technical_notes:
+        description_parts.append(f"Technical notes: {technical_notes}")
+    description = "\n\n".join(p for p in description_parts if p) or "Auto-filed by Enceladus Cursor webhook handler."
+
+    record_id = _create_tracker_record_auto(
+        project_id=project_id,
+        prefix=meta.prefix,
+        record_type="issue",
+        title=str(payload.get("title") or "")[:MAX_TITLE_LENGTH],
+        description=description,
+        priority=str(payload.get("priority") or "P2"),
+        assigned_to="AGENT-003",
+        severity="high",
+        hypothesis=hypothesis,
+        governance_hash=governance_hash,
+    )
+    return {"record_id": record_id}
+
+
+def _handle_cursor_webhook(event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/cursor/webhook — ADE Component C entry point.
+
+    Reads the RAW body (decoding base64 if API Gateway encoded it) inside
+    cursor_webhook.handle so the HMAC is computed over the exact signed bytes.
+    Always returns 200 on a valid-signature request even if an internal create
+    fails (Cursor retries non-2xx); 401 on bad signature, 400 on bad body.
+    """
+    module = _load_cursor_webhook_module()
+    deps = module.CursorWebhookDeps(
+        create_document=_cursor_create_document_via_api,
+        create_issue=_cursor_create_issue,
+        resolve_governance_hash=_compute_governance_hash_local,
+    )
+    status_code, body = module.handle(event, None, deps, secret=CURSOR_WEBHOOK_SECRET)
+    return _response(status_code, body)
+
+
 def _handle_governance_get(event: Dict[str, Any]) -> Dict[str, Any]:
     """GET /api/v1/governance/{file_name} — read governance file content from S3 (ENC-FTR-040)."""
     path = event.get("rawPath") or event.get("path") or ""
@@ -13676,6 +13835,13 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if method == "POST" and match_batch_results:
         request_id = match_batch_results.group(1)
         return _handle_anthropic_batch_results_callback(event, request_id)
+
+    # POST /api/v1/cursor/webhook  (ADE Component C)
+    # Authenticated via Cursor HMAC-SHA256 signature over the raw body (verified
+    # inside _handle_cursor_webhook), NOT Cognito/internal key — so it is matched
+    # before the generic auth gate below.
+    if method == "POST" and path.endswith("/api/v1/cursor/webhook"):
+        return _handle_cursor_webhook(event)
 
     # Auth all other routes.
     claims, auth_err = _authenticate(event)

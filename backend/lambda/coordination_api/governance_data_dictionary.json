@@ -1,6 +1,6 @@
 {
-  "version": "2026-06-28.02",
-  "updated_at": "2026-06-28T03:55:00Z",
+  "version": "2026-06-28.03",
+  "updated_at": "2026-06-28T07:26:56Z",
   "last_change_summary": "ENC-TSK-I74 (ENC-ISS-417/418/422/424 sweep): checkout_service plan completion gate (ENC-TSK-A89) now resolves cross-project objectives in their own project partition (ISS-417); coordination_api .build_extras packages dispatch_plan_generator + handoff_mandate together (ISS-424); V4Gamma deploy role gains lambda publish/alias perms + _deploy.yml fails loud on alias errors (ISS-418); enceladus-mcp-streamable live Function URL codified in CFN (ISS-422). No data-dictionary schema change — bump satisfies the path-triggered Governance Dictionary Guard on the checkout_service lambda_function.py edit.",
   "owners": [
     "enceladus-platform"
