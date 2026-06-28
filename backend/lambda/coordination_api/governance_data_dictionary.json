@@ -5911,6 +5911,35 @@
         }
       }
     },
+    "coordination_api.session_init_intent_classifier": {
+      "description": "ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init proactive intent classifier in coordination_api (inference-only, no training writes). Two HTTP routes (POST /api/v1/coordination/session-init/classify-intent and POST /api/v1/coordination/session-init/intent-centroid-drift), surfaced on the MCP code-mode surface as coordination(action='session.classify_intent') and coordination(action='session.intent_centroid_drift'). classify-intent embeds the first-turn request text with amazon.titan-embed-text-v2:0 (256-dim, normalized \u2014 same contract as backend/lambda/graph_sync/embedding.py) and returns predicted_entelechy={node_ids:list[str], confidence:float} via cosine nearest-neighbor over the governed corpus embeddings. The canonical NN primitive (intent_classifier.cosine_similarity + rank_neighbors) runs over a raw-embedding corpus (the FTR-089 egress consumption path); until that egress lands the default neighbor provider delegates the vector search to the deployed graph_query_api hybrid endpoint (GRAPH_QUERY_API_URL), degrading to zero neighbors (confidence 0.0) when unset so session-init inference never blocks. applied_entelechy_override (list[str], a single id, or {node_ids:[...]}) is optional; when present the io value overrides the prediction (override wins) while the classifier prediction is still computed and logged (AC-2). intent-centroid-drift computes the rolling intent vector per wave as the mean of the FTR-089 embeddings for dispatched records and a scalar intent_centroid_drift (cosine distance vs the previous wave centroid; nullable on the first wave), best-effort persisted as a NEW nullable column intent_centroid_drift on the FTR-087-owned enceladus-drift-telemetry table ALONGSIDE d_centroid (DRIFT_TELEMETRY_TABLE; graceful no-op when unset/missing; FTR-087 fields never overwritten) (AC-3). OGTM (ENC-FTR-066) is N/A for Phase 1: no new edge type, record type, or relational field is introduced \u2014 predictions are returned inline (AC-4). Scope guard (AC-5): inference-only \u2014 intent_classifier.INFERENCE_ONLY=True / TRAINING_ENABLED=False; the persistent-model-mutation training arc is a deferred follow-on pending io review.",
+      "fields": {
+        "routes": {
+          "type": "object",
+          "definition": "POST /api/v1/coordination/session-init/classify-intent -> _handle_session_init_classify_intent(event, claims). POST /api/v1/coordination/session-init/intent-centroid-drift -> _handle_session_init_intent_drift(event, claims). Both registered before the 404 fallback in lambda_handler; auth via the standard coordination auth gate (Cognito or X-Coordination-Internal-Key)."
+        },
+        "mcp_actions": {
+          "type": "object",
+          "definition": "coordination(action='session.classify_intent') -> raw tool coordination_classify_intent; coordination(action='session.intent_centroid_drift') -> raw tool coordination_intent_centroid_drift. Both proxy to the coordination API HTTP routes via _coordination_api_request."
+        },
+        "classify_intent_request": {
+          "type": "object",
+          "definition": "{first_turn_text:str (required; request_text accepted as alias), session_metadata:object?, applied_entelechy_override:list[str]|str|{node_ids:[...]}?, top_k:int? (default 5, max 25), project_id:str? (default 'enceladus')}."
+        },
+        "classify_intent_response": {
+          "type": "object",
+          "definition": "{success:true, predicted_entelechy:{node_ids:list[str], confidence:float in [0,1]}, applied_entelechy:{node_ids:list[str], confidence:float, source:'classifier'|'io_override'}, override_applied:bool, neighbors:list[{record_id,score}], query_embedding_dim:int, model_id:str, inference_only:true, ...}. predicted_entelechy always carries the classifier's own prediction even when overridden (it is logged)."
+        },
+        "intent_centroid_drift_contract": {
+          "type": "object",
+          "definition": "Request {wave_id:str (required), embeddings:list[list[float]] (FTR-089 embeddings for dispatched records; dispatched_record_embeddings accepted as alias), previous_centroid:list[float]?, persist:bool? (default true), project_id:str?}. Response {success:true, wave_id, intent_centroid_dim:int, intent_centroid_drift:float|null, record_count:int, persistence:{persisted:bool, ...}}."
+        },
+        "env_vars": {
+          "type": "object",
+          "definition": "GRAPH_QUERY_API_URL (default empty -> classifier degrades to no neighbors). DRIFT_TELEMETRY_TABLE (default empty -> intent_centroid_drift persistence is a graceful no-op; the table is owned by FTR-087). BEDROCK_REGION (default us-west-2) for the Titan V2 embed; requires bedrock:InvokeModel on amazon.titan-embed-text-v2:0 on the coordination_api role for live (gamma) predictions."
+        }
+      }
+    },
     "mcp_server.governance_hash_resolution": {
       "description": "Hash resolution chain in enceladus-mcp-server._get_governance_hash_via_api() after the ENC-TSK-I29 cutover. Four-tier resolution with 60s TTL cache.",
       "fields": {
