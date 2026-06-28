@@ -1,0 +1,494 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus Agent Authentication — dual-client Cognito M2M stack (ENC-FTR-074 Ph1 / ENC-TSK-I79).
+  Provisions a dedicated Cognito User Pool for governed agent authentication with two App Clients
+  (enceladus-web-ui: authorization_code for human-interactive sessions; enceladus-agent-m2m:
+  client_credentials for headless agent sessions), a shared resource server (enceladus-api) carrying
+  the four governance-tier scopes, a V3_0 pre-token generation Lambda that stamps agent_tier +
+  session_id custom claims onto client_credentials access tokens, and the M2M client secret in
+  Secrets Manager with a 90-day rotation schedule.
+
+  IMPORTANT — DEPLOY TARGET: gamma (v4) ONLY. v3-prod is FROZEN (DOC-499FA089EC30). This stack
+  defines its OWN User Pool rather than mutating the shared human-auth pool (us-east-1_b2D0V3E1k),
+  so wiring the pre-token trigger cannot affect production. Deploy via the
+  cloudformation-agent-auth-stack-deploy workflow (gamma branches only).
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: "-gamma"
+    AllowedValues: ["", "-gamma"]
+    Description: >
+      Resource-name suffix used to keep account-global resource names from colliding across
+      environments. Gamma resolves to "-gamma"; this stack is intended for gamma only in Phase 1.
+
+  WebUiCallbackUrl:
+    Type: String
+    Default: "https://jreese.net/enceladus/auth/callback"
+    Description: OAuth redirect (callback) URL for the human-interactive web UI client.
+
+  WebUiLogoutUrl:
+    Type: String
+    Default: "https://jreese.net/enceladus"
+    Description: Sign-out redirect URL for the human-interactive web UI client.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Pre-token generation Lambda (V3_0) — stamps governed custom claims onto the
+  # client_credentials access token. Python 3.11 per ENC-TSK-I79 AC3.
+  #
+  # Inline ZipFile (no binary deps) so the stack deploys with a single
+  # `aws cloudformation deploy --template-file` invocation and no artifact
+  # packaging step. The handler is intentionally self-contained.
+  # ---------------------------------------------------------------------------
+
+  PreTokenLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "enceladus-agent-pretoken-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: agent-auth
+
+  PreTokenLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "enceladus-agent-pretoken${EnvironmentSuffix}"
+      Description: >
+        ENC-FTR-074 Ph1 V3_0 pre-token generation trigger. On
+        TokenGeneration_ClientCredentials, injects enc:agent_tier and enc:session_id custom claims
+        into the M2M access token.
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt PreTokenLambdaRole.Arn
+      Timeout: 5
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          """ENC-FTR-074 Ph1 — Cognito V3_0 pre-token generation trigger.
+
+          Fires on triggerSource == 'TokenGeneration_ClientCredentials' and stamps governed
+          custom claims onto the M2M access token. The agent_tier is derived from the requested
+          resource-server scopes (admin > elevated > standard > observe); session_id is taken
+          from clientMetadata when the caller supplies it, else left empty for the authorizer to
+          mint downstream.
+          """
+
+          # Highest-privilege scope wins when several are requested.
+          _TIER_BY_SCOPE = (
+              ("agent.admin", "admin"),
+              ("agent.elevated", "elevated"),
+              ("agent.standard", "standard"),
+              ("agent.observe", "observe"),
+          )
+
+          def _resolve_tier(scopes):
+              names = [str(s).rsplit("/", 1)[-1] for s in (scopes or [])]
+              for scope_suffix, tier in _TIER_BY_SCOPE:
+                  if scope_suffix in names:
+                      return tier
+              return "observe"
+
+          def handler(event, context):
+              request = event.get("request", {}) or {}
+              scopes = request.get("scopes", []) or []
+              metadata = request.get("clientMetadata", {}) or {}
+
+              claims = {
+                  "enc:agent_tier": _resolve_tier(scopes),
+                  "enc:session_id": str(metadata.get("session_id", "")),
+              }
+
+              event["response"] = {
+                  "claimsAndScopeOverrideDetails": {
+                      "accessTokenGeneration": {
+                          "claimsToAddOrOverride": claims,
+                      },
+                  },
+              }
+              return event
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: agent-auth
+
+  PreTokenLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/enceladus-agent-pretoken${EnvironmentSuffix}"
+      RetentionInDays: 30
+
+  # Grant Cognito permission to invoke the pre-token Lambda BEFORE the User Pool is created.
+  # SourceAccount (not SourceArn) is used deliberately to break the classic Cognito<->Lambda
+  # circular dependency: the User Pool references the Lambda ARN, so the invoke permission
+  # cannot reference the (not-yet-created) pool ARN. The pool DependsOn this permission.
+  PreTokenInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PreTokenLambda
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # ---------------------------------------------------------------------------
+  # Dedicated agent-auth Cognito User Pool.
+  # UserPoolTier ESSENTIALS is required for access-token customization (V2_0/V3_0
+  # pre-token claims). The pool is gamma-scoped and independent of the shared
+  # human-auth pool so wiring the trigger never touches production.
+  # ---------------------------------------------------------------------------
+
+  AgentUserPool:
+    Type: AWS::Cognito::UserPool
+    DependsOn: PreTokenInvokePermission
+    Properties:
+      UserPoolName: !Sub "enceladus-agent-auth${EnvironmentSuffix}"
+      UserPoolTier: ESSENTIALS
+      DeletionProtection: INACTIVE
+      MfaConfiguration: "OFF"
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: admin_only
+            Priority: 1
+      LambdaConfig:
+        PreTokenGenerationConfig:
+          LambdaVersion: V3_0
+          LambdaArn: !GetAtt PreTokenLambda.Arn
+      UserPoolTags:
+        Project: enceladus
+        Component: agent-auth
+
+  AgentUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      # Hosted-UI / OAuth2 token-endpoint domain prefix must be globally unique.
+      Domain: !Sub "enceladus-agent${EnvironmentSuffix}-${AWS::AccountId}"
+      UserPoolId: !Ref AgentUserPool
+
+  # ---------------------------------------------------------------------------
+  # Resource server + four governance-tier scopes (ENC-TSK-I79 AC2).
+  # ---------------------------------------------------------------------------
+
+  EnceladusApiResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref AgentUserPool
+      Identifier: enceladus-api
+      Name: enceladus-api
+      Scopes:
+        - ScopeName: agent.standard
+          ScopeDescription: "Tier 1 — standard governed mutations (tracker/document writes, checkout.advance)."
+        - ScopeName: agent.elevated
+          ScopeDescription: "Tier 2 — deploy-capable operations (deploy.submit, changelog.write, github.integration)."
+        - ScopeName: agent.admin
+          ScopeDescription: "Administrative agent operations below the human-only governance boundary."
+        - ScopeName: agent.observe
+          ScopeDescription: "Tier 0 — read-only observer access (tracker/document/governance/changelog/feed reads)."
+
+  # ---------------------------------------------------------------------------
+  # App Client 1 — enceladus-web-ui: authorization_code + PKCE, public (no secret),
+  # for human-interactive sessions (ENC-TSK-I79 AC1).
+  # ---------------------------------------------------------------------------
+
+  WebUiClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: enceladus-web-ui
+      UserPoolId: !Ref AgentUserPool
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - !Ref WebUiCallbackUrl
+      LogoutURLs:
+        - !Ref WebUiLogoutUrl
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  # ---------------------------------------------------------------------------
+  # App Client 2 — enceladus-agent-m2m: client_credentials, confidential (with secret),
+  # for headless agent sessions (ENC-TSK-I79 AC1). DependsOn the resource server so the
+  # custom scopes exist before they are referenced.
+  # ---------------------------------------------------------------------------
+
+  AgentM2MClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: EnceladusApiResourceServer
+    Properties:
+      ClientName: enceladus-agent-m2m
+      UserPoolId: !Ref AgentUserPool
+      GenerateSecret: true
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthScopes:
+        - enceladus-api/agent.standard
+        - enceladus-api/agent.elevated
+        - enceladus-api/agent.admin
+        - enceladus-api/agent.observe
+      EnableTokenRevocation: true
+      AccessTokenValidity: 60
+      TokenValidityUnits:
+        AccessToken: minutes
+
+  # ---------------------------------------------------------------------------
+  # M2M client secret in Secrets Manager with 90-day rotation (ENC-TSK-I79 AC4).
+  #
+  # The secret holds the M2M client_id (non-secret) at create time; the secret
+  # material is hydrated from Cognito by the rotation Lambda's createSecret step.
+  # RotateImmediatelyOnUpdate is false so a deploy-time rotation failure can never
+  # roll the stack back ("deploys clean on gamma"). No credential material is ever
+  # committed to source control.
+  # ---------------------------------------------------------------------------
+
+  AgentM2MClientSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: enceladus/agent-m2m/client-secret
+      Description: >
+        Cognito enceladus-agent-m2m App Client credentials (client_credentials grant).
+        Secret material hydrated from Cognito by the rotation Lambda; 90-day rotation (ENC-FTR-074).
+      SecretString: !Sub '{"client_id":"${AgentM2MClient}","client_secret":""}'
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: agent-auth
+
+  SecretRotationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "enceladus-agent-m2m-rotation-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: rotation-secrets-and-cognito
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerRotation
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:UpdateSecretVersionStage
+                Resource: !Ref AgentM2MClientSecret
+              - Sid: CognitoDescribeClient
+                Effect: Allow
+                Action:
+                  - cognito-idp:DescribeUserPoolClient
+                Resource: !GetAtt AgentUserPool.Arn
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: agent-auth
+
+  SecretRotationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "enceladus-agent-m2m-rotation${EnvironmentSuffix}"
+      Description: >
+        ENC-FTR-074 Ph1 Secrets Manager rotation Lambda for the enceladus-agent-m2m client secret
+        (standard 4-step rotation; createSecret hydrates AWSPENDING from the live Cognito client).
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt SecretRotationLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref AgentUserPool
+          CLIENT_ID: !Ref AgentM2MClient
+      Code:
+        ZipFile: |
+          """ENC-FTR-074 Ph1 — Secrets Manager rotation for the enceladus-agent-m2m client secret.
+
+          Implements the canonical four-step rotation state machine. createSecret reads the live
+          Cognito App Client secret and stages it as AWSPENDING; finishSecret promotes AWSPENDING to
+          AWSCURRENT. Phase-1 note: Cognito does not expose a native rotate-client-secret API, so
+          this keeps Secrets Manager synchronized with Cognito (the source of truth) rather than
+          minting a brand-new secret value. True regeneration is deferred to a later FTR-074 phase.
+          """
+          import json
+          import os
+          import boto3
+
+          _sm = boto3.client("secretsmanager")
+          _idp = boto3.client("cognito-idp")
+
+
+          def _client_payload():
+              desc = _idp.describe_user_pool_client(
+                  UserPoolId=os.environ["USER_POOL_ID"],
+                  ClientId=os.environ["CLIENT_ID"],
+              )["UserPoolClient"]
+              return json.dumps({
+                  "client_id": desc.get("ClientId", ""),
+                  "client_secret": desc.get("ClientSecret", ""),
+              })
+
+
+          def handler(event, context):
+              arn = event["SecretId"]
+              token = event["ClientRequestToken"]
+              step = event["Step"]
+
+              meta = _sm.describe_secret(SecretId=arn)
+              versions = meta.get("VersionIdsToStages", {})
+              if not meta.get("RotationEnabled", True):
+                  raise ValueError("Secret %s rotation is not enabled" % arn)
+              if token not in versions:
+                  raise ValueError("Token %s has no stage for secret %s" % (token, arn))
+              if "AWSCURRENT" in versions.get(token, []):
+                  return
+              if "AWSPENDING" not in versions.get(token, []):
+                  raise ValueError("Token %s not staged AWSPENDING for %s" % (token, arn))
+
+              if step == "createSecret":
+                  try:
+                      _sm.get_secret_value(
+                          SecretId=arn, VersionId=token, VersionStage="AWSPENDING"
+                      )
+                  except _sm.exceptions.ResourceNotFoundException:
+                      _sm.put_secret_value(
+                          SecretId=arn,
+                          ClientRequestToken=token,
+                          SecretString=_client_payload(),
+                          VersionStages=["AWSPENDING"],
+                      )
+              elif step in ("setSecret", "testSecret"):
+                  # No external service to update; the access-token exchange is validated
+                  # out-of-band against the Cognito token endpoint.
+                  return
+              elif step == "finishSecret":
+                  current = None
+                  for version_id, stages in versions.items():
+                      if "AWSCURRENT" in stages:
+                          current = version_id
+                          break
+                  if current == token:
+                      return
+                  _sm.update_secret_version_stage(
+                      SecretId=arn,
+                      VersionStage="AWSCURRENT",
+                      MoveToVersionId=token,
+                      RemoveFromVersionId=current,
+                  )
+              else:
+                  raise ValueError("Unknown rotation step: %s" % step)
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: agent-auth
+
+  SecretRotationLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/enceladus-agent-m2m-rotation${EnvironmentSuffix}"
+      RetentionInDays: 30
+
+  SecretRotationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SecretRotationLambda
+      Action: lambda:InvokeFunction
+      Principal: secretsmanager.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  M2MSecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: SecretRotationInvokePermission
+    Properties:
+      SecretId: !Ref AgentM2MClientSecret
+      RotationLambdaARN: !GetAtt SecretRotationLambda.Arn
+      RotateImmediatelyOnUpdate: false
+      RotationRules:
+        AutomaticallyAfterDays: 90
+
+Outputs:
+  UserPoolId:
+    Description: Agent-auth Cognito User Pool ID.
+    Value: !Ref AgentUserPool
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentUserPoolId"
+
+  UserPoolArn:
+    Description: Agent-auth Cognito User Pool ARN.
+    Value: !GetAtt AgentUserPool.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentUserPoolArn"
+
+  UserPoolDomain:
+    Description: Hosted UI / OAuth2 domain prefix for the agent-auth pool.
+    Value: !Ref AgentUserPoolDomain
+
+  TokenEndpoint:
+    Description: OAuth2 token endpoint for the client_credentials grant.
+    Value: !Sub "https://enceladus-agent${EnvironmentSuffix}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"
+
+  WebUiClientId:
+    Description: enceladus-web-ui App Client ID (authorization_code, public).
+    Value: !Ref WebUiClient
+    Export:
+      Name: !Sub "${AWS::StackName}-WebUiClientId"
+
+  AgentM2MClientId:
+    Description: enceladus-agent-m2m App Client ID (client_credentials, confidential).
+    Value: !Ref AgentM2MClient
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentM2MClientId"
+
+  ResourceServerIdentifier:
+    Description: Resource server identifier carrying the agent.* governance-tier scopes.
+    Value: enceladus-api
+
+  PreTokenLambdaArn:
+    Description: V3_0 pre-token generation Lambda ARN.
+    Value: !GetAtt PreTokenLambda.Arn
+
+  M2MClientSecretArn:
+    Description: Secrets Manager ARN for the M2M client secret (90-day rotation).
+    Value: !Ref AgentM2MClientSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-M2MClientSecretArn"
