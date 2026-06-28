@@ -4827,6 +4827,77 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="coordination_classify_intent",
+            description=(
+                "Session-init intent classifier (ENC-FTR-084 Ph1). Embeds the "
+                "first-turn request text via Titan V2 and returns predicted_entelechy "
+                "{node_ids, confidence}. Optional applied_entelechy_override wins over "
+                "the prediction (which is still computed + logged). Inference-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "first_turn_text": {
+                        "type": "string",
+                        "description": "The first-turn request text to classify.",
+                    },
+                    "session_metadata": {
+                        "type": "object",
+                        "description": "Optional session metadata (surface, model, etc.).",
+                    },
+                    "applied_entelechy_override": {
+                        "description": "Optional io override: list of node_ids, a single id, or {node_ids:[...]}. When present it overrides the prediction.",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Nearest-neighbor breadth (default 5, max 25).",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project scope for the corpus (default 'enceladus').",
+                    },
+                },
+                "required": ["first_turn_text"],
+            },
+        ),
+        Tool(
+            name="coordination_intent_centroid_drift",
+            description=(
+                "Wave intent-centroid drift telemetry (ENC-FTR-084 Ph1, AC-3). Computes "
+                "the rolling intent vector (mean of FTR-089 embeddings for dispatched "
+                "records) and the scalar intent_centroid_drift vs the previous wave "
+                "centroid, best-effort persisted to enceladus-drift-telemetry."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "wave_id": {
+                        "type": "string",
+                        "description": "The coordination wave identifier.",
+                    },
+                    "embeddings": {
+                        "type": "array",
+                        "description": "List of embedding vectors for the records dispatched in this wave.",
+                        "items": {"type": "array", "items": {"type": "number"}},
+                    },
+                    "previous_centroid": {
+                        "type": "array",
+                        "description": "Optional previous wave centroid vector (drift is null without it).",
+                        "items": {"type": "number"},
+                    },
+                    "persist": {
+                        "type": "boolean",
+                        "description": "Best-effort persist the new intent_centroid_drift column (default true).",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project scope (default 'enceladus').",
+                    },
+                },
+                "required": ["wave_id"],
+            },
+        ),
+        Tool(
             name="coordination_cognito_session",
             description=(
                 "Create a Cognito-authenticated cookie bundle for terminal diagnostics "
@@ -7529,6 +7600,9 @@ _COORDINATION_ACTIONS: Dict[str, Dict[str, Any]] = {
     "auth.cognito_session": {"tool": "coordination_cognito_session"},
     "dispatch_plan.generate": {"tool": "dispatch_plan_generate"},
     "dispatch_plan.dry_run": {"tool": "dispatch_plan_dry_run"},
+    # ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier.
+    "session.classify_intent": {"tool": "coordination_classify_intent"},
+    "session.intent_centroid_drift": {"tool": "coordination_intent_centroid_drift"},
 }
 
 _EXECUTE_ACTIONS: Dict[str, Dict[str, Any]] = {
@@ -8792,6 +8866,45 @@ async def _coordination_cognito_session(args: dict) -> list[TextContent]:
         payload["include_tokens"] = bool(args.get("include_tokens"))
 
     result = _coordination_api_request("POST", "/auth/cognito/session", payload=payload)
+    return _result_text(result)
+
+
+async def _coordination_classify_intent(args: dict) -> list[TextContent]:
+    """Session-init intent classification (ENC-FTR-084 Ph1 / ENC-TSK-I93).
+
+    Embeds the first-turn text via Titan V2 and returns predicted_entelechy
+    {node_ids, confidence}. Honors applied_entelechy_override (override wins;
+    the prediction is still computed + logged). Inference-only.
+    """
+    payload: Dict[str, Any] = {}
+    for key in (
+        "first_turn_text",
+        "request_text",
+        "session_metadata",
+        "applied_entelechy_override",
+        "top_k",
+        "project_id",
+    ):
+        if key in args and args[key] is not None:
+            payload[key] = args[key]
+    result = _coordination_api_request("POST", "/session-init/classify-intent", payload=payload)
+    return _result_text(result)
+
+
+async def _coordination_intent_centroid_drift(args: dict) -> list[TextContent]:
+    """Wave intent-centroid drift telemetry (ENC-FTR-084 Ph1, AC-3 / ENC-TSK-I93)."""
+    payload: Dict[str, Any] = {}
+    for key in (
+        "wave_id",
+        "embeddings",
+        "dispatched_record_embeddings",
+        "previous_centroid",
+        "persist",
+        "project_id",
+    ):
+        if key in args and args[key] is not None:
+            payload[key] = args[key]
+    result = _coordination_api_request("POST", "/session-init/intent-centroid-drift", payload=payload)
     return _result_text(result)
 
 
@@ -10352,6 +10465,8 @@ _TOOL_HANDLERS = {
     "coordination_capabilities": _coordination_capabilities,
     "coordination_request_get": _coordination_request_get,
     "coordination_cognito_session": _coordination_cognito_session,
+    "coordination_classify_intent": _coordination_classify_intent,
+    "coordination_intent_centroid_drift": _coordination_intent_centroid_drift,
     "governance_update": _governance_update,
     "governance_hash": _governance_hash,
     "governance_get": _governance_get,
