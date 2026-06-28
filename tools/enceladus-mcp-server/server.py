@@ -7510,6 +7510,9 @@ _SEARCH_ACTIONS: Dict[str, Dict[str, Any]] = {
     "tracker.embeddings_for": {"tool": "tracker_embeddings_for"},
     # ENC-FTR-095 / ENC-TSK-I90: Sheaf Laplacian H1 inconsistency detection
     "tracker.sheaf_cohomology": {"tool": "tracker_sheaf_cohomology"},
+    # ENC-FTR-088 / ENC-TSK-I81: graph Laplacian read action (CSR adjacency +
+    # Fiedler eigenvector via scipy.sparse.linalg.eigsh in graph_query_api).
+    "tracker.graph_laplacian": {"tool": "tracker_graph_laplacian"},
     # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
     "tracker.manifest": {"tool": "tracker_manifest"},
     "tracker.get_acs": {"tool": "tracker_get_acs"},
@@ -9118,6 +9121,35 @@ async def _tracker_sheaf_cohomology(args: dict) -> list[TextContent]:
     vertex_set_query = args.get("vertex_set_query")
     if vertex_set_query:
         query_params["vertex_set_query"] = vertex_set_query
+async def _tracker_graph_laplacian(args: dict) -> list[TextContent]:
+    """ENC-FTR-088 / ENC-TSK-I81: graph Laplacian read action.
+
+    Resolves an induced subgraph from a vertex set (vertex_set_query keyword or
+    explicit record_ids), then returns the CSR adjacency (base64 float32), the
+    Fiedler eigenvector, the k smallest Laplacian eigenvalues, the degree vector,
+    and an index->record_id vertex_map. Backed by the graph_query_api
+    search_type='laplacian' handler (scipy.sparse.linalg.eigsh). project_id
+    defaults to 'enceladus'. No new DynamoDB tables or edge types.
+    """
+    project_id = args.get("project_id") or "enceladus"
+    query_params: Dict[str, Any] = {
+        "search_type": "laplacian",
+        "project_id": project_id,
+    }
+    if args.get("vertex_set_query") is not None:
+        query_params["vertex_set_query"] = args["vertex_set_query"]
+    if args.get("record_ids") is not None:
+        rids = args["record_ids"]
+        query_params["record_ids"] = ",".join(rids) if isinstance(rids, list) else rids
+    if args.get("edge_type_filter") is not None:
+        etf = args["edge_type_filter"]
+        query_params["edge_type_filter"] = ",".join(etf) if isinstance(etf, list) else etf
+    if args.get("k") is not None:
+        query_params["k"] = str(args["k"])
+    if args.get("limit") is not None:
+        query_params["limit"] = str(args["limit"])
+    if args.get("normalization") is not None:
+        query_params["normalization"] = args["normalization"]
 
     resp = _graph_query_api_request(query=query_params)
     return _result_text(resp)
@@ -10336,6 +10368,8 @@ _TOOL_HANDLERS = {
     "tracker_embeddings_for": _tracker_embeddings_for,
     # ENC-FTR-095 / ENC-TSK-I90: Sheaf Laplacian H1 inconsistency detection
     "tracker_sheaf_cohomology": _tracker_sheaf_cohomology,
+    # ENC-FTR-088 / ENC-TSK-I81: graph Laplacian read action
+    "tracker_graph_laplacian": _tracker_graph_laplacian,
     # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
     "tracker_manifest": _tracker_manifest,
     "tracker_get_acs": _tracker_get_acs,
