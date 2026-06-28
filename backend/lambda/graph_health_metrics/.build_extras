@@ -1,0 +1,6 @@
+# ENC-TSK-G43 cross-Lambda module sharing manifest (honored by _build.yml).
+# ENC-TSK-I10 (Dedup P6): the daily convergence probe imports the pure dedup
+# convergence math owned by graph_query_api. Packaged here so `import
+# dedup_convergence` resolves at runtime (same precedent as graph_sync/embedding.py
+# -> graph_query_api). Keep in lockstep with the canonical owner.
+backend/lambda/graph_query_api/dedup_convergence.py

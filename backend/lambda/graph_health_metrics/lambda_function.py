@@ -21,10 +21,12 @@ Environment variables:
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
 import boto3
+
+import dedup_convergence
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -32,6 +34,32 @@ logger.setLevel(logging.INFO)
 NEO4J_SECRET_NAME = os.environ.get("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
 CLOUDWATCH_NAMESPACE = os.environ.get("CLOUDWATCH_NAMESPACE", "Enceladus/GraphHealth")
 PROJECT_ID = os.environ.get("PROJECT_ID", "enceladus")
+
+# --- ENC-TSK-I10 (Dedup P6) convergence-probe configuration ----------------
+# Governed dedup-convergence signals (DOC-DF651F07D5C2 §10) are published to
+# their own namespace so they don't dilute the C10 graph-health proxy metrics.
+DEDUP_NAMESPACE = os.environ.get("DEDUP_NAMESPACE", "Enceladus/DedupConvergence")
+# Namespace the production auto-merge / walk-back audit counters are emitted to
+# by the dedup auto-merge producer (tracker_mutation, flag-gated DARK until the
+# precision floor is certified — DOC-DF651F07D5C2 §13). Defaults to the dedup
+# namespace; the probe reads them back to compute the live walk-back rate.
+DEDUP_AUDIT_NAMESPACE = os.environ.get("DEDUP_AUDIT_NAMESPACE", DEDUP_NAMESPACE)
+DEDUP_AUTO_MERGE_METRIC = os.environ.get("DEDUP_AUTO_MERGE_METRIC", "AutoMergeCount")
+DEDUP_WALK_BACK_METRIC = os.environ.get("DEDUP_WALK_BACK_METRIC", "WalkBackCount")
+
+
+def _dedup_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _dedup_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
 
 _neo4j_driver = None
 _creds_cache = None
@@ -128,14 +156,136 @@ def _publish_to_cloudwatch(metrics: Dict[str, float]) -> None:
         )
 
 
+def _read_walk_back_counts(window_days: float) -> Dict[str, int]:
+    """ENC-TSK-I10: read the production auto-merge + walk-back audit counters
+    (Sum) over the trailing window from CloudWatch.
+
+    These counters are emitted by the dedup auto-merge producer when io enables
+    MECHANICAL T-HIGH auto-walk (DOC-DF651F07D5C2 §5/§13). Until then auto-merge
+    is DARK, so both sums are 0 and the walk-back rate is definitionally 0
+    (shadow). A read failure degrades to 0 rather than failing the probe."""
+    try:
+        cw = boto3.client("cloudwatch")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[WARNING] walk-back counter client init failed: %s", exc)
+        return {"auto_merges": 0, "walk_backs": 0}
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=max(1.0, window_days))
+    dimensions = [{"Name": "ProjectId", "Value": PROJECT_ID}]
+
+    def _sum(metric_name: str) -> int:
+        try:
+            resp = cw.get_metric_statistics(
+                Namespace=DEDUP_AUDIT_NAMESPACE,
+                MetricName=metric_name,
+                Dimensions=dimensions,
+                StartTime=start,
+                EndTime=now,
+                Period=int(max(1.0, window_days) * 86400),
+                Statistics=["Sum"],
+            )
+            return int(sum(dp.get("Sum", 0.0) for dp in resp.get("Datapoints", [])))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[WARNING] walk-back counter read failed (%s): %s", metric_name, exc)
+            return 0
+
+    return {
+        "auto_merges": _sum(DEDUP_AUTO_MERGE_METRIC),
+        "walk_backs": _sum(DEDUP_WALK_BACK_METRIC),
+    }
+
+
+def _compute_dedup_signals(driver) -> Dict[str, Any]:
+    """ENC-TSK-I10: assemble the full dedup-convergence snapshot — the four
+    graph-derived signals plus the walk-back model-health loop."""
+    cosine_threshold = _dedup_float("DEDUP_COSINE_THRESHOLD", dedup_convergence.DEFAULT_COSINE_THRESHOLD)
+    flow_window_days = _dedup_float("DEDUP_FLOW_WINDOW_DAYS", float(dedup_convergence.DEFAULT_FLOW_WINDOW_DAYS))
+    precision_floor = _dedup_float("DEDUP_PRECISION_FLOOR", dedup_convergence.DEFAULT_PRECISION_FLOOR)
+    vector_top_k = _dedup_int("DEDUP_VECTOR_TOP_K", dedup_convergence.DEFAULT_VECTOR_TOP_K)
+    walkback_window_days = _dedup_float(
+        "DEDUP_WALKBACK_WINDOW_DAYS", float(dedup_convergence.DEFAULT_WALKBACK_WINDOW_DAYS)
+    )
+
+    signals = dedup_convergence.compute_graph_signals(
+        driver,
+        PROJECT_ID,
+        cosine_threshold=cosine_threshold,
+        flow_window_days=flow_window_days,
+        vector_top_k=vector_top_k,
+    )
+    counts = _read_walk_back_counts(walkback_window_days)
+    signals["walk_back"] = dedup_convergence.walk_back_health(
+        counts["auto_merges"], counts["walk_backs"], precision_floor
+    )
+    signals["walk_back"]["window_days"] = walkback_window_days
+    return signals
+
+
+def _publish_dedup_signals(signals: Dict[str, Any]) -> Dict[str, float]:
+    """ENC-TSK-I10: publish the dedup-convergence signals as governed
+    CloudWatch metrics under DEDUP_NAMESPACE."""
+    wb = signals.get("walk_back", {})
+    metrics: Dict[str, float] = {
+        # Stock (§10): same-type duplicate-pair count, trending to floor.
+        "DuplicatePairStock": float(signals.get("stock_pairs", 0)),
+        # Precision@1 recovery (§10): live proxy + static baseline/ceiling refs.
+        "Precision1RecoveryProxy": float(signals.get("precision_at_1_recovery_proxy", 0.0)),
+        "Precision1RecoveryEstimate": float(signals.get("precision_at_1_recovery_fraction", 0.0)),
+        "Precision1Baseline": float(signals.get("precision_at_1_baseline", dedup_convergence.PRECISION_AT_1_BASELINE)),
+        "RecallCeiling": float(signals.get("recall_ceiling", dedup_convergence.RECALL_CEILING)),
+        # Flow (§10): new same-type duplicate pairs per window.
+        "NewDuplicateFlow": float(signals.get("new_duplicate_pairs", 0)),
+        # Percolation (§10): LCC size → 1 at convergence + cluster count.
+        "DuplicateLCCSize": float(signals.get("lcc_size", 0)),
+        "NonTrivialComponentCount": float(signals.get("nontrivial_component_count", 0)),
+        "EmbeddedRecordCount": float(signals.get("embedded_record_count", 0)),
+        # Walk-back model-health loop (§10): live certificate-precision estimate.
+        "AutoMergeWalkBackRate": float(wb.get("walk_back_rate", 0.0)),
+        "AutoMergeCount": float(wb.get("auto_merge_count", 0)),
+        "WalkBackCount": float(wb.get("walk_back_count", 0)),
+        "WalkBackRateBreachedFloor": 1.0 if wb.get("breached_floor") else 0.0,
+    }
+    cw = boto3.client("cloudwatch")
+    now = datetime.now(timezone.utc)
+    dimensions = [{"Name": "ProjectId", "Value": PROJECT_ID}]
+    metric_data = [
+        {"MetricName": name, "Value": value, "Unit": "None", "Timestamp": now, "Dimensions": dimensions}
+        for name, value in metrics.items()
+    ]
+    if metric_data:
+        cw.put_metric_data(Namespace=DEDUP_NAMESPACE, MetricData=metric_data)
+        logger.info(
+            "[SUCCESS] Published %d dedup-convergence signals to %s: %s",
+            len(metric_data), DEDUP_NAMESPACE, {k: round(v, 4) for k, v in metrics.items()},
+        )
+    return metrics
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Lambda entry point — compute and publish graph health metrics."""
+    """Lambda entry point — compute and publish graph health metrics + the
+    ENC-TSK-I10 dedup-convergence signals (DOC-DF651F07D5C2 §10)."""
     logger.info("[START] Graph health metrics computation (proxy path)")
 
     try:
         driver = _get_neo4j_driver()
         metrics = _compute_metrics(driver)
         _publish_to_cloudwatch(metrics)
+
+        # ENC-TSK-I10: dedup-convergence probe. Isolated so a dedup failure
+        # (e.g. a missing vector index) never breaks the C10 graph-health path.
+        dedup_result: Dict[str, Any] = {"published": False}
+        try:
+            signals = _compute_dedup_signals(driver)
+            published = _publish_dedup_signals(signals)
+            dedup_result = {
+                "published": True,
+                "namespace": DEDUP_NAMESPACE,
+                "signals": signals,
+                "published_metrics": {k: round(v, 6) for k, v in published.items()},
+            }
+        except Exception as exc:
+            logger.error("[ERROR] Dedup-convergence probe failed: %s", exc, exc_info=True)
+            dedup_result = {"published": False, "error": str(exc)}
 
         return {
             "statusCode": 200,
@@ -145,6 +295,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "namespace": CLOUDWATCH_NAMESPACE,
                 "implementation_path": "cloudwatch_proxy",
                 "gds_available": False,
+                "dedup_convergence": dedup_result,
             }),
         }
     except Exception as exc:
