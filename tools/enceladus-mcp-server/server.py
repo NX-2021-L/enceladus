@@ -7530,6 +7530,10 @@ _EXECUTE_ACTIONS: Dict[str, Dict[str, Any]] = {
         "tool": "tracker_set_acceptance_evidence",
         "requires_governance_hash": True,
     },
+    # ENC-TSK-B63 AC-7 / ENC-ISS-241: bidirectional related_*_ids convenience action.
+    # Core (not behind ENABLE_TYPED_RELATIONSHIPS) — operates on the canonical
+    # related_{task,issue,feature}_ids fields, not the FTR-049 typed-edge primitive.
+    "tracker.relate": {"tool": "tracker_relate", "requires_governance_hash": True},
     "documents.check_policy": {"tool": "check_document_policy"},
     "documents.put": {"tool": "documents_put", "requires_governance_hash": True},
     "documents.patch": {"tool": "documents_patch", "requires_governance_hash": True},
@@ -9046,6 +9050,30 @@ async def _tracker_create_relationship(args: dict) -> list:
     return _result_text(resp)
 
 
+async def _tracker_relate(args: dict) -> list:
+    """ENC-TSK-B63 AC-7 / ENC-ISS-241: create a symmetric related_*_ids cross-reference
+    between two records, writing BOTH sides under a single governance-hash-checked
+    transaction. Idempotent and self-healing for a pre-existing one-sided edge."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    project_id = args.get("project_id", "")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+
+    payload = {
+        "source_id": args.get("source_id", ""),
+        "target_id": args.get("target_id", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("relation_type") is not None:
+        payload["relation_type"] = args["relation_type"]
+
+    resp = _tracker_api_request("POST", f"/{project_id}/relate", payload=payload)
+    return _result_text(resp)
+
+
 async def _tracker_archive_relationship(args: dict) -> list:
     """Archive (soft-delete) a typed relationship edge. Data preserved in DynamoDB."""
     governance_error = _require_governance_hash(args)
@@ -10206,6 +10234,8 @@ _TOOL_HANDLERS = {
     "tracker_create_relationship": _tracker_create_relationship,
     "tracker_archive_relationship": _tracker_archive_relationship,
     "tracker_list_relationships": _tracker_list_relationships,
+    # ENC-TSK-B63 AC-7 / ENC-ISS-241: bidirectional related_*_ids convenience action
+    "tracker_relate": _tracker_relate,
     # ENC-FTR-037: Checkout service tools
     "checkout_task": _checkout_task,
     "release_task": _release_task,
