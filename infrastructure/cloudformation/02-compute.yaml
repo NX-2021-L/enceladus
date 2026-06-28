@@ -1366,6 +1366,86 @@ Resources:
       SourceArn: !GetAtt GraphHealthMetricsSchedule.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-I88 / ENC-FTR-085 — comp-percolation-monitor (ENC-PLN-006 v4/gamma)
+  # Nightly percolation-threshold telemetry: analytical p_c (Molloy-Reed) +
+  # empirical p_c (Monte Carlo). Reads the graph ONLY via the graph_query_api
+  # endpoint (search_type=adjacency) — no direct Neo4j, no new edge type (OGTM
+  # N/A). Gamma-only (Condition: IsGamma): v3-prod is frozen (DOC-499FA089EC30)
+  # and these resources must never be created on the prod stack. Runtime/arch
+  # use the IsGamma !If form so the arch-parity guard passes; on this gamma-only
+  # resource they always resolve to python3.12/arm64.
+  # ---------------------------------------------------------------------------
+  PercolationMonitorFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-percolation-monitor${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 1024
+      Timeout: 900
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt PercolationMonitorRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          GRAPH_QUERY_API_BASE: !Sub "https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
+          PERCOLATION_TABLE: !Sub "enceladus-percolation-telemetry${EnvironmentSuffix}"
+          CLOUDWATCH_NAMESPACE: Enceladus/Percolation
+          PROJECT_ID: enceladus
+          MC_TRIALS: "40"
+          MC_NUM_P: "30"
+          MC_P_MIN: "0.02"
+          MC_P_MAX: "0.60"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: percolation-monitor
+        - Key: Feature
+          Value: ENC-FTR-085
+
+  PercolationMonitorSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsGamma
+    Properties:
+      Name: !Sub "enceladus-percolation-nightly${EnvironmentSuffix}"
+      Description: "ENC-FTR-085: nightly percolation-threshold measurement at 03:00 UTC."
+      ScheduleExpression: "cron(0 3 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt PercolationMonitorFunction.Arn
+          Id: percolation-nightly
+
+  PercolationMonitorPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref PercolationMonitorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PercolationMonitorSchedule.Arn
+
+  # ---------------------------------------------------------------------------
   # ENC-FTR-101 Option B (ENC-TSK-H37): standing-projection out-of-band refresh
   # Keeps the named GDS projection warm so anchored hybrid PPR runs
   # gds.pageRank.stream against a standing projection instead of provisioning a
@@ -3485,6 +3565,61 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ENC-TSK-I88 / ENC-FTR-085: comp-percolation-monitor execution role (gamma-only).
+  # Reads the graph over HTTPS via graph_query_api (no Neo4j/Secrets access);
+  # writes telemetry to its own DynamoDB table and CloudWatch metrics only.
+  PercolationMonitorRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-percolation-monitor-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PercolationMonitorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              - Sid: PercolationTelemetryWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-percolation-telemetry${EnvironmentSuffix}"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

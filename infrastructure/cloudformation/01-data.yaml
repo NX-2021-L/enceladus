@@ -24,6 +24,8 @@ Parameters:
 
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
+  # ENC-TSK-I88 / ENC-FTR-085: gamma-only resources (deploy target v4/gamma).
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -575,6 +577,31 @@ Resources:
           Value: enceladus
         - Key: Component
           Value: governance
+
+  # ENC-TSK-I88 / ENC-FTR-085 (ENC-PLN-006 v4/gamma): comp-percolation-monitor
+  # nightly telemetry. One row per nightly run, keyed pk="date#YYYY-MM-DD".
+  # Gamma-only (Condition: IsGamma) — v3-prod is frozen (DOC-499FA089EC30) and
+  # this resource must never be created on the prod stack.
+  PercolationTelemetryTable:
+    Type: AWS::DynamoDB::Table
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "enceladus-percolation-telemetry${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: percolation-monitor
+        - Key: Feature
+          Value: ENC-FTR-085
 
 Outputs:
   CoordinationTableName:
