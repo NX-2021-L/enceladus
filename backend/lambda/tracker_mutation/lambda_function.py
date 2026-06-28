@@ -499,6 +499,49 @@ _TRACKER_CREATE_MAX_ATTEMPTS = 32
 # Relation fields
 _RELATION_ID_FIELDS = {"related_task_ids", "related_issue_ids", "related_feature_ids"}
 
+# ENC-TSK-B63 AC-7 / ENC-ISS-241: bidirectional related_*_ids enforcement.
+# The related_{task,issue,feature}_ids field name encodes the TARGET record's type;
+# the inverse field on each target encodes the SOURCE record's type. So when record A
+# (type src) lists record B in related_{B_type}_ids, B must list A in related_{src}_ids —
+# atomically, in the same DynamoDB transaction, with fail-atomic semantics when any
+# target record does not exist (no silent unidirectional edges, the ENC-ISS-241 defect).
+_RELATION_FIELD_TO_TARGET_TYPE = {
+    "related_task_ids": "task",
+    "related_issue_ids": "issue",
+    "related_feature_ids": "feature",
+}
+# Only these source record types have a canonical related_<src>_ids inverse field.
+_BIDIRECTIONAL_SOURCE_TYPES = frozenset({"task", "issue", "feature"})
+# DynamoDB TransactWriteItems hard limit (source primary + N inverse target writes).
+_RELATION_TXN_MAX_ITEMS = 100
+
+
+def _bidirectional_relations_enabled() -> bool:
+    """ENC-TSK-B63 AC-4/AC-7: independently toggleable bidirectional relation
+    enforcement (rollback validated). Default ON; flip the AppConfig flag
+    ``enable_bidirectional_relations`` (or set ENABLE_BIDIRECTIONAL_RELATIONS=false)
+    to fall back to the legacy single-sided write path without a redeploy."""
+    return _appconfig_flag(
+        "enable_bidirectional_relations",
+        env_fallback="ENABLE_BIDIRECTIONAL_RELATIONS",
+        default=True,
+    )
+
+
+def _inverse_relation_field(source_type: str) -> Optional[str]:
+    """Field on a TARGET record that should list a SOURCE record of source_type."""
+    if source_type in _BIDIRECTIONAL_SOURCE_TYPES:
+        return f"related_{source_type}_ids"
+    return None
+
+
+def _resolve_target_project(target_id: str) -> Optional[str]:
+    """Resolve a target record's project from its ID prefix (e.g. ENC-TSK-001 -> enceladus)."""
+    parts = target_id.strip().upper().split("-")
+    if not parts or not parts[0]:
+        return None
+    return _get_prefix_map_cached().get(parts[0])
+
 # ENC-TSK-F41 / DOC-546B896390EA §5: server-side-only counter fields on task
 # records. Incremented atomically by the tracker lifecycle handler (closed_count
 # on every task->closed transition; checkout_count on every successful
@@ -3891,6 +3934,21 @@ def _handle_update_field(
                 "checkout": False, "checkout_state": "checked_in", "updated_at": now,
             })
 
+    # --- ENC-TSK-B63 AC-7 / ENC-ISS-241: atomic bidirectional relation enforcement ---
+    # When a related_*_ids field is written on a task/issue/feature, write the inverse
+    # field on every affected target in the SAME DynamoDB transaction (fail-atomic on a
+    # missing target). The flag-OFF path falls through to the legacy single-sided write.
+    if (
+        field in _RELATION_ID_FIELDS
+        and record_type in _BIDIRECTIONAL_SOURCE_TYPES
+        and _bidirectional_relations_enabled()
+    ):
+        bidi_result = _write_relation_field_bidirectional(
+            project_id, record_type, record_id, field, value, item_data, body,
+        )
+        if bidi_result is not None:
+            return bidi_result
+
     # --- Generic field update ---
     note_val = value if len(str(value)) <= 100 else str(value)[:100] + "..."
     note_text = f"Field '{field}' set to '{note_val}'{note_suffix}"
@@ -4784,6 +4842,271 @@ def _validate_rel_endpoints_exist(
     return None
 
 
+def _write_relation_field_bidirectional(
+    project_id: str,
+    record_type: str,
+    record_id: str,
+    field: str,
+    new_ids: Sequence[str],
+    item_data: Dict,
+    body: Dict,
+    *,
+    relate_note: Optional[str] = None,
+    force_add_targets: Optional[Sequence[str]] = None,
+) -> Optional[Dict]:
+    """Atomically write a related_*_ids field on the SOURCE record AND the inverse
+    field on every affected TARGET record, in a single DynamoDB transaction.
+
+    ENC-TSK-B63 AC-7 / ENC-ISS-241. Fail-atomic: if any added target record does not
+    exist, the whole transaction is rejected (HTTP 404) and the forward write never
+    lands — no silent unidirectional edges. Idempotent: an inverse already present on a
+    target is left untouched. Returns the governed HTTP response dict, or ``None`` when
+    the source record_type has no canonical inverse field (caller should fall back to
+    the plain single-field write path).
+    """
+    inverse_field = _inverse_relation_field(record_type)
+    if inverse_field is None:
+        return None  # signal: not handled here — caller does the legacy single write
+
+    ddb = _get_ddb()
+    now = _now_z()
+    source_id_u = record_id.strip().upper()
+    target_type = _RELATION_FIELD_TO_TARGET_TYPE[field]
+
+    # Normalize + dedup the desired forward list, preserving first-seen order.
+    seen: set = set()
+    forward_list: List[str] = []
+    for rid in new_ids:
+        ru = str(rid).strip().upper()
+        if ru and ru not in seen:
+            seen.add(ru)
+            forward_list.append(ru)
+
+    existing_set = {
+        str(x).strip().upper()
+        for x in (item_data.get(field) or [])
+        if str(x).strip()
+    }
+    new_set = set(forward_list)
+    additions = [t for t in forward_list if t not in existing_set]
+    removals = [t for t in existing_set if t not in new_set]
+
+    # force_add_targets lets tracker.relate guarantee (and self-heal) the inverse even
+    # when the forward edge already exists — additions diff alone would miss that case.
+    add_targets: List[str] = list(additions)
+    if force_add_targets:
+        add_seen = set(add_targets)
+        for t in force_add_targets:
+            tu = str(t).strip().upper()
+            if tu and tu in new_set and tu not in add_seen:
+                add_seen.add(tu)
+                add_targets.append(tu)
+
+    note_suffix = _write_source_note_suffix(body)
+    src_note = relate_note or f"Field '{field}' set to '{forward_list}'{note_suffix}"
+    src_history = {"M": {
+        "timestamp": _ser_s(now), "status": _ser_s("worklog"),
+        "description": _ser_s(src_note),
+    }}
+
+    transact_items: List[Dict] = [{
+        "Update": {
+            "TableName": DYNAMODB_TABLE,
+            "Key": _build_key(project_id, record_type, source_id_u),
+            "UpdateExpression": (
+                "SET #fld = :val, updated_at = :now, last_update_note = :note, "
+                "write_source = :wsrc, "
+                "sync_version = if_not_exists(sync_version, :zero) + :one, "
+                "history = list_append(if_not_exists(history, :empty), :hentry)"
+            ),
+            "ExpressionAttributeNames": {"#fld": field},
+            "ExpressionAttributeValues": {
+                ":val": _ser_value(forward_list),
+                ":now": _ser_s(now), ":note": _ser_s(src_note),
+                ":wsrc": _build_write_source(body),
+                ":zero": {"N": "0"}, ":one": {"N": "1"},
+                ":hentry": {"L": [src_history]}, ":empty": {"L": []},
+            },
+            "ConditionExpression": "attribute_exists(record_id)",
+        }
+    }]
+
+    affected: List[Dict[str, str]] = []
+    for action, targets in (("add", add_targets), ("remove", removals)):
+        for tid in targets:
+            tproj = _resolve_target_project(tid) or project_id
+            traw = _get_record_raw(tproj, target_type, tid)
+            if traw is None:
+                if action == "remove":
+                    # The source no longer references a target that has already
+                    # vanished — nothing to clean up, so don't fail the whole write.
+                    continue
+                return _error(
+                    404,
+                    (
+                        f"Cannot write bidirectional relation: target record '{tid}' "
+                        f"does not exist in project '{tproj}'. The '{field}' write is "
+                        f"rejected atomically so no unidirectional edge is created "
+                        f"(ENC-ISS-241 / ENC-TSK-B63 AC-7)."
+                    ),
+                    code="RELATION_TARGET_NOT_FOUND",
+                    field=field,
+                    target_id=tid,
+                )
+            tdata = _deser_item(traw)
+            tcur = [
+                str(x).strip().upper()
+                for x in (tdata.get(inverse_field) or [])
+                if str(x).strip()
+            ]
+            tcur_set = set(tcur)
+            if action == "add":
+                if source_id_u in tcur_set:
+                    continue  # inverse already present — idempotent, skip
+                tnew = tcur + [source_id_u]
+                tnote = (
+                    f"Inverse relation: added {source_id_u} to {inverse_field} "
+                    f"(bidirectional enforcement, ENC-ISS-241)"
+                )
+            else:  # remove
+                if source_id_u not in tcur_set:
+                    continue
+                tnew = [x for x in tcur if x != source_id_u]
+                tnote = (
+                    f"Inverse relation: removed {source_id_u} from {inverse_field} "
+                    f"(bidirectional enforcement, ENC-ISS-241)"
+                )
+            thistory = {"M": {
+                "timestamp": _ser_s(now), "status": _ser_s("worklog"),
+                "description": _ser_s(tnote),
+            }}
+            transact_items.append({
+                "Update": {
+                    "TableName": DYNAMODB_TABLE,
+                    "Key": _build_key(tproj, target_type, tid),
+                    "UpdateExpression": (
+                        "SET #inv = :inv, updated_at = :now, last_update_note = :tnote, "
+                        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+                        "history = list_append(if_not_exists(history, :empty), :thentry)"
+                    ),
+                    "ExpressionAttributeNames": {"#inv": inverse_field},
+                    "ExpressionAttributeValues": {
+                        ":inv": _ser_value(tnew),
+                        ":now": _ser_s(now), ":tnote": _ser_s(tnote),
+                        ":zero": {"N": "0"}, ":one": {"N": "1"},
+                        ":thentry": {"L": [thistory]}, ":empty": {"L": []},
+                    },
+                    "ConditionExpression": "attribute_exists(record_id)",
+                }
+            })
+            affected.append({"target_id": tid, "action": action})
+
+    if len(transact_items) > _RELATION_TXN_MAX_ITEMS:
+        return _error(
+            400,
+            (
+                f"Too many relation targets in one write "
+                f"({len(transact_items) - 1}); DynamoDB transactions are limited to "
+                f"{_RELATION_TXN_MAX_ITEMS} items. Split the update into smaller batches."
+            ),
+            code="RELATION_BATCH_TOO_LARGE",
+            field=field,
+        )
+
+    try:
+        ddb.transact_write_items(TransactItems=transact_items)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "TransactionCanceledException":
+            # Source missing, or a target changed/vanished between read and write.
+            return _error(
+                409,
+                (
+                    "Bidirectional relation transaction was cancelled — a record "
+                    "changed concurrently or no longer exists. Retry the write."
+                ),
+                code="RELATION_TRANSACTION_CANCELLED",
+                field=field,
+            )
+        logger.error("transact_write_items failed: %s", exc)
+        return _error(500, "Database write failed.")
+
+    return _response(200, {
+        "success": True,
+        "record_id": source_id_u,
+        "field": field,
+        "value": forward_list,
+        "updated_at": now,
+        "bidirectional": True,
+        "inverse_field": inverse_field,
+        "affected_targets": affected,
+    })
+
+
+def _handle_relate(project_id: str, body: Dict) -> Dict:
+    """POST /{project}/relate — ENC-TSK-B63 AC-7 convenience action.
+
+    Creates the symmetric related_*_ids cross-reference between two records and writes
+    BOTH sides under a single governance-hash-checked transaction: target is added to
+    source.related_{target_type}_ids and source is added to target.related_{source_type}_ids.
+    Idempotent and self-healing (a pre-existing forward edge with a missing inverse is
+    repaired). relation_type is optional metadata recorded in the worklog note.
+    """
+    source_id = str(body.get("source_id", "")).strip().upper()
+    target_id = str(body.get("target_id", "")).strip().upper()
+    relation_type = str(body.get("relation_type", "relates-to")).strip() or "relates-to"
+
+    if not source_id or not target_id:
+        return _error(400, "source_id and target_id are required for tracker.relate.")
+    if source_id == target_id:
+        return _error(400, "Cannot relate a record to itself (irreflexive).")
+
+    source_type = _record_type_from_id(source_id)
+    target_type = _record_type_from_id(target_id)
+    if source_type not in _BIDIRECTIONAL_SOURCE_TYPES:
+        return _error(
+            400,
+            (
+                f"tracker.relate source must be one of {sorted(_BIDIRECTIONAL_SOURCE_TYPES)}; "
+                f"could not resolve a valid type from '{source_id}'."
+            ),
+            code="RELATION_UNSUPPORTED_TYPE",
+        )
+    if target_type not in _BIDIRECTIONAL_SOURCE_TYPES:
+        return _error(
+            400,
+            (
+                f"tracker.relate target must be one of {sorted(_BIDIRECTIONAL_SOURCE_TYPES)}; "
+                f"could not resolve a valid type from '{target_id}'."
+            ),
+            code="RELATION_UNSUPPORTED_TYPE",
+        )
+
+    field = f"related_{target_type}_ids"
+    raw = _get_record_raw(project_id, source_type, source_id)
+    if raw is None:
+        return _error(404, f"Source record '{source_id}' not found in project '{project_id}'.")
+    item_data = _deser_item(raw)
+
+    existing = [
+        str(x).strip().upper()
+        for x in (item_data.get(field) or [])
+        if str(x).strip()
+    ]
+    new_ids = existing if target_id in set(existing) else existing + [target_id]
+
+    note = (
+        f"tracker.relate: {source_id} <-> {target_id} ({relation_type})"
+        f"{_write_source_note_suffix(body)}"
+    )
+    result = _write_relation_field_bidirectional(
+        project_id, source_type, source_id, field, new_ids, item_data, body,
+        relate_note=note, force_add_targets=[target_id],
+    )
+    if result is None:
+        return _error(500, "tracker.relate could not be applied (no inverse field for source type).")
+    return result
+
+
 def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
     """Create a typed relationship edge with auto-maintained inverse."""
     source_id = str(body.get("source_id", "")).strip().upper()
@@ -5663,6 +5986,10 @@ _RE_DEDUP_REVIEW = re.compile(
 _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/relationship$"
 )
+# ENC-TSK-B63 AC-7: tracker.relate convenience action (bidirectional related_*_ids).
+_RE_RELATE = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/relate$"
+)
 _RE_RECORD_SUB = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/(?P<type>task|issue|feature|lesson|plan|generation)/(?P<id>[A-Za-z0-9_-]+)/(?P<sub>log|checkout|acceptance-evidence|extend)$"
 )
@@ -5723,6 +6050,25 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             return _handle_dedup_approve(project_id, body, claims)
         else:
             return _error(400, "Field 'op' must be 'propose' or 'approve'.")
+
+    # --- Route: tracker.relate convenience action (ENC-TSK-B63 AC-7 / ENC-ISS-241) ---
+    m_relate = _RE_RELATE.match(path)
+    if m_relate:
+        project_id = m_relate.group("project")
+        if method != "POST":
+            return _error(405, "Method not allowed on /relate. Use POST.")
+        claims, auth_err = _authenticate(event, ["tracker:write"])
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        try:
+            body = json.loads(event.get("body") or "{}")
+        except (ValueError, TypeError):
+            return _error(400, "Invalid JSON body.")
+        _normalize_write_source(body, claims)
+        return _handle_relate(project_id, body)
 
     # --- Route: typed relationship edges (ENC-FTR-049) ---
     m_rel = _RE_RELATIONSHIP.match(path)
