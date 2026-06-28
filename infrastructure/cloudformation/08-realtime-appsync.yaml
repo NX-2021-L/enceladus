@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus v4 Real-Time Layer — AWS AppSync Events API + FeedPublisher
+  (real-time) Lambda wired to DynamoDB Streams. Delivers sub-500ms feed deltas
+  to the PWA 2.0 Governance Cockpit (ENC-TSK-B67, PLN-006 Phase 7).
+
+  Authoritative spec: DOC-E470AC8CE9A8 (Near-Zero Latency React PWA
+  Architecture). This is the live-delta path; the existing SQS-FIFO -> S3
+  snapshot pipeline (devops-feed-publisher) is preserved as the cold-start
+  source + WebSocket fallback (AC-4).
+
+  Deploy target: gamma (v4/main). v3-prod is frozen — production deploy is
+  gated behind the PLN-006 cutover (ENC-TSK-B69, Phase 8).
+
+Parameters:
+  Environment:
+    Type: String
+    Default: gamma
+    AllowedValues: [production, staging, gamma]
+  EnvironmentSuffix:
+    Type: String
+    Default: "-gamma"
+    AllowedValues: ["", "-gamma"]
+  TrackerStreamArn:
+    Type: String
+    Description: >
+      DynamoDB Streams ARN for the devops-project-tracker table (NEW_AND_OLD_IMAGES).
+      Sourced from the 01-data stack export TrackerTable.StreamArn.
+  LambdaCodeS3Bucket:
+    Type: String
+    Default: devops-agentcli-compute
+  LambdaCodeS3Key:
+    Type: String
+    Description: S3 key of the feed_realtime_publisher deployment zip.
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # AppSync Events API (AC-1) — pure pub/sub over serverless WebSockets.
+  # Channels: /feed/updates, /records/{recordId}, /projects/{projectId}.
+  # Channel wildcards (/feed/*) enable flexible scoping with no infra changes.
+  # ---------------------------------------------------------------------------
+  RealtimeEventsApi:
+    Type: AWS::AppSync::Api
+    Properties:
+      Name: !Sub "enceladus-realtime-events${EnvironmentSuffix}"
+      EventConfig:
+        AuthProviders:
+          - AuthType: API_KEY
+        ConnectionAuthModes:
+          - AuthType: API_KEY
+        DefaultPublishAuthModes:
+          - AuthType: API_KEY
+        DefaultSubscribeAuthModes:
+          - AuthType: API_KEY
+
+  RealtimeApiKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+      ApiId: !GetAtt RealtimeEventsApi.ApiId
+      Description: PWA 2.0 realtime feed subscribe/publish key
+
+  # Namespace covering the /feed, /records, /projects channel families. A single
+  # namespace with onPublish/onSubscribe defaults is sufficient; per-family
+  # handlers can be added later without client changes (AC-1 wildcard scoping).
+  FeedChannelNamespace:
+    Type: AWS::AppSync::ChannelNamespace
+    Properties:
+      ApiId: !GetAtt RealtimeEventsApi.ApiId
+      Name: default
+
+  # ---------------------------------------------------------------------------
+  # FeedPublisher (real-time) Lambda execution role
+  # ---------------------------------------------------------------------------
+  RealtimePublisherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "devops-feed-realtime-publisher-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: stream-read-and-appsync-publish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !Ref TrackerStreamArn
+              - Effect: Allow
+                Action:
+                  - appsync:EventPublish
+                Resource: !Sub "${RealtimeEventsApi.ApiArn}/*"
+
+  RealtimePublisherFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "devops-feed-realtime-publisher${EnvironmentSuffix}"
+      Runtime: python3.12
+      Handler: lambda_function.handler
+      Timeout: 15
+      MemorySize: 256
+      Role: !GetAtt RealtimePublisherRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+      Environment:
+        Variables:
+          APPSYNC_EVENTS_HTTP_ENDPOINT: !GetAtt RealtimeEventsApi.Dns.Http
+          # API key is injected post-deploy from the RealtimeApiKey resource to
+          # avoid embedding the key value in template parameters.
+          MAX_SUMMARY_BYTES: "500"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: realtime-feed
+
+  # ---------------------------------------------------------------------------
+  # Event Source Mapping (AC-2): BatchSize=1, MaximumBatchingWindowInSeconds=0
+  # for minimum latency, ReportBatchItemFailures for per-record retry.
+  # ---------------------------------------------------------------------------
+  RealtimeStreamMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref RealtimePublisherFunction
+      EventSourceArn: !Ref TrackerStreamArn
+      StartingPosition: LATEST
+      BatchSize: 1
+      MaximumBatchingWindowInSeconds: 0
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      MaximumRetryAttempts: 3
+      BisectBatchOnFunctionError: true
+
+Outputs:
+  RealtimeEventsApiId:
+    Value: !GetAtt RealtimeEventsApi.ApiId
+    Export:
+      Name: !Sub "enceladus-realtime-events-api-id${EnvironmentSuffix}"
+  RealtimeEventsHttpEndpoint:
+    Description: HTTP endpoint for FeedPublisher POSTs and PWA client config.
+    Value: !GetAtt RealtimeEventsApi.Dns.Http
+  RealtimeEventsRealtimeEndpoint:
+    Description: WebSocket (realtime) endpoint for the PWA AppSync Events client.
+    Value: !GetAtt RealtimeEventsApi.Dns.Realtime
+  RealtimePublisherFunctionName:
+    Value: !Ref RealtimePublisherFunction
