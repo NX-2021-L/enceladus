@@ -428,6 +428,13 @@ _ALLOWED_EDGE_TYPES = frozenset({
     # graph_sync RELATIONSHIP_TYPE_TO_EDGE_LABEL; labels must stay byte-identical
     # across both lambdas (ENC-ISS-178).
     "PATHWAY_TRAVERSED",
+    # ENC-TSK-C08 / ENC-FTR-064 (OGTM): Handoff Consolidation Engine provenance
+    # edges. CONSOLIDATED_FROM: Lesson-candidate Document -> source Handoff
+    # Documents. PROPOSED_BY: candidate -> proposer (the HCE feature/agent).
+    # Field-projected by graph_sync from the candidate's consolidated_from /
+    # proposed_by fields; labels must stay byte-identical across both lambdas.
+    "CONSOLIDATED_FROM", "CONSOLIDATES",
+    "PROPOSED_BY", "PROPOSES",
     "TRAVERSED_BY",
 })
 

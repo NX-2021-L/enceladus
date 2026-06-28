@@ -4560,6 +4560,9 @@ _RELATIONSHIP_TYPES = frozenset({
     "deploys", "deployed-by",
     # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship.
     "pathway-traversed", "traversed-by",
+    # ENC-TSK-C08 / ENC-FTR-064: Handoff Consolidation Engine provenance edges.
+    "consolidated-from", "consolidates",
+    "proposed-by", "proposes",
 })
 
 _INVERSE_PAIRS: Dict[str, str] = {
@@ -4595,6 +4598,9 @@ _INVERSE_PAIRS: Dict[str, str] = {
     "deploys": "deployed-by", "deployed-by": "deploys",
     # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship.
     "pathway-traversed": "traversed-by", "traversed-by": "pathway-traversed",
+    # ENC-TSK-C08 / ENC-FTR-064: Handoff Consolidation Engine provenance edges.
+    "consolidated-from": "consolidates", "consolidates": "consolidated-from",
+    "proposed-by": "proposes", "proposes": "proposed-by",
 }
 
 _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
@@ -4636,6 +4642,11 @@ _OWL_CHARACTERISTICS: Dict[str, Dict[str, bool]] = {
     # ENC-FTR-082 Phase A / AC-6: Pathway-telemetry traversal relationship.
     "pathway-traversed":  {"asymmetric": True, "irreflexive": True, "transitive": False},
     "traversed-by":       {"asymmetric": True, "irreflexive": True, "transitive": False},
+    # ENC-TSK-C08 / ENC-FTR-064: Handoff Consolidation Engine provenance edges.
+    "consolidated-from":  {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "consolidates":       {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "proposed-by":        {"asymmetric": True, "irreflexive": True, "transitive": False},
+    "proposes":           {"asymmetric": True, "irreflexive": True, "transitive": False},
 }
 
 # Domain/range constraints: {relationship_type: {source_types, target_types}}
@@ -4688,6 +4699,13 @@ _DOMAIN_RANGE_CONSTRAINTS: Dict[str, Dict[str, Optional[frozenset]]] = {
     # can be any governed record type (intent/anchor -> result node), so unconstrained.
     "pathway-traversed":  {"source": None, "target": None},
     "traversed-by":       {"source": None, "target": None},
+    # ENC-TSK-C08 / ENC-FTR-064: HCE provenance edges. Endpoints are document IDs
+    # (candidate / handoff) and the proposer record; documents are not a tracker
+    # record type, so source/target are unconstrained (mirrors hands-off).
+    "consolidated-from":  {"source": None, "target": None},
+    "consolidates":       {"source": None, "target": None},
+    "proposed-by":        {"source": None, "target": None},
+    "proposes":           {"source": None, "target": None},
 }
 
 _TRANSITIVE_TYPES = frozenset(

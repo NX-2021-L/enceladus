@@ -294,6 +294,12 @@ def _collect_placeholder_target_refs(record: Dict[str, Any]) -> Set[PlaceholderR
             _add_placeholder_ref(refs, _infer_label_from_id(rid), rid)
         for source_id in record.get("informed_by", []) or []:
             _add_placeholder_ref(refs, "Document", source_id)
+        # ENC-TSK-C08 / ENC-FTR-064: HCE provenance placeholder targets.
+        for source_id in record.get("consolidated_from", []) or []:
+            _add_placeholder_ref(refs, "Document", source_id)
+        proposed_by = _bare_id(str(record.get("proposed_by") or "").strip())
+        if proposed_by:
+            _add_placeholder_ref(refs, _infer_label_from_id(proposed_by), proposed_by)
 
         doc_subtype = str(record.get("document_subtype") or "").strip()
         if doc_subtype == "coe":
@@ -852,6 +858,51 @@ def _reconcile_edges(tx, record: Dict[str, Any]) -> None:
                         doc_id, source_record_id,
                     )
 
+        # ENC-TSK-C08 / ENC-FTR-064 (OGTM): HCE provenance edges.
+        # CONSOLIDATED_FROM -> each source Handoff document a Lesson candidate was
+        # consolidated from; CONSOLIDATES is the inverse. Placeholder MERGE so the
+        # edge lands even if a source document has not yet been projected.
+        for source_id in record.get("consolidated_from", []) or []:
+            source_id = _bare_id(source_id) if source_id else ""
+            if not source_id:
+                continue
+            tx.run(
+                "MERGE (s:Document {record_id: $sid}) "
+                "ON CREATE SET s.is_placeholder = true",
+                sid=source_id,
+            )
+            tx.run(
+                "MATCH (d:Document), (s:Document) "
+                "WHERE d.record_id = $did AND s.record_id = $sid "
+                "MERGE (d)-[:CONSOLIDATED_FROM]->(s) "
+                "MERGE (s)-[:CONSOLIDATES]->(d)",
+                did=doc_id, sid=source_id,
+            )
+
+        # PROPOSED_BY -> the proposer record (HCE feature / agent); PROPOSES inverse.
+        proposed_by = _bare_id(str(record.get("proposed_by") or "").strip())
+        if proposed_by:
+            target_label = _infer_label_from_id(proposed_by)
+            if target_label:
+                tx.run(
+                    f"MERGE (t:{target_label} {{record_id: $pid}}) "
+                    "ON CREATE SET t.is_placeholder = true",
+                    pid=proposed_by,
+                )
+                tx.run(
+                    f"MATCH (d:Document), (t:{target_label}) "
+                    "WHERE d.record_id = $did AND t.record_id = $pid "
+                    "MERGE (d)-[:PROPOSED_BY]->(t) "
+                    "MERGE (t)-[:PROPOSES]->(d)",
+                    did=doc_id, pid=proposed_by,
+                )
+            else:
+                logger.warning(
+                    "[WARNING] Document %s proposed_by %s has unrecognised ID prefix; "
+                    "skipping PROPOSED_BY edge",
+                    doc_id, proposed_by,
+                )
+
     # ENC-FTR-098 / ENC-TSK-G35: MENTIONS edge auto-extraction from prose.
     # For every governed record_type with prose fields, strip fenced code
     # blocks, regex-extract Enceladus ID tokens via the Unit 2 extractor,
@@ -1034,6 +1085,15 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     # must stay byte-identical to graph_query_api _ALLOWED_EDGE_TYPES (ENC-ISS-178).
     "pathway-traversed": "PATHWAY_TRAVERSED",          # observed retrieval traversal
     "traversed-by": "TRAVERSED_BY",                    # inverse
+    # ENC-TSK-C08 / ENC-FTR-064 (OGTM): Handoff Consolidation Engine provenance.
+    # The operational path is field-projection from the candidate Document's
+    # consolidated_from / proposed_by fields (see _reconcile_edges document
+    # branch); these mapping entries also register the typed relationship-record
+    # path for parity. Labels stay byte-identical to graph_query_api.
+    "consolidated-from": "CONSOLIDATED_FROM",          # candidate -> source handoff
+    "consolidates": "CONSOLIDATES",                    # inverse
+    "proposed-by": "PROPOSED_BY",                      # candidate -> proposer
+    "proposes": "PROPOSES",                            # inverse
 }
 
 
