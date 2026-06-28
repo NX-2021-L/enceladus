@@ -378,16 +378,6 @@ Resources:
                   - lambda:UpdateFunctionConfiguration
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
-                  # ENC-ISS-418: the V4Gamma deploy role could publish versions but had no
-                  # alias permissions, so the _deploy.yml direct-alias path got AccessDenied
-                  # (swallowed) and the gamma :live alias froze at v81 — every post-I07
-                  # tracker_mutation deploy was published-but-not-served. Grant publish + alias
-                  # (gamma-scoped) so deploys self-advance :live.
-                  - lambda:PublishVersion
-                  - lambda:ListVersionsByFunction
-                  - lambda:GetAlias
-                  - lambda:CreateAlias
-                  - lambda:UpdateAlias
                 Resource:
                   - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:*-gamma"
                   - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:*-gamma:*"
@@ -671,6 +661,12 @@ Resources:
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
                   - lambda:ListVersionsByFunction
+                  # ENC-ISS-418: alias perms so _deploy.yml can advance/create the :live
+                  # alias on every v4-gamma deploy. Without these the direct-alias path
+                  # AccessDenied'd and gamma :live froze at v81 (published-but-not-served).
+                  - lambda:GetAlias
+                  - lambda:CreateAlias
+                  - lambda:UpdateAlias
                 Resource: "*"
               # S3 read for artifact version probing (belt-and-suspenders;
               # update-function-code fetches via Lambda service role, but
