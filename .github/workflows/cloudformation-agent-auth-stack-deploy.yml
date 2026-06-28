@@ -1,0 +1,122 @@
+name: CloudFormation Agent Auth Stack Deploy
+
+# ENC-FTR-074 Ph1 / ENC-TSK-I79 — dual-client Cognito M2M agent-auth stack.
+# DEPLOY TARGET: gamma (v4) ONLY. v3-prod is FROZEN (DOC-499FA089EC30). This workflow
+# therefore triggers exclusively on v4/** branches and resolves ENVIRONMENT_SUFFIX to
+# "-gamma"; it must never run against main / the production stack.
+
+on:
+  push:
+    branches:
+      - 'v4/**'
+    paths:
+      - "infrastructure/cloudformation/08-agent-auth.yaml"
+      - ".github/workflows/cloudformation-agent-auth-stack-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: "CloudFormation stack name for 08-agent-auth template"
+        type: string
+        required: false
+        default: "enceladus-agent-auth"
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual agent-auth stack deploy (gamma)"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  TEMPLATE_FILE: infrastructure/cloudformation/08-agent-auth.yaml
+  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  DEFAULT_STACK_NAME: enceladus-agent-auth
+
+jobs:
+  guard-gamma-only:
+    name: Guard — gamma only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse non-gamma targets
+        run: |
+          set -euo pipefail
+          if [ "${ENVIRONMENT_SUFFIX}" != "-gamma" ]; then
+            echo "::error::Agent-auth stack is gamma-only (v3-prod is FROZEN, DOC-499FA089EC30)."
+            exit 1
+          fi
+          echo "Gamma target confirmed (ENVIRONMENT_SUFFIX=${ENVIRONMENT_SUFFIX})."
+
+  deploy:
+    name: Deploy Agent Auth CloudFormation stack
+    needs: guard-gamma-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: cloudformation-agent-auth-stack-deploy-${{ github.ref_name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC CloudFormation role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment parameters
+        id: params
+        run: |
+          set -euo pipefail
+          stack_name="${{ github.event.inputs.stack_name || env.DEFAULT_STACK_NAME }}${ENVIRONMENT_SUFFIX}"
+          echo "stack_name=${stack_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Clean up ROLLBACK_COMPLETE stack if present
+        run: |
+          set -euo pipefail
+          stack_name="${{ steps.params.outputs.stack_name }}"
+          status=$(aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${stack_name}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          if [ "${status}" = "ROLLBACK_COMPLETE" ]; then
+            echo "Stack ${stack_name} is in ROLLBACK_COMPLETE — deleting before redeploy"
+            aws cloudformation delete-stack \
+              --region "${AWS_REGION}" \
+              --stack-name "${stack_name}"
+            aws cloudformation wait stack-delete-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${stack_name}"
+            echo "Stack deleted successfully"
+          fi
+
+      - name: Deploy Agent Auth stack (08-agent-auth)
+        run: |
+          set -euo pipefail
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --template-file "${TEMPLATE_FILE}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 08-agent-auth/ \
+            --parameter-overrides \
+              EnvironmentSuffix="${ENVIRONMENT_SUFFIX}"
+
+      - name: Verify deployed stack state
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
+            --output table
