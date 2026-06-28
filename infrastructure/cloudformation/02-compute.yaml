@@ -338,6 +338,8 @@ Resources:
           DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
+          # ENC-TSK-H84 / ENC-FTR-111 AC-5: read the per-project deploy_policy to gate deploy-init auto-walk.
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
       Tags:
         - Key: Project
           Value: enceladus
@@ -2012,6 +2014,13 @@ Resources:
                 Action:
                   - dynamodb:GetItem
                 Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/component-registry${EnvironmentSuffix}"
+              # ENC-TSK-H84 / ENC-FTR-111 AC-5: read the projects table for the per-project
+              # deploy_policy that gates deploy-init auto-walk (evaluate_auto_walk action).
+              - Sid: DynamoDBProjectsRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
 
   DocumentApiRole:
     Type: AWS::IAM::Role

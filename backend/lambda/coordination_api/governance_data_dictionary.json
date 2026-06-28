@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-28.03",
-  "updated_at": "2026-06-28T07:26:56Z",
-  "last_change_summary": "ENC-TSK-I74 (ENC-ISS-417/418/422/424 sweep): checkout_service plan completion gate (ENC-TSK-A89) now resolves cross-project objectives in their own project partition (ISS-417); coordination_api .build_extras packages dispatch_plan_generator + handoff_mandate together (ISS-424); V4Gamma deploy role gains lambda publish/alias perms + _deploy.yml fails loud on alias errors (ISS-418); enceladus-mcp-streamable live Function URL codified in CFN (ISS-422). No data-dictionary schema change — bump satisfies the path-triggered Governance Dictionary Guard on the checkout_service lambda_function.py edit.",
+  "version": "2026-06-28.04",
+  "updated_at": "2026-06-28T12:05:00Z",
+  "last_change_summary": "ENC-TSK-H84 (Arc-Walker Phase 1): add project_service.deploy_policy entity — the per-project deploy_policy enum (ci_triggered / manual, default ci_triggered) on the projects-table record. project_service persists it at create + read-time defaults existing projects (enceladus = ci_triggered); the Lifecycle Service evaluate_auto_walk action reads it to gate deploy-init auto-walk per ruling O-2 (ENC-FTR-111 AC-5).",
   "owners": [
     "enceladus-platform"
   ],
@@ -1728,6 +1728,21 @@
         "uri": {
           "type": "string",
           "usage_guidance": "Resolved as governance://{file_name}. Registered file_names are pre-validated; arbitrary 'agents/' paths are accepted by the API and resolve if the S3 object exists."
+        }
+      }
+    },
+    "project_service.deploy_policy": {
+      "description": "ENC-TSK-H84 / ENC-FTR-111 (Universal Arc-Walker Phase 1): per-project deploy_policy attribute on the projects DynamoDB table record, declaring how a project's deployments are triggered. Written by project_service at create time and surfaced on GET/LIST; read by the Lifecycle Service (evaluate_auto_walk action) to gate deploy-init auto-walk per ruling O-2 (ENC-FTR-111 AC-5). Pairs with the existing projects-table deploy_mode attribute (deploy.spec / _get_project_deploy_mode, ENC-ISS-102) but is orthogonal: deploy_mode controls CodeBuild vs record-only finalize; deploy_policy controls whether the Arc-Walker may mechanically auto-advance the deploy-init gate.",
+      "fields": {
+        "deploy_policy": {
+          "type": "enum",
+          "enum": [
+            "ci_triggered",
+            "manual"
+          ],
+          "default": "ci_triggered",
+          "definition": "How this project's deployments are triggered. 'ci_triggered': CI kicks off the deploy on merge to the deploy branch, so the deploy-init gate carries no irreducible human/external claim and the Universal Arc-Walker may mechanically auto-advance it (gate_class=mechanical AND deploy_policy=ci_triggered => auto-walkable, ruling O-2). 'manual': a human or external actor triggers the deploy, so the walker MUST NOT auto-advance deploy-init even though the static gate_class is mechanical. Stored on the projects-table record (project_id partition).",
+          "usage_guidance": "Set optionally at POST /api/v1/projects (project_service _validate_create_input; defaults to ci_triggered when omitted; invalid values are rejected 400). Existing/legacy project records that predate the field — including enceladus — are seeded to ci_triggered by read-time defaulting in project_service._enrich_project and by lifecycle_service._get_project_deploy_policy, and physically materialized by the idempotent backfill tools/seed_deploy_policy.py (run under a privileged session post-deploy; the agent-cli principal cannot write the projects table). The Lifecycle Service evaluate_auto_walk action derives auto-walk eligibility SOLELY from the gate_class taxonomy plus this runtime qualifier — never from evidence-field emptiness (DOC-078C57FC1BE6 §7.2). seed value: enceladus = ci_triggered."
         }
       }
     },
