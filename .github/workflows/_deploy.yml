@@ -59,17 +59,25 @@ env:
 jobs:
 
   # ---------------------------------------------------------------------------
-  # BUILD — runs only on push-to-v4/main (gamma path).
-  # push-to-main is intentionally a no-op: v3-prod is workflow_dispatch-only,
-  # and v4/main is forward-synced from main by the sync-main-to-v4main workflow
-  # (ENC-TSK-G71) which then triggers this workflow on the v4/main push.
-  # workflow_dispatch / workflow_call callers provide a pre-built SHA.
+  # BUILD — produces the Gen2 artifacts the deploy consumes.
+  # Runs on: push-to-v4/main (gamma path, builds github.sha), AND
+  #          workflow_dispatch / workflow_call (builds the caller-supplied SHA).
+  # ENC-TSK-I60: dispatch/call previously skipped build and required artifacts to
+  # have been pre-built by a v4/main push. v3-prod is workflow_dispatch-only and
+  # in post-fork mode a main SHA never reaches v4/main, so its Gen2 artifacts
+  # were never built — every dispatched v3-prod deploy failed at Resolve. Building
+  # the target SHA here makes a dispatched deploy self-contained (build -> resolve
+  # -> deploy) with zero out-of-band S3 artifact population.
+  # push-to-main stays a no-op (build skipped -> resolve/deploy skipped).
   # ---------------------------------------------------------------------------
   build:
-    if: github.event_name == 'push' && github.ref_name == 'v4/main'
+    if: |
+      (github.event_name == 'push' && github.ref_name == 'v4/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
     uses: ./.github/workflows/_build.yml
     with:
-      commit_sha: ${{ github.sha }}
+      commit_sha: ${{ inputs.commit_sha || github.sha }}
 
   # ---------------------------------------------------------------------------
   # RESOLVE — parse env manifest, probe S3 for artifacts, emit deploy inputs.
@@ -78,15 +86,11 @@ jobs:
   resolve:
     name: Resolve artifacts (${{ inputs.target_environment || 'v4-gamma' }})
     needs: [build]
-    # On push events, only proceed when the build job actually ran (v4/main).
-    # On workflow_dispatch / workflow_call, build is skipped — proceed with the
-    # caller-supplied commit_sha + target_environment.
-    if: |
-      always() &&
-      (
-        (github.event_name == 'push' && needs.build.result == 'success') ||
-        (github.event_name != 'push' && needs.build.result == 'skipped')
-      )
+    # ENC-TSK-I60: build now runs on every deploy path (push-to-v4/main,
+    # workflow_dispatch, workflow_call), so resolve simply requires it to have
+    # succeeded. push-to-main is preserved as a no-op: build is skipped there, so
+    # this condition is false and resolve (and deploy) are skipped.
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       commit_sha:            ${{ steps.sha.outputs.commit_sha }}
@@ -101,7 +105,14 @@ jobs:
       codedeploy_app_name:   ${{ steps.manifest.outputs.codedeploy_app_name }}
 
     steps:
+      # ENC-TSK-I60: pin to the target SHA so the `find backend/lambda` probe
+      # enumerates exactly the function set that _build.yml built and that the
+      # deploy job (which checks out commit_sha) will deploy. Without this the
+      # probe runs against the workflow's branch HEAD, which drifts past the
+      # deployed SHA over time and reintroduces missing-artifact failures.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
 
       - name: Resolve commit SHA
         id: sha
@@ -205,7 +216,7 @@ jobs:
           if [[ ${#MISSING[@]} -gt 0 ]]; then
             echo "::error::Artifacts missing in S3 for SHA=${SHA} (arch=${ARCH}-py${PY}):"
             printf '  missing: %s\n' "${MISSING[@]}"
-            echo "::error::Build artifacts first via _build.yml before dispatching _deploy.yml."
+            echo "::error::The build job should have produced these (it runs on push-to-v4/main and on dispatch/call). Check the build job logs for this run; a partial build or a SHA/branch mismatch in the resolve checkout is the usual cause (ENC-TSK-I60)."
             exit 1
           fi
 
@@ -231,11 +242,12 @@ jobs:
   deploy:
     name: Deploy → ${{ needs.resolve.outputs.environment }}
     needs: resolve
-    # Without this explicit condition, GitHub Actions' implicit success() check evaluates
-    # the transitive job chain: build (skipped on workflow_dispatch) → resolve → deploy.
-    # A skipped ancestor causes success() to return false, silently skipping the deploy job.
-    # This if: allows the deploy to run on workflow_dispatch (build skipped) as long as
-    # resolve itself succeeded.
+    # GitHub Actions' implicit success() check evaluates the transitive job chain
+    # build → resolve → deploy; a skipped ancestor (e.g. build on push-to-main,
+    # which is a deliberate no-op) would make success() false and silently skip
+    # deploy. This explicit condition runs deploy whenever resolve itself
+    # succeeded, regardless of upstream skips. (ENC-TSK-I60: build now runs on
+    # dispatch/call too, but this guard remains correct for the push-to-main path.)
     if: always() && needs.resolve.result == 'success'
     environment: ${{ needs.resolve.outputs.environment }}
     runs-on: ubuntu-latest
