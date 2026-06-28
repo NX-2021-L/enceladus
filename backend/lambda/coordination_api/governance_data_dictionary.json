@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-28.01",
-  "updated_at": "2026-06-28T02:20:00Z",
-  "last_change_summary": "ENC-TSK-I63 / ENC-TSK-I62: devops-document-api _sync_governance_documents now propagates a governance_data_dictionary.json sync into the governance-policies DDB record (discrete version + updated_at + the served dictionary_json blob), closing the ENC-TSK-I61 gap that required a manual `aws dynamodb update-item`. Includes an S3-vs-DDB entities deep-equal drift pre-check (#v reserved-word alias; raw-S3-bytes blob write keeps the item 400KB-safe) plus the paired CFN change (DocumentApiRole +dynamodb:UpdateItem, DocumentApiFunction +GOVERNANCE_POLICIES_TABLE). No data-dictionary schema change — bump satisfies the path-triggered Governance Dictionary Guard on lambda_function.py edits.",
+  "version": "2026-06-28.02",
+  "updated_at": "2026-06-28T03:55:00Z",
+  "last_change_summary": "ENC-TSK-I74 (ENC-ISS-417/418/422/424 sweep): checkout_service plan completion gate (ENC-TSK-A89) now resolves cross-project objectives in their own project partition (ISS-417); coordination_api .build_extras packages dispatch_plan_generator + handoff_mandate together (ISS-424); V4Gamma deploy role gains lambda publish/alias perms + _deploy.yml fails loud on alias errors (ISS-418); enceladus-mcp-streamable live Function URL codified in CFN (ISS-422). No data-dictionary schema change — bump satisfies the path-triggered Governance Dictionary Guard on the checkout_service lambda_function.py edit.",
   "owners": [
     "enceladus-platform"
   ],

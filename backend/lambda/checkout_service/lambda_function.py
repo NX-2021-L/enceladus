@@ -3041,6 +3041,48 @@ def _handle_plan_release(project_id: str, plan_id: str, body: dict) -> dict:
     return _response(200, {"success": True, "plan_id": plan_id})
 
 
+_PREFIX_MAP_CACHE: Optional[Dict[str, str]] = None
+_PREFIX_MAP_CACHE_AT: float = 0.0
+
+
+def _project_for_record_id(record_id: str, default_project: str) -> str:
+    """ENC-ISS-417: resolve a record's owning project from its ID prefix.
+
+    Objective IDs encode their project (e.g. ``INT-TSK-071`` -> ``intelligence``,
+    ``ENC-TSK-A89`` -> ``enceladus``). The plan completion gate (ENC-TSK-A89) must
+    resolve cross-project objective statuses in their OWN project partition, with
+    parity to plan.objectives_status — otherwise a cross-project objective resolves
+    as not_found in the plan's own partition and the plan can never complete.
+
+    Mirrors tracker_mutation._get_prefix_map_cached (projects table scan, 300s cache).
+    Falls back to ``default_project`` when the prefix is unmapped or the scan fails.
+    """
+    global _PREFIX_MAP_CACHE, _PREFIX_MAP_CACHE_AT
+    prefix = str(record_id or "").split("-", 1)[0].strip().upper()
+    if not prefix:
+        return default_project
+    now = time.time()
+    if _PREFIX_MAP_CACHE is None or (now - _PREFIX_MAP_CACHE_AT) >= 300.0:
+        try:
+            resp = _ddb.scan(
+                TableName=PROJECTS_TABLE,
+                ProjectionExpression="project_id, prefix",
+            )
+            mapping: Dict[str, str] = {}
+            for item in resp.get("Items", []):
+                pid = item.get("project_id", {}).get("S", "")
+                pfx = item.get("prefix", {}).get("S", "")
+                if pid and pfx:
+                    mapping[pfx.upper()] = pid
+            _PREFIX_MAP_CACHE = mapping
+            _PREFIX_MAP_CACHE_AT = now
+        except Exception as exc:
+            logger.warning("ENC-ISS-417: projects prefix-map scan failed: %s", exc)
+            if _PREFIX_MAP_CACHE is None:
+                return default_project
+    return (_PREFIX_MAP_CACHE or {}).get(prefix, default_project)
+
+
 def _validate_plan_objectives_complete(
     project_id: str,
     plan: dict,
@@ -3059,11 +3101,15 @@ def _validate_plan_objectives_complete(
         obj_id = str(obj_id).strip()
         if not obj_id:
             continue
-        obj_status_code, obj_record = _get_task(project_id, obj_id)
+        # ENC-ISS-417: resolve each objective in its OWN project partition (derived
+        # from the ID prefix) so cross-project objectives are validated correctly
+        # instead of resolving as not_found in the plan's own project.
+        obj_project = _project_for_record_id(obj_id, project_id)
+        obj_status_code, obj_record = _get_task(obj_project, obj_id)
         if obj_status_code != 200:
             for rtype in ("feature", "issue", "plan"):
                 obj_status_code, obj_record = _tracker_request(
-                    "GET", f"/{project_id}/{rtype}/{obj_id}",
+                    "GET", f"/{obj_project}/{rtype}/{obj_id}",
                 )
                 if obj_status_code == 200:
                     if isinstance(obj_record, dict) and isinstance(obj_record.get("record"), dict):

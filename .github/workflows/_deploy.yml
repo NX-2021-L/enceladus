@@ -514,12 +514,25 @@ jobs:
                   capture_output=True, text=True,
               )
               if alias_r.returncode != 0:
-                  subprocess.run(
+                  create_r = subprocess.run(
                       ['aws', 'lambda', 'create-alias',
                        '--function-name', mapped_name, '--name', 'live',
                        '--function-version', new_version, '--region', region],
                       capture_output=True, text=True, check=False,
                   )
+                  if create_r.returncode != 0:
+                      # ENC-ISS-418: fail loud — do NOT swallow alias errors. The V4Gamma
+                      # deploy role previously lacked lambda:UpdateAlias/CreateAlias, so both
+                      # the update and the create silently AccessDenied while we still logged a
+                      # false 'live:N (direct)' success — freezing gamma :live at v81 for ~2
+                      # days (published-but-not-served). Raise so the worker records an error
+                      # and the deploy exits non-zero.
+                      err = ((alias_r.stderr or '').strip() + ' || ' + (create_r.stderr or '').strip()).strip()
+                      log(f'  [ERROR] {mapped_name}: could not advance :live to {new_version} '
+                          f'(update-alias AND create-alias both failed): {err}', err=True)
+                      raise RuntimeError(
+                          f'{mapped_name}: failed to advance :live alias to {new_version}: {err}'
+                      )
               log(f'  + {mapped_name} → live:{new_version} (direct)')
               return {'fn': fn, 'mapped_name': mapped_name, 'status': 'direct'}
 

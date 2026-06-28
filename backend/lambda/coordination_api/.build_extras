@@ -1,0 +1,13 @@
+# ENC-TSK-G43: cross-Lambda module sharing manifest.
+# Each non-comment line is a repo-relative path to a single file; the build
+# step copies it to the function root so the Lambda can `import` it normally.
+# Honored by .github/workflows/_build.yml.
+#
+# ENC-ISS-424: coordination(action=dispatch_plan.generate / dry_run) dynamically
+# loads dispatch_plan_generator.py, whose import shim does `import handoff_mandate`
+# (retrying after inserting its OWN directory onto sys.path). Both modules live in
+# tools/enceladus-mcp-server/ and MUST be co-located at the Lambda function root,
+# else the generator loads but the shim fails with "No module named 'handoff_mandate'"
+# (observed during ENC-TSK-I44 prod E2E). Declaring both here packages them together.
+tools/enceladus-mcp-server/dispatch_plan_generator.py
+tools/enceladus-mcp-server/handoff_mandate.py
