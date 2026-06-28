@@ -2076,6 +2076,19 @@ Resources:
                 Action:
                   - s3:ListBucket
                 Resource: "arn:aws:s3:::jreese-net"
+              # ENC-TSK-I72 / ENC-TSK-I62: the governance sync path propagates a
+              # governance_data_dictionary.json change into the governance-policies record
+              # (discrete version + updated_at + dictionary_json blob), so the document-api
+              # role needs read+write here. (The ENC-TSK-I63 grant was misplaced on
+              # BedrockActionsRole; this is the corrective grant on the real DocumentApiRole.)
+              - Sid: GovernancePoliciesReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}/index/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -3030,16 +3043,12 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:Query
                 Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-deployment-manager${EnvironmentSuffix}"
-              # ENC-TSK-I63 / ENC-TSK-I62: UpdateItem added so the governance sync path can
-              # propagate a dictionary version bump into the governance-policies record
-              # (discrete version + updated_at + dictionary_json blob). Read-only before.
-              - Sid: GovernancePoliciesReadWrite
+              - Sid: GovernancePoliciesRead
                 Effect: Allow
                 Action:
                   - dynamodb:GetItem
                   - dynamodb:Query
                   - dynamodb:Scan
-                  - dynamodb:UpdateItem
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}/index/*"
