@@ -91,6 +91,80 @@ export default defineConfig({
         // blocks ENC-TSK-E76 AC3). NetworkOnly ensures every method on this
         // prefix goes straight to CloudFront without SW cache involvement.
         runtimeCaching: [
+          // -------------------------------------------------------------------
+          // PWA 2.0 Governance Cockpit Workbox strategy map (ENC-TSK-B67 AC-17).
+          // Six strategy assignments + app-shell, per DOC-E470AC8CE9A8 §7.1.
+          // These are additive and scoped to the v4 /api/v1 read/mutation +
+          // feed routes; the legacy /mobile/v1 + /api/v1/deploy rules below are
+          // preserved unchanged.
+          // -------------------------------------------------------------------
+          // (b) StaleWhileRevalidate — /api/feed* (instant cache + bg refresh;
+          //     WebSocket signals invalidation). AC-17(b).
+          {
+            urlPattern: ({ url }) =>
+              url.pathname.startsWith('/api/feed') ||
+              url.pathname.startsWith('/api/v1/feed'),
+            handler: 'StaleWhileRevalidate',
+            method: 'GET',
+            options: { cacheName: 'pwa2-feed-swr' },
+          },
+          // (e) NetworkOnly — Cognito auth endpoints; tokens must never cache.
+          //     AC-17(e). Placed before NetworkFirst record/doc rules.
+          {
+            urlPattern: ({ url }) =>
+              url.pathname.startsWith('/api/v1/auth') ||
+              url.pathname.includes('/oauth2/') ||
+              url.pathname.startsWith('/callback'),
+            handler: 'NetworkOnly',
+          },
+          // (f) NetworkOnly + BackgroundSyncPlugin — mutation endpoints queue
+          //     offline writes for automatic replay on reconnect. AC-17(f)/AC-18.
+          ...(['POST', 'PUT', 'DELETE'] as const).map((method) => ({
+            urlPattern: ({ url }: { url: URL }) =>
+              url.pathname.startsWith('/api/v1/') &&
+              !url.pathname.startsWith('/api/v1/deploy/'),
+            handler: 'NetworkOnly' as const,
+            method,
+            options: {
+              backgroundSync: {
+                name: `pwa2-mutation-queue-${method.toLowerCase()}`,
+                options: { maxRetentionTime: 24 * 60 },
+              },
+            },
+          })),
+          // (c) NetworkFirst (5s) — record + document detail reads. AC-17(c).
+          {
+            urlPattern: ({ url }) =>
+              url.pathname.startsWith('/api/v1/records/') ||
+              url.pathname.startsWith('/api/v1/documents') ||
+              url.pathname.startsWith('/api/v1/governance'),
+            handler: 'NetworkFirst',
+            method: 'GET',
+            options: { cacheName: 'pwa2-detail-nf', networkTimeoutSeconds: 5 },
+          },
+          // (d) CacheFirst — S3 pre-computed payloads (invalidated only by an
+          //     explicit WebSocket gap_too_large signal). AC-17(d).
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith('/mobile/v1/feed'),
+            handler: 'CacheFirst',
+            method: 'GET',
+            options: {
+              cacheName: 'pwa2-s3-snapshot',
+              expiration: { maxEntries: 32, maxAgeSeconds: 7 * 24 * 60 * 60 },
+            },
+          },
+          // (a) CacheFirst — fonts/images (content-hashed JS/CSS are precached
+          //     via globPatterns; this covers runtime font/image assets). AC-17(a).
+          {
+            urlPattern: ({ request }) =>
+              request.destination === 'font' || request.destination === 'image',
+            handler: 'CacheFirst',
+            method: 'GET',
+            options: {
+              cacheName: 'pwa2-static-assets',
+              expiration: { maxEntries: 80, maxAgeSeconds: 30 * 24 * 60 * 60 },
+            },
+          },
           {
             urlPattern: ({ url }) => url.pathname.startsWith('/api/v1/deploy/'),
             handler: 'NetworkOnly',
