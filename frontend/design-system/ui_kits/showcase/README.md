@@ -2,6 +2,12 @@
 
 Pixel-faithful recreation of the **public showcase at jreese.net/enceladus-showcase**. It's the platform's portfolio artefact for hiring managers — one long dark-canvas article with a hero, architecture cards, innovation items, a stats grid, a pull-quote, and a lightbox carousel for screenshots.
 
+## v4 narrative (ENC-TSK-B69 / JWO-TSK-023)
+
+`index.html` now carries the **v4 generation narrative and brand identity** — the extended-mind thesis, Generational Metabolism (durable gamma vs. frozen v3 production), three-signal hybrid retrieval, trust-boundary service decomposition, the Artifact-Genesis Corollary, and OGTM. The brand tokens (abyss / starlight / seafoam / moondust) are unchanged.
+
+> **Deploy note:** the live `jreese.net/enceladus-showcase.html` is a separate static-site repo (`NX-2021-L/enceladus-showcase`) deployed via the `web_deploy` arc. Publishing this v4 narrative to the live URL and closing JWO-TSK-023 is io-gated and tracked as a Phase 5 deliverable in DOC-6EFD5DB32CD8; it is **not** performed by gamma-targeted v4/main work. This kit is the reviewable source of the v4 copy.
+
 ## Source of truth
 
 - `NX-2021-L/enceladus-showcase` · `enceladus-showcase.html` (static, single-file, ~37 KB). All brand tokens + component styles are in the inline `<style>` block of that file — nothing else is needed.

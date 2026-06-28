@@ -121,35 +121,35 @@
     const data = {
       hero: {
         title: 'ENCELADUS',
-        subtitle: 'The system that learns from itself.',
-        byline: 'J Reese · Solo Architect & Operator · April 2026',
+        subtitle: 'The extended mind, made operational.',
+        byline: 'J Reese · Solo Architect & Operator · v4 Generation · June 2026',
         badges: [
-          { label: 'v3.0', variant: 'default' },
-          { label: 'Active Production', variant: 'green' },
+          { label: 'v4 · Governed Agentic Architecture', variant: 'default' },
+          { label: 'Gamma-Validated', variant: 'green' },
           { label: 'AWS Serverless', variant: 'default' },
-          { label: 'Multi-Agent', variant: 'default' },
+          { label: 'Hybrid Retrieval', variant: 'default' },
         ],
       },
       architecture: [
-        { label: 'Infrastructure', body: '20 Lambda functions, 8 DynamoDB tables, 2 SQS FIFO queues, Neo4j AuraDB Free (graph-indexed search), CloudFront CDN, API Gateway HTTP v2, Cognito auth with Lambda@Edge' },
-        { label: 'Frontend',       body: 'React 19 PWA with TypeScript, Vite, Tailwind CSS, TanStack React Query — mobile-first governance cockpit across all active projects with full primitive surface' },
-        { label: 'Agent Interface', body: 'Code-mode MCP: 5 governed meta-tools (search, execute, get_compact_context, coordination, connection_health) over Streamable HTTP + OAuth 2.1/PKCE — 89% schema reduction vs. raw mode' },
-        { label: 'CI/CD',          body: '5 GitHub Actions workflows, nightly SHA-256 parity audits, secrets guardrail, 13 deployment types with semver changelog; component registry enforces deployment transition arcs at the infrastructure level' },
-        { label: 'Multi-Agent',    body: 'Coordination API with dispatch heuristics and graph-indexed tracker search across Claude, OpenAI Codex, and AWS Bedrock; 10 typed relationship edges with weight, confidence, and provenance' },
+        { label: 'Generational Metabolism', body: 'v4 (ENC-GEN-002) evolves on a durable gamma pre-production stack with its own control, data, and graph planes. v3 remains the frozen production baseline; cutover is a single io-approved promotion gate, never an agent action — the generation boundary is governed, not improvised.' },
+        { label: 'Hybrid Retrieval',       body: 'Three-signal context assembly — vector similarity (Titan V2 / Neo4j HNSW), graph topology (Personalized PageRank over a pre-materialized standing projection), and keyword RRF (k=60). Roughly 87% retrieval accuracy vs. ~65% keyword-only, at near-zero incremental cost.' },
+        { label: 'Trust-Boundary Services', body: 'tracker_mutation decomposes along trust boundaries — Record (data integrity), Lifecycle (state-machine correctness + Universal Arc-Walker), Scoring (constitutional evaluation), Checkout (token lifecycle), MCP (context assembly) — so agents and humans can reason about each surface independently.' },
+        { label: 'Agent Interface', body: 'Code-mode MCP: 5 governed meta-tools (search, execute, get_compact_context, coordination, connection_health) over Streamable HTTP + OAuth 2.1/PKCE. Server-minted agent + session identity (ENC-AGT / ENC-SES) makes every checkout ownership-attributable.' },
+        { label: 'Governance Substrate', body: 'A canonical governance-version record vends the authoritative SHA-256 hash for every write; a recompute Lambda + daily drift backstop guarantee complete mediation. The component registry enforces the strictest deploy arc across every component a task touches.' },
       ],
       innovations: [
-        { title: 'Governed Lesson Primitive', html: `The Lesson Primitive (<span class="record-id">ENC-FTR-052</span>) transforms operational history into institutional knowledge. Every lesson is a first-class governed record type, evidence-gated and append-only, constitutionally scored against four pillars (force/surrender, convergence/play, efficiency/love, intention/flow) and a vibe board before it can propose governance amendments. Cross-project knowledge mining scanned 2,789 records across 20 projects and produced 17 governed lessons — the first time Enceladus examined its own operational history as a knowledge asset.` },
-        { title: 'Exclusive Checkout Service', html: `Prevents agent collisions via atomic task ownership — only the owning session can advance status. Child tasks support parallel dispatch. Commit Approval IDs (CAI) gate code completion; Commit Complete IDs (CCI) are validated in PR bodies by GitHub Actions before merge. A checkout-service assistant subsystem auto-remediates misclassified tasks by relaxing deployment arcs when evidence confirms the mechanism, and can never tighten them.` },
-        { title: 'Evidence-Gated Lifecycle', html: `Task state machine (<code>open → in-progress → coding-complete → committed → pr → merged-main → deploy-success → closed</code>) requires proof at every gate: commit SHAs validated against GitHub API, PR merge timestamps within 60-second tolerance, deployment evidence from GitHub Actions Jobs API with 7 validated fields. The component registry enforces the most-restrictive deployment arc across all components a task touches — infrastructure-level governance agents cannot bypass.` },
-        { title: 'Governance as Architecture', html: `SHA-256 governance hash required on every write mutation. MCP-API boundary policy ensures no tool handler directly accesses DynamoDB business tables, preventing transport-specific behavior drift. Write-source attribution on all mutations enables the audit Lambda to detect anomalies and alert via SNS. A CI-gated governance data dictionary enforces authoritative field semantics at both runtime and deploy time.` },
-        { title: 'Token Economy Design', html: `Every design decision weighs token cost. The code-mode MCP interface delivers an 89% tool-schema reduction. Graph-indexed tracker search collapses 20–50 sequential record lookups into 1–2 Neo4j traversal queries. Context nodes wrap every tracker record in mathematically-scored metadata enabling greedy knapsack context packing within token budgets. Prompt caching, strategic model selection, and batch API routing compress operational AI cost by an estimated 60–80% overall.` },
-        { title: 'Event-Driven Pipelines', html: `DynamoDB Streams → EventBridge Pipes → SQS FIFO (natural debounce via 5-min visibility timeout) → Lambda feed publisher → S3/CloudFront invalidation. The same stream architecture drives the Neo4j graph sync with graceful degradation — DynamoDB mutations are never blocked by graph failures, and agents receive structured fallback hints when the index is unreachable.` },
+        { title: 'The Graph Is the Memory', html: `AI agents have no persistent memory across sessions; Enceladus's knowledge graph is the institutional memory that compounds over time. The 𝔄/𝔇 ontology (Applied Entelechy / Acquired Dynamis) formalizes it: 𝔄 is the compute-loaded hot subgraph serving present intent under a scale-appropriate budget, 𝔇 is the retained corpus at unbounded scale. Every session is a 𝔇→𝔄 transport conditioned on intent — and because DynamoDB is the authoritative source from which Neo4j is always rebuildable, the memory is durable.` },
+        { title: 'Governed Lesson Primitive', html: `The Lesson Primitive (<span class="record-id">ENC-FTR-052</span>) turns operational history into institutional knowledge. Every lesson is a first-class governed record — evidence-gated, append-only, and constitutionally scored against four pillars (efficiency, human-protection, intention, alignment) and a 10-anchor vibe board, with anti-pattern penalties, before it can propose a governance amendment under a human-approval handshake. Lessons project <code>LEARNED_FROM</code> edges into the graph so wisdom is traversable, not buried.` },
+        { title: 'Evidence-Gated Lifecycle', html: `Task state machine (<code>open → in-progress → coding-complete → committed → pr → merged-main → deploy-success → closed</code>) requires proof at every gate: commit SHAs validated against GitHub, PR-merge timestamps within tolerance, deploy evidence from the GitHub Actions Jobs API. Commit Approval IDs (CAI) gate code completion and Commit Complete IDs (CCI) are validated in PR bodies before merge. The Universal Arc-Walker auto-advances only mechanical gates — every attestation and io-gated transition is structurally non-walkable.` },
+        { title: 'Artifact-Genesis Corollary', html: `Every task must produce a governed artifact a future session can inspect — a repo commit, a structured external-deploy receipt, or a novel docstore document. A lifecycle advance without a trace is an unfalsifiable claim, and unfalsifiable claims are hallucination fossils. The deprecated artifact-less <code>no_code</code> path is gone; the transition_type enum mechanizes the corollary at the infrastructure level.` },
+        { title: 'OGTM — Traversability as a Design Gate', html: `The Ontological Graph Traversability Mandate (<span class="record-id">ENC-FTR-066</span>) blocks any new record type, relational field, or edge type from advancing past <em>planned</em> until it has a graph_sync projection handler, an edge-label mapping, an allowed-edge-type registration, and a live end-to-end traversal proof. New primitives are born connected — the graph can never silently fragment.` },
+        { title: 'Token Economy & Energy Framing', html: `Code-mode MCP delivers a large tool-schema reduction; graph-indexed search collapses 20–50 record lookups into 1–2 traversals; context nodes enable greedy knapsack packing within a token budget. v4 reframes three-signal retrieval as one step of energy descent in an associative memory, making hallucination a measurable spurious-attractor rate rather than a vibe — the constraint is the moat.` },
       ],
       stats: [
-        { n: '2,789+', l: 'Governed Records' }, { n: '20', l: 'Production Projects' },
-        { n: '5', l: 'Code-Mode Tools' }, { n: '17', l: 'Governed Lessons' },
-        { n: '~$35', l: 'Monthly Cost' }, { n: '20', l: 'Lambda Functions' },
-        { n: '8', l: 'DynamoDB Tables' }, { n: '1', l: 'Operator' },
+        { n: 'v4', l: 'Current Generation' }, { n: '21+', l: 'Active Projects' },
+        { n: '5', l: 'Code-Mode Tools' }, { n: '~87%', l: 'Retrieval Accuracy' },
+        { n: '~$35', l: 'Monthly Cost' }, { n: '3-Signal', l: 'Hybrid Retrieval' },
+        { n: '4-Pillar', l: 'Constitutional Scoring' }, { n: '1', l: 'Operator' },
       ],
       carousel: [
         { src: '../../assets/showcase-dashboard.jpg',      caption: 'Dashboard — project overview and active task feed' },
@@ -239,7 +239,7 @@
     function BottomLineQuote() {
       return (
         <blockquote>
-          <p>Enceladus is not a product for sale — it is an operational philosophy made manifest. It demonstrates that a single operator, armed with the right abstractions and governed AI agents, can build, maintain, and <em>learn from</em> production systems at a scale and quality level that would traditionally require a team. The platform's power comes not from complexity, but from the disciplined simplicity of treating every entity, every transition, every mutation, and now every lesson as an opportunity to enforce quality, accumulate wisdom, and align with values at the architectural level.</p>
+          <p>Enceladus is not a product for sale — it is an operational philosophy made manifest. It demonstrates that a single operator, armed with the right abstractions and governed AI agents, can build, maintain, and <em>learn from</em> production systems at a scale and quality level that would traditionally require a team. The v4 generation proves the next claim: that an extended cognitive system can <em>evolve its own architecture</em> under governance — metabolizing a whole new backend on a durable staging plane, holding the production cutover behind a single human gate, and treating every entity, every transition, every mutation, and every lesson as an opportunity to enforce quality, accumulate wisdom, and align with values at the architectural level.</p>
         </blockquote>
       );
     }
@@ -248,7 +248,7 @@
       const year = new Date().getFullYear();
       return (
         <footer className="site-footer">
-          <p>Copyright © J Reese 2002–{year} · Enceladus v3.0 · April 2026</p>
+          <p>Copyright © J Reese 2002–{year} · Enceladus v4 Generation · Gamma-Validated · June 2026</p>
           <div className="footer-links">
             <a href="#">linkedin</a> · <a href="#">resume</a> · <a href="#">home</a>
           </div>
@@ -308,8 +308,9 @@
           <main className="container px-5 mx-auto" style={{maxWidth:'1200px'}}>
             <div className="article-body">
               <h2>The Thesis</h2>
-              <p>Enceladus began as a personal governance framework and evolved into something unexpected: a living, self-auditing operational platform that doesn't just <em>execute</em> work — it <em>learns</em> from its own history. Today it orchestrates 20 active production projects through a single AWS serverless backbone, coordinating multiple AI agents (Claude, OpenAI Codex, AWS Bedrock) under a shared constitutional governance model, while its knowledge layer continuously mines its own operational record for lessons that then propose governance amendments back to the system.</p>
-              <p>The platform is operated by a single human — me — with ~2,789 governed records produced across 20 projects. It runs on less than $35 per month of AWS spend. Every mutation is cryptographically signed, every lesson is evidence-gated, and every deployment boundary is enforced by the component registry before code ships.</p>
+              <p>Enceladus began as a personal governance framework and evolved into something unexpected: a living, self-auditing operational platform that doesn't just <em>execute</em> work — it <em>learns</em> from its own history. The v4 generation sharpens the founding commitment into an architectural axiom: Enceladus is not infrastructure that agents use, it is constitutively part of the operator's cognitive process — the <em>extended mind</em>, made operational. Governance degradation isn't a data-quality problem; it is cognitive impairment of that extended mind.</p>
+              <p>It orchestrates 21+ active projects through a single AWS serverless backbone, coordinating multiple AI agents (Claude, OpenAI Codex, AWS Bedrock) under a shared constitutional governance model, while its knowledge layer continuously mines its own operational record for lessons that propose governance amendments back to the system. Every mutation is cryptographically signed against a canonical governance hash, every lesson is evidence-gated and constitutionally scored, and every deployment boundary is enforced by the component registry before code ships.</p>
+              <p>v4 is engineered under a <em>Generational Metabolism</em> discipline: the new architecture matures on a durable gamma stack — its own control, data, and graph planes — while the v3 production baseline stays frozen. The promotion from gamma to production is a single, explicit, human-approved gate, never something an agent initiates. The platform still runs on less than $35 per month. The constraint is the moat.</p>
               <h2>Architecture at a Glance</h2>
               <ArchGrid items={data.architecture} />
               <h2>Innovations</h2>
