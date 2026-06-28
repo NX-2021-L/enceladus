@@ -475,6 +475,10 @@ EVENT_DETAIL_TYPE_REOPENED = "record.status.reopened"
 # ENC-FTR-111 / ENC-TSK-H83: Artifact-Genesis telemetry for an auto_walk_opt_out latch
 # (feeds ENC-TSK-B66 / the T5 ARC_WALK telemetry consumer).
 EVENT_DETAIL_TYPE_OPT_OUT_LATCHED = "record.auto_walk_opt_out.latched"
+# ENC-TSK-I09 (Dedup P5): io-reviewable audit feed for every MECHANICAL arc-walker
+# auto-merge. One event streams per certificate-certified T-HIGH supersession the
+# walker executes (DOC-DF651F07D5C2 §8 — the kill-switch + audit-feed rail).
+EVENT_DETAIL_TYPE_AUTO_MERGED = "record.dedup.auto_merged"
 
 # ENC-FTR-111 / ENC-TSK-H83 — Universal Arc-Walker circuit breaker.
 # Reserved write_source identity the (future, FTR-111 Phase 1 core / T4) arc-walker writes under.
@@ -1527,6 +1531,29 @@ def _emit_opt_out_latch_event(project_id: str, record_type: str, record_id: str,
         }])
     except Exception as exc:
         logger.error("opt_out latch event emit failed: %s", exc)
+
+
+def _emit_auto_merge_event(project_id: str, record_type: str, superseded_id: str,
+                           canonical_id: str, cluster_id: Optional[str], cosine: Any,
+                           calibrated_prob: Any, precision_lcb: Any) -> None:
+    """ENC-TSK-I09: stream one MECHANICAL auto-merge to the io-reviewable audit feed
+    (DOC-DF651F07D5C2 §8). Best-effort — a telemetry failure never rolls back the
+    (already-committed, reversible) supersession."""
+    detail = {
+        "project_id": project_id, "record_type": record_type,
+        "event": "dedup_auto_merged", "advanced_by": ARC_WALKER_ACTOR,
+        "superseded_id": superseded_id, "canonical_id": canonical_id,
+        "cluster_id": cluster_id, "cosine": cosine,
+        "calibrated_prob": calibrated_prob, "precision_lcb": precision_lcb,
+        "reversible": True, "merged_at": _now_z(),
+    }
+    try:
+        _get_events().put_events(Entries=[{
+            "Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE_AUTO_MERGED,
+            "Detail": json.dumps(detail), "EventBusName": EVENT_BUS,
+        }])
+    except Exception as exc:
+        logger.error("auto-merge audit event emit failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -5333,24 +5360,53 @@ def _revert_supersession(project_id: str, b_id: str, body: Dict) -> Optional[Dic
         other = m.get("other_id") if isinstance(m, dict) else None
         if rtype and other and _unarchive_relationship_edge(project_id, b_id, str(other), str(rtype)):
             restored.append({"rel_type": rtype, "other_id": other})
+
+    # ENC-TSK-I09 (Dedup P5): if THIS supersession was performed by the MECHANICAL
+    # arc-walker (write_source actor == system:arc-walker), an io walk-back of it
+    # is corrective will exercised against an auto-merge. Per DOC-DF651F07D5C2 §6/§8
+    # that PERMANENTLY demotes the record to ATTESTATION: latch auto_walk_opt_out=true
+    # on the restored record (rides the same atomic write) and emit the Artifact-Genesis
+    # latch telemetry. The arc-walker can never clear the latch (ENC-FTR-111 AC-2), so
+    # the record is never auto-merged again. Human-approved (ENC-TSK-I08) supersessions
+    # carry provenance=human / a non-walker provider and are intentionally NOT latched.
+    prior_ws = b_data.get("write_source") or {}
+    auto_merged = ARC_WALKER_ACTOR in (
+        str(prior_ws.get("provider", "")).strip().lower(),
+        str(prior_ws.get("channel", "")).strip().lower(),
+    )
+
     note = f"Un-superseded (restored to {prev}){_write_source_note_suffix(body)}"
-    hist = {"M": {"timestamp": _ser_s(now), "status": _ser_s(prev), "description": _ser_s(note)}}
+    hist_entries = [{"M": {"timestamp": _ser_s(now), "status": _ser_s(prev), "description": _ser_s(note)}}]
+    set_clause = (
+        "SET #st = :prev, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+    )
+    eav: Dict[str, Any] = {
+        ":prev": _ser_s(prev), ":now": _ser_s(now), ":note": _ser_s(note),
+        ":wsrc": _build_write_source(body),
+        ":zero": {"N": "0"}, ":one": {"N": "1"}, ":empty": {"L": []},
+    }
+    latched_by = ""
+    if auto_merged:
+        latched_by = str(_normalize_write_source(body).get("provider", "")).strip() or "io"
+        set_clause += "auto_walk_opt_out = :optout, "
+        eav[":optout"] = {"BOOL": True}
+        hist_entries.append(_opt_out_latch_history_entry(now, latched_by, "superseded", prev, "auto-merge walk-back"))
+    set_clause += "history = list_append(if_not_exists(history, :empty), :h) "
+    set_clause += "REMOVE superseded_by, superseded_at, pre_supersession_status, superseded_migrated_edges"
+    eav[":h"] = {"L": hist_entries}
+
     _get_ddb().update_item(
         TableName=DYNAMODB_TABLE, Key=_build_key(project_id, b_type, b_id),
-        UpdateExpression=(
-            "SET #st = :prev, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
-            "sync_version = if_not_exists(sync_version, :zero) + :one, "
-            "history = list_append(if_not_exists(history, :empty), :h) "
-            "REMOVE superseded_by, superseded_at, pre_supersession_status, superseded_migrated_edges"
-        ),
+        UpdateExpression=set_clause,
         ExpressionAttributeNames={"#st": "status"},
-        ExpressionAttributeValues={
-            ":prev": _ser_s(prev), ":now": _ser_s(now), ":note": _ser_s(note),
-            ":wsrc": _build_write_source(body),
-            ":zero": {"N": "0"}, ":one": {"N": "1"}, ":empty": {"L": []}, ":h": {"L": [hist]},
-        },
+        ExpressionAttributeValues=eav,
     )
-    return {"unsuperseded_id": b_id, "restored_status": prev, "restored_edges": restored, "unsuperseded_at": now}
+    if auto_merged:
+        _emit_opt_out_latch_event(project_id, b_type, b_id, "superseded", prev,
+                                  "auto-merge walk-back", latched_by)
+    return {"unsuperseded_id": b_id, "restored_status": prev, "restored_edges": restored,
+            "unsuperseded_at": now, "auto_walk_opt_out_latched": auto_merged}
 
 
 # ---------------------------------------------------------------------------
@@ -5374,6 +5430,63 @@ _DEDUP_TAU_MID = 0.95          # calibrated_prob >= tau_mid (cert not passed) ->
 _DEDUP_REVIEW_FLOOR = 0.50     # calibrated_prob >= review_floor -> at least T-LOW; below -> distinct
 _DEDUP_TIER_RANK = {"T-LOW": 1, "T-MID": 2, "T-HIGH": 3}
 _DEDUP_ACTIONABLE_TIERS = ("T-HIGH", "T-MID", "T-LOW")
+
+# ENC-TSK-I09 (Dedup P5): the earned-precision floor that licenses MECHANICAL
+# auto-merge (DOC-DF651F07D5C2 §4.3). A T-HIGH pair's certificate is honored by
+# the arc-walker ONLY when its 95% lower confidence bound on precision clears this
+# value. Structural guarantee (per-pair), independent of the operational flag.
+# Callers may RAISE the floor but never lower it below this constant.
+_DEDUP_CERT_PRECISION_LCB_FLOOR = 0.999
+
+
+def _dedup_auto_merge_enabled() -> bool:
+    """ENC-TSK-I09: the operational gate. Auto-merge stays DARK (shadow / propose-only)
+    until io enables this flag — which the design says is turned on ONLY after the
+    certificate precision floor has been empirically certified (DOC-DF651F07D5C2 §4.3/§13)."""
+    return _appconfig_flag("enable_dedup_auto_merge", env_fallback="ENABLE_DEDUP_AUTO_MERGE")
+
+
+def _dedup_auto_merge_kill_switch() -> bool:
+    """ENC-TSK-I09: the global kill switch (DOC-DF651F07D5C2 §8). When truthy the
+    arc-walker auto-merge halts instantly regardless of the enable flag — checked
+    FIRST, before any eligibility evaluation or write."""
+    return _appconfig_flag("dedup_auto_merge_kill_switch", env_fallback="DEDUP_AUTO_MERGE_KILL_SWITCH")
+
+
+def _dedup_auto_merge_cert_holds(verdict: Optional[Dict], lcb_floor: float) -> Tuple[bool, str]:
+    """ENC-TSK-I09: does this verdict carry a passing P2 certificate that licenses a
+    MECHANICAL merge (DOC-DF651F07D5C2 §4.3)? Requires the conjunctive certificate to
+    have PASSED and its 95% precision lower confidence bound to clear the floor. The
+    verdict must be the DIRECT (canonical, member) pair — the caller looks it up by the
+    canonical-anchored pair key, so a (member, neighbor) verdict can never satisfy this
+    (no transitive chain-drag, §4.4). Returns (holds, reason_when_not)."""
+    if not verdict:
+        return False, "no direct certificate against the chosen canonical (no chain-drag, §4.4)"
+    cert = verdict.get("certificate") or {}
+    if cert.get("passed") is not True:
+        return False, "certificate not passed (P2 CERT does not hold)"
+    lcb = cert.get("precision_lcb")
+    try:
+        lcb = float(lcb)
+    except (TypeError, ValueError):
+        return False, "certificate precision_lcb missing or non-numeric"
+    if lcb < lcb_floor:
+        return False, f"certificate precision LCB {lcb} < required floor {lcb_floor}"
+    return True, ""
+
+
+def _dedup_member_opt_out_latched(project_id: str, member_id: str) -> Tuple[bool, Optional[str]]:
+    """ENC-TSK-I09: is the auto_walk_opt_out circuit breaker latched on this member?
+    A latched record is demoted to ATTESTATION and the arc-walker MUST NOT auto-merge
+    it (DOC-DF651F07D5C2 §6; ENC-FTR-111 AC-2). Note: the latch blocks ONLY the
+    mechanical walker — the io-Cognito approval path (ENC-TSK-I08) is unaffected.
+    Returns (latched, error_when_not_readable)."""
+    mtype = _record_type_from_id(member_id)
+    raw = _get_record_raw(project_id, mtype, member_id)
+    if raw is None:
+        return False, f"member record not found: {member_id}"
+    data = _deser_item(raw)
+    return bool(data.get("auto_walk_opt_out")), None
 
 
 def _dedup_pair_key(a: str, b: str) -> Tuple[str, str]:
@@ -5652,6 +5765,206 @@ def _handle_dedup_approve(project_id: str, body: Dict, claims: Optional[Dict]) -
 
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-I09 (Dedup P5): MECHANICAL arc-walker auto-merge for T-HIGH.
+#
+# The universal arc-walker auto-supersedes certificate-certified T-HIGH duplicate
+# pairs WITHOUT a per-merge io gate — judgment has been proved away by the P2
+# certainty model (DOC-DF651F07D5C2 §4/§8). io sovereignty is preserved in
+# substance by four rails, all wired here:
+#   1. Feature flag   — auto-merge stays DARK (shadow / propose-only) until io
+#                       enables enable_dedup_auto_merge after the precision floor
+#                       is certified. Disabled => evaluate + report, never write.
+#   2. Kill switch    — dedup_auto_merge_kill_switch halts auto-walk INSTANTLY,
+#                       checked before any eligibility evaluation or write.
+#   3. Certificate    — every member must individually hold a passing certificate
+#                       with precision LCB >= 0.999 against the CHOSEN canonical
+#                       (direct pair only — no transitive chain-drag, §4.4).
+#   4. Opt-out latch  — auto_walk_opt_out (ENC-FTR-111/H83) demotes a record to
+#                       ATTESTATION; the walker skips it. An io walk-back of any
+#                       auto-merge latches it (see _revert_supersession).
+# Every executed merge streams to the io-reviewable audit feed (EventBridge
+# record.dedup.auto_merged). Supersession itself is the soft, reversible ENC-TSK-I07
+# primitive — no auto-merge is ever destructive.
+#
+# Invoked via POST /{project}/dedup-review op=auto-merge (tracker:write). The merge
+# is mechanical, NOT io-approved, so — unlike op=approve — it does NOT require an io
+# Cognito session; it is gated by flag + kill switch + per-pair certificate instead.
+# ---------------------------------------------------------------------------
+
+def _dedup_auto_merge_cluster(project_id: str, cluster: Dict,
+                              verdict_index: Dict[Tuple[str, str], Dict],
+                              lcb_floor: float, shadow: bool, body: Dict) -> Dict:
+    """Evaluate (and, unless shadow, execute) the MECHANICAL auto-merge for one
+    I05 cluster. Each duplicate is auto-superseded into the cluster's canonical iff
+    it holds a direct passing certificate (LCB >= floor) AND is not opt-out latched."""
+    cluster_id = cluster.get("cluster_id")
+    canonical = str(cluster.get("canonical", "")).strip().upper()
+    members = [str(m).strip().upper() for m in (cluster.get("members") or []) if str(m).strip()]
+    base = {"cluster_id": cluster_id, "canonical": canonical,
+            "merged_count": 0, "skipped_count": 0, "results": []}
+
+    if not canonical or canonical not in members:
+        return {**base, "excluded": True, "reason": "cluster missing a canonical member"}
+
+    homo, htype = _dedup_homogeneous(members)
+    if not homo or htype not in _SUPERSEDABLE_TYPES:
+        return {**base, "excluded": True,
+                "reason": (f"hard-floor excluded (record_type={htype or 'mixed'} not a same-type "
+                           f"supersedable cluster; §4.0)")}
+
+    results: List[Dict] = []
+    merged = 0
+    skipped = 0
+    for d in members:
+        if d == canonical:
+            continue
+        # Rail 3 — direct certificate against the CHOSEN canonical (no chain-drag, §4.4).
+        v = verdict_index.get(_dedup_pair_key(canonical, d))
+        ok, why = _dedup_auto_merge_cert_holds(v, lcb_floor)
+        if not ok:
+            skipped += 1
+            results.append({"member": d, "action": "skipped", "reason": why})
+            continue
+        # Rail 4 — opt-out circuit breaker: latched => ATTESTATION, walker must skip (§6).
+        latched, latch_err = _dedup_member_opt_out_latched(project_id, d)
+        if latch_err:
+            skipped += 1
+            results.append({"member": d, "action": "skipped", "reason": latch_err})
+            continue
+        if latched:
+            skipped += 1
+            results.append({"member": d, "action": "skipped",
+                            "reason": "auto_walk_opt_out latched — demoted to ATTESTATION (§6)"})
+            continue
+        cosine = ((v or {}).get("signals") or {}).get("cosine")
+        prob = (v or {}).get("calibrated_prob")
+        lcb = ((v or {}).get("certificate") or {}).get("precision_lcb")
+        if shadow:
+            # Rail 1 — flag disabled: report the proposed merge, write nothing.
+            results.append({"member": d, "action": "would-merge",
+                            "cosine": cosine, "calibrated_prob": prob, "precision_lcb": lcb,
+                            "reason": "shadow mode (enable_dedup_auto_merge off): certificate holds; no write"})
+            continue
+        # MECHANICAL merge: soft, reversible supersession via the ENC-TSK-I07 primitive,
+        # stamped with the arc-walker write_source so the audit feed + walk-back latch
+        # detection (in _revert_supersession) are unambiguous.
+        reason = (f"MECHANICAL arc-walker auto-merge (ENC-TSK-I09; T-HIGH certificate-certified, "
+                  f"precision LCB >= {lcb_floor}"
+                  + (f"; cluster={cluster_id}" if cluster_id else "") + ").")
+        resp = _handle_create_relationship(project_id, {
+            "source_id": d,
+            "target_id": canonical,
+            "relationship_type": "superseded-by",
+            "reason": reason,
+            "provenance": "system",
+            "write_source": body.get("write_source", {}),
+        })
+        status_code = resp.get("statusCode")
+        try:
+            payload = json.loads(resp.get("body") or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        if status_code in (200, 201):
+            merged += 1
+            _emit_auto_merge_event(project_id, htype, d, canonical, cluster_id, cosine, prob, lcb)
+            results.append({
+                "member": d, "action": "auto-merged", "status_code": status_code,
+                "idempotent": bool(payload.get("idempotent")
+                                   or (payload.get("supersession") or {}).get("idempotent")),
+                "supersession": payload.get("supersession"),
+                "cosine": cosine, "calibrated_prob": prob, "precision_lcb": lcb,
+            })
+        else:
+            # An evidence-orphan 409 (or any per-member failure) is surfaced, never forced.
+            skipped += 1
+            results.append({"member": d, "action": "failed", "status_code": status_code,
+                            "detail": payload.get("error")})
+
+    return {"cluster_id": cluster_id, "canonical": canonical, "record_type": htype,
+            "excluded": False, "merged_count": merged, "skipped_count": skipped, "results": results}
+
+
+def _handle_dedup_auto_merge(project_id: str, body: Dict, claims: Optional[Dict]) -> Dict:
+    """op=auto-merge: the MECHANICAL T-HIGH arc-walker (DOC-DF651F07D5C2 §P5).
+
+    Gated by kill switch (instant halt) + feature flag (dark-until-certified shadow)
+    + per-pair certificate (precision LCB >= 0.999, direct against canonical) +
+    opt-out latch. Soft, reversible supersession; every executed merge streams to the
+    io audit feed. Not io-approved (mechanical), so no Cognito gate — the rails are the
+    governance, not a per-merge keystroke."""
+    # Rail 2 — global kill switch, checked FIRST: halt instantly, evaluate nothing.
+    if _dedup_auto_merge_kill_switch():
+        return _response(200, {
+            "success": True, "project_id": project_id, "halted": True, "kill_switch": True,
+            "enabled": _dedup_auto_merge_enabled(), "merged_count": 0, "skipped_count": 0,
+            "clusters": [],
+            "note": ("Global kill switch (dedup_auto_merge_kill_switch) engaged — arc-walker "
+                     "auto-merge halted instantly (DOC-DF651F07D5C2 §8). No records superseded."),
+        })
+
+    # Earned-precision discipline: the floor may be RAISED but never lowered below 0.999.
+    try:
+        lcb_floor = float(body.get("precision_lcb_floor", _DEDUP_CERT_PRECISION_LCB_FLOOR))
+    except (TypeError, ValueError):
+        return _error(400, "precision_lcb_floor must be numeric.")
+    if lcb_floor < _DEDUP_CERT_PRECISION_LCB_FLOOR:
+        return _error(400, (f"precision_lcb_floor may not be lowered below the earned-precision floor "
+                            f"{_DEDUP_CERT_PRECISION_LCB_FLOOR} (DOC-DF651F07D5C2 §4.3). "
+                            f"Auto-walk is earned by measured precision, not asserted."))
+
+    clusters = body.get("clusters")
+    if not isinstance(clusters, list):
+        return _error(400, "Field 'clusters' (list of I05 cluster objects) is required.")
+    verdicts = body.get("verdicts") or []
+    if not isinstance(verdicts, list):
+        return _error(400, "Field 'verdicts' must be a list of I06 verdict objects (carrying certificates).")
+
+    vindex: Dict[Tuple[str, str], Dict] = {}
+    for v in verdicts:
+        a, b = v.get("a"), v.get("b")
+        if a and b:
+            vindex[_dedup_pair_key(a, b)] = v
+
+    enabled = _dedup_auto_merge_enabled()
+    shadow = not enabled  # Rail 1 — dark until the flag is enabled post-certification.
+
+    # Force arc-walker attribution: the audit feed and the walk-back opt-out latch
+    # (_revert_supersession) key off write_source == system:arc-walker. A caller cannot
+    # spoof a different actor onto a mechanical merge.
+    body["write_source"] = {"channel": ARC_WALKER_ACTOR, "provider": ARC_WALKER_ACTOR}
+
+    cluster_results: List[Dict] = []
+    merged_count = 0
+    skipped_count = 0
+    for cluster in clusters:
+        cres = _dedup_auto_merge_cluster(project_id, cluster, vindex, lcb_floor, shadow, body)
+        cluster_results.append(cres)
+        merged_count += cres.get("merged_count", 0)
+        skipped_count += cres.get("skipped_count", 0)
+
+    return _response(200, {
+        "success": True,
+        "project_id": project_id,
+        "enabled": enabled,
+        "shadow": shadow,
+        "kill_switch": False,
+        "advanced_by": ARC_WALKER_ACTOR,
+        "precision_lcb_floor": lcb_floor,
+        "cluster_count": len(clusters),
+        "merged_count": merged_count,
+        "skipped_count": skipped_count,
+        "clusters": cluster_results,
+        "note": ((("SHADOW (enable_dedup_auto_merge off): proposed merges reported, nothing written. "
+                   if shadow else
+                   "Executed MECHANICAL auto-merges via the soft, reversible ENC-TSK-I07 superseded-by op; "
+                   "each streamed to the io audit feed. "))
+                 + "Every member individually held a passing certificate (precision LCB >= "
+                   f"{lcb_floor}) against the chosen canonical — no transitive chain-drag. "
+                   "Opt-out-latched records were skipped (ATTESTATION). A global kill switch can halt instantly."),
+    })
+
+
+# ---------------------------------------------------------------------------
 # Path parsing & routing
 # ---------------------------------------------------------------------------
 
@@ -5707,9 +6020,11 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         except (ValueError, TypeError):
             return _error(400, "Invalid JSON body.")
         op = str(body.get("op", "")).strip().lower()
-        # propose is mutation-free (read scope); approve writes (write scope) AND is
-        # additionally io-Cognito-gated inside _handle_dedup_approve.
-        scopes = ["tracker:write"] if op == "approve" else ["tracker:read"]
+        # propose is mutation-free (read scope); approve and auto-merge write (write
+        # scope). approve is additionally io-Cognito-gated inside _handle_dedup_approve;
+        # auto-merge (ENC-TSK-I09) is MECHANICAL — gated by flag + kill switch + per-pair
+        # certificate, not by an io session.
+        scopes = ["tracker:write"] if op in ("approve", "auto-merge") else ["tracker:read"]
         claims, auth_err = _authenticate(event, scopes)
         if auth_err:
             return auth_err
@@ -5721,8 +6036,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             return _handle_dedup_propose(project_id, body)
         elif op == "approve":
             return _handle_dedup_approve(project_id, body, claims)
+        elif op == "auto-merge":
+            return _handle_dedup_auto_merge(project_id, body, claims)
         else:
-            return _error(400, "Field 'op' must be 'propose' or 'approve'.")
+            return _error(400, "Field 'op' must be 'propose', 'approve', or 'auto-merge'.")
 
     # --- Route: typed relationship edges (ENC-FTR-049) ---
     m_rel = _RE_RELATIONSHIP.match(path)
