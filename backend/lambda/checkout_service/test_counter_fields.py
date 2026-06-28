@@ -76,7 +76,7 @@ class CheckoutSurfacesCheckoutCountTests(unittest.TestCase):
                                side_effect=fake_tracker_request):
             resp = checkout_lambda._handle_checkout(
                 "enceladus", "ENC-TSK-901",
-                {"active_agent_session_id": "claude-code-f41-test"},
+                {"active_agent_session_id": "ENC-SES-001"},
             )
         return resp
 
@@ -118,7 +118,7 @@ class CheckoutSurfacesCheckoutCountTests(unittest.TestCase):
                                side_effect=fake_tracker_request):
             resp = checkout_lambda._handle_checkout(
                 "enceladus", "ENC-TSK-902",
-                {"active_agent_session_id": "legacy-agent"},
+                {"active_agent_session_id": "ENC-SES-001"},
             )
         self.assertEqual(resp["statusCode"], 200)
         body = json.loads(resp["body"])
@@ -139,7 +139,7 @@ class CheckoutSurfacesCheckoutCountTests(unittest.TestCase):
                                side_effect=fake_tracker_request):
             resp = checkout_lambda._handle_checkout(
                 "enceladus", "ENC-TSK-903",
-                {"active_agent_session_id": "agent"},
+                {"active_agent_session_id": "ENC-SES-001"},
             )
         self.assertEqual(resp["statusCode"], 200)
         body = json.loads(resp["body"])
