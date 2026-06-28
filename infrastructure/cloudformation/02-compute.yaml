@@ -278,6 +278,9 @@ Resources:
           S3_PREFIX: !Sub "${S3EnvPrefix}agent-documents"
           S3_REFERENCE_PREFIX: !Sub "${S3EnvPrefix}mobile/v1/reference"
           S3_GOVERNANCE_PREFIX: !Sub "${S3EnvPrefix}governance/live"
+          # ENC-TSK-I64 / ENC-TSK-I62: needed so the governance sync path can propagate a
+          # governance_data_dictionary.json change into the governance-policies record.
+          GOVERNANCE_POLICIES_TABLE: !Sub "governance-policies${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -1843,6 +1846,18 @@ Resources:
                 Action:
                   - s3:ListBucket
                 Resource: "arn:aws:s3:::jreese-net"
+              # ENC-TSK-I64 / ENC-TSK-I62: the governance sync path propagates a
+              # governance_data_dictionary.json change into the governance-policies record
+              # (discrete version + updated_at + dictionary_json blob), so the document-api
+              # role needs read+write here. Eliminates the manual aws dynamodb update-item.
+              - Sid: GovernancePoliciesReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/governance-policies${EnvironmentSuffix}/index/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

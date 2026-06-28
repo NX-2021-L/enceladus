@@ -491,5 +491,100 @@ class GovernanceSyncPushTests(unittest.TestCase):
         self.assertIn(resp["statusCode"], [200, 204])
 
 
+class DictionaryPropagationTests(unittest.TestCase):
+    """ENC-TSK-I63 / ENC-TSK-I62: governance_data_dictionary.json -> governance-policies DDB
+    propagation (discrete version + updated_at + dictionary_json blob) with drift pre-check."""
+
+    @staticmethod
+    def _dict_bytes(version, entities):
+        # Compact, like the live S3 object (no pretty-print bloat).
+        return json.dumps(
+            {"version": version, "entities": entities}, separators=(",", ":")
+        ).encode("utf-8")
+
+    def _ddb_item(self, version, entities):
+        return {
+            "Item": {
+                "policy_id": {"S": document_api.GOVERNANCE_DICTIONARY_POLICY_ID},
+                "version": {"S": version},
+                "updated_at": {"S": "2026-06-27T00:00:00Z"},
+                "dictionary_json": {
+                    "S": json.dumps(
+                        {"version": version, "entities": entities}, separators=(",", ":")
+                    )
+                },
+            }
+        }
+
+    @patch.object(document_api, "_get_ddb")
+    def test_propagates_version_bump_entities_unchanged(self, mock_ddb):
+        ddb = MagicMock()
+        ddb.get_item.return_value = self._ddb_item("2026-06-27.08", {"tracker.task": {"x": 1}})
+        mock_ddb.return_value = ddb
+        s3_body = self._dict_bytes("2026-06-27.09", {"tracker.task": {"x": 1}})
+
+        document_api._propagate_dictionary_to_governance_policies(s3_body)
+
+        ddb.update_item.assert_called_once()
+        kwargs = ddb.update_item.call_args.kwargs
+        # reserved-word alias for `version`
+        self.assertEqual(kwargs["ExpressionAttributeNames"], {"#v": "version"})
+        self.assertIn("#v = :ver", kwargs["UpdateExpression"])
+        self.assertEqual(kwargs["ExpressionAttributeValues"][":ver"]["S"], "2026-06-27.09")
+        # byte-identical raw S3 bytes are written -> inherently 400KB-safe (no round-trip bloat)
+        self.assertEqual(
+            kwargs["ExpressionAttributeValues"][":blob"]["S"], s3_body.decode("utf-8")
+        )
+        self.assertEqual(
+            kwargs["Key"], {"policy_id": {"S": document_api.GOVERNANCE_DICTIONARY_POLICY_ID}}
+        )
+
+    @patch.object(document_api, "_get_ddb")
+    def test_drift_aborts_when_entities_differ(self, mock_ddb):
+        ddb = MagicMock()
+        ddb.get_item.return_value = self._ddb_item("2026-06-27.08", {"tracker.task": {"x": 1}})
+        mock_ddb.return_value = ddb
+        # entities changed alongside the version bump -> must abort, never clobber
+        s3_body = self._dict_bytes("2026-06-27.09", {"tracker.task": {"x": 2}})
+
+        with self.assertRaises(RuntimeError) as ctx:
+            document_api._propagate_dictionary_to_governance_policies(s3_body)
+        self.assertIn("DRIFT", str(ctx.exception))
+        ddb.update_item.assert_not_called()
+
+    @patch.object(document_api, "_get_ddb")
+    def test_idempotent_when_already_in_lockstep(self, mock_ddb):
+        ddb = MagicMock()
+        body = self._dict_bytes("2026-06-27.08", {"tracker.task": {"x": 1}})
+        ddb.get_item.return_value = {
+            "Item": {
+                "policy_id": {"S": document_api.GOVERNANCE_DICTIONARY_POLICY_ID},
+                "version": {"S": "2026-06-27.08"},
+                "dictionary_json": {"S": body.decode("utf-8")},
+            }
+        }
+        mock_ddb.return_value = ddb
+
+        document_api._propagate_dictionary_to_governance_policies(body)
+        ddb.update_item.assert_not_called()
+
+    @patch.object(document_api, "_get_ddb")
+    def test_missing_record_raises(self, mock_ddb):
+        ddb = MagicMock()
+        ddb.get_item.return_value = {}  # no Item
+        mock_ddb.return_value = ddb
+        with self.assertRaises(RuntimeError):
+            document_api._propagate_dictionary_to_governance_policies(
+                self._dict_bytes("2026-06-27.09", {})
+            )
+        ddb.update_item.assert_not_called()
+
+    @patch.object(document_api, "_get_ddb")
+    def test_missing_version_raises(self, mock_ddb):
+        mock_ddb.return_value = MagicMock()
+        with self.assertRaises(ValueError):
+            document_api._propagate_dictionary_to_governance_policies(b'{"entities":{}}')
+
+
 if __name__ == "__main__":
     unittest.main()

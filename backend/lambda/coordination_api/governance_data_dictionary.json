@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-27.05",
-  "updated_at": "2026-06-28T01:02:00Z",
-  "last_change_summary": "ENC-TSK-I40 / ENC-FTR-117: added checkout_service.session_id_validation entity documenting the _resolve_agent_session_id() stamping integration point and ENC-SES-NNN format enforcement at checkout.task and checkout.plan. Required by governance-dictionary-guard for checkout_service/lambda_function.py modification.",
+  "version": "2026-06-28.01",
+  "updated_at": "2026-06-28T03:01:00Z",
+  "last_change_summary": "ENC-TSK-I64 / ENC-TSK-I62: v3-prod landing of the governance-sync hardening — devops-document-api _sync_governance_documents propagates a governance_data_dictionary.json sync into the governance-policies record (discrete version + updated_at + dictionary_json blob), eliminating the manual aws dynamodb update-item (ENC-TSK-I61 gap). Paired CFN: DocumentApiRole +dynamodb:GetItem/UpdateItem on governance-policies, DocumentApiFunction +GOVERNANCE_POLICIES_TABLE. Gamma-verified (ENC-TSK-I63). Bump satisfies the path-triggered Governance Dictionary Guard on lambda_function.py edits.",
   "owners": [
     "enceladus-platform"
   ],
