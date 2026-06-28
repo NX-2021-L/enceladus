@@ -141,6 +141,22 @@ Parameters:
     AllowedValues: ["true", "false"]
     Description: Enable SnapStart on all Lambdas. Set true only for arm64/python3.12 stacks.
 
+  # ENC-TSK-C08 / ENC-FTR-064: configurable HCE cadence. The engine's adaptive
+  # trigger makes this an upper bound — a scheduled invoke runs a full
+  # scan-cluster-propose cycle only when enough new Handoffs accumulated.
+  HceScheduleExpression:
+    Type: String
+    Default: "cron(0 4 * * ? *)"
+    Description: >
+      EventBridge schedule for the Handoff Consolidation Engine (default 04:00 UTC
+      nightly). The adaptive trigger gates whether each fire does real work.
+  HceAdaptiveMinHandoffs:
+    Type: String
+    Default: "3"
+    Description: >
+      Adaptive-trigger threshold — minimum new Handoffs in the lookback window
+      before the HCE runs a full cycle on a scheduled fire.
+
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
@@ -1359,6 +1375,116 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GraphHealthMetricsSchedule.Arn
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-096: Handoff Consolidation Engine (HCE)
+  # Scheduled + adaptive-triggered memory consolidation. Reads Handoff documents
+  # (DynamoDB, read-only) and proposes Lesson candidates via the governed
+  # Document API Lambda invoke (writes never touch DynamoDB/S3 directly).
+  # ---------------------------------------------------------------------------
+
+  HandoffConsolidationEngineFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-handoff-consolidation-engine${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 512
+      Timeout: 300
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt HandoffConsolidationEngineRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          PROJECT_ID: enceladus
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          ADAPTIVE_TRIGGER_MIN_HANDOFFS: !Ref HceAdaptiveMinHandoffs
+          HCE_LOOKBACK_DAYS: "90"
+          HCE_PROPOSER_ID: ENC-FTR-064
+          HCE_GDMP_PROVENANCE_ENABLED: "true"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: handoff-consolidation-engine
+
+  HandoffConsolidationEngineRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-handoff-consolidation-engine-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: handoff-consolidation-engine-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              # Read-only over the documents table (enceladus-agent-cli posture:
+              # all writes route through the Document API Lambda below).
+              - Sid: DocumentsTableRead
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              # Governed write path: invoke the Document API Lambda to create
+              # Lesson candidates and PATCH GDMP provenance.
+              - Sid: InvokeDocumentApi
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-document-api${EnvironmentSuffix}"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: handoff-consolidation-engine
+
+  HandoffConsolidationEngineSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-handoff-consolidation-engine-schedule${EnvironmentSuffix}"
+      ScheduleExpression: !Ref HceScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt HandoffConsolidationEngineFunction.Arn
+          Id: handoff-consolidation-engine-target
+
+  HandoffConsolidationEnginePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HandoffConsolidationEngineFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HandoffConsolidationEngineSchedule.Arn
 
   # ---------------------------------------------------------------------------
   # ENC-FTR-101 Option B (ENC-TSK-H37): standing-projection out-of-band refresh

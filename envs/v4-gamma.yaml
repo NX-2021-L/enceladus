@@ -76,6 +76,7 @@ function_name_map:
   graph_health_metrics: enceladus-graph-health-metrics-gamma
   graph_query_api: devops-graph-query-api-gamma
   graph_sync: devops-graph-sync-gamma
+  handoff_consolidation_engine: enceladus-handoff-consolidation-engine-gamma
   neo4j_backup: enceladus-neo4j-backup-gamma
   prod_health_monitor: enceladus-prod-health-monitor-gamma
   project_service: devops-project-service-gamma
