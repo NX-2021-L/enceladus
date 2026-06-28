@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-28.05",
-  "updated_at": "2026-06-28T12:41:27Z",
-  "last_change_summary": "ENC-TSK-I09 (Dedup P5) reconciled with ENC-TSK-H84 (Arc-Walker Phase 1) on merge to v4/main (PRs #625/#624). Adds tracker.dedup_auto_merge: the MECHANICAL arc-walker auto-merge surface for certificate-certified T-HIGH duplicate pairs (POST /{project}/dedup-review op=auto-merge, tracker:write) gated by four io-sovereignty rails — enable_dedup_auto_merge flag (dark/shadow default), dedup_auto_merge_kill_switch (instant halt), per-pair certificate precision-LCB>=0.999 against the chosen canonical (no transitive chain-drag), and the auto_walk_opt_out latch that demotes a record to ATTESTATION on any io walk-back — plus the record.dedup.auto_merged EventBridge audit feed. Updates tracker.task.status / tracker.issue.status 'superseded' notes (T-HIGH auto-merge no longer deferred). Retains the H84 project_service.deploy_policy entity added at version .04. Version 2026-06-28.04 -> 2026-06-28.05.",
+  "version": "2026-06-28.06",
+  "updated_at": "2026-06-28T13:20:00Z",
+  "last_change_summary": "ENC-TSK-H85 (Arc-Walker Phase 1 CORE — synchronous inline mechanical walk, ENC-FTR-111). Adds lifecycle_service.arc_walker_walk: after a successful forward task advance, tracker_mutation hands off to the Universal Arc-Walker, which loops forward across the two Phase-1 MECHANICAL legs — <deploy-arc>|merged-main -> deploy-init (ci_triggered only, ruling O-2) and code_only|merged-main -> closed (reuses the stored commit_sha + a system-run GitHub compare via the new github_integration /commits/compare-main route) — as idempotent conditional writes (advance iff status == expected_prior), behind the independent enable_arc_walker AppConfig flag. The walk honors the auto_walk_opt_out latch, pins the matrix_version, integrity-checks checkout_transition_type (409 halt on mismatch), halts at the first attestation/opt-out/gate-fail boundary, and emits a record.arc_walk.advanced Artifact-Genesis event per crossing. Eligibility is the lifecycle_service evaluate_auto_walk verdict (gate_class MECHANICAL + deploy_policy), never evidence-field emptiness. Version 2026-06-28.05 -> 2026-06-28.06. PRIOR: ENC-TSK-I09 (Dedup P5) reconciled with ENC-TSK-H84 (Arc-Walker Phase 1) on merge to v4/main (PRs #625/#624). Adds tracker.dedup_auto_merge: the MECHANICAL arc-walker auto-merge surface for certificate-certified T-HIGH duplicate pairs (POST /{project}/dedup-review op=auto-merge, tracker:write) gated by four io-sovereignty rails — enable_dedup_auto_merge flag (dark/shadow default), dedup_auto_merge_kill_switch (instant halt), per-pair certificate precision-LCB>=0.999 against the chosen canonical (no transitive chain-drag), and the auto_walk_opt_out latch that demotes a record to ATTESTATION on any io walk-back — plus the record.dedup.auto_merged EventBridge audit feed. Updates tracker.task.status / tracker.issue.status 'superseded' notes (T-HIGH auto-merge no longer deferred). Retains the H84 project_service.deploy_policy entity added at version .04. Version 2026-06-28.04 -> 2026-06-28.05.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1774,6 +1774,39 @@
           "default": "ci_triggered",
           "definition": "How this project's deployments are triggered. 'ci_triggered': CI kicks off the deploy on merge to the deploy branch, so the deploy-init gate carries no irreducible human/external claim and the Universal Arc-Walker may mechanically auto-advance it (gate_class=mechanical AND deploy_policy=ci_triggered => auto-walkable, ruling O-2). 'manual': a human or external actor triggers the deploy, so the walker MUST NOT auto-advance deploy-init even though the static gate_class is mechanical. Stored on the projects-table record (project_id partition).",
           "usage_guidance": "Set optionally at POST /api/v1/projects (project_service _validate_create_input; defaults to ci_triggered when omitted; invalid values are rejected 400). Existing/legacy project records that predate the field — including enceladus — are seeded to ci_triggered by read-time defaulting in project_service._enrich_project and by lifecycle_service._get_project_deploy_policy, and physically materialized by the idempotent backfill tools/seed_deploy_policy.py (run under a privileged session post-deploy; the agent-cli principal cannot write the projects table). The Lifecycle Service evaluate_auto_walk action derives auto-walk eligibility SOLELY from the gate_class taxonomy plus this runtime qualifier — never from evidence-field emptiness (DOC-078C57FC1BE6 §7.2). seed value: enceladus = ci_triggered."
+        }
+      }
+    },
+    "lifecycle_service.arc_walker_walk": {
+      "description": "ENC-TSK-H85 / ENC-FTR-111 Phase 1 CORE (T4): the Universal Arc-Walker's synchronous inline mechanical walk (DOC-078C57FC1BE6 §6.1). After a successful FORWARD task status advance, tracker_mutation._handle_update_field hands off to tracker_mutation._arc_walk_after_advance, which loops forward across the Phase-1 MECHANICAL gates in the SAME Lambda invocation before returning. Phase 1 covers exactly two legs (§3.1/§11): (1) <deploy-arc>|merged-main -> deploy-init, auto-walkable only on ci_triggered projects (ruling O-2); (2) code_only|merged-main -> closed, which reuses the commit_sha the agent already supplied at `committed` and runs a system-run GitHub ancestor-of-main compare (the new github_integration GET /api/v1/github/commits/compare-main route; status 'ahead'|'identical' => on main). Gated behind the independent enable_arc_walker AppConfig flag (env_fallback ENABLE_ARC_WALKER, default false) — distinct from enable_lifecycle_service_extraction. The walk NEVER fails the agent's already-committed advance: any walk error is swallowed and the original advance response is returned (optionally augmented with an arc_walk summary). Eligibility is decided SOLELY by the lifecycle_service evaluate_auto_walk verdict (gate_class MECHANICAL + deploy_policy O-2), never from evidence-field emptiness (the §7.2 coding-complete trap).",
+      "governing_feature": "ENC-FTR-111",
+      "governing_task": "ENC-TSK-H85",
+      "fields": {
+        "feature_flag": {
+          "type": "string",
+          "definition": "enable_arc_walker — independent AppConfig boolean (env_fallback ENABLE_ARC_WALKER, default false), read at request time via enceladus_shared.appconfig_flags.flag() so it toggles and rolls back without a redeploy. Separate from enable_lifecycle_service_extraction (ENC-TSK-H46): the validation extraction and the mechanical walk graduate independently (DOC-078C57FC1BE6 §11).",
+          "usage_guidance": "While off, tracker_mutation never enters the walk and every advance behaves exactly as pre-H85. Register in 06-feature-flags.yaml and the AppConfig profile before enabling in any environment."
+        },
+        "phase1_legs": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "The only two gates Phase 1 auto-crosses: '<github_pr_deploy|lambda_deploy|web_deploy>|merged-main->deploy-init' (MECHANICAL, ci_triggered-only per O-2) and 'code_only|merged-main->closed' (MECHANICAL, commit_sha reuse + GitHub compare). All other gates are attestation or external-fact and are structurally unreachable in Phase 1 (deploy-success/closed/coding-complete/pr/committed/merged-main)."
+        },
+        "idempotent_conditional_write": {
+          "type": "object",
+          "definition": "Each auto-step is a single DynamoDB update_item with ConditionExpression '#s = :expected_prior' (advance iff status == the status the walker observed). A concurrent agent/walker advance that moved the record off expected_prior fails the condition; the walker treats ConditionalCheckFailedException as 'concurrent_advance' and halts cleanly — no double-step, no lost update (DOC-078C57FC1BE6 §8 idempotency / §9 concurrent-advance mitigation)."
+        },
+        "safety_invariants": {
+          "type": "object",
+          "definition": "Honored before/at every step: (a) auto_walk_opt_out latched => halt before any evaluation or write, and the walker can NEVER clear the latch (ENC-TSK-H83); (b) checkout_transition_type integrity — a mismatch with the live transition_type halts the walk with a 409 (B07/B08), identical to an agent advance; (c) matrix_version pinning — if the evaluate_auto_walk verdict's matrix_version differs from the record's pinned version (checkout_matrix_version, else the embedded MATRIX_VERSION) the walk halts; (d) the ENC-ISS-106 subtask gate is enforced via the reused validate_transition call; (e) the walk halts at the first attestation/opt-out/gate-fail boundary."
+        },
+        "write_source": {
+          "type": "string",
+          "definition": "Every walker write is stamped write_source.channel = write_source.provider = 'system:arc-walker' (ARC_WALKER_ACTOR), so the audit feed, the opt-out walk-back detection, and the §13 attribution are unambiguous. code_only|closed additionally persists code_on_main_evidence={commit_sha, github_verified:true} and atomically increments closed_count."
+        },
+        "artifact_genesis": {
+          "type": "string",
+          "definition": "Every crossing is a governed mutation, never silent (DOC-078C57FC1BE6 §8/§10): a '[ARC-WALKER][AUTO-ADVANCE]' history entry rides the conditional write (carrying gate_class, derivation, matrix_version, trigger=sync, advanced_by) and a record.arc_walk.advanced EventBridge event is emitted with {record_id, from_status, to_status, gate_class, derivation, trigger, matrix_version, latency_ms}. Telemetry emission is best-effort and never rolls back the committed advance."
         }
       }
     },

@@ -185,6 +185,44 @@ def _lifecycle_service_enabled() -> bool:
     return _appconfig_flag("enable_lifecycle_service_extraction", env_fallback="ENABLE_LIFECYCLE_SERVICE")
 
 
+def _arc_walker_enabled() -> bool:
+    """ENC-TSK-H85 / ENC-FTR-111 Phase 1 — the Universal Arc-Walker is behind its OWN independent
+    feature flag, read at request time so it toggles (and rolls back) without a redeploy. It is
+    deliberately separate from enable_lifecycle_service_extraction: the validation extraction (H46)
+    and the synchronous mechanical walk (this task) graduate independently (DOC-078C57FC1BE6 §11)."""
+    return _appconfig_flag("enable_arc_walker", env_fallback="ENABLE_ARC_WALKER")
+
+
+def _invoke_lifecycle_action(payload: dict):
+    """Synchronously invoke the Lifecycle Service for an arbitrary action and return its raw verdict
+    dict, or None on ANY failure. Unlike _invoke_lifecycle_service this does NOT require an ``allow``
+    key, so it serves the ENC-TSK-H85 arc-walker which consumes the evaluate_auto_walk verdict
+    (auto_walkable / gate_class / matrix_version) in addition to validate_transition."""
+    fn = LIFECYCLE_SERVICE_FUNCTION
+    if not fn:
+        logger.error("[H85] LIFECYCLE_SERVICE_FUNCTION not configured; arc-walk skipped")
+        return None
+    try:
+        resp = _get_lambda_client().invoke(
+            FunctionName=fn,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        if resp.get("FunctionError"):
+            logger.error("[H85] Lifecycle Service FunctionError=%s", resp.get("FunctionError"))
+            return None
+        body = resp.get("Payload")
+        raw = body.read() if hasattr(body, "read") else body
+        verdict = json.loads(raw)
+        if not isinstance(verdict, dict):
+            logger.error("[H85] Lifecycle Service returned malformed verdict: %r", verdict)
+            return None
+        return verdict
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[H85] Lifecycle Service invoke failed: %s", exc)
+        return None
+
+
 def _invoke_lifecycle_service(payload: dict):
     """Synchronously invoke the Lifecycle Service and return its verdict dict, or None on ANY
     failure (function not configured, invoke error, FunctionError, malformed verdict). Returning
@@ -479,6 +517,9 @@ EVENT_DETAIL_TYPE_OPT_OUT_LATCHED = "record.auto_walk_opt_out.latched"
 # auto-merge. One event streams per certificate-certified T-HIGH supersession the
 # walker executes (DOC-DF651F07D5C2 §8 — the kill-switch + audit-feed rail).
 EVENT_DETAIL_TYPE_AUTO_MERGED = "record.dedup.auto_merged"
+# ENC-TSK-H85 / ENC-FTR-111 Phase 1: Artifact-Genesis audit feed for every MECHANICAL gate the
+# synchronous inline arc-walker crosses on its own (DOC-078C57FC1BE6 §8/§10 — no silent mutations).
+EVENT_DETAIL_TYPE_ARC_WALK = "record.arc_walk.advanced"
 
 # ENC-FTR-111 / ENC-TSK-H83 — Universal Arc-Walker circuit breaker.
 # Reserved write_source identity the (future, FTR-111 Phase 1 core / T4) arc-walker writes under.
@@ -1554,6 +1595,290 @@ def _emit_auto_merge_event(project_id: str, record_type: str, superseded_id: str
         }])
     except Exception as exc:
         logger.error("auto-merge audit event emit failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-H85 / ENC-FTR-111 Phase 1 — Universal Arc-Walker: synchronous inline mechanical walk.
+#
+# After any successful FORWARD task advance, the walker loops forward across the Phase-1 MECHANICAL
+# gates in the SAME Lambda invocation before returning (DOC-078C57FC1BE6 §6.1). Phase 1 covers
+# exactly two legs (§3.1 / §11):
+#   - <deploy-arc>|merged-main -> deploy-init  (auto-walkable only on ci_triggered projects; O-2)
+#   - code_only|merged-main    -> closed       (reuses the stored commit_sha + a GitHub compare)
+#
+# Eligibility is decided SOLELY by the Lifecycle Service evaluate_auto_walk verdict (gate_class
+# MECHANICAL + the deploy_policy O-2 qualifier) — NEVER from evidence-field emptiness (§7.2, the
+# "coding-complete trap"). The walk honors the auto_walk_opt_out latch (§7.4), pins the matrix
+# version (§8), integrity-checks checkout_transition_type (B07/B08 → 409 halt), performs each step
+# as an idempotent conditional write (advance iff status == expected_prior), halts at the first
+# attestation / opt-out / gate-fail boundary, and emits an Artifact-Genesis record per crossing.
+# The walker writes under write_source=system:arc-walker and can NEVER clear the opt-out latch.
+# ---------------------------------------------------------------------------
+_ARC_WALK_MAX_STEPS = 8  # safety depth cap (§9 cascade-runaway mitigation); Phase 1 needs <= 1.
+_ARC_WALK_DEPLOY_ARC_TYPES = frozenset({"github_pr_deploy", "lambda_deploy", "web_deploy"})
+
+
+def _arc_walk_next_candidate(transition_type: str, current_status: str) -> Optional[str]:
+    """Propose the single forward status the Phase-1 arc-walker would attempt from current_status,
+    or None when there is no Phase-1 MECHANICAL leg out of current_status. This only PROPOSES a
+    target; the authoritative mechanical/deploy_policy eligibility ruling is the Lifecycle Service
+    evaluate_auto_walk verdict (DOC-078C57FC1BE6 §3.1/§11)."""
+    tt = (transition_type or "github_pr_deploy").strip().lower()
+    cur = (current_status or "").strip().lower()
+    if cur == "merged-main":
+        if tt == "code_only":
+            return "closed"
+        if tt in _ARC_WALK_DEPLOY_ARC_TYPES:
+            return "deploy-init"
+    return None
+
+
+def _arc_walk_compare_commit_to_main(owner: str, repo: str, sha: str) -> Tuple[bool, str]:
+    """code_only|closed is MECHANICAL because the system already holds the commit_sha (the agent
+    supplied it at `committed`); the gate's only action is a system-run GitHub compare confirming the
+    commit is an ancestor of main (DOC-078C57FC1BE6 §3.1). Routed through github_integration (the
+    GitHub external-fact surface); tracker_mutation never calls GitHub directly."""
+    if not GITHUB_INTEGRATION_API_BASE:
+        logger.warning("[H85] GITHUB_INTEGRATION_API_BASE not set; cannot compare %s to main", sha)
+        return False, "github_integration_unconfigured"
+    url = (
+        f"{GITHUB_INTEGRATION_API_BASE}/commits/compare-main"
+        f"?owner={urllib.parse.quote(owner)}"
+        f"&repo={urllib.parse.quote(repo)}"
+        f"&sha={urllib.parse.quote(sha)}"
+    )
+    req = urllib.request.Request(url, method="GET", headers={
+        "X-Coordination-Internal-Key": COORDINATION_INTERNAL_API_KEY,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            if data.get("valid"):
+                return True, str(data.get("status", "ancestor"))
+            return False, str(data.get("reason", "not_ancestor_of_main"))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[H85] commit compare-main call failed: %s", exc)
+        return False, f"compare_service_error: {exc}"
+
+
+def _arc_walk_history_entry(now: str, from_status: str, to_status: str, gate_class: Optional[str],
+                            derivation: str, matrix_version: Any) -> Dict:
+    """Artifact-Genesis history entry for one auto-walk crossing (DOC-078C57FC1BE6 §8 — no silent
+    mutations). Carries advanced_by, the gate crossed + its class, the derivation, the matrix ref,
+    and the trigger (sync)."""
+    msg = (
+        f"[ARC-WALKER][AUTO-ADVANCE] {from_status or '?'} -> {to_status} "
+        f"(gate_class={gate_class}, trigger=sync, matrix_version={matrix_version}). "
+        f"{derivation} advanced_by={ARC_WALKER_ACTOR}."
+    )
+    return {"M": {
+        "timestamp": _ser_s(now), "status": _ser_s("worklog"), "description": _ser_s(msg),
+    }}
+
+
+def _emit_arc_walk_event(project_id: str, record_id: str, from_status: str, to_status: str,
+                         gate_class: Optional[str], derivation: str, matrix_version: Any,
+                         latency_ms: int) -> None:
+    """Emit the ARC_WALK Artifact-Genesis telemetry event (DOC-078C57FC1BE6 §10). Best-effort — a
+    telemetry failure never rolls back the (already-committed) conditional advance."""
+    detail = {
+        "project_id": project_id, "record_type": "task", "record_id": record_id,
+        "event": "arc_walk_advanced", "advanced_by": ARC_WALKER_ACTOR,
+        "from_status": from_status, "to_status": to_status, "gate_class": gate_class,
+        "derivation": derivation, "trigger": "sync", "matrix_version": matrix_version,
+        "latency_ms": latency_ms, "advanced_at": _now_z(),
+    }
+    try:
+        _get_events().put_events(Entries=[{
+            "Source": EVENT_SOURCE, "DetailType": EVENT_DETAIL_TYPE_ARC_WALK,
+            "Detail": json.dumps(detail), "EventBusName": EVENT_BUS,
+        }])
+    except Exception as exc:  # noqa: BLE001
+        logger.error("arc_walk event emit failed: %s", exc)
+
+
+def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
+                            landed_status: str) -> Dict:
+    """ENC-TSK-H85 / ENC-FTR-111 Phase 1 (T4) — drive the synchronous inline mechanical walk.
+
+    Called after a successful forward task advance committed to `landed_status`. Loops forward across
+    the Phase-1 mechanical gates, halting at the first attestation / opt-out / gate-fail boundary.
+    Returns a structured summary (never raises into the caller's response). NEVER fails the agent's
+    original advance — the walk is a pure optimization on top of an already-committed transition."""
+    transition_type = (item_data.get("transition_type") or "github_pr_deploy").strip().lower()
+    checkout_tt = (item_data.get("checkout_transition_type") or "").strip().lower()
+    opt_out = _coerce_bool(item_data.get("auto_walk_opt_out", False))
+    commit_sha = (item_data.get("commit_sha") or "").strip().lower()
+    subtask_ids = item_data.get("subtask_ids") or []
+
+    pinned_raw = item_data.get("checkout_matrix_version")
+    try:
+        pinned_matrix = int(pinned_raw) if pinned_raw not in (None, "") else MATRIX_VERSION
+    except (TypeError, ValueError):
+        pinned_matrix = MATRIX_VERSION
+
+    summary: Dict[str, Any] = {"walked": [], "trigger": "sync", "matrix_version": pinned_matrix}
+
+    # §7.4 opt-out circuit breaker: a latched record is demoted to ATTESTATION. The walker halts
+    # before ANY evaluation or write and can never clear the latch (ENC-TSK-H83).
+    if opt_out:
+        summary["halted_reason"] = "opt_out_latched"
+        return summary
+
+    # §8 transition_type integrity (B07/B08): a mismatch between the type stamped at checkout and the
+    # live type is a governance-integrity violation — halt with 409 exactly as an agent advance would.
+    if checkout_tt and checkout_tt != transition_type:
+        summary["halted_reason"] = "transition_type_integrity_409"
+        summary["halt_status"] = 409
+        summary["checkout_transition_type"] = checkout_tt
+        summary["current_transition_type"] = transition_type
+        return summary
+
+    ddb = _get_ddb()
+    key = _build_key(project_id, "task", record_id)
+    current = (landed_status or "").strip().lower()
+
+    for _ in range(_ARC_WALK_MAX_STEPS):
+        target = _arc_walk_next_candidate(transition_type, current)
+        if target is None:
+            # No outgoing mechanical leg — the next gate is attestation / external-fact / terminal.
+            summary["halted_reason"] = "no_mechanical_gate"
+            break
+
+        step_start = dt.datetime.utcnow()
+
+        # (1) Eligibility — authoritative MECHANICAL + deploy_policy (O-2) verdict from the service.
+        verdict = _invoke_lifecycle_action({
+            "action": "evaluate_auto_walk",
+            "transition_type": transition_type,
+            "target_status": target,
+            "project_id": project_id,
+        })
+        if verdict is None:
+            summary["halted_reason"] = "lifecycle_service_unavailable"
+            break
+        gate_class = verdict.get("gate_class")
+        # §8 matrix pinning: never auto-cross under a matrix version other than the pinned one.
+        v_matrix = verdict.get("matrix_version")
+        if v_matrix is not None and int(v_matrix) != int(pinned_matrix):
+            summary["halted_reason"] = "matrix_version_mismatch"
+            summary["service_matrix_version"] = v_matrix
+            break
+        if not verdict.get("auto_walkable"):
+            # First attestation / external-fact / manual-deploy boundary — halt (§7).
+            summary["halted_reason"] = verdict.get("reason") or f"gate_not_auto_walkable:{gate_class}"
+            summary["gate_class"] = gate_class
+            break
+
+        # (2) Legality — reuse the full Lifecycle Service gate set (transition validity + subtask gate
+        # + evidence shape). code_only|closed evidence is the stored commit_sha the agent already gave.
+        evidence: Dict[str, Any] = {}
+        if target == "closed" and transition_type == "code_only":
+            evidence = {"code_on_main_evidence": {"commit_sha": commit_sha}}
+        legal = _invoke_lifecycle_action({
+            "action": "validate_transition",
+            "project_id": project_id, "record_id": record_id, "record_type": "task",
+            "current_status": current, "target_status": target,
+            "transition_type": transition_type, "transition_evidence": evidence,
+            "subtask_ids": subtask_ids, "is_checkout_service_request": True,
+        })
+        if legal is None:
+            summary["halted_reason"] = "lifecycle_service_unavailable"
+            break
+        if not legal.get("allow"):
+            err = legal.get("error") or {}
+            summary["halted_reason"] = f"gate_fail:{err.get('code', 'INVALID')}"
+            break
+
+        # (3) Per-leg derivation + extra evidence persistence.
+        extra_set = ""
+        extra_vals: Dict[str, Any] = {}
+        add_clause = ""
+        if target == "closed" and transition_type == "code_only":
+            if not re.match(r"^[0-9a-f]{40}$", commit_sha):
+                summary["halted_reason"] = "gate_fail:missing_commit_sha"
+                break
+            owner, repo = _resolve_github_repo(project_id)
+            if not owner or not repo:
+                summary["halted_reason"] = "gate_fail:repo_unresolved"
+                break
+            ok, why = _arc_walk_compare_commit_to_main(owner, repo, commit_sha)
+            if not ok:
+                summary["halted_reason"] = f"gate_fail:compare:{why}"
+                break
+            derivation = (
+                f"code_only|closed reuses commit_sha {commit_sha[:12]} (supplied at committed) and a "
+                f"system-run GitHub compare confirmed it is an ancestor of main ({why})."
+            )
+            extra_set = ", code_on_main_evidence = :coe"
+            extra_vals[":coe"] = {"M": {
+                "commit_sha": _ser_s(commit_sha), "github_verified": {"BOOL": True},
+            }}
+            add_clause = " ADD closed_count :one"
+        else:
+            derivation = (
+                "deploy-init records an initiation timestamp; on a ci_triggered project the merge "
+                "entails initiation (ruling O-2) — no new external-world claim is introduced."
+            )
+
+        # (4) Idempotent conditional write: advance iff status == expected_prior (§8 idempotency).
+        now2 = _now_z()
+        hentry = _arc_walk_history_entry(now2, current, target, gate_class, derivation, pinned_matrix)
+        note = f"[ARC-WALKER] auto-advanced {current} -> {target} (system:arc-walker)"
+        ws_av = {"M": {
+            "channel": _ser_s(ARC_WALKER_ACTOR), "provider": _ser_s(ARC_WALKER_ACTOR),
+            "dispatch_id": _ser_s(""), "coordination_request_id": _ser_s(""),
+            "timestamp": _ser_s(now2),
+        }}
+        update_expr = (
+            "SET #s = :next, updated_at = :now, last_update_note = :note, write_source = :wsrc, "
+            "sync_version = if_not_exists(sync_version, :zero) + :one, "
+            "history = list_append(if_not_exists(history, :empty), :hentry)"
+            + extra_set + add_clause
+        )
+        attr_vals = {
+            ":next": _ser_s(target), ":now": _ser_s(now2), ":note": _ser_s(note), ":wsrc": ws_av,
+            ":zero": {"N": "0"}, ":one": {"N": "1"},
+            ":hentry": {"L": [hentry]}, ":empty": {"L": []},
+            ":expected": _ser_s(current),
+        }
+        attr_vals.update(extra_vals)
+        try:
+            ddb.update_item(
+                TableName=DYNAMODB_TABLE, Key=key,
+                UpdateExpression=update_expr,
+                ConditionExpression="#s = :expected",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues=attr_vals,
+            )
+        except ClientError as exc:
+            if _is_conditional_check_failed(exc):
+                # A concurrent advance moved the record off expected_prior. The conditional write is
+                # the idempotency guard (§8/§9): no double-step, no lost update — halt cleanly.
+                summary["halted_reason"] = "concurrent_advance"
+                break
+            logger.error("[H85] arc-walk conditional write failed: %s", exc)
+            summary["halted_reason"] = "write_error"
+            break
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[H85] arc-walk write error: %s", exc)
+            summary["halted_reason"] = "write_error"
+            break
+
+        latency_ms = int((dt.datetime.utcnow() - step_start).total_seconds() * 1000)
+        _emit_arc_walk_event(project_id, record_id, current, target, gate_class,
+                             derivation, pinned_matrix, latency_ms)
+        summary["walked"].append({
+            "from": current, "to": target, "gate_class": gate_class,
+            "derivation": derivation, "matrix_version": pinned_matrix, "latency_ms": latency_ms,
+        })
+        current = target
+    else:
+        # Loop exhausted the depth cap without an explicit halt (should be unreachable in Phase 1).
+        summary.setdefault("halted_reason", "max_steps_reached")
+
+    summary["final_status"] = current
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -4044,6 +4369,23 @@ def _handle_update_field(
     }
     if warnings:
         result["warnings"] = warnings
+
+    # ENC-TSK-H85 / ENC-FTR-111 Phase 1: after a successful FORWARD task status advance, hand off to
+    # the Universal Arc-Walker to walk forward across the mechanical gates in the same invocation
+    # (DOC-078C57FC1BE6 §6.1). Behind its own independent flag; wrapped so a walk failure NEVER
+    # affects the agent's already-committed advance (the walk is a pure optimization on top of it).
+    if (record_type == "task" and field == "status" and not is_revert
+            and _arc_walker_enabled()):
+        try:
+            arc_walk = _arc_walk_after_advance(project_id, record_id, item_data, new_lower)
+            if arc_walk and arc_walk.get("walked"):
+                result["arc_walk"] = arc_walk
+            elif arc_walk:
+                # Surface the halt reason too (observability) without implying any advance happened.
+                result["arc_walk"] = arc_walk
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[H85] arc-walk post-advance hook failed (non-fatal): %s", exc)
+
     return _response(200, result)
 
 
