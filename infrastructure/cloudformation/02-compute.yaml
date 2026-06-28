@@ -3667,6 +3667,49 @@ Resources:
         - Key: Environment
           Value: gamma
 
+
+  # ---------------------------------------------------------------------------
+  # ENC-ISS-422 (residual of ENC-ISS-306): enceladus-mcp-streamable Function URL
+  # was left at Qualifier=NONE (-> $LATEST) when ENC-TSK-I24 fixed only mcp-code,
+  # so any update-function-code on streamable is an unguarded prod traffic switch
+  # (same class as the 2026-04-25 mcp-code Sev1). Mirror the I24 mcp-code mitigation:
+  # repoint the streamable Function URL to the `live` alias and codify it here so it
+  # is stack-managed. As with mcp-code, the `live` ALIAS itself is deliberately NOT
+  # codified (AWS::Lambda::Alias requires a FunctionVersion ops moves on every
+  # promotion -> ENC-ISS-313 CFN-stomp class); the Url references the alias by name
+  # and the alias stays operationally managed.
+  #
+  # ADOPTED OUT-OF-BAND (import-first, like EnceladusMcpCodeLiveFunctionUrl): ops
+  # creates the streamable `live` alias, repoints the Function URL to Qualifier=live,
+  # then a non-destructive CFN IMPORT adopts THIS resource with the identical physical
+  # id (mcp.jreese.net served uninterrupted). Do not let a normal compute deploy try to
+  # CREATE it. Prod-only (Condition: IsProduction) — not rendered on the gamma stack.
+  # ---------------------------------------------------------------------------
+  EnceladusMcpStreamableLiveFunctionUrl:
+    Type: AWS::Lambda::Url
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TargetFunctionArn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-streamable"
+      Qualifier: live
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowCredentials: true
+        AllowHeaders:
+          - content-type
+          - authorization
+          - accept
+          - mcp-session-id
+        AllowMethods:
+          - "*"
+        AllowOrigins:
+          - "https://claude.ai"
+        ExposeHeaders:
+          - mcp-session-id
+        MaxAge: 86400
+
   # ENC-TSK-I27 / ENC-FTR-116 Wave 2: recompute-governance Lambda.
   # Triggered by S3 ObjectCreated on governance/live/*; writes canonical
   # governance-version DDB record. IAM sole-writer grant (I28).
