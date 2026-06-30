@@ -6015,6 +6015,29 @@
           "usage_guidance": "Defined in infrastructure/cloudformation/02-compute.yaml on GraphHealthMetricsFunction. The role gains cloudwatch:GetMetricStatistics/GetMetricData (in addition to the existing PutMetricData) to read the walk-back counters."
         }
       }
+    },
+    "graph_query_api.graph_laplacian": {
+      "description": "ENC-TSK-I81 (FTR-088): graph Laplacian read action via tracker.graph_laplacian. Returns adjacency_csr (base64 float32 CSR), fiedler_vector, eigenvalues[:k], vertex_map. Uses scipy.sparse.linalg.eigsh.",
+      "fields": {
+        "vertex_set_query": {
+          "type": "string"
+        },
+        "k": {
+          "type": "integer"
+        },
+        "adjacency_csr": {
+          "type": "string"
+        },
+        "fiedler_vector": {
+          "type": "array"
+        },
+        "eigenvalues": {
+          "type": "array"
+        },
+        "vertex_map": {
+          "type": "object"
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
