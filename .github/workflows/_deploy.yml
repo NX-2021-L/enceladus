@@ -732,7 +732,6 @@ jobs:
               "submitted_by": "gha-deploy-pipeline",
               "non_ui_config": {
                   "service_group": "lambda",
-                  "target_arn": os.environ['DEPLOY_ROLE_ARN'],
               },
               "governance_hash": os.environ['GOVERNANCE_HASH'],
           }))
