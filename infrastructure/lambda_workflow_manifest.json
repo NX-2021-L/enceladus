@@ -22,6 +22,12 @@
       "deploy_script": "backend/lambda/lifecycle_service/deploy.sh"
     },
     {
+      "function_name": "enceladus-scoring-service",
+      "lambda_dir": "backend/lambda/scoring_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/scoring_service/deploy.sh"
+    },
+    {
       "function_name": "devops-coordination-api",
       "lambda_dir": "backend/lambda/coordination_api",
       "workflow_file": ".github/workflows/_deploy.yml",

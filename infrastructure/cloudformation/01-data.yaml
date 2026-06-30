@@ -556,6 +556,21 @@ Resources:
         - Key: Component
           Value: coordination
 
+  # ENC-TSK-H47 / B63 Phase 2B: lesson constitutional-scoring work queue. tracker_mutation
+  # publishes a {lesson.scoring.requested} message here after writing a lesson with
+  # scoring_status='pending' (when enable_scoring_service_extraction is ON); the Scoring Service
+  # Lambda (02-compute.yaml) subscribes and flips scoring_status -> 'scored' asynchronously.
+  LessonScoringTopic:
+    Type: AWS::SNS::Topic
+    DeletionPolicy: Retain
+    Properties:
+      TopicName: !Sub "enceladus-lesson-scoring${EnvironmentSuffix}"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: scoring
+
   # Agent ID v3 identity stores (ENC-TSK-I37 / ENC-FTR-117)
   AgentSessionsTable:
     Type: AWS::DynamoDB::Table
@@ -764,6 +779,10 @@ Outputs:
     Value: !Ref ComponentRegistryEventsTopic
     Export:
       Name: !Sub ${AWS::StackName}-ComponentRegistryEventsTopicArn
+  LessonScoringTopicArn:
+    Value: !Ref LessonScoringTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-LessonScoringTopicArn
   # Agent ID v3 identity stores (ENC-TSK-I37 / ENC-FTR-117)
   AgentSessionsTableName:
     Value: !Ref AgentSessionsTable
