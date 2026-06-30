@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-30.11",
-  "updated_at": "2026-06-30T21:46:00Z",
-  "last_change_summary": "ENC-TSK-I91 (FTR-105 AC-7 spurious-attractor telemetry wiring). graph_query_api.drift_telemetry now computes spurious_attractor_rate from wave retrieval_records (no longer a permanent null stub); graph_query_api.adjacency surfaces a recent spurious_attractor_rate aggregate read off the existing enceladus-drift-telemetry GSI; comp-percolation-monitor's DDB row gains a nullable spurious_attractor_rate field sourced from that same adjacency response. No new edge types, no new Neo4j writes, no new AWS infrastructure. Version -> 2026-06-30.11. Prior change (now on v4/main, .10) — ENC-TSK-H47 (B63 Phase 2B, ENC-PLN-006 gamma): extracted lesson constitutional scoring into a new standalone backend/lambda/scoring_service Lambda, SNS-triggered and ASYNC, behind the enable_scoring_service_extraction AppConfig flag (default OFF); see that task's worklog for the full change summary.",
+  "version": "2026-06-30.12",
+  "updated_at": "2026-06-30T21:58:00Z",
+  "last_change_summary": "ENC-TSK-J01 (FTR-108 Ph1, design-only, no functional change): doc-comment cross-reference added to graph_query_api._build_pathway_telemetry_record noting that edge_participation[].edge_id (retrieval_outcome=='hit') is the confirmed Ph1 source of truth for the Tero current-reinforcement contract's flow(e,t) signal (design doc DOC-88A8F4835811). No schema/field/status changes. Version -> 2026-06-30.12. Prior change (now on v4/main, .11) — ENC-TSK-I91 (FTR-105 AC-7 spurious-attractor telemetry wiring); see that task's worklog for the full change summary.",
   "owners": [
     "enceladus-platform"
   ],
