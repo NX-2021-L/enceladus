@@ -448,6 +448,52 @@ Resources:
         - Key: Component
           Value: graph
 
+  # ENC-FTR-086 Ph1 / ENC-TSK-I82: write buffer between the convergence fan-out
+  # (DynamoDB-stream-triggered) and the idempotent counter increment. FIFO with
+  # per-attribute MessageGroupId so increments to one attribute are ordered while
+  # distinct attributes process concurrently. ContentBasedDeduplication is OFF —
+  # the fan-out supplies an explicit, deterministic MessageDeduplicationId.
+  ConvergenceTelemetryQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "enceladus-convergence-telemetry-queue${EnvironmentSuffix}.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      # Must be >= the convergence Lambda Timeout (60) so a redelivery is not
+      # made visible mid-processing.
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 86400
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ConvergenceTelemetryDLQ.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: convergence
+        - Key: Feature
+          Value: ENC-FTR-086
+
+  ConvergenceTelemetryDLQ:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "enceladus-convergence-telemetry-dlq${EnvironmentSuffix}.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: convergence
+        - Key: Feature
+          Value: ENC-FTR-086
+
   # ---------------------------------------------------------------------------
   # SNS Topics
   # ---------------------------------------------------------------------------
@@ -595,6 +641,41 @@ Resources:
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
+  # ENC-FTR-086 Ph1 / ENC-TSK-I82: Convergence Surface attribute-value counter.
+  # Frequency-ranked telemetry over canonical open-taxonomy values. One partition
+  # per attribute (attribute_name = "{project_id}#{record_type}#{field}"); the
+  # attribute_name-index GSI is count-ordered so it serves both ranked reads and
+  # lowest-count eviction at the 10k cap. TTL on expires_at ages out stale rows.
+  ConvergenceTelemetryTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "enceladus-convergence-telemetry${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: attribute_name
+          AttributeType: S
+        - AttributeName: canonical_value
+          AttributeType: S
+        - AttributeName: count
+          AttributeType: N
+      KeySchema:
+        - AttributeName: attribute_name
+          KeyType: HASH
+        - AttributeName: canonical_value
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: attribute_name-index
+          KeySchema:
+            - AttributeName: attribute_name
+              KeyType: HASH
+            - AttributeName: count
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
       Tags:
         - Key: Project
           Value: enceladus
@@ -602,6 +683,9 @@ Resources:
           Value: percolation-monitor
         - Key: Feature
           Value: ENC-FTR-085
+          Value: convergence
+        - Key: Feature
+          Value: ENC-FTR-086
 
 Outputs:
   CoordinationTableName:
@@ -705,3 +789,24 @@ Outputs:
     Value: !GetAtt GovernanceVersionTable.Arn
     Export:
       Name: !Sub ${AWS::StackName}-GovernanceVersionTableArn
+  # ENC-FTR-086 Ph1 / ENC-TSK-I82: Convergence Surface
+  ConvergenceTelemetryTableName:
+    Value: !Ref ConvergenceTelemetryTable
+    Export:
+      Name: !Sub ${AWS::StackName}-ConvergenceTelemetryTable
+  ConvergenceTelemetryTableArn:
+    Value: !GetAtt ConvergenceTelemetryTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ConvergenceTelemetryTableArn
+  ConvergenceTelemetryQueueUrl:
+    Value: !Ref ConvergenceTelemetryQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-ConvergenceTelemetryQueueUrl
+  ConvergenceTelemetryQueueArn:
+    Value: !GetAtt ConvergenceTelemetryQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ConvergenceTelemetryQueueArn
+  ConvergenceTelemetryDLQArn:
+    Value: !GetAtt ConvergenceTelemetryDLQ.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ConvergenceTelemetryDLQArn

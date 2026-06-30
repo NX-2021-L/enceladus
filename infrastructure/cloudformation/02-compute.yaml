@@ -1116,6 +1116,58 @@ Resources:
           Value: graph
 
   # ---------------------------------------------------------------------------
+  # Convergence Surface fan-out + increment Lambda (ENC-FTR-086 Ph1 / ENC-TSK-I82)
+  # ---------------------------------------------------------------------------
+  # One function, two event sources (dispatched on eventSource in the handler):
+  #   - DynamoDB Stream (tracker) -> fan-out per open-taxonomy attribute to SQS
+  #   - SQS FIFO -> idempotent counter increment with 10k-cap lowest-count eviction
+  # ENC-FTR-086 D1: isolated tier-1 service — its own IAM role, no import path
+  # from any governance Lambda; tracker mutations never wait on it.
+  ConvergenceTelemetryFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-convergence-telemetry${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt ConvergenceTelemetryRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          CONVERGENCE_TABLE: !Sub "enceladus-convergence-telemetry${EnvironmentSuffix}"
+          CONVERGENCE_QUEUE_URL: !ImportValue
+            Fn::Sub: ${DataStackName}-ConvergenceTelemetryQueueUrl
+          CONVERGENCE_TTL_DAYS: "90"
+          CONVERGENCE_CAP: "10000"
+          DYNAMODB_REGION: !Ref AWS::Region
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: convergence
+        - Key: Feature
+          Value: ENC-FTR-086
+
+  # ---------------------------------------------------------------------------
   # Neo4j Backup Lambda
   # ---------------------------------------------------------------------------
 
@@ -1705,6 +1757,35 @@ Resources:
       BatchSize: 25
       MaximumBatchingWindowInSeconds: 30
       StartingPosition: LATEST
+      Enabled: true
+
+  # ENC-FTR-086 Ph1 / ENC-TSK-I82: tracker DynamoDB Stream -> convergence fan-out.
+  ConvergenceStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      FunctionName: !Ref ConvergenceTelemetryFunction
+      BatchSize: 25
+      MaximumBatchingWindowInSeconds: 30
+      StartingPosition: LATEST
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+      Enabled: true
+
+  # ENC-FTR-086 Ph1 / ENC-TSK-I82: convergence SQS FIFO -> idempotent increment.
+  ConvergenceSqsTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-ConvergenceTelemetryQueueArn
+      FunctionName: !Ref ConvergenceTelemetryFunction
+      BatchSize: 10
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
       Enabled: true
 
   # ---------------------------------------------------------------------------
@@ -3572,6 +3653,95 @@ Resources:
                   - bedrock:InvokeModel
                 Resource:
                   - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ENC-FTR-086 Ph1 / ENC-TSK-I82: Convergence Surface Lambda role.
+  # D1 architectural separation: read-only on the tracker STREAM (never the
+  # governance tables) + read/write only on its own counter table + consume/send
+  # on its own FIFO queue. Governance Lambdas have no access to the counter table.
+  ConvergenceTelemetryRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-convergence-telemetry-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadTrackerStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+        - PolicyName: ConvergenceQueue
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeAndSendConvergenceQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:SendMessage
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-ConvergenceTelemetryQueueArn
+        - PolicyName: ConvergenceCounterTable
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CounterTableReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: ${DataStackName}-ConvergenceTelemetryTableArn
+                  - !Sub
+                    - "${TableArn}/index/*"
+                    - TableArn: !ImportValue
+                        Fn::Sub: ${DataStackName}-ConvergenceTelemetryTableArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus

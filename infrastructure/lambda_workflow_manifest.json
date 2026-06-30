@@ -241,6 +241,16 @@
       "lambda_dir": "backend/lambda/arc_walk_metrics",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/arc_walk_metrics/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-convergence-telemetry",
+      "lambda_dir": "backend/lambda/convergence_telemetry",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/convergence_telemetry/deploy.sh",
+      "package_extra_files": [
+        "canonicalize.py",
+        "counter_store.py"
+      ]
     }
   ]
 }
