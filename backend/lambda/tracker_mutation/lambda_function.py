@@ -513,6 +513,11 @@ EVENT_DETAIL_TYPE_REOPENED = "record.status.reopened"
 # ENC-FTR-111 / ENC-TSK-H83: Artifact-Genesis telemetry for an auto_walk_opt_out latch
 # (feeds ENC-TSK-B66 / the T5 ARC_WALK telemetry consumer).
 EVENT_DETAIL_TYPE_OPT_OUT_LATCHED = "record.auto_walk_opt_out.latched"
+# ENC-FTR-111 / ENC-TSK-H86 (T5): the matching CLEAR-side telemetry. DOC-078C57FC1BE6 §10 requires
+# BOTH opt_out latch AND clear events to feed the ENC-TSK-B66 observability dashboard. The latch
+# (auto-set on a human walk-back, H83) emits EVENT_DETAIL_TYPE_OPT_OUT_LATCHED; an explicit
+# human/agent tracker.set(auto_walk_opt_out=...) emits latched-or-cleared via _emit_opt_out_state_event.
+EVENT_DETAIL_TYPE_OPT_OUT_CLEARED = "record.auto_walk_opt_out.cleared"
 # ENC-TSK-I09 (Dedup P5): io-reviewable audit feed for every MECHANICAL arc-walker
 # auto-merge. One event streams per certificate-certified T-HIGH supersession the
 # walker executes (DOC-DF651F07D5C2 §8 — the kill-switch + audit-feed rail).
@@ -1572,6 +1577,47 @@ def _emit_opt_out_latch_event(project_id: str, record_type: str, record_id: str,
         }])
     except Exception as exc:
         logger.error("opt_out latch event emit failed: %s", exc)
+
+
+def _opt_out_state_history_entry(now: str, latched: bool, actor: str) -> Dict:
+    """ENC-TSK-H86 (T5): Artifact-Genesis history entry for an EXPLICIT (human/agent) set or clear
+    of auto_walk_opt_out via tracker.set. Carries an [ARC-WALKER][OPT-OUT-SET|OPT-OUT-CLEAR] marker
+    so the read-only convergence/telemetry probe (arc_walk_metrics) can count latch/clear events
+    from record history. The auto-latch path (H83) records its own [OPT-OUT-LATCH] entry."""
+    marker = "OPT-OUT-SET" if latched else "OPT-OUT-CLEAR"
+    verb = "latched true" if latched else "cleared (set false)"
+    msg = (
+        f"[ARC-WALKER][{marker}] auto_walk_opt_out {verb} by {actor or 'unknown'}. "
+        f"The Universal Arc-Walker (ENC-FTR-111) "
+        + ("will not auto-advance this record while the latch is set."
+           if latched else "may auto-advance this record across mechanical gates again.")
+    )
+    return {"M": {
+        "timestamp": _ser_s(now), "status": _ser_s("worklog"), "description": _ser_s(msg),
+    }}
+
+
+def _emit_opt_out_state_event(project_id: str, record_type: str, record_id: str,
+                              latched: bool, actor: str) -> None:
+    """ENC-TSK-H86 (T5) / ENC-FTR-111 AC-6: emit the opt_out latch-or-clear telemetry event for an
+    EXPLICIT tracker.set of auto_walk_opt_out (the H83 auto-latch path emits its own latch event).
+    Both latch and clear feed the ENC-TSK-B66 observability dashboard. Best-effort — a telemetry
+    failure never rolls back the already-committed field write."""
+    detail = {
+        "project_id": project_id, "record_type": record_type, "record_id": record_id,
+        "event": "auto_walk_opt_out_latched" if latched else "auto_walk_opt_out_cleared",
+        "advanced_by": ARC_WALKER_ACTOR, "actor": actor or "unknown",
+        "latched": bool(latched), "trigger": "explicit_set" if latched else "explicit_clear",
+        "changed_at": _now_z(),
+    }
+    detail_type = EVENT_DETAIL_TYPE_OPT_OUT_LATCHED if latched else EVENT_DETAIL_TYPE_OPT_OUT_CLEARED
+    try:
+        _get_events().put_events(Entries=[{
+            "Source": EVENT_SOURCE, "DetailType": detail_type,
+            "Detail": json.dumps(detail), "EventBusName": EVENT_BUS,
+        }])
+    except Exception as exc:  # noqa: BLE001
+        logger.error("opt_out state event emit failed: %s", exc)
 
 
 def _emit_auto_merge_event(project_id: str, record_type: str, superseded_id: str,
@@ -4282,6 +4328,15 @@ def _handle_update_field(
         "description": _ser_s(note_text),
     }}
 
+    # ENC-TSK-H86 (T5): an EXPLICIT human/agent tracker.set of auto_walk_opt_out records a governed
+    # [ARC-WALKER][OPT-OUT-SET|OPT-OUT-CLEAR] history marker (parallel to the H83 auto-latch entry)
+    # so the read-only arc_walk_metrics probe can count latch/clear events from record history.
+    _optout_explicit: Optional[bool] = None
+    if field == "auto_walk_opt_out":
+        _optout_explicit = _coerce_bool(value)
+        _optout_actor = str(_normalize_write_source(body, claims).get("provider", "")).strip()
+        history_entry = _opt_out_state_history_entry(now, _optout_explicit, _optout_actor)
+
     # Build extra SET clauses for evidence fields (ENC-FTR-022)
     extra_sets = []
     extra_vals = {}
@@ -4361,6 +4416,14 @@ def _handle_update_field(
         _emit_opt_out_latch_event(
             project_id, record_type, record_id,
             _optout_latch["from"], _optout_latch["to"], _optout_latch["reason"], _optout_latch["by"],
+        )
+
+    # ENC-TSK-H86 (T5) / ENC-FTR-111 AC-6: emit the opt_out latch-or-clear telemetry event after an
+    # EXPLICIT tracker.set of auto_walk_opt_out commits, so both states reach the ENC-TSK-B66 dashboard.
+    if _optout_explicit is not None:
+        _emit_opt_out_state_event(
+            project_id, record_type, record_id, _optout_explicit,
+            str(_normalize_write_source(body, claims).get("provider", "")).strip(),
         )
 
     result: Dict[str, Any] = {
