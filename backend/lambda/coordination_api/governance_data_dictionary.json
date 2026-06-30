@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-30.13",
-  "updated_at": "2026-06-30T22:01:00Z",
-  "last_change_summary": "ENC-TSK-I98 (FTR-104 Ph1 AC-1/AC-2): graph_query_api.pathway_telemetry gains an additive 'energy' block (E(x) = E_vector + lambda_graph*E_PPR + lambda_kw*E_keyword per retrieval record, plus the lambda weights used); hybrid retrieval response gains retrieval_records[]/energy_lambda_weights. ppr_source_is_gds_pagerank flags whether E_PPR came from the FTR-101 gds_pagerank projection vs cypher_fallback. No existing field renamed/removed. Version -> 2026-06-30.13. Prior change (now on v4/main, .12) — ENC-TSK-J01 (FTR-108 Ph1, design-only); see that task's worklog for the full change summary.",
+  "version": "2026-06-30.14",
+  "updated_at": "2026-06-30T23:15:00Z",
+  "last_change_summary": "ENC-TSK-I92 (FTR-110 Ph1): graph_query_api hybrid retrieval gains a fifth, additive dispersion/corroboration Weber-law bonus signal layered on top of the existing 4-signal RRF fusion. Each candidate's per_node_fusion/_node_ entry gains k_corr (dispersion-constrained corroborator count -- near-duplicate records, pairwise cosine distance < 0.3, never count as corroborating each other), b_corr (B_corr = Weber_k * ln(1+k_corr)/ln(1+k_max), call-relative normalization, default Weber_k=0.3), final_score (fused_score + b_corr) and final_rank; nodes/per_node_fusion are now ordered by final_score rather than the pure-RRF fused_score (fused_score/fused_rank remain unmodified). Response gains corroboration_weber_k. No existing field renamed/removed; degrades to a no-op when no candidate carries an embedding. Version -> 2026-06-30.14. Prior change (.13) -- ENC-TSK-I98 (FTR-104 Ph1 AC-1/AC-2), the per-retrieval energy function E(x) additive 'energy' block; see that task's worklog for the full change summary.",
   "owners": [
     "enceladus-platform"
   ],

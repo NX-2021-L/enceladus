@@ -37,6 +37,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs
 
+import corroboration
 import dedup_convergence
 import energy_function
 
@@ -2018,7 +2019,8 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
 
     Response contract:
       {
-        "nodes":             [...ordered by fused score...],
+        "nodes":             [...ordered by final score (fused RRF score +
+                              ENC-TSK-I92 dispersion/corroboration bonus)...],
         "edges":             [],
         "paths":             [],
         "summary":           "Hybrid: N nodes (vector=V, graph=G, keyword=K)",
@@ -2027,8 +2029,17 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "graph_algorithm":   "gds_pagerank" | "cypher_fallback" | "unavailable",
         "rrf_k":             60,
         "embedding_coverage_sample": {covered: N, total_ranked: N},
-        "per_node_fusion":   {record_id: {fused_rank, per_signal_ranks}}
+        "per_node_fusion":   {record_id: {fused_rank, per_signal_ranks, ...,
+                              k_corr, b_corr, final_score, final_rank}},
+        "corroboration_weber_k": 0.3,
       }
+
+    ENC-TSK-I92 (ENC-FTR-110 Ph1): each candidate's pure-RRF `fused_score`
+    (vector/graph/keyword/PPR fused via `_rrf_fuse`) is augmented with a fifth,
+    additive corroboration bonus B_corr — see the `corroboration` module and
+    the "ENC-TSK-I92" banner below — to produce `final_score`, which is what
+    `nodes`/`per_node_fusion` are actually ordered by. `fused_score`/
+    `fused_rank` remain the unmodified pure-RRF values throughout.
     """
     query_text = str(params.get("query", "")).strip()
     anchor_record_id = str(params.get("anchor_record_id", "")).strip()
@@ -2056,6 +2067,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # weights once per call (not once per candidate) so a single hybrid call
     # never re-probes AppConfig more than once.
     energy_lambda_graph, energy_lambda_kw = energy_function.load_lambda_weights()
+
+    # ENC-TSK-I92 (ENC-FTR-110 Ph1): resolve the corroboration Weber_k bonus
+    # weight once per call, same one-AppConfig-probe-per-call discipline as
+    # the energy lambda weights above.
+    corroboration_weber_k = corroboration.load_weber_k()
 
     # ENC-TSK-F36 / ENC-ISS-268 / DOC-D4CB8048798B — verify the cached Bolt
     # pool is live before dispatching to any of the three signal functions.
@@ -2201,6 +2217,10 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "energy_lambda_weights": {
                 "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
             },
+            # ENC-TSK-I92 (ENC-FTR-110 Ph1): the Weber_k bonus weight used for
+            # this call, surfaced even with zero candidates for observability
+            # parity with energy_lambda_weights above.
+            "corroboration_weber_k": corroboration_weber_k,
         }
 
     fused = _rrf_fuse(signals, k=RRF_K)
@@ -2238,6 +2258,52 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             lambda_kw=energy_lambda_kw,
         )
 
+    # ENC-TSK-I92 (ENC-FTR-110 Ph1): dispersion/corroboration Weber-law bonus —
+    # a fifth scoring signal, layered on top of (not folded into) the 4-signal
+    # RRF sum above. For each candidate, count corroborators: other candidates
+    # in this SAME result set that are similar enough to it (cosine similarity
+    # >= corroboration.DEFAULT_SIMILARITY_THRESHOLD) AND pairwise dispersed
+    # from each other (cosine distance >= corroboration.DISPERSION_MIN_
+    # DISTANCE), so a cluster of near-duplicate records never counts as more
+    # than one independent corroborator (the "dispersion constraint" —
+    # corroboration.count_corroborators). B_corr is a bonus, not an RRF term:
+    # it is added on top of each candidate's already-fused RRF fused_score to
+    # produce final_score, and is never folded into _rrf_fuse's 1/(k+rank) sum
+    # — that sum is exact-value-asserted by test_hybrid_retrieval.py and must
+    # stay pure RRF. Degrades to a no-op (B_corr == 0.0 for everyone, final_
+    # score == fused_score) when no candidate in this call carries a usable
+    # embedding, so this is fully backward compatible with callers/tests that
+    # never populate the embedding property.
+    embeddings_by_rid = {
+        rid: node_by_rid[rid].get(_EMBEDDING_PROPERTY)
+        for rid in top_rids
+        if node_by_rid.get(rid) and node_by_rid[rid].get(_EMBEDDING_PROPERTY)
+    }
+    corroboration_counts = corroboration.compute_corroboration_counts(embeddings_by_rid)
+    corroboration_bonuses = corroboration.compute_bonuses(
+        corroboration_counts, weber_k=corroboration_weber_k,
+    )
+    for item in top_fused:
+        rid = item["record_id"]
+        bonus = corroboration_bonuses.get(rid)
+        item["k_corr"] = bonus["k_corr"] if bonus else 0
+        item["b_corr"] = bonus["b_corr"] if bonus else 0.0
+        item["final_score"] = item["fused_score"] + item["b_corr"]
+
+    # Re-rank by final_score (RRF fused_score + corroboration bonus), NOT
+    # fused_score alone, so a candidate several genuinely-distinct records
+    # independently corroborate can outrank a single high-RRF candidate with
+    # zero independent corroboration (ENC-FTR-110 AC-4 — the spurious-
+    # attractor hedge this signal exists to provide). fused_rank/fused_score
+    # above are left untouched (the pure-RRF values); only presentation order
+    # — and the node-level final_rank/final_score below — reflect the bonus.
+    # Python's sort is stable, so when every candidate's b_corr is 0.0 (no
+    # embeddings / no corroboration anywhere in this call) the RRF order from
+    # _rrf_fuse is preserved exactly.
+    top_fused.sort(key=lambda d: d["final_score"], reverse=True)
+    for idx, item in enumerate(top_fused, start=1):
+        item["final_rank"] = idx
+
     # Ordered list of nodes matching the fused ranking.
     nodes: List[Dict[str, Any]] = []
     embedding_covered = 0
@@ -2253,6 +2319,12 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         node["_fused_score"] = item["fused_score"]
         node["_per_signal_ranks"] = item["per_signal_ranks"]
         node["_retrieval_energy"] = energy_by_rid[rid]["retrieval_energy"]
+        # ENC-TSK-I92 (ENC-FTR-110 Ph1): corroboration count + Weber bonus +
+        # the bonus-adjusted final_score/final_rank (see banner above).
+        node["_corroboration_count"] = item["k_corr"]
+        node["_b_corr"] = item["b_corr"]
+        node["_final_score"] = item["final_score"]
+        node["_final_rank"] = item["final_rank"]
         if node.get(_EMBEDDING_PROPERTY):
             embedding_covered += 1
             # Drop the 256-float blob from the response to keep payloads small.
@@ -2262,6 +2334,10 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "fused_score": item["fused_score"],
             "per_signal_ranks": item["per_signal_ranks"],
             "retrieval_energy": energy_by_rid[rid]["retrieval_energy"],
+            "k_corr": item["k_corr"],
+            "b_corr": item["b_corr"],
+            "final_score": item["final_score"],
+            "final_rank": item["final_rank"],
         }
         nodes.append(node)
 
@@ -2348,6 +2424,10 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "energy_lambda_weights": {
             "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
         },
+        # ENC-TSK-I92 (ENC-FTR-110 Ph1): Weber_k bonus weight used for this
+        # call's corroboration bonus (see per_node_fusion[*].b_corr/k_corr and
+        # nodes[*]._b_corr/_corroboration_count/_final_score/_final_rank).
+        "corroboration_weber_k": corroboration_weber_k,
     }
 
 
