@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-30.05",
-  "updated_at": "2026-06-30T02:30:00Z",
-  "last_change_summary": "ENC-TSK-I90 (FTR-095 sheaf Laplacian H1). Adds graph_query_api.sheaf_cohomology. Version -> 2026-06-30.05.",
+  "version": "2026-06-30.06",
+  "updated_at": "2026-06-30T02:45:00Z",
+  "last_change_summary": "ENC-TSK-I84 (FTR-096 Ph1 memory consolidation). Adds monitoring.memory_consolidation. Version -> 2026-06-30.06.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5967,6 +5967,11 @@
       "description": "Sheaf Laplacian H1 inconsistency-detection. search_type=sheaf_cohomology on graph_query_api. Returns h1_dim, inconsistency_nodes[], inconsistency_edges[], computation_ms.",
       "owner": "graph-query-api",
       "source": "ENC-TSK-I90 / ENC-FTR-095",
+      "telemetry_eligible": false
+    },
+    "monitoring.memory_consolidation": {
+      "description": "See source task.",
+      "source": "ENC-TSK",
       "telemetry_eligible": false
     }
   },
