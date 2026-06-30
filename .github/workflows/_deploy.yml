@@ -732,6 +732,7 @@ jobs:
               "submitted_by": "gha-deploy-pipeline",
               "non_ui_config": {
                   "service_group": "lambda",
+                  "target_arn": f"arn:aws:lambda:us-west-2:356364570033:function:devops-tracker-mutation-api{'-gamma' if 'gamma' in env else ''}",
               },
               "governance_hash": os.environ['GOVERNANCE_HASH'],
           }))
