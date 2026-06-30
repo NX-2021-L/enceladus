@@ -86,11 +86,11 @@ try:
 except Exception:
     _CERT_BUNDLE = None
 
-# Budget Hierarchy Controller (ENC-FTR-083 Ph1 / ENC-TSK-I86). Imported with the
-# same defensive fallback as mcp_client so a flat-file Lambda package and a
-# package-relative import both resolve.
+# Budget Hierarchy Controller (ENC-FTR-083 Ph1 / ENC-TSK-I86; Ph2 / ENC-TSK-I87).
+# Imported with the same defensive fallback as mcp_client so a flat-file Lambda
+# package and a package-relative import both resolve.
 try:
-    from budget_hierarchy import log_session_budget_allocation
+    from budget_hierarchy import log_session_budget_allocation, evaluate_corpus_budget
 except ModuleNotFoundError:
     _BHC_MODULE_PATH = pathlib.Path(__file__).with_name("budget_hierarchy.py")
     _BHC_SPEC = importlib.util.spec_from_file_location("coordination_budget_hierarchy", _BHC_MODULE_PATH)
@@ -99,6 +99,7 @@ except ModuleNotFoundError:
     _BHC_MODULE = importlib.util.module_from_spec(_BHC_SPEC)
     _BHC_SPEC.loader.exec_module(_BHC_MODULE)
     log_session_budget_allocation = _BHC_MODULE.log_session_budget_allocation
+    evaluate_corpus_budget = _BHC_MODULE.evaluate_corpus_budget
 
 
 def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
@@ -10938,6 +10939,17 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
         log_session_budget_allocation(logger, request_id=request_id, project_id=project_id)
     except Exception:  # noqa: BLE001 — budget telemetry must never break session init
         logger.debug("budget allocation logging skipped (non-fatal)", exc_info=True)
+
+    # ENC-FTR-083 Ph2 (ENC-TSK-I87) — corpus-budget alert ladder + corpus
+    # token-usage telemetry. No-op unless a corpus-usage signal is configured
+    # (BUDGET_CORPUS_USED_TOKENS env / AppConfig), so this stays silent in the
+    # common case; when present it classifies the five-level ladder, publishes
+    # NOTICE+ alerts to SNS, and emits the CorpusTokenUsage CloudWatch metric.
+    # Best-effort: never let budget telemetry break request intake.
+    try:
+        evaluate_corpus_budget(logger, request_id=request_id, project_id=project_id)
+    except Exception:  # noqa: BLE001 — budget telemetry must never break session init
+        logger.debug("corpus budget evaluation skipped (non-fatal)", exc_info=True)
 
     if decomposition.get("feature_id"):
         _append_tracker_history(
