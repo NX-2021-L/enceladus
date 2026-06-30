@@ -1429,12 +1429,24 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       FunctionName: !Sub "enceladus-percolation-monitor${EnvironmentSuffix}"
+  # ENC-TSK-H86 / ENC-FTR-111 Phase 1 (T5): Universal Arc-Walker telemetry +
+  # convergence-probe Lambda. Read-only — scans the tracker table and publishes
+  # CloudWatch metrics (Enceladus/ArcWalk) that surface the arc-walk dashboard
+  # signals to ENC-TSK-B66. It never mutates a record (DOC-078C57FC1BE6 §10).
+  # ---------------------------------------------------------------------------
+  ArcWalkMetricsFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-arc-walk-metrics${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
       Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 1024
       Timeout: 900
+      MemorySize: 256
+      Timeout: 120
       Architectures:
         - !If [IsGamma, arm64, x86_64]
       SnapStart: !If
@@ -1464,6 +1476,16 @@ Resources:
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
+      Role: !GetAtt ArcWalkMetricsRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          CLOUDWATCH_NAMESPACE: Enceladus/ArcWalk
+          DYNAMODB_REGION: !Ref "AWS::Region"
+          PROJECT_ID: enceladus
       Tags:
         - Key: Project
           Value: enceladus
@@ -1492,6 +1514,25 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt PercolationMonitorSchedule.Arn
+          Value: arc-walk-metrics
+
+  ArcWalkMetricsSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-arc-walk-metrics-hourly${EnvironmentSuffix}"
+      ScheduleExpression: "rate(1 hour)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ArcWalkMetricsFunction.Arn
+          Id: arc-walk-metrics-hourly
+
+  ArcWalkMetricsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ArcWalkMetricsFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ArcWalkMetricsSchedule.Arn
 
   # ---------------------------------------------------------------------------
   # ENC-FTR-101 Option B (ENC-TSK-H37): standing-projection out-of-band refresh
@@ -3714,6 +3755,13 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       RoleName: !Sub "enceladus-percolation-monitor-role${EnvironmentSuffix}"
+  # ENC-TSK-H86 / ENC-FTR-111 (T5): Arc-Walk Metrics Lambda IAM Role.
+  # Read-only: scan the tracker table + read project deploy_policy, publish CloudWatch metrics.
+  ArcWalkMetricsRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-arc-walk-metrics-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -3723,6 +3771,7 @@ Resources:
             Action: sts:AssumeRole
       Policies:
         - PolicyName: PercolationMonitorPolicy
+        - PolicyName: ArcWalkMetricsPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -3756,6 +3805,14 @@ Resources:
                   - appconfig:GetLatestConfiguration
                   - appconfig:StartConfigurationSession
                 Resource: "*"
+              - Sid: TrackerAndProjectsReadOnly
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
       Tags:
         - Key: Project
           Value: enceladus

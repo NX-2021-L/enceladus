@@ -74,6 +74,7 @@ function_name_map:
   governance_audit: enceladus-governance-audit-gamma
   governance_drift_check: devops-governance-drift-check-gamma
   graph_health_metrics: enceladus-graph-health-metrics-gamma
+  arc_walk_metrics: enceladus-arc-walk-metrics-gamma
   graph_query_api: devops-graph-query-api-gamma
   graph_sync: devops-graph-sync-gamma
   memory_consolidation: enceladus-memory-consolidation-gamma
