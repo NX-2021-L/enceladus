@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs
 
 import dedup_convergence
+import energy_function
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -1931,7 +1932,8 @@ def _reconstruct_pathway_edges(driver, project_id, anchor_record_id, result_rids
 def _build_pathway_telemetry_record(*, wave_id, intent_signature, project_id,
                                     anchor_record_id, node_sequence, edges_traversed,
                                     edge_participation, result_count, graph_algorithm,
-                                    signal_availability) -> Dict[str, Any]:
+                                    signal_availability, retrieval_records=None,
+                                    lambda_graph=None, lambda_kw=None) -> Dict[str, Any]:
     """Assemble the AC-1 raw telemetry record (also carries the AC-10 edge
     participation list). This field set IS the ENC-FTR-108 AC-4 input contract.
 
@@ -1940,8 +1942,15 @@ def _build_pathway_telemetry_record(*, wave_id, intent_signature, project_id,
     participate in a successful retrieval this wave" -- the flow(e, t) signal in
     the Tero current-reinforcement contract (DOC-88A8F4835811). No flow_weight
     write path exists yet; that is Ph2, gated on an OGTM preflight not yet run.
+
+    ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-2): additive ``energy`` block carrying the
+    per-record E(x) breakdown (``energy_function.build_retrieval_record``
+    shape) computed for this hybrid call, plus the lambda weights used to
+    compute it. ``retrieval_records``/``lambda_graph``/``lambda_kw`` all
+    default to None/empty so existing callers (and the pre-I98 telemetry
+    schema) are unaffected — no rename/removal of any existing field.
     """
-    return {
+    record = {
         "schema": "enceladus.pathway.telemetry.v1",
         "wave_id": wave_id or "unassigned",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1957,6 +1966,14 @@ def _build_pathway_telemetry_record(*, wave_id, intent_signature, project_id,
             "signal_availability": signal_availability,
         },
     }
+    if retrieval_records is not None or lambda_graph is not None or lambda_kw is not None:
+        record["energy"] = {
+            "schema": energy_function.ENERGY_SCHEMA,
+            "lambda_graph": lambda_graph,
+            "lambda_kw": lambda_kw,
+            "records": retrieval_records or [],
+        }
+    return record
 
 
 def _emit_pathway_telemetry(record: Dict[str, Any]) -> None:
@@ -2034,6 +2051,11 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # At least one of query or anchor_record_id is required.
     if not query_text and not anchor_record_id:
         return {"error": "hybrid search requires at least one of: query, anchor_record_id"}
+
+    # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-2): resolve the energy-function lambda
+    # weights once per call (not once per candidate) so a single hybrid call
+    # never re-probes AppConfig more than once.
+    energy_lambda_graph, energy_lambda_kw = energy_function.load_lambda_weights()
 
     # ENC-TSK-F36 / ENC-ISS-268 / DOC-D4CB8048798B — verify the cached Bolt
     # pool is live before dispatching to any of the three signal functions.
@@ -2148,11 +2170,14 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "keyword": keyword_available,
         }
         # AC-1: emit telemetry even for zero-result retrievals (no edges/nodes).
+        # ENC-TSK-I98: lambda weights are still logged even with zero candidates
+        # so the AppConfig-resolved values used for this call are auditable.
         _emit_pathway_telemetry(_build_pathway_telemetry_record(
             wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
             anchor_record_id=anchor_record_id, node_sequence=[], edges_traversed=[],
             edge_participation=[], result_count=0, graph_algorithm=graph_algorithm,
-            signal_availability=_sig_avail,
+            signal_availability=_sig_avail, retrieval_records=[],
+            lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
         ))
         return {
             "nodes": [],
@@ -2169,6 +2194,13 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "signal_availability": _sig_avail,
             "graph_algorithm": graph_algorithm,
             "rrf_k": RRF_K,
+            # ENC-TSK-I98 (ENC-FTR-104 Ph1): per-retrieval energy telemetry —
+            # empty when no candidates were fused, but the lambda weights used
+            # for this call are still surfaced for observability.
+            "retrieval_records": [],
+            "energy_lambda_weights": {
+                "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
+            },
         }
 
     fused = _rrf_fuse(signals, k=RRF_K)
@@ -2179,6 +2211,32 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     # ---- Resolve full node payloads ---------------------------------------
     top_rids = [item["record_id"] for item in top_fused]
     node_by_rid = _fetch_nodes_by_record_ids(driver, project_id, top_rids)
+
+    # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-1/AC-2): per-candidate energy function
+    # E(x) = E_vector + lambda_graph*E_PPR + lambda_kw*E_keyword, computed from
+    # this call's own vector/graph/keyword signals — no new signal sources.
+    # graph_score/keyword_score are normalized call-relative against the top
+    # score in their respective ranked signal list (vector is already [0,1]
+    # cosine similarity, so it needs no re-normalization). graph_algorithm is
+    # threaded through unchanged so a unit test can assert E_PPR was sourced
+    # from the FTR-101 standing AGA projection ("gds_pagerank") rather than the
+    # "cypher_fallback" proxy.
+    _max_graph_score = graph_ranks[0]["score"] if graph_ranks else None
+    _max_keyword_score = keyword_ranks[0]["score"] if keyword_ranks else None
+    energy_by_rid: Dict[str, Dict[str, Any]] = {}
+    for item in top_fused:
+        rid = item["record_id"]
+        sig_scores = item.get("per_signal_scores") or {}
+        energy_by_rid[rid] = energy_function.compute_retrieval_energy(
+            vector_score=sig_scores.get("vector"),
+            graph_score=sig_scores.get("graph"),
+            keyword_score=sig_scores.get("keyword"),
+            max_graph_score=_max_graph_score,
+            max_keyword_score=_max_keyword_score,
+            graph_algorithm=graph_algorithm,
+            lambda_graph=energy_lambda_graph,
+            lambda_kw=energy_lambda_kw,
+        )
 
     # Ordered list of nodes matching the fused ranking.
     nodes: List[Dict[str, Any]] = []
@@ -2194,6 +2252,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         node["_fused_rank"] = item["fused_rank"]
         node["_fused_score"] = item["fused_score"]
         node["_per_signal_ranks"] = item["per_signal_ranks"]
+        node["_retrieval_energy"] = energy_by_rid[rid]["retrieval_energy"]
         if node.get(_EMBEDDING_PROPERTY):
             embedding_covered += 1
             # Drop the 256-float blob from the response to keep payloads small.
@@ -2202,6 +2261,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "fused_rank": item["fused_rank"],
             "fused_score": item["fused_score"],
             "per_signal_ranks": item["per_signal_ranks"],
+            "retrieval_energy": energy_by_rid[rid]["retrieval_energy"],
         }
         nodes.append(node)
 
@@ -2231,14 +2291,32 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "keyword": keyword_available,
     }
 
+    # ENC-TSK-I98 (ENC-FTR-104 Ph1 AC-1/AC-5): the wave-close `retrieval_records`
+    # shape consumed by drift_telemetry.compute_spurious_attractor_rate
+    # (ENC-FTR-105 AC-7 / ENC-TSK-I91) — one entry per FINAL returned node
+    # (post T3-filter/top_n trim), each carrying retrieval_energy/
+    # avg_retrieval_energy plus the full component breakdown. graph_query_api
+    # does not itself assemble/dispatch the wave-close event (no caller in
+    # this package builds the multi-call wave aggregate and invokes
+    # action="wave_close_drift" — that orchestration lives outside this
+    # Lambda); this is the producer-side payload such a caller forwards
+    # verbatim into retrieval_records.
+    retrieval_records = [
+        energy_function.build_retrieval_record(rid, energy_by_rid[rid])
+        for rid in result_rids if rid in energy_by_rid
+    ]
+
     # AC-1: emit the raw pathway-telemetry record (S3 append log when configured,
     # else CloudWatch fallback). Carries the AC-10 edge_participation list.
+    # ENC-TSK-I98: additively carries the per-record energy breakdown (AC-2)
+    # alongside everything FTR-082 already logs here.
     _emit_pathway_telemetry(_build_pathway_telemetry_record(
         wave_id=wave_id, intent_signature=intent_signature, project_id=project_id,
         anchor_record_id=anchor_record_id, node_sequence=node_sequence,
         edges_traversed=edges_traversed, edge_participation=edge_participation,
         result_count=len(nodes), graph_algorithm=graph_algorithm,
-        signal_availability=_sig_avail,
+        signal_availability=_sig_avail, retrieval_records=retrieval_records,
+        lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
     ))
 
     return {
@@ -2264,6 +2342,12 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         "per_node_fusion": per_node_fusion,
         "fsrs_t3_threshold": FSRS_T3_THRESHOLD,
         "include_below_threshold": include_below_threshold,
+        # ENC-TSK-I98 (ENC-FTR-104 Ph1): per-retrieval energy telemetry, ready
+        # to be forwarded as `retrieval_records` on a wave-close event.
+        "retrieval_records": retrieval_records,
+        "energy_lambda_weights": {
+            "lambda_graph": energy_lambda_graph, "lambda_kw": energy_lambda_kw,
+        },
     }
 
 
