@@ -334,6 +334,41 @@ class GetDocumentTests(unittest.TestCase):
     @patch.object(document_api, "_authenticate",
                   return_value=({"sub": "user1"}, None))
     @patch.object(document_api, "_get_ddb")
+    @patch.object(document_api, "_get_content", return_value="# Hello World\n\nRaw markdown body.")
+    def test_get_existing_document_exposes_raw_markdown_content(self, _mock_content, mock_ddb, _mock_auth):
+        """ENC-TSK-H79 (ENC-FTR-051 precondition): the document detail GET
+        response already returns the raw markdown source — unrendered, as
+        stored in S3 — under both `document.content` and the legacy
+        top-level `content` field. This locks down that existing behavior so
+        a future change cannot silently regress the precondition for
+        on-demand markdown download (ENC-TSK-H80).
+        """
+        fake_ddb = MagicMock()
+        mock_ddb.return_value = fake_ddb
+        fake_ddb.get_item.return_value = {
+            "Item": {
+                "document_id": {"S": "DOC-TEST123"},
+                "title": {"S": "Test Document"},
+                "project_id": {"S": "devops"},
+                "status": {"S": "active"},
+                "created_at": {"S": "2026-01-01T00:00:00Z"},
+                "updated_at": {"S": "2026-01-01T00:00:00Z"},
+            }
+        }
+
+        event = _make_event(method="GET", path="/api/v1/documents/DOC-TEST123")
+        resp = document_api.lambda_handler(event, None)
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        raw_markdown = "# Hello World\n\nRaw markdown body."
+        # Top-level legacy field (mobile/raw clients).
+        self.assertEqual(body["content"], raw_markdown)
+        # Structured envelope field (current PWA client).
+        self.assertEqual(body["document"]["content"], raw_markdown)
+
+    @patch.object(document_api, "_authenticate",
+                  return_value=({"sub": "user1"}, None))
+    @patch.object(document_api, "_get_ddb")
     def test_get_nonexistent_document_returns_404(self, mock_ddb, _mock_auth):
         fake_ddb = MagicMock()
         mock_ddb.return_value = fake_ddb
