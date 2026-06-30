@@ -3326,7 +3326,7 @@ def _code_mode_tool_catalog() -> list[Tool]:
                             "Read action identifier such as projects.list, tracker.get, "
                             "tracker.graphsearch, documents.search, deploy.history, "
                             "changelog.version, governance.dictionary, reference.search, "
-                            "or system.connection_health."
+                            "telemetry.rank, or system.connection_health."
                         ),
                     },
                     "arguments": {
@@ -7512,6 +7512,8 @@ _SEARCH_ACTIONS: Dict[str, Dict[str, Any]] = {
     "tracker.worklog_timeline": {"tool": "tracker_worklog_timeline"},
     "tracker.worklogs": {"tool": "tracker_worklogs"},
     "tracker.manifest_bulk": {"tool": "tracker_manifest_bulk"},
+    # ENC-FTR-086 / ENC-TSK-I83: Convergence Surface frequency-rank read action
+    "telemetry.rank": {"tool": "telemetry_rank"},
 }
 
 _COORDINATION_ACTIONS: Dict[str, Dict[str, Any]] = {
@@ -8987,6 +8989,78 @@ async def _tracker_graphsearch(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+# --- ENC-FTR-086 / ENC-TSK-I83: Convergence Surface read action -------------
+# telemetry.rank is a SOFT prior (Locked Design Decision D1, DOC-E3F5E025B3D9):
+# queryable by agents, structurally invisible to governance gates. The ranking
+# logic lives in the isolated ``telemetry_rank`` sibling module which imports
+# nothing from governance code; governance Lambdas import neither it nor the
+# convergence-telemetry counter table. On any failure the action degrades to an
+# empty row list with degraded:true rather than raising — telemetry being down
+# must never block mutation work.
+
+# Bound on records scanned for the compute-on-read projection.
+_TELEMETRY_READ_MAX_RECORDS = int(os.environ.get("CONVERGENCE_TELEMETRY_MAX_RECORDS", "5000"))
+
+
+async def _telemetry_rank(args: dict) -> list[TextContent]:
+    """Frequency-ranked attribute-value leaderboard (ENC-FTR-086 Convergence Surface).
+
+    Arguments: attribute_name (required), project_id (default 'enceladus'),
+    record_type (resolved from the eligible-fields map when omitted), limit
+    (default 10, max 100), cursor (opaque, optional).
+
+    Phase-2 read surface: the ranking is projected on-read from the governed
+    tracker records that are the source of truth, routed through the tracker
+    service API (consistent with the MCP API boundary guard — handlers never
+    touch DynamoDB directly). When ENC-FTR-086 Phase-1 lands its dedicated
+    read Lambda, this handler can front it over HTTP without changing the D3
+    response contract (the ``telemetry_rank.rank_counter_items`` helper already
+    emits the identical row shape from pre-aggregated counter rows).
+    """
+    import telemetry_rank  # noqa: E402,PLC0415 (isolated sibling module; lazy keeps cold-start lean)
+
+    try:
+        attribute_name = str(args.get("attribute_name") or args.get("attribute") or "").strip()
+        if not attribute_name:
+            return _result_text(
+                {"error": "attribute_name is required", **telemetry_rank.degraded_payload("missing_attribute_name")}
+            )
+
+        project_id = str(args.get("project_id") or "enceladus").strip() or "enceladus"
+        record_type = telemetry_rank.resolve_record_type(attribute_name, args.get("record_type"))
+        limit = args.get("limit", args.get("top_n", telemetry_rank.DEFAULT_LIMIT))
+        cursor = args.get("cursor")
+
+        if not telemetry_rank.is_eligible(attribute_name):
+            # Not a failure — a policy answer. Return empty rows + eligibility hint.
+            payload = telemetry_rank.degraded_payload("attribute_not_telemetry_eligible")
+            payload["degraded"] = False
+            payload["eligible"] = False
+            payload["attribute_name"] = attribute_name
+            payload["eligible_attributes"] = sorted(telemetry_rank.ELIGIBLE_FIELDS.keys())
+            return _result_text(payload)
+
+        # Compute-on-read from the governed tracker records via the service API.
+        resp = _tracker_api_request("GET", f"/{project_id}", query={"type": record_type})
+        if not isinstance(resp, dict) or resp.get("error"):
+            return _result_text(telemetry_rank.degraded_payload("tracker_read_failed"))
+        records = resp.get("records", []) or []
+        if len(records) > _TELEMETRY_READ_MAX_RECORDS:
+            records = records[:_TELEMETRY_READ_MAX_RECORDS]
+        result = telemetry_rank.rank_records(records, attribute_name, limit=limit, cursor=cursor)
+
+        result["source"] = "compute_on_read"
+        result["degraded"] = False
+        result["eligible"] = True
+        result["attribute_name"] = attribute_name
+        result["record_type"] = record_type
+        result["project_id"] = project_id
+        return _result_text(result)
+    except Exception as exc:
+        logger.warning("[telemetry.rank] degraded: %s", exc)
+        return _result_text(telemetry_rank.degraded_payload(f"exception:{type(exc).__name__}"))
+
+
 def _invoke_hybrid_retrieval(
     project_id: str,
     query_text: Optional[str],
@@ -10202,6 +10276,8 @@ _TOOL_HANDLERS = {
     "tracker_worklog_timeline": _tracker_worklog_timeline,
     "tracker_worklogs": _tracker_worklogs,
     "tracker_manifest_bulk": _tracker_manifest_bulk,
+    # ENC-FTR-086 / ENC-TSK-I83: Convergence Surface frequency-rank read action
+    "telemetry_rank": _telemetry_rank,
     # ENC-FTR-049: Typed relationship edges
     "tracker_create_relationship": _tracker_create_relationship,
     "tracker_archive_relationship": _tracker_archive_relationship,
