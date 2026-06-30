@@ -1286,6 +1286,52 @@ def _orchestrate_typed_batch(
     logger.info(f"[INFO] Spec ID: {spec_id}")
 
     if deployment_type in NON_UI_SERVICE_GROUP_BY_TYPE:
+        # ENC-ISS-452: guard record_only before inline validation/execution so lambda_update
+        # REQs from Gen2 record_deploy produce a DEP record instead of a status=failed SPEC.
+        deploy_mode = _get_project_deploy_mode(project_id)
+        if deploy_mode == "record_only":
+            logger.info(
+                "[INFO] Record-only mode for %s (%s) — skipping non-UI execution",
+                project_id, deployment_type,
+            )
+            config = _read_deploy_config(project_id)
+            current_version = _get_current_version(project_id, config)
+            new_version, change_type = _resolve_version(current_version, requests)
+            logger.info(
+                "[INFO] Version: %s → %s (%s) [record-only]",
+                current_version, new_version, change_type,
+            )
+            _write_spec(
+                project_id,
+                spec_id,
+                deployment_type=deployment_type,
+                deployment_category="non_ui",
+                previous_version=current_version,
+                resolved_version=new_version,
+                resolved_change_type=change_type,
+                included_request_ids=request_ids,
+                aggregated_changes=all_changes,
+                aggregated_release_summary=agg_summary,
+                integration_analysis=analysis,
+                all_related_record_ids=all_related,
+            )
+            _mark_requests(project_id, request_ids, "included", spec_id)
+            _finalize_record_only(
+                project_id,
+                spec_id,
+                current_version,
+                new_version,
+                change_type,
+                all_changes,
+                agg_summary,
+                request_ids,
+                all_related,
+            )
+            logger.info(
+                "[SUCCESS] Record-only non-UI deployment finalized: v%s (%s)", new_version, spec_id,
+            )
+            return
+
         valid, targets, errors = _validate_non_ui_requests(deployment_type, requests)
         if not valid:
             logger.error("[ERROR] Non-UI validation failed for %s", deployment_type)

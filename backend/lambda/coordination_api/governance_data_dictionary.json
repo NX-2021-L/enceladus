@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-27.04",
-  "updated_at": "2026-06-27T14:00:00Z",
-  "last_change_summary": "ENC-TSK-I27 / ENC-FTR-116 Wave 2: added governance.version_record (canonical DDB record schema for devops-recompute-governance Lambda) and recompute_governance.event_handler (S3-triggered Lambda contract: trigger, canonical file set, dedup, CAS guard, recursion invariant, env vars). Required by governance-dictionary-guard for backend/lambda/recompute_governance/lambda_function.py addition.",
+  "version": "2026-06-30.01",
+  "updated_at": "2026-06-30T05:00:00Z",
+  "last_change_summary": "ENC-TSK-I97 / ENC-ISS-452: version bump for deploy_orchestrator/lambda_function.py fix (record_only guard before NON_UI_SERVICE_GROUP_BY_TYPE branch). No new entities added; bump required by Governance Dictionary Guard.",
   "owners": [
     "enceladus-platform"
   ],
