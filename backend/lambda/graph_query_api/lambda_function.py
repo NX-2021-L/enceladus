@@ -37,6 +37,8 @@ import uuid
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs
 
+import dedup_convergence
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -64,7 +66,7 @@ MAX_DEPTH = 5
 MAX_RESULTS = 100
 QUERY_TIMEOUT_SECONDS = 10
 
-VALID_SEARCH_TYPES = {"adjacency", "hybrid", "keyword", "neighbors", "path", "sheaf_cohomology", "traversal"}
+VALID_SEARCH_TYPES = {"adjacency", "dedup_convergence", "hybrid", "keyword", "neighbors", "path", "sheaf_cohomology", "traversal"}
 
 # ENC-TSK-I88 (ENC-FTR-085 comp-percolation-monitor): bounded page sizes for the
 # read-only adjacency export consumed by the nightly percolation Lambda. Mirrors
@@ -2135,6 +2137,50 @@ def _query_sheaf_cohomology(driver, project_id: str, params: Dict) -> Dict:
         ),
         "query_cypher": node_cypher,
     }
+def _query_dedup_convergence(driver, project_id: str, params: Dict) -> Dict:
+    """ENC-TSK-I10 (Dedup P6): on-demand duplicate-dedup convergence snapshot
+    (DOC-DF651F07D5C2 §10). Read-only; mutation-free.
+
+    Computes the four graph-derived signals — duplicate-pair stock, the
+    precision@1 recovery proxy (vs the 0.3727 baseline / ~0.8242 ceiling), new
+    duplicate flow per window, and the same-type duplicate graph's LCC
+    (percolation → 1) — over the live Neo4j projection. The production
+    auto-merge walk-back rate is layered on by the scheduled probe
+    (graph_health_metrics) from the audit-feed counters; it is not derivable
+    from the graph projection (supersession provenance is not a node property),
+    so this read surface returns the graph signals only.
+
+    Query params (all optional): cosine_threshold, flow_window_days,
+    vector_top_k.
+    """
+    def _flt(name: str, default: float) -> float:
+        try:
+            return float(params.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _intp(name: str, default: int) -> int:
+        try:
+            return max(1, int(params.get(name, default)))
+        except (TypeError, ValueError):
+            return default
+
+    cosine_threshold = _flt("cosine_threshold", dedup_convergence.DEFAULT_COSINE_THRESHOLD)
+    if not (0.0 <= cosine_threshold <= 1.0):
+        return {"error": "cosine_threshold must be in [0, 1]."}
+    flow_window_days = _flt("flow_window_days", float(dedup_convergence.DEFAULT_FLOW_WINDOW_DAYS))
+    vector_top_k = _intp("vector_top_k", dedup_convergence.DEFAULT_VECTOR_TOP_K)
+
+    signals = dedup_convergence.compute_graph_signals(
+        driver,
+        project_id,
+        cosine_threshold=cosine_threshold,
+        flow_window_days=flow_window_days,
+        label_vector_indexes=LABEL_VECTOR_INDEXES,
+        vector_top_k=vector_top_k,
+    )
+    # _handle_search audits node/edge/path counts; keep those keys present.
+    return {"nodes": [], "edges": [], "paths": [], "convergence": signals}
 
 
 SEARCH_HANDLERS = {
@@ -2145,6 +2191,7 @@ SEARCH_HANDLERS = {
     "hybrid": _query_hybrid,
     "adjacency": _query_adjacency,
         "sheaf_cohomology": _query_sheaf_cohomology,
+    "dedup_convergence": _query_dedup_convergence,
 }
 
 
@@ -2255,6 +2302,7 @@ def _handle_search(event: Dict) -> Dict:
         "inconsistency_nodes",
         "inconsistency_edges",
         "computation_ms",
+        "convergence",
     ):
         if hybrid_key in result:
             response_body[hybrid_key] = result[hybrid_key]
