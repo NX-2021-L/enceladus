@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-30.04",
-  "updated_at": "2026-06-30T02:15:00Z",
-  "last_change_summary": "ENC-TSK-I89 (FTR-089 tracker.embeddings_for). Adds graph_query_api.embeddings_for: admin-scoped raw-embedding egress for Titan V2 vectors (256-dim). Version -> 2026-06-30.04. PRIOR: ENC-TSK-I88 / ENC-FTR-085: add graph_query_api.adjacency \u2014 read-only adjacency export via graph_quer...",
+  "version": "2026-06-30.05",
+  "updated_at": "2026-06-30T02:30:00Z",
+  "last_change_summary": "ENC-TSK-I90 (FTR-095 sheaf Laplacian H1). Adds graph_query_api.sheaf_cohomology. Version -> 2026-06-30.05.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5961,6 +5961,12 @@
       "description": "Returns stored Amazon Titan Text Embeddings V2 vectors (256-dim, L2-normalised) for a list of record_ids in a project. search_type=embeddings_for on GET /api/v1/tracker/graphsearch. Admin-tier only. Returns {embeddings[], matrix(Nx256), missing[]}. No new edge types or graph writes (OGTM N/A).",
       "owner": "graph-query-api",
       "source": "ENC-TSK-I89 / ENC-FTR-089",
+      "telemetry_eligible": false
+    },
+    "graph_query_api.sheaf_cohomology": {
+      "description": "Sheaf Laplacian H1 inconsistency-detection. search_type=sheaf_cohomology on graph_query_api. Returns h1_dim, inconsistency_nodes[], inconsistency_edges[], computation_ms.",
+      "owner": "graph-query-api",
+      "source": "ENC-TSK-I90 / ENC-FTR-095",
       "telemetry_eligible": false
     }
   },

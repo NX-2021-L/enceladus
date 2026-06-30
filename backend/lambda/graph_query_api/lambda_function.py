@@ -40,6 +40,16 @@ from urllib.parse import parse_qs
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# ENC-FTR-095 / ENC-TSK-I90: sheaf Laplacian H1 inconsistency detection. The
+# module is co-located in this Lambda package (no .build_extras entry needed) and
+# is pure-Python (no numpy/scipy), so the import is unconditional but guarded so a
+# packaging slip degrades the one search_type rather than the whole function.
+try:  # pragma: no cover - import guard
+    import sheaf_cohomology as _sheaf_cohomology
+except Exception:  # pragma: no cover - import guard
+    _sheaf_cohomology = None
+    logger.warning("[WARNING] sheaf_cohomology module unavailable — sheaf_cohomology search_type disabled")
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -54,7 +64,7 @@ MAX_DEPTH = 5
 MAX_RESULTS = 100
 QUERY_TIMEOUT_SECONDS = 10
 
-VALID_SEARCH_TYPES = {"traversal", "neighbors", "path", "keyword", "hybrid", "adjacency"}
+VALID_SEARCH_TYPES = {"adjacency", "hybrid", "keyword", "neighbors", "path", "sheaf_cohomology", "traversal"}
 
 # ENC-TSK-I88 (ENC-FTR-085 comp-percolation-monitor): bounded page sizes for the
 # read-only adjacency export consumed by the nightly percolation Lambda. Mirrors
@@ -2020,6 +2030,111 @@ def _query_adjacency(driver, project_id: str, params: Dict) -> Dict:
         result["node_count"] = node_count
         result["edge_count"] = edge_count
     return result
+# ---------------------------------------------------------------------------
+# ENC-FTR-095 / ENC-TSK-I90: Sheaf Laplacian H1 inconsistency detection
+# ---------------------------------------------------------------------------
+
+def _query_sheaf_cohomology(driver, project_id: str, params: Dict) -> Dict:
+    """Compute the first sheaf cohomology dimension over a tracker subgraph.
+
+    Reads the existing governed graph (nodes + edges) via Cypher and builds a
+    cellular sheaf with R^d stalks (d = embedding dim) and identity restriction
+    maps on consistent edges; contradictory-status edges zero their restriction
+    maps, producing first cohomology. No writes, no new edge types (OGTM-safe).
+
+    Optional ``vertex_set_query`` restricts the computation to the connected
+    subgraph around an anchor record_id; otherwise the whole project graph is
+    used (bounded by MAX_RESULTS nodes).
+    """
+    if _sheaf_cohomology is None:
+        return {"error": "sheaf_cohomology module unavailable"}
+
+    vertex_set_query = str(params.get("vertex_set_query", "") or "").strip()
+
+    node_projection = (
+        "RETURN n.record_id AS record_id, n.status AS status, "
+        "CASE WHEN n.embedding IS NULL THEN 0 ELSE size(n.embedding) END AS embedding_dim "
+        "LIMIT $limit"
+    )
+    if vertex_set_query:
+        node_cypher = (
+            "MATCH (start) WHERE start.project_id = $project_id "
+            "AND start.record_id = $anchor "
+            "OPTIONAL MATCH (start)-[*1..3]-(m) WHERE m.project_id = $project_id "
+            "WITH collect(DISTINCT start) + collect(DISTINCT m) AS ns "
+            "UNWIND ns AS n WITH DISTINCT n "
+            "WHERE n IS NOT NULL AND NOT 'Project' IN labels(n) "
+            + node_projection
+        )
+        node_params: Dict[str, Any] = {
+            "project_id": project_id,
+            "anchor": vertex_set_query.upper(),
+            "limit": MAX_RESULTS,
+        }
+    else:
+        node_cypher = (
+            "MATCH (n) WHERE n.project_id = $project_id "
+            "AND NOT 'Project' IN labels(n) AND n.record_id IS NOT NULL "
+            + node_projection
+        )
+        node_params = {"project_id": project_id, "limit": MAX_RESULTS}
+
+    nodes: List[Dict[str, Any]] = []
+    node_ids: List[str] = []
+    embedding_dims: List[int] = []
+    with driver.session() as session:
+        for rec in session.run(node_cypher, **node_params):
+            rid = rec.get("record_id")
+            if not rid:
+                continue
+            emb_dim = int(rec.get("embedding_dim") or 0)
+            nodes.append({"record_id": rid, "status": rec.get("status") or ""})
+            node_ids.append(rid)
+            if emb_dim > 0:
+                embedding_dims.append(emb_dim)
+
+        edges: List[Dict[str, Any]] = []
+        if node_ids:
+            edge_cypher = (
+                "MATCH (a)-[r]->(b) "
+                "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+                "AND a.record_id IN $ids AND b.record_id IN $ids "
+                "RETURN startNode(r).record_id AS start, endNode(r).record_id AS end, "
+                "type(r) AS type LIMIT $limit"
+            )
+            for rec in session.run(
+                edge_cypher, project_id=project_id, ids=node_ids, limit=MAX_RESULTS * 10
+            ):
+                edges.append({
+                    "start": rec.get("start"),
+                    "end": rec.get("end"),
+                    "type": rec.get("type"),
+                })
+
+    embedding_dim = max(embedding_dims) if embedding_dims else 1
+    result = _sheaf_cohomology.compute_sheaf_h1(nodes, edges, embedding_dim=embedding_dim)
+
+    return {
+        "nodes": [],
+        "edges": [],
+        "paths": [],
+        "h1_dim": result["h1_dim"],
+        "h1_structural": result["h1_structural"],
+        "betti_1": result["betti_1"],
+        "embedding_dim": result["embedding_dim"],
+        "node_count": result["node_count"],
+        "edge_count": result["edge_count"],
+        "incidence_rank": result["incidence_rank"],
+        "inconsistency_nodes": result["inconsistency_nodes"],
+        "inconsistency_edges": result["inconsistency_edges"],
+        "computation_ms": result["computation_ms"],
+        "summary": (
+            f"Sheaf H1: dim={result['h1_dim']} (structural={result['h1_structural']}, "
+            f"stalk_dim={result['embedding_dim']}) over {result['node_count']} nodes / "
+            f"{result['edge_count']} edges; {len(result['inconsistency_nodes'])} inconsistency node(s)"
+        ),
+        "query_cypher": node_cypher,
+    }
 
 
 SEARCH_HANDLERS = {
@@ -2029,6 +2144,7 @@ SEARCH_HANDLERS = {
     "keyword": _query_keyword,
     "hybrid": _query_hybrid,
     "adjacency": _query_adjacency,
+        "sheaf_cohomology": _query_sheaf_cohomology,
 }
 
 
@@ -2128,6 +2244,17 @@ def _handle_search(event: Dict) -> Dict:
         "returned",
         "has_more",
         "next_offset",
+                # ENC-FTR-095 / ENC-TSK-I90: sheaf_cohomology observability fields.
+        "h1_dim",
+        "h1_structural",
+        "betti_1",
+        "embedding_dim",
+        "node_count",
+        "edge_count",
+        "incidence_rank",
+        "inconsistency_nodes",
+        "inconsistency_edges",
+        "computation_ms",
     ):
         if hybrid_key in result:
             response_body[hybrid_key] = result[hybrid_key]
