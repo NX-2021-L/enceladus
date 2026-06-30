@@ -235,6 +235,12 @@
       "lambda_dir": "backend/lambda/governance_drift_check",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/governance_drift_check/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-arc-walk-metrics",
+      "lambda_dir": "backend/lambda/arc_walk_metrics",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/arc_walk_metrics/deploy.sh"
     }
   ]
 }
