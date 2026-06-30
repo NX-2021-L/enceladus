@@ -139,6 +139,12 @@
       "deploy_script": "backend/lambda/neo4j_backup/deploy.sh"
     },
     {
+      "function_name": "enceladus-memory-consolidation",
+      "lambda_dir": "backend/lambda/memory_consolidation",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/memory_consolidation/deploy.sh"
+    },
+    {
       "function_name": "enceladus-graph-health-metrics",
       "lambda_dir": "backend/lambda/graph_health_metrics",
       "workflow_file": ".github/workflows/_deploy.yml",

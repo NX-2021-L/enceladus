@@ -1160,6 +1160,54 @@ Resources:
           Value: neo4j-backup
 
   # ---------------------------------------------------------------------------
+  # ENC-FTR-096 Ph1 / ENC-TSK-I84: Memory Consolidation Lambda
+  # Nightly EventBridge scan of Handoff docs -> co-citation clusters ->
+  # lesson-candidate drafts (draft-only, io-approval gated). OGTM: no new edge
+  # types; graph_sync untouched (related_items project to existing RELATED_TO).
+  # ---------------------------------------------------------------------------
+  MemoryConsolidationFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-memory-consolidation${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt MemoryConsolidationRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          S3_BUCKET: !Ref S3Bucket
+          S3_PREFIX: !Sub "${S3EnvPrefix}agent-documents"
+          CONSOLIDATION_PROJECT_IDS: enceladus
+          CONSOLIDATION_LOOKBACK_HOURS: "24"
+          CONSOLIDATION_MIN_WAVES: "2"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: memory-consolidation
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-F73 / ENC-ISS-283: Env Drift Auditor Lambda (F57 AC-3/4 CFN adoption)
   # Live resource created out-of-band for ENC-ISS-283; imported under this stack
   # via create-change-set --change-set-type=IMPORT. EventBridge schedule
@@ -1603,6 +1651,26 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt Neo4jBackupSchedule.Arn
+
+  # ENC-FTR-096 Ph1 / ENC-TSK-I84: nightly memory consolidation trigger (02:00 UTC)
+  MemoryConsolidationSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-memory-consolidation-nightly${EnvironmentSuffix}"
+      Description: "Nightly handoff-to-lesson consolidation scan (ENC-FTR-096 Ph1)"
+      ScheduleExpression: "cron(0 2 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MemoryConsolidationFunction.Arn
+          Id: memory-consolidation-nightly
+
+  MemoryConsolidationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MemoryConsolidationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MemoryConsolidationSchedule.Arn
 
   ProjectJsonSyncRule:
     Type: AWS::Events::Rule
@@ -3515,6 +3583,63 @@ Resources:
                 Action:
                   - s3:PutObject
                 Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}neo4j-backups/*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ENC-FTR-096 Ph1 / ENC-TSK-I84: Memory Consolidation Lambda IAM Role
+  MemoryConsolidationRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-memory-consolidation-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: memory-consolidation-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              # Read Handoff docs (Query via project-updated-index), read/put
+              # lesson-candidate drafts. No tracker table access — io-approval gate.
+              - Sid: DocumentsTableReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              - Sid: S3DocumentsObjectAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}agent-documents/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
