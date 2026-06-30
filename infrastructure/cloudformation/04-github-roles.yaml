@@ -403,6 +403,14 @@ Resources:
                   - dynamodb:DescribeTable
                 Resource:
                   - !Sub "arn:aws:dynamodb:us-west-2:${AWS::AccountId}:table/*-gamma"
+              # Required by cfn-drift-audit.yml (ENC-TSK-I94 / ENC-ISS-442):
+              # audit_cfn_drift.py calls `aws events list-rules` to compare
+              # live EventBridge rules against CFN-declared rules.
+              - Sid: CfnDriftAuditEventBridgeRead
+                Effect: Allow
+                Action:
+                  - events:ListRules
+                Resource: !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/*"
 
         - PolicyName: BackendDeployPolicy-LambdaArtifacts
           PolicyDocument:
