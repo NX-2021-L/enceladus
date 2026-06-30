@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-30.12",
-  "updated_at": "2026-06-30T21:58:00Z",
-  "last_change_summary": "ENC-TSK-J01 (FTR-108 Ph1, design-only, no functional change): doc-comment cross-reference added to graph_query_api._build_pathway_telemetry_record noting that edge_participation[].edge_id (retrieval_outcome=='hit') is the confirmed Ph1 source of truth for the Tero current-reinforcement contract's flow(e,t) signal (design doc DOC-88A8F4835811). No schema/field/status changes. Version -> 2026-06-30.12. Prior change (now on v4/main, .11) — ENC-TSK-I91 (FTR-105 AC-7 spurious-attractor telemetry wiring); see that task's worklog for the full change summary.",
+  "version": "2026-06-30.13",
+  "updated_at": "2026-06-30T22:01:00Z",
+  "last_change_summary": "ENC-TSK-I98 (FTR-104 Ph1 AC-1/AC-2): graph_query_api.pathway_telemetry gains an additive 'energy' block (E(x) = E_vector + lambda_graph*E_PPR + lambda_kw*E_keyword per retrieval record, plus the lambda weights used); hybrid retrieval response gains retrieval_records[]/energy_lambda_weights. ppr_source_is_gds_pagerank flags whether E_PPR came from the FTR-101 gds_pagerank projection vs cypher_fallback. No existing field renamed/removed. Version -> 2026-06-30.13. Prior change (now on v4/main, .12) — ENC-TSK-J01 (FTR-108 Ph1, design-only); see that task's worklog for the full change summary.",
   "owners": [
     "enceladus-platform"
   ],
