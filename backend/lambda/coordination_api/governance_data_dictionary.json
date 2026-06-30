@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-30.08",
-  "updated_at": "2026-06-30T02:50:00Z",
-  "last_change_summary": "ENC-TSK-I87 FTR-083 Ph2 BHC alert. Version -> 2026-06-30.08.",
+  "version": "2026-06-30.09",
+  "updated_at": "2026-06-30T03:00:00Z",
+  "last_change_summary": "ENC-TSK-H86 (FTR-111 arc-walker telemetry). Adds lifecycle_service.arc_walker_telemetry. Version -> 2026-06-30.09.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5978,6 +5978,12 @@
       "description": "See source task.",
       "source": "ENC-TSK",
       "telemetry_eligible": false
+    },
+    "lifecycle_service.arc_walker_telemetry": {
+      "description": "Arc-walker telemetry emitted by tracker_mutation. Latch/clear events + convergence probe metrics. CloudWatch Enceladus/ArcWalk namespace.",
+      "owner": "tracker-mutation",
+      "source": "ENC-TSK-H86 / ENC-FTR-111",
+      "telemetry_eligible": true
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",

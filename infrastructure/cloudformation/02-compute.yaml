@@ -1493,6 +1493,105 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt PercolationMonitorSchedule.Arn
 
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-H86 / ENC-FTR-111 Phase 1 (T5): Universal Arc-Walker telemetry +
+  # convergence-probe Lambda. Read-only — scans the tracker table and publishes
+  # CloudWatch metrics (Enceladus/ArcWalk).
+  # ---------------------------------------------------------------------------
+  ArcWalkMetricsFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-arc-walk-metrics${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 120
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt ArcWalkMetricsRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          CLOUDWATCH_NAMESPACE: Enceladus/ArcWalk
+          DYNAMODB_REGION: !Ref "AWS::Region"
+          PROJECT_ID: enceladus
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: arc-walk-metrics
+
+  ArcWalkMetricsSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-arc-walk-metrics-hourly${EnvironmentSuffix}"
+      ScheduleExpression: "rate(1 hour)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ArcWalkMetricsFunction.Arn
+          Id: arc-walk-metrics-hourly
+
+  ArcWalkMetricsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ArcWalkMetricsFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ArcWalkMetricsSchedule.Arn
+
+  # ENC-TSK-H86 / ENC-FTR-111 (T5): Arc-Walk Metrics Lambda IAM Role.
+  ArcWalkMetricsRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-arc-walk-metrics-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ArcWalkMetricsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              - Sid: TrackerAndProjectsReadOnly
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
   # ---------------------------------------------------------------------------
   # ENC-FTR-101 Option B (ENC-TSK-H37): standing-projection out-of-band refresh
   # Keeps the named GDS projection warm so anchored hybrid PPR runs
