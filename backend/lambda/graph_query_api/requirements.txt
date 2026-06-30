@@ -1,1 +1,7 @@
 neo4j>=5.0,<6.0
+# ENC-TSK-I81 / ENC-FTR-088: graph_laplacian read action computes the induced-
+# subgraph Laplacian spectrum via scipy.sparse.linalg.eigsh on a scipy.sparse
+# CSR adjacency. numpy is scipy's hard dependency. Arch-correct manylinux2014
+# wheels are resolved by the _build.yml matrix (--platform/--only-binary).
+numpy>=1.26,<3.0
+scipy>=1.11,<2.0

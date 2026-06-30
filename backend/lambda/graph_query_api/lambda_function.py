@@ -66,7 +66,7 @@ MAX_DEPTH = 5
 MAX_RESULTS = 100
 QUERY_TIMEOUT_SECONDS = 10
 
-VALID_SEARCH_TYPES = {"adjacency", "dedup_convergence", "hybrid", "keyword", "neighbors", "path", "sheaf_cohomology", "traversal"}
+VALID_SEARCH_TYPES = {"adjacency", "dedup_convergence", "hybrid", "keyword", "laplacian", "neighbors", "path", "sheaf_cohomology", "traversal"}
 
 # ENC-TSK-I88 (ENC-FTR-085 comp-percolation-monitor): bounded page sizes for the
 # read-only adjacency export consumed by the nightly percolation Lambda. Mirrors
@@ -100,6 +100,15 @@ MAX_EMBEDDING_EGRESS_RECORD_IDS = 100
 # raw-embedding egress.
 _EGRESS_ADMIN_AGENT_TIER = "admin"
 _EGRESS_ADMIN_COGNITO_GROUP = "io-dev-admin"
+
+# ENC-TSK-I81 / ENC-FTR-088: graph_laplacian read action bounds.
+# A vertex-set query resolves an induced subgraph whose (sparse) Laplacian
+# spectrum is computed via scipy.sparse.linalg.eigsh. Cap the vertex count so a
+# pathological query can never build an O(n^2) dense fallback large enough to
+# blow the 180s SLO / Lambda memory; eigsh on the CSR operator stays cheap well
+# past this bound but the dense small-n fallback must not.
+LAPLACIAN_MAX_VERTICES = 500
+LAPLACIAN_DEFAULT_K = 3
 
 # ---------------------------------------------------------------------------
 # ENC-TSK-B92 Phase 1 hybrid retrieval constants
@@ -724,6 +733,273 @@ def _query_keyword(driver, project_id: str, params: Dict) -> Dict:
         "paths": [],
         "summary": f"Keyword '{search_query}': {matched} matches, {len(nodes)} total nodes (with neighbors)",
         "query_cypher": cypher,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-I81 / ENC-FTR-088: graph Laplacian read action
+# ---------------------------------------------------------------------------
+# Resolves a vertex set (keyword query or explicit record_ids), materializes the
+# induced subgraph adjacency over EXISTING typed edges (no new edge types — OGTM
+# N/A, AC-4), and computes the smallest-k Laplacian eigenpairs via
+# scipy.sparse.linalg.eigsh (AC-2). Returns a CSR adjacency (base64 float32 data
+# + base64 int32 indices/indptr), the Fiedler vector, the k smallest eigenvalues,
+# the degree vector, and an index->record_id vertex_map. From adjacency_csr +
+# degrees a client reconstructs L = D - A (combinatorial) or the symmetric
+# normalized Laplacian L_sym = I - D^{-1/2} A D^{-1/2} — the spectral object the
+# Wave-Close Drift Telemetry d_spectral measurement consumes (ENC-FTR-087, AC-3).
+#
+# The DEFAULT normalization is combinatorial (L = D - A): its smallest eigenvalue
+# is identically 0 for ANY graph (the constant vector is always in the null
+# space), so eigenvalues[0] < 0.001 holds even for an edge-sparse / disconnected
+# 10-node subgraph (AC-5). normalization='normalized' is offered as an opt-in for
+# scale-invariant spectral comparison.
+
+
+def _b64_array(arr, np_dtype: str) -> str:
+    """Base64-encode a numpy array's raw little-endian bytes for compact, lossless
+    transport of CSR components (AC-1 adjacency_csr 'base64 float32' contract)."""
+    import base64
+    import numpy as np
+    return base64.b64encode(
+        np.ascontiguousarray(arr, dtype=np_dtype).tobytes()
+    ).decode("ascii")
+
+
+def _laplacian_select_vertices(driver, project_id: str, params: Dict) -> Dict:
+    """Resolve the ordered vertex set for the induced subgraph.
+
+    Selection precedence: explicit record_ids (comma list) -> keyword
+    vertex_set_query (title/record_id CONTAINS) -> all project nodes. Placeholder
+    nodes (ENC-TSK-E06 is_placeholder) are excluded so edge-target stubs never
+    enter the spectrum. Returns {ids, query_cypher} or {error}.
+    """
+    try:
+        limit = int(params.get("limit", LAPLACIAN_MAX_VERTICES) or LAPLACIAN_MAX_VERTICES)
+    except (TypeError, ValueError):
+        return {"error": "limit must be an integer"}
+    limit = max(2, min(limit, LAPLACIAN_MAX_VERTICES))
+
+    record_ids_param = params.get("record_ids", "")
+    vertex_set_query = (params.get("vertex_set_query", "") or "").strip()
+
+    explicit_ids: List[str] = []
+    if record_ids_param:
+        if isinstance(record_ids_param, list):
+            explicit_ids = [str(x).strip() for x in record_ids_param if str(x).strip()]
+        else:
+            explicit_ids = [x.strip() for x in str(record_ids_param).split(",") if x.strip()]
+
+    if explicit_ids:
+        cypher = (
+            "MATCH (n) "
+            "WHERE n.project_id = $project_id AND n.record_id IN $ids "
+            "AND coalesce(n.is_placeholder, false) = false "
+            "RETURN DISTINCT n.record_id AS rid ORDER BY rid LIMIT $limit"
+        )
+        run_params = {"project_id": project_id, "ids": explicit_ids, "limit": limit}
+    elif vertex_set_query:
+        cypher = (
+            "MATCH (n) "
+            "WHERE n.project_id = $project_id "
+            "AND coalesce(n.is_placeholder, false) = false "
+            "AND (toLower(coalesce(n.title, '')) CONTAINS toLower($q) "
+            "OR n.record_id CONTAINS toUpper($q)) "
+            "RETURN DISTINCT n.record_id AS rid ORDER BY rid LIMIT $limit"
+        )
+        run_params = {"project_id": project_id, "q": vertex_set_query, "limit": limit}
+    else:
+        cypher = (
+            "MATCH (n) "
+            "WHERE n.project_id = $project_id "
+            "AND coalesce(n.is_placeholder, false) = false "
+            "RETURN DISTINCT n.record_id AS rid ORDER BY rid LIMIT $limit"
+        )
+        run_params = {"project_id": project_id, "limit": limit}
+
+    with driver.session() as session:
+        result = session.run(cypher, **run_params)
+        ids = [rec["rid"] for rec in result if rec.get("rid")]
+    return {"ids": ids, "query_cypher": cypher}
+
+
+def _query_laplacian(driver, project_id: str, params: Dict) -> Dict:
+    """Compute the induced-subgraph Laplacian spectrum (ENC-FTR-088).
+
+    Params: vertex_set_query | record_ids (selection), edge_type_filter
+    (restrict adjacency to existing edge types), k (smallest eigenpairs,
+    default 3), limit, normalization ('combinatorial' default | 'normalized').
+    """
+    # --- parameters ---
+    try:
+        k = int(params.get("k", LAPLACIAN_DEFAULT_K) or LAPLACIAN_DEFAULT_K)
+    except (TypeError, ValueError):
+        return {"error": "k must be an integer"}
+    if k < 1:
+        return {"error": "k must be >= 1"}
+
+    normalization = (params.get("normalization", "combinatorial") or "combinatorial").strip().lower()
+    if normalization not in {"combinatorial", "normalized"}:
+        return {"error": "normalization must be 'combinatorial' or 'normalized'"}
+
+    edge_type_filter = params.get("edge_type_filter", "")
+    etypes: List[str] = []
+    if edge_type_filter:
+        if isinstance(edge_type_filter, list):
+            etypes = [t.strip().upper() for t in edge_type_filter if str(t).strip()]
+        else:
+            etypes = [t.strip().upper() for t in str(edge_type_filter).split(",") if t.strip()]
+        invalid = [t for t in etypes if t not in _ALLOWED_EDGE_TYPES]
+        if invalid:
+            return {"error": f"Invalid edge_type_filter: {invalid}. Allowed: {sorted(_ALLOWED_EDGE_TYPES)}"}
+
+    # --- vertex set ---
+    selection = _laplacian_select_vertices(driver, project_id, params)
+    if "error" in selection:
+        return selection
+    ids: List[str] = selection["ids"]
+    n = len(ids)
+    if n < 2:
+        return {
+            "error": (
+                f"Laplacian requires at least 2 vertices; vertex set resolved {n}. "
+                "Broaden vertex_set_query, pass more record_ids, or raise limit."
+            )
+        }
+    idx = {rid: i for i, rid in enumerate(ids)}
+
+    # --- induced-subgraph edges over EXISTING edge types (no new edge types) ---
+    if etypes:
+        edge_cypher = (
+            "MATCH (a)-[r]-(b) "
+            "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+            "AND a.record_id IN $ids AND b.record_id IN $ids AND type(r) IN $etypes "
+            "RETURN DISTINCT a.record_id AS s, b.record_id AS t"
+        )
+        edge_run = {"project_id": project_id, "ids": ids, "etypes": etypes}
+    else:
+        edge_cypher = (
+            "MATCH (a)-[r]-(b) "
+            "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+            "AND a.record_id IN $ids AND b.record_id IN $ids "
+            "RETURN DISTINCT a.record_id AS s, b.record_id AS t"
+        )
+        edge_run = {"project_id": project_id, "ids": ids}
+
+    pairs: set = set()  # unordered {(i, j) : i < j} — binary, undirected adjacency
+    with driver.session() as session:
+        result = session.run(edge_cypher, **edge_run)
+        for rec in result:
+            s, t = rec.get("s"), rec.get("t")
+            if s is None or t is None or s == t:
+                continue
+            i, j = idx.get(s), idx.get(t)
+            if i is None or j is None:
+                continue
+            pairs.add((min(i, j), max(i, j)))
+
+    # --- sparse Laplacian + smallest-k eigenpairs via scipy.sparse.linalg.eigsh ---
+    import numpy as np
+    from scipy.sparse import csr_matrix, diags
+    from scipy.sparse.linalg import eigsh
+
+    rows: List[int] = []
+    cols: List[int] = []
+    data: List[float] = []
+    for (i, j) in pairs:
+        rows.extend((i, j))
+        cols.extend((j, i))
+        data.extend((1.0, 1.0))
+    adjacency = csr_matrix((data, (rows, cols)), shape=(n, n), dtype="float64")
+    adjacency.sum_duplicates()
+    adjacency.sort_indices()
+
+    degrees = np.asarray(adjacency.sum(axis=1)).ravel()
+
+    if normalization == "normalized":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            d_inv_sqrt = 1.0 / np.sqrt(degrees)
+        d_inv_sqrt[~np.isfinite(d_inv_sqrt)] = 0.0  # isolated vertices -> 0
+        d_mat = diags(d_inv_sqrt)
+        laplacian = (diags(np.ones(n)) - (d_mat @ adjacency @ d_mat)).tocsr()
+        formula = "L_sym = I - D^(-1/2) A D^(-1/2)"
+    else:
+        laplacian = (diags(degrees) - adjacency).tocsr()
+        formula = "L = D - A"
+
+    k_req = min(k, n)
+    want = min(max(k_req, 2), n)  # at least 2 so the Fiedler vector (index 1) exists
+
+    # eigsh (ARPACK) requires 0 < want < n and is unstable for tiny / near-full
+    # spectra; it also rejects an all-zero operator ("Starting vector is zero"),
+    # which is exactly the edgeless-subgraph case (L = 0). Fall back to dense eigh
+    # for those, and on any convergence failure. The mandated
+    # scipy.sparse.linalg.eigsh drives the normal path (e.g. the AC-5 10-node
+    # subgraph). A deterministic start vector keeps repeated calls reproducible.
+    if n <= 3 or want >= n or laplacian.nnz == 0:
+        evals, evecs = np.linalg.eigh(laplacian.toarray())
+        eig_method = "dense_eigh"
+    else:
+        try:
+            v0 = np.random.default_rng(0).standard_normal(n)
+            evals, evecs = eigsh(laplacian, k=want, which="SA", v0=v0)
+            eig_method = "eigsh_SA"
+        except Exception:
+            logger.warning("[WARNING] eigsh failed; dense eigh fallback", exc_info=True)
+            evals, evecs = np.linalg.eigh(laplacian.toarray())
+            eig_method = "dense_eigh_fallback"
+
+    order = np.argsort(evals)
+    evals = evals[order]
+    evecs = evecs[:, order]
+
+    eigenvalues = [float(x) for x in evals[:k_req]]
+    fiedler = np.asarray(evecs[:, 1]).ravel()
+    fiedler_vector = [float(x) for x in fiedler]
+
+    adjacency_csr = {
+        "encoding": "base64",
+        "byte_order": "little",
+        "dtype": {"data": "float32", "indices": "int32", "indptr": "int32"},
+        "shape": [n, n],
+        "nnz": int(adjacency.nnz),
+        "data_b64": _b64_array(adjacency.data, "<f4"),
+        "indices_b64": _b64_array(adjacency.indices, "<i4"),
+        "indptr_b64": _b64_array(adjacency.indptr, "<i4"),
+    }
+
+    lambda0 = eigenvalues[0] if eigenvalues else float("nan")
+    return {
+        "nodes": [],
+        "edges": [],
+        "paths": [],
+        "vertex_map": ids,
+        "adjacency_csr": adjacency_csr,
+        "degrees": [float(x) for x in degrees],
+        "eigenvalues": eigenvalues,
+        "fiedler_vector": fiedler_vector,
+        "laplacian": {
+            "n": n,
+            "k": k_req,
+            "edge_count": len(pairs),
+            "normalization": normalization,
+            "formula": formula,
+            "weighted": False,
+            "eig_method": eig_method,
+            "edge_type_filter": etypes or None,
+            "reconstruct": (
+                "A = scipy.sparse.csr_matrix((b64decode(data_b64,float32), "
+                "b64decode(indices_b64,int32), b64decode(indptr_b64,int32)), shape); "
+                "D = diag(A.sum(axis=1)); combinatorial L = D - A; "
+                "normalized L_sym = D^(-1/2) (D - A) D^(-1/2)."
+            ),
+        },
+        "summary": (
+            f"Laplacian ({normalization}) over {n} vertices, {len(pairs)} edges; "
+            f"{len(eigenvalues)} smallest eigenvalues (lambda0={lambda0:.6g}), "
+            f"Fiedler dim {len(fiedler_vector)} via {eig_method}"
+        ),
+        "query_cypher": f"{selection['query_cypher']} ;; {edge_cypher}",
     }
 
 
@@ -2192,6 +2468,7 @@ SEARCH_HANDLERS = {
     "adjacency": _query_adjacency,
         "sheaf_cohomology": _query_sheaf_cohomology,
     "dedup_convergence": _query_dedup_convergence,
+    "laplacian": _query_laplacian,
 }
 
 
@@ -2303,6 +2580,13 @@ def _handle_search(event: Dict) -> Dict:
         "inconsistency_edges",
         "computation_ms",
         "convergence",
+        # ENC-TSK-I81 / ENC-FTR-088: graph_laplacian response fields.
+        "vertex_map",
+        "adjacency_csr",
+        "degrees",
+        "eigenvalues",
+        "fiedler_vector",
+        "laplacian",
     ):
         if hybrid_key in result:
             response_body[hybrid_key] = result[hybrid_key]
