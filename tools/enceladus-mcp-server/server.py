@@ -3324,7 +3324,7 @@ def _code_mode_tool_catalog() -> list[Tool]:
                         "type": "string",
                         "description": (
                             "Read action identifier such as projects.list, tracker.get, "
-                            "tracker.graphsearch, tracker.embeddings_for, documents.search, "
+                            "tracker.graphsearch, tracker.sheaf_cohomology, documents.search, "
                             "deploy.history, changelog.version, governance.dictionary, "
                             "reference.search, or system.connection_health."
                         ),
@@ -7508,6 +7508,8 @@ _SEARCH_ACTIONS: Dict[str, Dict[str, Any]] = {
     "tracker.graphsearch": {"tool": "tracker_graphsearch"},
     # ENC-FTR-089 / ENC-TSK-I89: admin-scoped raw-embedding egress.
     "tracker.embeddings_for": {"tool": "tracker_embeddings_for"},
+    # ENC-FTR-095 / ENC-TSK-I90: Sheaf Laplacian H1 inconsistency detection
+    "tracker.sheaf_cohomology": {"tool": "tracker_sheaf_cohomology"},
     # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
     "tracker.manifest": {"tool": "tracker_manifest"},
     "tracker.get_acs": {"tool": "tracker_get_acs"},
@@ -9096,6 +9098,27 @@ async def _tracker_embeddings_for(args: dict) -> list[TextContent]:
         "project_id": project_id,
         "record_ids": ",".join(ids),
     }
+async def _tracker_sheaf_cohomology(args: dict) -> list[TextContent]:
+    """Sheaf Laplacian H1 inconsistency detection (ENC-FTR-095 / ENC-TSK-I90).
+
+    Forwards to the graph_query_api ``sheaf_cohomology`` search_type, which reads
+    the existing governed graph and returns the first sheaf cohomology dimension
+    (``h1_dim``), the flagged ``inconsistency_nodes`` (endpoints of contradictory
+    edges), and ``computation_ms``. Read-only: no graph writes, no new edge types.
+    """
+    project_id = args.get("project_id")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+
+    query_params: Dict[str, Any] = {
+        "search_type": "sheaf_cohomology",
+        "project_id": project_id,
+    }
+    # Optional anchor restricting the computation to a connected subgraph.
+    vertex_set_query = args.get("vertex_set_query")
+    if vertex_set_query:
+        query_params["vertex_set_query"] = vertex_set_query
+
     resp = _graph_query_api_request(query=query_params)
     return _result_text(resp)
 
@@ -10311,6 +10334,8 @@ _TOOL_HANDLERS = {
     "tracker_graphsearch": _tracker_graphsearch,
     # ENC-FTR-089 / ENC-TSK-I89: admin-scoped raw-embedding egress
     "tracker_embeddings_for": _tracker_embeddings_for,
+    # ENC-FTR-095 / ENC-TSK-I90: Sheaf Laplacian H1 inconsistency detection
+    "tracker_sheaf_cohomology": _tracker_sheaf_cohomology,
     # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
     "tracker_manifest": _tracker_manifest,
     "tracker_get_acs": _tracker_get_acs,
