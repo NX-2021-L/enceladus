@@ -19,6 +19,11 @@ The schema carries ``spurious_attractor_rate`` and ``re_traversal_rate`` as
 explicit null stubs — the wiring points for ENC-FTR-105 (Spurious-Attractor /
 Hallucination Telemetry, AC-7/AC-8) which will populate them in a later phase.
 
+ENC-TSK-I91 (ENC-FTR-105 AC-7) fills in the first of those two stubs:
+``spurious_attractor_rate`` is now computed from the wave's retrieval records
+(see ``compute_spurious_attractor_rate`` below) when the caller supplies them;
+``re_traversal_rate`` (AC-8) remains an untouched null stub for a later task.
+
 This module is pure-Python and dependency-free (no numpy, no boto3 import at
 module load). The DynamoDB client is dependency-injected so the wave-close path
 is unit-testable without AWS. OGTM (ENC-FTR-066): drift telemetry writes a
@@ -38,6 +43,18 @@ DRIFT_TELEMETRY_SCHEMA = "enceladus.drift.telemetry.v1"
 
 # Default Fiedler-subspace dimension for d_spectral (AC: d_spectral(H,V;k=3)).
 DEFAULT_SPECTRAL_K = 3
+
+# ENC-TSK-I91 (ENC-FTR-105 AC-7): a retrieval result counts as a "spurious
+# attractor" once its retrieval_energy (ENC-FTR-083 Ph1/Ph2 per-record energy
+# telemetry) crosses the WARNING floor of the BHC five-level alert ladder
+# (ENC-FTR-083 Ph2 / ENC-TSK-I87, backend/lambda/coordination_api.budget_
+# hierarchy.ALERT_LADDER). The floor (0.85) is duplicated here rather than
+# imported: graph_query_api and coordination_api are independently deployed
+# Lambda packages, each with its own requirements.txt/deploy.sh, and this
+# module's docstring contract ("pure-Python and dependency-free") rules out a
+# cross-package import. Keep this constant in sync with budget_hierarchy.
+# ALERT_LADDER's WARNING floor if that ladder is ever recalibrated.
+BHC_WARNING_THRESHOLD: float = 0.85
 
 Vector = Sequence[float]
 Matrix = Sequence[Sequence[float]]
@@ -259,6 +276,58 @@ def d_spectral(
 
 
 # ---------------------------------------------------------------------------
+# spurious_attractor_rate — ENC-FTR-105 AC-7 (ENC-TSK-I91)
+# ---------------------------------------------------------------------------
+
+def _record_avg_retrieval_energy(record: Dict[str, Any]) -> Optional[float]:
+    """Average retrieval_energy for one retrieval record.
+
+    Accepts either a precomputed ``avg_retrieval_energy`` scalar (the caller
+    already reduced it) or a raw ``retrieval_energy`` sequence (per-signal /
+    per-hop energy samples for that record, per ENC-FTR-083 Ph1/Ph2 per-record
+    energy telemetry), in which case it is averaged here. Returns None when
+    neither is present, so a record with no energy telemetry is excluded from
+    the rate rather than poisoning it with a fabricated zero.
+    """
+    avg = record.get("avg_retrieval_energy")
+    if avg is not None:
+        return float(avg)
+    energies = record.get("retrieval_energy")
+    if not energies:
+        return None
+    return sum(float(e) for e in energies) / len(energies)
+
+
+def compute_spurious_attractor_rate(
+    retrieval_records: Optional[Sequence[Dict[str, Any]]],
+    threshold: float = BHC_WARNING_THRESHOLD,
+) -> Optional[float]:
+    """ENC-FTR-105 AC-7 — fraction of retrieval records in the wave whose avg
+    retrieval_energy exceeds the BHC WARNING threshold.
+
+    A "spurious attractor" is a retrieval result whose energy signal settled
+    into a high-energy / low-confidence basin (crossing into the BHC WARNING
+    band of the ENC-FTR-083 Ph2 alert ladder) rather than a genuine semantic
+    minimum. Records lacking energy telemetry are excluded from both the
+    numerator and denominator (see ``_record_avg_retrieval_energy``).
+
+    Returns None (the FTR-105 null-stub value) when ``retrieval_records`` is
+    empty/absent or none of its records carry energy telemetry — the same
+    independent-degrade contract as d_centroid_L2 / d_spectral.
+    """
+    if not retrieval_records:
+        return None
+    energies = [
+        e for e in (_record_avg_retrieval_energy(r) for r in retrieval_records)
+        if e is not None
+    ]
+    if not energies:
+        return None
+    exceeding = sum(1 for e in energies if e > threshold)
+    return exceeding / len(energies)
+
+
+# ---------------------------------------------------------------------------
 # Record assembly + DynamoDB emission
 # ---------------------------------------------------------------------------
 
@@ -357,15 +426,26 @@ def compute_and_emit_wave_close_drift(
     k: int = DEFAULT_SPECTRAL_K,
     laplacian_fn: Optional[Callable[[Matrix, int], Sequence[Vector]]] = None,
     timestamp: Optional[str] = None,
+    retrieval_records: Optional[Sequence[Dict[str, Any]]] = None,
     spurious_attractor_rate: Optional[float] = None,
     re_traversal_rate: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """End-to-end wave-close handler: compute d_centroid_L2 + d_spectral and
-    persist a single record to the drift-telemetry table.
+    """End-to-end wave-close handler: compute d_centroid_L2 + d_spectral +
+    spurious_attractor_rate and persist a single record to the drift-telemetry
+    table.
 
-    Either metric independently degrades to ``None`` (rather than raising) when
+    Each metric independently degrades to ``None`` (rather than raising) when
     its inputs are absent — d_centroid may ship ahead of d_spectral per the
-    ENC-FTR-087 dependency note (gated on tracker.graph_laplacian / ENC-FTR-088).
+    ENC-FTR-087 dependency note (gated on tracker.graph_laplacian / ENC-FTR-088),
+    and spurious_attractor_rate (ENC-FTR-105 AC-7, ENC-TSK-I91) likewise ships
+    independently of both.
+
+    ``spurious_attractor_rate``, if passed explicitly, takes precedence
+    (back-compat with callers that already computed/forward it, e.g. a direct
+    test invocation or a future caller with its own aggregate); otherwise it is
+    computed from ``retrieval_records`` via ``compute_spurious_attractor_rate``
+    when supplied. ``re_traversal_rate`` (AC-8) remains an untouched pass-through
+    null stub — out of scope for this task.
     """
     d_cent: Optional[float] = None
     if h_embeddings and v_embeddings:
@@ -385,6 +465,10 @@ def compute_and_emit_wave_close_drift(
             laplacian_fn=laplacian_fn,
         )
 
+    sar: Optional[float] = spurious_attractor_rate
+    if sar is None and retrieval_records is not None:
+        sar = compute_spurious_attractor_rate(retrieval_records)
+
     record = build_drift_record(
         wave_id=wave_id,
         project_id=project_id,
@@ -395,7 +479,7 @@ def compute_and_emit_wave_close_drift(
         n_h=len(h_embeddings) if h_embeddings is not None else None,
         n_v=len(v_embeddings) if v_embeddings is not None else None,
         timestamp=timestamp,
-        spurious_attractor_rate=spurious_attractor_rate,
+        spurious_attractor_rate=sar,
         re_traversal_rate=re_traversal_rate,
     )
     emit_drift_record(ddb_client, table_name, record)

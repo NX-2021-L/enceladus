@@ -11,6 +11,12 @@ corpus-scale token-usage telemetry emitted as the CloudWatch metric
 Enceladus/BudgetController/CorpusTokenUsage (ENC-ISS-265 closure evidence). See
 the "Phase 2" banner below for the per-AC mapping.
 
+ENC-TSK-I91 (ENC-FTR-105 AC-7): a standalone spurious-attractor NOTICE rung
+(``evaluate_spurious_attractor_alert``) that publishes to the same SNS topic
+via the same idiom as the AC-4 alert ladder, gated on
+spurious_attractor_rate > 0.15 rather than corpus token utilization — see the
+"ENC-TSK-I91" banner near the bottom of this module.
+
 Implements the Budget Hierarchy Controller primitive described in
 DOC-C6584044BEEB (Primitive 2 + Definition 5), grounded in the two governed
 research artifacts:
@@ -77,6 +83,9 @@ __all__ = [
     "evaluate_corpus_budget",
     "WaveBudgetDriftMonitor",
     "emergency_wave_admission",
+    # --- ENC-TSK-I91 (ENC-FTR-105 AC-7) ---
+    "SPURIOUS_ATTRACTOR_NOTICE_THRESHOLD",
+    "evaluate_spurious_attractor_alert",
 ]
 
 # ---------------------------------------------------------------------------
@@ -786,6 +795,99 @@ def emergency_wave_admission(
         json.dumps({**record, "persisted": persisted, "table": table}, sort_keys=True),
     )
     return {**record, "persisted": persisted, "table": table}
+
+
+# ===========================================================================
+# ENC-TSK-I91 (ENC-FTR-105 AC-7) — spurious-attractor NOTICE rung
+#
+# A standalone alert rung, separate from the AC-4 ALERT_LADDER (which
+# classifies corpus *token* utilization — a different signal). When a wave's
+# spurious_attractor_rate (emitted by graph_query_api.drift_telemetry at
+# wave-close, ENC-TSK-I91 AC-1) exceeds SPURIOUS_ATTRACTOR_NOTICE_THRESHOLD,
+# this publishes an SNS NOTICE alert, mirroring publish_corpus_alert's SNS
+# idiom exactly (topic ARN resolution, lazy client caching, payload shape,
+# best-effort swallow) so on-call tooling that already consumes
+# budget.corpus_alert NOTICE/WARNING/CRITICAL/FRAGMENTED messages needs no new
+# parsing path for this rung.
+# ===========================================================================
+
+# AC-7: strict greater-than threshold, so a rate of exactly 0.15 does NOT
+# publish while 0.16 does (mirrors the strict semantics of DRIFT_INF_NORM_
+# THRESHOLD above).
+SPURIOUS_ATTRACTOR_NOTICE_THRESHOLD: float = 0.15
+
+
+def evaluate_spurious_attractor_alert(
+    spurious_attractor_rate: Optional[float],
+    *,
+    logger,
+    sns_client=None,
+    topic_arn: Optional[str] = None,
+    project_id: str = "",
+    request_id: str = "",
+    wave_id: str = "",
+) -> Optional[Dict[str, object]]:
+    """ENC-TSK-I91 (ENC-FTR-105 AC-7) — publish an SNS NOTICE alert when a
+    wave's spurious_attractor_rate exceeds SPURIOUS_ATTRACTOR_NOTICE_THRESHOLD
+    (0.15, strict greater-than).
+
+    Always logs a structured ``[BUDGET][ALERT]`` line (the CloudWatch-Logs
+    evidence surface, same convention as publish_corpus_alert) regardless of
+    whether the threshold was crossed. The SNS publish itself only fires on
+    breach, using the same topic-ARN resolution chain
+    (``topic_arn`` kwarg -> ``BUDGET_ALERT_SNS_TOPIC_ARN`` ->
+    ``DEAD_LETTER_SNS_TOPIC_ARN``) and the same lazily-cached ``sns`` client as
+    the AC-4 ladder; any publish failure is logged and swallowed so alerting
+    can never break the wave-close caller.
+
+    Returns None when ``spurious_attractor_rate`` is None — the FTR-105
+    null-stub case ships ahead of this rung becoming meaningful, so there is
+    nothing to evaluate yet.
+    """
+    if spurious_attractor_rate is None:
+        return None
+
+    rate = float(spurious_attractor_rate)
+    exceeds = rate > SPURIOUS_ATTRACTOR_NOTICE_THRESHOLD
+    payload = {
+        "event_type": "budget.spurious_attractor_alert",
+        "level": "NOTICE",
+        "threshold": SPURIOUS_ATTRACTOR_NOTICE_THRESHOLD,
+        "spurious_attractor_rate": round(rate, 6),
+        "project_id": project_id,
+        "request_id": request_id,
+        "wave_id": wave_id,
+    }
+    # AC-7 CloudWatch-Logs evidence line (always emitted, mirrors AC-4).
+    logger.info("[BUDGET][ALERT] %s", json.dumps({**payload, "exceeds": exceeds}, sort_keys=True))
+
+    published = False
+    message_id = ""
+    if not exceeds:
+        return {**payload, "exceeds": exceeds, "published": published, "sns_message_id": message_id}
+
+    arn = topic_arn or os.environ.get("BUDGET_ALERT_SNS_TOPIC_ARN") or os.environ.get(
+        "DEAD_LETTER_SNS_TOPIC_ARN", ""
+    )
+    if not arn:
+        logger.info(
+            "[BUDGET][ALERT] no SNS topic configured (BUDGET_ALERT_SNS_TOPIC_ARN); "
+            "spurious_attractor NOTICE logged only"
+        )
+        return {**payload, "exceeds": exceeds, "published": published, "sns_message_id": message_id}
+
+    try:
+        client = sns_client or _boto3_client("sns")
+        resp = client.publish(
+            TopicArn=arn,
+            Subject=f"Budget NOTICE: spurious-attractor rate {rate:.0%}",
+            Message=json.dumps(payload, sort_keys=True),
+        )
+        published = True
+        message_id = str(resp.get("MessageId", "")) if isinstance(resp, dict) else ""
+    except Exception as exc:  # noqa: BLE001 — alerting must never break the caller
+        logger.warning("[BUDGET][ALERT] SNS publish failed level=NOTICE (spurious_attractor): %s", exc)
+    return {**payload, "exceeds": exceeds, "published": published, "sns_message_id": message_id}
 
 
 def _to_dynamodb_item(record: Dict[str, object]) -> Dict[str, Dict[str, str]]:

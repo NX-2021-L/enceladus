@@ -3,11 +3,17 @@
 Network-free: exercises the degree statistics, Monte Carlo site-percolation
 sweep, and second-derivative empirical-p_c detection against a deterministic
 synthetic graph. No AWS or graph_query_api calls.
+
+ENC-TSK-I91 (ENC-FTR-105 AC-7) adds tests for _fetch_graph's
+spurious_attractor_rate pass-through (monkeypatching the internal
+_graphsearch call rather than making a real HTTP request, same network-free
+convention as the rest of this file).
 """
 
 import os
 import random
 import unittest
+from unittest import mock
 
 os.environ.setdefault("GRAPH_QUERY_API_BASE", "https://example.invalid/api/v1/tracker/graphsearch")
 
@@ -94,6 +100,58 @@ class UnionFindTest(unittest.TestCase):
         edges = [("a", "b"), ("c", "d")]
         ratio = pm._largest_component_ratio(edges, {"a", "b", "c", "d"}, 4, random.Random(0))
         self.assertAlmostEqual(ratio, 0.5, places=6)
+
+
+class FetchGraphSpuriousAttractorRateTest(unittest.TestCase):
+    """ENC-TSK-I91 (ENC-FTR-105 AC-7): spurious_attractor_rate pass-through
+    from the adjacency endpoint's first page into _fetch_graph's return value."""
+
+    def _single_page_body(self, extra=None):
+        body = {
+            "node_count": 2,
+            "edge_count": 1,
+            "edges": [{"s": "A", "t": "B"}],
+            "has_more": False,
+        }
+        if extra:
+            body.update(extra)
+        return body
+
+    def test_rate_passed_through_when_present(self):
+        with mock.patch.object(pm, "_graphsearch", return_value=self._single_page_body(
+            {"spurious_attractor_rate": 0.37}
+        )):
+            node_count, edges, rate = pm._fetch_graph()
+        self.assertEqual(node_count, 2)
+        self.assertEqual(edges, [("A", "B")])
+        self.assertAlmostEqual(rate, 0.37)
+
+    def test_rate_is_none_when_key_absent(self):
+        """Backward compatibility: an older graph_query_api deploy that
+        predates ENC-TSK-I91 simply omits the key."""
+        with mock.patch.object(pm, "_graphsearch", return_value=self._single_page_body()):
+            _node_count, _edges, rate = pm._fetch_graph()
+        self.assertIsNone(rate)
+
+    def test_rate_is_none_when_explicitly_null(self):
+        with mock.patch.object(pm, "_graphsearch", return_value=self._single_page_body(
+            {"spurious_attractor_rate": None}
+        )):
+            _node_count, _edges, rate = pm._fetch_graph()
+        self.assertIsNone(rate)
+
+    def test_rate_taken_from_first_page_only(self):
+        first = self._single_page_body({"spurious_attractor_rate": 0.6, "has_more": True, "next_offset": 1})
+        second = {
+            "node_count": 0,  # later pages don't repeat node_count/rate
+            "edges": [{"s": "B", "t": "C"}],
+            "has_more": False,
+        }
+        with mock.patch.object(pm, "_graphsearch", side_effect=[first, second]):
+            node_count, edges, rate = pm._fetch_graph()
+        self.assertEqual(node_count, 2)
+        self.assertEqual(edges, [("A", "B"), ("B", "C")])
+        self.assertAlmostEqual(rate, 0.6)
 
 
 if __name__ == "__main__":
