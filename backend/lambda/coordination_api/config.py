@@ -58,6 +58,8 @@ __all__ = [
     "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
     "COORDINATION_INTERNAL_API_KEYS",
     "COORDINATION_MCP_HTTP_PATH",
+    "DRIFT_TELEMETRY_TABLE",
+    "GRAPH_QUERY_API_URL",
     "COORDINATION_PUBLIC_BASE_URL",
     "COORDINATION_TABLE",
     "CORS_ORIGIN",
@@ -175,6 +177,15 @@ SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
+
+# --- ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier ---
+# graph_query_api hybrid endpoint used by the default nearest-neighbor provider
+# (Titan V2 vector search). Empty => the classifier degrades to no neighbors so
+# session-init inference never blocks. Set on the gamma stack to enable real
+# predictions. The drift-telemetry table is owned by FTR-087 (planned); empty
+# default keeps the new intent_centroid_drift column write a graceful no-op.
+GRAPH_QUERY_API_URL = os.environ.get("GRAPH_QUERY_API_URL", "").strip()
+DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
 
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")

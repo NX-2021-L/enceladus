@@ -60,6 +60,20 @@ except ModuleNotFoundError:
     _MCP_SPEC.loader.exec_module(_MCP_MODULE)
     CoordinationMcpClient = _MCP_MODULE.CoordinationMcpClient
 
+# ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier + drift.
+try:
+    import intent_classifier as _intent_classifier
+    import intent_drift as _intent_drift
+except ModuleNotFoundError:  # pragma: no cover - packaging fallback
+    _IC_PATH = pathlib.Path(__file__).with_name("intent_classifier.py")
+    _IC_SPEC = importlib.util.spec_from_file_location("intent_classifier", _IC_PATH)
+    _intent_classifier = importlib.util.module_from_spec(_IC_SPEC)  # type: ignore[arg-type]
+    _IC_SPEC.loader.exec_module(_intent_classifier)  # type: ignore[union-attr]
+    _ID_PATH = pathlib.Path(__file__).with_name("intent_drift.py")
+    _ID_SPEC = importlib.util.spec_from_file_location("intent_drift", _ID_PATH)
+    _intent_drift = importlib.util.module_from_spec(_ID_SPEC)  # type: ignore[arg-type]
+    _ID_SPEC.loader.exec_module(_intent_drift)  # type: ignore[union-attr]
+
 try:
     import jwt
     from jwt.algorithms import RSAAlgorithm
@@ -340,6 +354,9 @@ CALLBACK_SQS_QUEUE_URL = os.environ.get("CALLBACK_SQS_QUEUE_URL", "")
 CALLBACK_EVENT_SOURCE = os.environ.get("CALLBACK_EVENT_SOURCE", "enceladus.coordination")
 CALLBACK_EVENT_DETAIL_TYPE = os.environ.get("CALLBACK_EVENT_DETAIL_TYPE", "coordination.callback")
 FEED_SUBSCRIPTIONS_TABLE = os.environ.get("FEED_SUBSCRIPTIONS_TABLE", "feed-subscriptions")
+# ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier config.
+GRAPH_QUERY_API_URL = os.environ.get("GRAPH_QUERY_API_URL", "").strip()
+DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
 FEED_PUSH_DEFAULT_EVENT_BUS = os.environ.get("FEED_PUSH_DEFAULT_EVENT_BUS", "default")
 FEED_PUSH_HTTP_TIMEOUT_SECONDS = float(os.environ.get("FEED_PUSH_HTTP_TIMEOUT_SECONDS", "5"))
 MCP_CONNECTIVITY_BACKOFF_SECONDS = (10, 30, 60)
@@ -13813,6 +13830,119 @@ def _handle_chat_message(
 
 
 # ---------------------------------------------------------------------------
+# ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier
+# ---------------------------------------------------------------------------
+
+
+def _handle_session_init_classify_intent(
+    event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/session-init/classify-intent (ENC-FTR-084 Ph1).
+
+    Accepts the first-turn request text + session metadata and returns the
+    predicted_entelechy {node_ids, confidence} via Titan V2 nearest-neighbor
+    inference. Honors applied_entelechy_override (override wins; the classifier
+    prediction is still computed and logged). Inference-only: no governed
+    mutation, no training, no weight writes.
+    """
+    try:
+        raw_body = event.get("body") or "{}"
+        body = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
+    except (json.JSONDecodeError, TypeError):
+        return _error(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        return _error(400, "Request body must be a JSON object")
+
+    first_turn_text = str(body.get("first_turn_text") or body.get("request_text") or "").strip()
+    if not first_turn_text:
+        return _error(400, "Missing required field: first_turn_text")
+
+    session_metadata = body.get("session_metadata")
+    if session_metadata is not None and not isinstance(session_metadata, dict):
+        return _error(400, "'session_metadata' must be an object when provided")
+
+    project_id = str(body.get("project_id") or "enceladus").strip() or "enceladus"
+    top_k = body.get("top_k", _intent_classifier.DEFAULT_TOP_K)
+
+    try:
+        result = _intent_classifier.classify_session_intent(
+            first_turn_text,
+            session_metadata or {},
+            applied_entelechy_override=body.get("applied_entelechy_override"),
+            top_k=top_k,
+            project_id=project_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — inference must never 500 session-init
+        logger.exception("session-init classify-intent failed")
+        return _error(500, f"Intent classification failed: {exc}")
+
+    return _response(200, {"success": True, **result})
+
+
+def _handle_session_init_intent_drift(
+    event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/session-init/intent-centroid-drift (ENC-FTR-084 Ph1, AC-3).
+
+    Computes the rolling intent vector for a wave (mean of the supplied FTR-089
+    embeddings for dispatched records), derives the scalar intent_centroid_drift
+    against the previous wave centroid, and best-effort persists that new nullable
+    column into enceladus-drift-telemetry alongside the FTR-087 d_centroid field.
+    """
+    try:
+        raw_body = event.get("body") or "{}"
+        body = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
+    except (json.JSONDecodeError, TypeError):
+        return _error(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        return _error(400, "Request body must be a JSON object")
+
+    wave_id = str(body.get("wave_id") or "").strip()
+    if not wave_id:
+        return _error(400, "Missing required field: wave_id")
+
+    embeddings = body.get("embeddings") or body.get("dispatched_record_embeddings") or []
+    if not isinstance(embeddings, list):
+        return _error(400, "'embeddings' must be a list of embedding vectors")
+
+    previous_centroid = body.get("previous_centroid")
+    if previous_centroid is not None and not isinstance(previous_centroid, list):
+        return _error(400, "'previous_centroid' must be a list when provided")
+
+    persist = body.get("persist", True)
+
+    try:
+        centroid = _intent_drift.compute_intent_centroid(embeddings)
+        drift = _intent_drift.compute_intent_centroid_drift(previous_centroid, centroid)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("intent-centroid-drift computation failed")
+        return _error(500, f"Centroid drift computation failed: {exc}")
+
+    persistence: Dict[str, Any] = {"persisted": False, "reason": "persist_disabled"}
+    if persist:
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        persistence = _intent_drift.persist_intent_centroid_drift(
+            wave_id,
+            drift,
+            now_iso=now_iso,
+            table_name=DRIFT_TELEMETRY_TABLE or None,
+            ddb=_get_ddb(),
+        )
+
+    return _response(
+        200,
+        {
+            "success": True,
+            "wave_id": wave_id,
+            "intent_centroid_dim": len(centroid) if centroid else 0,
+            "intent_centroid_drift": drift,
+            "record_count": len([e for e in embeddings if isinstance(e, (list, tuple)) and e]),
+            "persistence": persistence,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
 
@@ -14056,5 +14186,13 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if method == "POST" and match_session_msg:
         session_id = match_session_msg.group(1)
         return _handle_chat_message(event, session_id, claims or {})
+
+    # POST /api/v1/coordination/session-init/classify-intent (ENC-FTR-084 Ph1 / ENC-TSK-I93)
+    if method == "POST" and path == "/api/v1/coordination/session-init/classify-intent":
+        return _handle_session_init_classify_intent(event, claims or {})
+
+    # POST /api/v1/coordination/session-init/intent-centroid-drift (ENC-FTR-084 Ph1, AC-3)
+    if method == "POST" and path == "/api/v1/coordination/session-init/intent-centroid-drift":
+        return _handle_session_init_intent_drift(event, claims or {})
 
     return _error(404, f"Unsupported route: {method} {path}")
