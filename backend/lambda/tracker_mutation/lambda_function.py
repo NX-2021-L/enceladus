@@ -252,6 +252,69 @@ def _invoke_lifecycle_service(payload: dict):
         logger.error("[H46] Lifecycle Service invoke failed: %s", exc)
         return None
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-H47 / B63 Phase 2B — Scoring Service extraction.
+# When enable_scoring_service_extraction is ON, the standalone, SNS-triggered Scoring Service is the
+# SOLE owner of lesson constitutional scoring: tracker_mutation writes the lesson with
+# scoring_status='pending' (skipping the inline pillar_composite/resonance computation) and publishes
+# a {lesson.scoring.requested} message to the lesson-scoring SNS topic; the Scoring Service computes
+# the scores asynchronously and flips scoring_status -> 'scored'. When OFF (default), the inline
+# scoring below runs exactly as before and the lesson is written already-scored — that is the
+# zero-behavior-change rollback path (ENC-TSK-H47 AC #3). Unlike the synchronous, FAIL-CLOSED
+# Lifecycle Service (H46), this path is async and best-effort about the SNS publish: the lesson
+# write is the source of truth and is never blocked by a notification-side-channel failure (a
+# missed publish leaves the lesson scoring_status='pending' for a re-drive, never an unscored task
+# CRUD failure). The flag is read at request time so an AppConfig toggle takes effect — and rolls
+# back — without a redeploy.
+# ---------------------------------------------------------------------------
+LESSON_SCORING_TOPIC_ARN = os.environ.get("LESSON_SCORING_TOPIC_ARN", "")
+_sns_client = None
+
+
+def _get_sns():
+    global _sns_client
+    if _sns_client is None:
+        _sns_client = boto3.client(
+            "sns",
+            region_name=DYNAMODB_REGION,
+            config=Config(retries={"max_attempts": 2, "mode": "standard"}),
+        )
+    return _sns_client
+
+
+def _scoring_service_enabled() -> bool:
+    """Read the AppConfig flag at request time (independent toggle + rollback, ENC-TSK-H47 AC #3)."""
+    return _appconfig_flag("enable_scoring_service_extraction", env_fallback="ENABLE_SCORING_SERVICE")
+
+
+def _publish_lesson_scoring_request(project_id: str, record_id: str, item_id: str,
+                                    pillar_scores: Dict[str, float]) -> bool:
+    """Publish a {lesson.scoring.requested} SNS message so the Scoring Service can score the lesson
+    asynchronously. Best-effort: returns True on publish, False otherwise. Failures are logged and
+    swallowed — the lesson DynamoDB write is the source of truth and must never be blocked by an SNS
+    side-channel failure (the lesson simply stays scoring_status='pending' until a re-drive)."""
+    if not LESSON_SCORING_TOPIC_ARN:
+        logger.error("[H47] LESSON_SCORING_TOPIC_ARN not configured; lesson %s left scoring_status=pending", record_id)
+        return False
+    payload = {
+        "event_type": "lesson.scoring.requested",
+        "schema_version": 1,
+        "project_id": project_id,
+        "record_id": record_id,
+        "item_id": item_id,
+        "pillar_scores": pillar_scores,
+    }
+    try:
+        _get_sns().publish(
+            TopicArn=LESSON_SCORING_TOPIC_ARN,
+            Subject=f"Lesson scoring requested: {item_id}"[:100],
+            Message=json.dumps(payload),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[H47] lesson scoring SNS publish failed for %s: %s", record_id, exc)
+        return False
+
 # Valid record types and their closed/default statuses
 _RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "generation"}
 _CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived", "plan": "complete", "generation": "archived"}
@@ -2555,12 +2618,20 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
         item["evidence_chain"] = {"L": [_ser_s(eid.strip()) for eid in evidence_chain]}
         item["provenance"] = _ser_s(provenance)
         item["confidence"] = {"N": str(body.get("confidence", 0.5))}
-        # ENC-FTR-054: Compute constitutional scores server-side
-        pillar_composite = _compute_lesson_pillar_composite(parsed_pillar_scores)
-        resonance_score = _compute_resonance_score(parsed_pillar_scores)
+        # ENC-FTR-054: Constitutional scores. ENC-TSK-H47 / B63 Phase 2B: when the Scoring Service
+        # is ON, defer the computation to the async SNS-triggered service — store only the validated
+        # pillar_scores and mark scoring_status='pending'; the service computes pillar_composite +
+        # resonance_score and flips scoring_status -> 'scored'. When OFF (rollback), score inline
+        # exactly as before and mark scoring_status='scored' (the lesson is born already scored).
         item["pillar_scores"] = {"M": {k: {"N": str(v)} for k, v in parsed_pillar_scores.items()}}
-        item["resonance_score"] = {"N": str(resonance_score)}
-        item["pillar_composite"] = {"N": str(pillar_composite)}
+        if _scoring_service_enabled():
+            item["scoring_status"] = {"S": "pending"}
+        else:
+            pillar_composite = _compute_lesson_pillar_composite(parsed_pillar_scores)
+            resonance_score = _compute_resonance_score(parsed_pillar_scores)
+            item["resonance_score"] = {"N": str(resonance_score)}
+            item["pillar_composite"] = {"N": str(pillar_composite)}
+            item["scoring_status"] = {"S": "scored"}
         item["extensions"] = {"L": []}
         item["lesson_version"] = {"N": "1"}
         if analysis_reference:
@@ -2628,6 +2699,13 @@ def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict
     except Exception as exc:
         logger.error("create failed: %s", exc)
         return _error(500, "Database write failed.")
+
+    # ENC-TSK-H47 / B63 Phase 2B: a lesson written with scoring_status='pending' (flag ON) needs the
+    # async Scoring Service kicked off. Publish AFTER the write succeeds (the lesson is the source of
+    # truth) and best-effort — a failed publish leaves the lesson scoring_status='pending' for a
+    # re-drive, never a failed create. No-op when the flag is OFF (inline scoring already ran).
+    if record_type == "lesson" and _scoring_service_enabled():
+        _publish_lesson_scoring_request(project_id, sk, new_id, parsed_pillar_scores)
 
     # ENC-FTR-056: Update parent record's subtask_ids list
     if is_child and parent_task_id:
@@ -4788,16 +4866,27 @@ def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
         update_parts.append("evidence_chain = list_append(if_not_exists(evidence_chain, :empty), :new_ev)")
         expr_values[":new_ev"] = {"L": [_ser_s(eid.strip()) for eid in new_evidence_ids if eid.strip()]}
 
-    # ENC-FTR-054: Recompute scores if pillar_scores updated
+    # ENC-FTR-054: Recompute scores if pillar_scores updated. ENC-TSK-H47 / B63 Phase 2B: when the
+    # Scoring Service is ON, defer the recomputation to the async service — store the new
+    # pillar_scores and reset scoring_status='pending'; the SNS publish below (after the write
+    # succeeds) re-scores. When OFF (rollback), recompute inline exactly as before.
+    _scoring_deferred = False
     if updated_pillar_scores:
-        new_composite = _compute_lesson_pillar_composite(updated_pillar_scores)
-        new_resonance = _compute_resonance_score(updated_pillar_scores)
         update_parts.append("pillar_scores = :ps")
-        update_parts.append("resonance_score = :rs")
-        update_parts.append("pillar_composite = :pc")
         expr_values[":ps"] = {"M": {k: {"N": str(v)} for k, v in updated_pillar_scores.items()}}
-        expr_values[":rs"] = {"N": str(new_resonance)}
-        expr_values[":pc"] = {"N": str(new_composite)}
+        if _scoring_service_enabled():
+            update_parts.append("scoring_status = :pending")
+            expr_values[":pending"] = {"S": "pending"}
+            _scoring_deferred = True
+        else:
+            new_composite = _compute_lesson_pillar_composite(updated_pillar_scores)
+            new_resonance = _compute_resonance_score(updated_pillar_scores)
+            update_parts.append("resonance_score = :rs")
+            update_parts.append("pillar_composite = :pc")
+            update_parts.append("scoring_status = :scored")
+            expr_values[":rs"] = {"N": str(new_resonance)}
+            expr_values[":pc"] = {"N": str(new_composite)}
+            expr_values[":scored"] = {"S": "scored"}
 
     try:
         ddb.update_item(
@@ -4808,6 +4897,14 @@ def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
     except Exception as exc:
         logger.error("update_item (lesson extend) failed: %s", exc)
         return _error(500, "Database write failed.")
+
+    # ENC-TSK-H47 / B63 Phase 2B: if scoring was deferred (flag ON + pillar_scores changed), the
+    # lesson is now scoring_status='pending'; kick off the async Scoring Service. Best-effort —
+    # the write already succeeded and is the source of truth.
+    if _scoring_deferred and updated_pillar_scores:
+        _publish_lesson_scoring_request(
+            project_id, key["record_id"]["S"], record_id.upper(), updated_pillar_scores
+        )
 
     return _response(200, {
         "success": True, "record_id": record_id, "updated_at": now,

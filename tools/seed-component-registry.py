@@ -131,6 +131,28 @@ KNOWN_COMPONENTS = [
         },
     },
     {
+        "component_id": "comp-scoring-service",
+        "component_name": "Scoring Service Lambda",
+        "project_id": "enceladus",
+        "category": "lambda",
+        "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
+        "description": "Enceladus Scoring Service Lambda (B63 Phase 2B / ENC-TSK-H47) — standalone, SNS-triggered async owner of lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson scoring_status: pending -> scored lifecycle. Subscribes to the enceladus-lesson-scoring SNS topic; tracker_mutation publishes to it behind the enable_scoring_service_extraction feature flag (best-effort; idempotent conditional write-back for at-least-once delivery).",
+        "github_repo": "NX-2021-L/enceladus",
+        "status": "active",
+        "source_paths": {
+            "primary": "backend/lambda/scoring_service/lambda_function.py",
+            "directory": "backend/lambda/scoring_service/",
+            "workflow": ".github/workflows/_deploy.yml",
+            "deploy_script": "backend/lambda/scoring_service/deploy.sh",
+            "related": [
+                "backend/lambda/tracker_mutation/lambda_function.py",
+                "backend/lambda/shared_layer/",
+            ],
+            "architecture_sections": ["4.17"],
+        },
+    },
+    {
         "component_id": "comp-coordination-api",
         "component_name": "Coordination API Lambda",
         "project_id": "enceladus",

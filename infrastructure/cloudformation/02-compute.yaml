@@ -252,6 +252,9 @@ Resources:
           # is ON. The flag itself lives in AppConfig (independently toggleable); it defaults OFF
           # so this var is inert until the flag is flipped — a zero-behavior-change deploy.
           LIFECYCLE_SERVICE_FUNCTION: !Sub "enceladus-lifecycle-service${EnvironmentSuffix}"
+          # ENC-TSK-H47: the lesson-scoring SNS topic tracker_mutation publishes to when
+          # enable_scoring_service_extraction is ON. Inert until the (default-OFF) flag is flipped.
+          LESSON_SCORING_TOPIC_ARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-lesson-scoring${EnvironmentSuffix}"
       Tags:
         - Key: Project
           Value: enceladus
@@ -345,6 +348,60 @@ Resources:
           Value: enceladus
         - Key: Component
           Value: lifecycle
+
+  # ENC-TSK-H47 / B63 Phase 2B — Scoring Service. Standalone, SNS-triggered ASYNC consumer that owns
+  # lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson
+  # scoring_status: pending -> scored lifecycle. Subscribes to LessonScoringTopic; pure DynamoDB
+  # writer (tracker table only). No GitHub, no AppConfig (the flag gates the PUBLISHER, not this
+  # consumer). See ScoringServiceSubscription / ScoringServiceSnsPermission for the SNS wiring.
+  ScoringServiceFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-scoring-service${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt ScoringServiceRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          DYNAMODB_REGION: !Ref AWS::Region
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: scoring
+
+  # ENC-TSK-H47: subscribe the Scoring Service to the lesson-scoring topic (async fan-out). Lambda
+  # protocol SNS subscriptions cannot use raw message delivery, so the function receives the
+  # standard SNS Notification envelope ({Records:[{Sns:{Message}}]}), which the handler unwraps.
+  ScoringServiceSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-lesson-scoring${EnvironmentSuffix}"
+      Protocol: lambda
+      Endpoint: !GetAtt ScoringServiceFunction.Arn
+
+  # ENC-TSK-H47: allow SNS to invoke the Scoring Service for the subscription above.
+  ScoringServiceSnsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScoringServiceFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-lesson-scoring${EnvironmentSuffix}"
 
   ProjectServiceFunction:
     Type: AWS::Lambda::Function
@@ -2315,6 +2372,18 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-lifecycle-service${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-lifecycle-service${EnvironmentSuffix}:*"
+        # ENC-TSK-H47: allow tracker_mutation to publish lesson-scoring requests to the Scoring
+        # Service SNS topic (least-privilege: this one topic only).
+        - PolicyName: publish-lesson-scoring
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PublishLessonScoring
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-lesson-scoring${EnvironmentSuffix}"
 
   # ENC-TSK-H46 / B63 Phase 2A — execution role for the Lifecycle Service. Read-only:
   # tracker table (subtask gate child lookups) + component-registry (STRICTNESS_RANK).
@@ -2362,6 +2431,41 @@ Resources:
                 Action:
                   - dynamodb:GetItem
                 Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+
+  # ENC-TSK-H47 / B63 Phase 2B — execution role for the Scoring Service. Least-privilege: CloudWatch
+  # Logs + write-back of the scoring attributes on the tracker (lesson) table only. GetItem/UpdateItem
+  # are scoped to the tracker table; the conditional write-back touches only the scoring_status /
+  # pillar_composite / resonance_score / scoring_completed_at attributes of an existing lesson item.
+  ScoringServiceRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-scoring-service-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: enceladus-scoring-service-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-scoring-service${EnvironmentSuffix}*"
+              - Sid: DynamoDBLessonScoringWriteback
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
 
   DocumentApiRole:
     Type: AWS::IAM::Role
