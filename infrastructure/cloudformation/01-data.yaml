@@ -186,6 +186,44 @@ Resources:
         - Key: Component
           Value: documents
 
+  # ---------------------------------------------------------------------------
+  # ENC-FTR-087 Phase 1 (ENC-TSK-I85) — Wave-Close Drift Telemetry time series.
+  # One item per wave-close event keyed on wave_id (distinct per wave); the
+  # project-timestamp-index GSI serves the per-project time series consumed by
+  # the BHC drift-monitor. Carries d_centroid_L2 + d_spectral plus the
+  # ENC-FTR-105 null-stub slots (spurious_attractor_rate, re_traversal_rate).
+  # ---------------------------------------------------------------------------
+  DriftTelemetryTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "enceladus-drift-telemetry${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: wave_id
+          AttributeType: S
+        - AttributeName: project_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: wave_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: project-timestamp-index
+          KeySchema:
+            - AttributeName: project_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: drift-telemetry
+
   DeploymentManagerTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain

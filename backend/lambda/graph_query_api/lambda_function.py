@@ -182,7 +182,14 @@ try:
 except (TypeError, ValueError):
     _PATHWAY_EDGE_DEADLINE_S = 2.0
 
+# ENC-FTR-087 Phase 1 — wave-close drift telemetry sink. When DRIFT_TELEMETRY_TABLE
+# is set (01-data.yaml provisions the table; 02-compute.yaml grants PutItem + injects
+# the env var) each wave-close event writes one d_centroid_L2 + d_spectral record to
+# the per-project DynamoDB time series (queryable via the project-timestamp-index GSI).
+DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
+
 _s3 = None
+_dynamodb = None
 
 
 def _get_secretsmanager():
@@ -216,6 +223,20 @@ def _get_s3():
             ),
         )
     return _s3
+
+
+def _get_dynamodb():
+    """Lazy low-level DynamoDB client for the ENC-FTR-087 wave-close drift sink."""
+    global _dynamodb
+    if _dynamodb is None:
+        import boto3
+        from botocore.config import Config
+        _dynamodb = boto3.client(
+            "dynamodb",
+            region_name=SECRETS_REGION,
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _dynamodb
 
 
 def _get_neo4j_credentials() -> Dict[str, str]:
@@ -2036,8 +2057,60 @@ def _handle_health(event: Dict) -> Dict:
 # Lambda handler
 # ---------------------------------------------------------------------------
 
+def _handle_wave_close_drift(event: Dict[str, Any]) -> Dict[str, Any]:
+    """ENC-FTR-087 Phase 1 wave-close drift emission (direct-invoke action).
+
+    Payload (event) fields:
+      project_id (required), wave_id (required), prev_wave_id (optional),
+      h_embeddings / v_embeddings (lists of equal-length float vectors) for
+      d_centroid_L2, and one of {h_fiedler/v_fiedler} or {h_adjacency/v_adjacency}
+      for d_spectral. Both metrics degrade to null when their inputs are absent
+      (d_centroid may ship ahead of d_spectral per ENC-FTR-087 / ENC-FTR-088).
+
+    Returns the emitted record. Never raises into the caller for a malformed
+    payload — returns a structured 400 instead.
+    """
+    import drift_telemetry
+
+    project_id = str(event.get("project_id", "")).strip()
+    wave_id = str(event.get("wave_id", "")).strip()
+    if not project_id or not wave_id:
+        return _error(400, "wave_close_drift requires project_id and wave_id")
+    if not DRIFT_TELEMETRY_TABLE:
+        return _error(503, "DRIFT_TELEMETRY_TABLE is not configured")
+
+    k = event.get("k", drift_telemetry.DEFAULT_SPECTRAL_K)
+    try:
+        record = drift_telemetry.compute_and_emit_wave_close_drift(
+            ddb_client=_get_dynamodb(),
+            table_name=DRIFT_TELEMETRY_TABLE,
+            project_id=project_id,
+            wave_id=wave_id,
+            prev_wave_id=event.get("prev_wave_id"),
+            h_embeddings=event.get("h_embeddings"),
+            v_embeddings=event.get("v_embeddings"),
+            h_adjacency=event.get("h_adjacency"),
+            v_adjacency=event.get("v_adjacency"),
+            h_fiedler=event.get("h_fiedler"),
+            v_fiedler=event.get("v_fiedler"),
+            k=int(k),
+            spurious_attractor_rate=event.get("spurious_attractor_rate"),
+            re_traversal_rate=event.get("re_traversal_rate"),
+        )
+    except ValueError as exc:
+        return _error(400, f"wave_close_drift payload error: {exc}")
+    except Exception as exc:  # noqa: BLE001 — emission failures must not crash the invoke
+        logger.exception("[ERROR] wave_close_drift emission failed")
+        return _error(500, f"wave_close_drift emission failed: {exc}")
+    return _response(200, {"emitted": record})
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """API Gateway v2 proxy handler."""
+    # ENC-FTR-087 Phase 1: wave-close drift emission via direct invoke / event.
+    if isinstance(event, dict) and event.get("action") == "wave_close_drift":
+        return _handle_wave_close_drift(event)
+
     # ENC-FTR-101 (Option B): out-of-band standing-projection refresh. EventBridge
     # scheduled events / direct invokes carry action='refresh_projection' (and lack
     # the API Gateway requestContext), so detect them before the HTTP routing below.
