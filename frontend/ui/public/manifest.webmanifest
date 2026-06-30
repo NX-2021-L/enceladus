@@ -1,0 +1,17 @@
+{
+  "name": "Enceladus",
+  "short_name": "Enceladus",
+  "description": "Portfolio management platform — governed agent coordination",
+  "start_url": "/enceladus/",
+  "display": "standalone",
+  "background_color": "#0A0A0F",
+  "theme_color": "#3D9BA8",
+  "lang": "en",
+  "scope": "/enceladus/",
+  "icons": [
+    {"src": "favicon.ico", "sizes": "64x64 32x32 24x24 16x16", "type": "image/x-icon"},
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}
