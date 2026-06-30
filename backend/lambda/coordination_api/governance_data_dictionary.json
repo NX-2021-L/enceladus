@@ -6067,6 +6067,23 @@
           "type": "object"
         }
       }
+    },
+    "monitoring.convergence_telemetry": {
+      "description": "ENC-TSK-I82 (FTR-086 Ph1): Convergence Surface DDB counter table + SQS FIFO + Streams fan-out Lambda.",
+      "fields": {
+        "attribute_name": {
+          "type": "string"
+        },
+        "canonical_value": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "expires_at": {
+          "type": "integer"
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
