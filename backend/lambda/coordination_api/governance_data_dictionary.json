@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-30.03",
-  "updated_at": "2026-06-30T02:05:00Z",
-  "last_change_summary": "ENC-TSK-I88 / ENC-FTR-085: add graph_query_api.adjacency \u2014 read-only adjacency export via graph_query_api for nightly percolation Lambda. Version 2026-06-30.02 -> 2026-06-30.03. PRIOR: ENC-TSK-I83 (FTR-086 Ph2 \u2014 Convergence Surface telemetry.rank MCP read action). Adds the telemetry.eligible_fields entit...",
+  "version": "2026-06-30.04",
+  "updated_at": "2026-06-30T02:15:00Z",
+  "last_change_summary": "ENC-TSK-I89 (FTR-089 tracker.embeddings_for). Adds graph_query_api.embeddings_for: admin-scoped raw-embedding egress for Titan V2 vectors (256-dim). Version -> 2026-06-30.04. PRIOR: ENC-TSK-I88 / ENC-FTR-085: add graph_query_api.adjacency \u2014 read-only adjacency export via graph_quer...",
   "owners": [
     "enceladus-platform"
   ],
@@ -5956,6 +5956,12 @@
           "definition": "GOVERNANCE_VERSION_TABLE (default: governance-version), GOVERNANCE_S3_BUCKET (default: jreese-net), DRIFT_METRIC_NAMESPACE (default: Enceladus/Governance), GOVERNANCE_ALERT_SNS_ARN."
         }
       }
+    },
+    "graph_query_api.embeddings_for": {
+      "description": "Returns stored Amazon Titan Text Embeddings V2 vectors (256-dim, L2-normalised) for a list of record_ids in a project. search_type=embeddings_for on GET /api/v1/tracker/graphsearch. Admin-tier only. Returns {embeddings[], matrix(Nx256), missing[]}. No new edge types or graph writes (OGTM N/A).",
+      "owner": "graph-query-api",
+      "source": "ENC-TSK-I89 / ENC-FTR-089",
+      "telemetry_eligible": false
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",

@@ -111,6 +111,63 @@ def test_search_uses_boundary_scoped_raw_tools():
     assert blocked["error"]["code"] == "boundary_denied"
 
 
+def test_search_registers_tracker_embeddings_for_action():
+    """ENC-FTR-089 / ENC-TSK-I89: tracker.embeddings_for is a registered search
+    action that forwards record_ids to the graph query API as a csv with
+    search_type=embeddings_for."""
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+
+    assert server._SEARCH_ACTIONS["tracker.embeddings_for"]["tool"] == "tracker_embeddings_for"
+    assert "tracker_embeddings_for" in server._TOOL_HANDLERS
+
+    captured = {}
+
+    def _fake_graph_request(query=None):
+        captured["query"] = query
+        return {
+            "success": True,
+            "model_id": "amazon.titan-embed-text-v2:0",
+            "dimension": 256,
+            "returned_count": 2,
+            "embeddings": [
+                {"record_id": "ENC-TSK-001", "embedding": [0.1] * 256, "dimension": 256},
+                {"record_id": "ENC-ISS-002", "embedding": [0.2] * 256, "dimension": 256},
+            ],
+            "matrix": [[0.1] * 256, [0.2] * 256],
+            "missing": [],
+        }
+
+    with patch.object(server, "_graph_query_api_request", _fake_graph_request):
+        payload = json.loads(
+            _run(
+                server.call_tool(
+                    "search",
+                    {
+                        "action": "tracker.embeddings_for",
+                        "arguments": {
+                            "project_id": "enceladus",
+                            "record_ids": ["ENC-TSK-001", "ENC-ISS-002"],
+                        },
+                    },
+                )
+            )[0].text
+        )
+
+    assert payload["success"] is True
+    assert captured["query"]["search_type"] == "embeddings_for"
+    assert captured["query"]["project_id"] == "enceladus"
+    assert captured["query"]["record_ids"] == "ENC-TSK-001,ENC-ISS-002"
+    assert payload["result"]["returned_count"] == 2
+    assert len(payload["result"]["matrix"]) == 2
+
+
+def test_tracker_embeddings_for_requires_record_ids():
+    server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
+    result = _run(server._tracker_embeddings_for({"project_id": "enceladus"}))
+    payload = json.loads(result[0].text)
+    assert "record_ids is required" in payload["error"]
+
+
 def test_get_compact_context_preserves_existing_codemap_payload():
     server = _load_server(ENCELADUS_MCP_INTERFACE_MODE="code")
 
