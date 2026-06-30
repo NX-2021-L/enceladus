@@ -32,6 +32,39 @@ Parameters:
     Default: "https://jreese.net/enceladus"
     Description: Sign-out redirect URL for the human-interactive web UI client.
 
+  # --- ENC-FTR-074 Ph2 (ENC-TSK-I80) parameters ---------------------------------
+
+  ApiStackName:
+    Type: String
+    Default: "enceladus-api-gamma"
+    Description: >
+      Name of the deployed API stack (03-api.yaml) whose HTTP API the REQUEST authorizer and the
+      Tier 0 / Tier 1 self-test routes attach to. The ApiId is consumed via the cross-stack export
+      named "<ApiStackName>-ApiId". Defaults to the gamma API stack; v3-prod is FROZEN, never targeted.
+
+  HumanUserPoolId:
+    Type: String
+    Default: "us-east-1_b2D0V3E1k"
+    Description: >
+      Cognito User Pool ID for the human-interactive (PWA) principal class. The REQUEST authorizer
+      validates human JWTs (id/access tokens) against this pool's JWKS to discriminate the human
+      principal type from the M2M (agent-auth pool) and internal-key principal types.
+
+  InternalKeySecretId:
+    Type: String
+    Default: ""
+    Description: >
+      Optional Secrets Manager secret id/ARN whose SecretString holds the internal service key used
+      by trusted orchestrators (the X-Coordination-Internal-Key header). When set, the authorizer
+      recognizes and validates the internal-key principal type. When empty the internal-key path is
+      deny-closed (only human-JWT and M2M-scope-token principals are accepted). The value may be a
+      raw string or a JSON object with a "client_secret"/"key"/"internal_key" field.
+
+Conditions:
+  # ENC-FTR-074 Ph2: only grant the authorizer secretsmanager:GetSecretValue (and enable the
+  # internal-key principal path) when an internal-key secret id/ARN is supplied.
+  HasInternalKeySecret: !Not [!Equals [!Ref InternalKeySecretId, ""]]
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -446,6 +479,529 @@ Resources:
       RotationRules:
         AutomaticallyAfterDays: 90
 
+  # ===========================================================================
+  # ENC-FTR-074 Ph2 (ENC-TSK-I80) — REQUEST-type API Gateway Lambda authorizer,
+  # governance-authority tier enforcement, and Tier 0 / Tier 1 self-test routes.
+  #
+  # The authorizer attaches to the HTTP API provisioned by 03-api.yaml (ApiId
+  # imported from "${ApiStackName}-ApiId"). All Phase-2 resources live in this
+  # gamma-only stack and add NEW, namespaced routes (/api/v1/agent/selftest/*),
+  # so existing 03-api routes and v3-prod are untouched.
+  # ===========================================================================
+
+  # --- REQUEST authorizer Lambda -------------------------------------------------
+
+  AgentAuthorizerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "enceladus-agent-authorizer-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies: !If
+        - HasInternalKeySecret
+        - - PolicyName: read-internal-key-secret
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Sid: ReadInternalKeySecret
+                  Effect: Allow
+                  Action:
+                    - secretsmanager:GetSecretValue
+                  Resource: !Ref InternalKeySecretId
+        - !Ref "AWS::NoValue"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: agent-auth
+
+  AgentAuthorizerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "enceladus-agent-authorizer${EnvironmentSuffix}"
+      Description: >
+        ENC-FTR-074 Ph2 REQUEST-type HTTP API Lambda authorizer. Discriminates three principal
+        types (internal-key, human JWT, M2M scope token) and enforces the route-tier
+        governance-authority boundary (agent.standard denied on Tier 0 routes).
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt AgentAuthorizerLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 256
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          AGENT_USER_POOL_ID: !Ref AgentUserPool
+          HUMAN_USER_POOL_ID: !Ref HumanUserPoolId
+          AGENT_M2M_CLIENT_ID: !Ref AgentM2MClient
+          RESOURCE_SERVER_ID: enceladus-api
+          INTERNAL_KEY_SECRET_ID: !Ref InternalKeySecretId
+      Code:
+        ZipFile: |
+          """ENC-FTR-074 Ph2 — REQUEST-type API Gateway (HTTP API) Lambda authorizer.
+
+          Discriminates three principal types and enforces a route-tier governance-authority
+          boundary:
+
+            * internal-key — trusted service/orchestrator presenting X-Coordination-Internal-Key
+                             (validated against the Secrets Manager value in INTERNAL_KEY_SECRET_ID);
+                             granted the highest tier (admin).
+            * human        — a human-interactive (PWA) Cognito JWT issued by HUMAN_USER_POOL_ID,
+                             presented as a Bearer token or the enceladus_id_token cookie. Humans
+                             are not scope-limited here; granted admin.
+            * m2m          — a headless agent client_credentials access token issued by
+                             AGENT_USER_POOL_ID carrying enceladus-api/agent.* scopes and the
+                             enc:agent_tier custom claim (ENC-TSK-I79 pre-token Lambda). The tier is
+                             taken from enc:agent_tier (fallback: derived from the scope set).
+
+          Tier model (governance-authority boundary): observe(0) < standard(1) < elevated(2) <
+          admin(3). A route declares the MINIMUM tier it requires; agent.standard (rank 1) is
+          accepted on a Tier 1 route (requires standard) and rejected (403) on a Tier 0 route
+          (governance-authority; requires elevated+).
+
+          Pure standard-library RS256 verification (verified by hand against the Cognito JWKS):
+          deliberately avoids PyJWT/cryptography so the authorizer does not inherit the shared-layer
+          .so ABI failure class (ENC-ISS-198 / ENC-LSN-020). boto3 ships in the Lambda runtime.
+          """
+          import base64
+          import hashlib
+          import hmac
+          import json
+          import os
+          import time
+          import urllib.request
+
+          import boto3
+
+          AGENT_USER_POOL_ID = os.environ.get("AGENT_USER_POOL_ID", "")
+          HUMAN_USER_POOL_ID = os.environ.get("HUMAN_USER_POOL_ID", "")
+          AGENT_M2M_CLIENT_ID = os.environ.get("AGENT_M2M_CLIENT_ID", "")
+          RESOURCE_SERVER_ID = os.environ.get("RESOURCE_SERVER_ID", "enceladus-api")
+          INTERNAL_KEY_SECRET_ID = os.environ.get("INTERNAL_KEY_SECRET_ID", "")
+
+          _TIER_RANK = {"observe": 0, "standard": 1, "elevated": 2, "admin": 3}
+
+          # SHA-256 DigestInfo prefix for PKCS#1 v1.5 (RFC 8017).
+          _SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
+
+          _TIER0 = "elevated"   # governance-authority boundary — agent.standard denied
+          _TIER1 = "standard"   # standard governed mutation — agent.standard allowed
+
+          # Longest-prefix tier map. Unmatched non-GET routes default to standard (Tier 1).
+          _ROUTE_TIERS = (
+              ("/api/v1/agent/selftest/admin", _TIER0),
+              ("/api/v1/agent/selftest/standard", _TIER1),
+              ("/api/v1/tracker/", _TIER1),
+              ("/api/v1/documents", _TIER1),
+              ("/api/v1/checkout/", _TIER1),
+              ("/api/v1/coordination/components", _TIER1),
+          )
+          # Tier 0 governance-authority markers (deny agent.standard) matched by substring.
+          _TIER0_MARKERS = (
+              "/api/v1/agent/selftest/admin",
+              "/dedup-review",
+              "/deprecate",
+              "/restore",
+              "/revert",
+              "/api/v1/deploy/submit",
+              "/api/v1/deploy/trigger",
+              "/api/v1/deploy/decide",
+          )
+
+          _jwks_cache = {}
+          _jwks_fetched = {}
+          _JWKS_TTL = 3600.0
+          _internal_key_cache = None
+
+
+          def _b64url_decode(data):
+              if isinstance(data, str):
+                  data = data.encode("ascii")
+              return base64.urlsafe_b64decode(data + b"=" * (-len(data) % 4))
+
+
+          def _b64url_int(data):
+              return int.from_bytes(_b64url_decode(data), "big")
+
+
+          def _get_jwks(pool_id):
+              now = time.time()
+              cached = _jwks_cache.get(pool_id)
+              if cached and (now - _jwks_fetched.get(pool_id, 0.0)) < _JWKS_TTL:
+                  return cached
+              url = (
+                  "https://cognito-idp.%s.amazonaws.com/%s/.well-known/jwks.json"
+                  % (pool_id.split("_", 1)[0], pool_id)
+              )
+              with urllib.request.urlopen(url, timeout=5) as resp:
+                  data = json.loads(resp.read())
+              keys = {}
+              for k in data.get("keys", []):
+                  keys[k["kid"]] = (_b64url_int(k["n"]), _b64url_int(k["e"]))
+              _jwks_cache[pool_id] = keys
+              _jwks_fetched[pool_id] = now
+              return keys
+
+
+          def _rsa_verify(signing_input, signature, n, e):
+              k = (n.bit_length() + 7) // 8
+              if len(signature) != k:
+                  return False
+              s = int.from_bytes(signature, "big")
+              if s >= n:
+                  return False
+              em = pow(s, e, n).to_bytes(k, "big")
+              digest = hashlib.sha256(signing_input).digest()
+              t = _SHA256_DIGEST_INFO + digest
+              if k < len(t) + 11:
+                  return False
+              expected = b"\x00\x01" + b"\xff" * (k - len(t) - 3) + b"\x00" + t
+              return hmac.compare_digest(em, expected)
+
+
+          def _verify_jwt(token, pool_id):
+              parts = token.split(".")
+              if len(parts) != 3:
+                  raise ValueError("malformed token")
+              header = json.loads(_b64url_decode(parts[0]))
+              if header.get("alg") != "RS256":
+                  raise ValueError("unexpected alg")
+              claims = json.loads(_b64url_decode(parts[1]))
+              kid = header.get("kid")
+              key = _get_jwks(pool_id).get(kid)
+              if key is None:
+                  _jwks_fetched.pop(pool_id, None)
+                  key = _get_jwks(pool_id).get(kid)
+              if key is None:
+                  raise ValueError("unknown kid")
+              signing_input = (parts[0] + "." + parts[1]).encode("ascii")
+              if not _rsa_verify(signing_input, _b64url_decode(parts[2]), key[0], key[1]):
+                  raise ValueError("bad signature")
+              exp = claims.get("exp")
+              if exp is not None and time.time() > float(exp) + 5:
+                  raise ValueError("expired")
+              if not str(claims.get("iss", "")).endswith("/" + pool_id):
+                  raise ValueError("issuer mismatch")
+              return claims
+
+
+          def _tier_from_scope(scope_value):
+              names = [s.rsplit("/", 1)[-1] for s in str(scope_value or "").split()]
+              for tier in ("admin", "elevated", "standard", "observe"):
+                  if "agent." + tier in names:
+                      return tier
+              return "observe"
+
+
+          def _load_internal_key():
+              global _internal_key_cache
+              if _internal_key_cache is not None:
+                  return _internal_key_cache
+              if not INTERNAL_KEY_SECRET_ID:
+                  _internal_key_cache = ""
+                  return ""
+              try:
+                  raw = boto3.client("secretsmanager").get_secret_value(
+                      SecretId=INTERNAL_KEY_SECRET_ID
+                  )["SecretString"]
+              except Exception:
+                  _internal_key_cache = ""
+                  return ""
+              value = raw
+              try:
+                  obj = json.loads(raw)
+                  if isinstance(obj, dict):
+                      value = (
+                          obj.get("internal_key")
+                          or obj.get("key")
+                          or obj.get("client_secret")
+                          or ""
+                      )
+              except (ValueError, TypeError):
+                  value = raw
+              _internal_key_cache = (value or "").strip()
+              return _internal_key_cache
+
+
+          def _required_tier(method, path):
+              # Governance-authority markers (mutations) win regardless of method.
+              for marker in _TIER0_MARKERS:
+                  if marker in path:
+                      return _TIER0
+              # Read-only methods need only the observer tier (agent.observe taxonomy).
+              if str(method).upper() in ("GET", "HEAD", "OPTIONS"):
+                  return "observe"
+              best = None
+              for prefix, tier in _ROUTE_TIERS:
+                  if path.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
+                      best = (prefix, tier)
+              if best is not None:
+                  return best[1]
+              return _TIER1
+
+
+          def _headers(event):
+              raw = event.get("headers") or {}
+              return {str(k).lower(): v for k, v in raw.items()}
+
+
+          def _bearer_token(headers, event):
+              auth = headers.get("authorization") or ""
+              if auth.lower().startswith("bearer "):
+                  return auth[7:].strip()
+              parts = [headers.get("cookie") or ""]
+              cookies = event.get("cookies") or []
+              if isinstance(cookies, list):
+                  parts.extend(cookies)
+              for chunk in parts:
+                  for piece in str(chunk).split(";"):
+                      piece = piece.strip()
+                      if piece.startswith("enceladus_id_token="):
+                          return piece[len("enceladus_id_token="):]
+              return ""
+
+
+          def _identify(event):
+              headers = _headers(event)
+              internal_key = (
+                  headers.get("x-coordination-internal-key")
+                  or headers.get("x-checkout-assistant-key")
+                  or ""
+              )
+              if internal_key:
+                  expected = _load_internal_key()
+                  if expected and hmac.compare_digest(internal_key, expected):
+                      return {"principal": "internal", "tier": "admin", "sub": "internal-key"}
+                  return {"principal": "internal", "tier": None, "error": "invalid internal key"}
+
+              token = _bearer_token(headers, event)
+              if not token:
+                  return {"principal": "anonymous", "tier": None, "error": "no credentials"}
+              try:
+                  unverified = json.loads(_b64url_decode(token.split(".")[1]))
+              except Exception:
+                  return {"principal": "unknown", "tier": None, "error": "undecodable token"}
+
+              iss = str(unverified.get("iss", ""))
+              if AGENT_USER_POOL_ID and iss.endswith("/" + AGENT_USER_POOL_ID):
+                  claims = _verify_jwt(token, AGENT_USER_POOL_ID)
+                  tier = (claims.get("enc:agent_tier") or "").strip() or _tier_from_scope(
+                      claims.get("scope")
+                  )
+                  return {
+                      "principal": "m2m",
+                      "tier": tier,
+                      "sub": claims.get("sub", ""),
+                      "client_id": claims.get("client_id", ""),
+                      "session_id": claims.get("enc:session_id", ""),
+                      "scope": claims.get("scope", ""),
+                  }
+              if HUMAN_USER_POOL_ID and iss.endswith("/" + HUMAN_USER_POOL_ID):
+                  claims = _verify_jwt(token, HUMAN_USER_POOL_ID)
+                  return {"principal": "human", "tier": "admin", "sub": claims.get("sub", "")}
+              return {"principal": "unknown", "tier": None, "error": "unrecognized issuer"}
+
+
+          def handler(event, context):
+              rc = event.get("requestContext") or {}
+              http = rc.get("http") or {}
+              method = http.get("method") or event.get("httpMethod") or ""
+              path = http.get("path") or event.get("rawPath") or ""
+              route_key = event.get("routeKey") or rc.get("routeKey") or ""
+              if route_key and " " in route_key:
+                  rk_method, rk_path = route_key.split(" ", 1)
+                  method = method or rk_method
+                  path = rk_path or path
+
+              try:
+                  identity = _identify(event)
+              except ValueError as exc:
+                  identity = {"principal": "invalid", "tier": None, "error": str(exc)}
+              except Exception as exc:  # fail closed on any verification error
+                  identity = {"principal": "error", "tier": None, "error": "verify error: %s" % exc}
+
+              required = _required_tier(method, path)
+              principal_tier = identity.get("tier")
+              authorized = (
+                  principal_tier is not None
+                  and _TIER_RANK.get(principal_tier, -1) >= _TIER_RANK.get(required, 99)
+              )
+              ctx = {
+                  "principalType": str(identity.get("principal", "")),
+                  "agentTier": str(principal_tier or ""),
+                  "requiredTier": str(required),
+                  "sub": str(identity.get("sub", "")),
+                  "sessionId": str(identity.get("session_id", "")),
+                  "clientId": str(identity.get("client_id", "")),
+                  "scope": str(identity.get("scope", "")),
+                  "authReason": "ok" if authorized else str(identity.get("error", "denied")),
+              }
+              return {"isAuthorized": bool(authorized), "context": ctx}
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: agent-auth
+
+  AgentAuthorizerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/enceladus-agent-authorizer${EnvironmentSuffix}"
+      RetentionInDays: 30
+
+  AgentAuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AgentAuthorizerLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiId}/*"
+        - ApiId: !ImportValue
+            "Fn::Sub": "${ApiStackName}-ApiId"
+
+  # REQUEST authorizer. IdentitySource omitted + AuthorizerResultTtlInSeconds 0 means the
+  # authorizer is invoked on EVERY request (no caching) — required because the principal may
+  # arrive via the Authorization header, the enceladus_id_token cookie, OR the internal-key
+  # header, and the decision is route-tier dependent.
+  AgentRequestAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !ImportValue
+        "Fn::Sub": "${ApiStackName}-ApiId"
+      Name: !Sub "enceladus-agent-request-authorizer${EnvironmentSuffix}"
+      AuthorizerType: REQUEST
+      AuthorizerPayloadFormatVersion: "2.0"
+      EnableSimpleResponses: true
+      AuthorizerResultTtlInSeconds: 0
+      AuthorizerUri: !Sub
+        - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations"
+        - FnArn: !GetAtt AgentAuthorizerLambda.Arn
+
+  # --- Self-test backend + Tier 0 / Tier 1 routes --------------------------------
+  # A tiny echo Lambda backs the demonstration routes. On a Tier 0 route an agent.standard
+  # token is rejected at the gateway (403) before reaching the integration; on a Tier 1 route
+  # it is admitted and the echo returns the resolved principal/tier context (ENC-TSK-I80 AC3).
+
+  AgentSelftestLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "enceladus-agent-selftest-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: agent-auth
+
+  AgentSelftestLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "enceladus-agent-selftest${EnvironmentSuffix}"
+      Description: >
+        ENC-FTR-074 Ph2 echo backend for the Tier 0 / Tier 1 authorizer self-test routes. Returns
+        200 and reflects the authorizer-resolved principal/tier context so an admitted request can
+        be confirmed end-to-end.
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt AgentSelftestLambdaRole.Arn
+      Timeout: 5
+      MemorySize: 128
+      Architectures:
+        - arm64
+      Code:
+        ZipFile: |
+          import json
+
+          def handler(event, context):
+              rc = event.get("requestContext") or {}
+              authz = rc.get("authorizer") or {}
+              lam = authz.get("lambda") or authz
+              body = {
+                  "ok": True,
+                  "service": "agent-auth-selftest",
+                  "routeKey": rc.get("routeKey") or event.get("routeKey", ""),
+                  "principalType": lam.get("principalType", ""),
+                  "agentTier": lam.get("agentTier", ""),
+                  "requiredTier": lam.get("requiredTier", ""),
+                  "scope": lam.get("scope", ""),
+              }
+              return {
+                  "statusCode": 200,
+                  "headers": {"Content-Type": "application/json"},
+                  "body": json.dumps(body),
+              }
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: agent-auth
+
+  AgentSelftestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/enceladus-agent-selftest${EnvironmentSuffix}"
+      RetentionInDays: 30
+
+  AgentSelftestInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AgentSelftestLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiId}/*"
+        - ApiId: !ImportValue
+            "Fn::Sub": "${ApiStackName}-ApiId"
+
+  AgentSelftestIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !ImportValue
+        "Fn::Sub": "${ApiStackName}-ApiId"
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AgentSelftestLambda.Arn
+      IntegrationMethod: POST
+      PayloadFormatVersion: "2.0"
+
+  # Tier 1 route — requires agent.standard; agent.standard tokens ARE admitted.
+  AgentSelftestStandardRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !ImportValue
+        "Fn::Sub": "${ApiStackName}-ApiId"
+      RouteKey: POST /api/v1/agent/selftest/standard
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref AgentRequestAuthorizer
+      Target: !Sub "integrations/${AgentSelftestIntegration}"
+
+  # Tier 0 route — governance-authority boundary; agent.standard tokens are REJECTED (403).
+  AgentSelftestAdminRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !ImportValue
+        "Fn::Sub": "${ApiStackName}-ApiId"
+      RouteKey: POST /api/v1/agent/selftest/admin
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref AgentRequestAuthorizer
+      Target: !Sub "integrations/${AgentSelftestIntegration}"
+
 Outputs:
   UserPoolId:
     Description: Agent-auth Cognito User Pool ID.
@@ -492,3 +1048,23 @@ Outputs:
     Value: !Ref AgentM2MClientSecret
     Export:
       Name: !Sub "${AWS::StackName}-M2MClientSecretArn"
+
+  # --- ENC-FTR-074 Ph2 (ENC-TSK-I80) outputs -----------------------------------
+
+  AgentRequestAuthorizerId:
+    Description: REQUEST-type Lambda authorizer id attached to the HTTP API (ENC-TSK-I80 AC1).
+    Value: !Ref AgentRequestAuthorizer
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentRequestAuthorizerId"
+
+  AgentAuthorizerLambdaArn:
+    Description: REQUEST authorizer Lambda ARN (discriminates internal-key / human / M2M principals).
+    Value: !GetAtt AgentAuthorizerLambda.Arn
+
+  AgentSelftestTier1RouteKey:
+    Description: Tier 1 self-test route — agent.standard admitted.
+    Value: "POST /api/v1/agent/selftest/standard"
+
+  AgentSelftestTier0RouteKey:
+    Description: Tier 0 self-test route — agent.standard rejected (403).
+    Value: "POST /api/v1/agent/selftest/admin"
