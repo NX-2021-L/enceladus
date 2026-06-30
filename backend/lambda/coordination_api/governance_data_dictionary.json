@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-28.02",
-  "updated_at": "2026-06-28T03:52:10Z",
-  "last_change_summary": "ENC-TSK-I71 / ENC-FTR-117 AC#8: agent-session TTL idle-sweep backstop. New coordination.agent_session_idle_sweep entity documents the scheduled EventBridge reaper (AgentSessionIdleSweepSchedule, rate(1 hour)) that flips sessions left allocated/claimed past AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS to 'retired' via the same append-only conditional UpdateItem as agent.retire — deliberately NOT DynamoDB native TTL, which would hard-delete and violate the append-only retire model from ENC-TSK-I38. Completes FTR-117 AC#8 (append-only storage + explicit agent.retire + idle-sweep backstop). Bump satisfies the path-triggered Governance Dictionary Guard on coordination_api lambda_function.py/config.py edits.",
+  "version": "2026-06-30.01",
+  "updated_at": "2026-06-30T03:30:00Z",
+  "last_change_summary": "ENC-ISS-452 (ENC-TSK-I96): Updated deploy.spec to document that record_only mode now applies to ALL deployment types (including lambda_update/non-UI). deploy_mode check moved before NON_UI branch in deploy_orchestrator so Gen2 _deploy.yml record_deploy submissions auto-finalize as DEP records. Updated deploy_mode usage_guidance accordingly.",
   "owners": [
     "enceladus-platform"
   ],
@@ -1260,7 +1260,7 @@
             "record_only"
           ],
           "definition": "Execution mode for the spec. 'standard' (default) runs full CodeBuild pipeline. 'record_only' skips CodeBuild and finalizes inline \u2014 used for externally-deployed projects (ENC-ISS-102, ENC-ISS-103).",
-          "usage_guidance": "Set on the spec by _finalize_record_only() when the project's deploy_mode is 'record_only'. The deploy_mode is read from the projects DDB table via _get_project_deploy_mode(). To enable record-only mode for a project, set deploy_mode='record_only' on its projects table record."
+          "usage_guidance": "Set on the spec by _finalize_record_only() when the project's deploy_mode is 'record_only'. As of ENC-ISS-452, the record_only check runs BEFORE the NON_UI_SERVICE_GROUP_BY_TYPE branch, so lambda_update (and other non-UI types) also take the record_only path \u2014 _finalize_record_only() is called for any deployment_type when deploy_mode='record_only'. The deploy_mode is read from the projects DDB table via _get_project_deploy_mode(). To enable record-only mode for a project, set deploy_mode='record_only' on its projects table record."
         },
         "non_ui_targets": {
           "type": "object",
@@ -5750,7 +5750,7 @@
       }
     },
     "coordination.agent_session_idle_sweep": {
-      "description": "ENC-TSK-I71 / ENC-FTR-117 AC#8. Scheduled idle-sweep backstop that reaps abandoned agent sessions. The AgentSessionIdleSweepSchedule EventBridge rule (infrastructure/cloudformation/02-compute.yaml, rate(1 hour)) invokes the coordination_api Lambda with Input {\"action\":\"agent_session_idle_sweep\"}; lambda_handler dispatches to _handle_agent_session_idle_sweep, which calls agent_id_alloc.sweep_idle_sessions. Sessions left in a live status (allocated or claimed) whose last lifecycle transition (claimed_at, else created_at) is older than AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS are flipped to 'retired' via the SAME append-only conditional UpdateItem used by agent.retire (#st = :allocated OR #st = :claimed -> retired). Third leg of FTR-117 AC#8 (append-only storage + explicit agent.retire + TTL idle-sweep backstop). Deliberately NOT DynamoDB native TTL: native TTL hard-deletes and would violate the append-only retire model from ENC-TSK-I38. Idempotent — already-retired sessions are excluded by the live-status scan filter, and a candidate concurrently retired between scan and update is skipped. Not an HTTP route (no auth/claims); invoked only by EventBridge.",
+      "description": "ENC-TSK-I71 / ENC-FTR-117 AC#8. Scheduled idle-sweep backstop that reaps abandoned agent sessions. The AgentSessionIdleSweepSchedule EventBridge rule (infrastructure/cloudformation/02-compute.yaml, rate(1 hour)) invokes the coordination_api Lambda with Input {\"action\":\"agent_session_idle_sweep\"}; lambda_handler dispatches to _handle_agent_session_idle_sweep, which calls agent_id_alloc.sweep_idle_sessions. Sessions left in a live status (allocated or claimed) whose last lifecycle transition (claimed_at, else created_at) is older than AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS are flipped to 'retired' via the SAME append-only conditional UpdateItem used by agent.retire (#st = :allocated OR #st = :claimed -> retired). Third leg of FTR-117 AC#8 (append-only storage + explicit agent.retire + TTL idle-sweep backstop). Deliberately NOT DynamoDB native TTL: native TTL hard-deletes and would violate the append-only retire model from ENC-TSK-I38. Idempotent \u2014 already-retired sessions are excluded by the live-status scan filter, and a candidate concurrently retired between scan and update is skipped. Not an HTTP route (no auth/claims); invoked only by EventBridge.",
       "fields": {
         "AGENT_SESSIONS_IDLE_SWEEP_ENABLED": {
           "type": "boolean",
@@ -5766,7 +5766,7 @@
         },
         "summary": {
           "type": "object",
-          "definition": "Return value (CloudWatch only — no HTTP envelope): {enabled, dry_run, idle_threshold_seconds, cutoff, scanned_live, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped}."
+          "definition": "Return value (CloudWatch only \u2014 no HTTP envelope): {enabled, dry_run, idle_threshold_seconds, cutoff, scanned_live, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped}."
         }
       }
     },
@@ -5839,6 +5839,13 @@
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
   "change_log": [
     {
+      "version": "2026-06-30.01",
+      "date": "2026-06-30",
+      "summary": "ENC-ISS-452: record_only guard now applies to all deployment_types (lambda_update included). Updated deploy.spec.deploy_mode.usage_guidance.",
+      "task": "ENC-TSK-I96",
+      "issue": "ENC-ISS-452"
+    },
+    {
       "version": "2026-06-21.02",
       "date": "2026-06-21",
       "summary": "ENC-TSK-G45 + ENC-TSK-G12 (PR #483): Diataxis Reference rewrite of the top-20 code-mode tool descriptions + canonical typed handoff mandate schema (handoff_mandate.py, strict:true dispatch generator). server.py tool-surface change; version bump required by the CI governance-dictionary guard."
@@ -5866,7 +5873,7 @@
     {
       "version": "2026-06-28.02",
       "date": "2026-06-28",
-      "summary": "ENC-TSK-I71 / ENC-FTR-117 AC#8: add coordination.agent_session_idle_sweep entity (scheduled EventBridge backstop reaping abandoned allocated/claimed sessions to 'retired' via append-only flip — NOT native DynamoDB TTL; AGENT_SESSIONS_IDLE_SWEEP_ENABLED + AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS config). Version bump required by governance-dictionary-guard for coordination_api lambda_function.py/config.py edits."
+      "summary": "ENC-TSK-I71 / ENC-FTR-117 AC#8: add coordination.agent_session_idle_sweep entity (scheduled EventBridge backstop reaping abandoned allocated/claimed sessions to 'retired' via append-only flip \u2014 NOT native DynamoDB TTL; AGENT_SESSIONS_IDLE_SWEEP_ENABLED + AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS config). Version bump required by governance-dictionary-guard for coordination_api lambda_function.py/config.py edits."
     }
   ]
 }

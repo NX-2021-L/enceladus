@@ -1285,6 +1285,52 @@ def _orchestrate_typed_batch(
     spec_id = f"SPEC-{_utc_now_compact()}"
     logger.info(f"[INFO] Spec ID: {spec_id}")
 
+    # --- Record-only mode: skip all execution for externally-deployed projects ---
+    # Check BEFORE the non-UI branch so lambda_update (and other non-UI types) also
+    # take the record-only path when deploy_mode='record_only'. Previously this check
+    # appeared after the non-UI branch exit, making it unreachable for those types.
+    # See ENC-ISS-452, ENC-ISS-102, ENC-ISS-103.
+    deploy_mode = _get_project_deploy_mode(project_id)
+    if deploy_mode == "record_only":
+        logger.info("[INFO] Record-only mode for %s — skipping execution", project_id)
+        config = _read_deploy_config(project_id)
+        current_version = _get_current_version(project_id, config)
+        new_version, change_type = _resolve_version(current_version, requests)
+        logger.info(
+            "[INFO] Version: %s → %s (%s) [record-only]",
+            current_version, new_version, change_type,
+        )
+        _write_spec(
+            project_id,
+            spec_id,
+            deployment_type=deployment_type,
+            deployment_category="ui",
+            previous_version=current_version,
+            resolved_version=new_version,
+            resolved_change_type=change_type,
+            included_request_ids=request_ids,
+            aggregated_changes=all_changes,
+            aggregated_release_summary=agg_summary,
+            integration_analysis=analysis,
+            all_related_record_ids=all_related,
+        )
+        _mark_requests(project_id, request_ids, "included", spec_id)
+        _finalize_record_only(
+            project_id,
+            spec_id,
+            current_version,
+            new_version,
+            change_type,
+            all_changes,
+            agg_summary,
+            request_ids,
+            all_related,
+        )
+        logger.info(
+            "[SUCCESS] Record-only deployment finalized: v%s (%s)", new_version, spec_id,
+        )
+        return
+
     if deployment_type in NON_UI_SERVICE_GROUP_BY_TYPE:
         valid, targets, errors = _validate_non_ui_requests(deployment_type, requests)
         if not valid:
@@ -1377,52 +1423,6 @@ def _orchestrate_typed_batch(
 
     if deployment_type not in UI_DEPLOYMENT_TYPES:
         logger.error("[ERROR] Unsupported deployment type '%s'", deployment_type)
-        return
-
-    # --- Record-only mode: skip CodeBuild for externally-deployed projects ---
-    # Projects with deploy_mode='record_only' deploy via their own CI/CD.
-    # We only need to track version + changelog. See ENC-ISS-102, ENC-ISS-103.
-    deploy_mode = _get_project_deploy_mode(project_id)
-    if deploy_mode == "record_only":
-        logger.info("[INFO] Record-only mode for %s — skipping CodeBuild", project_id)
-        config = _read_deploy_config(project_id)
-        current_version = _get_current_version(project_id, config)
-        new_version, change_type = _resolve_version(current_version, requests)
-        logger.info(
-            "[INFO] Version: %s → %s (%s) [record-only]",
-            current_version, new_version, change_type,
-        )
-
-        _write_spec(
-            project_id,
-            spec_id,
-            deployment_type=deployment_type,
-            deployment_category="ui",
-            previous_version=current_version,
-            resolved_version=new_version,
-            resolved_change_type=change_type,
-            included_request_ids=request_ids,
-            aggregated_changes=all_changes,
-            aggregated_release_summary=agg_summary,
-            integration_analysis=analysis,
-            all_related_record_ids=all_related,
-        )
-        _mark_requests(project_id, request_ids, "included", spec_id)
-
-        _finalize_record_only(
-            project_id,
-            spec_id,
-            current_version,
-            new_version,
-            change_type,
-            all_changes,
-            agg_summary,
-            request_ids,
-            all_related,
-        )
-        logger.info(
-            "[SUCCESS] Record-only deployment finalized: v%s (%s)", new_version, spec_id,
-        )
         return
 
     # UI deployment flow: read deploy config and run semver resolution + CodeBuild.
