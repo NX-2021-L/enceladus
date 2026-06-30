@@ -1385,6 +1385,16 @@ Resources:
           CLOUDWATCH_NAMESPACE: Enceladus/GraphHealth
           PROJECT_ID: enceladus
           SECRETS_REGION: !Ref "AWS::Region"
+          # ENC-TSK-I10 (Dedup P6): convergence-probe signal configuration
+          # (DOC-DF651F07D5C2 §10). The walk-back model-health loop reads the
+          # production auto-merge/walk-back audit counters back from CloudWatch.
+          DEDUP_NAMESPACE: Enceladus/DedupConvergence
+          DEDUP_AUDIT_NAMESPACE: Enceladus/DedupConvergence
+          DEDUP_COSINE_THRESHOLD: "0.95"
+          DEDUP_PRECISION_FLOOR: "0.999"
+          DEDUP_FLOW_WINDOW_DAYS: "7"
+          DEDUP_WALKBACK_WINDOW_DAYS: "30"
+          DEDUP_VECTOR_TOP_K: "25"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -3783,6 +3793,14 @@ Resources:
                 Effect: Allow
                 Action:
                   - cloudwatch:PutMetricData
+                Resource: "*"
+              # ENC-TSK-I10 (Dedup P6): the walk-back model-health loop reads
+              # the auto-merge/walk-back audit counters back from CloudWatch.
+              - Sid: CloudWatchMetricsRead
+                Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:GetMetricData
                 Resource: "*"
               - Sid: SecretsManagerNeo4j
                 Effect: Allow
