@@ -1,7 +1,7 @@
 {
-  "version": "2026-06-30.06",
-  "updated_at": "2026-06-30T02:45:00Z",
-  "last_change_summary": "ENC-TSK-I84 (FTR-096 Ph1 memory consolidation). Adds monitoring.memory_consolidation. Version -> 2026-06-30.06.",
+  "version": "2026-06-30.08",
+  "updated_at": "2026-06-30T02:50:00Z",
+  "last_change_summary": "ENC-TSK-I87 FTR-083 Ph2 BHC alert. Version -> 2026-06-30.08.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5970,6 +5970,11 @@
       "telemetry_eligible": false
     },
     "monitoring.memory_consolidation": {
+      "description": "See source task.",
+      "source": "ENC-TSK",
+      "telemetry_eligible": false
+    },
+    "coordination_api.bhc_alert": {
       "description": "See source task.",
       "source": "ENC-TSK",
       "telemetry_eligible": false
