@@ -3324,9 +3324,9 @@ def _code_mode_tool_catalog() -> list[Tool]:
                         "type": "string",
                         "description": (
                             "Read action identifier such as projects.list, tracker.get, "
-                            "tracker.graphsearch, documents.search, deploy.history, "
-                            "changelog.version, governance.dictionary, reference.search, "
-                            "telemetry.rank, or system.connection_health."
+                            "tracker.graphsearch, tracker.embeddings_for, documents.search, "
+                            "deploy.history, changelog.version, governance.dictionary, "
+                            "reference.search, or system.connection_health."
                         ),
                     },
                     "arguments": {
@@ -7506,6 +7506,8 @@ _SEARCH_ACTIONS: Dict[str, Dict[str, Any]] = {
     "system.connection_health": {"tool": "connection_health"},
     "github.projects_list": {"tool": "github_projects_list"},
     "tracker.graphsearch": {"tool": "tracker_graphsearch"},
+    # ENC-FTR-089 / ENC-TSK-I89: admin-scoped raw-embedding egress.
+    "tracker.embeddings_for": {"tool": "tracker_embeddings_for"},
     # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
     "tracker.manifest": {"tool": "tracker_manifest"},
     "tracker.get_acs": {"tool": "tracker_get_acs"},
@@ -9059,6 +9061,43 @@ async def _telemetry_rank(args: dict) -> list[TextContent]:
     except Exception as exc:
         logger.warning("[telemetry.rank] degraded: %s", exc)
         return _result_text(telemetry_rank.degraded_payload(f"exception:{type(exc).__name__}"))
+async def _tracker_embeddings_for(args: dict) -> list[TextContent]:
+    """ENC-FTR-089 / ENC-TSK-I89 — raw-embedding egress (admin-scoped read).
+
+    Returns the stored Amazon Titan Text Embeddings V2 vector (256-dim
+    float32, L2-normalized) for each requested record_id, reading the existing
+    `embedding` graph node property (no new edge types/nodes). The response
+    carries an N x 256 `matrix` so callers can compute the demand centroid /
+    Fréchet barycenter approximation directly via np.mean(matrix, axis=0)
+    (FTR-084 / FTR-087).
+
+    IAM scope: gated downstream to the internal service key and admin-tier
+    (io-dev-admin) Cognito tokens; standard agent tokens receive HTTP 403.
+    """
+    project_id = args.get("project_id")
+    record_ids = args.get("record_ids")
+    if not project_id:
+        return _result_text({"error": "project_id is required"})
+    if record_ids is None or record_ids == "":
+        return _result_text({"error": "record_ids is required (list of record IDs)"})
+
+    if isinstance(record_ids, str):
+        ids = [r.strip() for r in record_ids.split(",") if r.strip()]
+    elif isinstance(record_ids, (list, tuple)):
+        ids = [str(r).strip() for r in record_ids if str(r).strip()]
+    else:
+        return _result_text({"error": "record_ids must be a list or comma-separated string"})
+
+    if not ids:
+        return _result_text({"error": "record_ids must contain at least one record ID"})
+
+    query_params: Dict[str, Any] = {
+        "search_type": "embeddings_for",
+        "project_id": project_id,
+        "record_ids": ",".join(ids),
+    }
+    resp = _graph_query_api_request(query=query_params)
+    return _result_text(resp)
 
 
 def _invoke_hybrid_retrieval(
@@ -10270,6 +10309,8 @@ _TOOL_HANDLERS = {
     "github_projects_list": _github_projects_list,
     # ENC-FTR-047: Graph search
     "tracker_graphsearch": _tracker_graphsearch,
+    # ENC-FTR-089 / ENC-TSK-I89: admin-scoped raw-embedding egress
+    "tracker_embeddings_for": _tracker_embeddings_for,
     # ENC-FTR-097 / ENC-TSK-G27: Manifest Primitive v1 read actions
     "tracker_manifest": _tracker_manifest,
     "tracker_get_acs": _tracker_get_acs,

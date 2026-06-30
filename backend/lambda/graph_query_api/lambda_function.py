@@ -64,6 +64,32 @@ ADJACENCY_DEFAULT_LIMIT = 5000
 ADJACENCY_MAX_LIMIT = 20000
 
 # ---------------------------------------------------------------------------
+# ENC-FTR-089 / ENC-TSK-I89 — tracker.embeddings_for raw-embedding egress
+# ---------------------------------------------------------------------------
+# Research-only egress of the stored Amazon Titan Text Embeddings V2 vectors
+# (256-dim, L2-normalized) that graph_sync/embedding.py writes onto record
+# nodes under the `embedding` property. This is an IAM-scoped read: it exposes
+# raw model vectors, so it is gated to the internal service key and admin-tier
+# (io-dev-admin) Cognito tokens only — standard/elevated/observe agent tokens
+# are rejected with 403. It introduces NO new edge types or graph nodes and
+# does not touch graph_sync (OGTM AC-4): it reads the existing Titan V2
+# vectors in place. Callers stack the returned vectors into an (N x 256)
+# matrix and compute np.mean(matrix, axis=0) as a demand-centroid / Fréchet
+# barycenter approximation (FTR-084 / FTR-087).
+EMBEDDING_EGRESS_SEARCH_TYPE = "embeddings_for"
+EMBEDDING_EGRESS_DIMENSIONS = 256
+EMBEDDING_EGRESS_MODEL_ID = "amazon.titan-embed-text-v2:0"
+MAX_EMBEDDING_EGRESS_RECORD_IDS = 100
+
+# Admin-tier authorization tokens. `enc:agent_tier` is the governed claim the
+# ENC-FTR-074 pre-token Lambda stamps onto M2M access tokens (admin > elevated
+# > standard > observe); `io-dev-admin` is the product-lead Cognito group on
+# human/admin identities. Either one (or the internal service key) authorizes
+# raw-embedding egress.
+_EGRESS_ADMIN_AGENT_TIER = "admin"
+_EGRESS_ADMIN_COGNITO_GROUP = "io-dev-admin"
+
+# ---------------------------------------------------------------------------
 # ENC-TSK-B92 Phase 1 hybrid retrieval constants
 # ---------------------------------------------------------------------------
 
@@ -2108,6 +2134,245 @@ def _handle_search(event: Dict) -> Dict:
     return _response(200, response_body)
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-089 / ENC-TSK-I89 — raw-embedding egress (admin-scoped)
+# ---------------------------------------------------------------------------
+
+def _extract_egress_token(headers: Dict[str, str]) -> str:
+    """Pull a JWT from the Authorization bearer header or the auth cookies."""
+    auth_header = headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[len("Bearer "):].strip()
+    cookie = headers.get("cookie", "")
+    for part in cookie.split(";"):
+        part = part.strip()
+        for cookie_name in ("enceladus_id_token=", "enceladus_access_token="):
+            if part.startswith(cookie_name):
+                return part[len(cookie_name):].strip()
+    return ""
+
+
+def _decode_jwt_claims(token: str) -> Dict[str, Any]:
+    """Best-effort decode of a JWT payload segment.
+
+    Signature verification is delegated to the API Gateway JWT authorizer
+    (ENC-FTR-074 Ph2 / ENC-TSK-I80) — this only reads the governed tier claim
+    for egress gating on the gamma research plane, mirroring the existing
+    in-Lambda auth posture where cryptographic validation is performed at the
+    edge. Returns an empty dict on any malformed input.
+    """
+    try:
+        segments = token.split(".")
+        if len(segments) < 2:
+            return {}
+        import base64
+
+        payload = segments[1]
+        payload += "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("utf-8"))
+        claims = json.loads(decoded.decode("utf-8"))
+        return claims if isinstance(claims, dict) else {}
+    except Exception:
+        return {}
+
+
+def _egress_jwt_claims(event: Dict) -> Dict[str, Any]:
+    """Resolve verified JWT claims, preferring authorizer-injected context."""
+    request_context = event.get("requestContext") or {}
+    authorizer = request_context.get("authorizer") or {}
+    jwt_context = authorizer.get("jwt") or {}
+    claims = jwt_context.get("claims")
+    if isinstance(claims, dict) and claims:
+        return claims
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+    token = _extract_egress_token(headers)
+    if not token:
+        return {}
+    return _decode_jwt_claims(token)
+
+
+def _authorize_embedding_egress(event: Dict) -> Optional[str]:
+    """Authorize raw-embedding egress. Returns None if allowed, else a reason.
+
+    Accepted principals:
+      - the internal service key (X-Coordination-Internal-Key), used by the MCP
+        server's governed forward path;
+      - Cognito tokens carrying enc:agent_tier == 'admin' OR the io-dev-admin
+        group.
+    Standard / elevated / observe agent tokens (and anonymous callers) are
+    rejected so the caller can be answered with HTTP 403 (ENC-FTR-089 AC-2).
+    """
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+
+    internal_key = headers.get("x-coordination-internal-key", "")
+    if internal_key and COORDINATION_INTERNAL_API_KEY:
+        valid_keys = {COORDINATION_INTERNAL_API_KEY}
+        if COORDINATION_INTERNAL_API_KEY_PREVIOUS:
+            valid_keys.add(COORDINATION_INTERNAL_API_KEY_PREVIOUS)
+        if internal_key.strip() in valid_keys:
+            return None
+
+    claims = _egress_jwt_claims(event)
+    tier = str(claims.get("enc:agent_tier") or "").strip().lower()
+    if tier == _EGRESS_ADMIN_AGENT_TIER:
+        return None
+
+    raw_groups = claims.get("cognito:groups") or []
+    if isinstance(raw_groups, str):
+        raw_groups = raw_groups.replace(",", " ").split()
+    groups = {str(g).strip().lower() for g in raw_groups if str(g).strip()}
+    if _EGRESS_ADMIN_COGNITO_GROUP in groups:
+        return None
+
+    return (
+        "Raw-embedding egress requires the internal service key or an "
+        "admin-tier (io-dev-admin) Cognito token."
+    )
+
+
+def _parse_egress_record_ids(event: Dict) -> List[str]:
+    """Parse and de-duplicate record_ids from query params (csv or multiValue)."""
+    qs = event.get("queryStringParameters") or {}
+    multi_qs = event.get("multiValueQueryStringParameters") or {}
+
+    raw_ids: List[str] = []
+    if isinstance(multi_qs.get("record_ids"), list):
+        for value in multi_qs["record_ids"]:
+            raw_ids.extend(str(value).split(","))
+    else:
+        raw_ids.extend(str(qs.get("record_ids", "")).split(","))
+    # Tolerate the singular form for ergonomic single-record calls.
+    if not any(r.strip() for r in raw_ids) and qs.get("record_id"):
+        raw_ids = str(qs.get("record_id")).split(",")
+
+    seen: set = set()
+    ordered: List[str] = []
+    for candidate in raw_ids:
+        record_id = candidate.strip()
+        if record_id and record_id not in seen:
+            seen.add(record_id)
+            ordered.append(record_id)
+    return ordered
+
+
+def _handle_embeddings_for(event: Dict) -> Dict:
+    """Handle GET /api/v1/tracker/graphsearch?search_type=embeddings_for.
+
+    ENC-FTR-089 / ENC-TSK-I89. Returns the stored Titan V2 embedding vector
+    (256-dim float32, L2-normalized) for each requested record_id. Operates
+    over the existing `embedding` node property written by graph_sync — no new
+    edge types or graph nodes are introduced (OGTM AC-4).
+    """
+    auth_failure = _authorize_embedding_egress(event)
+    if auth_failure is not None:
+        return _error(403, auth_failure, code="PERMISSION_DENIED")
+
+    qs = event.get("queryStringParameters") or {}
+    project_id = qs.get("project_id", "")
+    if not project_id:
+        return _error(400, "project_id query parameter required")
+
+    record_ids = _parse_egress_record_ids(event)
+    if not record_ids:
+        return _error(400, "record_ids query parameter required (comma-separated record IDs)")
+    if len(record_ids) > MAX_EMBEDDING_EGRESS_RECORD_IDS:
+        return _error(
+            400,
+            f"record_ids exceeds the maximum of {MAX_EMBEDDING_EGRESS_RECORD_IDS} per request",
+        )
+
+    driver = _ensure_live_driver(_get_neo4j_driver())
+    if driver is None:
+        return _error(503, "Graph index temporarily unavailable. Use tracker_list for equivalent queries.",
+                      code="GRAPH_UNAVAILABLE", retryable=True)
+
+    cypher = (
+        "MATCH (n) WHERE n.project_id = $project_id AND n.record_id IN $record_ids "
+        f"RETURN n.record_id AS record_id, n.`{_EMBEDDING_PROPERTY}` AS embedding, "
+        "labels(n) AS labels"
+    )
+
+    start = time.time()
+    found: Dict[str, Dict[str, Any]] = {}
+    try:
+        with driver.session() as session:
+            result = session.run(cypher, project_id=project_id, record_ids=record_ids)
+            for record in result:
+                rid = record["record_id"]
+                if rid is None:
+                    continue
+                embedding = record["embedding"]
+                # A record_id should resolve to one node; if a stale duplicate
+                # exists, keep the first row that carries a usable vector.
+                existing = found.get(rid)
+                if existing is not None and existing.get("embedding") is not None:
+                    continue
+                found[rid] = {
+                    "embedding": list(embedding) if embedding is not None else None,
+                    "labels": sorted(record["labels"]) if record["labels"] else [],
+                }
+    except Exception:
+        logger.exception("[ERROR] embeddings_for query failed: project_id=%s", project_id)
+        return _error(503, "Graph index temporarily unavailable. Use tracker_list for equivalent queries.",
+                      code="GRAPH_UNAVAILABLE", retryable=True)
+
+    duration_ms = int((time.time() - start) * 1000)
+
+    embeddings: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    for rid in record_ids:
+        entry = found.get(rid)
+        vector = entry.get("embedding") if entry else None
+        if isinstance(vector, list) and len(vector) == EMBEDDING_EGRESS_DIMENSIONS:
+            embeddings.append({
+                "record_id": rid,
+                "embedding": vector,
+                "dimension": len(vector),
+                "labels": entry.get("labels", []),
+            })
+        else:
+            missing.append(rid)
+
+    # Row-aligned (N x 256) matrix of only the resolved vectors so a client can
+    # call np.mean(matrix, axis=0) directly for the demand-centroid / Fréchet
+    # barycenter approximation (ENC-FTR-089 AC-3).
+    matrix = [item["embedding"] for item in embeddings]
+
+    logger.info(
+        json.dumps({
+            "event": "embeddings_for_query",
+            "project_id": project_id,
+            "requested_count": len(record_ids),
+            "returned_count": len(embeddings),
+            "missing_count": len(missing),
+            "duration_ms": duration_ms,
+        })
+    )
+
+    return _response(200, {
+        "success": True,
+        "model_id": EMBEDDING_EGRESS_MODEL_ID,
+        "dimension": EMBEDDING_EGRESS_DIMENSIONS,
+        "normalize": True,
+        "requested_count": len(record_ids),
+        "returned_count": len(embeddings),
+        "embeddings": embeddings,
+        "matrix": matrix,
+        "missing": missing,
+        "duration_ms": duration_ms,
+        # ENC-FTR-089 AC-3: response-schema documentation for centroid use.
+        "response_schema": {
+            "embeddings": "Array of {record_id, embedding: float[256], dimension, labels}; "
+                          "row-order matches the requested record_ids minus any in `missing`.",
+            "matrix": "N x 256 float matrix of the resolved vectors (embeddings[*].embedding). "
+                      "Compute the demand centroid / Fréchet barycenter approximation as "
+                      "np.mean(np.asarray(matrix), axis=0); valid because Titan V2 vectors are "
+                      "L2-normalized so the Euclidean mean approximates the spherical barycenter.",
+            "missing": "record_ids with no graph node or no stored embedding (excluded from matrix).",
+        },
+    })
+
+
 def _handle_health(event: Dict) -> Dict:
     """Handle GET /api/v1/tracker/graphsearch/health.
 
@@ -2251,6 +2516,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     # Route dispatch
     if method == "GET" and "/graphsearch" in path and not path.endswith("/health"):
+        qs = event.get("queryStringParameters") or {}
+        # ENC-FTR-089 / ENC-TSK-I89: admin-scoped raw-embedding egress shares the
+        # graphsearch route via search_type=embeddings_for (no new API Gateway
+        # route or CFN change); the handler enforces its own stricter admin gate.
+        if (qs.get("search_type") or "") == EMBEDDING_EGRESS_SEARCH_TYPE:
+            return _handle_embeddings_for(event)
         return _handle_search(event)
 
     return _error(404, f"Route not found: {method} {path}")
