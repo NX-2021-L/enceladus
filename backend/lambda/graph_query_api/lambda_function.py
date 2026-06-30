@@ -1933,7 +1933,14 @@ def _build_pathway_telemetry_record(*, wave_id, intent_signature, project_id,
                                     edge_participation, result_count, graph_algorithm,
                                     signal_availability) -> Dict[str, Any]:
     """Assemble the AC-1 raw telemetry record (also carries the AC-10 edge
-    participation list). This field set IS the ENC-FTR-108 AC-4 input contract."""
+    participation list). This field set IS the ENC-FTR-108 AC-4 input contract.
+
+    ENC-TSK-J01 (FTR-108 Ph1, design-only): edge_participation[].edge_id entries
+    with retrieval_outcome == "hit" are the Ph1 source of truth for "did edge e
+    participate in a successful retrieval this wave" -- the flow(e, t) signal in
+    the Tero current-reinforcement contract (DOC-88A8F4835811). No flow_weight
+    write path exists yet; that is Ph2, gated on an OGTM preflight not yet run.
+    """
     return {
         "schema": "enceladus.pathway.telemetry.v1",
         "wave_id": wave_id or "unassigned",
