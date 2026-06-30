@@ -54,7 +54,14 @@ MAX_DEPTH = 5
 MAX_RESULTS = 100
 QUERY_TIMEOUT_SECONDS = 10
 
-VALID_SEARCH_TYPES = {"traversal", "neighbors", "path", "keyword", "hybrid"}
+VALID_SEARCH_TYPES = {"traversal", "neighbors", "path", "keyword", "hybrid", "adjacency"}
+
+# ENC-TSK-I88 (ENC-FTR-085 comp-percolation-monitor): bounded page sizes for the
+# read-only adjacency export consumed by the nightly percolation Lambda. Mirrors
+# the vector_read pagination discipline — large corpora stream across several
+# calls so a single response never exceeds the API Gateway payload cap.
+ADJACENCY_DEFAULT_LIMIT = 5000
+ADJACENCY_MAX_LIMIT = 20000
 
 # ---------------------------------------------------------------------------
 # ENC-TSK-B92 Phase 1 hybrid retrieval constants
@@ -1893,12 +1900,109 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
 _EMBEDDING_PROPERTY = "embedding"
 
 
+def _query_adjacency(driver, project_id: str, params: Dict) -> Dict:
+    """Return the project-scoped undirected simple-graph adjacency (ENC-TSK-I88).
+
+    Read-only structural export for offline analytics — specifically the
+    comp-percolation-monitor nightly Lambda (ENC-FTR-085), which needs the live
+    degree sequence (Molloy-Reed) and an edge list (Monte Carlo site-percolation
+    sweep). It matches every edge label without filtering, introduces NO new edge
+    type, and performs no writes, so OGTM (ENC-FTR-066) is N/A — mirroring the
+    vector_read exemption (graph_query_api.vector_read).
+
+    Project ('Project') container nodes and placeholder edge-target stubs
+    (is_placeholder, ENC-TSK-E06) are excluded so degree statistics reflect only
+    real governed records. Each undirected pair is emitted once (a.record_id <
+    b.record_id also drops self-loops), deduplicated to a simple graph across
+    multiple parallel edge types. Pagination is via offset/limit over a stable
+    (s, t) ordering; node_count/edge_count totals are returned on the first page
+    (offset == 0) so the caller can size the corpus before streaming.
+    """
+    try:
+        offset = int(params.get("offset", 0) or 0)
+    except (TypeError, ValueError):
+        return {"error": "offset must be an integer"}
+    try:
+        limit = int(params.get("limit", ADJACENCY_DEFAULT_LIMIT) or ADJACENCY_DEFAULT_LIMIT)
+    except (TypeError, ValueError):
+        return {"error": "limit must be an integer"}
+    if offset < 0:
+        return {"error": "offset must be >= 0"}
+    if limit < 1 or limit > ADJACENCY_MAX_LIMIT:
+        return {"error": f"limit must be between 1 and {ADJACENCY_MAX_LIMIT}"}
+
+    node_filter = (
+        "n.project_id = $project_id "
+        "AND NOT 'Project' IN labels(n) "
+        "AND coalesce(n.is_placeholder, false) = false "
+        "AND n.record_id IS NOT NULL"
+    )
+    edge_match = (
+        "MATCH (a)-[r]-(b) "
+        "WHERE a.project_id = $project_id AND b.project_id = $project_id "
+        "AND NOT 'Project' IN labels(a) AND NOT 'Project' IN labels(b) "
+        "AND coalesce(a.is_placeholder, false) = false "
+        "AND coalesce(b.is_placeholder, false) = false "
+        "AND a.record_id IS NOT NULL AND b.record_id IS NOT NULL "
+        "AND a.record_id < b.record_id "
+    )
+
+    edges: List[Dict[str, str]] = []
+    node_count: Optional[int] = None
+    edge_count: Optional[int] = None
+    with driver.session() as session:
+        if offset == 0:
+            node_count = int(
+                session.run(
+                    f"MATCH (n) WHERE {node_filter} RETURN count(n) AS c"
+                ).single()["c"]
+            )
+            edge_count = int(
+                session.run(
+                    f"{edge_match} "
+                    "RETURN count(DISTINCT [a.record_id, b.record_id]) AS c"
+                ).single()["c"]
+            )
+        page = session.run(
+            f"{edge_match} "
+            "WITH DISTINCT a.record_id AS s, b.record_id AS t "
+            "ORDER BY s, t "
+            "SKIP $offset LIMIT $limit "
+            "RETURN s, t",
+            project_id=project_id,
+            offset=offset,
+            limit=limit,
+        )
+        for rec in page:
+            edges.append({"s": rec["s"], "t": rec["t"]})
+
+    returned = len(edges)
+    has_more = returned == limit
+    result: Dict[str, Any] = {
+        "nodes": [],
+        "edges": edges,
+        "paths": [],
+        "offset": offset,
+        "limit": limit,
+        "returned": returned,
+        "has_more": has_more,
+        "next_offset": (offset + returned) if has_more else None,
+        "summary": f"Adjacency page for {project_id}: {returned} edges (offset {offset}, has_more={has_more})",
+        "query_cypher": "adjacency",
+    }
+    if node_count is not None:
+        result["node_count"] = node_count
+        result["edge_count"] = edge_count
+    return result
+
+
 SEARCH_HANDLERS = {
     "traversal": _query_traversal,
     "neighbors": _query_neighbors,
     "path": _query_path,
     "keyword": _query_keyword,
     "hybrid": _query_hybrid,
+    "adjacency": _query_adjacency,
 }
 
 
@@ -1990,6 +2094,14 @@ def _handle_search(event: Dict) -> Dict:
         "include_below_threshold",
         "edge_participation",
         "pathway",
+        # ENC-TSK-I88: adjacency export pagination + corpus-size fields.
+        "node_count",
+        "edge_count",
+        "offset",
+        "limit",
+        "returned",
+        "has_more",
+        "next_offset",
     ):
         if hybrid_key in result:
             response_body[hybrid_key] = result[hybrid_key]

@@ -145,6 +145,12 @@
       "deploy_script": "backend/lambda/graph_health_metrics/deploy.sh"
     },
     {
+      "function_name": "enceladus-percolation-monitor",
+      "lambda_dir": "backend/lambda/percolation_monitor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/percolation_monitor/deploy.sh"
+    },
+    {
       "function_name": "devops-github-integration",
       "lambda_dir": "backend/lambda/github_integration",
       "workflow_file": ".github/workflows/_deploy.yml",

@@ -1,0 +1,100 @@
+"""Unit tests for comp-percolation-monitor pure-math core (ENC-TSK-I88).
+
+Network-free: exercises the degree statistics, Monte Carlo site-percolation
+sweep, and second-derivative empirical-p_c detection against a deterministic
+synthetic graph. No AWS or graph_query_api calls.
+"""
+
+import os
+import random
+import unittest
+
+os.environ.setdefault("GRAPH_QUERY_API_BASE", "https://example.invalid/api/v1/tracker/graphsearch")
+
+import lambda_function as pm
+
+
+def _ring_lattice(n, k):
+    """k-regular ring lattice: each node joined to its k nearest neighbors."""
+    edges = []
+    half = k // 2
+    for i in range(n):
+        for j in range(1, half + 1):
+            a, b = str(i), str((i + j) % n)
+            lo, hi = min(a, b), max(a, b)
+            edges.append((lo, hi))
+    # dedupe
+    return sorted(set(edges))
+
+
+class DegreeStatsTest(unittest.TestCase):
+    def test_regular_graph_degree_stats(self):
+        # 4-regular ring: every degree is exactly 4, so <k>=4, <k^2>=16.
+        n = 50
+        edges = _ring_lattice(n, 4)
+        stats = pm._degree_stats(n, edges)
+        self.assertAlmostEqual(stats["mean_degree"], 4.0, places=6)
+        self.assertAlmostEqual(stats["mean_degree_sq"], 16.0, places=6)
+        # Molloy-Reed form used by AC-2: p_c = <k>/<k^2> = 4/16 = 0.25.
+        self.assertAlmostEqual(stats["analytical_pc"], 0.25, places=6)
+        self.assertTrue(0.01 <= stats["analytical_pc"] <= 0.99)
+
+    def test_isolated_nodes_lower_mean_degree(self):
+        # 10 connected (a triangle-ish chain) + 90 isolated nodes.
+        edges = [("0", "1"), ("1", "2"), ("2", "3")]
+        stats = pm._degree_stats(100, edges)
+        # sum_k = 6 over 100 nodes => 0.06
+        self.assertAlmostEqual(stats["mean_degree"], 0.06, places=6)
+
+    def test_empty_graph(self):
+        stats = pm._degree_stats(0, [])
+        self.assertEqual(stats["analytical_pc"], 0.0)
+
+
+class MonteCarloTest(unittest.TestCase):
+    def test_lcc_ratio_monotone_nondecreasing_in_p(self):
+        n = 200
+        edges = _ring_lattice(n, 6)
+        universe = sorted({v for e in edges for v in e})
+        p_grid = pm._linspace(0.02, 0.95, 30)
+        ratios = pm._monte_carlo_sweep(universe, edges, n, p_grid, trials=20, seed=7)
+        self.assertEqual(len(ratios), 30)
+        # Site percolation LCC ratio is ~monotone in p; allow small MC noise.
+        for lo, hi in zip(ratios, ratios[1:]):
+            self.assertLessEqual(lo, hi + 0.06)
+        self.assertLess(ratios[0], 0.2)
+        self.assertGreater(ratios[-1], 0.6)
+
+    def test_empirical_pc_in_range(self):
+        n = 200
+        edges = _ring_lattice(n, 6)
+        universe = sorted({v for e in edges for v in e})
+        p_grid = pm._linspace(0.02, 0.60, 30)
+        ratios = pm._monte_carlo_sweep(universe, edges, n, p_grid, trials=25, seed=11)
+        pc = pm._empirical_pc(p_grid, ratios)
+        self.assertGreaterEqual(pc, p_grid[0])
+        self.assertLessEqual(pc, p_grid[-1])
+
+    def test_empirical_pc_detects_sharp_onset(self):
+        # Synthetic LCC curve: flat, sharp jump at index 10, then flat.
+        p_grid = pm._linspace(0.0, 1.0, 21)
+        ratios = [0.01] * 10 + [0.01, 0.5] + [0.9] * 9
+        pc = pm._empirical_pc(p_grid, ratios)
+        # Max positive curvature is at the foot of the jump (index 10).
+        self.assertAlmostEqual(pc, p_grid[10], places=6)
+
+
+class UnionFindTest(unittest.TestCase):
+    def test_single_component(self):
+        edges = [("a", "b"), ("b", "c"), ("c", "d")]
+        ratio = pm._largest_component_ratio(edges, {"a", "b", "c", "d"}, 4, random.Random(0))
+        self.assertAlmostEqual(ratio, 1.0, places=6)
+
+    def test_fragmented(self):
+        edges = [("a", "b"), ("c", "d")]
+        ratio = pm._largest_component_ratio(edges, {"a", "b", "c", "d"}, 4, random.Random(0))
+        self.assertAlmostEqual(ratio, 0.5, places=6)
+
+
+if __name__ == "__main__":
+    unittest.main()
