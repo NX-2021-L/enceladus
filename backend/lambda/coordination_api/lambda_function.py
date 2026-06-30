@@ -86,6 +86,21 @@ try:
 except Exception:
     _CERT_BUNDLE = None
 
+# Budget Hierarchy Controller (ENC-FTR-083 Ph1 / ENC-TSK-I86; Ph2 / ENC-TSK-I87).
+# Imported with the same defensive fallback as mcp_client so a flat-file Lambda
+# package and a package-relative import both resolve.
+try:
+    from budget_hierarchy import log_session_budget_allocation, evaluate_corpus_budget
+except ModuleNotFoundError:
+    _BHC_MODULE_PATH = pathlib.Path(__file__).with_name("budget_hierarchy.py")
+    _BHC_SPEC = importlib.util.spec_from_file_location("coordination_budget_hierarchy", _BHC_MODULE_PATH)
+    if _BHC_SPEC is None or _BHC_SPEC.loader is None:
+        raise
+    _BHC_MODULE = importlib.util.module_from_spec(_BHC_SPEC)
+    _BHC_SPEC.loader.exec_module(_BHC_MODULE)
+    log_session_budget_allocation = _BHC_MODULE.log_session_budget_allocation
+    evaluate_corpus_budget = _BHC_MODULE.evaluate_corpus_budget
+
 
 def _normalize_api_keys(*raw_values: str) -> tuple[str, ...]:
     """Return deduplicated, non-empty key values from scalar/csv env sources."""
@@ -10915,6 +10930,26 @@ def _handle_create_request(event: Dict[str, Any], claims: Dict[str, Any]) -> Dic
             return _error(409, "Coordination request ID collision; retry")
         logger.exception("put request failed")
         return _error(500, f"Failed persisting coordination request: {exc}")
+
+    # ENC-FTR-083 Ph1 (ENC-TSK-I86) — Budget Hierarchy Controller. Log the
+    # per-session budget allocation (four-scale token budgets + cognitive
+    # temperature tuple) at DEBUG on every session init. Best-effort: never let
+    # budget logging break request intake.
+    try:
+        log_session_budget_allocation(logger, request_id=request_id, project_id=project_id)
+    except Exception:  # noqa: BLE001 — budget telemetry must never break session init
+        logger.debug("budget allocation logging skipped (non-fatal)", exc_info=True)
+
+    # ENC-FTR-083 Ph2 (ENC-TSK-I87) — corpus-budget alert ladder + corpus
+    # token-usage telemetry. No-op unless a corpus-usage signal is configured
+    # (BUDGET_CORPUS_USED_TOKENS env / AppConfig), so this stays silent in the
+    # common case; when present it classifies the five-level ladder, publishes
+    # NOTICE+ alerts to SNS, and emits the CorpusTokenUsage CloudWatch metric.
+    # Best-effort: never let budget telemetry break request intake.
+    try:
+        evaluate_corpus_budget(logger, request_id=request_id, project_id=project_id)
+    except Exception:  # noqa: BLE001 — budget telemetry must never break session init
+        logger.debug("corpus budget evaluation skipped (non-fatal)", exc_info=True)
 
     if decomposition.get("feature_id"):
         _append_tracker_history(
