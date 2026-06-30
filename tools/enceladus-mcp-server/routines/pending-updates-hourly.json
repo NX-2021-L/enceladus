@@ -1,0 +1,40 @@
+{
+  "$comment": "ENC-FTR-074 Ph2 (ENC-TSK-I80) AC4 — declarative spec for the hourly Pending-Updates routine. Consumed by whichever scheduler wires it (cron / systemd timer / EventBridge Scheduler / Claude Code routine). The runner authenticates with a Cognito M2M token carrying the agent.standard scope and calls the governed Pending-Updates read on the gamma MCP gateway, which is admitted by the Ph2 REQUEST authorizer (Tier 1) and logged to CloudWatch.",
+  "routine": {
+    "name": "enceladus-pending-updates-hourly",
+    "description": "Governed hourly Pending Updates pull for project=enceladus, authenticated via Cognito M2M client_credentials (scope agent.standard).",
+    "schedule": {
+      "type": "cron",
+      "expression": "0 * * * *",
+      "timezone": "UTC",
+      "eventbridge_scheduler_expression": "cron(0 * * * ? *)"
+    },
+    "auth": {
+      "principal_type": "m2m",
+      "grant": "client_credentials",
+      "scope": "enceladus-api/agent.standard",
+      "tier": "standard",
+      "token_endpoint_env": "ENCELADUS_M2M_TOKEN_ENDPOINT",
+      "credentials_secret": "enceladus/agent-m2m/client-secret",
+      "headers_helper": "tools/enceladus-mcp-server/agent_m2m_headers_helper.sh"
+    },
+    "command": {
+      "executable": "bash",
+      "args": ["tools/enceladus-mcp-server/routines/run_pending_updates.sh"]
+    },
+    "target": {
+      "mcp_url": "https://enceladus-gamma.jreese.net/api/v1/coordination/mcp",
+      "tool": "search",
+      "action": "tracker.pending_updates",
+      "arguments": {"project_id": "enceladus"}
+    },
+    "evidence": {
+      "log_group_candidates": [
+        "/enceladus/mcp/server-gamma",
+        "/aws/lambda/devops-coordination-api-gamma",
+        "/aws/lambda/enceladus-agent-authorizer-gamma"
+      ],
+      "success_signal": "[SUCCESS] pending-updates routine completed (HTTP 200)"
+    }
+  }
+}
