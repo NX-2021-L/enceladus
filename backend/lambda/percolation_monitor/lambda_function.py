@@ -23,6 +23,14 @@ connection and no graph writes, and introduces no new edge type. Results are
 written to the enceladus-percolation-telemetry DynamoDB table and emitted as
 CloudWatch metrics under the Enceladus/Percolation namespace.
 
+ENC-TSK-I91 (ENC-FTR-105 AC-7): the DynamoDB row additionally carries a
+nullable ``spurious_attractor_rate`` field alongside analytical_pc/empirical_pc
+-- a recent-average aggregate read verbatim off the same adjacency response
+this Lambda already consumes (graph_query_api computes it from the
+enceladus-drift-telemetry table; see _fetch_graph). This is a
+backward-compatible schema addition: an older graph_query_api deploy that
+predates this field simply omits the key, and the row writes None.
+
 Environment variables:
   GRAPH_QUERY_API_BASE          graphsearch endpoint base URL (read surface)
   COORDINATION_INTERNAL_API_KEY service-to-service key for graph_query_api auth
@@ -102,14 +110,25 @@ def _graphsearch(params: Dict[str, Any]) -> Dict[str, Any]:
     return body
 
 
-def _fetch_graph() -> Tuple[int, List[Tuple[str, str]]]:
-    """Page the adjacency export; return (node_count, edge_list).
+def _fetch_graph() -> Tuple[int, List[Tuple[str, str]], Optional[float]]:
+    """Page the adjacency export; return (node_count, edge_list, spurious_attractor_rate).
 
     node_count is the total number of governed nodes (including isolated ones),
     so LCC ratios and degree means are taken relative to the whole graph.
+
+    spurious_attractor_rate (ENC-FTR-105 AC-7 / ENC-TSK-I91) is read verbatim
+    from the first adjacency page's optional ``spurious_attractor_rate`` key --
+    a best-effort recent-average aggregate that graph_query_api itself computes
+    from the enceladus-drift-telemetry table (this Lambda never touches that
+    table directly, preserving the AC-5 "graph read EXCLUSIVELY through
+    graph_query_api" OGTM contract and requiring no new IAM grant for this
+    Lambda's role). None when the key is absent (an older graph_query_api
+    deploy that predates ENC-TSK-I91) or when graph_query_api itself had no
+    recent rate to report -- both degrade silently, never raising.
     """
     edges: List[Tuple[str, str]] = []
     node_count = 0
+    spurious_attractor_rate: Optional[float] = None
     offset = 0
     for page_idx in range(_MAX_PAGES):
         body = _graphsearch({
@@ -120,6 +139,8 @@ def _fetch_graph() -> Tuple[int, List[Tuple[str, str]]]:
         })
         if offset == 0:
             node_count = int(body.get("node_count", 0) or 0)
+            raw_rate = body.get("spurious_attractor_rate")
+            spurious_attractor_rate = float(raw_rate) if raw_rate is not None else None
         for e in body.get("edges", []):
             s, t = e.get("s"), e.get("t")
             if s and t and s != t:
@@ -130,8 +151,11 @@ def _fetch_graph() -> Tuple[int, List[Tuple[str, str]]]:
         offset = int(next_offset) if next_offset is not None else offset + ADJACENCY_PAGE_LIMIT
     else:
         logger.warning("[WARNING] adjacency pagination hit _MAX_PAGES=%d ceiling", _MAX_PAGES)
-    logger.info("[INFO] Graph read: node_count=%d edge_count=%d", node_count, len(edges))
-    return node_count, edges
+    logger.info(
+        "[INFO] Graph read: node_count=%d edge_count=%d spurious_attractor_rate=%s",
+        node_count, len(edges), spurious_attractor_rate,
+    )
+    return node_count, edges, spurious_attractor_rate
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +313,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     started = time.time()
 
     try:
-        node_count, edges = _fetch_graph()
+        node_count, edges, spurious_attractor_rate = _fetch_graph()
         stats = _degree_stats(node_count, edges)
         analytical_pc = stats["analytical_pc"]
         mean_degree = stats["mean_degree"]
@@ -313,6 +337,12 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "mean_degree_sq": stats["mean_degree_sq"],
             "analytical_pc": analytical_pc,
             "empirical_pc": empirical_pc,
+            # ENC-FTR-105 AC-7 / ENC-TSK-I91: nullable, backward-compatible
+            # schema addition -- recent spurious_attractor_rate aggregate
+            # sourced from graph_query_api's adjacency response (see
+            # _fetch_graph). None on an older graph_query_api deploy or when
+            # no recent drift-telemetry record carries a non-null rate.
+            "spurious_attractor_rate": spurious_attractor_rate,
             "mc_trials": MC_TRIALS,
             "mc_num_p": MC_NUM_P,
             "sweep_p": [round(p, 6) for p in p_grid],
@@ -346,6 +376,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "analytical_pc": round(analytical_pc, 6),
                 "empirical_pc": round(empirical_pc, 6),
                 "analytical_pc_in_range": analytical_in_range,
+                "spurious_attractor_rate": (
+                    round(spurious_attractor_rate, 6) if spurious_attractor_rate is not None else None
+                ),
             }),
         }
     except Exception as exc:

@@ -293,6 +293,58 @@ def _get_dynamodb():
     return _dynamodb
 
 
+_SPURIOUS_ATTRACTOR_RECENT_LIMIT = 5
+
+
+def _recent_spurious_attractor_rate(project_id: str) -> Optional[float]:
+    """ENC-TSK-I91 (ENC-FTR-105 AC-7) — best-effort mean of the most recent
+    non-null spurious_attractor_rate values for a project.
+
+    Read-only Query against the project-timestamp-index GSI on the existing
+    enceladus-drift-telemetry table — the same IAM grant ENC-TSK-I85 already
+    provisioned for the wave-close write path (DriftTelemetryTableAccess /
+    dynamodb:Query), so this adds no new infrastructure. Surfaced on the
+    adjacency search_type (ENC-FTR-085 / ENC-TSK-I88) so the nightly
+    percolation-monitor Lambda — which reads the graph exclusively through this
+    endpoint — can fold a recent spurious_attractor_rate aggregate into its own
+    telemetry without gaining a new DynamoDB grant of its own.
+
+    Returns None (rather than raising) on any failure, missing table config, or
+    when no recent record carries a non-null rate, so this enrichment can never
+    break the adjacency page it rides along on.
+    """
+    if not DRIFT_TELEMETRY_TABLE:
+        return None
+    try:
+        resp = _get_dynamodb().query(
+            TableName=DRIFT_TELEMETRY_TABLE,
+            IndexName="project-timestamp-index",
+            KeyConditionExpression="project_id = :pid",
+            ExpressionAttributeValues={":pid": {"S": project_id}},
+            ScanIndexForward=False,
+            Limit=_SPURIOUS_ATTRACTOR_RECENT_LIMIT,
+        )
+    except Exception:  # noqa: BLE001 — enrichment must never break adjacency reads
+        logger.warning(
+            "[WARNING] recent spurious_attractor_rate lookup failed project_id=%s",
+            project_id, exc_info=True,
+        )
+        return None
+
+    values: List[float] = []
+    for item in resp.get("Items", []):
+        n = item.get("spurious_attractor_rate", {}).get("N")
+        if n is None:
+            continue
+        try:
+            values.append(float(n))
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def _get_neo4j_credentials() -> Dict[str, str]:
     sm = _get_secretsmanager()
     resp = sm.get_secret_value(SecretId=NEO4J_SECRET_NAME)
@@ -2231,6 +2283,12 @@ def _query_adjacency(driver, project_id: str, params: Dict) -> Dict:
     multiple parallel edge types. Pagination is via offset/limit over a stable
     (s, t) ordering; node_count/edge_count totals are returned on the first page
     (offset == 0) so the caller can size the corpus before streaming.
+
+    The first page also carries ``spurious_attractor_rate`` (ENC-FTR-105 AC-7 /
+    ENC-TSK-I91) — a best-effort mean over the project's most recent
+    drift-telemetry records (see ``_recent_spurious_attractor_rate``), null when
+    unavailable. This is a read of an existing telemetry sink, not a new edge
+    type or graph write, so it does not change the OGTM analysis above.
     """
     try:
         offset = int(params.get("offset", 0) or 0)
@@ -2307,6 +2365,7 @@ def _query_adjacency(driver, project_id: str, params: Dict) -> Dict:
     if node_count is not None:
         result["node_count"] = node_count
         result["edge_count"] = edge_count
+        result["spurious_attractor_rate"] = _recent_spurious_attractor_rate(project_id)
     return result
 # ---------------------------------------------------------------------------
 # ENC-FTR-095 / ENC-TSK-I90: Sheaf Laplacian H1 inconsistency detection
@@ -2902,6 +2961,10 @@ def _handle_wave_close_drift(event: Dict[str, Any]) -> Dict[str, Any]:
       d_centroid_L2, and one of {h_fiedler/v_fiedler} or {h_adjacency/v_adjacency}
       for d_spectral. Both metrics degrade to null when their inputs are absent
       (d_centroid may ship ahead of d_spectral per ENC-FTR-087 / ENC-FTR-088).
+      retrieval_records (ENC-FTR-105 AC-7 / ENC-TSK-I91, optional) — the wave's
+      retrieval records (each carrying retrieval_energy / avg_retrieval_energy)
+      from which spurious_attractor_rate is computed; an explicit
+      spurious_attractor_rate field, if present, takes precedence over it.
 
     Returns the emitted record. Never raises into the caller for a malformed
     payload — returns a structured 400 instead.
@@ -2930,6 +2993,7 @@ def _handle_wave_close_drift(event: Dict[str, Any]) -> Dict[str, Any]:
             h_fiedler=event.get("h_fiedler"),
             v_fiedler=event.get("v_fiedler"),
             k=int(k),
+            retrieval_records=event.get("retrieval_records"),
             spurious_attractor_rate=event.get("spurious_attractor_rate"),
             re_traversal_rate=event.get("re_traversal_rate"),
         )

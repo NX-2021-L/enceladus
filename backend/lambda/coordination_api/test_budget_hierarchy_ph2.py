@@ -348,6 +348,87 @@ class TestEvaluateCorpusBudget(unittest.TestCase):
         self.assertEqual(result["level"]["level"], "NOTICE")
 
 
+class TestSpuriousAttractorAlert(unittest.TestCase):
+    """ENC-TSK-I91 (ENC-FTR-105 AC-7): spurious-attractor NOTICE rung.
+
+    SNS publish fires on threshold breach (> 0.15) and does not fire below it,
+    via the exact same SNS-publish idiom as the AC-4 alert ladder.
+    """
+
+    def test_threshold_is_015(self):
+        self.assertAlmostEqual(bhc.SPURIOUS_ATTRACTOR_NOTICE_THRESHOLD, 0.15)
+
+    def test_none_rate_is_a_noop(self):
+        logger = _CapturingLogger()
+        sns = _FakeSns()
+        result = bhc.evaluate_spurious_attractor_alert(
+            None, logger=logger, sns_client=sns,
+            topic_arn="arn:aws:sns:us-west-2:111122223333:t",
+        )
+        self.assertIsNone(result)
+        self.assertEqual(len(sns.calls), 0)
+
+    def test_above_threshold_publishes_notice(self):
+        logger = _CapturingLogger()
+        sns = _FakeSns()
+        result = bhc.evaluate_spurious_attractor_alert(
+            0.20, logger=logger, sns_client=sns,
+            topic_arn="arn:aws:sns:us-west-2:111122223333:enceladus-budget-alerts",
+            project_id="enceladus", wave_id="wave-9",
+        )
+        self.assertTrue(result["published"])
+        self.assertEqual(len(sns.calls), 1)
+        published = json.loads(sns.calls[0]["Message"])
+        self.assertEqual(published["level"], "NOTICE")
+        self.assertEqual(published["event_type"], "budget.spurious_attractor_alert")
+        self.assertAlmostEqual(published["spurious_attractor_rate"], 0.20)
+        self.assertEqual(published["wave_id"], "wave-9")
+        # AC-7 CloudWatch-Logs evidence line present (same convention as AC-4).
+        self.assertTrue(any("[BUDGET][ALERT]" in r for r in logger.info_records))
+
+    def test_at_threshold_does_not_publish(self):
+        """Strict greater-than: exactly 0.15 must NOT publish."""
+        logger = _CapturingLogger()
+        sns = _FakeSns()
+        result = bhc.evaluate_spurious_attractor_alert(
+            0.15, logger=logger, sns_client=sns,
+            topic_arn="arn:aws:sns:us-west-2:111122223333:t",
+        )
+        self.assertFalse(result["published"])
+        self.assertEqual(len(sns.calls), 0)
+
+    def test_below_threshold_does_not_publish(self):
+        logger = _CapturingLogger()
+        sns = _FakeSns()
+        result = bhc.evaluate_spurious_attractor_alert(
+            0.05, logger=logger, sns_client=sns,
+            topic_arn="arn:aws:sns:us-west-2:111122223333:t",
+        )
+        self.assertFalse(result["published"])
+        self.assertEqual(len(sns.calls), 0)
+        self.assertTrue(any("[BUDGET][ALERT]" in r for r in logger.info_records))
+
+    def test_no_topic_configured_logs_only(self):
+        logger = _CapturingLogger()
+        os.environ.pop("BUDGET_ALERT_SNS_TOPIC_ARN", None)
+        os.environ.pop("DEAD_LETTER_SNS_TOPIC_ARN", None)
+        result = bhc.evaluate_spurious_attractor_alert(0.5, logger=logger, sns_client=_FakeSns())
+        self.assertFalse(result["published"])
+
+    def test_publish_failure_is_swallowed(self):
+        class _BoomSns:
+            def publish(self, **kwargs):
+                raise RuntimeError("SNS down")
+
+        logger = _CapturingLogger()
+        result = bhc.evaluate_spurious_attractor_alert(
+            0.9, logger=logger, sns_client=_BoomSns(),
+            topic_arn="arn:aws:sns:us-west-2:111122223333:t",
+        )
+        self.assertFalse(result["published"])
+        self.assertTrue(any("SNS publish failed" in r for r in logger.warning_records))
+
+
 if __name__ == "__main__":
     logging.disable(logging.CRITICAL)
     unittest.main()

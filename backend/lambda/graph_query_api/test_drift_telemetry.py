@@ -9,6 +9,12 @@ wave-close emission path is fully exercised offline. Covers task ACs:
   AC-4  3 synthetic wave-close events -> 3 records, distinct wave_ids, monotonic
         timestamps.
   AC-5  spurious_attractor_rate + re_traversal_rate present as null stubs.
+
+ENC-TSK-I91 (ENC-FTR-105 AC-7) adds:
+  compute_spurious_attractor_rate — fraction of retrieval records whose avg
+  retrieval_energy exceeds BHC_WARNING_THRESHOLD, and its wiring into
+  compute_and_emit_wave_close_drift via the retrieval_records parameter
+  (re_traversal_rate / AC-8 is untouched and still ships as a null stub).
 """
 
 import math
@@ -180,6 +186,78 @@ class TestThreeSyntheticWaveCloses(unittest.TestCase):
         item = ddb.items[0]["Item"]
         self.assertEqual(set(item["d_centroid_L2"]), {"N"})   # centroid shipped
         self.assertEqual(item["d_spectral"], {"NULL": True})  # spectral deferred
+
+
+class TestSpuriousAttractorRate(unittest.TestCase):
+    """ENC-TSK-I91 (ENC-FTR-105 AC-7): fraction of retrieval records whose avg
+    retrieval_energy exceeds BHC_WARNING_THRESHOLD."""
+
+    def test_none_when_no_records(self):
+        self.assertIsNone(dt.compute_spurious_attractor_rate(None))
+        self.assertIsNone(dt.compute_spurious_attractor_rate([]))
+
+    def test_none_when_no_record_has_energy(self):
+        records = [{"record_id": "ENC-X"}, {"record_id": "ENC-Y"}]
+        self.assertIsNone(dt.compute_spurious_attractor_rate(records))
+
+    def test_fraction_exceeding_threshold(self):
+        # threshold defaults to BHC_WARNING_THRESHOLD (0.85).
+        records = [
+            {"retrieval_energy": [0.9, 0.95]},   # avg 0.925 -> exceeds
+            {"avg_retrieval_energy": 0.5},        # below
+            {"retrieval_energy": [0.86]},         # exceeds
+            {"avg_retrieval_energy": 0.84},        # below (strict >)
+        ]
+        rate = dt.compute_spurious_attractor_rate(records)
+        self.assertAlmostEqual(rate, 0.5)
+
+    def test_records_without_energy_excluded_from_denominator(self):
+        records = [
+            {"avg_retrieval_energy": 0.9},   # exceeds
+            {"record_id": "no-energy-here"},  # excluded entirely
+        ]
+        rate = dt.compute_spurious_attractor_rate(records)
+        self.assertAlmostEqual(rate, 1.0)
+
+    def test_custom_threshold(self):
+        records = [{"avg_retrieval_energy": 0.5}, {"avg_retrieval_energy": 0.2}]
+        rate = dt.compute_spurious_attractor_rate(records, threshold=0.3)
+        self.assertAlmostEqual(rate, 0.5)
+
+    def test_wired_into_wave_close(self):
+        """compute_and_emit_wave_close_drift computes spurious_attractor_rate
+        from retrieval_records when no explicit value is supplied."""
+        ddb = FakeDDB()
+        dt.compute_and_emit_wave_close_drift(
+            ddb_client=ddb, table_name="t", project_id="enceladus", wave_id="w",
+            retrieval_records=[
+                {"avg_retrieval_energy": 0.9},
+                {"avg_retrieval_energy": 0.1},
+            ],
+        )
+        item = ddb.items[0]["Item"]
+        self.assertEqual(item["spurious_attractor_rate"], {"N": repr(0.5)})
+
+    def test_explicit_value_takes_precedence_over_retrieval_records(self):
+        ddb = FakeDDB()
+        dt.compute_and_emit_wave_close_drift(
+            ddb_client=ddb, table_name="t", project_id="enceladus", wave_id="w",
+            retrieval_records=[{"avg_retrieval_energy": 0.9}],
+            spurious_attractor_rate=0.0,
+        )
+        item = ddb.items[0]["Item"]
+        self.assertEqual(item["spurious_attractor_rate"], {"N": repr(0.0)})
+
+    def test_no_retrieval_records_still_null_stub(self):
+        """Backward compatibility: omitting retrieval_records entirely (as all
+        14 pre-existing tests do) must still ship the AC-5 null stub."""
+        ddb = FakeDDB()
+        dt.compute_and_emit_wave_close_drift(
+            ddb_client=ddb, table_name="t", project_id="enceladus", wave_id="w",
+            h_embeddings=[[1.0, 1.0]], v_embeddings=[[0.0, 0.0]],
+        )
+        item = ddb.items[0]["Item"]
+        self.assertEqual(item["spurious_attractor_rate"], {"NULL": True})
 
 
 if __name__ == "__main__":
