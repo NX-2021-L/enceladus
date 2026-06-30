@@ -645,3 +645,123 @@ jobs:
             "/repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
             -f state=failure \
             -f description="Deploy failed — ${{ needs.resolve.outputs.environment }}"
+
+  # ---------------------------------------------------------------------------
+  # RECORD_DEPLOY — write a DPL record so deploy.history stays current (ENC-ISS-451).
+  # The Gen2 pipeline previously had zero DynamoDB writes for deploy state (AC-2),
+  # leaving deploy.history frozen at April 2026. This job closes that gap by POSTing
+  # to the tracker deploy submit endpoint after every successful v4/main gamma deploy.
+  #
+  # continue-on-error: true — telemetry failure MUST NEVER block or fail the deploy.
+  # Only runs on push to v4/main (actual gamma deploys); skipped on workflow_dispatch
+  # and workflow_call which already have their own deploy-submit flows.
+  # ---------------------------------------------------------------------------
+  record_deploy:
+    name: Record deploy → DPL (ENC-ISS-451)
+    needs: [resolve, deploy]
+    if: always() && needs.deploy.result == 'success' && github.event_name == 'push' && github.ref_name == 'v4/main'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 5
+
+    steps:
+      - name: Fetch current governance hash
+        id: govhash
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          HASH=$(curl -sf \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Accept: application/json" \
+            "https://jreese.net/api/v1/health" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('governance_hash',''))" 2>/dev/null || true)
+          echo "governance_hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Governance hash: ${HASH:-(fetch failed)}"
+
+      - name: Extract PR number for merge commit
+        id: pr_info
+        env:
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
+          COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+        run: |
+          # Primary: GitHub API — find PR(s) associated with this merge commit
+          PR_NUMBER=$(gh api "/repos/$GITHUB_REPOSITORY/commits/${COMMIT_SHA}/pulls" \
+            --jq '.[0].number // empty' 2>/dev/null || true)
+
+          # Fallback: parse "(#NNN)" or "Merge pull request #NNN" from commit message
+          if [ -z "$PR_NUMBER" ]; then
+            MSG="${{ github.event.head_commit.message }}"
+            PR_NUMBER=$(echo "$MSG" | grep -oE '(^Merge pull request #|#)[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+          fi
+
+          echo "pr_number=${PR_NUMBER:-0}" >> "$GITHUB_OUTPUT"
+          echo "PR number: ${PR_NUMBER:-(not found, using 0)}"
+
+      - name: Submit DPL deploy record
+        id: submit
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+          GOVERNANCE_HASH: ${{ steps.govhash.outputs.governance_hash }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          DEPLOY_ROLE_ARN: ${{ needs.resolve.outputs.deploy_role_arn }}
+          COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
+          MERGED_AT: ${{ github.event.head_commit.timestamp }}
+        run: |
+          BODY=$(python3 - <<'PY'
+          import json, os
+          pr_raw = os.environ.get('PR_NUMBER', '0')
+          pr_id = int(pr_raw) if pr_raw.isdigit() else 0
+          sha = os.environ['COMMIT_SHA']
+          env = os.environ['ENVIRONMENT']
+          print(json.dumps({
+              "project_id": "enceladus",
+              "change_type": "patch",
+              "deployment_type": "lambda_update",
+              "summary": f"Gen2 Lambda deploy to {env} @ {sha[:7]} (PR #{pr_id})",
+              "changes": [
+                  f"commit_sha: {sha}",
+                  "branch: v4/main",
+                  f"environment: {env}",
+                  "workflow: _deploy.yml / Deploy Lambda Artifacts (Gen2)",
+              ],
+              "pr_id": pr_id,
+              "merged_at": os.environ['MERGED_AT'],
+              "pr_owner": "NX-2021-L",
+              "pr_repo": "enceladus",
+              "submitted_by": "gha-deploy-pipeline",
+              "non_ui_config": {
+                  "service_group": "lambda",
+                  "target_arn": os.environ['DEPLOY_ROLE_ARN'],
+              },
+              "governance_hash": os.environ['GOVERNANCE_HASH'],
+          }))
+          PY
+          )
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "$BODY" \
+            "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/deploy/submit")
+
+          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+
+          echo "Response (HTTP $HTTP_CODE): $HTTP_BODY"
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+            DEPLOY_ID=$(echo "$HTTP_BODY" | python3 -c \
+              "import sys,json; d=json.load(sys.stdin); print(d.get('deploy_id') or d.get('request_id') or d.get('spec_id') or 'unknown')" \
+              2>/dev/null || echo "unknown")
+            echo "deploy_id=${DEPLOY_ID}" >> "$GITHUB_OUTPUT"
+            echo "✅ DPL record written: ${DEPLOY_ID}"
+          else
+            echo "deploy_id=failed-http-${HTTP_CODE}" >> "$GITHUB_OUTPUT"
+            echo "⚠️ DPL record submit failed (HTTP ${HTTP_CODE}) — deploy succeeded, telemetry gap only"
+            # Exit 1 so the step shows as failed in the UI, but continue-on-error: true
+            # at job level means the overall workflow is not affected.
+            exit 1
+          fi
