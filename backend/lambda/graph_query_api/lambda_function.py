@@ -1652,6 +1652,28 @@ def _handle_refresh_projection(event: Dict) -> Dict[str, Any]:
     return {"ok": all(r.get("refreshed") for r in results), "results": results}
 
 
+def _handle_refresh_flow_weight(event: Dict) -> Dict[str, Any]:
+    """ENC-FTR-108 Ph2 (ENC-TSK-J02) out-of-band flow_weight refresh entrypoint.
+    Mirrors _handle_refresh_projection's contract: invoked by an EventBridge
+    scheduled/wave-close rule or a direct Lambda invoke carrying
+    action='refresh_flow_weight' (dispatched in lambda_handler below); NOT
+    exposed on the public API Gateway route. Delegates to flow_weight_refresh.
+    run_refresh, which reads FTR-082's existing edge_participation telemetry
+    from S3 and writes the Tero current-reinforcement law onto existing
+    relationships in batched, watermarked Cypher. See flow_weight_refresh.py
+    for the full design (delta/mu defaults, watermark storage, idempotency).
+    """
+    try:
+        import flow_weight_refresh as _fwr
+    except Exception:
+        logger.exception("[ERROR] flow_weight_refresh module unavailable")
+        return {"ok": False, "error": "flow_weight_refresh module unavailable"}
+    driver = _ensure_live_driver(_get_neo4j_driver())
+    if driver is None:
+        return {"ok": False, "error": "neo4j driver unavailable after rebuild attempt"}
+    return _fwr.run_refresh(driver, _get_s3(), event)
+
+
 def _hybrid_keyword_ranks(
     driver,
     project_id: str,
@@ -3196,6 +3218,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # ENC-FTR-087 Phase 1: wave-close drift emission via direct invoke / event.
     if isinstance(event, dict) and event.get("action") == "wave_close_drift":
         return _handle_wave_close_drift(event)
+
+    # ENC-FTR-108 Ph2 (ENC-TSK-J02): out-of-band flow_weight refresh. Checked
+    # before the generic aws.events/Scheduled-Event fallback below so an
+    # explicit action='refresh_flow_weight' invoke (or EventBridge rule Input)
+    # never falls through to the FTR-101 projection-refresh handler.
+    if isinstance(event, dict) and event.get("action") == "refresh_flow_weight":
+        return _handle_refresh_flow_weight(event)
 
     # ENC-FTR-101 (Option B): out-of-band standing-projection refresh. EventBridge
     # scheduled events / direct invokes carry action='refresh_projection' (and lack
