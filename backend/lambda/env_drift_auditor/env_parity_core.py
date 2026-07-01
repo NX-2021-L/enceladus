@@ -207,10 +207,57 @@ def find_signature_match(open_issues: Sequence[Dict[str, Any]], signature: str) 
     token = sig_token(signature)
     for issue in open_issues:
         if token in str(issue.get("title", "")):
-            bare = issue.get("item_id") or issue.get("id")
-            if not bare:
-                rid = str(issue.get("record_id", ""))
-                bare = rid.split("#", 1)[1] if "#" in rid else rid
+            bare = _bare_issue_id(issue)
+            if bare:
+                return bare
+    return None
+
+
+def _bare_issue_id(issue: Dict[str, Any]) -> Optional[str]:
+    """Prefer ``item_id`` (the bare ENC-ISS-NNN the ``/log`` route wants), else the
+    segment after ``#`` in ``record_id``."""
+    bare = issue.get("item_id") or issue.get("id")
+    if not bare:
+        rid = str(issue.get("record_id", ""))
+        bare = rid.split("#", 1)[1] if "#" in rid else rid
+    return bare or None
+
+
+def find_matching_drift_issue(
+    open_issues: Sequence[Dict[str, Any]],
+    signature: str,
+    fn_name: str,
+    missing_vars: Sequence[str],
+) -> Optional[str]:
+    """Find the ONE canonical open issue for a (lambda, missing-var-set) finding.
+
+    ENC-TSK-J30 hardening of the ENC-TSK-H10 dedup: the auditor also consolidates
+    LEGACY, pre-signature ``[auto-drift]`` issues. The 2026-06-18..21 storm filed one
+    tokenless P0 per run (ENC-ISS-319..381 for devops-deploy-intake / SQS_QUEUE_URL);
+    those titles carry no ``[sig:...]`` token, so ``find_signature_match`` never
+    matched them and they orphaned into a permanent open pile — a *new* signature
+    issue would then be a duplicate on top of the storm. Match order:
+      1. exact signature-token match (H10, tokenful issues); then
+      2. the deterministic ``[auto-drift] {fn} missing required env vars: {vars}``
+         title for the SAME fn + missing-var set (legacy / tokenless issues).
+    Guarantees one canonical record per (fn, var-set) rather than a re-storm.
+    """
+    matched = find_signature_match(open_issues, signature)
+    if matched:
+        return matched
+    want = frozenset(v for v in missing_vars if v)
+    if not want:
+        return None
+    prefix = f"[auto-drift] {fn_name} missing required env vars:"
+    for issue in open_issues:
+        title = str(issue.get("title", ""))
+        if not title.startswith(prefix):
+            continue
+        # the vars listed between the prefix and an optional trailing [sig:...] token
+        tail = title[len(prefix):].split("[sig:", 1)[0]
+        vars_in_title = frozenset(v.strip() for v in tail.split(",") if v.strip())
+        if vars_in_title == want:
+            bare = _bare_issue_id(issue)
             if bare:
                 return bare
     return None
