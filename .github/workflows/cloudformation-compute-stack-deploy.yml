@@ -291,6 +291,16 @@ jobs:
           # canonical :10 ARN here forces the param so the heal moves live; the H24 gate
           # (tools/verify_shared_layer_version.py) asserts this override stays == the canonical pin.
 
+          # ENC-TSK-J31 / ENC-ISS-462: env-aware AppConfig IDs so the gamma stack reads its OWN
+          # feature-flags (enceladus-feature-flags-gamma) instead of prod's. Previously both prod
+          # AND gamma deploys passed the prod IDs (5t3sqte/bnwj3lj), so gamma/UAT silently resolved
+          # prod feature flags. Prod: 5t3sqte/bnwj3lj; gamma: fhhcl7m/zecfu42.
+          if [ "${ENVIRONMENT_SUFFIX}" = "-gamma" ]; then
+            APPCFG_APP="fhhcl7m"; APPCFG_ENV="zecfu42"
+          else
+            APPCFG_APP="5t3sqte"; APPCFG_ENV="bnwj3lj"
+          fi
+
           aws cloudformation deploy \
             --region "${AWS_REGION}" \
             --stack-name "${{ steps.params.outputs.stack_name }}" \
@@ -302,8 +312,8 @@ jobs:
             --parameter-overrides \
               DataStackName="${{ steps.params.outputs.data_stack_name }}" \
               CoordinationInternalApiKey="${{ secrets.COORDINATION_INTERNAL_API_KEY }}" \
-              AppConfigApplicationId="5t3sqte" \
-              AppConfigEnvironmentId="bnwj3lj" \
+              AppConfigApplicationId="${APPCFG_APP}" \
+              AppConfigEnvironmentId="${APPCFG_ENV}" \
               EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" \
               SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10" \
               CursorWebhookSecret="${{ secrets.CURSOR_WEBHOOK_SECRET }}"
