@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-01.01",
-  "updated_at": "2026-07-01T12:50:00Z",
-  "last_change_summary": "ENC-ISS-452 (ENC-TSK-I96): Updated deploy.spec to document that record_only mode now applies to ALL deployment types (including lambda_update/non-UI). deploy_mode check moved before NON_UI branch in deploy_orchestrator so Gen2 _deploy.yml record_deploy submissions auto-finalize as DEP records. Updated deploy_mode usage_guidance accordingly.",
+  "version": "2026-07-01.02",
+  "updated_at": "2026-07-01T22:06:00Z",
+  "last_change_summary": "ENC-TSK-J41 v3-prod port (SEV-1 ENC-ISS-465 cost kill, via DOC-B716E8FB10B6 Channel A): graph_query_api adds GDS_HARD_DISABLED env gate (_check_gds_available->False; forces cypher_fallback, no Aura Graph Analytics session). 02-compute.yaml prefix->AWS::NoValue, GDS_HARD_DISABLED=1, StandingProjectionRefreshSchedule State=DISABLED. Env-gate only; no new record schema/edge types.",
   "owners": [
     "enceladus-platform"
   ],

@@ -153,6 +153,7 @@ _HEALTH_PROBE_TOKEN = "governance"
 # ('weight' today; flips to 'flow_weight' once ENC-FTR-108 writes adaptive
 # weights into the slot this projection initializes to 1.0).
 _GDS_STANDING_PROJECTION_PREFIX = os.environ.get("GDS_STANDING_PROJECTION_PREFIX", "").strip()
+_GDS_HARD_DISABLED = os.environ.get("GDS_HARD_DISABLED", "").strip().lower() in ("1", "true", "yes", "on")  # ENC-ISS-465/J41: hard-disable AGA/GDS -> cypher_fallback (kills Graph Analytics Serverless cost)
 _GDS_SESSION_MEMORY = os.environ.get("GDS_SESSION_MEMORY", "2GB").strip() or "2GB"
 _GDS_WEIGHT_PROPERTY = os.environ.get("GDS_WEIGHT_PROPERTY", "weight").strip() or "weight"
 _GDS_FLOW_WEIGHT_PROPERTY = "flow_weight"
@@ -709,6 +710,8 @@ def _check_gds_available(driver) -> bool:
 
     Returns True if CALL gds.list() succeeds; False otherwise. Never raises.
     """
+    if _GDS_HARD_DISABLED:
+        return False  # ENC-ISS-465/J41: force cypher_fallback; never create an AGA session
     import time as _time
     now = _time.time()
     if (
@@ -1175,6 +1178,8 @@ def _refresh_standing_projection(driver, project_id: str) -> Dict[str, Any]:
     slot (ENC-FTR-101 AC-5), then stamps a GdsProjectionMeta marker carrying the
     last-refresh epoch for staleness telemetry (AC-3). Never raises.
     """
+    if _GDS_HARD_DISABLED:
+        return {"refreshed": False, "reason": "GDS_HARD_DISABLED", "project_id": project_id}
     graph_name = _standing_projection_name(project_id)
     if not graph_name:
         return {"refreshed": False, "reason": "GDS_STANDING_PROJECTION_PREFIX unset", "project_id": project_id}
