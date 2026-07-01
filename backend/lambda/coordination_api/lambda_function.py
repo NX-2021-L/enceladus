@@ -74,6 +74,16 @@ except ModuleNotFoundError:  # pragma: no cover - packaging fallback
     _intent_drift = importlib.util.module_from_spec(_ID_SPEC)  # type: ignore[arg-type]
     _ID_SPEC.loader.exec_module(_intent_drift)  # type: ignore[union-attr]
 
+# ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-credential lifecycle allocator. Import with the
+# same packaging fallback used above so a flat-zip deploy resolves it by file path.
+try:
+    import agent_id_alloc as _agent_id_alloc
+except ModuleNotFoundError:  # pragma: no cover - packaging fallback
+    _AIA_PATH = pathlib.Path(__file__).with_name("agent_id_alloc.py")
+    _AIA_SPEC = importlib.util.spec_from_file_location("agent_id_alloc", _AIA_PATH)
+    _agent_id_alloc = importlib.util.module_from_spec(_AIA_SPEC)  # type: ignore[arg-type]
+    _AIA_SPEC.loader.exec_module(_agent_id_alloc)  # type: ignore[union-attr]
+
 try:
     import jwt
     from jwt.algorithms import RSAAlgorithm
@@ -13128,6 +13138,77 @@ def _handle_auth_tokens_list() -> Dict[str, Any]:
     return _response(200, {"tokens": tokens, "count": len(tokens)})
 
 
+def _handle_agent_credential_issue(event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/credentials — issue a credential for an identity.
+
+    Body: {"agent_identity_id": "ENC-AGT-NNN", "rotated_from": "<optional parent CRED>"}.
+    The credential id is minted server-side (callers may never supply it). The persisted
+    row streams to graph_sync, which projects the :AgentCredential node + OWNED_BY edge
+    (and DERIVED_FROM when rotated_from is set) asynchronously — NO synchronous Neo4j call.
+    """
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc))
+
+    agent_identity_id = str(body.get("agent_identity_id") or "").strip()
+    if not agent_identity_id:
+        return _error(400, "agent_identity_id is required")
+    rotated_from = str(body.get("rotated_from") or "").strip()
+    try:
+        item = _agent_id_alloc.issue_credential(
+            agent_identity_id=agent_identity_id,
+            rotated_from=rotated_from,
+            caller_payload=body,
+        )
+    except _agent_id_alloc.CallerSuppliedIdError as exc:
+        return _error(400, str(exc))
+    except ValueError as exc:
+        return _error(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to issue agent credential")
+        return _error(500, f"Failed to issue agent credential: {exc}")
+    return _response(201, {"success": True, "credential": item})
+
+
+def _handle_agent_credential_rotate(credential_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/credentials/{id}/rotate — rotate a credential.
+
+    Issues a successor credential (rotated_from={id}) then revokes the parent
+    (reason='rotated', NON-cascading). Returns {new_credential, revoked_parent}.
+    """
+    try:
+        result = _agent_id_alloc.rotate_credential(credential_id)
+    except ValueError as exc:
+        return _error(404 if "not found" in str(exc).lower() else 409, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to rotate agent credential %s", credential_id)
+        return _error(500, f"Failed to rotate agent credential: {exc}")
+    return _response(200, {"success": True, **result})
+
+
+def _handle_agent_credential_revoke(credential_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/credentials/{id}/revoke — revoke + cascade.
+
+    Body: {"reason": "<optional>"}. Revokes the credential and cascades (DynamoDB-side):
+    retires bound sessions and recursively revokes rotation descendants. The graph edges
+    reflect the cascade asynchronously once the stream events flow through graph_sync.
+    """
+    try:
+        body = _json_body(event)
+    except ValueError as exc:
+        return _error(400, str(exc))
+    reason = str(body.get("reason") or "revoked").strip() or "revoked"
+    try:
+        summary = _agent_id_alloc.revoke_credential(credential_id, reason)
+    except ValueError as exc:
+        return _error(404, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to revoke agent credential %s", credential_id)
+        return _error(500, f"Failed to revoke agent credential: {exc}")
+    return _response(200, {"success": True, **summary})
+
+
 def _handle_auth_tokens_create(event: Dict[str, Any]) -> Dict[str, Any]:
     try:
         body = _json_body(event)
@@ -14110,6 +14191,26 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         return _handle_projects_get(match_project.group(1))
 
     # --- Unified auth token management (auth required) ---
+
+    # --- Agent-credential lifecycle (ENC-TSK-J04 / ENC-FTR-074 Ph3) ---
+
+    # POST /api/v1/coordination/agents/credentials — issue
+    if method == "POST" and path == "/api/v1/coordination/agents/credentials":
+        return _handle_agent_credential_issue(event)
+
+    # POST /api/v1/coordination/agents/credentials/{id}/rotate
+    match_cred_rotate = re.fullmatch(
+        r"/api/v1/coordination/agents/credentials/(CRED-[0-9a-fA-F]+)/rotate", path
+    )
+    if method == "POST" and match_cred_rotate:
+        return _handle_agent_credential_rotate(match_cred_rotate.group(1), event)
+
+    # POST /api/v1/coordination/agents/credentials/{id}/revoke
+    match_cred_revoke = re.fullmatch(
+        r"/api/v1/coordination/agents/credentials/(CRED-[0-9a-fA-F]+)/revoke", path
+    )
+    if method == "POST" and match_cred_revoke:
+        return _handle_agent_credential_revoke(match_cred_revoke.group(1), event)
 
     # GET /api/v1/coordination/auth/tokens
     if method == "GET" and path == "/api/v1/coordination/auth/tokens":

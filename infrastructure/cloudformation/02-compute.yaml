@@ -200,6 +200,12 @@ Resources:
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
           # ENC-FTR-116 / ENC-TSK-I29: canonical governance-version DDB record.
           GOVERNANCE_VERSION_TABLE: !Sub "governance-version${EnvironmentSuffix}"
+          # ENC-TSK-I37 / ENC-TSK-J04 (ENC-FTR-117 / ENC-FTR-074): agent identity stores.
+          # Env-suffixed so gamma resolves the "-gamma" tables; the agent_id_alloc
+          # allocator + credential lifecycle read these names.
+          AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
+          AGENT_TYPES_TABLE: !Sub "agent-types${EnvironmentSuffix}"
+          AGENT_CREDENTIALS_TABLE: !Sub "agent-credentials${EnvironmentSuffix}"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -2034,6 +2040,78 @@ Resources:
           MessageGroupId: document
           MessageDeduplicationId: $.dynamodb.Keys.document_id.S
 
+  # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity graph projection pipes. Three more
+  # EventBridge Pipes modeled on TrackerToGraphPipe/DocumentsToGraphPipe, each sourcing a
+  # distinct agent-store DynamoDB Stream and targeting the SAME GraphSyncQueue. graph_sync
+  # consumes all pipes transparently via its existing SQS event source. Each uses a literal
+  # MessageGroupId (the store name) so agent mutations stay in a distinct FIFO group from
+  # the tracker/document groups; the store's own id field is the dedup id.
+  AgentSessionsToGraphPipe:
+    Type: AWS::Pipes::Pipe
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-agent-sessions-to-graph-sync-queue${EnvironmentSuffix}"
+      RoleArn: !GetAtt GraphPipeRole.Arn
+      Source: !ImportValue
+        Fn::Sub: ${DataStackName}-AgentSessionsStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+      Target: !ImportValue
+        Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+      TargetParameters:
+        SqsQueueParameters:
+          MessageGroupId: agent-session
+          MessageDeduplicationId: $.dynamodb.Keys.session_id.S
+
+  AgentTypesToGraphPipe:
+    Type: AWS::Pipes::Pipe
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-agent-types-to-graph-sync-queue${EnvironmentSuffix}"
+      RoleArn: !GetAtt GraphPipeRole.Arn
+      Source: !ImportValue
+        Fn::Sub: ${DataStackName}-AgentTypesStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+      Target: !ImportValue
+        Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+      TargetParameters:
+        SqsQueueParameters:
+          MessageGroupId: agent-identity
+          MessageDeduplicationId: $.dynamodb.Keys.agent_type_id.S
+
+  AgentCredentialsToGraphPipe:
+    Type: AWS::Pipes::Pipe
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-agent-credentials-to-graph-sync-queue${EnvironmentSuffix}"
+      RoleArn: !GetAtt GraphPipeRole.Arn
+      Source: !ImportValue
+        Fn::Sub: ${DataStackName}-AgentCredentialsStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+      Target: !ImportValue
+        Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+      TargetParameters:
+        SqsQueueParameters:
+          MessageGroupId: agent-credential
+          MessageDeduplicationId: $.dynamodb.Keys.credential_id.S
+
   # ---------------------------------------------------------------------------
   # IAM Roles (placeholder — full policies in each Lambda's deploy.sh)
   # ---------------------------------------------------------------------------
@@ -2123,6 +2201,21 @@ Resources:
                   - dynamodb:Scan
                   - dynamodb:Query
                 Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+              # ENC-TSK-I37 / ENC-TSK-J04 (ENC-FTR-117 / ENC-FTR-074): agent identity stores.
+              # agent_id_alloc mints ENC-SES/ENC-AGT and the credential lifecycle
+              # (issue/rotate/revoke + cascade) reads/writes the agent-credentials table.
+              - Sid: AgentIdStoresAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-types${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-credentials${EnvironmentSuffix}"
               - Sid: GovernancePoliciesReadWrite
                 Effect: Allow
                 Action:
@@ -4187,6 +4280,21 @@ Resources:
                   - dynamodb:ListStreams
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-DocumentsStreamArn
+              # ENC-TSK-J04 / ENC-FTR-074 Ph3: Agent*ToGraphPipe source perms
+              - Sid: ReadAgentStreams
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: ${DataStackName}-AgentSessionsStreamArn
+                  - !ImportValue
+                    Fn::Sub: ${DataStackName}-AgentTypesStreamArn
+                  - !ImportValue
+                    Fn::Sub: ${DataStackName}-AgentCredentialsStreamArn
         - PolicyName: PipeTargetSqs
           PolicyDocument:
             Version: '2012-10-17'
