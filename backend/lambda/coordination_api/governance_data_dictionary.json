@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-01.04",
-  "updated_at": "2026-07-01T21:59:00Z",
-  "last_change_summary": "ENC-TSK-J43: backported coordination.agent_session/coordination.agent_type entities + mcp_server.agent_actions entity (I38 HTTP routes, ported to v4/main gamma) and credential_id session-binding field.",
+  "version": "2026-07-01.05",
+  "updated_at": "2026-07-01T22:10:00Z",
+  "last_change_summary": "ENC-TSK-J44: fixed graph_sync record-type synthesis probe order (session_id before credential_id) to prevent credential-bound sessions from corrupting the credential's Neo4j node.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6086,7 +6086,7 @@
       }
     },
     "graph_sync.agent_identity_edges": {
-      "description": "ENC-TSK-J04 / ENC-FTR-074 Ph3: agent identity/session/credential graph projection. Three DynamoDB stores (agent-types -> :AgentIdentity, agent-sessions -> :AgentSession, agent-credentials -> :AgentCredential) each carry a NEW_AND_OLD_IMAGES DynamoDB Stream wired through a dedicated EventBridge Pipe (AgentSessionsToGraphPipe / AgentTypesToGraphPipe / AgentCredentialsToGraphPipe) into the SAME devops-graph-sync-queue.fifo consumed by graph_sync -- no synchronous Neo4j write exists anywhere on the auth/mutation hot path (coordination_api and agent_id_alloc import no neo4j driver). The stores carry no record_type column, so graph_sync._normalize_record_for_graph synthesizes record_type (agent_identity/agent_session/agent_credential) and record_id from the id field. _upsert_agent_node MERGEs the node by its id; _reconcile_agent_edges and the generic _project_mutated_edge hook MERGE five typed edges. Counter# sentinel rows are excluded. OGTM (ENC-FTR-066) compliance: all five edge labels are registered byte-identically in graph_sync.RELATIONSHIP_TYPE_TO_EDGE_LABEL and graph_query_api._ALLOWED_EDGE_TYPES (ENC-ISS-178 drift guard) so they are traversable via tracker.graphsearch. The labels are emitted directly from the agent-store streams (NOT via the ENC-FTR-049 relationship-record path). E2E gamma tracker.graphsearch validation is a post-deploy manual/CI step (deferred to after this code merges + deploys to v4-gamma).",
+      "description": "ENC-TSK-J04 / ENC-FTR-074 Ph3: agent identity/session/credential graph projection. Three DynamoDB stores (agent-types -> :AgentIdentity, agent-sessions -> :AgentSession, agent-credentials -> :AgentCredential) each carry a NEW_AND_OLD_IMAGES DynamoDB Stream wired through a dedicated EventBridge Pipe (AgentSessionsToGraphPipe / AgentTypesToGraphPipe / AgentCredentialsToGraphPipe) into the SAME devops-graph-sync-queue.fifo consumed by graph_sync -- no synchronous Neo4j write exists anywhere on the auth/mutation hot path (coordination_api and agent_id_alloc import no neo4j driver). The stores carry no record_type column, so graph_sync._normalize_record_for_graph synthesizes record_type (agent_identity/agent_session/agent_credential) and record_id from the id field. _upsert_agent_node MERGEs the node by its id; _reconcile_agent_edges and the generic _project_mutated_edge hook MERGE five typed edges. Counter# sentinel rows are excluded. OGTM (ENC-FTR-066) compliance: all five edge labels are registered byte-identically in graph_sync.RELATIONSHIP_TYPE_TO_EDGE_LABEL and graph_query_api._ALLOWED_EDGE_TYPES (ENC-ISS-178 drift guard) so they are traversable via tracker.graphsearch. The labels are emitted directly from the agent-store streams (NOT via the ENC-FTR-049 relationship-record path). E2E gamma tracker.graphsearch validation is a post-deploy manual/CI step (deferred to after this code merges + deploys to v4-gamma). ENC-TSK-J44 (2026-07-01): fixed a record-type synthesis bug where the id-field probe order (in _normalize_record_for_graph) checked credential_id before session_id -- since J43 added an optional credential_id FK onto agent-session rows, a credential-bound session was misclassified as agent_credential and its properties were MERGEd onto the real credential's node, corrupting shared fields (e.g. status). Probe order corrected to check each type's own PK (session_id) before any field it may merely carry as an FK.",
       "fields": {
         "node_labels": {
           "type": "object",
@@ -6278,6 +6278,11 @@
       "version": "2026-07-01.04",
       "task": "ENC-TSK-J43",
       "summary": "Backported I38 agent-session HTTP routes to v4/main + credential_id binding on coordination.agent_session."
+    },
+    {
+      "version": "2026-07-01.05",
+      "task": "ENC-TSK-J44",
+      "summary": "Fixed graph_sync._normalize_record_for_graph probe order bug (credential-bound sessions misclassified as agent_credential)."
     }
   ]
 }
