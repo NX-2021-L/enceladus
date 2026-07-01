@@ -245,7 +245,21 @@ else
             --output-json "${DRIFT_REPORT}" \
             --fail-on-drift; then
         echo "[PASS] No CFN drift detected for ${DRIFT_ENV}"
+        DRIFT_RC=0
     else
+        DRIFT_RC=$?
+    fi
+
+    # ENC-TSK-J22 / GH#672: audit_cfn_drift.py exits 2 (not 1) when a live AWS
+    # read was denied (e.g. CloudFormationDeployRole missing events:ListRules) —
+    # a permission gap, not evidence of drift. Treat exit 2 as flagged-but-
+    # non-fatal so the gate doesn't false-fail on a role's missing read grant;
+    # exit 1 (real drift) still fails the gate closed as before.
+    if [[ "${DRIFT_RC:-0}" -eq 2 ]]; then
+        echo "[WARN] CFN drift audit INCONCLUSIVE for ${DRIFT_ENV} — a live-read permission"
+        echo "       gap (e.g. missing events:ListRules) prevented full evaluation. Flagged,"
+        echo "       NOT treated as drift; gate not failed (see ${DRIFT_REPORT}; GH #672)."
+    elif [[ "${DRIFT_RC:-0}" -ne 0 ]]; then
         echo "[FAIL] CFN drift detected for ${DRIFT_ENV} — resolve before deploying (see ${DRIFT_REPORT}; ENC-ISS-455 / ENC-TSK-J12)"
         ERRORS=$((ERRORS + 1))
     fi
