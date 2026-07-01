@@ -77,6 +77,21 @@ class TestNormalizeSynthesizesRecordType(_CypherCaptureMixin, unittest.TestCase)
         )
         self.assertEqual(sess["record_type"], "agent_session")
 
+    def test_credential_bound_session_synthesized_as_session_not_credential(self):
+        # ENC-TSK-J43 regression: a session bound to a credential carries BOTH session_id
+        # and credential_id. Must resolve as agent_session (its own PK), not agent_credential
+        # (a mere FK on the row) -- misclassifying it would MERGE the session's properties
+        # onto the real credential's Neo4j node under the shared credential_id record_id,
+        # corrupting fields like status via SET n += $props.
+        out = self.lf._normalize_record_for_graph({
+            "session_id": "ENC-SES-001",
+            "agent_type_id": "ENC-AGT-005",
+            "credential_id": "CRED-a535fc10c7844268a7a4980af9067b1d",
+            "status": "retired",
+        })
+        self.assertEqual(out["record_type"], "agent_session")
+        self.assertEqual(out["record_id"], "ENC-SES-001")
+
 
 class TestEdgeLabelRegistration(_CypherCaptureMixin, unittest.TestCase):
     NEW = {

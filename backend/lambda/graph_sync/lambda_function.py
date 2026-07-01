@@ -156,12 +156,19 @@ def _normalize_record_for_graph(record: Dict[str, Any]) -> Dict[str, Any]:
 
     # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity stores carry no record_type column and
     # key on their own id field. Synthesize record_type + record_id from the id field so
-    # the graph dispatch can route them. Order matters: sessions AND credentials also carry
-    # agent_type_id / agent_identity_id, so probe the most-specific key first.
+    # the graph dispatch can route them. Order matters: probe each type's OWN partition-key
+    # field before any foreign-key field another type might also carry. ENC-TSK-J43 added an
+    # optional credential_id FK onto agent-session rows, so session_id (a session's own PK)
+    # MUST be probed before credential_id (a session row now has both) -- checking
+    # credential_id first misclassified every credential-bound session as an agent_credential
+    # record, corrupting the real credential's Neo4j node via SET n += $props on shared field
+    # names (e.g. status). Credential rows have no session_id, so this ordering is safe for
+    # them; agent-type rows have neither session_id nor credential_id, so they fall through
+    # correctly regardless of position.
     if not record_type:
         for id_field, synthetic_type in (
-            ("credential_id", "agent_credential"),
             ("session_id", "agent_session"),
+            ("credential_id", "agent_credential"),
             ("agent_type_id", "agent_identity"),
         ):
             id_val = str(normalized.get(id_field) or "").strip()
