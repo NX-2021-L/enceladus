@@ -202,6 +202,19 @@ Resources:
                   - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/enceladus-*"
                   - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/on-project-json-sync*"
 
+              # Required by pre-deploy-health-gate.sh Check 7 (ENC-TSK-J12 /
+              # ENC-ISS-455): audit_cfn_drift.py calls `aws events list-rules`
+              # to compare live EventBridge rules against CFN-declared rules.
+              # Mirrors BackendDeployRole's CfnDriftAuditEventBridgeRead grant
+              # (ENC-TSK-I94 / ENC-ISS-442). GH#672 / ENC-TSK-J22: without this,
+              # the health gate's drift check crashed with AccessDenied on
+              # every compute/api/monitoring push-deploy.
+              - Sid: CfnDriftAuditEventBridgeRead
+                Effect: Allow
+                Action:
+                  - events:ListRules
+                Resource: !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/*"
+
               - Sid: PipesValidationReadOnly
                 Effect: Allow
                 Action:
