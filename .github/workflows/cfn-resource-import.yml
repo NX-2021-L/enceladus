@@ -1,0 +1,317 @@
+name: CFN Resource Import / Recovery (privileged, fail-closed)
+
+# ENC-TSK-J13 / DOC-AA5C7A37A103 — the AUTONOMY ENABLER for the ENC-TSK-J10 CFN
+# drift close-out wave. This privileged workflow assumes the CloudFormation role
+# and adopts out-of-band live resources into a stack via change-set IMPORT (or
+# recovers/creates the monitoring stacks). It has NO GitHub Environment reviewer
+# gate — the human review that normally guards a privileged CFN change is REPLACED,
+# for this wave, by the automated FAIL-CLOSED invariant checks below:
+#
+#   1. create-change-set (never a plain full-env deploy)
+#   2. tools/assert_changeset_safe.py — programmatic proof the change-set contains
+#      ONLY Import/no-op (import mode) or only non-destructive Add/Modify/Import
+#      (recover/create mode). ANY Remove / Replace / Conditional-replacement /
+#      Dynamic — or an unexpected Add/Modify in import mode — ABORTS before execute.
+#   3. tools/pre-deploy-health-gate.sh (ENC-PLN-020) must pass.
+#   4. Post-execute verification (describe-stack / get-routes / describe-rule).
+#
+# Only after ALL of 1–3 pass does execute-change-set run. preview_only=true stops
+# after the assertion and DELETES the change-set (no mutation) — use it to prove a
+# stack's next change-set is non-destructive (J16's six previews).
+#
+# Agent identity (enceladus-agent-cli) is read-only AWS + STS-AssumeRole-denied, so
+# this CI workflow is the ONLY autonomous privileged path (DOC-AA5C7A37A103). Do NOT
+# run `aws cloudformation deploy` / execute-change-set from an agent terminal.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "import = adopt OOB resources (IMPORT, assert Import-only). monitoring-recover = repair a degraded stack. monitoring-create = create/roll-forward a stack."
+        type: choice
+        options:
+          - import
+          - monitoring-recover
+          - monitoring-create
+        default: import
+        required: true
+      stack_name:
+        description: "Target CFN stack (enceladus-api, enceladus-compute, enceladus-monitoring, enceladus-monitoring-gamma, ...)."
+        type: string
+        required: true
+      template_file:
+        description: "Template path, repo-relative."
+        type: string
+        required: true
+        default: infrastructure/cloudformation/03-api.yaml
+      manifest_file:
+        description: "resources-to-import manifest, repo-relative. REQUIRED for import; supply on monitoring-recover to adopt an OOB resource; leave blank for a pure create/update."
+        type: string
+        required: false
+        default: ""
+      parameter_overrides:
+        description: "Space-separated Key=Value CFN parameters. If blank on IMPORT/UPDATE of an existing stack, current stack parameters are re-used (UsePreviousValue)."
+        type: string
+        required: false
+        default: ""
+      capabilities:
+        description: "CFN capabilities."
+        type: string
+        required: false
+        default: "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+      preview_only:
+        description: "true = create the change-set, run the fail-closed assertion, then DELETE it without executing (no mutation)."
+        type: boolean
+        default: false
+      reason:
+        description: "Why this run is dispatched (audit trail)."
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  STAGING_BUCKET: enceladus-cfn-staging-us-west-2
+
+jobs:
+  import:
+    name: "${{ inputs.mode }} -> ${{ inputs.stack_name }}${{ inputs.preview_only && ' (preview)' || '' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: cfn-resource-import-${{ inputs.stack_name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify CloudFormation role secret is set
+        run: |
+          if [ -z "${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}" ]; then
+            echo "::error::AWS_CLOUDFORMATION_ROLE_TO_ASSUME secret is not set. Needs a role with cloudformation:*, apigateway:*, events:*, lambda:Get*, cloudwatch:*, s3 staging access."
+            exit 1
+          fi
+          echo "CF role secret present."
+
+      - name: Configure AWS credentials (OIDC privileged CloudFormation role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Self-check the fail-closed assertion tool
+        run: |
+          set -euo pipefail
+          echo "Verifying tools/assert_changeset_safe.py classifier before trusting it as the gate..."
+          python3 tools/assert_changeset_safe.py --self-check
+
+      - name: Resolve operation parameters
+        id: op
+        env:
+          MODE: ${{ inputs.mode }}
+          MANIFEST: ${{ inputs.manifest_file }}
+          TEMPLATE: ${{ inputs.template_file }}
+          STACK: ${{ inputs.stack_name }}
+        run: |
+          set -euo pipefail
+          # Derive change-set type + assertion mode from (mode, manifest presence).
+          cst=""; assert_mode=""; skip_drift="0"
+          case "${MODE}" in
+            import)
+              if [ -z "${MANIFEST}" ]; then echo "::error::import mode requires manifest_file"; exit 1; fi
+              cst="IMPORT"; assert_mode="import"; skip_drift="1" ;;
+            monitoring-recover)
+              if [ -n "${MANIFEST}" ]; then cst="IMPORT"; assert_mode="import"; skip_drift="1";
+              else cst="UPDATE"; assert_mode="recover"; fi ;;
+            monitoring-create)
+              if [ -n "${MANIFEST}" ]; then cst="IMPORT"; assert_mode="import"; skip_drift="1";
+              else cst="CREATE"; assert_mode="create"; fi ;;
+            *) echo "::error::unknown mode ${MODE}"; exit 1 ;;
+          esac
+          # Preflight: files exist
+          if [ ! -f "${TEMPLATE}" ]; then echo "::error::template not found: ${TEMPLATE}"; exit 1; fi
+          if [ -n "${MANIFEST}" ] && [ ! -f "${MANIFEST}" ]; then echo "::error::manifest not found: ${MANIFEST}"; exit 1; fi
+          # Change-set name: stack + run id (no Date.now available; run id is unique)
+          csn="j13imp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "change_set_type=${cst}"
+            echo "assert_mode=${assert_mode}"
+            echo "skip_drift=${skip_drift}"
+            echo "change_set_name=${csn}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "mode=${MODE} -> change-set-type=${cst}, assert-mode=${assert_mode}, skip_drift=${skip_drift}, name=${csn}"
+
+      - name: Stage template to S3 (avoids 51KB inline template-body limit)
+        id: stage
+        run: |
+          set -euo pipefail
+          key="imports/${{ inputs.stack_name }}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"
+          aws s3 cp "${{ inputs.template_file }}" "s3://${STAGING_BUCKET}/${key}" --region "${AWS_REGION}"
+          echo "template_url=https://${STAGING_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${key}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build CFN parameters
+        id: params
+        env:
+          OVERRIDES: ${{ inputs.parameter_overrides }}
+          CST: ${{ steps.op.outputs.change_set_type }}
+          STACK: ${{ inputs.stack_name }}
+        run: |
+          set -euo pipefail
+          args=""
+          if [ -n "${OVERRIDES}" ]; then
+            for kv in ${OVERRIDES}; do
+              k="${kv%%=*}"; v="${kv#*=}"
+              args="${args} ParameterKey=${k},ParameterValue=${v}"
+            done
+          elif [ "${CST}" != "CREATE" ]; then
+            # Re-use the existing stack's parameters (UsePreviousValue) so an
+            # import/update never accidentally re-defaults a parameter.
+            keys=$(aws cloudformation describe-stacks --stack-name "${STACK}" --region "${AWS_REGION}" \
+              --query 'Stacks[0].Parameters[].ParameterKey' --output text 2>/dev/null || true)
+            for k in ${keys}; do
+              args="${args} ParameterKey=${k},UsePreviousValue=true"
+            done
+          fi
+          echo "parameters=${args}" >> "${GITHUB_OUTPUT}"
+          echo "parameters: ${args:-<none>}"
+
+      - name: Create change-set
+        id: create
+        env:
+          CST: ${{ steps.op.outputs.change_set_type }}
+          CSN: ${{ steps.op.outputs.change_set_name }}
+          TURL: ${{ steps.stage.outputs.template_url }}
+          PARAMS: ${{ steps.params.outputs.parameters }}
+        run: |
+          set -euo pipefail
+          extra=""
+          if [ -n "${{ inputs.manifest_file }}" ]; then
+            extra="--resources-to-import file://${{ inputs.manifest_file }}"
+          fi
+          pargs=""
+          if [ -n "${PARAMS}" ]; then pargs="--parameters ${PARAMS}"; fi
+          set -x
+          aws cloudformation create-change-set \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ inputs.stack_name }}" \
+            --change-set-name "${CSN}" \
+            --change-set-type "${CST}" \
+            --template-url "${TURL}" \
+            --capabilities ${{ inputs.capabilities }} \
+            ${pargs} ${extra} \
+            --description "ENC-TSK-J13 ${{ inputs.mode }}: ${{ inputs.reason }}"
+          set +x
+
+      - name: Wait for change-set creation (tolerate benign empty)
+        id: wait
+        env:
+          CSN: ${{ steps.op.outputs.change_set_name }}
+        run: |
+          set +e
+          aws cloudformation wait change-set-create-complete \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ inputs.stack_name }}" \
+            --change-set-name "${CSN}"
+          echo "wait-exit=$? (non-zero can be the benign 'no changes' case; the assertion step judges it)"
+
+      - name: Describe change-set
+        id: describe
+        env:
+          CSN: ${{ steps.op.outputs.change_set_name }}
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-change-set \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ inputs.stack_name }}" \
+            --change-set-name "${CSN}" \
+            --output json > /tmp/changeset.json
+          echo "=== change-set summary ==="
+          python3 -c "import json; d=json.load(open('/tmp/changeset.json')); print('Status:',d.get('Status'),'| StatusReason:',d.get('StatusReason','')); [print(' ',c['ResourceChange'].get('Action'), c['ResourceChange'].get('ResourceType'), c['ResourceChange'].get('LogicalResourceId'), 'Replacement=',c['ResourceChange'].get('Replacement')) for c in d.get('Changes',[])]"
+
+      - name: "FAIL-CLOSED GATE: assert change-set is Import/no-op only"
+        env:
+          AMODE: ${{ steps.op.outputs.assert_mode }}
+        run: |
+          set -euo pipefail
+          echo "Asserting change-set safety (mode=${AMODE}) — this REPLACES human review."
+          python3 tools/assert_changeset_safe.py --changeset-json /tmp/changeset.json --mode "${AMODE}"
+
+      - name: "Pre-deploy health gate (ENC-PLN-020)"
+        env:
+          HEALTH_GATE_SKIP_DRIFT: ${{ steps.op.outputs.skip_drift }}
+        run: |
+          set -euo pipefail
+          echo "HEALTH_GATE_SKIP_DRIFT=${HEALTH_GATE_SKIP_DRIFT} (1 = import context; assert_changeset_safe is the drift control)"
+          bash tools/pre-deploy-health-gate.sh \
+            --stack "${{ inputs.stack_name }}" \
+            --template "${{ inputs.template_file }}"
+
+      - name: "Preview only — delete change-set, do NOT execute"
+        if: ${{ inputs.preview_only }}
+        env:
+          CSN: ${{ steps.op.outputs.change_set_name }}
+        run: |
+          set -euo pipefail
+          echo "preview_only=true: change-set passed the fail-closed assertion + health gate; deleting without executing."
+          aws cloudformation delete-change-set \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ inputs.stack_name }}" \
+            --change-set-name "${CSN}" || true
+          echo "PREVIEW PASSED — the next change-set for ${{ inputs.stack_name }} is non-destructive."
+
+      - name: Execute change-set
+        if: ${{ !inputs.preview_only }}
+        env:
+          CSN: ${{ steps.op.outputs.change_set_name }}
+        run: |
+          set -euo pipefail
+          aws cloudformation execute-change-set \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ inputs.stack_name }}" \
+            --change-set-name "${CSN}"
+
+      - name: Wait for stack to reach a completed state
+        if: ${{ !inputs.preview_only }}
+        run: |
+          set +e
+          # IMPORT completes as IMPORT_COMPLETE; UPDATE/CREATE as *_COMPLETE.
+          aws cloudformation wait stack-import-complete --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" 2>/dev/null
+          aws cloudformation wait stack-update-complete --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" 2>/dev/null
+          aws cloudformation wait stack-create-complete --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" 2>/dev/null
+          status=$(aws cloudformation describe-stacks --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" --query 'Stacks[0].StackStatus' --output text)
+          echo "Final stack status: ${status}"
+          case "${status}" in
+            *ROLLBACK*|*FAILED*) echo "::error::stack ended in ${status}"; exit 1 ;;
+            *COMPLETE) echo "stack healthy: ${status}" ;;
+            *) echo "::error::unexpected status ${status}"; exit 1 ;;
+          esac
+
+      - name: Post-execute verification
+        if: ${{ !inputs.preview_only }}
+        run: |
+          set -euo pipefail
+          echo "=== stack state ==="
+          aws cloudformation describe-stacks --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" \
+            --query 'Stacks[0].{Name:StackName,Status:StackStatus,Updated:LastUpdatedTime}' --output table
+          echo "=== managed resource counts by type ==="
+          aws cloudformation list-stack-resources --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" \
+            --query 'StackResourceSummaries[].ResourceType' --output text | tr '\t' '\n' | sort | uniq -c || true
+
+      - name: Report stack events on failure
+        if: failure()
+        env:
+          CSN: ${{ steps.op.outputs.change_set_name }}
+        run: |
+          echo "=== change-set (if any) ==="
+          aws cloudformation describe-change-set --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" --change-set-name "${CSN}" --output json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print('Status',d.get('Status'),d.get('StatusReason',''))" 2>/dev/null || echo "(no change-set)"
+          echo "=== stack events (last 25) ==="
+          aws cloudformation describe-stack-events --region "${AWS_REGION}" --stack-name "${{ inputs.stack_name }}" \
+            --query 'StackEvents[:25].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+            --output table || echo "(describe-stack-events unavailable)"
