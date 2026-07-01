@@ -27,6 +27,7 @@ Parameters:
 
 Conditions:
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  IsProduction: !Equals [!Ref EnvironmentSuffix, ""]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -779,6 +780,7 @@ Resources:
 
   RouteDeleteCoordinationAuthOauthClientsByClientId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -787,6 +789,7 @@ Resources:
 
   RouteDeleteCoordinationAuthTokensByTokenId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -795,6 +798,7 @@ Resources:
 
   RouteDeleteTrackerByProjectIdRelationship:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -803,6 +807,7 @@ Resources:
 
   RouteDeleteTrackerByProjectIdByRecordTypeByRecordIdCheckout:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -859,6 +864,7 @@ Resources:
 
   RouteGetCoordinationAuthOauthClients:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -867,6 +873,7 @@ Resources:
 
   RouteGetCoordinationAuthTokens:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -875,6 +882,7 @@ Resources:
 
   RouteGetCoordinationProjects:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -883,6 +891,7 @@ Resources:
 
   RouteGetCoordinationProjectsByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -907,6 +916,7 @@ Resources:
 
   RouteGetGovernanceDictionary:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -915,6 +925,7 @@ Resources:
 
   RouteGetGovernanceHash:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -923,6 +934,7 @@ Resources:
 
   RouteGetGovernanceByFileName:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -931,6 +943,7 @@ Resources:
 
   RouteGetHealth:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -939,6 +952,7 @@ Resources:
 
   RouteGetTrackerPendingUpdates:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -947,6 +961,7 @@ Resources:
 
   RouteGetTrackerByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -955,6 +970,7 @@ Resources:
 
   RouteGetTrackerByProjectIdRelationship:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -963,6 +979,7 @@ Resources:
 
   RouteGetTrackerByProjectIdByRecordTypeByRecordId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -971,6 +988,7 @@ Resources:
 
   RouteOptAuthRefresh:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1019,6 +1037,7 @@ Resources:
 
   RouteOptCoordinationAuthCognitoSession:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1027,6 +1046,7 @@ Resources:
 
   RouteOptCoordinationAuthOauthClients:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1035,6 +1055,7 @@ Resources:
 
   RouteOptCoordinationAuthOauthClientsByClientId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1043,6 +1064,7 @@ Resources:
 
   RouteOptCoordinationAuthOauthClientsByClientIdPermissions:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1051,6 +1073,7 @@ Resources:
 
   RouteOptCoordinationAuthOauthClientsByClientIdUsage:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1059,6 +1082,7 @@ Resources:
 
   RouteOptCoordinationAuthPermissionsByTokenId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1067,6 +1091,7 @@ Resources:
 
   RouteOptCoordinationAuthTokens:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1075,6 +1100,7 @@ Resources:
 
   RouteOptCoordinationAuthTokensByTokenId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1083,6 +1109,7 @@ Resources:
 
   RouteOptCoordinationCapabilities:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1091,6 +1118,7 @@ Resources:
 
   RouteOptCoordinationMcp:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1099,6 +1127,7 @@ Resources:
 
   RouteOptCoordinationMonitor:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1107,6 +1136,7 @@ Resources:
 
   RouteOptCoordinationProjects:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1115,6 +1145,7 @@ Resources:
 
   RouteOptCoordinationProjectsByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1123,6 +1154,7 @@ Resources:
 
   RouteOptCoordinationRequests:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1131,6 +1163,7 @@ Resources:
 
   RouteOptCoordinationRequestsByRequestId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1139,6 +1172,7 @@ Resources:
 
   RouteOptCoordinationRequestsByRequestIdCallback:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1147,6 +1181,7 @@ Resources:
 
   RouteOptCoordinationRequestsByRequestIdDispatch:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1155,6 +1190,7 @@ Resources:
 
   RouteOptDeployHistoryByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1163,6 +1199,7 @@ Resources:
 
   RouteOptDeployStateByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1171,6 +1208,7 @@ Resources:
 
   RouteOptDeployStatusBySpecId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1179,6 +1217,7 @@ Resources:
 
   RouteOptDeploySubmit:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1187,6 +1226,7 @@ Resources:
 
   RouteOptDocPrepByProjectName:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1195,6 +1235,7 @@ Resources:
 
   RouteOptDocuments:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1203,6 +1244,7 @@ Resources:
 
   RouteOptDocumentsByDocumentId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1211,6 +1253,7 @@ Resources:
 
   RouteOptFeed:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1227,6 +1270,7 @@ Resources:
 
   RouteOptGovernanceDictionary:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1235,6 +1279,7 @@ Resources:
 
   RouteOptGovernanceHash:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1243,6 +1288,7 @@ Resources:
 
   RouteOptGovernanceByFileName:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1251,6 +1297,7 @@ Resources:
 
   RouteOptHealth:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1259,6 +1306,7 @@ Resources:
 
   RouteOptProjects:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1267,6 +1315,7 @@ Resources:
 
   RouteOptProjectsByProjectName:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1275,6 +1324,7 @@ Resources:
 
   RouteOptReferenceSearch:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1283,6 +1333,7 @@ Resources:
 
   RouteOptTrackerPendingUpdates:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1291,6 +1342,7 @@ Resources:
 
   RouteOptTrackerByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1299,6 +1351,7 @@ Resources:
 
   RouteOptTrackerByProjectIdRelationship:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1307,6 +1360,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordType:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1315,6 +1369,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1323,6 +1378,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1331,6 +1387,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordIdCheckout:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1339,6 +1396,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordIdExtend:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1347,6 +1405,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordIdLog:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1355,6 +1414,7 @@ Resources:
 
   RouteOptByProjectIdByRecordTypeByRecordId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1363,6 +1423,7 @@ Resources:
 
   RoutePatchCoordinationAuthOauthClientsByClientIdPermissions:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1371,6 +1432,7 @@ Resources:
 
   RoutePatchCoordinationAuthOauthClientsByClientIdUsage:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1379,6 +1441,7 @@ Resources:
 
   RoutePatchCoordinationAuthPermissionsByTokenId:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1411,6 +1474,7 @@ Resources:
 
   RoutePostCoordinationAuthCognitoSession:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1419,6 +1483,7 @@ Resources:
 
   RoutePostCoordinationAuthOauthClients:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1427,6 +1492,7 @@ Resources:
 
   RoutePostCoordinationAuthTokens:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1435,6 +1501,7 @@ Resources:
 
   RoutePostCoordinationComponentsPropose:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1443,6 +1510,7 @@ Resources:
 
   RoutePostCoordinationComponentsByComponentIdAdvance:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1451,6 +1519,7 @@ Resources:
 
   RoutePostCoordinationComponentsByComponentIdApprove:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1459,6 +1528,7 @@ Resources:
 
   RoutePostCoordinationComponentsByComponentIdCloudwatchEvent:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1467,6 +1537,7 @@ Resources:
 
   RoutePostCoordinationComponentsByComponentIdReject:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1507,6 +1578,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordType:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1515,6 +1587,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1523,6 +1596,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordTypeByRecordIdCheckout:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1531,6 +1605,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordTypeByRecordIdExtend:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1539,6 +1614,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordTypeByRecordIdLog:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
@@ -1547,6 +1623,7 @@ Resources:
 
   RoutePutGovernanceByFileName:
     Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
     DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
