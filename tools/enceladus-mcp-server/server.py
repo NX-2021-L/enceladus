@@ -3341,7 +3341,8 @@ def _code_mode_tool_catalog() -> list[Tool]:
             name="coordination",
             description=(
                 "Compact coordination/orchestration surface for capabilities, request inspection, "
-                "dispatch-plan generation, and managed-session auth helpers."
+                "dispatch-plan generation, managed-session auth helpers, and agent identity actions "
+                "(ENC-FTR-117 / ENC-TSK-I38)."
             ),
             inputSchema={
                 "type": "object",
@@ -3349,8 +3350,11 @@ def _code_mode_tool_catalog() -> list[Tool]:
                     "action": {
                         "type": "string",
                         "description": (
-                            "Coordination action identifier such as capabilities.get, request.get, "
-                            "dispatch_plan.generate, dispatch_plan.dry_run, or auth.cognito_session."
+                            "Coordination action identifier. Orchestration: capabilities.get, "
+                            "request.get, dispatch_plan.generate, dispatch_plan.dry_run, "
+                            "auth.cognito_session. Agent identity (ENC-TSK-I38): agent.register, "
+                            "agent.claim, agent.list, agent.retire, agent.type.list, "
+                            "agent.type.register."
                         ),
                     },
                     "arguments": {
@@ -7603,6 +7607,13 @@ _COORDINATION_ACTIONS: Dict[str, Dict[str, Any]] = {
     # ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier.
     "session.classify_intent": {"tool": "coordination_classify_intent"},
     "session.intent_centroid_drift": {"tool": "coordination_intent_centroid_drift"},
+    # ENC-TSK-I38: Agent identity surface (ENC-FTR-117); ported to v4/main by ENC-TSK-J43.
+    "agent.register": {"tool": "agent_register"},
+    "agent.claim": {"tool": "agent_claim"},
+    "agent.list": {"tool": "agent_list"},
+    "agent.retire": {"tool": "agent_retire"},
+    "agent.type.list": {"tool": "agent_type_list"},
+    "agent.type.register": {"tool": "agent_type_register"},
 }
 
 _EXECUTE_ACTIONS: Dict[str, Dict[str, Any]] = {
@@ -9501,6 +9512,69 @@ async def _dispatch_plan_dry_run(args: dict) -> list[TextContent]:
 
 
 # -------------------------------------------------------------------
+# ENC-TSK-I38: Agent identity actions (agent.*) — ported to v4/main by ENC-TSK-J43
+# -------------------------------------------------------------------
+
+
+async def _agent_register(args: dict) -> list[TextContent]:
+    """Mint a new ENC-SES-NNN session (agent.register)."""
+    payload: Dict[str, Any] = {}
+    # ENC-TSK-J43: credential_id is an optional binding to an ENC-CRED credential; it is
+    # only forwarded when supplied, so omitting it is fully backward-compatible.
+    for key in ("agent_type_id", "runtime", "parent_session_id", "status", "credential_id"):
+        if args.get(key) is not None:
+            payload[key] = args[key]
+    result = _coordination_api_request("POST", "/agents/sessions", payload=payload)
+    return _result_text(result)
+
+
+async def _agent_claim(args: dict) -> list[TextContent]:
+    """Claim a pre-minted ENC-SES-NNN (allocated → claimed, agent.claim)."""
+    payload: Dict[str, Any] = {"session_id": args["session_id"]}
+    if args.get("expected_agent_type_id"):
+        payload["expected_agent_type_id"] = args["expected_agent_type_id"]
+    result = _coordination_api_request("POST", "/agents/sessions/claim", payload=payload)
+    return _result_text(result)
+
+
+async def _agent_list(args: dict) -> list[TextContent]:
+    """List live sessions from the ENC-SES directory (agent.list)."""
+    query: Dict[str, Any] = {}
+    if args.get("status"):
+        query["status"] = args["status"]
+    if args.get("agent_type_id"):
+        query["agent_type_id"] = args["agent_type_id"]
+    result = _coordination_api_request("GET", "/agents/sessions", query=query or None)
+    return _result_text(result)
+
+
+async def _agent_retire(args: dict) -> list[TextContent]:
+    """Retire an ENC-SES-NNN session (append-only, agent.retire)."""
+    session_id = urllib.parse.quote(str(args["session_id"]), safe="")
+    result = _coordination_api_request("POST", f"/agents/sessions/{session_id}/retire")
+    return _result_text(result)
+
+
+async def _agent_type_list(args: dict) -> list[TextContent]:
+    """List entries in the ENC-AGT agent-type directory (agent.type.list)."""
+    query: Dict[str, Any] = {}
+    if args.get("status"):
+        query["status"] = args["status"]
+    result = _coordination_api_request("GET", "/agents/types", query=query or None)
+    return _result_text(result)
+
+
+async def _agent_type_register(args: dict) -> list[TextContent]:
+    """Idempotently register an agent type in the ENC-AGT directory (agent.type.register)."""
+    payload: Dict[str, Any] = {}
+    for key in ("surface", "model", "cost_tier"):
+        if args.get(key) is not None:
+            payload[key] = args[key]
+    result = _coordination_api_request("POST", "/agents/types", payload=payload)
+    return _result_text(result)
+
+
+# -------------------------------------------------------------------
 # GitHub integration (ENC-FTR-021 Phase 2)
 # -------------------------------------------------------------------
 
@@ -10467,6 +10541,13 @@ _TOOL_HANDLERS = {
     "coordination_cognito_session": _coordination_cognito_session,
     "coordination_classify_intent": _coordination_classify_intent,
     "coordination_intent_centroid_drift": _coordination_intent_centroid_drift,
+    # ENC-TSK-I38: Agent identity actions (ported to v4/main by ENC-TSK-J43)
+    "agent_register": _agent_register,
+    "agent_claim": _agent_claim,
+    "agent_list": _agent_list,
+    "agent_retire": _agent_retire,
+    "agent_type_list": _agent_type_list,
+    "agent_type_register": _agent_type_register,
     "governance_update": _governance_update,
     "governance_hash": _governance_hash,
     "governance_get": _governance_get,
