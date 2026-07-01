@@ -1752,6 +1752,596 @@ Resources:
       RouteKey: PUT /api/v1/governance/{fileName+}
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ==================================================================
+  # ENC-TSK-J27 / ENC-ISS-455 (gamma half): 65 live-only gamma routes
+  # adopted into enceladus-api-gamma via change-set IMPORT (batches j27-b1..b7),
+  # now codified Condition: IsGamma (prod excludes them) + DeletionPolicy: Retain.
+  # ==================================================================
+  GammaImportedRoute001:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/v1/coordination/auth/oauth-clients/{clientId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute002:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/v1/coordination/auth/tokens/{tokenId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute003:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/auth/oauth-clients"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute004:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/auth/tokens"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute005:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/projects"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute006:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/projects/{projectId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute007:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/governance/dictionary"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute008:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/governance/hash"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute009:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/governance/{fileName+}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute010:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/health"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute011:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/auth/refresh"
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  GammaImportedRoute012:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/cognito/session"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute013:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/oauth-clients"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute014:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute015:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/permissions"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute016:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/usage"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute017:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/permissions/{tokenId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute018:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/tokens"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute019:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/auth/tokens/{tokenId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute020:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/capabilities"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute021:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/mcp"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute022:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/monitor"
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  GammaImportedRoute023:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/projects"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute024:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/projects/{projectId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute025:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/requests"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute026:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/requests/{requestId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute027:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/requests/{requestId}/callback"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute028:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/coordination/requests/{requestId}/dispatch"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute029:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/deploy/history/{projectId}"
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  GammaImportedRoute030:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/deploy/state/{projectId}"
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  GammaImportedRoute031:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/deploy/status/{specId}"
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  GammaImportedRoute032:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/deploy/submit"
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  GammaImportedRoute033:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/doc-prep/{projectName}"
+      Target: !Sub integrations/${DocPrepIntegration}
+
+  GammaImportedRoute034:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/documents"
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  GammaImportedRoute035:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/documents/{documentId}"
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  GammaImportedRoute036:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/feed"
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  GammaImportedRoute037:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/governance/dictionary"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute038:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/governance/hash"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute039:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/governance/{fileName+}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute040:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/health"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute041:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/projects"
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  GammaImportedRoute042:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/projects/{projectName}"
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  GammaImportedRoute043:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/reference/search"
+      Target: !Sub integrations/${ReferenceSearchIntegration}
+
+  GammaImportedRoute044:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/pending-updates"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute045:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute046:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/relationship"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute047:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute048:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute049:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute050:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute051:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute052:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/log"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute053:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "OPTIONS /{projectId}/{recordType}/{recordId}"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  GammaImportedRoute054:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/permissions"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute055:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/usage"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute056:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PATCH /api/v1/coordination/auth/permissions/{tokenId}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute057:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/auth/cognito/session"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute058:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/auth/oauth-clients"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute059:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/auth/tokens"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute060:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/propose"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute061:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/{componentId}/advance"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute062:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/{componentId}/approve"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute063:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/{componentId}/cloudwatch_event"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute064:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/components/{componentId}/reject"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  GammaImportedRoute065:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /api/v1/governance/{fileName+}"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
 Outputs:
   ApiEndpoint:
     Value: !GetAtt HttpApi.ApiEndpoint
