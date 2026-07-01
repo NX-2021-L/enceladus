@@ -641,6 +641,53 @@ class CredentialLifecycleTest(unittest.TestCase):
         self.assertEqual(alloc.get_credential(b["credential_id"])["status"], "revoked")
         self.assertLessEqual(len(summary["revoked_credentials"]), 2)
 
+    # -- ENC-TSK-J43: mint_session_id credential_id binding + validation ------
+    def test_mint_session_with_valid_credential_binds_field(self):
+        cred = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        item = alloc.mint_session_id(
+            agent_type_id="ENC-AGT-001", runtime="cc-desktop",
+            status="claimed", credential_id=cred["credential_id"],
+        )
+        # The binding field is written under the exact name the revoke cascade reads.
+        self.assertEqual(item["credential_id"], cred["credential_id"])
+        persisted = alloc.get_session(item["session_id"])
+        self.assertEqual(persisted["credential_id"], cred["credential_id"])
+
+    def test_mint_session_with_missing_credential_raises(self):
+        with self.assertRaises(ValueError):
+            alloc.mint_session_id(
+                agent_type_id="ENC-AGT-001", runtime="cc-desktop",
+                credential_id="CRED-doesnotexist",
+            )
+
+    def test_mint_session_with_revoked_credential_raises(self):
+        cred = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        alloc.revoke_credential(cred["credential_id"])
+        with self.assertRaises(ValueError):
+            alloc.mint_session_id(
+                agent_type_id="ENC-AGT-001", runtime="cc-desktop",
+                credential_id=cred["credential_id"],
+            )
+
+    def test_credential_less_session_omits_binding_field(self):
+        # Backward-compat: no credential_id => the frozen value-identity shape is preserved
+        # (credential_id is NOT written), matching SESSION_NODE_PROPERTIES exactly.
+        item = alloc.mint_session_id(agent_type_id="ENC-AGT-001", runtime="cc-desktop")
+        self.assertNotIn("credential_id", item)
+        self.assertEqual(set(item.keys()), {"session_id", *alloc.SESSION_NODE_PROPERTIES})
+
+    def test_revoke_cascade_finds_session_by_credential_id_field(self):
+        # Confirms the cascade reaps a live session bound via the SAME field name
+        # (`credential_id`) that mint_session_id writes.
+        cred = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
+        sess = alloc.mint_session_id(
+            agent_type_id="ENC-AGT-001", runtime="cc-desktop",
+            status="claimed", credential_id=cred["credential_id"],
+        )
+        summary = alloc.revoke_credential(cred["credential_id"], "compromised")
+        self.assertIn(sess["session_id"], summary["retired_sessions"])
+        self.assertEqual(alloc.get_session(sess["session_id"])["status"], "retired")
+
     def test_list_credentials_filters(self):
         c1 = alloc.issue_credential(agent_identity_id="ENC-AGT-001")
         alloc.issue_credential(agent_identity_id="ENC-AGT-002")

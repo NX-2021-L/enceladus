@@ -272,6 +272,19 @@ def mint_session_id(
     if not agent_type_id:
         raise ValueError("agent_type_id is required to mint a session")
 
+    # ENC-TSK-J43: when a session is bound to a credential, that credential must exist and
+    # be active at mint time. Binding to a missing/revoked credential is rejected so the
+    # revoke cascade's invariant holds (a live session's bound credential is always live).
+    if credential_id:
+        bound = get_credential(credential_id)
+        if bound is None:
+            raise ValueError(f"credential_id {credential_id!r} not found")
+        if bound.get("status") != "active":
+            raise ValueError(
+                f"credential_id {credential_id!r} is not active "
+                f"(status={bound.get('status')!r})"
+            )
+
     now = _now_z()
     resolved_claimed_at = claimed_at or (now if status == "claimed" else "")
 
