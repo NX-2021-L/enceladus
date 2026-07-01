@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus Lambda Artifact Staging (us-west-2) — ENC-TSK-J28 / ENC-ISS-454.
+  Same-region staging bucket for Gen2 Lambda deploys. The canonical build
+  artifacts live in s3://jreese-net/lambda-artifacts/ (us-west-1), but
+  `aws lambda update-function-code --s3-bucket` requires the source bucket to be
+  in the SAME region as the target function (us-west-2) — a cross-region bucket
+  returns PermanentRedirect. _deploy.yml copies each same-run artifact here, then
+  deploys by S3 reference (no ~70MB base64 direct-upload ceiling). Objects are
+  keyed by <fn>-<sha>.zip and expire automatically.
+
+Resources:
+
+  LambdaArtifactStagingBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: enceladus-lambda-artifacts-us-west-2
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-staged-artifacts
+            Status: Enabled
+            ExpirationInDays: 14
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  # Resource-based grant so the deploy roles can stage + read artifacts here
+  # WITHOUT widening their identity policies (keeps this out of the deploy-role
+  # capability contract owned by ENC-TSK-J29). Get is required both for the
+  # copy source-check and because update-function-code validates the caller can
+  # read the referenced S3 object.
+  LambdaArtifactStagingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LambdaArtifactStagingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DeployRolesStageAndRead
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:role/GitHubActions-V4Gamma-DeployRole"
+                - !Sub "arn:aws:iam::${AWS::AccountId}:role/GitHubActions-V3Prod-DeployRole"
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub "${LambdaArtifactStagingBucket.Arn}/*"
+
+Outputs:
+  LambdaArtifactStagingBucketName:
+    Description: us-west-2 staging bucket for Gen2 Lambda S3-reference deploys
+    Value: !Ref LambdaArtifactStagingBucket
