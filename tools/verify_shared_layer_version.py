@@ -110,10 +110,33 @@ _ARN_RE = re.compile(
     r"arn:aws:lambda:[a-z0-9-]+:\d+:layer:" + re.escape(LAYER_NAME) + r":(\d+)"
 )
 
+# ENC-ISS-459: a template with none of these has no enceladus-shared subject at all
+# (e.g. 03-api.yaml -- ApiGatewayV2 + Lambda::Permission entries that reference
+# functions by ARN/name, but define no Lambda resource of their own). The gate
+# fail-closed on that absence (no resolvable SharedLayerArn Default == violation),
+# blocking every non-compute stack unconditionally. Detect the subject instead.
+_SHARED_LAYER_PARAM_HEADER_RE = re.compile(r"^  SharedLayerArn:\s*$")
+_LAMBDA_SUBJECT_RESOURCE_RE = re.compile(
+    r"^\s*Type:\s*AWS::Lambda::(?:Function|LayerVersion)\s*$"
+)
+
 
 def _canonical_version():
     m = _ARN_RE.search(CANONICAL_SHARED_LAYER_ARN)
     return int(m.group(1)) if m else None
+
+
+def template_has_shared_layer_subject(path):
+    """True if `path` has anything for this gate to validate: a SharedLayerArn
+    parameter (declared, whether or not its Default resolves), or a
+    Lambda::Function / Lambda::LayerVersion resource. False for a template with
+    none of these -- the gate does not apply (ENC-ISS-459)."""
+    for line in open(path).read().split("\n"):
+        if _SHARED_LAYER_PARAM_HEADER_RE.match(line):
+            return True
+        if _LAMBDA_SUBJECT_RESOURCE_RE.match(line):
+            return True
+    return False
 
 
 def shared_layer_default(path):
@@ -384,6 +407,36 @@ Resources:
         - !Ref SharedLayerArn
 """
 
+# ENC-ISS-459: an API-Gateway-only stack (like 03-api.yaml) -- integrations reference
+# Lambda functions by ARN/name, but the template defines no Lambda resource of its own
+# and takes no SharedLayerArn parameter. Nothing here for the gate to validate.
+_SELFTEST_TEMPLATE_NO_SUBJECT = """\
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+Resources:
+  SomeRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SomeApi
+  SomePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "some-function${EnvironmentSuffix}"
+"""
+
+# Regression guard: a template with a bare Lambda::Function resource but no
+# SharedLayerArn parameter still has a subject -- the gate must still apply (and
+# check_template still fires: no resolvable Default at all).
+_SELFTEST_TEMPLATE_LAMBDA_NO_PARAM = """\
+Resources:
+  SomeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.11
+"""
+
 # Minimal compute-deploy workflow fragment. check_workflow line-scans for the override,
 # so this need not be valid YAML -- only the --parameter-overrides shape matters.
 _SELFTEST_WORKFLOW = """\
@@ -424,6 +477,9 @@ def _selftest():
     wf_ok = _tmp(".yml", _SELFTEST_WORKFLOW.format(override=canonical_override_line))
     wf_missing = _tmp(".yml", _SELFTEST_WORKFLOW.format(override=""))
     wf_bad = _tmp(".yml", _SELFTEST_WORKFLOW.format(override=bad_override_line))
+    # ENC-ISS-459 applicability gate
+    no_subject_path = _tmp(".yaml", _SELFTEST_TEMPLATE_NO_SUBJECT)
+    lambda_no_param_path = _tmp(".yaml", _SELFTEST_TEMPLATE_LAMBDA_NO_PARAM)
 
     bad = []
     try:
@@ -475,6 +531,32 @@ def _selftest():
             (
                 "--live --regress-only still fires on a regress",
                 _classify_live_version("fn", canonical + 1, canonical, regress_only=True) is not None,
+            )
+        )
+        # ENC-ISS-459: applicability gate
+        cases.append(
+            (
+                "no-subject (API-only) template is N/A, not a violation",
+                template_has_shared_layer_subject(no_subject_path) is False,
+            )
+        )
+        cases.append(
+            (
+                "template with Lambda::Function but no SharedLayerArn param still has a subject",
+                template_has_shared_layer_subject(lambda_no_param_path) is True,
+            )
+        )
+        cases.append(
+            (
+                "template with SharedLayerArn param still has a subject (regression guard)",
+                template_has_shared_layer_subject(good_path) is True,
+            )
+        )
+        cases.append(
+            (
+                "no-subject template still has a subject-less check_template (would "
+                "otherwise fail-close were the gate not skipped)",
+                check_template(no_subject_path) != [],
             )
         )
     finally:
@@ -552,6 +634,14 @@ def main(argv):
     if not os.path.isfile(template):
         print(f"FAIL: template not found: {template}", file=sys.stderr)
         return 2
+
+    if not template_has_shared_layer_subject(template):
+        print(
+            f"N/A: {template} declares no SharedLayerArn parameter and no "
+            f"Lambda::Function/LayerVersion resource -- the enceladus-shared "
+            f"layer-version gate does not apply to this template (ENC-ISS-459)."
+        )
+        return 0
 
     # template lives at infrastructure/cloudformation/ -> repo root is two up
     repo_root = os.path.abspath(os.path.join(os.path.dirname(template), "..", ".."))
