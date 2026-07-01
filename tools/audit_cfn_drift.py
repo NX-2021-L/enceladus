@@ -237,21 +237,15 @@ _RULE_NAME_RE = re.compile(
 # CLI-only EventBridge rules: live and serving a real feature, but declared in
 # NEITHER branch's CFN templates (genuine out-of-band orphans, confirmed via
 # ENC-TSK-J07 grep of main + v4/main). Environment scoping (_in_environment)
-# already keeps gamma-managed rules from showing as prod drift, so the ONLY rule
-# that still needs an explicit exception is enceladus-checkout-auto — the
-# ENC-FTR-037 auto-checkout companion, created out-of-band alongside
-# enceladus-checkout-service-auto and never codified.
+# already keeps gamma-managed rules from showing as prod drift.
 #
-# Durable fix is a CloudFormation change-set IMPORT (the rule already exists, so
-# a plain stack update plans it as an Add and AWS::EarlyValidation::ResourceExistenceCheck
-# rejects the whole change set — the ENC-ISS-386 / ENC-TSK-H29 wedge). Import is a
-# privileged manual op tracked under ENC-ISS-455; until then this documented
-# exception keeps the daily audit from re-raising gh#635 noise. Stored as an
-# env-suffix-stripped BASE name (see _strip_env_suffix). Verified live + ENABLED
-# via `aws events describe-rule` on 2026-06-30.
-_EVENTBRIDGE_CLI_EXCEPTION_BASES = {
-    "enceladus-checkout-auto",  # ENC-FTR-037 auto-checkout companion, rate(5 minutes)
-}
+# enceladus-checkout-auto was the only entry here (ENC-FTR-037 auto-checkout
+# companion) and has been adopted into 02-compute.yaml via change-set IMPORT
+# (ENC-TSK-J14; CheckoutAutoScheduleRule, DeletionPolicy: Retain) — it is now
+# CFN-declared, so the exception is no longer needed (ENC-TSK-J19). Stored as
+# env-suffix-stripped BASE names (see _strip_env_suffix) should a future
+# out-of-band orphan need documenting again.
+_EVENTBRIDGE_CLI_EXCEPTION_BASES: Set[str] = set()
 
 
 def _strip_env_suffix(name: str) -> str:
