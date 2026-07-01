@@ -1,0 +1,9 @@
+[
+  {
+    "ResourceType": "AWS::Events::Rule",
+    "LogicalResourceId": "EnvDriftAuditorScheduleRule",
+    "ResourceIdentifier": {
+      "Arn": "arn:aws:events:us-west-2:356364570033:rule/devops-env-drift-auditor-hourly"
+    }
+  }
+]
