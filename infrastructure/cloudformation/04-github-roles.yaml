@@ -300,6 +300,16 @@ Resources:
                 Effect: Allow
                 Action: lambda:GetFunctionConfiguration
                 Resource: "*"
+              # Required by cfn-drift-audit.yml (ENC-TSK-I94 / ENC-ISS-442):
+              # audit_cfn_drift.py calls `aws events list-rules` to compare
+              # live EventBridge rules against CFN-declared rules. Backported to
+              # v4/main for parity with main (ENC-TSK-J08 / ENC-ISS-455) so the
+              # two branches' github-roles templates do not drift.
+              - Sid: CfnDriftAuditEventBridgeRead
+                Effect: Allow
+                Action:
+                  - events:ListRules
+                Resource: !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/*"
               - Sid: LambdaExecutionRoles
                 Effect: Allow
                 Action:
