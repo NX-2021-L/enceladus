@@ -8,6 +8,7 @@ import { RecordNotFound } from '../components/shared/RecordNotFound'
 import { RecordFallbackError } from '../components/shared/RecordFallbackError'
 import { ErrorState } from '../components/shared/ErrorState'
 import { CopyButton } from '../components/shared/CopyButton'
+import { DownloadMarkdownButton } from '../components/shared/DownloadMarkdownButton'
 import { formatDate, timeAgo } from '../lib/formatters'
 import { HANDOFF_STATUS_COLORS, HANDOFF_STATUS_LABELS } from '../lib/constants'
 import { ProjectPrimaryDocumentsPage } from './ProjectPrimaryDocumentsPage'
@@ -89,7 +90,11 @@ export function DocumentDetailPage() {
         >
           {doc.project_id}
         </Link>
-        <span className="text-xs font-mono text-slate-500 mb-1 inline-flex items-center gap-1">{doc.document_id}<CopyButton text={doc.document_id} /></span>
+        <span className="text-xs font-mono text-slate-500 mb-1 inline-flex items-center gap-1">
+          {doc.document_id}
+          <CopyButton text={doc.document_id} />
+          <DownloadMarkdownButton document={doc} />
+        </span>
         <h1 className="text-lg font-semibold text-slate-100 mb-2">{doc.title}</h1>
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <StatusChip status={doc.status} />
