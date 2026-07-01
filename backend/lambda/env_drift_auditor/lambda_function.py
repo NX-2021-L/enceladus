@@ -38,6 +38,7 @@ from env_parity_core import (
     classify_required,
     critical_vars,
     drift_signature,
+    find_matching_drift_issue,
     find_signature_match,
     sig_token,
 )
@@ -188,18 +189,22 @@ def _fetch_open_issues() -> List[Dict[str, Any]]:
     return issues
 
 
-def _find_existing_drift_issue(signature: str) -> Tuple[Optional[str], bool]:
-    """Return (matched_issue_id, query_ok) for an OPEN issue carrying ``signature``.
+def _find_existing_drift_issue(
+    signature: str, fn_name: str, missing_vars: List[str]
+) -> Tuple[Optional[str], bool]:
+    """Return (matched_issue_id, query_ok) for the canonical OPEN issue of this finding.
 
     query_ok=False means the lookup itself failed; the caller fails OPEN to filing so a
-    transient query error never silently drops a real finding (ENC-TSK-H10).
+    transient query error never silently drops a real finding (ENC-TSK-H10). ENC-TSK-J30:
+    matches the signature token first, then the legacy tokenless auto-drift title for the
+    same (fn, missing-var set), so a persistent finding stays ONE canonical record.
     """
     try:
         issues = _fetch_open_issues()
     except Exception:
         logger.exception("open-issue dedup query failed")
         return None, False
-    return find_signature_match(issues, signature), True
+    return find_matching_drift_issue(issues, signature, fn_name, missing_vars), True
 
 
 def _bump_drift_issue(issue_id: str, fn_name: str, run_id: str, now: str) -> Dict[str, Any]:
@@ -250,7 +255,7 @@ def _handle_drift_finding(fn_name: str, drift: List[Dict[str, Any]], run_id: str
         logger.info("DRY_RUN: would emit drift for %s (sig=%s) — %s", fn_name, signature, drift)
         return {"dry_run": True, "signature": signature}
 
-    existing_id, query_ok = _find_existing_drift_issue(signature)
+    existing_id, query_ok = _find_existing_drift_issue(signature, fn_name, missing_var_names)
     if existing_id:
         logger.info(
             "drift on %s already tracked by %s (sig=%s) — bumping, not re-filing",

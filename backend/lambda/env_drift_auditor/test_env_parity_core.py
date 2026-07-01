@@ -235,6 +235,31 @@ def test_auditor_idempotent_dedup_bumps_not_refiles():
     assert r2.get("deduped") is True
 
 
+def test_find_matching_drift_issue_consolidates_legacy_tokenless():
+    """ENC-TSK-J30: the matcher consolidates pre-signature (tokenless) auto-drift
+    issues for the same (fn, missing-var set), so a new run bumps the 2026-06 storm
+    issue instead of filing yet another duplicate on top of it."""
+    sig = core.drift_signature("devops-deploy-intake", ["SQS_QUEUE_URL"])
+    legacy = [{
+        "item_id": "ENC-ISS-319",
+        "title": "[auto-drift] devops-deploy-intake missing required env vars: SQS_QUEUE_URL",
+        "status": "open",
+    }]
+    # find_signature_match alone can't see a tokenless legacy issue...
+    assert core.find_signature_match(legacy, sig) is None
+    # ...but find_matching_drift_issue consolidates it by fn + var-set.
+    assert core.find_matching_drift_issue(legacy, sig, "devops-deploy-intake", ["SQS_QUEUE_URL"]) == "ENC-ISS-319"
+    # A different fn or a different missing-var set must NOT match.
+    assert core.find_matching_drift_issue(legacy, sig, "devops-other", ["SQS_QUEUE_URL"]) is None
+    assert core.find_matching_drift_issue(legacy, sig, "devops-deploy-intake", ["DEPLOY_TABLE"]) is None
+    # Signature-token issues still take precedence when both are present.
+    legacy.append({
+        "item_id": "ENC-ISS-T9",
+        "title": f"[auto-drift] devops-deploy-intake missing required env vars: SQS_QUEUE_URL {core.sig_token(sig)}",
+    })
+    assert core.find_matching_drift_issue(legacy, sig, "devops-deploy-intake", ["SQS_QUEUE_URL"]) == "ENC-ISS-T9"
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
