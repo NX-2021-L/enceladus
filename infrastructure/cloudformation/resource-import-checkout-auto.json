@@ -3,7 +3,7 @@
     "ResourceType": "AWS::Events::Rule",
     "LogicalResourceId": "CheckoutAutoScheduleRule",
     "ResourceIdentifier": {
-      "Name": "enceladus-checkout-auto"
+      "Arn": "arn:aws:events:us-west-2:356364570033:rule/enceladus-checkout-auto"
     }
   }
 ]
