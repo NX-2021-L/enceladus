@@ -17,11 +17,17 @@
 #   4. Validates deploy scripts have no hardcoded runtime defaults
 #   5. Validates enceladus-shared layer is pinned to canonical (verify_shared_layer_version.py)
 #   6. Validates env-var parity — no out-of-band vars the deploy would strip (env_parity_gate.py)
+#   7. Validates no live CFN drift (fail-on-drift; audit_cfn_drift.py) before touching the stack
 #   ...and warns operator about direct deploy risks
 #
 # Part of ENC-PLN-020 (Production Deploy Hardening) / ENC-FTR-068.
 # ENC-TSK-H24: Check 5 added — the enceladus-shared :7-vs-:10 layer-version parity gate.
 # ENC-PLN-048 / ENC-FTR-102: Check 6 added — env-var parity gate (H17 resolver + H18 fail-closed).
+# ENC-TSK-J12 / ENC-ISS-455: Check 7 added — CFN drift regression guard. Adding or
+# adopting an out-of-band-existing resource via a plain deploy fails
+# AWS::EarlyValidation::ResourceExistenceCheck and wedges the stack (R1/R2 in
+# DOC-AA5C7A37A103); this check fails the gate closed while unresolved live
+# drift exists, until the change-set IMPORT reconciliation (ENC-TSK-J14) lands.
 
 set -euo pipefail
 
@@ -83,7 +89,7 @@ ERRORS=0
 SNAPSHOT_FILE="/tmp/pre-deploy-snapshot-${TIMESTAMP}.json"
 
 # --- Check 1: Capture Lambda snapshot ---
-echo "[CHECK 1/6] Capturing current Lambda state snapshot..."
+echo "[CHECK 1/7] Capturing current Lambda state snapshot..."
 
 if [[ ! -f "${MANIFEST}" ]]; then
     echo "[ERROR] Lambda workflow manifest not found: ${MANIFEST}"
@@ -128,7 +134,7 @@ fi
 
 # --- Check 2: Validate IsGamma conditionals ---
 echo ""
-echo "[CHECK 2/6] Validating CFN template architecture parity..."
+echo "[CHECK 2/7] Validating CFN template architecture parity..."
 
 if python3 "${REPO_ROOT}/tools/verify_lambda_arch_parity.py"; then
     echo "[PASS] CFN template uses IsGamma conditionals correctly"
@@ -139,7 +145,7 @@ fi
 
 # --- Check 3: Validate EnvironmentSuffix parameter ---
 echo ""
-echo "[CHECK 3/6] Validating EnvironmentSuffix parameter in template..."
+echo "[CHECK 3/7] Validating EnvironmentSuffix parameter in template..."
 
 if grep -q "EnvironmentSuffix" "${TEMPLATE_FILE}"; then
     echo "[PASS] Template contains EnvironmentSuffix parameter"
@@ -150,7 +156,7 @@ fi
 
 # --- Check 4: Validate deploy scripts ---
 echo ""
-echo "[CHECK 4/6] Validating deploy scripts via manifest..."
+echo "[CHECK 4/7] Validating deploy scripts via manifest..."
 
 # This is already done by verify_lambda_arch_parity.py, but we add a specific
 # check for hardcoded RUNTIME/ARCHITECTURE defaults without conditionals
@@ -165,7 +171,7 @@ fi
 
 # --- Check 5: Validate enceladus-shared layer-version parity (ENC-TSK-H24) ---
 echo ""
-echo "[CHECK 5/6] Validating enceladus-shared layer-version pin (:7-vs-:10 gate)..."
+echo "[CHECK 5/7] Validating enceladus-shared layer-version pin (:7-vs-:10 gate)..."
 
 # Static checks (template Default + workflow --parameter-overrides override) are
 # fail-closed (no AWS creds needed). ENC-TSK-H28 added the workflow-override check that
@@ -192,7 +198,7 @@ fi
 # advisory classification are the single source in env_drift_registry.json;
 # tools/env_parity_waivers.json carries only risk-accepted failure suppressions.
 echo ""
-echo "[CHECK 6/6] Validating env-var parity (no out-of-band vars the deploy would strip)..."
+echo "[CHECK 6/7] Validating env-var parity (no out-of-band vars the deploy would strip)..."
 
 # Infer EnvironmentSuffix from the stack name so gamma stacks resolve their -gamma env.
 PARITY_PARAMS=()
@@ -206,6 +212,31 @@ if python3 "${REPO_ROOT}/tools/env_parity_gate.py" \
     echo "[PASS] All deploy-critical env vars are present in the template-resolved env"
 else
     echo "[FAIL] Env parity gate found deploy-critical vars the deploy would strip (see above)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# --- Check 7: Validate no live CFN drift (ENC-TSK-J12 / ENC-ISS-455) ---
+# A plain deploy that ADDs or adopts a resource already existing out-of-band
+# fails AWS::EarlyValidation::ResourceExistenceCheck and wedges the stack
+# (R1/R2, DOC-AA5C7A37A103). Fail the gate closed while unresolved live drift
+# exists on the stack's environment; this is expected to (correctly) fail
+# on the API stack until the change-set IMPORT reconciliation (ENC-TSK-J14)
+# lands. Infer environment from the stack name, same as Check 6.
+echo ""
+DRIFT_ENV="prod"
+case "${STACK_NAME}" in
+    *gamma*) DRIFT_ENV="gamma" ;;
+esac
+DRIFT_REPORT="/tmp/pre-deploy-drift-${TIMESTAMP}.json"
+echo "[CHECK 7/7] Validating no live CFN drift (environment=${DRIFT_ENV}, fail-on-drift)..."
+
+if python3 "${REPO_ROOT}/tools/audit_cfn_drift.py" \
+        --environment "${DRIFT_ENV}" \
+        --output-json "${DRIFT_REPORT}" \
+        --fail-on-drift; then
+    echo "[PASS] No CFN drift detected for ${DRIFT_ENV}"
+else
+    echo "[FAIL] CFN drift detected for ${DRIFT_ENV} — resolve before deploying (see ${DRIFT_REPORT}; ENC-ISS-455 / ENC-TSK-J12)"
     ERRORS=$((ERRORS + 1))
 fi
 
