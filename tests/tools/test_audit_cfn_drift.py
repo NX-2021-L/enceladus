@@ -218,6 +218,21 @@ def test_resolve_api_id_single_match(monkeypatch, mod):
     assert mod.resolve_api_id("enceladus-") == "only1"
 
 
+def test_resolve_api_id_prefers_gamma_sibling_for_gamma_environment(monkeypatch, mod):
+    """ENC-TSK-J12: without this, a gamma audit dispatch silently resolved to
+    PROD's ApiId (the default prod-preferring behavior), comparing
+    gamma-declared routes against prod's live routes."""
+    apis = {
+        "Items": [
+            {"Name": "devops-tracker-api", "ApiId": "prod123"},
+            {"Name": "devops-tracker-api-gamma", "ApiId": "gamma456"},
+        ]
+    }
+    monkeypatch.setattr(mod, "_aws_json", lambda cmd: apis)
+    assert mod.resolve_api_id("enceladus-", "gamma") == "gamma456"
+    assert mod.resolve_api_id("enceladus-", "prod") == "prod123"
+
+
 def test_audit_no_drift(tmp_path, monkeypatch, mod):
     _write_cfn_template(
         tmp_path,
