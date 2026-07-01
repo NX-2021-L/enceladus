@@ -27,6 +27,7 @@ Resources:
   # ---------------------------------------------------------------------------
   ProdHealthMonitorRole:
     Type: AWS::IAM::Role
+    DeletionPolicy: Retain
     Properties:
       RoleName: !Sub "enceladus-prod-health-monitor-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
@@ -144,6 +145,7 @@ Resources:
 
   EnvDriftAuditorScheduleRule:
     Type: AWS::Events::Rule
+    DeletionPolicy: Retain
     Properties:
       Name: !Sub "devops-env-drift-auditor-hourly${EnvironmentSuffix}"
       Description: Triggers env drift auditor Lambda hourly at :07 past the hour
