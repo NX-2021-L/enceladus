@@ -735,6 +735,7 @@ Resources:
 
   GitHubProxyIntegration:
     Type: AWS::ApiGatewayV2::Integration
+    DeletionPolicy: Retain
     # ENC-TSK-J13: out-of-band integration (physical 0nmjqw3) adopted via change-set IMPORT.
     # Duplicate-to-CFN note: GitHubIntegration/gwha2wd targets the same Lambda; live traffic uses this one.
     Properties:
@@ -746,6 +747,7 @@ Resources:
 
   CheckoutApiIntegration:
     Type: AWS::ApiGatewayV2::Integration
+    DeletionPolicy: Retain
     # ENC-TSK-J13: out-of-band integration (physical oi4kfbn) adopted via change-set IMPORT.
     # Duplicate-to-CFN note: CheckoutServiceIntegration/reizplt targets the same Lambda; live traffic uses this one.
     Properties:
@@ -757,6 +759,7 @@ Resources:
 
   ChangelogApiIntegration:
     Type: AWS::ApiGatewayV2::Integration
+    DeletionPolicy: Retain
     # ENC-TSK-J13: out-of-band integration (physical w6ey7lp) adopted via change-set IMPORT.
     # Duplicate-to-CFN note: none (no CFN changelog integration existed) targets the same Lambda; live traffic uses this one.
     Properties:
@@ -768,6 +771,7 @@ Resources:
 
   RouteDeleteCheckoutByProjectTaskByTaskIdCheckout:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: DELETE /api/v1/checkout/{project}/task/{taskId}/checkout
@@ -775,6 +779,7 @@ Resources:
 
   RouteDeleteCoordinationAuthOauthClientsByClientId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: DELETE /api/v1/coordination/auth/oauth-clients/{clientId}
@@ -782,6 +787,7 @@ Resources:
 
   RouteDeleteCoordinationAuthTokensByTokenId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: DELETE /api/v1/coordination/auth/tokens/{tokenId}
@@ -789,6 +795,7 @@ Resources:
 
   RouteDeleteTrackerByProjectIdRelationship:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: DELETE /api/v1/tracker/{projectId}/relationship
@@ -796,6 +803,7 @@ Resources:
 
   RouteDeleteTrackerByProjectIdByRecordTypeByRecordIdCheckout:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: DELETE /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
@@ -803,6 +811,7 @@ Resources:
 
   RouteGetChangelogHistory:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/changelog/history
@@ -810,6 +819,7 @@ Resources:
 
   RouteGetChangelogHistoryByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/changelog/history/{projectId}
@@ -817,6 +827,7 @@ Resources:
 
   RouteGetChangelogVersionByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/changelog/version/{projectId}
@@ -824,6 +835,7 @@ Resources:
 
   RouteGetChangelogVersions:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/changelog/versions
@@ -831,6 +843,7 @@ Resources:
 
   RouteGetCheckoutValidateCommitCompleteByCciId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/checkout/validate/commit-complete/{cciId}
@@ -838,6 +851,7 @@ Resources:
 
   RouteGetCheckoutByProjectTaskByTaskIdStatus:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/checkout/{project}/task/{taskId}/status
@@ -845,6 +859,7 @@ Resources:
 
   RouteGetCoordinationAuthOauthClients:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/coordination/auth/oauth-clients
@@ -852,6 +867,7 @@ Resources:
 
   RouteGetCoordinationAuthTokens:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/coordination/auth/tokens
@@ -859,6 +875,7 @@ Resources:
 
   RouteGetCoordinationProjects:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/coordination/projects
@@ -866,6 +883,7 @@ Resources:
 
   RouteGetCoordinationProjectsByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/coordination/projects/{projectId}
@@ -873,6 +891,7 @@ Resources:
 
   RouteGetGithubCommitsValidate:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/github/commits/validate
@@ -880,6 +899,7 @@ Resources:
 
   RouteGetGithubProjects:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/github/projects
@@ -887,6 +907,7 @@ Resources:
 
   RouteGetGovernanceDictionary:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/governance/dictionary
@@ -894,6 +915,7 @@ Resources:
 
   RouteGetGovernanceHash:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/governance/hash
@@ -901,6 +923,7 @@ Resources:
 
   RouteGetGovernanceByFileName:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/governance/{fileName+}
@@ -908,6 +931,7 @@ Resources:
 
   RouteGetHealth:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/health
@@ -915,6 +939,7 @@ Resources:
 
   RouteGetTrackerPendingUpdates:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/tracker/pending-updates
@@ -922,6 +947,7 @@ Resources:
 
   RouteGetTrackerByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/tracker/{projectId}
@@ -929,6 +955,7 @@ Resources:
 
   RouteGetTrackerByProjectIdRelationship:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/tracker/{projectId}/relationship
@@ -936,6 +963,7 @@ Resources:
 
   RouteGetTrackerByProjectIdByRecordTypeByRecordId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: GET /api/v1/tracker/{projectId}/{recordType}/{recordId}
@@ -943,6 +971,7 @@ Resources:
 
   RouteOptAuthRefresh:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/auth/refresh
@@ -950,6 +979,7 @@ Resources:
 
   RouteOptCheckoutValidateCommitCompleteByCciId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/checkout/validate/commit-complete/{cciId}
@@ -957,6 +987,7 @@ Resources:
 
   RouteOptCheckoutByProjectTaskByTaskIdAdvance:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/advance
@@ -964,6 +995,7 @@ Resources:
 
   RouteOptCheckoutByProjectTaskByTaskIdCheckout:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/checkout
@@ -971,6 +1003,7 @@ Resources:
 
   RouteOptCheckoutByProjectTaskByTaskIdLog:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/log
@@ -978,6 +1011,7 @@ Resources:
 
   RouteOptCheckoutByProjectTaskByTaskIdStatus:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/status
@@ -985,6 +1019,7 @@ Resources:
 
   RouteOptCoordinationAuthCognitoSession:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/auth/cognito/session
@@ -992,6 +1027,7 @@ Resources:
 
   RouteOptCoordinationAuthOauthClients:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients
@@ -999,6 +1035,7 @@ Resources:
 
   RouteOptCoordinationAuthOauthClientsByClientId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}
@@ -1006,6 +1043,7 @@ Resources:
 
   RouteOptCoordinationAuthOauthClientsByClientIdPermissions:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/permissions
@@ -1013,6 +1051,7 @@ Resources:
 
   RouteOptCoordinationAuthOauthClientsByClientIdUsage:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/usage
@@ -1020,6 +1059,7 @@ Resources:
 
   RouteOptCoordinationAuthPermissionsByTokenId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/auth/permissions/{tokenId}
@@ -1027,6 +1067,7 @@ Resources:
 
   RouteOptCoordinationAuthTokens:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/auth/tokens
@@ -1034,6 +1075,7 @@ Resources:
 
   RouteOptCoordinationAuthTokensByTokenId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/auth/tokens/{tokenId}
@@ -1041,6 +1083,7 @@ Resources:
 
   RouteOptCoordinationCapabilities:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/capabilities
@@ -1048,6 +1091,7 @@ Resources:
 
   RouteOptCoordinationMcp:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/mcp
@@ -1055,6 +1099,7 @@ Resources:
 
   RouteOptCoordinationMonitor:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/monitor
@@ -1062,6 +1107,7 @@ Resources:
 
   RouteOptCoordinationProjects:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/projects
@@ -1069,6 +1115,7 @@ Resources:
 
   RouteOptCoordinationProjectsByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/projects/{projectId}
@@ -1076,6 +1123,7 @@ Resources:
 
   RouteOptCoordinationRequests:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/requests
@@ -1083,6 +1131,7 @@ Resources:
 
   RouteOptCoordinationRequestsByRequestId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/requests/{requestId}
@@ -1090,6 +1139,7 @@ Resources:
 
   RouteOptCoordinationRequestsByRequestIdCallback:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/requests/{requestId}/callback
@@ -1097,6 +1147,7 @@ Resources:
 
   RouteOptCoordinationRequestsByRequestIdDispatch:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/coordination/requests/{requestId}/dispatch
@@ -1104,6 +1155,7 @@ Resources:
 
   RouteOptDeployHistoryByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/deploy/history/{projectId}
@@ -1111,6 +1163,7 @@ Resources:
 
   RouteOptDeployStateByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/deploy/state/{projectId}
@@ -1118,6 +1171,7 @@ Resources:
 
   RouteOptDeployStatusBySpecId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/deploy/status/{specId}
@@ -1125,6 +1179,7 @@ Resources:
 
   RouteOptDeploySubmit:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/deploy/submit
@@ -1132,6 +1187,7 @@ Resources:
 
   RouteOptDocPrepByProjectName:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/doc-prep/{projectName}
@@ -1139,6 +1195,7 @@ Resources:
 
   RouteOptDocuments:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/documents
@@ -1146,6 +1203,7 @@ Resources:
 
   RouteOptDocumentsByDocumentId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/documents/{documentId}
@@ -1153,6 +1211,7 @@ Resources:
 
   RouteOptFeed:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/feed
@@ -1160,6 +1219,7 @@ Resources:
 
   RouteOptGithubByProxy:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/github/{proxy+}
@@ -1167,6 +1227,7 @@ Resources:
 
   RouteOptGovernanceDictionary:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/governance/dictionary
@@ -1174,6 +1235,7 @@ Resources:
 
   RouteOptGovernanceHash:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/governance/hash
@@ -1181,6 +1243,7 @@ Resources:
 
   RouteOptGovernanceByFileName:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/governance/{fileName+}
@@ -1188,6 +1251,7 @@ Resources:
 
   RouteOptHealth:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/health
@@ -1195,6 +1259,7 @@ Resources:
 
   RouteOptProjects:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/projects
@@ -1202,6 +1267,7 @@ Resources:
 
   RouteOptProjectsByProjectName:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/projects/{projectName}
@@ -1209,6 +1275,7 @@ Resources:
 
   RouteOptReferenceSearch:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/reference/search
@@ -1216,6 +1283,7 @@ Resources:
 
   RouteOptTrackerPendingUpdates:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/pending-updates
@@ -1223,6 +1291,7 @@ Resources:
 
   RouteOptTrackerByProjectId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/{projectId}
@@ -1230,6 +1299,7 @@ Resources:
 
   RouteOptTrackerByProjectIdRelationship:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/{projectId}/relationship
@@ -1237,6 +1307,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordType:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}
@@ -1244,6 +1315,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}
@@ -1251,6 +1323,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence
@@ -1258,6 +1331,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordIdCheckout:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
@@ -1265,6 +1339,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordIdExtend:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend
@@ -1272,6 +1347,7 @@ Resources:
 
   RouteOptTrackerByProjectIdByRecordTypeByRecordIdLog:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/log
@@ -1279,6 +1355,7 @@ Resources:
 
   RouteOptByProjectIdByRecordTypeByRecordId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: OPTIONS /{projectId}/{recordType}/{recordId}
@@ -1286,6 +1363,7 @@ Resources:
 
   RoutePatchCoordinationAuthOauthClientsByClientIdPermissions:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/permissions
@@ -1293,6 +1371,7 @@ Resources:
 
   RoutePatchCoordinationAuthOauthClientsByClientIdUsage:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/usage
@@ -1300,6 +1379,7 @@ Resources:
 
   RoutePatchCoordinationAuthPermissionsByTokenId:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: PATCH /api/v1/coordination/auth/permissions/{tokenId}
@@ -1307,6 +1387,7 @@ Resources:
 
   RoutePostCheckoutByProjectTaskByTaskIdAdvance:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/advance
@@ -1314,6 +1395,7 @@ Resources:
 
   RoutePostCheckoutByProjectTaskByTaskIdCheckout:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/checkout
@@ -1321,6 +1403,7 @@ Resources:
 
   RoutePostCheckoutByProjectTaskByTaskIdLog:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/log
@@ -1328,6 +1411,7 @@ Resources:
 
   RoutePostCoordinationAuthCognitoSession:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/auth/cognito/session
@@ -1335,6 +1419,7 @@ Resources:
 
   RoutePostCoordinationAuthOauthClients:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/auth/oauth-clients
@@ -1342,6 +1427,7 @@ Resources:
 
   RoutePostCoordinationAuthTokens:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/auth/tokens
@@ -1349,6 +1435,7 @@ Resources:
 
   RoutePostCoordinationComponentsPropose:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/components/propose
@@ -1356,6 +1443,7 @@ Resources:
 
   RoutePostCoordinationComponentsByComponentIdAdvance:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/components/{componentId}/advance
@@ -1363,6 +1451,7 @@ Resources:
 
   RoutePostCoordinationComponentsByComponentIdApprove:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/components/{componentId}/approve
@@ -1370,6 +1459,7 @@ Resources:
 
   RoutePostCoordinationComponentsByComponentIdCloudwatchEvent:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/components/{componentId}/cloudwatch_event
@@ -1377,6 +1467,7 @@ Resources:
 
   RoutePostCoordinationComponentsByComponentIdReject:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/coordination/components/{componentId}/reject
@@ -1384,6 +1475,7 @@ Resources:
 
   RoutePostGithubDeployGammaSuccessByPrnumber:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/github/deploy/gamma-success/{pr_number}
@@ -1391,6 +1483,7 @@ Resources:
 
   RoutePostGithubIssues:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/github/issues
@@ -1398,6 +1491,7 @@ Resources:
 
   RoutePostGithubProjectsSync:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/github/projects/sync
@@ -1405,6 +1499,7 @@ Resources:
 
   RoutePostGithubWebhook:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/github/webhook
@@ -1412,6 +1507,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordType:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/tracker/{projectId}/{recordType}
@@ -1419,6 +1515,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence
@@ -1426,6 +1523,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordTypeByRecordIdCheckout:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
@@ -1433,6 +1531,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordTypeByRecordIdExtend:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend
@@ -1440,6 +1539,7 @@ Resources:
 
   RoutePostTrackerByProjectIdByRecordTypeByRecordIdLog:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/log
@@ -1447,6 +1547,7 @@ Resources:
 
   RoutePutGovernanceByFileName:
     Type: AWS::ApiGatewayV2::Route
+    DeletionPolicy: Retain
     Properties:
       ApiId: !Ref HttpApi
       RouteKey: PUT /api/v1/governance/{fileName+}
