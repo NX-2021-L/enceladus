@@ -1,0 +1,72 @@
+name: IAM CFN Deploy Role — EventBridge ListRules Patch
+
+# ENC-TSK-J22 / GH#672: CloudFormationDeployRole (enceladus-cloudformation-deploy-github-role)
+# has events:DescribeRule but never events:ListRules, so tools/audit_cfn_drift.py's
+# `aws events list-rules` call (pre-deploy-health-gate.sh Check 7) fails AccessDenied
+# on every compute/api/monitoring stack-deploy. The durable fix lands the grant in
+# infrastructure/cloudformation/04-github-roles.yaml (mirroring BackendDeployRole's
+# CfnDriftAuditEventBridgeRead grant, ENC-ISS-442/ENC-TSK-I94); 04-github-roles has no
+# push-deploy, so this one-off dispatchable patch (matching the
+# iam-cloudformation-unblock.yml / iam-cfn-deploy-role-gamma-patch.yml pattern) applies
+# the same statement live immediately, ahead of the next full github-roles stack deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "Unblock GH#672 / ENC-TSK-J22 — grant events:ListRules to CloudFormationDeployRole for pre-deploy-health-gate.sh Check 7"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with events:ListRules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy — events:ListRules
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          cat > /tmp/cfn-deploy-role-eventbridge-listrules.json <<JSON
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "CfnDriftAuditEventBridgeRead",
+                "Effect": "Allow",
+                "Action": [
+                  "events:ListRules"
+                ],
+                "Resource": "arn:aws:events:us-west-2:${ACCOUNT_ID}:rule/*"
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-eventbridge-listrules-v1" \
+            --policy-document "file:///tmp/cfn-deploy-role-eventbridge-listrules.json"
+
+      - name: Verify inline policy attached
+        run: |
+          aws iam get-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-eventbridge-listrules-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table

@@ -30,7 +30,10 @@ Modes:
                                Also scopes which Condition-gated (IsProduction/
                                IsGamma) resources count as declared (ENC-TSK-J12).
   --output-json <path>         Write JSON drift report for CI consumption
-  --fail-on-drift              Exit 1 if any drift is detected
+  --fail-on-drift              Exit 1 if real drift is detected. Exit 2 (not 1) if any
+                               category could not be evaluated because a live AWS read
+                               was denied (AccessDenied) — a permission gap is flagged as
+                               'inconclusive', never reported as drift (ENC-TSK-J22 / GH#672).
   --self-check                 Run an offline sanity check of the
                                Condition-aware parser (no AWS calls) and exit
 
@@ -51,9 +54,33 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
 
+class LiveReadAccessDenied(RuntimeError):
+    """A live AWS read was denied by IAM — a permission gap, not CFN drift.
+
+    ENC-TSK-J22 / GH#672: CloudFormationDeployRole lacked events:ListRules, so
+    `aws events list-rules` raised an uncaught CalledProcessError that crashed
+    this script; pre-deploy-health-gate.sh Check 7 then mis-reported the crash
+    as "[FAIL] CFN drift detected". Raising this dedicated exception lets
+    callers distinguish "we don't have permission to check" from "we checked
+    and found drift" and surface the former as inconclusive instead.
+    """
+
+    def __init__(self, action: str, detail: str):
+        self.action = action
+        self.detail = detail
+        super().__init__(f"AccessDenied calling `{action}`: {detail}")
+
+
 def _aws_json(cmd: List[str]) -> object:
-    out = subprocess.check_output(cmd, text=True)
-    return json.loads(out) if out.strip() else None
+    proc = subprocess.run(cmd, text=True, capture_output=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        if "AccessDenied" in stderr:
+            raise LiveReadAccessDenied(action=" ".join(cmd), detail=stderr)
+        raise subprocess.CalledProcessError(
+            proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr
+        )
+    return json.loads(proc.stdout) if proc.stdout.strip() else None
 
 
 def live_apigw_routes(api_id: str) -> Set[str]:
@@ -303,14 +330,47 @@ def declared_eventbridge_rules(cfn_glob: str, name_prefix: str, environment: str
     return bases
 
 
+def _inconclusive_section(declared_count: int, reason: str, **extra: List[str]) -> Dict[str, object]:
+    section: Dict[str, object] = {
+        "inconclusive": True,
+        "inconclusive_reason": reason,
+        "live_count": None,
+        "declared_count": declared_count,
+        "live_only": [],
+        "cfn_only": [],
+    }
+    section.update(extra)
+    return section
+
+
 def audit(
-    api_id: str,
+    api_id: str | None,
     cfn_glob: str,
     event_rule_prefix: str,
     environment: str = "prod",
-) -> Dict[str, Dict[str, List[str]]]:
+    api_id_inconclusive: str | None = None,
+) -> Dict[str, Dict[str, object]]:
     declared_rt = declared_routes(cfn_glob, environment)
-    live_rt = live_apigw_routes(api_id)
+
+    # ENC-TSK-J22 / GH#672: a live-read AccessDenied (e.g. CloudFormationDeployRole
+    # lacking events:ListRules) is a permission gap, not evidence of drift. Each
+    # category is evaluated independently so one denied category doesn't crash
+    # the whole audit or masquerade as "drift detected" for the others.
+    if api_id_inconclusive:
+        apigw_section = _inconclusive_section(len(declared_rt), api_id_inconclusive)
+    else:
+        try:
+            live_rt = live_apigw_routes(api_id)
+        except LiveReadAccessDenied as e:
+            apigw_section = _inconclusive_section(len(declared_rt), str(e))
+        else:
+            apigw_section = {
+                "inconclusive": False,
+                "live_count": len(live_rt),
+                "declared_count": len(declared_rt),
+                "live_only": sorted(live_rt - declared_rt),
+                "cfn_only": sorted(declared_rt - live_rt),
+            }
 
     # ENC-TSK-J08: EventBridge comparison is done on environment-suffix-stripped
     # base names (see _strip_env_suffix), with the live set scoped to the audited
@@ -322,32 +382,36 @@ def audit(
     # IsProduction-gated resources only count as declared where they actually
     # deploy.
     declared_ev_bases = declared_eventbridge_rules(cfn_glob, event_rule_prefix, environment)
-    live_ev = live_eventbridge_rules(event_rule_prefix, environment)
-    live_ev_bases = {_strip_env_suffix(n) for n in live_ev}
-    exceptions = sorted(
-        n for n in live_ev
-        if _strip_env_suffix(n) in _EVENTBRIDGE_CLI_EXCEPTION_BASES
-    )
-    live_only = sorted(
-        n for n in live_ev
-        if _strip_env_suffix(n) not in declared_ev_bases
-        and _strip_env_suffix(n) not in _EVENTBRIDGE_CLI_EXCEPTION_BASES
-    )
-    cfn_only = sorted(b for b in declared_ev_bases if b not in live_ev_bases)
-    return {
-        "apigw_routes": {
-            "live_count": len(live_rt),
-            "declared_count": len(declared_rt),
-            "live_only": sorted(live_rt - declared_rt),
-            "cfn_only": sorted(declared_rt - live_rt),
-        },
-        "eventbridge_rules": {
+    try:
+        live_ev = live_eventbridge_rules(event_rule_prefix, environment)
+    except LiveReadAccessDenied as e:
+        eventbridge_section = _inconclusive_section(
+            len(declared_ev_bases), str(e), documented_exceptions=[]
+        )
+    else:
+        live_ev_bases = {_strip_env_suffix(n) for n in live_ev}
+        exceptions = sorted(
+            n for n in live_ev
+            if _strip_env_suffix(n) in _EVENTBRIDGE_CLI_EXCEPTION_BASES
+        )
+        live_only = sorted(
+            n for n in live_ev
+            if _strip_env_suffix(n) not in declared_ev_bases
+            and _strip_env_suffix(n) not in _EVENTBRIDGE_CLI_EXCEPTION_BASES
+        )
+        cfn_only = sorted(b for b in declared_ev_bases if b not in live_ev_bases)
+        eventbridge_section = {
+            "inconclusive": False,
             "live_count": len(live_ev),
             "declared_count": len(declared_ev_bases),
             "live_only": live_only,
             "cfn_only": cfn_only,
             "documented_exceptions": exceptions,
-        },
+        }
+
+    return {
+        "apigw_routes": apigw_section,
+        "eventbridge_rules": eventbridge_section,
     }
 
 
@@ -452,9 +516,21 @@ def main() -> int:
     if args.self_check:
         return 0 if _self_check() else 1
 
-    api_id = args.api_id or resolve_api_id(args.stack_prefix, args.environment)
+    api_id = args.api_id
+    api_id_inconclusive = None
+    if api_id is None:
+        try:
+            api_id = resolve_api_id(args.stack_prefix, args.environment)
+        except LiveReadAccessDenied as e:
+            api_id_inconclusive = str(e)
 
-    report = audit(api_id, args.cfn_glob, args.event_rule_prefix, args.environment)
+    report = audit(
+        api_id,
+        args.cfn_glob,
+        args.event_rule_prefix,
+        args.environment,
+        api_id_inconclusive=api_id_inconclusive,
+    )
     report["_api_id"] = api_id
     report["_cfn_glob"] = args.cfn_glob
     report["_environment"] = args.environment
@@ -465,12 +541,26 @@ def main() -> int:
     if args.output_json:
         Path(args.output_json).write_text(payload)
 
+    inconclusive_sections = [
+        section for section in ("apigw_routes", "eventbridge_rules")
+        if report[section].get("inconclusive")
+    ]
+    for section in inconclusive_sections:
+        print(
+            f"[INCONCLUSIVE] {section}: {report[section]['inconclusive_reason']} "
+            "-- this is a permission gap, not drift. Flagging rather than "
+            "failing closed as 'CFN drift detected' (ENC-TSK-J22 / GH#672)."
+        )
+
     any_drift = any(
-        report[section]["live_only"] or report[section]["cfn_only"]
+        not report[section].get("inconclusive")
+        and (report[section]["live_only"] or report[section]["cfn_only"])
         for section in ("apigw_routes", "eventbridge_rules")
     )
     if args.fail_on_drift and any_drift:
         return 1
+    if inconclusive_sections:
+        return 2
     return 0
 
 
