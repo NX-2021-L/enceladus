@@ -1,0 +1,16 @@
+[
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "ProdHealthMonitorFunction",
+    "ResourceIdentifier": {
+      "FunctionName": "enceladus-prod-health-monitor-gamma"
+    }
+  },
+  {
+    "ResourceType": "AWS::IAM::Role",
+    "LogicalResourceId": "ProdHealthMonitorRole",
+    "ResourceIdentifier": {
+      "RoleName": "enceladus-prod-health-monitor-role-gamma"
+    }
+  }
+]
