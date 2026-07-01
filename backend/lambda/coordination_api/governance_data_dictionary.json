@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-01.02",
-  "updated_at": "2026-07-01T18:30:00Z",
-  "last_change_summary": "ENC-TSK-J04 (FTR-074 Ph3): agent identity/session/credential Neo4j graph projection. New entities graph_sync.agent_identity_edges (OGTM write-up: :AgentIdentity/:AgentSession/:AgentCredential nodes + five typed edges AUTHENTICATED_AS/OWNED_BY/DERIVED_FROM/TRIGGERED_BY/MUTATED, registered byte-identically in graph_sync.RELATIONSHIP_TYPE_TO_EDGE_LABEL and graph_query_api._ALLOWED_EDGE_TYPES per ENC-ISS-178) and coordination.agent_credential (new agent-credentials table fields + lifecycle). Satisfies the Governance Dictionary Guard (config.py / graph_sync + graph_query_api lambda_function.py touched in the same change).",
+  "version": "2026-07-01.03",
+  "updated_at": "2026-07-01T21:42:00Z",
+  "last_change_summary": "ENC-TSK-J41 (SEV-1 ENC-ISS-465 cost kill): graph_query_api adds GDS_HARD_DISABLED env gate that short-circuits _check_gds_available()->False (forces cypher_fallback; no Aura Graph Analytics session ever created). No new record schema/edge types introduced; env-gate only. 02-compute.yaml retires the standing GDS projection (prefix->AWS::NoValue, GDS_HARD_DISABLED=1, StandingProjectionRefreshSchedule State=DISABLED). Satisfies the Governance Dictionary Guard (graph_query_api lambda_function.py touched).",
   "owners": [
     "enceladus-platform"
   ],
