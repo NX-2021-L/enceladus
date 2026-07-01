@@ -123,42 +123,145 @@ def declared_routes(cfn_glob: str) -> Set[str]:
     return keys
 
 
-def live_eventbridge_rules(name_prefix: str) -> Set[str]:
+def _in_environment(name: str, environment: str) -> bool:
+    """Does a live rule name belong to the environment being audited?
+
+    ENC-TSK-J08 / ENC-ISS-455: `aws events list-rules --name-prefix enceladus-`
+    returns BOTH prod (`<base>`) and gamma (`<base>-gamma`) rules, but the CFN
+    templates on a given branch declare only that branch's environment (main =>
+    prod, v4/main => gamma). Auditing conflated live rules against one branch's
+    templates makes every gamma rule look like drift on the (main-scheduled)
+    audit even though it is properly CFN-managed on v4/main. Scoping the live
+    set to the audited environment fixes the gh#635 inflation at its root.
+    """
+    is_gamma = name.endswith("-gamma")
+    if environment == "gamma":
+        return is_gamma
+    # prod: exclude every non-prod environment sibling (-gamma/-beta/-staging/...)
+    return not _is_env_sibling(name)
+
+
+def live_eventbridge_rules(name_prefix: str, environment: str = "prod") -> Set[str]:
     data = _aws_json([
         "aws", "events", "list-rules",
         "--name-prefix", name_prefix,
     ])
-    return {item["Name"] for item in (data or {}).get("Rules", [])}
+    return {
+        item["Name"]
+        for item in (data or {}).get("Rules", [])
+        if _in_environment(item["Name"], environment)
+    }
 
 
 _EVENTBRIDGE_RULE_RE = re.compile(
     r"Type:\s*AWS::Events::Rule[\s\S]*?(?=Type:\s*AWS::|\Z)"
 )
+# ENC-TSK-J08 / ENC-ISS-455: the name class must include the characters used by
+# `!Sub "<base>${EnvironmentSuffix}"` (the form EVERY rule in 02-compute.yaml /
+# 05-monitoring.yaml uses). The previous class `[A-Za-z0-9_.-]+` could not match
+# a value beginning with `!`/`$`/`{`, so EVERY !Sub-named rule extracted no name
+# and declared_count collapsed to 0 — the gh#635 false positive. We now capture
+# the optional `!Sub`, optional quotes, and the `${...}` substitution markers.
 _RULE_NAME_RE = re.compile(
-    r"(?:Name|RuleName):\s*['\"]?(?P<name>[A-Za-z0-9_.-]+)['\"]?"
+    r"(?:Name|RuleName):\s*(?:!Sub\s+)?['\"]?(?P<name>[A-Za-z0-9_.${}-]+)['\"]?"
 )
 
+# CLI-only EventBridge rules: live and serving a real feature, but declared in
+# NEITHER branch's CFN templates (genuine out-of-band orphans, confirmed via
+# ENC-TSK-J07 grep of main + v4/main). Environment scoping (_in_environment)
+# already keeps gamma-managed rules from showing as prod drift, so the ONLY rule
+# that still needs an explicit exception is enceladus-checkout-auto — the
+# ENC-FTR-037 auto-checkout companion, created out-of-band alongside
+# enceladus-checkout-service-auto and never codified.
+#
+# Durable fix is a CloudFormation change-set IMPORT (the rule already exists, so
+# a plain stack update plans it as an Add and AWS::EarlyValidation::ResourceExistenceCheck
+# rejects the whole change set — the ENC-ISS-386 / ENC-TSK-H29 wedge). Import is a
+# privileged manual op tracked under ENC-ISS-455; until then this documented
+# exception keeps the daily audit from re-raising gh#635 noise. Stored as an
+# env-suffix-stripped BASE name (see _strip_env_suffix). Verified live + ENABLED
+# via `aws events describe-rule` on 2026-06-30.
+_EVENTBRIDGE_CLI_EXCEPTION_BASES = {
+    "enceladus-checkout-auto",  # ENC-FTR-037 auto-checkout companion, rate(5 minutes)
+}
 
-def declared_eventbridge_rules(cfn_glob: str) -> Set[str]:
-    names: Set[str] = set()
+
+def _strip_env_suffix(name: str) -> str:
+    """Collapse an environment-suffixed rule name to its base.
+
+    CFN declares rules once via `!Sub "<base>${EnvironmentSuffix}"`; that single
+    declaration materializes as `<base>` in prod and `<base>-gamma` in gamma.
+    `aws events list-rules --name-prefix enceladus-` returns BOTH live variants.
+    Comparing on the stripped base makes one declaration cover both environments.
+    """
+    for suffix in _ENV_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _resolve_declared_name(raw: str) -> str | None:
+    """Resolve a declared rule name to its base, or None if unresolvable.
+
+    `${EnvironmentSuffix}` resolves to '' (the prod/base name). Any rule whose
+    name carries a different, non-resolvable `${...}` substitution is skipped
+    rather than guessed at.
+    """
+    base = re.sub(r"\$\{EnvironmentSuffix\}", "", raw).strip().strip("'\"")
+    if "${" in base:
+        return None
+    return _strip_env_suffix(base)
+
+
+def declared_eventbridge_rules(cfn_glob: str, name_prefix: str) -> Set[str]:
+    """CFN-declared EventBridge rule BASE names, scoped to ``name_prefix``.
+
+    Scoping to the same prefix the live query uses keeps the comparison
+    apples-to-apples: without it, fixing the !Sub bug would surface every
+    out-of-prefix declared rule (devops-*, on-project-json-sync) as phantom
+    ``cfn_only`` drift.
+    """
+    bases: Set[str] = set()
     for path in sorted(glob.glob(cfn_glob)):
         text = Path(path).read_text()
         for block in _EVENTBRIDGE_RULE_RE.findall(text):
             m = _RULE_NAME_RE.search(block)
-            if m:
-                names.add(m.group("name"))
-    return names
+            if not m:
+                continue
+            base = _resolve_declared_name(m.group("name"))
+            if base and base.startswith(name_prefix):
+                bases.add(base)
+    return bases
 
 
 def audit(
     api_id: str,
     cfn_glob: str,
     event_rule_prefix: str,
+    environment: str = "prod",
 ) -> Dict[str, Dict[str, List[str]]]:
     declared_rt = declared_routes(cfn_glob)
     live_rt = live_apigw_routes(api_id)
-    declared_ev = declared_eventbridge_rules(cfn_glob)
-    live_ev = live_eventbridge_rules(event_rule_prefix)
+
+    # ENC-TSK-J08: EventBridge comparison is done on environment-suffix-stripped
+    # base names (see _strip_env_suffix), with the live set scoped to the audited
+    # environment (see _in_environment) so gamma rules are not compared against
+    # prod (main) templates. declared_ev_bases is prefix-scoped to match the live
+    # query; the documented CLI-only exception is removed from the live side so
+    # the daily audit does not re-raise gh#635.
+    declared_ev_bases = declared_eventbridge_rules(cfn_glob, event_rule_prefix)
+    live_ev = live_eventbridge_rules(event_rule_prefix, environment)
+    live_ev_bases = {_strip_env_suffix(n) for n in live_ev}
+    exceptions = sorted(
+        n for n in live_ev
+        if _strip_env_suffix(n) in _EVENTBRIDGE_CLI_EXCEPTION_BASES
+    )
+    live_only = sorted(
+        n for n in live_ev
+        if _strip_env_suffix(n) not in declared_ev_bases
+        and _strip_env_suffix(n) not in _EVENTBRIDGE_CLI_EXCEPTION_BASES
+    )
+    cfn_only = sorted(b for b in declared_ev_bases if b not in live_ev_bases)
     return {
         "apigw_routes": {
             "live_count": len(live_rt),
@@ -168,9 +271,10 @@ def audit(
         },
         "eventbridge_rules": {
             "live_count": len(live_ev),
-            "declared_count": len(declared_ev),
-            "live_only": sorted(live_ev - declared_ev),
-            "cfn_only": sorted(declared_ev - live_ev),
+            "declared_count": len(declared_ev_bases),
+            "live_only": live_only,
+            "cfn_only": cfn_only,
+            "documented_exceptions": exceptions,
         },
     }
 
@@ -187,15 +291,26 @@ def main() -> int:
         "--event-rule-prefix",
         default="enceladus-",
     )
+    ap.add_argument(
+        "--environment",
+        default="prod",
+        choices=("prod", "gamma"),
+        help=(
+            "Which environment's live EventBridge rules to audit against the "
+            "checked-out branch's templates. Default 'prod' (main). Use 'gamma' "
+            "when auditing on v4/main. See _in_environment (ENC-TSK-J08)."
+        ),
+    )
     ap.add_argument("--output-json", default=None)
     ap.add_argument("--fail-on-drift", action="store_true")
     args = ap.parse_args()
 
     api_id = args.api_id or resolve_api_id(args.stack_prefix)
 
-    report = audit(api_id, args.cfn_glob, args.event_rule_prefix)
+    report = audit(api_id, args.cfn_glob, args.event_rule_prefix, args.environment)
     report["_api_id"] = api_id
     report["_cfn_glob"] = args.cfn_glob
+    report["_environment"] = args.environment
 
     payload = json.dumps(report, indent=2, sort_keys=True)
     print(payload)
