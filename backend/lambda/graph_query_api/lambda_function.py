@@ -558,6 +558,16 @@ _ALLOWED_EDGE_TYPES = frozenset({
     # across both lambdas (ENC-ISS-178).
     "PATHWAY_TRAVERSED",
     "TRAVERSED_BY",
+    # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent identity/session/credential lifecycle edges.
+    # Projected by graph_sync from the agent-store streams (_reconcile_agent_edges /
+    # _project_mutated_edge). Registered here so tracker.graphsearch edge_types=[...]
+    # queries traverse them; labels are byte-identical to graph_sync
+    # RELATIONSHIP_TYPE_TO_EDGE_LABEL values (ENC-ISS-178 drift guard).
+    "AUTHENTICATED_AS",   # AgentSession -> AgentIdentity
+    "OWNED_BY",           # AgentCredential -> AgentIdentity
+    "DERIVED_FROM",       # AgentCredential -> parent AgentCredential (rotation lineage)
+    "TRIGGERED_BY",       # AgentSession -> triggering session/routine
+    "MUTATED",            # AgentSession -> any record it wrote (write_source.provider)
 })
 
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 # ENC-TSK-B94: Incremental Titan V2 embedding helpers. build_embedding_text,
@@ -153,19 +154,37 @@ def _normalize_record_for_graph(record: Dict[str, Any]) -> Dict[str, Any]:
     if record_type == "document" and not normalized.get("record_id"):
         normalized["record_id"] = normalized.get("document_id", "")
 
+    # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity stores carry no record_type column and
+    # key on their own id field. Synthesize record_type + record_id from the id field so
+    # the graph dispatch can route them. Order matters: sessions AND credentials also carry
+    # agent_type_id / agent_identity_id, so probe the most-specific key first.
+    if not record_type:
+        for id_field, synthetic_type in (
+            ("credential_id", "agent_credential"),
+            ("session_id", "agent_session"),
+            ("agent_type_id", "agent_identity"),
+        ):
+            id_val = str(normalized.get(id_field) or "").strip()
+            if id_val:
+                normalized["record_type"] = synthetic_type
+                normalized["record_id"] = id_val
+                break
+
     return normalized
 
 
 def _extract_remove_record_id(keys: Dict[str, Any], old_record: Optional[Dict[str, Any]] = None) -> str:
     """Resolve the primary ID for REMOVE events across tracker + document tables."""
-    for key_name in ("record_id", "document_id", "item_id"):
+    id_fields = ("record_id", "document_id", "item_id",
+                 "session_id", "agent_type_id", "credential_id")
+    for key_name in id_fields:
         typed = keys.get(key_name) or {}
         value = str(typed.get("S") or "").strip()
         if value:
             return value
 
     if old_record:
-        for key_name in ("record_id", "document_id", "item_id"):
+        for key_name in id_fields:
             value = str(old_record.get(key_name) or "").strip()
             if value:
                 return value
@@ -187,6 +206,47 @@ RECORD_TYPE_TO_LABEL = {
     "generation": "Generation",  # GMF DOC-63420302EF65
 }
 
+# ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity graph projection. The three identity
+# stores (agent-types / agent-sessions / agent-credentials) key on their own id field and
+# carry NO record_type column, so _normalize_record_for_graph synthesizes a record_type
+# from the presence of the id field (see below). These are kept in a SEPARATE map from
+# RECORD_TYPE_TO_LABEL so the generic tracker/document dispatch (which assumes project_id,
+# title, embeddings) never accidentally picks up an agent row.
+AGENT_RECORD_TYPE_TO_LABEL = {
+    "agent_identity": "AgentIdentity",   # <- agent-types stream (ENC-AGT-NNN)
+    "agent_session": "AgentSession",     # <- agent-sessions stream (ENC-SES-NNN)
+    "agent_credential": "AgentCredential",  # <- agent-credentials stream (CRED-<hex>)
+}
+
+# The partition-key field for each agent store (the graph node's record_id).
+AGENT_ID_FIELD = {
+    "agent_identity": "agent_type_id",
+    "agent_session": "session_id",
+    "agent_credential": "credential_id",
+}
+
+# Node property sets copied onto each :Agent* node. Value-identical to the persisted
+# DynamoDB item shapes in coordination_api/agent_id_alloc.py (SESSION_NODE_PROPERTIES,
+# AGENT_TYPE_NODE_PROPERTIES, CREDENTIAL_NODE_PROPERTIES) plus the optional session
+# credential_id binding (ENC-TSK-J04 AC#4). record_id is set separately.
+AGENT_NODE_PROPERTIES = {
+    "agent_identity": (
+        "agent_type_id", "surface", "model", "cost_tier", "status", "usage_count",
+    ),
+    "agent_session": (
+        "session_id", "agent_type_id", "parent_session_id", "runtime",
+        "created_at", "claimed_at", "status", "credential_id",
+    ),
+    "agent_credential": (
+        "credential_id", "agent_identity_id", "issued_at", "status",
+        "revoked_at", "revoked_reason", "rotated_from",
+    ),
+}
+
+# A governed tracker write stamps write_source.provider = the acting session id
+# (e.g. "ENC-SES-029"). This pattern gates the generic MUTATED edge hook.
+_SESSION_PROVIDER_RE = re.compile(r"^ENC-SES-[0-9A-Z]+$")
+
 # ENC-TSK-E01 / ENC-ISS-184: ID-prefix to Neo4j label mapping for placeholder
 # node creation. When a plan emits a PLAN_CONTAINS edge to an objective task
 # that has not yet been projected (race window after plan.add_objective is
@@ -204,6 +264,11 @@ ID_PREFIX_TO_LABEL = {
     "DOC": "Document",
     "GEN": "Generation",
     "DPL": "DeploymentDecision",
+    # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity graph projection. ENC-SES / ENC-AGT are
+    # 3-segment ids (ENC-SES-029) so the parts[1] type_code resolves them here; CRED-<hex>
+    # is a 2-segment id handled by the dedicated branch in _infer_label_from_id below.
+    "SES": "AgentSession",
+    "AGT": "AgentIdentity",
 }
 
 
@@ -233,6 +298,9 @@ def _infer_label_from_id(record_id: str) -> str:
     # ENC-TSK-F45: Component IDs use 'comp-<name>' prefix (not the 3-segment ENC-TYPE-XXX form)
     if parts[0].lower() == "comp":
         return "Component"
+    # ENC-TSK-J04: Credential IDs use 'CRED-<uuid4hex>' (2-segment, no project prefix).
+    if parts[0].upper() == "CRED":
+        return "AgentCredential"
     if len(parts) < 2:
         return ""
     type_code = parts[1].upper()
@@ -368,6 +436,159 @@ def _upsert_project_node(tx, project_id: str) -> None:
     tx.run(
         "MERGE (p:Project {project_id: $pid})",
         pid=project_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agent-identity node + edge projection (ENC-TSK-J04 / ENC-FTR-074 Ph3)
+# ---------------------------------------------------------------------------
+
+def _merge_placeholder(tx, label: str, record_id: str) -> None:
+    """MERGE a labeled placeholder node (ENC-TSK-E01 pattern) so an edge lands even when
+    the target's own stream event has not yet projected it."""
+    if not label or not record_id:
+        return
+    tx.run(
+        f"MERGE (n:{label} {{record_id: $rid}}) ON CREATE SET n.is_placeholder = true",
+        rid=record_id,
+    )
+
+
+def _upsert_agent_node(tx, record: Dict[str, Any]) -> None:
+    """MERGE an :AgentIdentity / :AgentSession / :AgentCredential node by its id."""
+    record_type = record.get("record_type", "")
+    label = AGENT_RECORD_TYPE_TO_LABEL.get(record_type)
+    if not label:
+        return
+
+    id_field = AGENT_ID_FIELD[record_type]
+    raw_id = str(record.get("record_id") or record.get(id_field, "")).strip()
+    if not raw_id or raw_id.startswith("counter#"):
+        return  # reserved monotonic-counter sentinel row
+    record_id = _bare_id(raw_id)
+    if not record_id:
+        return
+
+    prop_keys = AGENT_NODE_PROPERTIES[record_type]
+    props = {k: record.get(k) for k in prop_keys if record.get(k) is not None}
+    props["record_id"] = record_id
+
+    tx.run(
+        f"MERGE (n:{label} {{record_id: $record_id}}) "
+        "SET n += $props "
+        "SET n.is_placeholder = false",
+        record_id=record_id, props=props,
+    )
+
+
+def _reconcile_agent_edges(tx, record: Dict[str, Any]) -> None:
+    """Project the typed lifecycle edges for an agent record (ENC-TSK-J04 AC#3).
+
+    AgentSession -> AUTHENTICATED_AS -> AgentIdentity   (session.agent_type_id)
+    AgentSession -> TRIGGERED_BY     -> parent session  (session.parent_session_id)
+    AgentCredential -> OWNED_BY      -> AgentIdentity    (credential.agent_identity_id)
+    AgentCredential -> DERIVED_FROM  -> parent credential (credential.rotated_from)
+
+    The source-endpoint fields are immutable across a record's lifetime (only status /
+    revoked_* / claimed_at change), so idempotent MERGE is sufficient — no delete-and-
+    recreate reconcile is needed.
+    """
+    record_type = record.get("record_type", "")
+    label = AGENT_RECORD_TYPE_TO_LABEL.get(record_type)
+    raw_id = str(record.get("record_id") or "").strip()
+    if not label or not raw_id or raw_id.startswith("counter#"):
+        return
+    record_id = _bare_id(raw_id)
+    if not record_id:
+        return
+
+    if record_type == "agent_session":
+        # AUTHENTICATED_AS -> AgentIdentity
+        agent_type_id = _bare_id(str(record.get("agent_type_id") or "").strip())
+        if agent_type_id:
+            _merge_placeholder(tx, "AgentIdentity", agent_type_id)
+            tx.run(
+                "MATCH (s:AgentSession {record_id: $sid}), (i:AgentIdentity {record_id: $aid}) "
+                "MERGE (s)-[:AUTHENTICATED_AS]->(i)",
+                sid=record_id, aid=agent_type_id,
+            )
+        # TRIGGERED_BY -> the triggering session/routine (parent_session_id). "root" and
+        # self-references are skipped. The parent is usually another AgentSession, but the
+        # placeholder is created on the label inferred from the id so a non-session trigger
+        # (e.g. a Routine id with a known prefix) still lands.
+        parent = _bare_id(str(record.get("parent_session_id") or "").strip())
+        if parent and parent.lower() != "root" and parent != record_id:
+            parent_label = _infer_label_from_id(parent) or "AgentSession"
+            _merge_placeholder(tx, parent_label, parent)
+            tx.run(
+                f"MATCH (s:AgentSession {{record_id: $sid}}), (p:{parent_label} {{record_id: $pid}}) "
+                "MERGE (s)-[:TRIGGERED_BY]->(p)",
+                sid=record_id, pid=parent,
+            )
+
+    elif record_type == "agent_credential":
+        # OWNED_BY -> AgentIdentity
+        owner = _bare_id(str(record.get("agent_identity_id") or "").strip())
+        if owner:
+            _merge_placeholder(tx, "AgentIdentity", owner)
+            tx.run(
+                "MATCH (c:AgentCredential {record_id: $cid}), (i:AgentIdentity {record_id: $oid}) "
+                "MERGE (c)-[:OWNED_BY]->(i)",
+                cid=record_id, oid=owner,
+            )
+        # DERIVED_FROM -> parent credential (rotation lineage)
+        parent_cred = _bare_id(str(record.get("rotated_from") or "").strip())
+        if parent_cred and parent_cred != record_id:
+            _merge_placeholder(tx, "AgentCredential", parent_cred)
+            tx.run(
+                "MATCH (c:AgentCredential {record_id: $cid}), (p:AgentCredential {record_id: $pid}) "
+                "MERGE (c)-[:DERIVED_FROM]->(p)",
+                cid=record_id, pid=parent_cred,
+            )
+
+
+def _project_mutated_edge(session, record: Dict[str, Any]) -> None:
+    """Generic MUTATED-edge hook (ENC-TSK-J04 AC#3, "the clever one").
+
+    Every governed tracker write stamps ``write_source.provider`` = the acting session id
+    (e.g. "ENC-SES-029") on the mutated record. When that provider matches the ENC-SES
+    pattern AND differs from the record's own id, MERGE a MUTATED edge from that session
+    node (placeholder if not yet projected) to this record's node. Runs for ALL record
+    types (tracker, document, and agent rows alike)."""
+    record_id = _bare_id(str(record.get("record_id") or "").strip())
+    if not record_id:
+        return
+    write_source = record.get("write_source")
+    provider = ""
+    if isinstance(write_source, dict):
+        provider = str(write_source.get("provider") or "").strip()
+    if not provider or not _SESSION_PROVIDER_RE.match(provider):
+        return
+    if provider == record_id:  # a session mutating its own row is not an interesting edge
+        return
+
+    record_type = record.get("record_type", "")
+    target_label = (
+        _infer_label_from_id(record_id)
+        or RECORD_TYPE_TO_LABEL.get(record_type)
+        or AGENT_RECORD_TYPE_TO_LABEL.get(record_type)
+    )
+    if not target_label:
+        return
+
+    session.execute_write(
+        lambda tx: _merge_mutated_edge(tx, provider, target_label, record_id)
+    )
+
+
+def _merge_mutated_edge(tx, provider: str, target_label: str, record_id: str) -> None:
+    """MERGE (:AgentSession {provider})-[:MUTATED]->(:target_label {record_id})."""
+    _merge_placeholder(tx, "AgentSession", provider)
+    _merge_placeholder(tx, target_label, record_id)
+    tx.run(
+        f"MATCH (s:AgentSession {{record_id: $sid}}), (t:{target_label} {{record_id: $rid}}) "
+        "MERGE (s)-[:MUTATED]->(t)",
+        sid=provider, rid=record_id,
     )
 
 
@@ -1034,6 +1255,17 @@ RELATIONSHIP_TYPE_TO_EDGE_LABEL = {
     # must stay byte-identical to graph_query_api _ALLOWED_EDGE_TYPES (ENC-ISS-178).
     "pathway-traversed": "PATHWAY_TRAVERSED",          # observed retrieval traversal
     "traversed-by": "TRAVERSED_BY",                    # inverse
+    # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent identity/session/credential lifecycle edges.
+    # Registered here (and byte-identically in graph_query_api._ALLOWED_EDGE_TYPES per
+    # ENC-ISS-178) for OGTM traversability. These edges are emitted directly by
+    # _reconcile_agent_edges / _project_mutated_edge from the agent-store streams (NOT via
+    # the ENC-FTR-049 relationship-record path), but the registry keeps them queryable via
+    # tracker.graphsearch and enforces the two-lambda drift guard.
+    "authenticated-as": "AUTHENTICATED_AS",            # AgentSession -> AgentIdentity
+    "owned-by": "OWNED_BY",                            # AgentCredential -> AgentIdentity
+    "derived-from": "DERIVED_FROM",                    # AgentCredential -> parent AgentCredential
+    "triggered-by": "TRIGGERED_BY",                    # AgentSession -> triggering session/routine
+    "mutated": "MUTATED",                              # AgentSession -> any mutated record
 }
 
 
@@ -1097,7 +1329,10 @@ def _delete_relationship_edge(tx, record_id_sk: str) -> None:
 
 def _delete_node(tx, record_id: str) -> None:
     """DETACH DELETE a node by record_id across all labels."""
-    for label in RECORD_TYPE_TO_LABEL.values():
+    # ENC-TSK-J04: include the agent-identity labels so hard-deleted agent rows (rare —
+    # the stores are append-only, retire/revoke are MODIFYs) also detach cleanly.
+    all_labels = list(RECORD_TYPE_TO_LABEL.values()) + list(AGENT_RECORD_TYPE_TO_LABEL.values())
+    for label in all_labels:
         tx.run(
             f"MATCH (n:{label} {{record_id: $rid}}) DETACH DELETE n",
             rid=record_id,
@@ -1166,6 +1401,26 @@ def _process_record(driver, stream_record: Dict) -> None:
                     )
             return
 
+        # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity node + edge projection.
+        # Agent rows ride the same async pipe; they carry no project_id / title / embedding
+        # so they take a dedicated branch ahead of the generic tracker/document path.
+        if record_type in AGENT_RECORD_TYPE_TO_LABEL:
+            agent_raw_id = str(record.get("record_id") or "").strip()
+            if not agent_raw_id or agent_raw_id.startswith("counter#"):
+                return  # skip the reserved monotonic-counter sentinel rows
+            agent_record_id = _bare_id(agent_raw_id)
+            with driver.session() as session:
+                session.execute_write(lambda tx: _upsert_agent_node(tx, record))
+                session.execute_write(lambda tx: _reconcile_agent_edges(tx, record))
+                # Generic MUTATED hook applies to agent rows too (a session may mutate
+                # another agent record and stamp write_source.provider).
+                _project_mutated_edge(session, record)
+            logger.info(
+                "[INFO] Synced agent %s %s (event=%s)",
+                record_type, agent_record_id, event_name,
+            )
+            return
+
         # Skip non-entity records
         if record_type not in RECORD_TYPE_TO_LABEL:
             return
@@ -1223,6 +1478,12 @@ def _process_record(driver, stream_record: Dict) -> None:
                         "primary projection preserved",
                         record_type, record_id,
                     )
+
+            # ENC-TSK-J04 / ENC-FTR-074 Ph3: generic MUTATED-edge hook. If this record was
+            # written by an agent session (write_source.provider = ENC-SES-NNN), MERGE a
+            # MUTATED edge from that session to this node. Runs after node upsert so the
+            # target node already exists.
+            _project_mutated_edge(session, record)
 
         logger.info(
             "[INFO] Synced %s %s (event=%s, project=%s)",

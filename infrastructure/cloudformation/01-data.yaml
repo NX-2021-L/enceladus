@@ -585,6 +585,11 @@ Resources:
       KeySchema:
         - AttributeName: session_id
           KeyType: HASH
+      # ENC-TSK-J04 / ENC-FTR-074 Ph3: stream feeds the AgentSessionsToGraphPipe ->
+      # GraphSyncQueue -> graph_sync path so :AgentSession nodes + AUTHENTICATED_AS /
+      # TRIGGERED_BY / MUTATED edges project asynchronously (no synchronous Neo4j write).
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
       Tags:
         - Key: Project
           Value: enceladus
@@ -609,6 +614,10 @@ Resources:
       KeySchema:
         - AttributeName: agent_type_id
           KeyType: HASH
+      # ENC-TSK-J04 / ENC-FTR-074 Ph3: stream feeds AgentTypesToGraphPipe so
+      # :AgentIdentity nodes project asynchronously into Neo4j.
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
       Tags:
         - Key: Project
           Value: enceladus
@@ -616,6 +625,34 @@ Resources:
           Value: coordination
         - Key: Feature
           Value: ENC-FTR-117
+
+  # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-credential lifecycle store, keyed CRED-<uuid4hex>.
+  # Node properties: agent_identity_id, issued_at, status, revoked_at, revoked_reason,
+  # rotated_from. Streamed to graph_sync (AgentCredentialsToGraphPipe) for :AgentCredential
+  # nodes + OWNED_BY / DERIVED_FROM edges. Append-only lifecycle (issue -> rotate -> revoke)
+  # via conditional writes in coordination_api/agent_id_alloc.py.
+  AgentCredentialsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "agent-credentials${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [IsProduction, true, false]
+      AttributeDefinitions:
+        - AttributeName: credential_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: credential_id
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: coordination
+        - Key: Feature
+          Value: ENC-FTR-074
 
   # ENC-TSK-I27 / ENC-FTR-116 Wave 2: canonical governance-version record.
   # Single-item table (version_id = "governance-version-current") written exclusively
@@ -792,6 +829,12 @@ Outputs:
     Value: !GetAtt AgentSessionsTable.Arn
     Export:
       Name: !Sub ${AWS::StackName}-AgentSessionsTableArn
+  # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-store stream ARNs consumed by the
+  # Agent*ToGraphPipe EventBridge Pipes in 02-compute.yaml.
+  AgentSessionsStreamArn:
+    Value: !GetAtt AgentSessionsTable.StreamArn
+    Export:
+      Name: !Sub ${AWS::StackName}-AgentSessionsStreamArn
   AgentTypesTableName:
     Value: !Ref AgentTypesTable
     Export:
@@ -800,6 +843,22 @@ Outputs:
     Value: !GetAtt AgentTypesTable.Arn
     Export:
       Name: !Sub ${AWS::StackName}-AgentTypesTableArn
+  AgentTypesStreamArn:
+    Value: !GetAtt AgentTypesTable.StreamArn
+    Export:
+      Name: !Sub ${AWS::StackName}-AgentTypesStreamArn
+  AgentCredentialsTableName:
+    Value: !Ref AgentCredentialsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-AgentCredentialsTable
+  AgentCredentialsTableArn:
+    Value: !GetAtt AgentCredentialsTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AgentCredentialsTableArn
+  AgentCredentialsStreamArn:
+    Value: !GetAtt AgentCredentialsTable.StreamArn
+    Export:
+      Name: !Sub ${AWS::StackName}-AgentCredentialsStreamArn
   GovernanceVersionTableName:
     Value: !Ref GovernanceVersionTable
     Export:

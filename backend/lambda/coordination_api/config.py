@@ -58,6 +58,11 @@ __all__ = [
     "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
     "COORDINATION_INTERNAL_API_KEYS",
     "COORDINATION_MCP_HTTP_PATH",
+    "AGENT_SESSIONS_TABLE",
+    "AGENT_TYPES_TABLE",
+    "AGENT_CREDENTIALS_TABLE",
+    "AGENT_SESSIONS_IDLE_SWEEP_ENABLED",
+    "AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS",
     "DRIFT_TELEMETRY_TABLE",
     "GRAPH_QUERY_API_URL",
     "COORDINATION_PUBLIC_BASE_URL",
@@ -172,6 +177,25 @@ COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
+# Agent ID v3 identity stores (ENC-TSK-I37 / ENC-FTR-117). Defaults are the prod table
+# names (no suffix); gamma sets AGENT_SESSIONS_TABLE/AGENT_TYPES_TABLE to the "-gamma"
+# names. The allocator (agent_id_alloc.py) is dormant until the agent.* surface (I38).
+AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
+AGENT_TYPES_TABLE = os.environ.get("AGENT_TYPES_TABLE", "agent-types")
+# ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-credential lifecycle store (CRED-<uuid4hex>).
+# Rides the same DynamoDB Streams -> EventBridge Pipe -> SQS -> graph_sync path as the
+# session/type stores so credential nodes + OWNED_BY/DERIVED_FROM edges project async.
+AGENT_CREDENTIALS_TABLE = os.environ.get("AGENT_CREDENTIALS_TABLE", "agent-credentials")
+# ENC-TSK-I71 / ENC-FTR-117 AC#8: scheduled idle-sweep backstop for abandoned agent
+# sessions. A session left in a live status (allocated/claimed) past the threshold is
+# reaped to 'retired' via an append-only status flip — NOT native DynamoDB TTL, which
+# hard-deletes and would violate the append-only retire model established in ENC-TSK-I38.
+AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
+)
+AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS = int(
+    os.environ.get("AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS", "86400")
+)
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
