@@ -3443,8 +3443,12 @@ Resources:
           ENABLE_LESSON_PRIMITIVE: "true"
           ENABLE_TYPED_RELATIONSHIPS: "true"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
-          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
-          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          # ENC-TSK-J31 / ENC-ISS-462: this function is a GAMMA function but is prod-stack-owned
+          # (Condition: IsProduction, H29/ISS-386 name-collision guard), so it inherits the PROD
+          # stack's AppConfigApplicationId param. Hardcode the GAMMA AppConfig ids so a prod compute
+          # deploy sets it to read gamma feature-flags (enceladus-feature-flags-gamma), not prod's.
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, "fhhcl7m", !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, "zecfu42", !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
       Tags:
         - Key: Project
