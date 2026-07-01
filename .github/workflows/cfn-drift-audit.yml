@@ -18,6 +18,25 @@ on:
         type: string
         required: false
         default: ""
+      environment:
+        description: >-
+          Which environment's live resources to audit against the
+          checked-out branch's templates (prod=main, gamma=v4/main).
+          ENC-TSK-J12: also scopes Condition-gated (IsProduction/IsGamma)
+          declared resources.
+        type: choice
+        options: ["prod", "gamma"]
+        required: false
+        default: "prod"
+      fail_on_drift:
+        description: >-
+          Fail this run if drift is detected. Use for a blocking
+          regression-guard dispatch (e.g. before merging a CFN template
+          change); leave false for the routine informational report
+          (ENC-TSK-J12).
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -43,17 +62,20 @@ jobs:
         id: audit
         run: |
           set -euo pipefail
+          ENVIRONMENT="${{ inputs.environment || 'prod' }}"
           if [[ -n "${{ inputs.api_id }}" ]]; then
             python3 tools/audit_cfn_drift.py \
               --api-id "${{ inputs.api_id }}" \
+              --environment "${ENVIRONMENT}" \
               --output-json /tmp/cfn-drift-report.json \
               || true
           else
             python3 tools/audit_cfn_drift.py \
+              --environment "${ENVIRONMENT}" \
               --output-json /tmp/cfn-drift-report.json \
               || true
           fi
-          echo "=== Drift Report ==="
+          echo "=== Drift Report (environment=${ENVIRONMENT}) ==="
           # The audit invocations above are guarded with `|| true` so that a
           # detected-drift exit code does not abort the step. But a hard crash
           # (e.g. resolve_api_id ambiguity) leaves no report behind. Surface
@@ -75,6 +97,16 @@ jobs:
           print('true' if drift else 'false')
           ")
           echo "any_drift=${any_drift}" >> "$GITHUB_OUTPUT"
+
+          # ENC-TSK-J12 regression guard: dispatch with fail_on_drift=true to
+          # use this run as a blocking gate (e.g. to validate a lane after a
+          # Channel C/A merge) rather than the default informational report.
+          # `inputs.fail_on_drift` is unset (empty) on schedule-triggered runs,
+          # so the daily cron never fails from this check.
+          if [[ "${{ inputs.fail_on_drift }}" == "true" && "${any_drift}" == "true" ]]; then
+            echo "::error::Drift detected on environment=${ENVIRONMENT} and fail_on_drift=true — failing this run as a regression-guard gate."
+            exit 1
+          fi
 
       - name: Upload drift report artifact
         if: always()
