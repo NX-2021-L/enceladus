@@ -1,0 +1,9 @@
+[
+  {
+    "ResourceType": "AWS::Events::Rule",
+    "LogicalResourceId": "CheckoutAutoScheduleRule",
+    "ResourceIdentifier": {
+      "Name": "enceladus-checkout-auto"
+    }
+  }
+]

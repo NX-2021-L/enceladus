@@ -3512,6 +3512,32 @@ Resources:
           - mcp-session-id
         MaxAge: 86400
 
+  # ENC-TSK-J13 (ENC-ISS-455): enceladus-checkout-auto — the sole documented prod
+  # EventBridge orphan (created out-of-band via CLI for ENC-FTR-037). ADOPTED via
+  # `create-change-set --change-set-type IMPORT` (resource-import-checkout-auto.json)
+  # BEFORE any normal compute deploy. A plain deploy that ADDs this rule fails closed
+  # at AWS::Events::Rule "already exists" (the enceladus-monitoring UPDATE_ROLLBACK
+  # class); import first. Literal prod-only name (Condition: IsProduction) — no gamma
+  # sibling exists. DeletionPolicy/UpdateReplacePolicy: Retain so a stack op never
+  # deletes the live auto-checkout schedule. Properties mirror live EXACTLY for a
+  # clean Import/no-op change-set (rate(5 minutes), ENABLED, target the -auto Lambda).
+  # NOTE: the events->lambda AWS::Lambda::Permission is NOT importable and stays
+  # out-of-band (ENC-ISS-394 precedent); only the rule is adopted here.
+  # After import, J14 drops the audit's documented-exception for enceladus-checkout-auto.
+  CheckoutAutoScheduleRule:
+    Type: AWS::Events::Rule
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: enceladus-checkout-auto
+      Description: "Auto-checkout Enceladus tasks after 15-minute window (ENC-FTR-037)"
+      ScheduleExpression: "rate(5 minutes)"
+      State: ENABLED
+      Targets:
+        - Id: checkout-auto-target
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-checkout-service-auto"
+
   # ENC-TSK-I27 / ENC-TSK-I28 / ENC-FTR-116 Wave 2: recompute-governance Lambda + sole-writer role.
   # Ported from v4/main to main for the io-authorized FTR-116 prod-exception deploy (DOC-05C45B438FC1
   # precedent). Code is an inline stub; the real handler ships via the artifact pipeline. CFN CREATES

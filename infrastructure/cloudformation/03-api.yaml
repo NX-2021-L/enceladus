@@ -725,6 +725,733 @@ Resources:
       RouteKey: OPTIONS /api/v1/tracker/graphsearch
       Target: !Sub integrations/${GraphQueryIntegration}
 
+  # ==================================================================
+  # ENC-TSK-J13 (ENC-ISS-455): out-of-band prod API surface adopted via
+  # change-set IMPORT (resource-import-api.json). 3 integrations + 98 routes.
+  # STAGED — do NOT plain-deploy before IMPORT (EarlyValidation wedge).
+  # All 98 routes classified KEEP-IMPORT (every one backs a live Lambda
+  # AWS_PROXY integration; zero stray/orphan routes).
+  # ==================================================================
+
+  GitHubProxyIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    # ENC-TSK-J13: out-of-band integration (physical 0nmjqw3) adopted via change-set IMPORT.
+    # Duplicate-to-CFN note: GitHubIntegration/gwha2wd targets the same Lambda; live traffic uses this one.
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-github-integration${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  CheckoutApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    # ENC-TSK-J13: out-of-band integration (physical oi4kfbn) adopted via change-set IMPORT.
+    # Duplicate-to-CFN note: CheckoutServiceIntegration/reizplt targets the same Lambda; live traffic uses this one.
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-checkout-service${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  ChangelogApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    # ENC-TSK-J13: out-of-band integration (physical w6ey7lp) adopted via change-set IMPORT.
+    # Duplicate-to-CFN note: none (no CFN changelog integration existed) targets the same Lambda; live traffic uses this one.
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-changelog-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  RouteDeleteCheckoutByProjectTaskByTaskIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/checkout/{project}/task/{taskId}/checkout
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteDeleteCoordinationAuthOauthClientsByClientId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/coordination/auth/oauth-clients/{clientId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteDeleteCoordinationAuthTokensByTokenId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/coordination/auth/tokens/{tokenId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteDeleteTrackerByProjectIdRelationship:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteDeleteTrackerByProjectIdByRecordTypeByRecordIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteGetChangelogHistory:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/history
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteGetChangelogHistoryByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/history/{projectId}
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteGetChangelogVersionByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/version/{projectId}
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteGetChangelogVersions:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/changelog/versions
+      Target: !Sub integrations/${ChangelogApiIntegration}
+
+  RouteGetCheckoutValidateCommitCompleteByCciId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/checkout/validate/commit-complete/{cciId}
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteGetCheckoutByProjectTaskByTaskIdStatus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/checkout/{project}/task/{taskId}/status
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteGetCoordinationAuthOauthClients:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/auth/oauth-clients
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetCoordinationAuthTokens:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/auth/tokens
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetCoordinationProjects:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/projects
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetCoordinationProjectsByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/projects/{projectId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetGithubCommitsValidate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/github/commits/validate
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RouteGetGithubProjects:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/github/projects
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RouteGetGovernanceDictionary:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/governance/dictionary
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetGovernanceHash:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/governance/hash
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetGovernanceByFileName:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/governance/{fileName+}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/health
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteGetTrackerPendingUpdates:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/pending-updates
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteGetTrackerByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteGetTrackerByProjectIdRelationship:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteGetTrackerByProjectIdByRecordTypeByRecordId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptAuthRefresh:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/auth/refresh
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
+  RouteOptCheckoutValidateCommitCompleteByCciId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/validate/commit-complete/{cciId}
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCheckoutByProjectTaskByTaskIdAdvance:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/advance
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCheckoutByProjectTaskByTaskIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/checkout
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCheckoutByProjectTaskByTaskIdLog:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/log
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCheckoutByProjectTaskByTaskIdStatus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/checkout/{project}/task/{taskId}/status
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RouteOptCoordinationAuthCognitoSession:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/cognito/session
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthOauthClients:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthOauthClientsByClientId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthOauthClientsByClientIdPermissions:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/permissions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthOauthClientsByClientIdUsage:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/usage
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthPermissionsByTokenId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/permissions/{tokenId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthTokens:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/tokens
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationAuthTokensByTokenId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/auth/tokens/{tokenId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationCapabilities:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/capabilities
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationMcp:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/mcp
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationMonitor:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/monitor
+      Target: !Sub integrations/${CoordinationMonitorIntegration}
+
+  RouteOptCoordinationProjects:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/projects
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationProjectsByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/projects/{projectId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationRequests:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/requests
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationRequestsByRequestId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/requests/{requestId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationRequestsByRequestIdCallback:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/requests/{requestId}/callback
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptCoordinationRequestsByRequestIdDispatch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/coordination/requests/{requestId}/dispatch
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptDeployHistoryByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/deploy/history/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteOptDeployStateByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/deploy/state/{projectId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteOptDeployStatusBySpecId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/deploy/status/{specId}
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteOptDeploySubmit:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/deploy/submit
+      Target: !Sub integrations/${DeployIntakeIntegration}
+
+  RouteOptDocPrepByProjectName:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/doc-prep/{projectName}
+      Target: !Sub integrations/${DocPrepIntegration}
+
+  RouteOptDocuments:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/documents
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptDocumentsByDocumentId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/documents/{documentId}
+      Target: !Sub integrations/${DocumentApiIntegration}
+
+  RouteOptFeed:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/feed
+      Target: !Sub integrations/${FeedQueryIntegration}
+
+  RouteOptGithubByProxy:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/github/{proxy+}
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RouteOptGovernanceDictionary:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/governance/dictionary
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptGovernanceHash:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/governance/hash
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptGovernanceByFileName:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/governance/{fileName+}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/health
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteOptProjects:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/projects
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  RouteOptProjectsByProjectName:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/projects/{projectName}
+      Target: !Sub integrations/${ProjectServiceIntegration}
+
+  RouteOptReferenceSearch:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/reference/search
+      Target: !Sub integrations/${ReferenceSearchIntegration}
+
+  RouteOptTrackerPendingUpdates:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/pending-updates
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdRelationship:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/relationship
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordType:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordIdExtend:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptTrackerByProjectIdByRecordTypeByRecordIdLog:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/log
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RouteOptByProjectIdByRecordTypeByRecordId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: OPTIONS /{projectId}/{recordType}/{recordId}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePatchCoordinationAuthOauthClientsByClientIdPermissions:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/permissions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePatchCoordinationAuthOauthClientsByClientIdUsage:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/usage
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePatchCoordinationAuthPermissionsByTokenId:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PATCH /api/v1/coordination/auth/permissions/{tokenId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCheckoutByProjectTaskByTaskIdAdvance:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/advance
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RoutePostCheckoutByProjectTaskByTaskIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/checkout
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RoutePostCheckoutByProjectTaskByTaskIdLog:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/checkout/{project}/task/{taskId}/log
+      Target: !Sub integrations/${CheckoutApiIntegration}
+
+  RoutePostCoordinationAuthCognitoSession:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/auth/cognito/session
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationAuthOauthClients:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/auth/oauth-clients
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationAuthTokens:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/auth/tokens
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsPropose:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/propose
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsByComponentIdAdvance:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/advance
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsByComponentIdApprove:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/approve
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsByComponentIdCloudwatchEvent:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/cloudwatch_event
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostCoordinationComponentsByComponentIdReject:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/components/{componentId}/reject
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RoutePostGithubDeployGammaSuccessByPrnumber:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/github/deploy/gamma-success/{pr_number}
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RoutePostGithubIssues:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/github/issues
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RoutePostGithubProjectsSync:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/github/projects/sync
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RoutePostGithubWebhook:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/github/webhook
+      Target: !Sub integrations/${GitHubProxyIntegration}
+
+  RoutePostTrackerByProjectIdByRecordType:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePostTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePostTrackerByProjectIdByRecordTypeByRecordIdCheckout:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePostTrackerByProjectIdByRecordTypeByRecordIdExtend:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePostTrackerByProjectIdByRecordTypeByRecordIdLog:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/log
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
+  RoutePutGovernanceByFileName:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /api/v1/governance/{fileName+}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
 Outputs:
   ApiEndpoint:
     Value: !GetAtt HttpApi.ApiEndpoint
