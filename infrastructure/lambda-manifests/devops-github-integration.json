@@ -9,6 +9,7 @@
     "environment": {
       "COGNITO_CLIENT_ID": "6q607dk3liirhtecgps7hifmlk",
       "COGNITO_USER_POOL_ID": "us-east-1_b2D0V3E1k",
+      "DEPLOY_TABLE": "devops-deployment-manager",
       "DYNAMODB_REGION": "us-west-2",
       "GITHUB_APP_ID": "",
       "GITHUB_INSTALLATION_ID": "",
