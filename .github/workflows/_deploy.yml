@@ -321,6 +321,12 @@ jobs:
           fn_map          = json.loads(os.environ.get('FUNCTION_NAME_MAP_JSON') or '{}')
           canary_pref     = os.environ.get('CANARY_PREFERENCE', '').strip()
           bucket = 'jreese-net'
+          # ENC-ISS-454: canonical artifacts live in jreese-net (us-west-1), but
+          # `update-function-code --s3-bucket` requires the source bucket in the
+          # function's region (us-west-2) — a cross-region bucket returns
+          # PermanentRedirect. Each same-run artifact is copied here first, then
+          # deployed by S3 reference (no ~70MB base64 direct-upload ceiling).
+          staging_bucket = 'enceladus-lambda-artifacts-us-west-2'
           arch   = os.environ['ARCH']
           py     = os.environ['PY_VERSION']
           sha    = os.environ['SHA']
@@ -381,6 +387,35 @@ jobs:
               with _print_lock:
                   print(msg, file=(sys.stderr if err else sys.stdout), flush=True)
 
+          _TRANSIENT = (
+              'TooManyRequestsException', 'ThrottlingException', 'Throttling',
+              'ResourceConflictException', 'update is in progress',
+              'Rate exceeded', 'RequestTimeout', 'ServiceException',
+              'InternalFailure', 'SlowDown',
+          )
+
+          def run_with_retry(cmd, what, attempts=4, skip_on=()):
+              """ENC-ISS-454 isolation: run an AWS CLI command with bounded retry on
+              transient/throttle errors. Returns the CompletedProcess (success OR
+              non-transient failure — caller inspects returncode), or None if a
+              skip_on marker matched (caller treats as skip). Retries never span
+              functions: a stuck package exhausts only its own attempts."""
+              last = None
+              for i in range(1, attempts + 1):
+                  last = subprocess.run(cmd, capture_output=True, text=True)
+                  if last.returncode == 0:
+                      return last
+                  stderr = last.stderr or ''
+                  if any(m in stderr for m in skip_on):
+                      return None
+                  if i == attempts or not any(m in stderr for m in _TRANSIENT):
+                      return last
+                  back = 2 ** i
+                  tail = (stderr.strip().splitlines() or [str(last.returncode)])[-1]
+                  log(f'  [retry {i}/{attempts}] {what}: {tail} — retrying in {back}s')
+                  time.sleep(back)
+              return last
+
           def deploy_one(fn, mapped_name, version_id):
               """Per-target pipeline: download artifact, update code, publish version,
               kick off CodeDeploy canary (or fall back to direct alias). Returns:
@@ -392,38 +427,39 @@ jobs:
                   log(f'[skip] {fn}  (not in function_name_map)')
                   return {'fn': fn, 'status': 'skip'}
               s3_key = f"{prefix}/{fn}-{sha}.zip"
-              log(f'[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id}')
+              log(f'[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id} (stage->{staging_bucket})')
 
-              tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
-              tmp.close()
-              try:
-                  dl = subprocess.run(
-                      ['aws', 's3api', 'get-object',
-                       '--bucket', bucket, '--key', s3_key,
-                       '--version-id', version_id,
-                       '--region', 'us-east-1', tmp.name],
-                      capture_output=True, text=True,
-                  )
-                  if dl.returncode != 0:
-                      log(f'::error::s3 download failed for {fn}: {dl.stderr.strip()}', err=True)
-                      return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 's3 download'}
+              # ENC-ISS-454: stage the exact same-run artifact version into the
+              # us-west-2 staging bucket (server-side cross-region copy), then deploy
+              # by S3 reference. Replaces the download + `--zip-file` inline upload,
+              # whose base64-encoded request body pushed the ~62MB graph_query_api
+              # package past the 70,167,211-byte UpdateFunctionCode request limit and
+              # failed the whole atomic ~30-Lambda job.
+              cp = run_with_retry(
+                  ['aws', 's3api', 'copy-object',
+                   '--region', region,
+                   '--bucket', staging_bucket, '--key', s3_key,
+                   '--copy-source', f'{bucket}/{s3_key}?versionId={version_id}'],
+                  what=f'stage {fn}',
+              )
+              if cp is None or cp.returncode != 0:
+                  detail = (cp.stderr.strip() if cp else 'skip marker')
+                  log(f'::error::stage-to-{staging_bucket} failed for {fn}: {detail}', err=True)
+                  return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 'stage copy'}
 
-                  r = subprocess.run(
-                      ['aws', 'lambda', 'update-function-code',
-                       '--region', region, '--function-name', mapped_name,
-                       '--zip-file', f'fileb://{tmp.name}', '--publish'],
-                      capture_output=True, text=True,
-                  )
-              finally:
-                  try: os.unlink(tmp.name)
-                  except OSError: pass
-
+              r = run_with_retry(
+                  ['aws', 'lambda', 'update-function-code',
+                   '--region', region, '--function-name', mapped_name,
+                   '--s3-bucket', staging_bucket, '--s3-key', s3_key,
+                   '--publish'],
+                  what=f'update-function-code {mapped_name}',
+                  skip_on=('ResourceNotFoundException', 'Function not found'),
+              )
+              if r is None:
+                  log(f'  [skip] {mapped_name}: not provisioned in this environment yet')
+                  return {'fn': fn, 'mapped_name': mapped_name, 'status': 'skip'}
               if r.returncode != 0:
-                  stderr = r.stderr.strip()
-                  if 'ResourceNotFoundException' in stderr or 'Function not found' in stderr:
-                      log(f'  [skip] {mapped_name}: not provisioned in this environment yet')
-                      return {'fn': fn, 'mapped_name': mapped_name, 'status': 'skip'}
-                  log(f'::error::update-function-code failed for {mapped_name}: {stderr}', err=True)
+                  log(f'::error::update-function-code failed for {mapped_name}: {r.stderr.strip()}', err=True)
                   return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 'update-function-code'}
 
               try:
@@ -547,6 +583,7 @@ jobs:
           deployments = []  # list of (fn, mapped_name, dep_id)
           errors = []
           skipped = []
+          results = []      # every deploy_one outcome, for the per-function summary
           deploy_units = []  # list of (fn, mapped_name, version_id)
           for fn, vid in sorted(version_ids.items()):
               names = [n.strip() for n in (fn_map.get(fn) or '').split(',') if n.strip()]
@@ -568,7 +605,10 @@ jobs:
                       fn, mapped_name = futures[fut]
                       log(f'::error::worker exception on {fn} -> {mapped_name}: {e}', err=True)
                       errors.append(fn)
+                      results.append({'fn': fn, 'mapped_name': mapped_name,
+                                      'status': 'error', 'error': f'worker exception: {e}'})
                       continue
+                  results.append(result)
                   fn = result['fn']
                   if result['status'] == 'codedeploy':
                       deployments.append((fn, result['mapped_name'], result['dep_id']))
@@ -583,6 +623,7 @@ jobs:
           # CODEDEPLOY WAIT — parallel poll, 900s per-deployment timeout (was 3600s)
           # ============================================================
           PER_DEPLOY_TIMEOUT_S = 900
+          cd_failed_ids = set()
           if deployments:
               log(f'Waiting for {len(deployments)} CodeDeploy deployment(s)...')
               t_wait = time.time()
@@ -605,6 +646,7 @@ jobs:
                           else:
                               log(f'::error::CodeDeploy {dep_id} for {mapped_name}: {status}', err=True)
                               errors.append(fn)
+                              cd_failed_ids.add(dep_id)
                       else:
                           still_pending.append((fn, mapped_name, dep_id))
                   pending = still_pending
@@ -612,13 +654,46 @@ jobs:
                   for fn, mapped_name, dep_id in pending:
                       log(f'::error::CodeDeploy {dep_id} for {mapped_name} did not reach terminal state in {PER_DEPLOY_TIMEOUT_S}s — investigate deployment group config (alarm-rollback, hooks, MinimumHealthyHosts)', err=True)
                       errors.append(fn)
+                      cd_failed_ids.add(dep_id)
               log(f'Wait phase complete in {time.time() - t_wait:.1f}s')
+
+          # ------------------------------------------------------------------
+          # Per-function pass/fail summary (ENC-ISS-454 isolation AC): one bad
+          # package shows as ONE red row while the other functions are plainly
+          # green — no more reading a wall of logs to learn what actually shipped.
+          # ------------------------------------------------------------------
+          def _row(r):
+              name = r.get('mapped_name') or r['fn']
+              st = r['status']
+              if st == 'codedeploy':
+                  ok = r.get('dep_id') not in cd_failed_ids
+                  return ('✅' if ok else '❌', name, 'codedeploy',
+                          f"deployment {r.get('dep_id', '')} " + ('ok' if ok else 'FAILED/timeout'))
+              if st == 'direct':
+                  return ('✅', name, 'direct', 'alias updated')
+              if st == 'skip':
+                  return ('⏭️', name, 'skip', r.get('error') or 'no mapping / not provisioned')
+              return ('❌', name, 'error', r.get('error') or 'error')
+
+          rows = [_row(r) for r in sorted(results, key=lambda x: (x.get('mapped_name') or x['fn']))]
+          summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary_path:
+              n_ok = sum(1 for row in rows if row[0] == '✅')
+              n_skip = sum(1 for row in rows if row[0] == '⏭️')
+              n_bad = sum(1 for row in rows if row[0] == '❌')
+              with open(summary_path, 'a') as sf:
+                  sf.write(f"### Gen2 Lambda deploy — {os.environ.get('ENVIRONMENT_SUFFIX') or 'prod'} @ {sha[:7]}\n\n")
+                  sf.write(f"**{n_ok} deployed · {n_skip} skipped · {n_bad} failed** "
+                           f"— S3-reference via `{staging_bucket}`\n\n")
+                  sf.write("| | Function | Path | Detail |\n|---|---|---|---|\n")
+                  for icon, name, path, detail in rows:
+                      sf.write(f"| {icon} | `{name}` | {path} | {detail} |\n")
 
           deployed = len(version_ids) - len(skipped) - len(errors)
           if skipped:
               log(f'Skipped {len(skipped)} functions with no env mapping or not provisioned: {", ".join(skipped)}')
           if errors:
-              log(f'::error::Deploy failed for: {", ".join(errors)}', err=True)
+              log(f'::error::Deploy failed for: {", ".join(sorted(set(errors)))} — see the per-function summary table', err=True)
               sys.exit(1)
 
           log(f'Deployed {deployed} Lambda functions  {arch}-py{py} @ {sha[:7]}')
