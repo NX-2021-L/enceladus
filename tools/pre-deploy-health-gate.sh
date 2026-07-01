@@ -228,16 +228,27 @@ case "${STACK_NAME}" in
     *gamma*) DRIFT_ENV="gamma" ;;
 esac
 DRIFT_REPORT="/tmp/pre-deploy-drift-${TIMESTAMP}.json"
-echo "[CHECK 7/7] Validating no live CFN drift (environment=${DRIFT_ENV}, fail-on-drift)..."
 
-if python3 "${REPO_ROOT}/tools/audit_cfn_drift.py" \
-        --environment "${DRIFT_ENV}" \
-        --output-json "${DRIFT_REPORT}" \
-        --fail-on-drift; then
-    echo "[PASS] No CFN drift detected for ${DRIFT_ENV}"
+# ENC-TSK-J13: the CFN change-set IMPORT workflow (cfn-resource-import.yml) IS the
+# drift remediation — running Check 7 during an import would fail closed on the very
+# drift being adopted. For those operations the fail-closed change-set assertion
+# (tools/assert_changeset_safe.py, mode=import) is the compensating control instead,
+# so the import workflow sets HEALTH_GATE_SKIP_DRIFT=1. Default (unset) is unchanged:
+# a plain 'aws cloudformation deploy' still gets the full fail-on-drift guard.
+if [[ "${HEALTH_GATE_SKIP_DRIFT:-0}" == "1" ]]; then
+    echo "[CHECK 7/7] SKIPPED — HEALTH_GATE_SKIP_DRIFT=1 (change-set IMPORT context;"
+    echo "            assert_changeset_safe.py mode=import is the compensating control)."
 else
-    echo "[FAIL] CFN drift detected for ${DRIFT_ENV} — resolve before deploying (see ${DRIFT_REPORT}; ENC-ISS-455 / ENC-TSK-J12)"
-    ERRORS=$((ERRORS + 1))
+    echo "[CHECK 7/7] Validating no live CFN drift (environment=${DRIFT_ENV}, fail-on-drift)..."
+    if python3 "${REPO_ROOT}/tools/audit_cfn_drift.py" \
+            --environment "${DRIFT_ENV}" \
+            --output-json "${DRIFT_REPORT}" \
+            --fail-on-drift; then
+        echo "[PASS] No CFN drift detected for ${DRIFT_ENV}"
+    else
+        echo "[FAIL] CFN drift detected for ${DRIFT_ENV} — resolve before deploying (see ${DRIFT_REPORT}; ENC-ISS-455 / ENC-TSK-J12)"
+        ERRORS=$((ERRORS + 1))
+    fi
 fi
 
 # --- Summary ---
