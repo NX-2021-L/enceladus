@@ -1053,7 +1053,12 @@ Resources:
           # next compute deploy does not strip it (ENC-LSN-053 strip-class drift).
           # Prod-only: gamma uses a separate AuraDB and its compute deploy is blocked
           # (ENC-ISS-197), so the feature stays dormant there (AWS::NoValue omits the key).
-          GDS_STANDING_PROJECTION_PREFIX: !If [IsProduction, "gds_standing", !Ref "AWS::NoValue"]
+          # ENC-ISS-465 / ENC-TSK-J41 (SEV-1 cost kill): standing GDS projection retired.
+          # Prefix forced to AWS::NoValue (feature OFF) and GDS_HARD_DISABLED=1 short-circuits
+          # _check_gds_available()->False so NO Aura Graph Analytics session (standing warm-path
+          # OR per-query gds.graph.project) is ever created; graph signal uses cypher_fallback.
+          GDS_STANDING_PROJECTION_PREFIX: !Ref "AWS::NoValue"
+          GDS_HARD_DISABLED: "1"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1231,7 +1236,7 @@ Resources:
       Name: !Sub "enceladus-standing-projection-refresh${EnvironmentSuffix}"
       Description: "ENC-FTR-101 Option B: refresh the standing GDS projection for graph_query_api hybrid PPR."
       ScheduleExpression: rate(30 minutes)
-      State: ENABLED
+      State: DISABLED  # ENC-ISS-465/J41: 30-min AGA warmer retired (cost kill)
       Targets:
         - Arn: !GetAtt GraphQueryApiFunction.Arn
           Id: standing-projection-refresh
