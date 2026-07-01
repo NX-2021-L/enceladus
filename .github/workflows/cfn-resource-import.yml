@@ -22,6 +22,13 @@ name: CFN Resource Import / Recovery (privileged, fail-closed)
 # Agent identity (enceladus-agent-cli) is read-only AWS + STS-AssumeRole-denied, so
 # this CI workflow is the ONLY autonomous privileged path (DOC-AA5C7A37A103). Do NOT
 # run `aws cloudformation deploy` / execute-change-set from an agent terminal.
+#
+# ENC-TSK-J18 / ENC-ISS-457 — trusted-ref execution. The CFN-role OIDC trust
+# authorizes only refs/heads/main + refs/heads/v4/**, so this job always runs on
+# the ref it was dispatched with (expected: main). A `source_ref` input supplies a
+# SECOND, separately-scoped checkout for staged infra files (e.g. a pre-import
+# branch carrying templates/manifests that must not merge to main pre-import) —
+# it never affects which ref the OIDC credentials step assumes the role from.
 
 on:
   workflow_dispatch:
@@ -63,6 +70,11 @@ on:
         description: "true = create the change-set, run the fail-closed assertion, then DELETE it without executing (no mutation)."
         type: boolean
         default: false
+      source_ref:
+        description: "Ref to check out staged template_file/manifest_file from (SECOND checkout, path-scoped — does NOT change which ref OIDC assumes the CFN role from; that is always the dispatch ref, expected main). Leave blank to resolve template_file/manifest_file from the dispatch ref only."
+        type: string
+        required: false
+        default: agent/enc-tsk-j13-import-staged
       reason:
         description: "Why this run is dispatched (audit trail)."
         type: string
@@ -88,6 +100,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify dispatch ref is OIDC-trusted
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF}"
+          case "${ref}" in
+            refs/heads/main|refs/heads/v4/*) echo "Dispatch ref ${ref} is OIDC-trusted." ;;
+            *)
+              echo "::error::Dispatch ref ${ref} is not authorized by the CFN role's OIDC trust policy (refs/heads/main, refs/heads/v4/** only). Re-dispatch with --ref main and set source_ref to the branch carrying staged templates/manifests. See ENC-ISS-457."
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout staged source (templates/manifests only, ENC-TSK-J18)
+        if: ${{ inputs.source_ref != '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          path: staged-src
 
       - name: Verify CloudFormation role secret is set
         run: |
@@ -119,6 +150,7 @@ jobs:
           MANIFEST: ${{ inputs.manifest_file }}
           TEMPLATE: ${{ inputs.template_file }}
           STACK: ${{ inputs.stack_name }}
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
           # Derive change-set type + assertion mode from (mode, manifest presence).
@@ -135,9 +167,25 @@ jobs:
               else cst="CREATE"; assert_mode="create"; fi ;;
             *) echo "::error::unknown mode ${MODE}"; exit 1 ;;
           esac
+          # ENC-TSK-J18: prefer the source_ref checkout for staged infra files (a
+          # pre-import branch may carry templates/manifests not yet on the trusted
+          # dispatch ref); fall back to the dispatch-ref copy when source_ref is
+          # blank or doesn't carry the file. OIDC still only ever assumes the CFN
+          # role from the dispatch ref (verified above) — this only picks a file.
+          resolve_path() {
+            local p="$1"
+            if [ -n "${SOURCE_REF}" ] && [ -f "staged-src/${p}" ]; then
+              echo "staged-src/${p}"
+            else
+              echo "${p}"
+            fi
+          }
+          template_resolved="$(resolve_path "${TEMPLATE}")"
+          manifest_resolved=""
+          if [ -n "${MANIFEST}" ]; then manifest_resolved="$(resolve_path "${MANIFEST}")"; fi
           # Preflight: files exist
-          if [ ! -f "${TEMPLATE}" ]; then echo "::error::template not found: ${TEMPLATE}"; exit 1; fi
-          if [ -n "${MANIFEST}" ] && [ ! -f "${MANIFEST}" ]; then echo "::error::manifest not found: ${MANIFEST}"; exit 1; fi
+          if [ ! -f "${template_resolved}" ]; then echo "::error::template not found: ${template_resolved}"; exit 1; fi
+          if [ -n "${manifest_resolved}" ] && [ ! -f "${manifest_resolved}" ]; then echo "::error::manifest not found: ${manifest_resolved}"; exit 1; fi
           # Change-set name: stack + run id (no Date.now available; run id is unique)
           csn="j13imp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           {
@@ -145,15 +193,20 @@ jobs:
             echo "assert_mode=${assert_mode}"
             echo "skip_drift=${skip_drift}"
             echo "change_set_name=${csn}"
+            echo "template_file_resolved=${template_resolved}"
+            echo "manifest_file_resolved=${manifest_resolved}"
           } >> "${GITHUB_OUTPUT}"
           echo "mode=${MODE} -> change-set-type=${cst}, assert-mode=${assert_mode}, skip_drift=${skip_drift}, name=${csn}"
+          echo "template=${template_resolved} manifest=${manifest_resolved:-<none>}"
 
       - name: Stage template to S3 (avoids 51KB inline template-body limit)
         id: stage
+        env:
+          TEMPLATE_RESOLVED: ${{ steps.op.outputs.template_file_resolved }}
         run: |
           set -euo pipefail
           key="imports/${{ inputs.stack_name }}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"
-          aws s3 cp "${{ inputs.template_file }}" "s3://${STAGING_BUCKET}/${key}" --region "${AWS_REGION}"
+          aws s3 cp "${TEMPLATE_RESOLVED}" "s3://${STAGING_BUCKET}/${key}" --region "${AWS_REGION}"
           echo "template_url=https://${STAGING_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${key}" >> "${GITHUB_OUTPUT}"
 
       - name: Build CFN parameters
@@ -189,11 +242,12 @@ jobs:
           CSN: ${{ steps.op.outputs.change_set_name }}
           TURL: ${{ steps.stage.outputs.template_url }}
           PARAMS: ${{ steps.params.outputs.parameters }}
+          MANIFEST_RESOLVED: ${{ steps.op.outputs.manifest_file_resolved }}
         run: |
           set -euo pipefail
           extra=""
-          if [ -n "${{ inputs.manifest_file }}" ]; then
-            extra="--resources-to-import file://${{ inputs.manifest_file }}"
+          if [ -n "${MANIFEST_RESOLVED}" ]; then
+            extra="--resources-to-import file://${MANIFEST_RESOLVED}"
           fi
           pargs=""
           if [ -n "${PARAMS}" ]; then pargs="--parameters ${PARAMS}"; fi
