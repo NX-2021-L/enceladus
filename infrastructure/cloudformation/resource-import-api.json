@@ -1,353 +1,810 @@
 [
   {
-    "ResourceType": "AWS::ApiGatewayV2::Api",
-    "LogicalResourceId": "HttpApi",
+    "ResourceType": "AWS::ApiGatewayV2::Integration",
+    "LogicalResourceId": "GitHubProxyIntegration",
     "ResourceIdentifier": {
-      "ApiId": "8nkzqkmxqc"
+      "ApiId": "8nkzqkmxqc",
+      "IntegrationId": "0nmjqw3"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "CoordinationApiIntegration",
+    "LogicalResourceId": "CheckoutApiIntegration",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "kbvzvie"
+      "IntegrationId": "oi4kfbn"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "TrackerMutationIntegration",
+    "LogicalResourceId": "ChangelogApiIntegration",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "t0kta4k"
-    }
-  },
-  {
-    "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "DocumentApiIntegration",
-    "ResourceIdentifier": {
-      "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "w68vrr1"
-    }
-  },
-  {
-    "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "ProjectServiceIntegration",
-    "ResourceIdentifier": {
-      "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "vz2xmz7"
-    }
-  },
-  {
-    "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "FeedQueryIntegration",
-    "ResourceIdentifier": {
-      "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "2jokxwl"
-    }
-  },
-  {
-    "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "CoordinationMonitorIntegration",
-    "ResourceIdentifier": {
-      "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "9br2p3d"
-    }
-  },
-  {
-    "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "DeployIntakeIntegration",
-    "ResourceIdentifier": {
-      "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "97dh84s"
-    }
-  },
-  {
-    "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "ReferenceSearchIntegration",
-    "ResourceIdentifier": {
-      "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "f5j0912"
-    }
-  },
-  {
-    "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "DocPrepIntegration",
-    "ResourceIdentifier": {
-      "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "es2dwuj"
-    }
-  },
-  {
-    "ResourceType": "AWS::ApiGatewayV2::Integration",
-    "LogicalResourceId": "AuthRefreshIntegration",
-    "ResourceIdentifier": {
-      "ApiId": "8nkzqkmxqc",
-      "IntegrationId": "7g2lg0h"
+      "IntegrationId": "w6ey7lp"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteCoordinationCreate",
+    "LogicalResourceId": "RouteDeleteCheckoutByProjectTaskByTaskIdCheckout",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "9tn7hjo"
+      "RouteId": "2toxjyf"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteCoordinationGet",
+    "LogicalResourceId": "RouteDeleteCoordinationAuthOauthClientsByClientId",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "xrgxc19"
+      "RouteId": "inheu43"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteCoordinationDispatch",
+    "LogicalResourceId": "RouteDeleteCoordinationAuthTokensByTokenId",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "jgrn6uu"
+      "RouteId": "kinci5j"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteCoordinationCallback",
+    "LogicalResourceId": "RouteDeleteTrackerByProjectIdRelationship",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "izqivn2"
+      "RouteId": "ca4fx7h"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteCoordinationCapabilities",
+    "LogicalResourceId": "RouteDeleteTrackerByProjectIdByRecordTypeByRecordIdCheckout",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "kvgf3th"
+      "RouteId": "p4tphh2"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteCoordinationMcpGet",
+    "LogicalResourceId": "RouteGetChangelogHistory",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "4yg74ho"
+      "RouteId": "za3nseq"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteCoordinationMcpPost",
+    "LogicalResourceId": "RouteGetChangelogHistoryByProjectId",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "peyb8qc"
+      "RouteId": "syajmp4"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteTrackerMutationLegacy",
+    "LogicalResourceId": "RouteGetChangelogVersionByProjectId",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "qk8jo5e"
+      "RouteId": "1ouvs37"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteTrackerMutationV1",
+    "LogicalResourceId": "RouteGetChangelogVersions",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "qeymb4h"
+      "RouteId": "neenwgu"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDocumentsList",
+    "LogicalResourceId": "RouteGetCheckoutValidateCommitCompleteByCciId",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "2o6ihsp"
+      "RouteId": "4bbbm5a"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDocumentsGet",
+    "LogicalResourceId": "RouteGetCheckoutByProjectTaskByTaskIdStatus",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "cthvt85"
+      "RouteId": "00bia72"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDocumentsSearch",
+    "LogicalResourceId": "RouteGetCoordinationAuthOauthClients",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "h169dol"
+      "RouteId": "tjw591r"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDocumentsCreate",
+    "LogicalResourceId": "RouteGetCoordinationAuthTokens",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "ln0z2tg"
+      "RouteId": "swuaosp"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDocumentsPatch",
+    "LogicalResourceId": "RouteGetCoordinationProjects",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "h8yl1jp"
+      "RouteId": "lcjiaue"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteProjectsList",
+    "LogicalResourceId": "RouteGetCoordinationProjectsByProjectId",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "g6dvz97"
+      "RouteId": "6d6h9l5"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteProjectsGet",
+    "LogicalResourceId": "RouteGetGithubCommitsValidate",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "qog6e8a"
+      "RouteId": "87ua0yp"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteProjectsCreate",
+    "LogicalResourceId": "RouteGetGithubProjects",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "1hwa6q9"
+      "RouteId": "tfu100b"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteFeedQuery",
+    "LogicalResourceId": "RouteGetGovernanceDictionary",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "8aqd4uh"
+      "RouteId": "0ib1y82"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteMonitorList",
+    "LogicalResourceId": "RouteGetGovernanceHash",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "xtyrate"
+      "RouteId": "t52xj8f"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteMonitorGet",
+    "LogicalResourceId": "RouteGetGovernanceByFileName",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "dly5pju"
+      "RouteId": "z4rgal1"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDeploySubmit",
+    "LogicalResourceId": "RouteGetHealth",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "oybr8ft"
+      "RouteId": "k3frrz5"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDeployStatus",
+    "LogicalResourceId": "RouteGetTrackerPendingUpdates",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "j65o4bb"
+      "RouteId": "sqn8mvj"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDeployHistory",
+    "LogicalResourceId": "RouteGetTrackerByProjectId",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "jcu41n1"
+      "RouteId": "4ircima"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDeployStateGet",
+    "LogicalResourceId": "RouteGetTrackerByProjectIdRelationship",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "rqw25bh"
+      "RouteId": "80fwtl5"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDeployStatePatch",
+    "LogicalResourceId": "RouteGetTrackerByProjectIdByRecordTypeByRecordId",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "p4glilj"
+      "RouteId": "42i9gq9"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteReferenceSearch",
+    "LogicalResourceId": "RouteOptAuthRefresh",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "w5ktyu2"
+      "RouteId": "lf4wp3l"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteDocPrep",
+    "LogicalResourceId": "RouteOptCheckoutValidateCommitCompleteByCciId",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "e91bs4g"
+      "RouteId": "vioepoo"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteAuthRefresh",
+    "LogicalResourceId": "RouteOptCheckoutByProjectTaskByTaskIdAdvance",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "ur6y7wq"
+      "RouteId": "pvyzjff"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteComponentsAddEdge",
+    "LogicalResourceId": "RouteOptCheckoutByProjectTaskByTaskIdCheckout",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "r8yvurf"
+      "RouteId": "3ebw75q"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteComponentsRemoveEdge",
+    "LogicalResourceId": "RouteOptCheckoutByProjectTaskByTaskIdLog",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "bamcafm"
+      "RouteId": "5ywq81b"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteComponentsDeprecate",
+    "LogicalResourceId": "RouteOptCheckoutByProjectTaskByTaskIdStatus",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "n5o6ut9"
+      "RouteId": "ovy4wcg"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteComponentsRestore",
+    "LogicalResourceId": "RouteOptCoordinationAuthCognitoSession",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "4y52eem"
+      "RouteId": "1ejr5nh"
     }
   },
   {
     "ResourceType": "AWS::ApiGatewayV2::Route",
-    "LogicalResourceId": "RouteComponentsRevert",
+    "LogicalResourceId": "RouteOptCoordinationAuthOauthClients",
     "ResourceIdentifier": {
       "ApiId": "8nkzqkmxqc",
-      "RouteId": "wz9oprl"
+      "RouteId": "psl4n5i"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationAuthOauthClientsByClientId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "tq4ge62"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationAuthOauthClientsByClientIdPermissions",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "sssju36"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationAuthOauthClientsByClientIdUsage",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "50rmr8b"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationAuthPermissionsByTokenId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "kmmxug6"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationAuthTokens",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "s0xlzpl"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationAuthTokensByTokenId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "2oji9is"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationCapabilities",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "9z55i5d"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationMcp",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "9fa7qy4"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationMonitor",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "2u37k27"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationProjects",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "yr0qnoc"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationProjectsByProjectId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "hft8nbm"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationRequests",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "6c7du4i"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationRequestsByRequestId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "1d4rk9b"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationRequestsByRequestIdCallback",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "k6cvaqm"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptCoordinationRequestsByRequestIdDispatch",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "4z36392"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptDeployHistoryByProjectId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "qxuwc84"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptDeployStateByProjectId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "vuqbfze"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptDeployStatusBySpecId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "wygehc0"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptDeploySubmit",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "k6v8ylt"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptDocPrepByProjectName",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "ve0e7yg"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptDocuments",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "9s9is37"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptDocumentsByDocumentId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "xd2sc6h"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptFeed",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "djc9j03"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptGithubByProxy",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "476dn7a"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptGovernanceDictionary",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "xvb71eu"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptGovernanceHash",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "jgde38c"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptGovernanceByFileName",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "ho7ave1"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptHealth",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "gogzmv7"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptProjects",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "3j3s7d9"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptProjectsByProjectName",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "9v09vsm"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptReferenceSearch",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "vocz29v"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptTrackerPendingUpdates",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "teuj45p"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptTrackerByProjectId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "mnsmb3q"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptTrackerByProjectIdRelationship",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "fwxuvfv"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptTrackerByProjectIdByRecordType",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "66ebh1j"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptTrackerByProjectIdByRecordTypeByRecordId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "qx7h1h4"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "k6b1vwc"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptTrackerByProjectIdByRecordTypeByRecordIdCheckout",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "v34kb3r"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptTrackerByProjectIdByRecordTypeByRecordIdExtend",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "2kupsqf"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptTrackerByProjectIdByRecordTypeByRecordIdLog",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "unkmfva"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RouteOptByProjectIdByRecordTypeByRecordId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "1zx390i"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePatchCoordinationAuthOauthClientsByClientIdPermissions",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "llsv5m5"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePatchCoordinationAuthOauthClientsByClientIdUsage",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "2hrfx90"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePatchCoordinationAuthPermissionsByTokenId",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "a29r97r"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCheckoutByProjectTaskByTaskIdAdvance",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "yfulrth"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCheckoutByProjectTaskByTaskIdCheckout",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "1osffkk"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCheckoutByProjectTaskByTaskIdLog",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "nkuflzf"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCoordinationAuthCognitoSession",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "08rcwqn"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCoordinationAuthOauthClients",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "tbubdpo"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCoordinationAuthTokens",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "1km0lg2"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCoordinationComponentsPropose",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "18o1zwi"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCoordinationComponentsByComponentIdAdvance",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "1u6lvv7"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCoordinationComponentsByComponentIdApprove",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "daa9o62"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCoordinationComponentsByComponentIdCloudwatchEvent",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "glgwnw8"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostCoordinationComponentsByComponentIdReject",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "ogdzuld"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostGithubDeployGammaSuccessByPrnumber",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "yi43nc0"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostGithubIssues",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "82n8beu"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostGithubProjectsSync",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "5ntletf"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostGithubWebhook",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "quqnmwo"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostTrackerByProjectIdByRecordType",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "i5d6cmh"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostTrackerByProjectIdByRecordTypeByRecordIdAcceptanceEvidence",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "co4bdks"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostTrackerByProjectIdByRecordTypeByRecordIdCheckout",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "gph0yo7"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostTrackerByProjectIdByRecordTypeByRecordIdExtend",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "1peer98"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePostTrackerByProjectIdByRecordTypeByRecordIdLog",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "nbyj0q6"
+    }
+  },
+  {
+    "ResourceType": "AWS::ApiGatewayV2::Route",
+    "LogicalResourceId": "RoutePutGovernanceByFileName",
+    "ResourceIdentifier": {
+      "ApiId": "8nkzqkmxqc",
+      "RouteId": "pk5h7l1"
     }
   }
 ]
