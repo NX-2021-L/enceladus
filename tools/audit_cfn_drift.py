@@ -78,7 +78,16 @@ def _is_env_sibling(name: str) -> bool:
     return any(name.endswith(suffix) for suffix in _ENV_SUFFIXES)
 
 
-def resolve_api_id(stack_prefix: str) -> str:
+def resolve_api_id(stack_prefix: str, environment: str = "prod") -> str:
+    """Resolve the ApiGatewayV2 API to audit, matching ``environment``.
+
+    ENC-TSK-J12: previously this always dropped every env-suffixed sibling
+    and returned the production ApiId, regardless of ``environment`` — a
+    gamma audit would silently compare gamma-declared routes against PROD's
+    live routes. Now prefers the -gamma sibling when environment == "gamma"
+    (still dropping every OTHER env-suffixed sibling, e.g. -beta/-staging),
+    and keeps the original prod-preferring behavior otherwise (ENC-TSK-H36).
+    """
     data = _aws_json([
         "aws", "apigatewayv2", "get-apis",
         "--max-results", "500",
@@ -95,6 +104,15 @@ def resolve_api_id(stack_prefix: str) -> str:
             f"pass --api-id explicitly."
         )
     if len(candidates) > 1:
+        if environment == "gamma":
+            gamma = [c for c in candidates if c.get("Name", "").endswith("-gamma")]
+            if len(gamma) == 1:
+                return gamma[0]["ApiId"]
+            names = [c["Name"] for c in (gamma or candidates)]
+            raise RuntimeError(
+                f"Multiple API Gateway v2 APIs match environment=gamma: {names}. "
+                f"Pass --api-id explicitly."
+            )
         # Prefer production APIs by dropping env-suffixed siblings. If exactly
         # one production candidate remains the ambiguity is resolved.
         prod = [c for c in candidates if not _is_env_sibling(c.get("Name", ""))]
@@ -440,7 +458,7 @@ def main() -> int:
     if args.self_check:
         return 0 if _self_check() else 1
 
-    api_id = args.api_id or resolve_api_id(args.stack_prefix)
+    api_id = args.api_id or resolve_api_id(args.stack_prefix, args.environment)
 
     report = audit(api_id, args.cfn_glob, args.event_rule_prefix, args.environment)
     report["_api_id"] = api_id
