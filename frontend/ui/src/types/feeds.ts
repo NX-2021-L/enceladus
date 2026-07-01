@@ -313,6 +313,8 @@ export interface Document {
   updated_at: string
   version: number
   content?: string
+  // ENC-FTR-051: maturity lifecycle state (e.g. "raw", "reviewed").
+  document_maturity_state?: string
   // Handoff fields (ENC-FTR-061)
   document_subtype?: DocumentSubtype
   source_record_id?: string
