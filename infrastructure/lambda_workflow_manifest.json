@@ -158,6 +158,12 @@
       "deploy_script": "backend/lambda/memory_consolidation/deploy.sh"
     },
     {
+      "function_name": "enceladus-rhythm-cycle",
+      "lambda_dir": "backend/lambda/rhythm_cycle",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/rhythm_cycle/deploy.sh"
+    },
+    {
       "function_name": "enceladus-graph-health-metrics",
       "lambda_dir": "backend/lambda/graph_health_metrics",
       "workflow_file": ".github/workflows/_deploy.yml",

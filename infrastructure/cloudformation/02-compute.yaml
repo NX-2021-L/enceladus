@@ -141,9 +141,20 @@ Parameters:
     AllowedValues: ["true", "false"]
     Description: Enable SnapStart on all Lambdas. Set true only for arm64/python3.12 stacks.
 
+  RhythmCycleEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      ENC-PLN-068: gamma rhythm tier schedules; when true, legacy superseded
+      gamma EventBridge rules are disabled (K91).
+
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  RhythmActive: !And
+    - !Condition IsGamma
+    - !Equals [!Ref RhythmCycleEnabled, "true"]
   # ENC-TSK-F63 AC-2: SnapStart enabled only when EnableSnapStart=true (arm64/py3.12 targets).
   # Replaces the old IsProduction-negation pattern (was: !If [IsProduction, NoValue, SnapStart]).
   SnapStartEnabled: !Equals [!Ref EnableSnapStart, "true"]
@@ -1878,7 +1889,7 @@ Resources:
     Properties:
       Name: !Sub "enceladus-graph-health-daily${EnvironmentSuffix}"
       ScheduleExpression: "cron(0 8 * * ? *)"
-      State: ENABLED
+      State: !If [RhythmActive, DISABLED, ENABLED]
       Targets:
         - Arn: !GetAtt GraphHealthMetricsFunction.Arn
           Id: graph-health-daily
@@ -2630,7 +2641,7 @@ Resources:
       Name: !Sub "enceladus-memory-consolidation-nightly${EnvironmentSuffix}"
       Description: "Nightly handoff-to-lesson consolidation scan (ENC-FTR-096 Ph1)"
       ScheduleExpression: "cron(0 2 * * ? *)"
-      State: ENABLED
+      State: !If [RhythmActive, DISABLED, ENABLED]
       Targets:
         - Arn: !GetAtt MemoryConsolidationFunction.Arn
           Id: memory-consolidation-nightly
@@ -5878,7 +5889,7 @@ Resources:
       Name: !Sub "devops-recompute-governance-backstop${EnvironmentSuffix}"
       Description: Hourly governance-version recompute backstop (ENC-TSK-I58 / ENC-ISS-421).
       ScheduleExpression: "rate(1 hour)"
-      State: ENABLED
+      State: !If [RhythmActive, DISABLED, ENABLED]
       Targets:
         - Id: RecomputeGovernanceBackstopTarget
           Arn: !GetAtt RecomputeGovernanceFunction.Arn
@@ -5951,6 +5962,267 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+
+  # ---------------------------------------------------------------------------
+  # ENC-PLN-068 / DOC-BDDE755DB874 — Rhythm Cycle (gamma only)
+  # EventBridge Scheduler groups + shared beat Lambda (ENC-TSK-K79..K94)
+  # ---------------------------------------------------------------------------
+  RhythmCycleFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-rhythm-cycle${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Architectures:
+        - arm64
+      Role: !GetAtt RhythmCycleRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          PROJECT_ID: enceladus
+          S3_BUCKET: !Ref S3Bucket
+          S3_ENV_PREFIX: !Ref S3EnvPrefix
+          S3_PREFIX: rhythm-cycle
+          CLOUDWATCH_NAMESPACE: Enceladus/Rhythm
+          PROJECTS_TABLE: projects
+          AGENT_SESSIONS_TABLE: agent-sessions
+          TRACKER_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker
+          COORDINATION_API_BASE: https://enceladus-gamma.jreese.net/api/v1
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          PRE_APPROVED_DISPATCH_SCOPES: '["ENC-PLN-068","ENC-TSK-K"]'
+          RHYTHM_SNS_TOPIC_ARN: !Ref RhythmBeatNotificationTopic
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: rhythm-cycle
+
+  RhythmCycleRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-rhythm-cycle-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RhythmCyclePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              - Sid: RhythmArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}"
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*"
+              - Sid: TrackerRead
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions/index/*"
+              - Sid: RhythmSnsPublish
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref RhythmBeatNotificationTopic
+
+  RhythmBeatNotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: IsGamma
+    Properties:
+      TopicName: !Sub "enceladus-rhythm-beat${EnvironmentSuffix}"
+      DisplayName: Enceladus Rhythm Cycle beat notifications
+
+  RhythmSchedulerRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    Properties:
+      RoleName: !Sub "enceladus-rhythm-scheduler-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeRhythmLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt RhythmCycleFunction.Arn
+
+  RhythmSenseGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-sense${EnvironmentSuffix}"
+
+  RhythmDecideGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-decide${EnvironmentSuffix}"
+
+  RhythmLightGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-light${EnvironmentSuffix}"
+
+  RhythmHeavyGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-heavy${EnvironmentSuffix}"
+
+  RhythmCoherenceGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-coherence${EnvironmentSuffix}"
+
+  RhythmSenseSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-sense-hourly${EnvironmentSuffix}"
+      GroupName: !GetAtt RhythmSenseGroup.Name
+      ScheduleExpression: cron(0 * * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt RhythmCycleFunction.Arn
+        RoleArn: !GetAtt RhythmSchedulerRole.Arn
+        Input: '{"tier":"sense"}'
+
+  RhythmLightSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-light-integrate${EnvironmentSuffix}"
+      GroupName: !GetAtt RhythmLightGroup.Name
+      ScheduleExpression: cron(15 0,6,12,18 * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt RhythmCycleFunction.Arn
+        RoleArn: !GetAtt RhythmSchedulerRole.Arn
+        Input: '{"tier":"light_integrate"}'
+
+  RhythmDecideSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-decide-act${EnvironmentSuffix}"
+      GroupName: !GetAtt RhythmDecideGroup.Name
+      ScheduleExpression: cron(30 0,3,6,9,12,15,18,21 * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt RhythmCycleFunction.Arn
+        RoleArn: !GetAtt RhythmSchedulerRole.Arn
+        Input: '{"tier":"decide"}'
+
+  RhythmHeavySchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-heavy-integrate${EnvironmentSuffix}"
+      GroupName: !GetAtt RhythmHeavyGroup.Name
+      ScheduleExpression: cron(45 0,12 * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt RhythmCycleFunction.Arn
+        RoleArn: !GetAtt RhythmSchedulerRole.Arn
+        Input: '{"tier":"heavy_integrate"}'
+
+  RhythmCoherenceSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: RhythmActive
+    Properties:
+      Name: !Sub "rhythm-coherence-point${EnvironmentSuffix}"
+      GroupName: !GetAtt RhythmCoherenceGroup.Name
+      ScheduleExpression: cron(0 0,12 * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt RhythmCycleFunction.Arn
+        RoleArn: !GetAtt RhythmSchedulerRole.Arn
+        Input: '{"tier":"coherence"}'
+
+  RhythmPathologyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: RhythmActive
+    Properties:
+      AlarmName: !Sub "enceladus-rhythm-pathology${EnvironmentSuffix}"
+      AlarmDescription: >-
+        ENC-TSK-K93: three consecutive non-decreasing Decide beats on
+        backlog_open_leaves_delta (Lyapunov pathology).
+      Namespace: Enceladus/Rhythm
+      MetricName: backlog_open_leaves_delta
+      Dimensions:
+        - Name: Tier
+          Value: decide
+        - Name: ProjectId
+          Value: enceladus
+        - Name: Grooming
+          Value: "false"
+      Statistic: Maximum
+      Period: 10800
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RhythmBeatNotificationTopic
 
 Outputs:
   CoordinationApiFunctionArn:
