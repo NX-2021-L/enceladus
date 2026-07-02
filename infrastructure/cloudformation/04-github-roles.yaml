@@ -60,6 +60,14 @@ Resources:
                 token.actions.githubusercontent.com:sub:
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/v4/*"
+                  # ENC-TSK-J61 / ENC-FTR-120: a job that declares a GitHub
+                  # Environment emits sub=repo:...:environment:<name> instead of
+                  # the ref-based sub, so the gated CFN deploy lanes (plan/apply
+                  # split, apply job runs inside the environment) need these.
+                  # Additive: ref-based subs stay for ungated/legacy callers.
+                  # Deployed live 2026-07-02 via change-set enc-tsk-j61-oidc-env-subs.
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:v3-prod"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:v4-gamma"
       Policies:
         - PolicyName: CloudFormationDeployPolicy
           PolicyDocument:
