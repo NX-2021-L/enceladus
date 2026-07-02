@@ -51,6 +51,8 @@ env:
 jobs:
   deploy:
     name: Submit Backend UI Deployment
+    # ENC-TSK-J64 / ENC-FTR-120: the DPL submit below is the irrevocable prod trigger (the orchestrator deploys the queued request with no further gate), so this job pauses on the v3-prod required-reviewer rule.
+    environment: v3-prod
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
