@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.16",
-  "updated_at": "2026-07-02T10:14:00Z",
-  "last_change_summary": "ENC-TSK-J93 (ENC-ISS-441 Ph3, ENC-FTR-122): SCI enforcement gate live in checkout_service (checkout/advance/log) + tracker_mutation (set/log/create) - 403 SCI_REQUIRED on absent/unknown/wrong-type/revoked/expired/mismatched SCI for post-epoch ENC-SES identities; fabricated session ids fail closed; SCI_ENFORCEMENT_EPOCH 2026-07-02T12:00:00Z grandfathers pre-existing sessions; identity-shape exemptions (non-ENC-SES providers) + FTR-037 checkout-service-key exemption in tracker_mutation; SCI-validated mutations refresh last_activity_at (J83). New entities checkout_service.sci_enforcement_gate + tracker.sci_enforcement_gate. The ENC-ISS-441 register->claim handshake is now ENFORCED. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "version": "2026-07-02.17",
+  "updated_at": "2026-07-02T10:30:00Z",
+  "last_change_summary": "ENC-TSK-J96 (ENC-ISS-441 Ph6, ENC-FTR-122): retirement_prompt injected verbatim into terminal-state success envelopes - checkout_service task->closed + plan->complete advances, tracker_mutation status writes to task/issue closed, feature production/deprecated, plan complete. Additive-only; non-terminal envelopes byte-identical. New entity tracker.retirement_prompt. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "owners": [
     "enceladus-platform"
   ],
@@ -6793,6 +6793,15 @@
           "definition": "X-Checkout-Service-Key-authenticated requests (FTR-037) skip the gate; the gate already ran at the checkout_service edge for the originating agent call."
         }
       }
+    },
+    "tracker.retirement_prompt": {
+      "description": "ENC-ISS-441 / ENC-TSK-J96 (ENC-FTR-122): terminal-state retirement nudge, part 3 of the io-designed session retirement lifecycle (issue worklog 2026-06-30). Whenever a success response is returned for a record reaching a FINAL lifecycle state, the envelope carries an additive-only string field retirement_prompt with the exact io-specified text: 'Prompt the user if this session can now be retired, or retire the session if it is certain that the full scope of the current session assignment is complete.' The acting agent either calls coordination agent.retire autonomously (scope exhausted) or surfaces the prompt to io. Injection points: checkout_service _handle_advance (task -> closed) and _handle_plan_advance (plan -> complete); tracker_mutation _handle_update_field status writes landing task/issue -> closed, feature -> production or deprecated, plan -> complete (_is_terminal_transition map). 'superseded' and plan 'incomplete' are NOT nudged (supersession is a server op, incomplete is an abandonment terminal). Non-terminal envelopes are byte-identical; consumers that ignore unknown fields are unaffected.",
+      "fields": {
+        "retirement_prompt": {
+          "type": "string",
+          "definition": "Fixed io-specified nudge text, present ONLY on terminal-state success envelopes. Complements the ENC-TSK-J94 sweeps: the prompt handles well-behaved agents, the sweeps catch the rest."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -6906,6 +6915,11 @@
       "version": "2026-07-02.16",
       "date": "2026-07-02",
       "summary": "ENC-TSK-J93 (ENC-ISS-441 Ph3, ENC-FTR-122): SCI enforcement gate live in checkout_service (checkout/advance/log) + tracker_mutation (set/log/create) - 403 SCI_REQUIRED on absent/unknown/wrong-type/revoked/expired/mismatched SCI for post-epoch ENC-SES identities; fabricated session ids fail closed; SCI_ENFORCEMENT_EPOCH 2026-07-02T12:00:00Z grandfathers pre-existing sessions; identity-shape exemptions (non-ENC-SES providers) + FTR-037 checkout-service-key exemption in tracker_mutation; SCI-validated mutations refresh last_activity_at (J83). New entities checkout_service.sci_enforcement_gate + tracker.sci_enforcement_gate. The ENC-ISS-441 register->claim handshake is now ENFORCED. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-07-02.17",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-J96 (ENC-ISS-441 Ph6, ENC-FTR-122): retirement_prompt injected verbatim into terminal-state success envelopes - checkout_service task->closed + plan->complete advances, tracker_mutation status writes to task/issue closed, feature production/deprecated, plan complete. Additive-only; non-terminal envelopes byte-identical. New entity tracker.retirement_prompt. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }

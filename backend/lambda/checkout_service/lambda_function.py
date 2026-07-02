@@ -982,6 +982,22 @@ def _delete_token(token_id: str) -> None:
 # deploys (PLN-047 / ENC-LSN-053 Sev1 class).
 SCI_ENFORCEMENT_EPOCH = "2026-07-02T12:00:00Z"
 
+# ENC-ISS-441 / ENC-TSK-J96: terminal-state retirement nudge (part 3 of the io-designed
+# session retirement lifecycle). Injected verbatim into terminal-state success envelopes;
+# the acting agent either retires its session autonomously (scope exhausted) or surfaces
+# the prompt to io. Exact io-specified text from the ENC-ISS-441 worklog.
+RETIREMENT_PROMPT = (
+    "Prompt the user if this session can now be retired, or retire the session if it "
+    "is certain that the full scope of the current session assignment is complete."
+)
+
+
+def _with_retirement_prompt(envelope: dict, new_status: str, terminal_statuses=("closed",)) -> dict:
+    """Inject the ENC-TSK-J96 retirement nudge when a record lands in a final state."""
+    if new_status in terminal_statuses:
+        envelope["retirement_prompt"] = RETIREMENT_PROMPT
+    return envelope
+
 # J92 token shape: pk = "SCI-{uuid4_hex}"
 _SCI_TOKEN_RE = re.compile(r"^SCI-[0-9a-f]{32}$")
 # I37 minted session ids: ENC-SES-NNN (base-36, uppercase)
@@ -3045,14 +3061,17 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         "advance OK: %s %s->%s (type=%s, matrix_version=%d)",
         task_id, current_status, target_status, transition_type, MATRIX_VERSION,
     )
-    return _response(200, {
+    advance_envelope = {
         "success": True,
         "task": updated_task,
         "previous_status": current_status,
         "new_status": target_status,
         "matrix_version": MATRIX_VERSION,
         **response_extras,
-    })
+    }
+    # ENC-ISS-441 / ENC-TSK-J96: task reached its final lifecycle state — nudge the
+    # acting session toward retirement (additive-only envelope field).
+    return _response(200, _with_retirement_prompt(advance_envelope, target_status))
 
 
 def _handle_log(project_id: str, task_id: str, body: dict) -> dict:
@@ -3470,12 +3489,16 @@ def _handle_plan_advance(project_id: str, plan_id: str, body: dict) -> dict:
         _release_plan(project_id, plan_id)
 
     _, updated_plan = _get_plan(project_id, plan_id)
-    return _response(200, {
+    plan_envelope = {
         "success": True,
         "plan": updated_plan,
         "previous_status": current_status,
         "new_status": target_status,
-    })
+    }
+    # ENC-ISS-441 / ENC-TSK-J96: plan reached its final lifecycle state — retirement nudge.
+    return _response(
+        200, _with_retirement_prompt(plan_envelope, target_status, terminal_statuses=("complete",))
+    )
 
 
 def _handle_plan_log(project_id: str, plan_id: str, body: dict) -> dict:
