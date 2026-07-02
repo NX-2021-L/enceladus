@@ -260,7 +260,7 @@ else
         echo "       gap (e.g. missing events:ListRules) prevented full evaluation. Flagged,"
         echo "       NOT treated as drift; gate not failed (see ${DRIFT_REPORT}; GH #672)."
     elif [[ "${DRIFT_RC:-0}" -ne 0 ]]; then
-        echo "[FAIL] CFN drift detected for ${DRIFT_ENV} — resolve before deploying (see ${DRIFT_REPORT}; ENC-ISS-455 / ENC-TSK-J12)"
+        echo "[FAIL] CFN drift detected for ${DRIFT_ENV} — live-only resources exist outside CFN (see ${DRIFT_REPORT}; ENC-ISS-455 / ENC-TSK-J12)"
         ERRORS=$((ERRORS + 1))
     fi
 fi
