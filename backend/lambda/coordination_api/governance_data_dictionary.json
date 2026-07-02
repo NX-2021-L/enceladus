@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-01.07",
-  "updated_at": "2026-07-02T02:20:00Z",
-  "last_change_summary": "ENC-TSK-J46 fix: lesson-candidate approve/reject now finalize via a direct DynamoDB write, not document_api's PATCH (whose internal-key auth was indistinguishable from the MCP server's agent-facing relay, which silently reopened the io-gate).",
+  "version": "2026-07-01.08",
+  "updated_at": "2026-07-02T02:45:00Z",
+  "last_change_summary": "ENC-TSK-J59 fix: _create_lesson_record now converts pillar_scores/confidence to Decimal before DynamoDB put_item -- boto3's TypeSerializer rejects native float Number values, which crashed the lesson-candidate approve path with a 500 on gamma.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6313,7 +6313,7 @@
         },
         "decision_write_mechanism": {
           "type": "string",
-          "definition": "Approve/reject finalize the candidate's handoff_status via a direct DynamoDB UpdateItem against the documents table (DocumentsTableCandidateDecisionWrite IAM statement, 02-compute.yaml), atomically conditioned on document_subtype='lesson-candidate' AND handoff_status='pending', and append a structured {status,note,by,at} entry to decision_log via list_append. This is NOT proxied through document_api's PATCH: that endpoint authenticates internal-key callers identically whether the caller is coordination_api (already Cognito-verified at its own HTTP layer) or the MCP server relaying a bare agent session's documents.patch call -- routing through it would silently readmit the exact autonomous-promotion path AC4 forbids. A ConditionalCheckFailedException (candidate already decided by a concurrent request) surfaces as HTTP 409."
+          "definition": "Approve/reject finalize the candidate's handoff_status via a direct DynamoDB UpdateItem against the documents table (DocumentsTableCandidateDecisionWrite IAM statement, 02-compute.yaml), atomically conditioned on document_subtype='lesson-candidate' AND handoff_status='pending', and append a structured {status,note,by,at} entry to decision_log via list_append. This is NOT proxied through document_api's PATCH: that endpoint authenticates internal-key callers identically whether the caller is coordination_api (already Cognito-verified at its own HTTP layer) or the MCP server relaying a bare agent session's documents.patch call -- routing through it would silently readmit the exact autonomous-promotion path AC4 forbids. A ConditionalCheckFailedException (candidate already decided by a concurrent request) surfaces as HTTP 409. ENC-TSK-J59: pillar_scores and confidence are converted to Decimal (via Decimal(str(v)) to avoid binary-float precision drift) before the lesson record's put_item -- boto3's TypeSerializer raises TypeError on native float Number values."
         }
       }
     }
@@ -6379,6 +6379,11 @@
       "version": "2026-07-01.07",
       "task": "ENC-TSK-J46",
       "summary": "Fixed a gamma E2E finding: lesson-candidate approve/reject were calling document_api's PATCH via the shared internal-key service credential, which document_api's Cognito-only gate for candidate transitions correctly rejected (that credential is indistinguishable from the MCP server's agent-facing documents.patch path). Replaced with a direct, atomically-conditioned DynamoDB write plus an append-only decision_log, gated solely by coordination_api's own Cognito check. Added DocumentsTableCandidateDecisionWrite (dynamodb:UpdateItem) to CoordinationApiRole."
+    },
+    {
+      "version": "2026-07-01.08",
+      "task": "ENC-TSK-J59",
+      "summary": "Fixed a second gamma E2E finding: approving a lesson candidate 500'd because _create_lesson_record passed pillar_scores/confidence as native Python floats into DynamoDB put_item -- boto3's TypeSerializer requires Decimal for Number attributes. Converted via Decimal(str(v)). Added a dedicated serialization regression test that exercises the real put_item path (no mocking of _serialize) so this class of bug fails in CI, not just in gamma."
     }
   ]
 }
