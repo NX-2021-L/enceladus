@@ -1898,11 +1898,21 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       Name: !Sub "devops-coordination-batch-poller${EnvironmentSuffix}"
-      ScheduleExpression: rate(5 minutes)
+      Description: "ENC-TSK-G19: poll Anthropic Message Batches every 60s until ended"
+      ScheduleExpression: rate(1 minute)
       State: ENABLED
       Targets:
         - Arn: !GetAtt CoordinationApiFunction.Arn
           Id: coordination-batch-poll
+          Input: '{"action": "coordination_batch_poll"}'
+
+  CoordinationBatchPollerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CoordinationApiFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CoordinationBatchPollerRule.Arn
 
   # ENC-TSK-I71 (ENC-FTR-117 AC#8), backported to v4 by ENC-TSK-J91 (ENC-ISS-441 Ph1). The
   # rule invokes the coordination_api with a fixed Input action; the handler reaps sessions

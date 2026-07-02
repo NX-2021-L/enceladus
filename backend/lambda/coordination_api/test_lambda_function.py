@@ -2630,6 +2630,80 @@ class SessionBridgeIntegrationTests(unittest.TestCase):
         mock_send_dispatch.assert_not_called()
         mock_find_host_dispatch.assert_not_called()
 
+    def test_dispatch_claude_batch_eligible_returns_202_running(self):
+        request = {
+            "request_id": "CRQ-CLAUDE-BATCH",
+            "project_id": "enceladus",
+            "state": "queued",
+            "dispatch_attempts": 0,
+            "provider_session": {
+                "preferred_provider": "claude_agent_sdk",
+                "batch_eligible": True,
+                "batch_workload_type": "nightly_changelog_generation",
+            },
+            "task_ids": [],
+            "feature_id": None,
+            "issue_ids": [],
+        }
+        updated_items = []
+        event = {
+            "body": json.dumps(
+                {
+                    "execution_mode": "claude_agent_sdk",
+                    "dispatch_id": "DSP-BATCH01",
+                    "prompt": "Generate nightly changelog",
+                    "provider_preferences": {
+                        "batch_eligible": True,
+                        "batch_workload_type": "nightly_changelog_generation",
+                    },
+                }
+            )
+        }
+
+        with patch.object(coordination_lambda, "_get_request", return_value=request), \
+             patch.object(coordination_lambda, "_acquire_dispatch_lock", return_value=True), \
+             patch.object(coordination_lambda, "_lambda_provider_preflight", return_value={"passed": True, "results": []}), \
+             patch.object(
+                 coordination_lambda,
+                 "_dispatch_claude_batch_api",
+                 return_value={
+                     "dispatch_id": "DSP-BATCH01",
+                     "execution_id": "batch_abc123",
+                     "execution_mode": "claude_agent_sdk",
+                     "provider": "claude_agent_sdk",
+                     "transport": "anthropic_messages_batches_api",
+                     "api_endpoint": "https://api.anthropic.com/v1/messages/batches",
+                     "sent_at": "2026-07-02T00:00:00Z",
+                     "status": "running",
+                     "batch_context": {
+                         "batch_id": "batch_abc123",
+                         "processing_status": "in_progress",
+                     },
+                 },
+             ) as mock_batch_dispatch, \
+             patch.object(coordination_lambda, "_dispatch_claude_api") as mock_sync_dispatch, \
+             patch.object(coordination_lambda, "_finalize_tracker_from_request"), \
+             patch.object(coordination_lambda, "_update_request", side_effect=lambda item: updated_items.append(dict(item))):
+            resp = coordination_lambda._handle_dispatch_request(event, "CRQ-CLAUDE-BATCH")
+
+        self.assertEqual(resp["statusCode"], 202)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertEqual((body.get("dispatch") or {}).get("status"), "running")
+        self.assertGreaterEqual(len(updated_items), 1)
+        final = updated_items[-1]
+        self.assertEqual(final.get("state"), "running")
+        mock_batch_dispatch.assert_called_once()
+        mock_sync_dispatch.assert_not_called()
+
+    def test_handle_coordination_batch_poll_invokes_pending_scan(self):
+        with patch.object(coordination_lambda, "_find_pending_batch_requests", return_value=[]):
+            resp = coordination_lambda._handle_coordination_batch_poll({"action": "coordination_batch_poll"})
+        self.assertEqual(resp["statusCode"], 200)
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertEqual(body["polled_count"], 0)
+
     def test_dispatch_bedrock_agent_routes_to_direct_api(self):
         request = {
             "request_id": "CRQ-BEDROCK-DIRECT",
