@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.33",
-  "updated_at": "2026-07-02T15:38:55Z",
-  "last_change_summary": "ENC-TSK-K46 (B66 Ph5, ENC-PLN-064): CloudWatch dashboard EnceladusV4Dashboard (enceladus-v4-architecture, 05-monitoring.yaml) documented. New entity monitoring.v4_architecture_dashboard — 13 widgets binding AWS/Lambda, Enceladus/Prod (K44), Enceladus/GraphHealth (K43), Enceladus/CEE (K41), Enceladus/ArcWalk (H86), plus a documented embedding-coverage gap panel. Authored+merged (PR #791); not yet live (cloudwatch:PutDashboard IAM grant pending).",
+  "version": "2026-07-02.34",
+  "updated_at": "2026-07-02T15:45:00Z",
+  "last_change_summary": "ENC-TSK-K34 (ENC-ISS-477 cutover, DOC-F234A4E11DFD Option E): the DynamoDB governance-policies mirror of this dictionary is retired from the read path. coordination_api._load_governance_dictionary now serves this bundled file exclusively -- no DDB scan, no fallback branch. ENC-TSK-K31 found the DDB mirror had never once served as a live, independently-authored hot-patch target (every write only ever caught DynamoDB up to a prior git/S3 change), and it had been unwritable since 2026-06-29 (509KB item vs DynamoDB's 400KB cap). document_api's dictionary-specific DDB propagation is removed alongside it. This file (repo -> Lambda bundle -> deploy) is now the sole and always-authoritative source; check_governance_dictionary_sync.py remains the enforcement that this file stays current with schema-affecting code changes. No entity schema changed.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7344,6 +7344,11 @@
       "version": "2026-07-02.33",
       "date": "2026-07-02",
       "summary": "ENC-TSK-K46 (B66 Ph5): governance-dictionary bump for the B66 Phase-5 CloudWatch dashboard (GOVERNANCE_SYNC_REQUIRED handoff DOC-83017CDCBD5A / ENC-TSK-K47 AC-2). Adds entity monitoring.v4_architecture_dashboard describing EnceladusV4Dashboard (05-monitoring.yaml, 13 widgets). K41/K42/K43(x2)/K44 Phase-5 entities were already landed by their own build-task PRs; K46 dashboard was the sole remaining Phase-5 entity."
+    },
+    {
+      "version": "2026-07-02.34",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K34 (ENC-ISS-477 cutover, DOC-F234A4E11DFD Option E): the DynamoDB governance-policies mirror of this dictionary is retired from the read path. coordination_api._load_governance_dictionary now serves this bundled file exclusively -- no DDB scan, no fallback branch. ENC-TSK-K31 found the DDB mirror had never once served as a live, independently-authored hot-patch target (every write only ever caught DynamoDB up to a prior git/S3 change), and it had been unwritable since 2026-06-29 (509KB item vs DynamoDB's 400KB cap). document_api's dictionary-specific DDB propagation is removed alongside it. This file (repo -> Lambda bundle -> deploy) is now the sole and always-authoritative source; check_governance_dictionary_sync.py remains the enforcement that this file stays current with schema-affecting code changes. No entity schema changed."
     }
   ]
 }
