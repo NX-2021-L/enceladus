@@ -221,6 +221,9 @@ Resources:
           # ENC-ISS-441 Ph4 tightens this to 7200).
           AGENT_SESSIONS_IDLE_SWEEP_ENABLED: "true"
           AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS: "86400"
+          # ENC-ISS-441 / ENC-TSK-J92: SCI tokens share the checkout service's token table
+          # (pk = token id, token_type=SCI). Env-suffixed so gamma writes the -gamma twin.
+          CHECKOUT_TOKENS_TABLE: !Sub "enceladus-checkout-tokens${EnvironmentSuffix}"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -2279,6 +2282,17 @@ Resources:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-types${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-credentials${EnvironmentSuffix}"
+              # ENC-ISS-441 / ENC-TSK-J92: agent.claim mints Session Claim ID (SCI) tokens
+              # into the checkout-tokens table (token_type=SCI); agent.retire and the J94
+              # sweeps revoke them. Minimal grant — no Scan/Query/Delete.
+              - Sid: SciTokenAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-checkout-tokens${EnvironmentSuffix}"
               - Sid: GovernancePoliciesReadWrite
                 Effect: Allow
                 Action:

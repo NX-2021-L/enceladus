@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.11",
-  "updated_at": "2026-07-02T09:42:00Z",
-  "last_change_summary": "ENC-TSK-G16: ephemeral 1h cache_control on deferred MCP toolset (last tools-array block); toolset_cache_eligibility metrics in coordination_capabilities.features.deferred_tool_loading.",
+  "version": "2026-07-02.12",
+  "updated_at": "2026-07-02T10:02:00Z",
+  "last_change_summary": "ENC-TSK-J92 (ENC-ISS-441 Ph2, ENC-FTR-122): Session Claim ID (SCI) primitive shipped DARK - agent.claim mints SCI-{uuid4_hex} into the checkout-tokens table (token_type=SCI, 24h TTL, env-suffixed CHECKOUT_TOKENS_TABLE) and returns it in the claim envelope; agent.retire revokes (revoked/revoked_at/revocation_reason); session item stamped with sci_token_id. New entity coordination.session_claim_id. IAM SciTokenAccess grant + CHECKOUT_TOKENS_TABLE env on CoordinationApiFunction (02-compute.yaml v4). No enforcement until ENC-TSK-J93. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "owners": [
     "enceladus-platform"
   ],
@@ -6633,6 +6633,43 @@
           "definition": "Return value (CloudWatch only - no HTTP envelope): {enabled, dry_run, idle_threshold_seconds, cutoff, scanned_live, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped}."
         }
       }
+    },
+    "coordination.session_claim_id": {
+      "description": "ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122): Session Claim ID (SCI) token primitive. A server-minted bearer token proving a session completed the ENC-FTR-117 register->claim handshake. Minted EXCLUSIVELY by coordination agent.claim on the allocated->claimed flip (agent_id_alloc.mint_sci); format SCI-{uuid4_hex} (regex ^SCI-[0-9a-f]{32}$), mirroring the checkout service's CAI/CCI discipline. Stored in the checkout-tokens table (CHECKOUT_TOKENS_TABLE, env-suffixed; pk = token id, token_type=SCI) with a 24h native-TTL expiry (SCI_TTL_SECONDS=86400) - expiry hard-deletes the token, which fails CLOSED at the Ph3 (ENC-TSK-J93) enforcement gate. The claimed session item is stamped with sci_token_id (post-mint attribute, same pattern as last_activity_at; SESSION_NODE_PROPERTIES mint shape unchanged) so revocation is a direct lookup, never a scan. Revoked (revoked=true, revoked_at, revocation_reason; first revocation metadata immutable) by agent.retire (explicit_retire) and by the ENC-TSK-J94 sweeps (unclaim_ttl_exceeded / idle_ttl_exceeded). Ships DARK in J92: no enforcement point reads the token until ENC-TSK-J93.",
+      "fields": {
+        "token_id": {
+          "type": "string",
+          "definition": "SCI-{uuid4_hex} (pk in the checkout-tokens table). Returned to the caller as 'sci' in the agent.claim response envelope alongside sci_issued_at and sci_ttl_seconds."
+        },
+        "token_type": {
+          "type": "string",
+          "definition": "Fixed 'SCI' discriminator - coexists with CAI/CCI records in the same table."
+        },
+        "session_id": {
+          "type": "string",
+          "definition": "Bound ENC-SES-NNN. Ph3 enforcement matches this against the presented active_agent_session_id."
+        },
+        "agent_type_id": {
+          "type": "string",
+          "definition": "Bound ENC-AGT-NNN lineage captured at claim time."
+        },
+        "issued_at": {
+          "type": "string",
+          "definition": "ISO 8601 UTC mint timestamp."
+        },
+        "ttl": {
+          "type": "integer",
+          "definition": "Unix epoch expiry = issued_at + 86400s. DynamoDB native TTL deletes the record at expiry; an absent token is invalid at the enforcement gate (fails closed)."
+        },
+        "revoked": {
+          "type": "boolean",
+          "definition": "False at mint. Set true (with revoked_at + revocation_reason) by agent.retire or the J94 sweeps; idempotent - first revocation metadata is never overwritten."
+        },
+        "sci_token_id": {
+          "type": "string",
+          "definition": "On the agent-sessions item (NOT this token record): the session's active SCI pointer, stamped at claim. Post-mint attribute outside SESSION_NODE_PROPERTIES."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -6731,6 +6768,11 @@
       "version": "2026-07-02.09",
       "date": "2026-07-02",
       "summary": "ENC-TSK-J91 (ENC-ISS-441 Ph1): I71 agent-session idle-sweep backported to v4/main - _handle_agent_session_idle_sweep + EventBridge dispatch in coordination_api, AgentSessionIdleSweepSchedule rule + permission + env vars in 02-compute.yaml (v4). New entity coordination.agent_session_idle_sweep documenting the v4 idle-reference precedence (last_activity_at > claimed_at > created_at). Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-07-02.12",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-J92 (ENC-ISS-441 Ph2, ENC-FTR-122): Session Claim ID (SCI) primitive shipped DARK - agent.claim mints SCI-{uuid4_hex} into the checkout-tokens table (token_type=SCI, 24h TTL, env-suffixed CHECKOUT_TOKENS_TABLE) and returns it in the claim envelope; agent.retire revokes (revoked/revoked_at/revocation_reason); session item stamped with sci_token_id. New entity coordination.session_claim_id. IAM SciTokenAccess grant + CHECKOUT_TOKENS_TABLE env on CoordinationApiFunction (02-compute.yaml v4). No enforcement until ENC-TSK-J93. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }

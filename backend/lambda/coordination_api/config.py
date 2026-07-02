@@ -43,6 +43,7 @@ __all__ = [
     "CALLBACK_EVENT_SOURCE",
     "CALLBACK_SQS_QUEUE_URL",
     "CALLBACK_TOKEN_TTL_SECONDS",
+    "CHECKOUT_TOKENS_TABLE",
     "CLAUDE_API_MAX_TOKENS_DEFAULT",
     "CLAUDE_API_MAX_TOKENS_MAX",
     "CLAUDE_API_MAX_TOKENS_MIN",
@@ -196,6 +197,10 @@ AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
 AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS = int(
     os.environ.get("AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS", "86400")
 )
+# ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122): Session Claim ID (SCI) tokens live in the SAME
+# DynamoDB table the checkout service uses for CAI/CCI (pk = token id, token_type
+# discriminator). Env-suffixed so gamma coordination_api writes the -gamma twin.
+CHECKOUT_TOKENS_TABLE = os.environ.get("CHECKOUT_TOKENS_TABLE", "enceladus-checkout-tokens")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 SSM_REGION = os.environ.get("SSM_REGION", "us-west-2")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")

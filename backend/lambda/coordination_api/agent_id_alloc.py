@@ -48,6 +48,7 @@ from config import (
     AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS,
     AGENT_SESSIONS_TABLE,
     AGENT_TYPES_TABLE,
+    CHECKOUT_TOKENS_TABLE,
     logger,
 )
 from aws_clients import _get_ddb
@@ -77,6 +78,10 @@ __all__ = [
     "get_credential",
     "claim_session",
     "retire_session",
+    "SCI_PREFIX",
+    "SCI_TTL_SECONDS",
+    "mint_sci",
+    "revoke_sci_for_session",
     "issue_credential",
     "rotate_credential",
     "revoke_credential",
@@ -530,6 +535,132 @@ def touch_session_activity(session_id: str) -> bool:
         if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
             return False
         raise
+
+
+# ---------------------------------------------------------------------------
+# Session Claim ID (SCI) tokens — ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122)
+# ---------------------------------------------------------------------------
+
+SCI_PREFIX = "SCI"
+# 24h session lifetime per the ENC-ISS-441 spec — deliberately distinct from the checkout
+# service's 90-day CAI/CCI TTL. The checkout-tokens table's native TTL hard-deletes the
+# record at expiry, which is CORRECT here (a token is not append-only session state):
+# an absent token reads as invalid at the Ph3 enforcement gate, i.e. expiry fails closed.
+SCI_TTL_SECONDS = 86400
+
+
+def mint_sci(session: Mapping[str, Any]) -> Dict[str, Any]:
+    """Mint a Session Claim ID for a just-claimed session (ENC-ISS-441 / ENC-TSK-J92).
+
+    Server-only: issued exclusively by ``agent.claim`` on the allocated -> claimed flip.
+    Writes the token to the checkout-tokens table (pk = SCI-{uuid4_hex}, token_type=SCI —
+    the same key discipline as the checkout service's CAI/CCI records) and stamps
+    ``sci_token_id`` on the session item as a post-mint attribute (the same pattern as
+    ``last_activity_at``, so SESSION_NODE_PROPERTIES / the mint shape are unchanged).
+    The session stamp makes revocation a direct lookup — never a table scan.
+    """
+    session_id = str(session.get("session_id") or "").strip()
+    agent_type_id = str(session.get("agent_type_id") or "").strip()
+    if not session_id:
+        raise ValueError("session with session_id is required to mint an SCI")
+
+    ddb = _get_ddb()
+    now_dt = dt.datetime.now(dt.timezone.utc)
+    token_id = f"{SCI_PREFIX}-{uuid.uuid4().hex}"
+    issued_at = now_dt.strftime(_TS_FORMAT)
+    expires_epoch = int(now_dt.timestamp()) + SCI_TTL_SECONDS
+
+    ddb.put_item(
+        TableName=CHECKOUT_TOKENS_TABLE,
+        Item={
+            "pk": _serialize(token_id),
+            "token_type": _serialize("SCI"),
+            "session_id": _serialize(session_id),
+            "agent_type_id": _serialize(agent_type_id),
+            "issued_at": _serialize(issued_at),
+            "revoked": _serialize(False),
+            "ttl": {"N": str(expires_epoch)},
+        },
+        ConditionExpression="attribute_not_exists(pk)",
+    )
+    ddb.update_item(
+        TableName=AGENT_SESSIONS_TABLE,
+        Key={"session_id": _serialize(session_id)},
+        UpdateExpression="SET sci_token_id = :tok",
+        ConditionExpression="attribute_exists(session_id) AND #st = :claimed",
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={
+            ":tok": _serialize(token_id),
+            ":claimed": _serialize("claimed"),
+        },
+    )
+    logger.info("[INFO] Minted SCI for session %s", session_id)
+    return {
+        "token_id": token_id,
+        "token_type": "SCI",
+        "session_id": session_id,
+        "agent_type_id": agent_type_id,
+        "issued_at": issued_at,
+        "ttl": expires_epoch,
+        "revoked": False,
+    }
+
+
+def revoke_sci_for_session(
+    session_id: str, *, reason: str = "explicit_retire"
+) -> Optional[Dict[str, Any]]:
+    """Revoke the SCI bound to a session, if any (ENC-ISS-441 / ENC-TSK-J92).
+
+    Idempotent by construction: a session with no ``sci_token_id`` returns None; a token
+    that is already revoked (or TTL-expired out of the table) is reported with
+    ``already_revoked`` and the first revocation's metadata is never overwritten.
+    Callers: ``agent.retire`` (reason=explicit_retire) and the ENC-TSK-J94 sweeps
+    (reason=unclaim_ttl_exceeded / idle_ttl_exceeded).
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    session = get_session(session_id)
+    if session is None:
+        raise ValueError(f"Session {session_id!r} not found")
+    token_id = str(session.get("sci_token_id") or "").strip()
+    if not token_id:
+        return None
+
+    ddb = _get_ddb()
+    try:
+        resp = ddb.update_item(
+            TableName=CHECKOUT_TOKENS_TABLE,
+            Key={"pk": _serialize(token_id)},
+            UpdateExpression=(
+                "SET revoked = :t, revoked_at = :now, revocation_reason = :reason"
+            ),
+            ConditionExpression="attribute_exists(pk) AND revoked = :f",
+            ExpressionAttributeValues={
+                ":t": _serialize(True),
+                ":f": _serialize(False),
+                ":now": _serialize(_now_z()),
+                ":reason": _serialize(reason),
+            },
+            ReturnValues="ALL_NEW",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.info(
+                "[INFO] SCI %s for session %s already revoked or expired", token_id, session_id
+            )
+            return {
+                "token_id": token_id,
+                "session_id": session_id,
+                "revoked": True,
+                "already_revoked": True,
+            }
+        raise
+
+    revoked = _deserialize(resp.get("Attributes", {}))
+    logger.info(
+        "[INFO] Revoked SCI %s for session %s (reason=%s)", token_id, session_id, reason
+    )
+    return revoked
 
 
 # ---------------------------------------------------------------------------
