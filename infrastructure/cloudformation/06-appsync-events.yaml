@@ -1,0 +1,293 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus AppSync Events real-time layer (ENC-TSK-K20, PWA 2.0 / B67 AC-10).
+
+  Declares the AppSync Events API (EVENT type), channel namespaces for the
+  /feed, /records, and /projects subscription surfaces, an API key, the
+  devops-appsync-feed-publisher Lambda + execution role, and the DynamoDB
+  Streams EventSourceMapping wiring that Lambda to the devops-project-tracker
+  table stream.
+
+  WARNING: The Lambda Code property uses a placeholder ZipFile value. Actual
+  code is deployed via the Gen2 pipeline (_build.yml + _deploy.yml). NEVER
+  change the ZipFile value — CloudFormation would overwrite the deployed code.
+
+  ESCALATED (privileged-terminal, live-state) residual steps — see Metadata
+  section "EscalatedResidualSteps" at the bottom of this template.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: gamma
+    AllowedValues: [production, gamma]
+    Description: >
+      Deployment environment. This template is gamma-only in current scope
+      (PLN-006 v4-migration invariant); production is a later io-gated cutover.
+  EnvironmentSuffix:
+    Type: String
+    Default: "-gamma"
+    AllowedValues: ["", "-gamma"]
+    Description: >
+      Appended to every resource name. Production uses "" (zero drift),
+      gamma uses "-gamma" for parallel deployment. Mirrors 02-compute.yaml.
+  DataStackName:
+    Type: String
+    Default: enceladus-data-gamma
+    Description: >
+      Name of the 01-data stack that owns devops-project-tracker and exports
+      its stream ARN as <DataStackName>-TrackerStreamArn.
+  SharedLayerArn:
+    Type: String
+    Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10
+    Description: Shared enceladus_shared layer ARN (mirrors 02-compute.yaml pin).
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, "production"]
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # AppSync Events API (EVENT type) — real-time publish/subscribe transport.
+  # ---------------------------------------------------------------------------
+  FeedEventsApi:
+    Type: AWS::AppSync::Api
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-feed-events${EnvironmentSuffix}"
+      EventConfig:
+        # API-key auth is the primary path for gamma; AWS_IAM (SigV4) is the
+        # documented alternative supported by the publisher Lambda.
+        AuthProviders:
+          - AuthType: API_KEY
+          - AuthType: AWS_IAM
+        ConnectionAuthModes:
+          - AuthType: API_KEY
+          - AuthType: AWS_IAM
+        DefaultPublishAuthModes:
+          - AuthType: API_KEY
+          - AuthType: AWS_IAM
+        DefaultSubscribeAuthModes:
+          - AuthType: API_KEY
+          - AuthType: AWS_IAM
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: pwa-realtime
+
+  # API key for browser/PWA subscribers and for the publisher's X-Api-Key path.
+  FeedEventsApiKey:
+    Type: AWS::AppSync::ApiKey
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !GetAtt FeedEventsApi.ApiId
+      Description: !Sub "enceladus feed events API key${EnvironmentSuffix}"
+
+  # ---------------------------------------------------------------------------
+  # Channel namespaces — wildcard subscription support per namespace.
+  #   /feed/*      global firehose        (/feed/updates)
+  #   /records/*   per-record channel     (/records/{recordId})
+  #   /projects/*  per-project channel    (/projects/{projectId})
+  # ---------------------------------------------------------------------------
+  FeedNamespace:
+    Type: AWS::AppSync::ChannelNamespace
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !GetAtt FeedEventsApi.ApiId
+      Name: feed
+      PublishAuthModes:
+        - AuthType: API_KEY
+        - AuthType: AWS_IAM
+      SubscribeAuthModes:
+        - AuthType: API_KEY
+        - AuthType: AWS_IAM
+
+  RecordsNamespace:
+    Type: AWS::AppSync::ChannelNamespace
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !GetAtt FeedEventsApi.ApiId
+      Name: records
+      PublishAuthModes:
+        - AuthType: API_KEY
+        - AuthType: AWS_IAM
+      SubscribeAuthModes:
+        - AuthType: API_KEY
+        - AuthType: AWS_IAM
+
+  ProjectsNamespace:
+    Type: AWS::AppSync::ChannelNamespace
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !GetAtt FeedEventsApi.ApiId
+      Name: projects
+      PublishAuthModes:
+        - AuthType: API_KEY
+        - AuthType: AWS_IAM
+      SubscribeAuthModes:
+        - AuthType: API_KEY
+        - AuthType: AWS_IAM
+
+  # ---------------------------------------------------------------------------
+  # Publisher Lambda execution role.
+  # ---------------------------------------------------------------------------
+  AppSyncFeedPublisherRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-appsync-feed-publisher-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBStreamEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+        - PolicyName: AppSyncEventPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Allows the SigV4 (AWS_IAM) publish path. The X-Api-Key path does
+              # not require this grant, but IAM auth is the documented fallback.
+              - Sid: AppSyncEventAccess
+                Effect: Allow
+                Action:
+                  - appsync:EventPublish
+                Resource:
+                  - !Sub "arn:aws:appsync:${AWS::Region}:${AWS::AccountId}:apis/${FeedEventsApi.ApiId}/*"
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-appsync-feed-publisher${EnvironmentSuffix}*"
+
+  # ---------------------------------------------------------------------------
+  # Publisher Lambda (Gen2 gamma: arm64/python3.12). ZipFile placeholder ONLY —
+  # code is deployed out-of-band by the Gen2 pipeline; CFN never overwrites it.
+  # ---------------------------------------------------------------------------
+  AppSyncFeedPublisherFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-appsync-feed-publisher${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 30
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt AppSyncFeedPublisherRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          # Populated at deploy time via --parameter-overrides / out-of-band once
+          # the AppSync API is provisioned (see ESCALATED steps). The API host is
+          # available from FeedEventsApi.Dns.Http after provisioning.
+          APPSYNC_EVENTS_HTTP_ENDPOINT: !GetAtt FeedEventsApi.Dns.Http
+          APPSYNC_EVENTS_API_KEY: !GetAtt FeedEventsApiKey.ApiKey
+          APPSYNC_EVENTS_REGION: !Ref AWS::Region
+          APPSYNC_EVENTS_TIMEOUT: "5"
+          DEFAULT_PROJECT_ID: enceladus
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: pwa-realtime
+
+  # ---------------------------------------------------------------------------
+  # DynamoDB Stream -> Lambda EventSourceMapping.
+  # BatchSize=1 + MaximumBatchingWindowInSeconds=0 for lowest-latency fan-out.
+  # ReportBatchItemFailures + LATEST starting position.
+  #
+  # The devops-project-tracker table already declares
+  # StreamSpecification.StreamViewType=NEW_AND_OLD_IMAGES in 01-data.yaml and
+  # exports its stream ARN as <DataStackName>-TrackerStreamArn, so we import it
+  # here rather than touching the live/imported table (see GovernanceAudit /
+  # Convergence stream triggers in 02-compute.yaml for the same pattern).
+  # ---------------------------------------------------------------------------
+  AppSyncFeedTrackerStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      FunctionName: !Ref AppSyncFeedPublisherFunction
+      BatchSize: 1
+      MaximumBatchingWindowInSeconds: 0
+      StartingPosition: LATEST
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      Enabled: true
+
+Outputs:
+  FeedEventsApiId:
+    Value: !GetAtt FeedEventsApi.ApiId
+    Export:
+      Name: !Sub ${AWS::StackName}-FeedEventsApiId
+  FeedEventsHttpEndpoint:
+    Value: !GetAtt FeedEventsApi.Dns.Http
+    Export:
+      Name: !Sub ${AWS::StackName}-FeedEventsHttpEndpoint
+  FeedEventsRealtimeEndpoint:
+    Value: !GetAtt FeedEventsApi.Dns.Realtime
+    Export:
+      Name: !Sub ${AWS::StackName}-FeedEventsRealtimeEndpoint
+  AppSyncFeedPublisherFunctionArn:
+    Value: !GetAtt AppSyncFeedPublisherFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AppSyncFeedPublisherFunctionArn
+
+Metadata:
+  EscalatedResidualSteps:
+    Description: >
+      Privileged-terminal / live-state steps required to make this stack live on
+      gamma. CloudFormation declares intent; these must be executed by an
+      operator with io-dev-admin credentials.
+    Steps:
+      # ESCALATED-1: New-Lambda pre-create. The Gen2 update-function-code path
+      # requires devops-appsync-feed-publisher-gamma to already EXIST. Deploy this
+      # 06-appsync-events.yaml stack (which creates the function with the ZipFile
+      # placeholder) BEFORE the Gen2 pipeline's update-function-code runs, or the
+      # deploy will fail with ResourceNotFound. Function name (gamma):
+      # devops-appsync-feed-publisher-gamma.
+      - "ESCALATED-1: Deploy 06-appsync-events.yaml (compute-stack style) to pre-create devops-appsync-feed-publisher-gamma before Gen2 update-function-code."
+      # ESCALATED-2: AppSync Events API provisioning. AWS::AppSync::Api (EVENT)
+      # + ChannelNamespace + ApiKey are provisioned by this stack, but the
+      # resulting FeedEventsHttpEndpoint / API key must be confirmed and, if the
+      # Lambda env is managed out-of-band, injected as
+      # APPSYNC_EVENTS_HTTP_ENDPOINT / APPSYNC_EVENTS_API_KEY on
+      # devops-appsync-feed-publisher-gamma.
+      - "ESCALATED-2: Confirm AppSync Events API host + API key post-provision and wire APPSYNC_EVENTS_HTTP_ENDPOINT / APPSYNC_EVENTS_API_KEY onto the Lambda."
+      # ESCALATED-3: DDB Streams on devops-project-tracker. The stream IS declared
+      # in 01-data.yaml (StreamViewType=NEW_AND_OLD_IMAGES) and exported. If the
+      # LIVE gamma table (devops-project-tracker-gamma) does not yet have the
+      # stream enabled (drift from template), enabling it is a privileged step —
+      # do NOT modify the imported table blindly. Verify:
+      #   aws dynamodb describe-table --table-name devops-project-tracker-gamma \
+      #     --query 'Table.StreamSpecification'
+      # and, if absent, enable NEW_AND_OLD_IMAGES via a controlled data-stack
+      # update before this EventSourceMapping can bind.
+      - "ESCALATED-3: Verify devops-project-tracker-gamma stream is live (NEW_AND_OLD_IMAGES) and exported as enceladus-data-gamma-TrackerStreamArn before the EventSourceMapping binds."
