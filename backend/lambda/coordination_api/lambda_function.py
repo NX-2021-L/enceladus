@@ -5097,6 +5097,45 @@ def _parse_sse_stream(resp) -> Dict[str, Any]:
     return message
 
 
+def _get_claude_deferred_tool_loading_capabilities() -> Dict[str, Any]:
+    """Expose ENC-TSK-G15 defer_loading + BM25 policy for coordination capabilities."""
+    try:
+        from mcp_integration import _get_defer_loading_policy_summary
+
+        return _get_defer_loading_policy_summary(
+            deferred_tool_count=len(_ENCELADUS_ALLOWED_RAW_TOOLS),
+        )
+    except Exception as exc:
+        logger.warning("deferred_tool_loading capabilities unavailable: %s", exc)
+        return {"supported": False, "error": str(exc)}
+
+
+def _maybe_attach_deferred_tool_loading(
+    provider_session: Dict[str, Any],
+    request_body: Dict[str, Any],
+    request_headers: Dict[str, str],
+) -> None:
+    """Attach BM25 tool search + mcp_toolset when provider_session requests defer_loading."""
+    if not provider_session.get("deferred_tool_loading"):
+        return
+    try:
+        from mcp_integration import _load_tool_defer_loading_module
+
+        policy = _load_tool_defer_loading_module()
+        mcp_server_name = str(
+            provider_session.get("mcp_server_name") or policy.DEFAULT_MCP_SERVER_NAME
+        ).strip()
+        eager_tools = provider_session.get("eager_load_tools")
+        tools = policy.build_anthropic_deferred_tools_array(
+            mcp_server_name=mcp_server_name,
+            eager_tools=eager_tools if isinstance(eager_tools, list) else None,
+        )
+        request_body["tools"] = tools
+        request_headers["anthropic-beta"] = policy.anthropic_beta_headers()
+    except Exception as exc:
+        logger.warning("deferred_tool_loading attach failed: %s", exc)
+
+
 def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatch_id: str) -> Dict[str, Any]:
     """Dispatch a request to the Anthropic Messages API with full feature support.
 
@@ -5206,15 +5245,19 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
     started_at = _now_z()
     started = time.perf_counter()
     timeout = ANTHROPIC_API_STREAM_TIMEOUT_SECONDS if use_streaming else ANTHROPIC_API_TIMEOUT_SECONDS
+    anthropic_headers = {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_API_VERSION,
+        "content-type": "application/json",
+    }
+    _maybe_attach_deferred_tool_loading(provider_session, request_body, anthropic_headers)
+    if "tools" in request_body:
+        request_json = json.dumps(request_body).encode("utf-8")
     req = urllib.request.Request(
         url=endpoint,
         method="POST",
         data=request_json,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": ANTHROPIC_API_VERSION,
-            "content-type": "application/json",
-        },
+        headers=anthropic_headers,
     )
     context = ssl.create_default_context(cafile=_CERT_BUNDLE) if _CERT_BUNDLE else None
     try:
@@ -7747,12 +7790,24 @@ def _dispatch_mcp_jsonrpc_method(method: str, params: Dict[str, Any]) -> Dict[st
     module = _load_mcp_server_module()
 
     if method_name == "initialize":
+        server_info: Dict[str, Any] = {
+            "name": "enceladus",
+            "version": "0.4.1",
+        }
+        try:
+            from mcp_integration import _get_defer_loading_policy_summary
+
+            policy = _get_defer_loading_policy_summary(
+                deferred_tool_count=len(_ENCELADUS_ALLOWED_RAW_TOOLS),
+            )
+            instructions = str(policy.get("server_instructions") or "").strip()
+            if instructions:
+                server_info["instructions"] = instructions
+        except Exception as exc:
+            logger.warning("MCP initialize: defer-loading server instructions unavailable: %s", exc)
         return {
             "protocolVersion": "2024-11-05",
-            "serverInfo": {
-                "name": "enceladus",
-                "version": "0.4.1",
-            },
+            "serverInfo": server_info,
             "capabilities": {
                 "tools": {"listChanged": False},
                 "resources": {"subscribe": False, "listChanged": False},
@@ -11410,6 +11465,9 @@ def _handle_capabilities() -> Dict[str, Any]:
                             "interface_modes": sorted(_ENCELADUS_INTERFACE_MODES),
                             "default_interface_mode": _ENCELADUS_DEFAULT_INTERFACE_MODE,
                             "code_mode_tools": sorted(_ENCELADUS_CODE_MODE_TOOLS),
+                            "server_instructions": _get_claude_deferred_tool_loading_capabilities().get(
+                                "server_instructions", ""
+                            ),
                             "access_token_secret_ref": provider_secrets["openai_codex"].get("secret_ref"),
                             "compatibility": {
                                 "chatgpt_custom_gpt": True,
@@ -11450,6 +11508,7 @@ def _handle_capabilities() -> Dict[str, Any]:
                                 "budget_range": [CLAUDE_THINKING_BUDGET_MIN, CLAUDE_THINKING_BUDGET_MAX],
                                 "default_budget": CLAUDE_THINKING_BUDGET_DEFAULT,
                             },
+                            "deferred_tool_loading": _get_claude_deferred_tool_loading_capabilities(),
                             "streaming": True,
                             "token_counting": True,
                             "cost_attribution": True,
