@@ -378,6 +378,12 @@ FEED_SUBSCRIPTIONS_TABLE = os.environ.get("FEED_SUBSCRIPTIONS_TABLE", "feed-subs
 AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
     os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
 )
+# ENC-ISS-441 / ENC-TSK-J94: master enable flag for the 10-minute unclaim TTL sweep
+# (ghost-registration reaper). TTL default lives in config.py and is the default of
+# agent_id_alloc.sweep_unclaimed_sessions; only the enable flag is read here.
+AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED", "true").lower() == "true"
+)
 # ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier config.
 GRAPH_QUERY_API_URL = os.environ.get("GRAPH_QUERY_API_URL", "").strip()
 DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
@@ -15190,6 +15196,47 @@ def _handle_agent_session_idle_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
+def _handle_agent_session_unclaim_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Scheduled ghost-registration reaper (ENC-ISS-441 / ENC-TSK-J94).
+
+    Invoked by the AgentSessionUnclaimSweepSchedule EventBridge rule (rate(10 minutes)),
+    NOT an HTTP route — no API Gateway envelope, auth, or claims on this path. Flips
+    'allocated' sessions never claimed within AGENT_SESSIONS_UNCLAIM_TTL_MINUTES of
+    created_at to 'retired' via the append-only conditional update in
+    agent_id_alloc.sweep_unclaimed_sessions, revoking any bound SCI. Returns a plain
+    summary dict for CloudWatch.
+    """
+    if not AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED:
+        logger.info(
+            "[INFO] unclaim-sweep skipped — AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED is false"
+        )
+        return {"enabled": False, "reason": "disabled", "retired_count": 0}
+    raw_ttl = event.get("unclaim_ttl_minutes")
+    sweep_kwargs: Dict[str, Any] = {"dry_run": bool(event.get("dry_run", False))}
+    if raw_ttl is not None:
+        try:
+            sweep_kwargs["unclaim_ttl_minutes"] = int(raw_ttl)
+        except (TypeError, ValueError):
+            return {
+                "enabled": True,
+                "error": "unclaim_ttl_minutes must be an integer",
+                "retired_count": 0,
+            }
+    try:
+        summary = _agent_id_alloc.sweep_unclaimed_sessions(**sweep_kwargs)
+    except ValueError as exc:
+        return {"enabled": True, "error": str(exc), "retired_count": 0}
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] unclaim-sweep DynamoDB failure: %s", exc)
+        return {"enabled": True, "error": "DynamoDB error during unclaim-sweep", "retired_count": 0}
+    logger.info(
+        "[SUCCESS] unclaim-sweep retired %d session(s), revoked %d SCI(s)",
+        summary.get("retired_count", 0),
+        summary.get("revoked_sci_count", 0),
+    )
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
@@ -15212,6 +15259,12 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if event.get("action") == "agent_session_idle_sweep":
         logger.info("[INFO] Scheduled agent-session idle-sweep invoked")
         return _handle_agent_session_idle_sweep(event)
+
+    # --- ENC-ISS-441 / ENC-TSK-J94: scheduled unclaim TTL sweep (ghost registrations) ---
+    # The AgentSessionUnclaimSweepSchedule rule delivers its Input JSON verbatim as the event.
+    if event.get("action") == "agent_session_unclaim_sweep":
+        logger.info("[INFO] Scheduled agent-session unclaim-sweep invoked")
+        return _handle_agent_session_unclaim_sweep(event)
 
     # --- v0.3: SQS callback ingestion ---
     # SQS events have 'Records' with 'eventSource' = 'aws:sqs'.

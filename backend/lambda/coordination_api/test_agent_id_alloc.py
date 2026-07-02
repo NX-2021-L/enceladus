@@ -807,5 +807,108 @@ class SciTokenTest(unittest.TestCase):
             alloc.revoke_sci_for_session("ENC-SES-404")
 
 
+@mock_aws
+class UnclaimAndRevocationSweepTest(unittest.TestCase):
+    """ENC-ISS-441 / ENC-TSK-J94: unclaim TTL sweep + sweep->SCI revocation bridging."""
+
+    def setUp(self):
+        self.ddb = boto3.client("dynamodb", region_name="us-west-2")
+        for table, key in (
+            (config.AGENT_SESSIONS_TABLE, "session_id"),
+            (config.AGENT_TYPES_TABLE, "agent_type_id"),
+            (config.CHECKOUT_TOKENS_TABLE, "pk"),
+        ):
+            self.ddb.create_table(
+                TableName=table,
+                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
+                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
+        patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)
+
+    def _mint(self, status="allocated"):
+        return alloc.mint_session_id(
+            agent_type_id="ENC-AGT-001", runtime="test", status=status
+        )
+
+    def _get_token(self, token_id):
+        resp = self.ddb.get_item(
+            TableName=config.CHECKOUT_TOKENS_TABLE, Key={"pk": {"S": token_id}}
+        )
+        return resp.get("Item")
+
+    # -- config defaults per the io design decision on ENC-ISS-441 -----------
+    def test_defaults_are_two_hours_and_ten_minutes(self):
+        self.assertEqual(config.AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS, 7200)
+        self.assertEqual(config.AGENT_SESSIONS_UNCLAIM_TTL_MINUTES, 10)
+
+    # -- unclaim candidate selection ------------------------------------------
+    def test_unclaim_sweep_retires_stale_allocated_session(self):
+        sid = self._mint(status="allocated")["session_id"]
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertIn(sid, summary["retired"])
+        self.assertEqual(alloc.get_session(sid)["status"], "retired")
+
+    def test_unclaim_sweep_ignores_claimed_sessions(self):
+        minted = self._mint(status="allocated")
+        alloc.claim_session(minted["session_id"])
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        self.assertEqual(summary["candidate_count"], 0)
+        self.assertEqual(alloc.get_session(minted["session_id"])["status"], "claimed")
+
+    def test_unclaim_sweep_leaves_fresh_allocated_sessions(self):
+        sid = self._mint(status="allocated")["session_id"]
+        # now() ~ mint time; a 10-minute TTL means the session is not yet a ghost.
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10)
+        self.assertEqual(summary["candidate_count"], 0)
+        self.assertEqual(alloc.get_session(sid)["status"], "allocated")
+
+    def test_unclaim_sweep_dry_run_mutates_nothing(self):
+        sid = self._mint(status="allocated")["session_id"]
+        summary = alloc.sweep_unclaimed_sessions(
+            unclaim_ttl_minutes=10, now=self._future, dry_run=True
+        )
+        self.assertEqual(summary["candidate_count"], 1)
+        self.assertEqual(summary["retired_count"], 0)
+        self.assertEqual(alloc.get_session(sid)["status"], "allocated")
+
+    def test_unclaim_sweep_validates_ttl(self):
+        for bad in (True, -1, "10"):
+            with self.assertRaises(ValueError):
+                alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=bad)  # type: ignore[arg-type]
+
+    # -- sweep -> SCI revocation bridging --------------------------------------
+    def test_idle_sweep_revokes_sci_of_swept_session(self):
+        minted = self._mint(status="allocated")
+        session = alloc.claim_session(minted["session_id"])
+        sci = alloc.mint_sci(session)
+        summary = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+        self.assertIn(minted["session_id"], summary["retired"])
+        self.assertEqual(summary["revoked_sci_count"], 1)
+        self.assertIn(sci["token_id"], summary["revoked_scis"])
+        item = self._get_token(sci["token_id"])
+        self.assertTrue(item["revoked"]["BOOL"])
+        self.assertEqual(item["revocation_reason"]["S"], "idle_ttl_exceeded")
+
+    def test_unclaim_sweep_without_sci_reports_zero_revocations(self):
+        self._mint(status="allocated")
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertEqual(summary["revoked_sci_count"], 0)
+        self.assertEqual(summary["revoked_scis"], [])
+
+    def test_unclaim_sweep_is_idempotent_on_rerun(self):
+        self._mint(status="allocated")
+        first = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        second = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+        self.assertEqual(first["retired_count"], 1)
+        self.assertEqual(second["candidate_count"], 0)
+        self.assertEqual(second["retired_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
