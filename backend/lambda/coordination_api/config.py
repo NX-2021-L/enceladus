@@ -64,6 +64,8 @@ __all__ = [
     "AGENT_CREDENTIALS_TABLE",
     "AGENT_SESSIONS_IDLE_SWEEP_ENABLED",
     "AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS",
+    "AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED",
+    "AGENT_SESSIONS_UNCLAIM_TTL_MINUTES",
     "DRIFT_TELEMETRY_TABLE",
     "GRAPH_QUERY_API_URL",
     "COORDINATION_PUBLIC_BASE_URL",
@@ -194,8 +196,20 @@ AGENT_CREDENTIALS_TABLE = os.environ.get("AGENT_CREDENTIALS_TABLE", "agent-crede
 AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
     os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
 )
+# ENC-ISS-441 / ENC-TSK-J94: default tightened from I71's 86400 (24h) to 7200 (2h) per the
+# io design decision on the issue. The idle reference prefers last_activity_at (J71/J83
+# heartbeat), so listening agents polling escalation.watch are exempt while they poll.
 AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS = int(
-    os.environ.get("AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS", "86400")
+    os.environ.get("AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS", "7200")
+)
+# ENC-ISS-441 / ENC-TSK-J94: unclaim TTL sweep — a session registered (allocated) but never
+# claimed within this many minutes is a ghost registration and is reaped to 'retired'.
+# 10 of 24 production sessions exhibited this pattern (the ENC-ISS-441 evidence).
+AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED", "true").lower() == "true"
+)
+AGENT_SESSIONS_UNCLAIM_TTL_MINUTES = int(
+    os.environ.get("AGENT_SESSIONS_UNCLAIM_TTL_MINUTES", "10")
 )
 # ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122): Session Claim ID (SCI) tokens live in the SAME
 # DynamoDB table the checkout service uses for CAI/CCI (pk = token id, token_type

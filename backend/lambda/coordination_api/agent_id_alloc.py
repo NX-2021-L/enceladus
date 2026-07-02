@@ -47,6 +47,7 @@ from config import (
     AGENT_CREDENTIALS_TABLE,
     AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS,
     AGENT_SESSIONS_TABLE,
+    AGENT_SESSIONS_UNCLAIM_TTL_MINUTES,
     AGENT_TYPES_TABLE,
     CHECKOUT_TOKENS_TABLE,
     logger,
@@ -86,6 +87,7 @@ __all__ = [
     "rotate_credential",
     "revoke_credential",
     "sweep_idle_sessions",
+    "sweep_unclaimed_sessions",
     "list_sessions",
     "list_agent_types",
     "list_credentials",
@@ -761,6 +763,7 @@ def sweep_idle_sessions(
 
     retired: List[str] = []
     skipped: List[Dict[str, str]] = []
+    revoked_scis: List[str] = []
     if not dry_run:
         for sid in candidate_ids:
             try:
@@ -769,6 +772,12 @@ def sweep_idle_sessions(
             except ValueError as exc:
                 # Concurrently retired/transitioned between scan and update — idempotent skip.
                 skipped.append({"session_id": sid, "reason": str(exc)})
+                continue
+            # ENC-ISS-441 / ENC-TSK-J94: a swept session's SCI must never mutate again.
+            # Revocation failure is non-fatal (logged; the next sweep re-revokes).
+            token = _revoke_sci_after_sweep(sid, reason="idle_ttl_exceeded")
+            if token:
+                revoked_scis.append(token)
 
     summary: Dict[str, Any] = {
         "enabled": True,
@@ -782,8 +791,129 @@ def sweep_idle_sessions(
         "retired": retired,
         "skipped_count": len(skipped),
         "skipped": skipped,
+        "revoked_sci_count": len(revoked_scis),
+        "revoked_scis": revoked_scis,
     }
     logger.info("[INFO] Agent-session idle-sweep: %s", json.dumps(summary, default=str))
+    return summary
+
+
+def _revoke_sci_after_sweep(session_id: str, *, reason: str) -> Optional[str]:
+    """Best-effort SCI revocation for a just-swept session (ENC-ISS-441 / ENC-TSK-J94).
+
+    Returns the token id when THIS call performed the revocation; None when the session
+    had no SCI, the token was already revoked (idempotent re-run), or revocation failed
+    (logged — the next sweep pass re-revokes, and an expired token fails closed anyway).
+    """
+    try:
+        revoked = revoke_sci_for_session(session_id, reason=reason)
+    except (ValueError, BotoCoreError, ClientError) as exc:
+        logger.warning(
+            "[ERROR] SCI revocation failed for swept session %s (reason=%s): %s",
+            session_id, reason, exc,
+        )
+        return None
+    if revoked and not revoked.get("already_revoked"):
+        token_id = str(revoked.get("token_id") or revoked.get("pk") or "")
+        logger.info(
+            "[INFO] Revoked SCI %s for swept session %s (reason=%s)",
+            token_id, session_id, reason,
+        )
+        return token_id or None
+    return None
+
+
+def sweep_unclaimed_sessions(
+    *,
+    unclaim_ttl_minutes: int = AGENT_SESSIONS_UNCLAIM_TTL_MINUTES,
+    now: Optional[dt.datetime] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Reap ghost registrations: ``allocated`` sessions never claimed within the TTL
+    (ENC-ISS-441 retirement lifecycle part 1 / ENC-TSK-J94).
+
+    A session that calls ``agent.register`` but never ``agent.claim`` within
+    ``unclaim_ttl_minutes`` (default 10) of ``created_at`` is flipped to ``retired`` —
+    the ENC-ISS-441 evidence found 10 of 24 production sessions in exactly this ghost
+    state. The reference timestamp is strictly ``created_at`` (an allocated session has
+    no claim heartbeat by definition; io design decision on the issue).
+
+    Same append-only, idempotent construction as ``sweep_idle_sessions``: candidates are
+    retired through ``retire_session``'s conditional flip, concurrent transitions are
+    skipped, nothing is deleted. Although an allocated session should have no SCI (SCIs
+    are minted at claim), revocation is still attempted per retired session as
+    defense-in-depth (reason=unclaim_ttl_exceeded).
+    """
+    if isinstance(unclaim_ttl_minutes, bool) or not isinstance(unclaim_ttl_minutes, int):
+        raise ValueError(
+            f"unclaim_ttl_minutes must be an int, got {type(unclaim_ttl_minutes).__name__}"
+        )
+    if unclaim_ttl_minutes < 0:
+        raise ValueError(f"unclaim_ttl_minutes must be >= 0, got {unclaim_ttl_minutes}")
+
+    now_dt = now or dt.datetime.now(dt.timezone.utc)
+    cutoff = (now_dt - dt.timedelta(minutes=unclaim_ttl_minutes)).strftime(_TS_FORMAT)
+
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {
+        "TableName": AGENT_SESSIONS_TABLE,
+        "FilterExpression": (
+            "NOT begins_with(session_id, :ctr_pfx) AND #st = :allocated"
+        ),
+        "ExpressionAttributeNames": {"#st": "status"},
+        "ExpressionAttributeValues": {
+            ":ctr_pfx": _serialize("counter#"),
+            ":allocated": _serialize("allocated"),
+        },
+    }
+
+    scanned_allocated = 0
+    candidate_ids: List[str] = []
+    scan = ddb.scan(**scan_kwargs)
+    while True:
+        for raw in scan.get("Items", []):
+            item = _deserialize(raw)
+            scanned_allocated += 1
+            created_at = str(item.get("created_at") or "")
+            if created_at and created_at < cutoff:
+                candidate_ids.append(item["session_id"])
+        last_key = scan.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan = ddb.scan(ExclusiveStartKey=last_key, **scan_kwargs)
+
+    retired: List[str] = []
+    skipped: List[Dict[str, str]] = []
+    revoked_scis: List[str] = []
+    if not dry_run:
+        for sid in candidate_ids:
+            try:
+                retire_session(sid)
+                retired.append(sid)
+            except ValueError as exc:
+                # Claimed or retired between scan and update — idempotent skip.
+                skipped.append({"session_id": sid, "reason": str(exc)})
+                continue
+            token = _revoke_sci_after_sweep(sid, reason="unclaim_ttl_exceeded")
+            if token:
+                revoked_scis.append(token)
+
+    summary: Dict[str, Any] = {
+        "enabled": True,
+        "dry_run": dry_run,
+        "unclaim_ttl_minutes": unclaim_ttl_minutes,
+        "cutoff": cutoff,
+        "scanned_allocated": scanned_allocated,
+        "candidate_count": len(candidate_ids),
+        "candidate_ids": candidate_ids,
+        "retired_count": len(retired),
+        "retired": retired,
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+        "revoked_sci_count": len(revoked_scis),
+        "revoked_scis": revoked_scis,
+    }
+    logger.info("[INFO] Agent-session unclaim-sweep: %s", json.dumps(summary, default=str))
     return summary
 
 

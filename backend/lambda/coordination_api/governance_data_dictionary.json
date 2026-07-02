@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.12",
-  "updated_at": "2026-07-02T10:02:00Z",
-  "last_change_summary": "ENC-TSK-J92 (ENC-ISS-441 Ph2, ENC-FTR-122): Session Claim ID (SCI) primitive shipped DARK - agent.claim mints SCI-{uuid4_hex} into the checkout-tokens table (token_type=SCI, 24h TTL, env-suffixed CHECKOUT_TOKENS_TABLE) and returns it in the claim envelope; agent.retire revokes (revoked/revoked_at/revocation_reason); session item stamped with sci_token_id. New entity coordination.session_claim_id. IAM SciTokenAccess grant + CHECKOUT_TOKENS_TABLE env on CoordinationApiFunction (02-compute.yaml v4). No enforcement until ENC-TSK-J93. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "version": "2026-07-02.13",
+  "updated_at": "2026-07-02T10:15:00Z",
+  "last_change_summary": "ENC-TSK-J94 (ENC-ISS-441 Ph4, ENC-FTR-122): retirement sweeps - new coordination.agent_session_unclaim_sweep entity (rate(10 minutes) EventBridge rule, allocated-only, created_at reference, SCI revocation unclaim_ttl_exceeded); idle sweep default threshold tightened 86400->7200 with last_activity_at-preferred reference and SCI revocation idle_ttl_exceeded (revoked_scis/revoked_sci_count in both sweep summaries). Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "owners": [
     "enceladus-platform"
   ],
@@ -6614,7 +6614,7 @@
       "apigw_routes": "03-api.yaml (Condition: IsGamma, prod promotion io-gated per DOC-B716E8FB10B6): RouteEscalationsFeed, RouteEscalationsApprove, RouteEscalationsDeny -> CoordinationApiIntegration; RouteTrackerEscalationApply (POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply) -> TrackerMutationIntegration as the HTTP lane to the idempotent applier."
     },
     "coordination.agent_session_idle_sweep": {
-      "description": "ENC-TSK-I71 / ENC-FTR-117 AC#8, backported to v4/main by ENC-TSK-J91 (ENC-ISS-441 Ph1). Scheduled idle-sweep backstop that reaps abandoned agent sessions. The AgentSessionIdleSweepSchedule EventBridge rule (infrastructure/cloudformation/02-compute.yaml, rate(1 hour)) invokes the coordination_api Lambda with Input {\"action\":\"agent_session_idle_sweep\"}; lambda_handler dispatches to _handle_agent_session_idle_sweep, which calls agent_id_alloc.sweep_idle_sessions. Sessions left in a live status (allocated or claimed) whose idle reference (last_activity_at heartbeat when present per ENC-TSK-J71/J83, else claimed_at, else created_at) is older than AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS are flipped to 'retired' via the SAME append-only conditional UpdateItem used by agent.retire (#st = :allocated OR #st = :claimed -> retired). Third leg of FTR-117 AC#8 (append-only storage + explicit agent.retire + TTL idle-sweep backstop). Deliberately NOT DynamoDB native TTL: native TTL hard-deletes and would violate the append-only retire model from ENC-TSK-I38. Idempotent - already-retired sessions are excluded by the live-status scan filter, and a candidate concurrently retired between scan and update is skipped. Not an HTTP route (no auth/claims); invoked only by EventBridge. ENC-ISS-441 Ph4 (ENC-TSK-J94) tightens the default threshold to 7200s and adds SCI revocation + the 10-minute unclaim sweep.",
+      "description": "ENC-TSK-I71 / ENC-FTR-117 AC#8, backported to v4/main by ENC-TSK-J91 (ENC-ISS-441 Ph1). Scheduled idle-sweep backstop that reaps abandoned agent sessions. The AgentSessionIdleSweepSchedule EventBridge rule (infrastructure/cloudformation/02-compute.yaml, rate(1 hour)) invokes the coordination_api Lambda with Input {\"action\":\"agent_session_idle_sweep\"}; lambda_handler dispatches to _handle_agent_session_idle_sweep, which calls agent_id_alloc.sweep_idle_sessions. Sessions left in a live status (allocated or claimed) whose idle reference (last_activity_at heartbeat when present per ENC-TSK-J71/J83, else claimed_at, else created_at) is older than AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS are flipped to 'retired' via the SAME append-only conditional UpdateItem used by agent.retire (#st = :allocated OR #st = :claimed -> retired). Third leg of FTR-117 AC#8 (append-only storage + explicit agent.retire + TTL idle-sweep backstop). Deliberately NOT DynamoDB native TTL: native TTL hard-deletes and would violate the append-only retire model from ENC-TSK-I38. Idempotent - already-retired sessions are excluded by the live-status scan filter, and a candidate concurrently retired between scan and update is skipped. Not an HTTP route (no auth/claims); invoked only by EventBridge. ENC-ISS-441 Ph4 (ENC-TSK-J94) tightens the default threshold to 7200s and adds SCI revocation + the 10-minute unclaim sweep. ENC-TSK-J94: the sweep now also revokes each retired session's SCI (revocation_reason=idle_ttl_exceeded) and the default threshold is 7200s.",
       "fields": {
         "AGENT_SESSIONS_IDLE_SWEEP_ENABLED": {
           "type": "boolean",
@@ -6622,7 +6622,7 @@
         },
         "AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS": {
           "type": "integer",
-          "definition": "Env var (config.py), default 86400 (24h) at J91 backport time. A live session whose idle reference is older than this is reaped. Operator-configurable per ENC-TSK-I71 AC#2; ENC-ISS-441 Ph4 (ENC-TSK-J94) tightens the default to 7200 (2h)."
+          "definition": "Env var (config.py), default 7200 (2h) since ENC-ISS-441 Ph4 (ENC-TSK-J94; was 86400/24h under I71). A live session whose idle reference (last_activity_at > claimed_at > created_at) is older than this is reaped. escalation.watch polling refreshes last_activity_at (J71/J83), so listening agents are exempt while they poll."
         },
         "action": {
           "type": "string",
@@ -6631,6 +6631,10 @@
         "summary": {
           "type": "object",
           "definition": "Return value (CloudWatch only - no HTTP envelope): {enabled, dry_run, idle_threshold_seconds, cutoff, scanned_live, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped}."
+        },
+        "revoked_scis": {
+          "type": "array",
+          "definition": "ENC-TSK-J94: token ids of SCIs revoked by this sweep pass (revocation_reason=idle_ttl_exceeded). revoked_sci_count carries the count; both appear in the summary envelope and CloudWatch logs."
         }
       }
     },
@@ -6668,6 +6672,27 @@
         "sci_token_id": {
           "type": "string",
           "definition": "On the agent-sessions item (NOT this token record): the session's active SCI pointer, stamped at claim. Post-mint attribute outside SESSION_NODE_PROPERTIES."
+        }
+      }
+    },
+    "coordination.agent_session_unclaim_sweep": {
+      "description": "ENC-ISS-441 / ENC-TSK-J94 (ENC-FTR-122): 10-minute unclaim TTL sweep - retirement lifecycle part 1 from the io design decision on ENC-ISS-441. The AgentSessionUnclaimSweepSchedule EventBridge rule (02-compute.yaml, rate(10 minutes)) invokes coordination_api with Input {\"action\":\"agent_session_unclaim_sweep\"}; lambda_handler dispatches to _handle_agent_session_unclaim_sweep -> agent_id_alloc.sweep_unclaimed_sessions. Sessions in status=allocated (registered via agent.register but never claimed) whose created_at is older than AGENT_SESSIONS_UNCLAIM_TTL_MINUTES are flipped to 'retired' via the same append-only conditional UpdateItem as agent.retire, and any bound SCI is revoked (revocation_reason=unclaim_ttl_exceeded; defense-in-depth - allocated sessions normally have no SCI since SCIs mint at claim). Reference timestamp is strictly created_at. Idempotent; dry_run-capable; master-flag guarded. Closes the ghost-registration gap (10 of 24 prod sessions were unclaimed, the ENC-ISS-441 evidence).",
+      "fields": {
+        "AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED": {
+          "type": "boolean",
+          "definition": "Env var (config.py + lambda_function.py), default true. Master enable flag; when false the handler short-circuits."
+        },
+        "AGENT_SESSIONS_UNCLAIM_TTL_MINUTES": {
+          "type": "integer",
+          "definition": "Env var (config.py), default 10. An allocated session whose created_at is older than this is a ghost registration and is reaped."
+        },
+        "action": {
+          "type": "string",
+          "definition": "EventBridge Input discriminator, fixed 'agent_session_unclaim_sweep'. Optional unclaim_ttl_minutes and dry_run keys override defaults per-invoke."
+        },
+        "summary": {
+          "type": "object",
+          "definition": "Return value (CloudWatch only): {enabled, dry_run, unclaim_ttl_minutes, cutoff, scanned_allocated, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped, revoked_sci_count, revoked_scis}."
         }
       }
     }
@@ -6773,6 +6798,11 @@
       "version": "2026-07-02.12",
       "date": "2026-07-02",
       "summary": "ENC-TSK-J92 (ENC-ISS-441 Ph2, ENC-FTR-122): Session Claim ID (SCI) primitive shipped DARK - agent.claim mints SCI-{uuid4_hex} into the checkout-tokens table (token_type=SCI, 24h TTL, env-suffixed CHECKOUT_TOKENS_TABLE) and returns it in the claim envelope; agent.retire revokes (revoked/revoked_at/revocation_reason); session item stamped with sci_token_id. New entity coordination.session_claim_id. IAM SciTokenAccess grant + CHECKOUT_TOKENS_TABLE env on CoordinationApiFunction (02-compute.yaml v4). No enforcement until ENC-TSK-J93. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-07-02.13",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-J94 (ENC-ISS-441 Ph4, ENC-FTR-122): retirement sweeps - new coordination.agent_session_unclaim_sweep entity (rate(10 minutes) EventBridge rule, allocated-only, created_at reference, SCI revocation unclaim_ttl_exceeded); idle sweep default threshold tightened 86400->7200 with last_activity_at-preferred reference and SCI revocation idle_ttl_exceeded (revoked_scis/revoked_sci_count in both sweep summaries). Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }
