@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.27",
-  "updated_at": "2026-07-02T13:15:00Z",
-  "last_change_summary": "ENC-TSK-K20 (PWA 2.0 / B67 AC-10): AppSync-Events FeedPublisher — new devops-appsync-feed-publisher Lambda (gamma arm64) consuming devops-project-tracker DynamoDB Streams (NEW_AND_OLD_IMAGES) and fanning out lightweight real-time event payloads to AppSync Events on /feed/updates, /records/{recordId}, /projects/{projectId}. New CFN 06-appsync-events.yaml (AppSync::Api EVENT + ChannelNamespaces + ApiKey + EventSourceMapping BatchSize=1/window=0/LATEST/ReportBatchItemFailures). New entities appsync_feed_publisher.lambda and appsync_feed.event (UUID v7 eventId, monotonic cursor, server-pre-rendered summary; median payload <= 500 bytes per AC-23). Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "version": "2026-07-02.28",
+  "updated_at": "2026-07-02T13:50:00Z",
+  "last_change_summary": "ENC-TSK-K43 (B66 Ph5): Fiedler lambda2 GraphHealth CloudWatch metric (gamma re-delivery of v3 ENC-TSK-C10) via the existing FTR-088 graph_laplacian CSR/Fiedler path (ISS-465-compliant, no GDS projection) + F_governance percentile normalization (DOC-A3D0CDF91CE9 Q3.1) in the Scoring Service. New entities graph_query_api.publish_graph_health and scoring_service.f_governance.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6267,6 +6267,49 @@
         }
       }
     },
+    "graph_query_api.publish_graph_health": {
+      "description": "ENC-TSK-K43 (B66 Ph5): out-of-band Fiedler lambda2 (algebraic connectivity) GraphHealth CloudWatch metric publisher, dispatched via action='publish_graph_health' (EventBridge scheduled rule Input or direct invoke). Computes lambda2 exclusively via the existing FTR-088 graph_laplacian CSR/Fiedler path (scipy eigsh/dense eigh) — never Neo4j GDS/AGA, honoring the ISS-465 GDS cost-kill invariant. Publishes to the Enceladus/GraphHealth CloudWatch namespace, metric FiedlerValue, dimension ProjectId.",
+      "fields": {
+        "project_id": {
+          "type": "string"
+        },
+        "project_ids": {
+          "type": "array"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "k": {
+          "type": "integer"
+        },
+        "lambda2": {
+          "type": "number"
+        },
+        "lambda0": {
+          "type": "number"
+        },
+        "published": {
+          "type": "integer"
+        }
+      }
+    },
+    "scoring_service.f_governance": {
+      "description": "ENC-TSK-K43 (B66 Ph5): F_governance percentile normalization integrated into the Scoring Service's _compute_resonance_score (math gate DOC-A3D0CDF91CE9 Q3.1). F_governance = percentile_rank(F_structural) + percentile_rank(F_temporal) + percentile_rank(F_evidential), bounded [0,3], 0 = perfect governance health. governance_compliance_weight maps it to a [0,1] compliance weight applied as an optional multiplicative term on resonance_score (backward compatible: omitted -> pre-K43 score unchanged). Optional message-level f_governance field on {lesson.scoring.requested} wires through score_lesson end-to-end.",
+      "fields": {
+        "f_governance": {
+          "type": "number"
+        },
+        "f_structural": {
+          "type": "number"
+        },
+        "f_temporal": {
+          "type": "number"
+        },
+        "f_evidential": {
+          "type": "number"
+        }
+      }
+    },
     "monitoring.convergence_telemetry": {
       "description": "ENC-TSK-I82 (FTR-086 Ph1): Convergence Surface DDB counter table + SQS FIFO + Streams fan-out Lambda.",
       "fields": {
@@ -7150,6 +7193,11 @@
       "date": "2026-07-02",
       "summary": "ENC-TSK-K20 (PWA 2.0 / B67 AC-10): AppSync-Events FeedPublisher — new devops-appsync-feed-publisher Lambda (gamma arm64) consuming devops-project-tracker DynamoDB Streams (NEW_AND_OLD_IMAGES) and fanning out lightweight real-time event payloads to AppSync Events on /feed/updates, /records/{recordId}, /projects/{projectId}. New CFN 06-appsync-events.yaml (AppSync::Api EVENT + ChannelNamespaces + ApiKey + EventSourceMapping BatchSize=1/window=0/LATEST/ReportBatchItemFailures). New entities appsync_feed_publisher.lambda and appsync_feed.event (UUID v7 eventId, monotonic cursor, server-pre-rendered summary; median payload <= 500 bytes per AC-23). Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
       "version": "2026-07-02.27"
+    },
+    {
+      "version": "2026-07-02.28",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K43 (B66 Ph5): Fiedler lambda2 GraphHealth CloudWatch metric (gamma re-delivery of v3 ENC-TSK-C10) via the existing FTR-088 graph_laplacian CSR/Fiedler path (ISS-465-compliant, no GDS projection), new action='publish_graph_health' dispatch entry in graph_query_api publishing to Enceladus/GraphHealth. F_governance percentile normalization (DOC-A3D0CDF91CE9 Q3.1) integrated into scoring_service _compute_resonance_score as an optional governance-compliance weighting term. New entities graph_query_api.publish_graph_health and scoring_service.f_governance. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }
