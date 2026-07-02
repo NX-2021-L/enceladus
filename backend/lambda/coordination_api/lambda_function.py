@@ -75,6 +75,15 @@ except ModuleNotFoundError:  # pragma: no cover - packaging fallback
     _intent_drift = importlib.util.module_from_spec(_ID_SPEC)  # type: ignore[arg-type]
     _ID_SPEC.loader.exec_module(_intent_drift)  # type: ignore[union-attr]
 
+# ENC-FTR-084 Ph2 / ENC-TSK-K02: intent-classifier training loop (scheduled).
+try:
+    import intent_training as _intent_training
+except ModuleNotFoundError:  # pragma: no cover - packaging fallback
+    _IT_PATH = pathlib.Path(__file__).with_name("intent_training.py")
+    _IT_SPEC = importlib.util.spec_from_file_location("intent_training", _IT_PATH)
+    _intent_training = importlib.util.module_from_spec(_IT_SPEC)  # type: ignore[arg-type]
+    _IT_SPEC.loader.exec_module(_intent_training)  # type: ignore[union-attr]
+
 # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-credential lifecycle allocator. Import with the
 # same packaging fallback used above so a flat-zip deploy resolves it by file path.
 try:
@@ -15992,6 +16001,106 @@ def _handle_agent_session_unclaim_sweep(event: Dict[str, Any]) -> Dict[str, Any]
     return summary
 
 
+def _intent_training_s3_get(key: str) -> str:
+    import boto3
+
+    bucket = _intent_training.INTENT_TRAINING_BUCKET
+    if not bucket:
+        raise RuntimeError("INTENT_TRAINING_BUCKET not configured")
+    resp = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+    return resp["Body"].read().decode("utf-8")
+
+
+def _intent_training_s3_put(key: str, body: str) -> None:
+    import boto3
+
+    bucket = _intent_training.INTENT_TRAINING_BUCKET
+    if not bucket:
+        raise RuntimeError("INTENT_TRAINING_BUCKET not configured")
+    boto3.client("s3").put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body.encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _build_training_rank_fn(labels: List[Dict[str, Any]]):
+    """Build a rank_fn that NN-searches a corpus derived from labeled embeddings."""
+    corpus: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in labels:
+        emb = row.get("embedding")
+        if not isinstance(emb, list):
+            continue
+        for rid in row.get("label_node_ids") or []:
+            rid_s = str(rid).strip()
+            if rid_s and rid_s not in seen:
+                corpus.append({"record_id": rid_s, "embedding": emb})
+                seen.add(rid_s)
+
+    def _rank(row: Dict[str, Any]) -> List[str]:
+        emb = row.get("embedding")
+        if not isinstance(emb, list) or not corpus:
+            return list(row.get("label_node_ids") or [])[:1]
+        neighbors = _intent_classifier.rank_neighbors(emb, corpus, top_k=5)
+        boosted = _intent_training.apply_record_boosts_to_neighbors(
+            [{"record_id": n["record_id"], "score": n["score"]} for n in neighbors],
+            row.get("record_boosts") or {},
+        )
+        return [str(n.get("record_id") or "") for n in boosted if n.get("record_id")]
+
+    return _rank
+
+
+def _hydrate_label_embeddings(labels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for row in labels:
+        item = dict(row)
+        if not isinstance(item.get("embedding"), list) and item.get("first_turn_text"):
+            item["embedding"] = _intent_classifier.embed_query_text(item["first_turn_text"])
+        out.append(item)
+    return out
+
+
+def _handle_intent_classifier_training(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Scheduled intent-classifier training (ENC-TSK-K02 / FTR-084 Ph2)."""
+    dry_run = bool(event.get("dry_run", False))
+    if _intent_training.is_training_hard_disabled():
+        logger.info("[INFO] intent training skipped — TRAINING_HARD_DISABLED")
+        return {
+            "enabled": False,
+            "reason": "TRAINING_HARD_DISABLED",
+            "cost_preflight_monthly_usd": _intent_training.COST_PREFLIGHT_MONTHLY_USD,
+        }
+    try:
+        labels_raw = _intent_training_s3_get(
+            _intent_training._prefix_key(_intent_training.LABELS_SUFFIX)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("intent training: labels unavailable: %s", exc)
+        return {"enabled": True, "trained": False, "reason": "labels_unavailable"}
+    labels = _hydrate_label_embeddings(_intent_training.parse_labels_jsonl(labels_raw))
+    rank_fn = _build_training_rank_fn(labels)
+    return _intent_training.run_training_cycle(
+        get_object=_intent_training_s3_get,
+        put_object=_intent_training_s3_put,
+        rank_fn=rank_fn,
+        dry_run=dry_run,
+        labels=labels,
+    )
+
+
+def _handle_intent_classifier_training_rollback(event: Dict[str, Any]) -> Dict[str, Any]:
+    """One-call rollback for versioned intent training weights (ENC-TSK-K02)."""
+    version_id = str(event.get("version_id") or "").strip() or None
+    return _intent_training.run_rollback(
+        get_object=_intent_training_s3_get,
+        put_object=_intent_training_s3_put,
+        requested_version_id=version_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
@@ -16025,6 +16134,15 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if event.get("action") == "agent_session_unclaim_sweep":
         logger.info("[INFO] Scheduled agent-session unclaim-sweep invoked")
         return _handle_agent_session_unclaim_sweep(event)
+
+    # --- ENC-TSK-K02 / FTR-084 Ph2: weekly intent-classifier training ---
+    if event.get("action") == "intent_classifier_training":
+        logger.info("[INFO] Scheduled intent-classifier training invoked")
+        return _handle_intent_classifier_training(event)
+
+    if event.get("action") == "intent_classifier_training_rollback":
+        logger.info("[INFO] Intent-classifier training rollback invoked")
+        return _handle_intent_classifier_training_rollback(event)
 
     # --- v0.3: SQS callback ingestion ---
     # SQS events have 'Records' with 'eventSource' = 'aws:sqs'.

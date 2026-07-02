@@ -234,6 +234,12 @@ Resources:
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
+          # ENC-TSK-K02 / FTR-084 Ph2: intent-classifier training loop (weekly EventBridge).
+          # TRAINING_HARD_DISABLED=1 is the ISS-465-style kill switch — installed before
+          # the first scheduled run; io clears to "0" to enable mutations.
+          TRAINING_HARD_DISABLED: "1"
+          INTENT_TRAINING_BUCKET: !Ref S3Bucket
+          INTENT_TRAINING_PREFIX: !Sub "${S3EnvPrefix}intent-training"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1978,6 +1984,50 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt AgentSessionUnclaimSweepSchedule.Arn
 
+  # ENC-TSK-K02 / FTR-084 Ph2: weekly intent-classifier training (per-invocation only).
+  IntentClassifierTrainingSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-intent-classifier-training${EnvironmentSuffix}"
+      Description: "ENC-TSK-K02: weekly intent-classifier weight mutation (TRAINING_HARD_DISABLED until io clears)"
+      ScheduleExpression: "cron(0 4 ? * SUN *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CoordinationApiFunction.Arn
+          Id: intent-classifier-training
+          Input: '{"action": "intent_classifier_training"}'
+
+  IntentClassifierTrainingPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref CoordinationApiFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IntentClassifierTrainingSchedule.Arn
+
+  IntentTrainingCostHeadroomAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-intent-training-invocations${EnvironmentSuffix}"
+      AlarmDescription: >-
+        ENC-TSK-K02 cost-preflight guard: weekly cadence expects <=5 training
+        invocations/month (~$0.04 projected). Breach indicates runaway schedule.
+      Namespace: AWS/Events
+      MetricName: Invocations
+      Dimensions:
+        - Name: RuleName
+          Value: !Sub "devops-intent-classifier-training${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 2592000
+      EvaluationPeriods: 1
+      Threshold: 6
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
   DeployCodeBuildFinalizeRule:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
@@ -2426,6 +2476,13 @@ Resources:
                 Resource:
                   - "arn:aws:s3:::jreese-net/governance/live/*"
                   - "arn:aws:s3:::jreese-net/governance/history/*"
+              # ENC-TSK-K02 / FTR-084 Ph2: versioned intent-training weight snapshots + labels.
+              - Sid: IntentTrainingS3ReadWrite
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}intent-training/*"
               - Sid: S3HeadBucket
                 Effect: Allow
                 Action:
