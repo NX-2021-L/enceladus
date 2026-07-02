@@ -38,7 +38,7 @@ import time
 import urllib.request
 import urllib.error
 from typing import Any, Dict, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -66,6 +66,23 @@ LAMBDA_REGION = os.environ.get("AWS_REGION", "us-west-2")
 CORS_ORIGIN = "https://jreese.net"
 ID_TOKEN_MAX_AGE = 3600       # 1 hour
 SESSION_COOKIE_MAX_AGE = 3600  # 1 hour
+REFRESH_TOKEN_MAX_AGE = 2592000  # 30 days
+
+# ENC-TSK-K95 — gamma cockpit OAuth2 authorization-code callback (GET
+# /api/v1/auth/callback). Mirrors the prod auth_edge Lambda@Edge exchange, but
+# same-origin behind the gamma API so the v4 cockpit (frontend/ui-v2) can log
+# in without a Lambda@Edge. Public app client (no secret). The redirect_uri is
+# a FIXED registered Cognito callback (the durable vanity URL); the post-login
+# 302 uses a relative Location so the browser returns to whatever host it is
+# on. Prod is untouched (it keeps its own edge + jreese.net callback).
+COGNITO_HOSTED_UI_DOMAIN = os.environ.get(
+    "COGNITO_HOSTED_UI_DOMAIN",
+    "https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com",
+)
+WEBUI_OAUTH_REDIRECT_URI = os.environ.get(
+    "WEBUI_OAUTH_REDIRECT_URI",
+    "https://enceladus-gamma.jreese.net/api/v1/auth/callback",
+)
 GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID", "")
 GITHUB_INSTALLATION_ID = os.environ.get("GITHUB_INSTALLATION_ID", "")
 GITHUB_PRIVATE_KEY_SECRET = os.environ.get("GITHUB_PRIVATE_KEY_SECRET", "devops/github-app/private-key")
@@ -283,6 +300,120 @@ def _handle_github_token(event: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# OAuth2 authorization-code callback (ENC-TSK-K95)
+# ---------------------------------------------------------------------------
+
+import base64  # noqa: E402  (grouped with the callback feature)
+
+
+def _b64url_decode_path(state: str) -> str:
+    """Decode the base64url `state` param (the pre-login path) set by the SPA.
+
+    Falls back to '/' on any decode error or a non-local/callback-looping value
+    so a crafted state can never open-redirect off-site.
+    """
+    if not state:
+        return "/"
+    try:
+        pad = "=" * ((4 - len(state) % 4) % 4)
+        decoded = base64.urlsafe_b64decode(state + pad).decode("utf-8")
+    except Exception:  # noqa: BLE001
+        return "/"
+    # Only same-origin absolute paths are allowed (no scheme/host, no protocol-
+    # relative //host), and never bounce back into the callback.
+    if not decoded.startswith("/") or decoded.startswith("//"):
+        return "/"
+    if decoded.startswith("/api/v1/auth/callback"):
+        return "/"
+    return decoded
+
+
+def _exchange_code_for_tokens(code: str) -> Dict[str, Optional[str]]:
+    """POST the authorization code to Cognito's /oauth2/token endpoint.
+
+    Public client (no secret) — grant_type=authorization_code with
+    client_id + code + the fixed registered redirect_uri. Raises ValueError on
+    any non-200 or missing id_token.
+    """
+    body = urlencode({
+        "grant_type": "authorization_code",
+        "client_id": COGNITO_CLIENT_ID,
+        "code": code,
+        "redirect_uri": WEBUI_OAUTH_REDIRECT_URI,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{COGNITO_HOSTED_UI_DOMAIN}/oauth2/token",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        logger.warning("oauth token exchange failed: %s %s", exc.code, detail)
+        raise ValueError("token_exchange_failed") from exc
+    except urllib.error.URLError as exc:
+        logger.error("oauth token endpoint unreachable: %s", exc)
+        raise ValueError("token_endpoint_unreachable") from exc
+
+    id_token = data.get("id_token")
+    if not id_token:
+        raise ValueError("no_id_token")
+    return {"id_token": id_token, "refresh_token": data.get("refresh_token")}
+
+
+def _handle_oauth_callback(event: Dict) -> Dict:
+    """GET /api/v1/auth/callback — Cognito Hosted-UI redirect lands here.
+
+    Exchanges ?code for tokens, sets the session cookies (host-scoped, matching
+    the prod auth_edge format), and 302-redirects to the ?state path.
+    """
+    params = event.get("queryStringParameters") or {}
+    code = params.get("code")
+    state = params.get("state") or ""
+
+    # Cognito surfaces auth errors as ?error=...; send the user back to sign in.
+    if params.get("error"):
+        logger.info("oauth callback error param: %s", params.get("error"))
+        return {"statusCode": 302, "headers": {"Location": "/", "Cache-Control": "no-store"}, "body": ""}
+    if not code:
+        return _error(400, "Missing authorization code.")
+
+    try:
+        tokens = _exchange_code_for_tokens(code)
+    except ValueError as exc:
+        logger.warning("oauth callback exchange failed: %s", exc)
+        # Bounce to the app root rather than showing a raw error; the SPA will
+        # re-prompt sign-in if still unauthenticated.
+        return {"statusCode": 302, "headers": {"Location": "/", "Cache-Control": "no-store"}, "body": ""}
+
+    target = _b64url_decode_path(state)
+    now_ms = str(int(time.time() * 1000))
+
+    cookies = [
+        f"enceladus_id_token={tokens['id_token']}; "
+        f"Path=/; Secure; HttpOnly; SameSite=None; Max-Age={ID_TOKEN_MAX_AGE}",
+        f"enceladus_session_at={now_ms}; "
+        f"Path=/enceladus; Secure; SameSite=None; Max-Age={SESSION_COOKIE_MAX_AGE}",
+    ]
+    if tokens.get("refresh_token"):
+        cookies.append(
+            f"enceladus_refresh_token={tokens['refresh_token']}; "
+            f"Path=/; Secure; HttpOnly; SameSite=None; Max-Age={REFRESH_TOKEN_MAX_AGE}"
+        )
+
+    logger.info("oauth callback succeeded; redirecting to %s", target)
+    return {
+        "statusCode": 302,
+        "headers": {"Location": target, "Cache-Control": "no-store"},
+        "cookies": cookies,
+        "body": "",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
@@ -307,6 +438,11 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
     if method == "GET" and path.rstrip("/").endswith("/github-token"):
         return _handle_github_token(event)
+
+    # ENC-TSK-K95: Cognito Hosted-UI authorization-code callback for the v4
+    # cockpit (same-origin login, no Lambda@Edge).
+    if method == "GET" and path.rstrip("/").endswith("/auth/callback"):
+        return _handle_oauth_callback(event)
 
     if method != "POST":
         return _error(405, "Method not allowed.")

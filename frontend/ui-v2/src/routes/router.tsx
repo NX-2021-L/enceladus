@@ -7,6 +7,7 @@ import {
 import { AppShell } from '../shell/AppShell'
 import { HomeRoute } from './HomeRoute'
 import { createRecordRoute } from './recordRoute'
+import { RouteError } from '../auth/RouteError'
 import {
   documentQueryOptions,
   featureQueryOptions,
@@ -82,6 +83,9 @@ const routeTree = rootRoute.addChildren([
 export const router = createRouter({
   routeTree,
   defaultPreload: 'intent',
+  // ENC-TSK-K95 — a 401 (SessionExpiredError) from any loader/query renders the
+  // sign-in prompt instead of the generic crash.
+  defaultErrorComponent: RouteError,
 })
 
 declare module '@tanstack/react-router' {
