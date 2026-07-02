@@ -4,13 +4,18 @@ import { RECORD_ROUTE_PATH } from './recordLink'
 import { RecordId } from '../components/RecordId'
 import type { RecordType } from '../types/records'
 
+// ENC-TSK-K70: sample IDs point at records verified PRESENT in the GAMMA
+// tables (devops-project-tracker-gamma / documents-gamma) — the prior IDs
+// existed only in prod, so every card 404ed against the gamma shadow data
+// (io gamma-native data decision, ENC-PLN-066). Re-verify against the gamma
+// list API before changing.
 const ENTRY: Array<{ type: RecordType; label: string; sampleId: string }> = [
-  { type: 'task', label: 'Task', sampleId: 'ENC-TSK-K21' },
-  { type: 'issue', label: 'Issue', sampleId: 'ENC-ISS-137' },
-  { type: 'feature', label: 'Feature', sampleId: 'ENC-FTR-050' },
-  { type: 'plan', label: 'Plan', sampleId: 'ENC-PLN-006' },
-  { type: 'lesson', label: 'Lesson', sampleId: 'ENC-LSN-001' },
-  { type: 'document', label: 'Document', sampleId: 'DOC-E470AC8CE9A8' },
+  { type: 'task', label: 'Task', sampleId: 'ENC-TSK-H68' },
+  { type: 'issue', label: 'Issue', sampleId: 'ENC-ISS-058' },
+  { type: 'feature', label: 'Feature', sampleId: 'ENC-FTR-096' },
+  { type: 'plan', label: 'Plan', sampleId: 'ENC-PLN-051' },
+  { type: 'lesson', label: 'Lesson', sampleId: 'ENC-LSN-057' },
+  { type: 'document', label: 'Document', sampleId: 'DOC-12A69AF1D3BE' },
 ]
 
 export function HomeRoute() {
