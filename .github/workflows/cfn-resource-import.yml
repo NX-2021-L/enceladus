@@ -91,6 +91,8 @@ env:
 jobs:
   import:
     name: "${{ inputs.mode }} -> ${{ inputs.stack_name }}${{ inputs.preview_only && ' (preview)' || '' }}"
+    # ENC-TSK-J64 / ENC-FTR-120: stack imports/recoveries mutate CFN state — gamma-suffixed stacks flow via v4-gamma (ungated); everything else pauses on v3-prod.
+    environment: ${{ contains(inputs.stack_name, '-gamma') && 'v4-gamma' || 'v3-prod' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:

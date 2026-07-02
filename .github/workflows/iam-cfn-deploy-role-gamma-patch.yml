@@ -1,4 +1,4 @@
-name: IAM CFN Deploy Role — Gamma DDB/SNS Patch
+name: IAM CFN Deploy Role — Gamma DDB/SNS/SQS Patch
 
 on:
   workflow_dispatch:
@@ -16,6 +16,8 @@ permissions:
 jobs:
   patch-role:
     name: Patch CFN deploy role with gamma DynamoDB and SNS permissions
+    # ENC-TSK-J64 / ENC-FTR-120: live IAM mutation (shared/global role objects) — pauses on the v3-prod required-reviewer rule.
+    environment: v3-prod
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -28,10 +30,10 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Apply inline policy — gamma DynamoDB + SNS bootstrap
+      - name: Apply inline policy — gamma DynamoDB + SNS + SQS bootstrap
         run: |
           set -euo pipefail
-          cat > /tmp/gamma-ddb-sns-policy.json <<'JSON'
+          cat > /tmp/gamma-ddb-sns-sqs-policy.json <<'JSON'
           {
             "Version": "2012-10-17",
             "Statement": [
@@ -66,9 +68,62 @@ jobs:
                   "sns:ListTagsForResource",
                   "sns:Subscribe",
                   "sns:Unsubscribe",
-                  "sns:GetSubscriptionAttributes"
+                  "sns:GetSubscriptionAttributes",
+                  "sns:ListSubscriptionsByTopic"
                 ],
                 "Resource": "arn:aws:sns:us-west-2:356364570033:enceladus-*-gamma"
+              },
+              {
+                "Sid": "GammaSQSBootstrap",
+                "Effect": "Allow",
+                "Action": [
+                  "sqs:GetQueueAttributes",
+                  "sqs:GetQueueUrl",
+                  "sqs:ListQueueTags",
+                  "sqs:CreateQueue",
+                  "sqs:SetQueueAttributes",
+                  "sqs:TagQueue",
+                  "sqs:UntagQueue"
+                ],
+                "Resource": "arn:aws:sqs:us-west-2:356364570033:devops-*-gamma*"
+              },
+              {
+                "Sid": "S3GovernanceBucketNotification",
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetBucketLocation",
+                  "s3:GetBucketNotification",
+                  "s3:PutBucketNotification",
+                  "s3:GetBucketNotificationConfiguration",
+                  "s3:PutBucketNotificationConfiguration"
+                ],
+                "Resource": "arn:aws:s3:::jreese-net"
+              },
+              {
+                "Sid": "LambdaGovernancePermission",
+                "Effect": "Allow",
+                "Action": [
+                  "lambda:AddPermission",
+                  "lambda:RemovePermission",
+                  "lambda:GetPolicy"
+                ],
+                "Resource": "arn:aws:lambda:us-west-2:356364570033:function:devops-recompute-governance*"
+              },
+              {
+                "Sid": "SNSGovernanceRelayUSWest1",
+                "Effect": "Allow",
+                "Action": [
+                  "sns:CreateTopic",
+                  "sns:GetTopicAttributes",
+                  "sns:SetTopicAttributes",
+                  "sns:DeleteTopic",
+                  "sns:TagResource",
+                  "sns:Subscribe",
+                  "sns:Unsubscribe",
+                  "sns:GetSubscriptionAttributes",
+                  "sns:ListSubscriptionsByTopic"
+                ],
+                "Resource": "arn:aws:sns:us-west-1:356364570033:enceladus-*-gamma"
               }
             ]
           }
@@ -77,7 +132,7 @@ jobs:
           aws iam put-role-policy \
             --role-name "enceladus-cloudformation-deploy-github-role" \
             --policy-name "enceladus-cfn-deploy-gamma-ddb-sns-v1" \
-            --policy-document "file:///tmp/gamma-ddb-sns-policy.json"
+            --policy-document "file:///tmp/gamma-ddb-sns-sqs-policy.json"
 
       - name: Verify inline policy attached
         run: |
