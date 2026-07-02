@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.20",
-  "updated_at": "2026-07-02T10:57:05Z",
-  "last_change_summary": "ENC-TSK-K12 (ENC-ISS-473, ENC-ISS-474): MCP server restores truncated tracker_embeddings_for and tracker_sheaf_cohomology handlers (search actions tracker.embeddings_for / tracker.sheaf_cohomology forwarding to graph_query_api embeddings_for and sheaf_cohomology search_types); coordination_api .build_extras now packages tools/enceladus-mcp-server/telemetry_rank.py so dispatch_plan / coordination paths can import telemetry.rank helpers. New entities mcp_server.tracker_embeddings_for and mcp_server.tracker_sheaf_cohomology. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "version": "2026-07-02.21",
+  "updated_at": "2026-07-02T11:02:00Z",
+  "last_change_summary": "ENC-TSK-J52 (FTR-104 Ph3): promote I99-tuned energy lambda weights (lambda_graph=1.0, lambda_kw=0.1) to live hybrid retrieval defaults + gamma ENERGY_LAMBDA_* env vars; optional include_energy query flag exposes energy_score + energy_breakdown on hybrid nodes.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4931,6 +4931,23 @@
         "telemetry_schema": {
           "type": "string",
           "definition": "enceladus.stigmergic.trace.v1"
+        }
+      }
+    },
+    "graph_query_api.energy_function": {
+      "description": "ENC-FTR-104 Ph3 / ENC-TSK-J52: live hybrid retrieval energy weights and optional response egress. Defaults promoted to I99-tuned lambda_graph=1.0 and lambda_kw=0.1 (was Ph1 0.5/0.25); gamma codified via ENERGY_LAMBDA_GRAPH/ENERGY_LAMBDA_KW on devops-graph-query-api. Hybrid search_type accepts include_energy=true to attach per-node energy_score + energy_breakdown; default off preserves RRF presentation without energy bloat. retrieval_records telemetry unchanged for wave-close consumers.",
+      "fields": {
+        "include_energy": {
+          "type": "boolean",
+          "definition": "Hybrid graphsearch query flag. When true, each returned node includes energy_score and energy_breakdown. Default false."
+        },
+        "lambda_graph": {
+          "type": "number",
+          "definition": "Live default 1.0 (I99 tuned). Resolved via AppConfig energy-function profile, ENERGY_LAMBDA_GRAPH env, then DEFAULT_LAMBDA_GRAPH."
+        },
+        "lambda_kw": {
+          "type": "number",
+          "definition": "Live default 0.1 (I99 tuned). Resolved via AppConfig, ENERGY_LAMBDA_KW env, then DEFAULT_LAMBDA_KW."
         }
       }
     },
