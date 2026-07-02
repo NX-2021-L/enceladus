@@ -86,6 +86,17 @@ export async function fetchTrackerRecord<T>(
 }
 
 /**
+ * Session probe (ENC-TSK-K98 — hard auth gate). Hits an authenticated read
+ * route purely for its auth status so the app can gate on load: a live session
+ * resolves, a 401 throws SessionExpiredError. `/projects` is a lightweight
+ * authed list endpoint; the body is intentionally ignored. Any non-401 failure
+ * still throws (the gate fails closed — no session confirmed, no app).
+ */
+export async function probeSession(init?: FetchInit): Promise<void> {
+  await requestJson<unknown>(`${API_BASE}/projects`, init)
+}
+
+/**
  * Document fetch. Path convention (from frontend/ui/src/api/documents.ts):
  *   `${API_BASE}/documents/{documentId}`.
  * Backend envelopes as `{ document: T }`.
