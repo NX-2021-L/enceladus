@@ -1748,6 +1748,9 @@ Resources:
           CLOUDWATCH_NAMESPACE: Enceladus/GraphHealth
           PROJECT_ID: enceladus
           SECRETS_REGION: !Ref "AWS::Region"
+          # ENC-TSK-K43: cross-Lambda invoke target for the real Fiedler lambda2
+          # (FTR-088 CSR/Fiedler path, ISS-465-compliant).
+          GRAPH_QUERY_API_LAMBDA_NAME: !Sub "devops-graph-query-api${EnvironmentSuffix}"
           # ENC-TSK-I10 (Dedup P6): convergence-probe signal configuration
           # (DOC-DF651F07D5C2 §10). The walk-back model-health loop reads the
           # production auto-merge/walk-back audit counters back from CloudWatch.
@@ -4889,6 +4892,14 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+              # ENC-TSK-K43 (B66 Ph5): cross-Lambda invoke into graph_query_api's
+              # publish_graph_health entrypoint for the real Fiedler lambda2
+              # (see _fetch_real_fiedler_value in lambda_function.py).
+              - Sid: InvokeGraphQueryApi
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
