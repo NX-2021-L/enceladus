@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.30",
-  "updated_at": "2026-07-02T13:00:00Z",
-  "last_change_summary": "ENC-TSK-K41 (B66 Ph5, ENC-PLN-064): Corpus Entropy Engine (CEE) Lambda -- nightly EventBridge (gamma, cron 05:00 UTC) telemetry-only scan for five entropy categories: orphan (no parent_task_id/related_task_ids or wave doc missing plan_anchor_id), stagnation (open tasks with no worklog within STAGNATION_THRESHOLD_DAYS=14), relational (declared related_*_ids with no corresponding graph_query_api adjacency edge), retention (Lesson stability < FSRS_T3_THRESHOLD=0.7, falling back to resonance_score), and compliance/semantic (document compliance_score below COMPLIANCE_SCORE_THRESHOLD=70 AND document_maturity_state=raw). Reads exclusively through the tracker/document/graph_query_api HTTP surface (no direct DynamoDB access, no new edge types -- OGTM). CEE_HARD_DISABLED=1 kill switch ships ON by default; io clears to 0 to enable the first scheduled run. Emits per-category EntropyFindingCount to CloudWatch namespace Enceladus/CEE. Cost-preflight (ISS-465): nightly cadence, 512MB/300s ceiling, well under $1/mo; CorpusEntropyEngineCostHeadroomAlarm guards EventBridge invocation count. New entity corpus_entropy_engine.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "version": "2026-07-02.31",
+  "updated_at": "2026-07-02T14:00:00Z",
+  "last_change_summary": "ENC-TSK-K43 (B66 Ph5) follow-up: FiedlerAlgebraicConnectivity (Enceladus/GraphHealth, ENC-TSK-C10) now carries the REAL Fiedler lambda2 via a cross-Lambda invoke from graph_health_metrics into graph_query_api's action='publish_graph_health' (FTR-088 CSR/Fiedler path, ISS-465-compliant), replacing the pre-K43 GraphEdgeDensity placeholder. New entity graph_health_metrics.real_fiedler_lambda2.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6272,6 +6272,15 @@
         }
       }
     },
+    "graph_health_metrics.real_fiedler_lambda2": {
+      "description": "ENC-TSK-K43 (B66 Ph5): FiedlerAlgebraicConnectivity (Enceladus/GraphHealth, ENC-TSK-C10) now carries the REAL Fiedler lambda2, not the pre-K43 GraphEdgeDensity placeholder. graph_health_metrics._fetch_real_fiedler_value cross-Lambda-invokes devops-graph-query-api's action='publish_graph_health' (the FTR-088 CSR/Fiedler path, ISS-465-compliant -- no GDS) and folds lambda2 into this Lambda's own metrics dict. Falls back to the original GraphEdgeDensity proxy only if the invoke fails, never blocking GraphNodeCount/GraphEdgeDensity/OrphanNodeRatio.",
+      "fields": {
+        "GRAPH_QUERY_API_LAMBDA_NAME": {
+          "type": "string",
+          "definition": "Cross-Lambda invoke target function name (default devops-graph-query-api, env-suffix-aware via CFN Sub)."
+        }
+      }
+    },
     "graph_query_api.graph_laplacian": {
       "description": "ENC-TSK-I81 (FTR-088): graph Laplacian read action via tracker.graph_laplacian. Returns adjacency_csr (base64 float32 CSR), fiedler_vector, eigenvalues[:k], vertex_map. Uses scipy.sparse.linalg.eigsh.",
       "fields": {
@@ -7264,6 +7273,11 @@
       "version": "2026-07-02.30",
       "date": "2026-07-02",
       "summary": "ENC-TSK-K41 (B66 Ph5, ENC-PLN-064): Corpus Entropy Engine (CEE) Lambda -- nightly EventBridge (gamma, cron 05:00 UTC) telemetry-only scan for five entropy categories: orphan (no parent_task_id/related_task_ids or wave doc missing plan_anchor_id), stagnation (open tasks with no worklog within STAGNATION_THRESHOLD_DAYS=14), relational (declared related_*_ids with no corresponding graph_query_api adjacency edge), retention (Lesson stability < FSRS_T3_THRESHOLD=0.7, falling back to resonance_score), and compliance/semantic (document compliance_score below COMPLIANCE_SCORE_THRESHOLD=70 AND document_maturity_state=raw). Reads exclusively through the tracker/document/graph_query_api HTTP surface (no direct DynamoDB access, no new edge types -- OGTM). CEE_HARD_DISABLED=1 kill switch ships ON by default; io clears to 0 to enable the first scheduled run. Emits per-category EntropyFindingCount to CloudWatch namespace Enceladus/CEE. Cost-preflight (ISS-465): nightly cadence, 512MB/300s ceiling, well under $1/mo; CorpusEntropyEngineCostHeadroomAlarm guards EventBridge invocation count. New entity corpus_entropy_engine.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-07-02.31",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K43 (B66 Ph5) follow-up: FiedlerAlgebraicConnectivity (Enceladus/GraphHealth, ENC-TSK-C10) now carries the REAL Fiedler lambda2 via a cross-Lambda invoke from graph_health_metrics into graph_query_api's action='publish_graph_health' (FTR-088 CSR/Fiedler path, ISS-465-compliant), replacing the pre-K43 GraphEdgeDensity placeholder. New entity graph_health_metrics.real_fiedler_lambda2."
     }
   ]
 }
