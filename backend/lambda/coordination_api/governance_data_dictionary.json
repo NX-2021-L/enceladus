@@ -1,6 +1,6 @@
 {
-  "version": "2026-07-02.06",
-  "updated_at": "2026-07-02T08:49:00Z",
+  "version": "2026-07-02.07",
+  "updated_at": "2026-07-02T09:05:00Z",
   "last_change_summary": "ENC-TSK-J03 (ENC-FTR-108 Ph3): graph_query_api.adjacency first-page enrichment adds nullable flow_weight_entropy + flow_weight_edge_count (Shannon entropy over live Neo4j flow_weight distribution for comp-percolation-monitor nightly CloudWatch publish). GDS_PPR_WEIGHT_PROPERTY env (default flow_weight) documents PPR read-path weight selection.",
   "owners": [
     "enceladus-platform"
@@ -6546,7 +6546,7 @@
         },
         "escalation.watch": {
           "type": "coordination_action",
-          "definition": "ENC-TSK-J71: coordination(action=escalation.watch, arguments={session_id, since?, project_id?}) -> GET /api/v1/coordination/escalations/watch. Pass the returned next_cursor back as since. Registered behind ENABLE_ESCALATION_PRIMITIVE."
+          "definition": "ENC-TSK-J71: coordination(action=escalation.watch, arguments={session_id, since?, project_id?}) -> GET /api/v1/coordination/escalations/watch. Pass the returned next_cursor back as since. Registered behind ENABLE_ESCALATION_PRIMITIVE. ENC-TSK-J89 (2026-07-02.07): MCP handler fixed to call the coordination API with a base-relative path (/escalations/watch); the prior absolute path double-prefixed COORDINATION_API_BASE and 404d on gamma and prod."
         }
       }
     },
