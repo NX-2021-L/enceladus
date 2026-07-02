@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.32",
-  "updated_at": "2026-07-02T14:44:00Z",
-  "last_change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda (enceladus-corpus-entropy-gdmp-remediation) added. Consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (missing fence language identifier, missing metadata field label) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent involvement. Dry-run default-on plus a 3-run io-approval ramp (FTR-106 AC-4 pattern reuse) gate mutation mode; CEE_GDMP_HARD_DISABLED kill switch ships ON by default. New entity corpus_entropy_gdmp_remediation.lambda.",
+  "version": "2026-07-02.34",
+  "updated_at": "2026-07-02T15:45:00Z",
+  "last_change_summary": "ENC-TSK-K34 (ENC-ISS-477 cutover, DOC-F234A4E11DFD Option E): the DynamoDB governance-policies mirror of this dictionary is retired from the read path. coordination_api._load_governance_dictionary now serves this bundled file exclusively -- no DDB scan, no fallback branch. ENC-TSK-K31 found the DDB mirror had never once served as a live, independently-authored hot-patch target (every write only ever caught DynamoDB up to a prior git/S3 change), and it had been unwritable since 2026-06-29 (509KB item vs DynamoDB's 400KB cap). document_api's dictionary-specific DDB propagation is removed alongside it. This file (repo -> Lambda bundle -> deploy) is now the sole and always-authoritative source; check_governance_dictionary_sync.py remains the enforcement that this file stays current with schema-affecting code changes. No entity schema changed.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7148,6 +7148,29 @@
           "definition": "A remediated document only advances document_maturity_state to compliant once its post-PATCH compliance_score is at or above this value AND zero compliance_warnings remain. Matches CEE's (K41) COMPLIANCE_SCORE_THRESHOLD."
         }
       }
+    },
+    "monitoring.v4_architecture_dashboard": {
+      "description": "ENC-TSK-K46 / B66 Ph5 (ENC-PLN-064, AC-2/AC-6/AC-7): EnceladusV4Dashboard (AWS::CloudWatch::Dashboard, DashboardName enceladus-v4-architecture${EnvironmentSuffix}) in infrastructure/cloudformation/05-monitoring.yaml — the single-pane operational view of the v4/gamma architecture. 13 widgets (10 metric + 3 text): Lambda error rates + p99 duration (AWS/Lambda Errors/Duration across enceladus-prod-health-monitor, devops-graph-query-api, enceladus-corpus-entropy-engine, enceladus-arc-walk-metrics, devops-coordination-api, devops-tracker-mutation-api); MCP cold start / DynamoDB throttle / graph_sync lag (Enceladus/Prod MCPColdStart / DynamoDBThrottle / GraphSyncLag, ENC-TSK-K44); Fiedler λ2 algebraic connectivity (Enceladus/GraphHealth FiedlerValue, dimension ProjectId=enceladus, ENC-TSK-K43); CEE per-category entropy counts (Enceladus/CEE EntropyFindingCount dimensioned by Category, ENC-TSK-K41); and arc-walk telemetry (Enceladus/ArcWalk ArcWalkAutoAdvances by gate_class, OptOutLatchEvents / OptOutClearEvents / OptOutLatchedRecords, ConvergenceBacklog / ConvergenceGatesShort, ENC-TSK-H86 / ENC-FTR-111). Includes one honestly-documented embedding-coverage-% gap text panel: no CloudWatch emission mechanism exists yet (graph_query_api's embedding_coverage_sample is a per-request API payload, and titan_embedding_backfill.count_embedding_coverage() does not PutMetricData) — a follow-up task must wire a coverage metric before that panel can show data. All namespace/metric names bind to the merged Wave-A Lambda sources (K41/K43/K44/H86), not placeholders. DEPLOY STATUS: authored and merged to v4/main (PR #791) but NOT yet live — the gamma enceladus-monitoring stack deploy rolled back (UPDATE_ROLLBACK_COMPLETE) because enceladus-cloudformation-deploy-github-role lacks cloudwatch:PutDashboard; a follow-up IAM-grant task is tracked before this resource can deploy. Gamma-only (PLN-006 invariant; v3-prod frozen).",
+      "owner": "devops-monitoring",
+      "source": "ENC-TSK-K46 / ENC-TSK-B66 (ENC-FTR-111 / ENC-TSK-H86)",
+      "fields": {
+        "DashboardName": {
+          "type": "string",
+          "definition": "CloudWatch dashboard name.",
+          "usage_guidance": "Fixed value: enceladus-v4-architecture${EnvironmentSuffix} (env-suffix-aware via CFN Sub)."
+        },
+        "widget_count": {
+          "type": "integer",
+          "definition": "Total dashboard widgets: 10 metric + 3 text = 13."
+        },
+        "bound_namespaces": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "CloudWatch namespaces surfaced: AWS/Lambda, Enceladus/Prod (K44), Enceladus/GraphHealth (K43), Enceladus/CEE (K41), Enceladus/ArcWalk (H86)."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda -- nightly EventBridge (gamma, cron 06:00 UTC, after K41's 05:00 CEE scan) consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (fence_missing_language, metadata_field_missing) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent session involvement. DATA-SAFETY: only the deterministic whitelist is auto-remediated; ambiguous/content-changing warnings are left for agent review; every auto-patch is logged with before/after compliance_score. Dry-run default-on (GDMP_DRY_RUN=1) plus a 3-run io-approval ramp (GDMP_IO_APPROVAL_RUNS=3, GDMP_MUTATION_ENABLED=0) reuse the FTR-106 / ENC-TSK-K03 unlearning Lambda's S3 run-counter pattern verbatim. CEE_GDMP_HARD_DISABLED=1 kill switch ships ON by default. Idempotent: is_already_compliant guards against re-patching already-compliant documents. New entity corpus_entropy_gdmp_remediation.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
@@ -7316,6 +7339,16 @@
       "version": "2026-07-02.31",
       "date": "2026-07-02",
       "summary": "ENC-TSK-K43 (B66 Ph5) follow-up: FiedlerAlgebraicConnectivity (Enceladus/GraphHealth, ENC-TSK-C10) now carries the REAL Fiedler lambda2 via a cross-Lambda invoke from graph_health_metrics into graph_query_api's action='publish_graph_health' (FTR-088 CSR/Fiedler path, ISS-465-compliant), replacing the pre-K43 GraphEdgeDensity placeholder. New entity graph_health_metrics.real_fiedler_lambda2."
+    },
+    {
+      "version": "2026-07-02.33",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K46 (B66 Ph5): governance-dictionary bump for the B66 Phase-5 CloudWatch dashboard (GOVERNANCE_SYNC_REQUIRED handoff DOC-83017CDCBD5A / ENC-TSK-K47 AC-2). Adds entity monitoring.v4_architecture_dashboard describing EnceladusV4Dashboard (05-monitoring.yaml, 13 widgets). K41/K42/K43(x2)/K44 Phase-5 entities were already landed by their own build-task PRs; K46 dashboard was the sole remaining Phase-5 entity."
+    },
+    {
+      "version": "2026-07-02.34",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K34 (ENC-ISS-477 cutover, DOC-F234A4E11DFD Option E): the DynamoDB governance-policies mirror of this dictionary is retired from the read path. coordination_api._load_governance_dictionary now serves this bundled file exclusively -- no DDB scan, no fallback branch. ENC-TSK-K31 found the DDB mirror had never once served as a live, independently-authored hot-patch target (every write only ever caught DynamoDB up to a prior git/S3 change), and it had been unwritable since 2026-06-29 (509KB item vs DynamoDB's 400KB cap). document_api's dictionary-specific DDB propagation is removed alongside it. This file (repo -> Lambda bundle -> deploy) is now the sole and always-authoritative source; check_governance_dictionary_sync.py remains the enforcement that this file stays current with schema-affecting code changes. No entity schema changed."
     }
   ]
 }

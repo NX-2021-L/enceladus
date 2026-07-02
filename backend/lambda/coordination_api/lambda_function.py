@@ -368,10 +368,6 @@ DEBOUNCE_WINDOW_SECONDS = int(os.environ.get("DEBOUNCE_WINDOW_SECONDS", "180")) 
 DISPATCH_LOCK_BUFFER_SECONDS = int(os.environ.get("DISPATCH_LOCK_BUFFER_SECONDS", "60"))
 DEAD_LETTER_TIMEOUT_MULTIPLIER = int(os.environ.get("DEAD_LETTER_TIMEOUT_MULTIPLIER", "2"))
 DEAD_LETTER_SNS_TOPIC_ARN = os.environ.get("DEAD_LETTER_SNS_TOPIC_ARN", "")
-GOVERNANCE_DICTIONARY_POLICY_ID = os.environ.get(
-    "GOVERNANCE_DICTIONARY_POLICY_ID",
-    "governance_data_dictionary",
-)
 
 COORDINATION_GSI_PROJECT = os.environ.get("COORDINATION_GSI_PROJECT", "project-updated-index")
 COORDINATION_GSI_IDEMPOTENCY = os.environ.get("COORDINATION_GSI_IDEMPOTENCY", "idempotency-key-index")
@@ -14048,93 +14044,24 @@ def _load_governance_dictionary_fallback() -> Dict[str, Any]:
     return payload
 
 
-def _extract_governance_dictionary(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if not isinstance(item, dict):
-        return None
-
-    for key in ("dictionary", "policy", "payload"):
-        value = item.get(key)
-        if isinstance(value, dict) and value:
-            return value
-
-    for key in ("dictionary_json", "policy_json", "payload_json", "content"):
-        raw = item.get(key)
-        if not isinstance(raw, str) or not raw.strip():
-            continue
-        try:
-            decoded = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(decoded, dict):
-            return decoded
-    return None
-
-
 def _load_governance_dictionary() -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    ddb = _get_ddb()
-    try:
-        resp = ddb.scan(
-            TableName=GOVERNANCE_POLICIES_TABLE,
-            FilterExpression="policy_id = :pid",
-            ExpressionAttributeValues={":pid": _serialize(GOVERNANCE_DICTIONARY_POLICY_ID)},
-        )
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "Unknown")
-        logger.warning(
-            "Unable to read governance dictionary from %s (%s); using fallback file",
-            GOVERNANCE_POLICIES_TABLE,
-            code,
-        )
-        return _load_governance_dictionary_fallback(), {
-            "source": "fallback_file",
-            "table": GOVERNANCE_POLICIES_TABLE,
-            "policy_id": GOVERNANCE_DICTIONARY_POLICY_ID,
-            "reason": code,
-        }
-    except Exception as exc:
-        logger.warning(
-            "Unable to read governance dictionary from %s (%s); using fallback file",
-            GOVERNANCE_POLICIES_TABLE,
-            exc,
-        )
-        return _load_governance_dictionary_fallback(), {
-            "source": "fallback_file",
-            "table": GOVERNANCE_POLICIES_TABLE,
-            "policy_id": GOVERNANCE_DICTIONARY_POLICY_ID,
-            "reason": str(exc),
-        }
+    """Load the governance dictionary from the bundled repo file.
 
-    raw_items = resp.get("Items", [])
-    items = [_deserialize(raw) for raw in raw_items]
-    if not items:
-        return _load_governance_dictionary_fallback(), {
-            "source": "fallback_file",
-            "table": GOVERNANCE_POLICIES_TABLE,
-            "policy_id": GOVERNANCE_DICTIONARY_POLICY_ID,
-            "reason": "not_found",
-        }
-
-    def _sort_key(value: Dict[str, Any]) -> str:
-        return str(value.get("updated_at") or value.get("created_at") or "")
-
-    items.sort(key=_sort_key, reverse=True)
-    for item in items:
-        dictionary = _extract_governance_dictionary(item)
-        if not dictionary:
-            continue
-        return dictionary, {
-            "source": "dynamodb",
-            "table": GOVERNANCE_POLICIES_TABLE,
-            "policy_id": str(item.get("policy_id") or GOVERNANCE_DICTIONARY_POLICY_ID),
-            "updated_at": str(item.get("updated_at") or ""),
-            "version": str(item.get("version") or ""),
-        }
-
-    return _load_governance_dictionary_fallback(), {
-        "source": "fallback_file",
-        "table": GOVERNANCE_POLICIES_TABLE,
-        "policy_id": GOVERNANCE_DICTIONARY_POLICY_ID,
-        "reason": "invalid_policy_payload",
+    ENC-TSK-K34 (ENC-ISS-477 resolution, DOC-F234A4E11DFD Option E): the
+    dictionary is a deploy-coupled contract artifact, not a live
+    governance-intent surface. ENC-TSK-K31 found the DynamoDB mirror had
+    never once been used as a live, independently-authored hot-patch target
+    -- every write only ever caught DynamoDB up to a prior git/S3 change --
+    and it eventually outgrew DynamoDB's 400KB item cap entirely. The DDB
+    scan branch is retired; the bundled file is now the sole and always-
+    authoritative source. check_governance_dictionary_sync.py remains the
+    deploy-coupling enforcement (repo -> bundle -> deploy).
+    """
+    dictionary = _load_governance_dictionary_fallback()
+    return dictionary, {
+        "source": "bundled",
+        "version": str(dictionary.get("version") or ""),
+        "updated_at": str(dictionary.get("updated_at") or ""),
     }
 
 
