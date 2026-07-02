@@ -3550,5 +3550,191 @@ class TriggerGovernanceSyncPushTests(unittest.TestCase):
         coordination_lambda._lambda_client = None
 
 
+class ContextManagementG17Tests(unittest.TestCase):
+    """ENC-TSK-G17 (G60/G61/G62): context-management beta wiring.
+
+    These are structural/config tests. G62's AC asks for a 30-turn live governed
+    session showing >=50% input-token reduction by turn 30 — that requires a real
+    Anthropic API session and cannot be honestly asserted in this sandbox. The
+    tests below verify the WIRING is correct (the config the Lambda emits would
+    trigger clearing above the 100k threshold with a keep-5 policy), not a live
+    measured reduction.
+    """
+
+    def test_append_anthropic_beta_appends_not_overwrites(self):
+        # Simulate deferred-tool-loading having already set the header first.
+        headers = {"anthropic-beta": "advanced-tool-use-2024,mcp-client-2025-11-20"}
+        coordination_lambda._append_anthropic_beta(
+            headers, coordination_lambda.CLAUDE_CONTEXT_MANAGEMENT_BETA
+        )
+        values = headers["anthropic-beta"].split(",")
+        # Both the pre-existing mcp-client-style beta AND context-management present.
+        self.assertIn("mcp-client-2025-11-20", values)
+        self.assertIn("advanced-tool-use-2024", values)
+        self.assertIn("context-management-2025-06-27", values)
+        # Comma-joined, order preserved (existing first), no clobber.
+        self.assertEqual(
+            headers["anthropic-beta"],
+            "advanced-tool-use-2024,mcp-client-2025-11-20,context-management-2025-06-27",
+        )
+
+    def test_append_anthropic_beta_deduplicates(self):
+        headers = {"anthropic-beta": "context-management-2025-06-27"}
+        coordination_lambda._append_anthropic_beta(
+            headers, coordination_lambda.CLAUDE_CONTEXT_MANAGEMENT_BETA
+        )
+        self.assertEqual(headers["anthropic-beta"], "context-management-2025-06-27")
+
+    def test_append_anthropic_beta_from_empty(self):
+        headers = {}
+        coordination_lambda._append_anthropic_beta(
+            headers, coordination_lambda.CLAUDE_CONTEXT_MANAGEMENT_BETA
+        )
+        self.assertEqual(headers["anthropic-beta"], "context-management-2025-06-27")
+
+    def test_context_management_config_shape(self):
+        cfg = coordination_lambda._build_claude_context_management_config()
+        edits = cfg["edits"]
+        self.assertEqual(len(edits), 1)
+        edit = edits[0]
+        self.assertEqual(edit["type"], "clear_tool_uses_20250919")
+        self.assertEqual(edit["trigger"], {"type": "input_tokens", "value": 100_000})
+        self.assertEqual(edit["keep"], {"type": "tool_uses", "value": 5})
+        # Memory tool is excluded from eviction (G61).
+        self.assertEqual(edit["exclude_tools"], ["memory"])
+
+    def test_attach_registers_memory_tool_and_composes_with_deferred(self):
+        # Simulate deferred tool loading having run first: a toolset + beta header.
+        request_body = {"tools": [{"type": "tool_search_tool_bm25_20251119"}]}
+        headers = {"anthropic-beta": "mcp-client-2025-11-20"}
+        attached = coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            request_body,
+            headers,
+            "claude-sonnet-4-6",
+            None,
+        )
+        self.assertTrue(attached)
+        # context_management block present with clear_tool_uses.
+        self.assertIn("context_management", request_body)
+        self.assertEqual(
+            request_body["context_management"]["edits"][0]["type"],
+            "clear_tool_uses_20250919",
+        )
+        # Memory tool appended (not clobbering the deferred toolset).
+        tool_types = [t.get("type") for t in request_body["tools"]]
+        self.assertIn("tool_search_tool_bm25_20251119", tool_types)
+        self.assertIn("memory_20250818", tool_types)
+        # Memory tool excluded from eviction.
+        self.assertIn(
+            "memory", request_body["context_management"]["edits"][0]["exclude_tools"]
+        )
+        # Beta header appended, not overwritten.
+        betas = headers["anthropic-beta"].split(",")
+        self.assertIn("mcp-client-2025-11-20", betas)
+        self.assertIn("context-management-2025-06-27", betas)
+
+    def test_attach_disabled_is_noop(self):
+        request_body = {}
+        headers = {}
+        attached = coordination_lambda._maybe_attach_context_management(
+            {}, request_body, headers, "claude-sonnet-4-6", None
+        )
+        self.assertFalse(attached)
+        self.assertNotIn("context_management", request_body)
+        self.assertNotIn("tools", request_body)
+        self.assertEqual(headers, {})
+
+    def test_attach_does_not_duplicate_memory_tool(self):
+        request_body = {"tools": [{"type": "memory_20250818", "name": "memory"}]}
+        headers = {}
+        coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            request_body,
+            headers,
+            "claude-sonnet-4-6",
+            None,
+        )
+        memory_tools = [
+            t for t in request_body["tools"] if t.get("type") == "memory_20250818"
+        ]
+        self.assertEqual(len(memory_tools), 1)
+
+    def test_clear_thinking_added_only_for_opus_with_thinking(self):
+        # Opus + active thinking -> clear_thinking companion edit present.
+        rb = {}
+        coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            rb,
+            {},
+            "claude-opus-4-6",
+            {"type": "adaptive"},
+        )
+        edit_types = [e["type"] for e in rb["context_management"]["edits"]]
+        self.assertIn("clear_thinking_20251015", edit_types)
+
+    def test_clear_thinking_absent_for_opus_without_thinking(self):
+        rb = {}
+        coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            rb,
+            {},
+            "claude-opus-4-6",
+            None,
+        )
+        edit_types = [e["type"] for e in rb["context_management"]["edits"]]
+        self.assertNotIn("clear_thinking_20251015", edit_types)
+
+    def test_clear_thinking_absent_for_non_opus_with_thinking(self):
+        rb = {}
+        coordination_lambda._maybe_attach_context_management(
+            {"context_management_enabled": True},
+            rb,
+            {},
+            "claude-sonnet-4-6",
+            {"type": "adaptive"},
+        )
+        edit_types = [e["type"] for e in rb["context_management"]["edits"]]
+        self.assertNotIn("clear_thinking_20251015", edit_types)
+
+    def test_g62_synthetic_30_turn_clearing_wiring(self):
+        """G62 wiring proof (NOT a live 50% measurement).
+
+        Build a synthetic sequence of 30 tool_use/tool_result turns whose
+        accumulated input tokens cross the configured 100k trigger, then apply
+        the keep-5 policy pulled from the SAME config the Lambda emits. Asserts:
+        (a) the config trigger would fire above threshold, and (b) keep-5 retains
+        the last 5 tool-use records and evicts the older 25, yielding a large
+        input-token reduction. This validates the config/wiring, not a live
+        Anthropic-measured reduction.
+        """
+        cfg = coordination_lambda._build_claude_context_management_config()
+        edit = cfg["edits"][0]
+        trigger_tokens = edit["trigger"]["value"]
+        keep = edit["keep"]["value"]
+
+        # Synthetic accumulation: 30 turns, each tool_use+tool_result ~= 4000 tok.
+        per_turn_tokens = 4000
+        turns = [
+            {"index": i, "tokens": per_turn_tokens} for i in range(30)
+        ]
+        total_before = sum(t["tokens"] for t in turns)
+
+        # (a) Config trigger would fire: accumulated context exceeds 100k.
+        self.assertGreater(total_before, trigger_tokens)
+
+        # (b) Apply keep-5 eviction policy from the wired config.
+        retained = turns[-keep:]
+        evicted = turns[:-keep]
+        self.assertEqual(len(retained), 5)
+        self.assertEqual(len(evicted), 25)
+
+        total_after = sum(t["tokens"] for t in retained)
+        reduction_pct = (1.0 - total_after / total_before) * 100.0
+        # keep-5 of 30 evenly-sized turns => ~83% structural reduction of
+        # evictable tool context. (Structural, not a live token-count claim.)
+        self.assertGreater(reduction_pct, 50.0)
+
+
 if __name__ == "__main__":
     unittest.main()
