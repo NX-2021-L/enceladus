@@ -1597,6 +1597,124 @@ Resources:
       SourceArn: !GetAtt StaleCheckoutMonitorSchedule.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-K44 / ENC-FTR-071 (B66 Ph5): Production Health Monitor Lambda.
+  # Moved from infrastructure/cloudformation/05-monitoring.yaml so the Lambda
+  # Workflow Coverage Guard recognizes it as a coverage-tracked function (the
+  # guard only parses AWS::Lambda::Function resources out of THIS template).
+  # 05-monitoring.yaml retains the IAM-independent bits that reference this
+  # function by name: the EventBridge 15-min schedule + permission, and the
+  # CloudWatch Alarms (CodeSizeMinimumAlarm plus the new K44 per-service
+  # alarms), mirroring the existing cross-stack pattern used there for
+  # devops-deploy-parity-validator / devops-env-drift-auditor (hardcoded
+  # !Sub ARN by function name, not !ImportValue — 05-monitoring.yaml does not
+  # take a compute-stack import today and this avoids a stack-dependency
+  # ordering change for a single Lambda move).
+  # Health checks (DynamoDB, Neo4j AuraDB, S3, SQS, Lambda cold-start
+  # baseline) publish DynamoDBThrottle / GraphSyncLag / MCPColdStart metrics
+  # feeding the B66 dashboard panels. Gamma only; not a v3-prod patch
+  # (ENC-PLN-019 lock) — deploys via the standard IsGamma/IsProduction !If
+  # arch/runtime conditions like every other Lambda in this template.
+  # ---------------------------------------------------------------------------
+
+  ProdHealthMonitorFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 120
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt ProdHealthMonitorRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          FUNCTION_NAMES: "[]"
+          DYNAMODB_TABLE_NAME: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
+          S3_HEALTH_BUCKET: !Ref S3Bucket
+          GRAPH_SYNC_QUEUE_URL: !ImportValue
+            Fn::Sub: ${DataStackName}-GraphSyncQueueUrl
+          SECRETS_REGION: !Ref "AWS::Region"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: health-monitor
+
+  ProdHealthMonitorRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-prod-health-monitor-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ProdHealthMonitorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+              - Sid: LambdaConfigRead
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListFunctions
+                Resource: "*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              - Sid: DynamoDBHealthCheck
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+              - Sid: SecretsManagerNeo4j
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+              - Sid: S3HealthCheck
+                Effect: Allow
+                Action:
+                  - s3:HeadBucket
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}"
+              - Sid: SqsHealthCheck
+                Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: health-monitor
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-C10: Graph Health Metrics Lambda (CloudWatch proxy path)
   # ---------------------------------------------------------------------------
 

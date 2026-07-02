@@ -23,63 +23,19 @@ Conditions:
 Resources:
 
   # ---------------------------------------------------------------------------
-  # Health Probe Lambda — reads CodeSize for all prod Lambdas
+  # Health Probe Lambda — ENC-TSK-K44 / ENC-FTR-071: the Lambda function
+  # (AWS::Lambda::Function) + its execution role now live in
+  # infrastructure/cloudformation/02-compute.yaml so the Lambda Workflow
+  # Coverage Guard (which only parses that template) recognizes the function.
+  # This template keeps the pieces that reference it by name: the EventBridge
+  # 15-min schedule + invoke permission, and the CloudWatch Alarms. Mirrors
+  # the existing cross-stack-by-ARN pattern already used below for
+  # devops-deploy-parity-validator / devops-env-drift-auditor.
   # ---------------------------------------------------------------------------
-  ProdHealthMonitorRole:
-    Type: AWS::IAM::Role
-    DeletionPolicy: Retain
-    Properties:
-      RoleName: !Sub "enceladus-prod-health-monitor-role${EnvironmentSuffix}"
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: ProdHealthMonitorPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: "arn:aws:logs:*:*:*"
-              - Effect: Allow
-                Action:
-                  - lambda:GetFunctionConfiguration
-                  - lambda:ListFunctions
-                Resource: "*"
-              - Effect: Allow
-                Action:
-                  - cloudwatch:PutMetricData
-                Resource: "*"
-
-  ProdHealthMonitorFunction:
-    Type: AWS::Lambda::Function
-    DeletionPolicy: Retain
-    Properties:
-      FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
-      Code:
-        ZipFile: "# managed outside CloudFormation — deployed by deploy.sh"
-      Runtime: !If [IsGamma, python3.12, python3.11]
-      Handler: lambda_function.handler
-      MemorySize: 256
-      Timeout: 120
-      Architectures:
-        - !If [IsGamma, arm64, x86_64]
-      Role: !GetAtt ProdHealthMonitorRole.Arn
-      Environment:
-        Variables:
-          FUNCTION_NAMES: "[]"
-
   ProdHealthMonitorInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref ProdHealthMonitorFunction
+      FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt HealthProbeScheduleRule.Arn
@@ -96,7 +52,7 @@ Resources:
       State: ENABLED
       Targets:
         - Id: ProdHealthMonitorTarget
-          Arn: !GetAtt ProdHealthMonitorFunction.Arn
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-prod-health-monitor${EnvironmentSuffix}"
 
   # ---------------------------------------------------------------------------
   # ENC-TSK-K43 (B66 Ph5) — Fiedler lambda-2 GraphHealth metric schedule
@@ -245,10 +201,88 @@ Resources:
         - [!Ref SnsTopicArn]
         - !Ref "AWS::NoValue"
 
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-K44 / ENC-FTR-071 — B66 Ph5 dashboard data-source alarms.
+  # Thresholds documented alongside the metric publishers in
+  # backend/lambda/prod_health_monitor/lambda_function.py (keep in sync).
+  # ---------------------------------------------------------------------------
+
+  # DynamoDB throttle — any throttled request against the tracker table in a
+  # 15-minute health-probe window pages (dashboard: DynamoDB-throttle panel).
+  DynamoDBThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-dynamodb-throttle${EnvironmentSuffix}"
+      AlarmDescription: >
+        Triggers when the production health monitor observes a DynamoDB
+        throttle signal against the tracker table.
+      Namespace: Enceladus/Prod
+      MetricName: DynamoDBThrottle
+      Dimensions:
+        - Name: TableName
+          Value: !Sub "devops-project-tracker${EnvironmentSuffix}"
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # graph_sync queue backlog — dashboard: graph_sync-lag panel.
+  GraphSyncLagAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-graph-sync-lag${EnvironmentSuffix}"
+      AlarmDescription: >
+        Triggers when the devops-graph-sync-queue backlog exceeds 100
+        messages, indicating graph projection is falling behind DynamoDB
+        writes.
+      Namespace: Enceladus/Prod
+      MetricName: GraphSyncLag
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub "devops-graph-sync-queue${EnvironmentSuffix}.fifo"
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # MCP cold-start baseline — dashboard: MCP-cold-start panel.
+  MCPColdStartAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-prod-mcp-cold-start${EnvironmentSuffix}"
+      AlarmDescription: >
+        Triggers when the production health monitor's Lambda cold-start
+        baseline sample reports an unhealthy (non-Active/non-Successful)
+        function state.
+      Namespace: Enceladus/Prod
+      MetricName: MCPColdStart
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
 Outputs:
   ProdHealthMonitorFunctionArn:
-    Description: ARN of the production health monitor Lambda
-    Value: !GetAtt ProdHealthMonitorFunction.Arn
+    Description: ARN of the production health monitor Lambda (defined in 02-compute.yaml)
+    Value: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-prod-health-monitor${EnvironmentSuffix}"
 
   HealthProbeScheduleRuleArn:
     Description: ARN of the EventBridge health probe schedule
