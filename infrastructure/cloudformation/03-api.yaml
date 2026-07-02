@@ -2221,6 +2221,52 @@ Resources:
       RouteKey: "PUT /api/v1/governance/{fileName+}"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-J80 / ENC-FTR-121: Escalations approval surface backport to v3-prod
+  # (DOC-5B888FCA43B8, io-consented under DOC-B716E8FB10B6). Clean ADDs — no
+  # escalation routes exist on the prod gateway. GET feed + Cognito-gated
+  # approve/deny + agent watch polling on coordination_api; the tracker apply
+  # route is the HTTP lane to applyEscalatedMutation (idempotent; actionable
+  # only while an escalation is io-approved and unapplied).
+  RouteEscalationsFeed:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/escalations"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteEscalationsWatch:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/escalations/watch"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteEscalationsApprove:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteEscalationsDeny:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteTrackerEscalationApply:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsProduction
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
 Outputs:
   ApiEndpoint:
     Value: !GetAtt HttpApi.ApiEndpoint

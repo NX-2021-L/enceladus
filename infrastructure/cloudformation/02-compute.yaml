@@ -182,6 +182,9 @@ Resources:
           CORS_ORIGIN: !Ref CorsOrigin
           ENCELADUS_MCP_INTERFACE_MODE: code
           DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
+          # ENC-TSK-J80 / ENC-FTR-121 Ph3 backport: applyEscalatedMutation lives in
+          # tracker_mutation; the Cognito approval flow invokes it directly.
+          TRACKER_MUTATION_LAMBDA_NAME: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
           # ENC-TSK-I37 / ENC-FTR-117: Agent ID v3 identity stores (server-side allocator path)
           AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
@@ -233,6 +236,9 @@ Resources:
           DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          # ENC-TSK-J80 / ENC-FTR-121 Ph5 backport: io's [ESCALATION] email rides
+          # the existing feed-alerts topic (DOC-5B888FCA43B8 §5.8; empty = skip).
+          ESCALATION_ALERTS_TOPIC_ARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-feed-alerts${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -1610,6 +1616,17 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              # ENC-TSK-J80 / ENC-FTR-121 Ph3 backport: the Cognito-gated escalation
+              # approval flow drives applyEscalatedMutation in tracker_mutation via
+              # direct Lambda invoke — the only reachable entry to the single
+              # privileged apply path (DOC-5B888FCA43B8 §6).
+              - Sid: InvokeTrackerMutationEscalationApply
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:*"
               - Sid: ProjectsTableRead
                 Effect: Allow
                 Action:
@@ -1814,6 +1831,18 @@ Resources:
                   - appconfig:GetLatestConfiguration
                   - appconfig:StartConfigurationSession
                 Resource: "*"
+        # ENC-TSK-J80 / ENC-FTR-121 Ph5 backport: escalation notifications to io
+        # ride the existing feed-alerts topic (DOC-5B888FCA43B8 §5.8).
+        - PolicyName: escalation-alerts-publish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PublishEscalationAlerts
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-feed-alerts${EnvironmentSuffix}"
 
   DocumentApiRole:
     Type: AWS::IAM::Role
