@@ -72,11 +72,11 @@ it is not required (and is not expected) to normalize to 1.0 — BHC-style
 telemetry in this codebase already prefers independent floors/dampers over
 convex-combination normalization (see ``budget_hierarchy.ALERT_LADDER``).
 
-Defaults: ``lambda_graph = 0.5`` (PPR is a strong but secondary corroborating
-signal — half the weight of the primary vector signal) and ``lambda_kw = 0.25``
-(keyword/CONTAINS scoring is the weakest, noisiest signal of the three per the
-ENC-ISS-310/ENC-TSK-G97 tokenization fix notes in
-``lambda_function._hybrid_keyword_ranks``, so it is damped hardest).
+Defaults: ``lambda_graph = 1.0`` (I99 GHN benchmark tuned value — graph
+corroboration at parity with the fixed unit vector weight) and
+``lambda_kw = 0.1`` (keyword damped hardest; I99 tuned value replacing the
+Ph1 ``0.25`` default). Prior Ph1 defaults were ``0.5`` / ``0.25``; promoted
+to live scoring by ENC-TSK-J52 (FTR-104 Ph3).
 
 Worked example
 ---------------
@@ -135,8 +135,8 @@ GDS_PAGERANK_SOURCE = "gds_pagerank"
 CYPHER_FALLBACK_SOURCE = "cypher_fallback"
 
 # Hard-coded fallback defaults (see module docstring "Weight convention").
-DEFAULT_LAMBDA_GRAPH: float = 0.5
-DEFAULT_LAMBDA_KW: float = 0.25
+DEFAULT_LAMBDA_GRAPH: float = 1.0
+DEFAULT_LAMBDA_KW: float = 0.1
 
 
 # ---------------------------------------------------------------------------

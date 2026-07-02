@@ -146,7 +146,7 @@ class TestTotalWeightConvention(unittest.TestCase):
     def test_default_total_weight(self):
         self.assertAlmostEqual(
             ef.total_weight(ef.DEFAULT_LAMBDA_GRAPH, ef.DEFAULT_LAMBDA_KW),
-            1.0 + 0.5 + 0.25,
+            1.0 + ef.DEFAULT_LAMBDA_GRAPH + ef.DEFAULT_LAMBDA_KW,
         )
 
     def test_total_weight_not_normalized_to_one(self):
@@ -225,8 +225,8 @@ class TestHybridEnergyWiring(unittest.TestCase):
     raw Cypher, since those are independently covered)."""
 
     def setUp(self):
-        self.lambda_graph = 0.5
-        self.lambda_kw = 0.25
+        self.lambda_graph = 1.0
+        self.lambda_kw = 0.1
         patchers = [
             mock.patch.object(lf, "_ensure_live_driver", side_effect=lambda d: d),
             mock.patch.object(lf, "_compute_query_embedding", return_value=[0.1, 0.2, 0.3]),
@@ -300,11 +300,29 @@ class TestHybridEnergyWiring(unittest.TestCase):
     def test_nodes_and_per_node_fusion_carry_retrieval_energy(self):
         result = lf._query_hybrid(
             mock.MagicMock(), "enceladus",
-            {"query": "energy function", "anchor_record_id": "ENC-FTR-104", "wave_id": "wave-1"},
+            {
+                "query": "energy function",
+                "anchor_record_id": "ENC-FTR-104",
+                "wave_id": "wave-1",
+                "include_energy": "true",
+            },
         )
         node_001 = next(n for n in result["nodes"] if n["record_id"] == "ENC-TSK-001")
         self.assertIn("_retrieval_energy", node_001)
+        self.assertIn("energy_score", node_001)
+        self.assertIn("energy_breakdown", node_001)
         self.assertIn("retrieval_energy", result["per_node_fusion"]["ENC-TSK-001"])
+
+    def test_include_energy_false_omits_public_energy_fields(self):
+        result = lf._query_hybrid(
+            mock.MagicMock(), "enceladus",
+            {"query": "energy function", "anchor_record_id": "ENC-FTR-104", "wave_id": "wave-1"},
+        )
+        node_001 = next(n for n in result["nodes"] if n["record_id"] == "ENC-TSK-001")
+        self.assertNotIn("energy_score", node_001)
+        self.assertNotIn("energy_breakdown", node_001)
+        self.assertNotIn("_retrieval_energy", node_001)
+        self.assertNotIn("retrieval_energy", result["per_node_fusion"]["ENC-TSK-001"])
 
     def test_energy_lambda_weights_echoed(self):
         result = lf._query_hybrid(

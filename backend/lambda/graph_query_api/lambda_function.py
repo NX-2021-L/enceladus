@@ -2119,6 +2119,8 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
       record_type      Optional filter (task/issue/feature/plan/lesson/document).
       top_n            Final result count (default 20, max 50).
       include_below_threshold  When "true", includes Lessons below T3.
+      include_energy   When "true", each node carries energy_score +
+                       energy_breakdown (FTR-104 Ph3 / ENC-TSK-J52). Default off.
 
     Response contract:
       {
@@ -2153,6 +2155,7 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         top_n = 20
     top_n = max(1, min(top_n, 50))
     include_below_threshold = str(params.get("include_below_threshold", "")).lower() == "true"
+    include_energy = str(params.get("include_energy", "")).lower() == "true"
 
     # ENC-FTR-082 Phase A (AC-1): optional pathway-telemetry provenance. Backward
     # compatible — both default to empty; intent_signature is derived deterministically
@@ -2432,7 +2435,18 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         node["_fused_rank"] = item["fused_rank"]
         node["_fused_score"] = item["fused_score"]
         node["_per_signal_ranks"] = item["per_signal_ranks"]
-        node["_retrieval_energy"] = energy_by_rid[rid]["retrieval_energy"]
+        energy_payload = energy_by_rid[rid]
+        if include_energy:
+            node["energy_score"] = energy_payload["retrieval_energy"]
+            node["energy_breakdown"] = {
+                "E_vector": energy_payload["E_vector"],
+                "E_PPR": energy_payload["E_PPR"],
+                "E_keyword": energy_payload["E_keyword"],
+                "lambda_graph": energy_payload["lambda_graph"],
+                "lambda_kw": energy_payload["lambda_kw"],
+                "graph_algorithm": energy_payload["graph_algorithm"],
+            }
+            node["_retrieval_energy"] = energy_payload["retrieval_energy"]
         # ENC-TSK-I92 (ENC-FTR-110 Ph1): corroboration count + Weber bonus +
         # the bonus-adjusted final_score/final_rank (see banner above).
         node["_corroboration_count"] = item["k_corr"]
@@ -2447,12 +2461,14 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             "fused_rank": item["fused_rank"],
             "fused_score": item["fused_score"],
             "per_signal_ranks": item["per_signal_ranks"],
-            "retrieval_energy": energy_by_rid[rid]["retrieval_energy"],
             "k_corr": item["k_corr"],
             "b_corr": item["b_corr"],
             "final_score": item["final_score"],
             "final_rank": item["final_rank"],
         }
+        if include_energy:
+            per_node_fusion[rid]["retrieval_energy"] = energy_payload["retrieval_energy"]
+            per_node_fusion[rid]["energy_breakdown"] = node.get("energy_breakdown")
         nodes.append(node)
 
     # ---- FSRS-6 / T3 Lesson post-filter -----------------------------------

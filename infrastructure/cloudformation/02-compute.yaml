@@ -1210,6 +1210,9 @@ Resources:
           DRIFT_TELEMETRY_TABLE: !Sub "enceladus-drift-telemetry${EnvironmentSuffix}"
           # ENC-FTR-109 / ENC-TSK-K05: stigmergic exploration trace sink.
           STIGMERGIC_TRACE_TABLE: !Sub "enceladus-stigmergic-trace${EnvironmentSuffix}"
+          # ENC-TSK-J52 / FTR-104 Ph3: I99-tuned energy lambda weights on gamma.
+          ENERGY_LAMBDA_GRAPH: "1.0"
+          ENERGY_LAMBDA_KW: "0.1"
           # ENC-FTR-082 AC-1 (ENC-TSK-H44): raw pathway-telemetry S3 sink. Setting
           # the bucket activates the durable .jsonl append-log (the code degrades
           # to CloudWatch when unset — ENC-TSK-H38); prefix is env-partitioned via
