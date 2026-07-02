@@ -1054,6 +1054,15 @@ Resources:
             - IsGamma
             - !ImportValue "enceladus-ui-cdn-gamma-UiDistributionId"
             - !Ref "AWS::NoValue"
+          # ENC-TSK-K98: gamma's /mobile/v1 objects are served PUBLICLY by the
+          # shared UI-origin cockpit CDN (full-record data leak). The ui-v2
+          # cockpit now reads its snapshot from the authenticated feed_query API,
+          # so disable the public mobile publish + CF invalidation on gamma.
+          # Prod omits the var -> lambda default "true" (unchanged behaviour).
+          FEED_S3_PUBLISH_ENABLED: !If
+            - IsGamma
+            - "false"
+            - !Ref "AWS::NoValue"
           EVENT_BUS: default
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"

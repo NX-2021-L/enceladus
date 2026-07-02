@@ -1,6 +1,9 @@
 import type { FeedRealtimeEvent, FeedSnapshot } from '../types/feedEvents'
 
-const FEED_BASE = (import.meta.env.VITE_FEED_BASE_URL ?? '/mobile/v1').replace(/\/$/, '')
+// ENC-TSK-K98: the cold-start snapshot is now served by the authenticated
+// feed_query API (GET /api/v1/feed/tasks.json), NOT the previously-public
+// /mobile/v1/ S3 objects. Same-origin, cookie-authenticated (see fetchJson).
+const FEED_BASE = (import.meta.env.VITE_FEED_BASE_URL ?? '/api/v1/feed').replace(/\/$/, '')
 
 async function fetchJson<T>(path: string): Promise<T> {
   const url = `${FEED_BASE}/${path}?_t=${Date.now()}`

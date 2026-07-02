@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.37",
-  "updated_at": "2026-07-02T21:01:00Z",
-  "last_change_summary": "ENC-PLN-068: monitoring.rhythm_cycle entity for enceladus-rhythm-cycle Lambda, EventBridge Scheduler tier groups, Enceladus/Rhythm CloudWatch namespace, S3 cycle-artifact convention, and Lyapunov backlog_open_leaves pathology alarm.",
+  "version": "2026-07-02.38",
+  "updated_at": "2026-07-02T21:35:00Z",
+  "last_change_summary": "ENC-TSK-K98: feed_query gains an authenticated cold-start snapshot route (GET /api/v1/feed/tasks.json, JWT-gated, minimal projection) replacing the previously-public /mobile/v1 S3 objects; feed_publisher gains FEED_S3_PUBLISH_ENABLED to disable the public /mobile publish + CF invalidation on gamma (cockpit reads the authed API instead). No governed record schema change.",
   "owners": [
     "enceladus-platform"
   ],

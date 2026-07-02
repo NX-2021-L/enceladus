@@ -594,6 +594,15 @@ Resources:
       RouteKey: GET /api/v1/feed
       Target: !Sub integrations/${FeedQueryIntegration}
 
+  # ENC-TSK-K98 — authenticated cold-start snapshot; replaces the public
+  # /mobile/v1/tasks.json S3 object. JWT-gated by the feed_query handler.
+  RouteFeedTasksJson:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/feed/tasks.json
+      Target: !Sub integrations/${FeedQueryIntegration}
+
   RouteFeedRefresh:
     Type: AWS::ApiGatewayV2::Route
     Properties:
