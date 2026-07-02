@@ -1,0 +1,82 @@
+name: IAM CFN Deploy Role — Lambda FunctionUrlConfig Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "Grant lambda:*FunctionUrlConfig on enceladus-mcp-code-gamma to CFN deploy role (ENC-TSK-K07/K09, 04-github-roles LambdaComputeOps stale)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with Lambda Function URL config permissions
+    # ENC-TSK-K09 / ENC-ISS-469: live IAM mutation (shared/global role object) — pauses on the v3-prod required-reviewer rule.
+    #
+    # ENC-TSK-K07's EnceladusMcpCodeGammaLiveFunctionUrl (AWS::Lambda::Url) apply
+    # failed AccessDenied 2026-07-02T10:00:43Z on lambda:CreateFunctionUrlConfig —
+    # the CloudFormationDeployPolicy LambdaComputeOps statement never granted
+    # Function URL config actions. Stack rolled back cleanly (UPDATE_ROLLBACK_COMPLETE,
+    # no wedge). Immediately unblocked same-session via a manual aws iam
+    # put-role-policy patch broadening LambdaComputeOps (Resource: "*", matching
+    # its existing scope) with product-lead IAM. This workflow codifies an
+    # equivalent, tightly-scoped, git-tracked, re-runnable grant (scoped to the
+    # specific gamma function rather than "*") so the fix survives as CI-executed
+    # and reviewable rather than only living as an invisible manual CLI mutation —
+    # mirrors the iam-cfn-deploy-role-gamma-patch.yml / iam-cfn-deploy-role-eventbridge-listrules-patch.yml
+    # precedent for 04-github-roles.yaml drift of this role.
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy — Lambda Function URL config (mcp-code-gamma)
+        run: |
+          set -euo pipefail
+          cat > /tmp/lambda-fnurlconfig-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "LambdaFunctionUrlConfigMcpCodeGamma",
+                "Effect": "Allow",
+                "Action": [
+                  "lambda:CreateFunctionUrlConfig",
+                  "lambda:GetFunctionUrlConfig",
+                  "lambda:UpdateFunctionUrlConfig",
+                  "lambda:DeleteFunctionUrlConfig"
+                ],
+                "Resource": [
+                  "arn:aws:lambda:us-west-2:356364570033:function:enceladus-mcp-code-gamma",
+                  "arn:aws:lambda:us-west-2:356364570033:function:enceladus-mcp-code-gamma:*"
+                ]
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-lambda-fnurlconfig-v1" \
+            --policy-document "file:///tmp/lambda-fnurlconfig-policy.json"
+
+      - name: Verify inline policy attached
+        run: |
+          aws iam get-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-lambda-fnurlconfig-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table

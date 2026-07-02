@@ -144,17 +144,30 @@ Resources:
 
               # Lambda compute-stack mutations cover functions, permissions,
               # event-source mappings, and layer validation.
+              #
+              # ENC-TSK-K09 / ENC-ISS-469: lambda:*FunctionUrlConfig actions added.
+              # ENC-TSK-K07's EnceladusMcpCodeGammaLiveFunctionUrl (AWS::Lambda::Url)
+              # apply failed AccessDenied 2026-07-02T10:00:43Z -- this Sid never
+              # granted Function URL config actions (stack rolled back cleanly,
+              # no wedge). Immediately unblocked by a manual aws iam put-role-policy
+              # patch to the live role (same session, product-lead IAM); this change
+              # codifies that identical patch so a future github-roles deploy
+              # reconciles cleanly instead of reverting it, and it stops being
+              # invisible to drift auditing.
               - Sid: LambdaComputeOps
                 Effect: Allow
                 Action:
                   - lambda:AddPermission
                   - lambda:CreateEventSourceMapping
                   - lambda:CreateFunction
+                  - lambda:CreateFunctionUrlConfig
                   - lambda:DeleteEventSourceMapping
                   - lambda:DeleteFunction
+                  - lambda:DeleteFunctionUrlConfig
                   - lambda:GetEventSourceMapping
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
+                  - lambda:GetFunctionUrlConfig
                   - lambda:GetLayerVersion
                   - lambda:PublishVersion
                   - lambda:RemovePermission
@@ -162,6 +175,7 @@ Resources:
                   - lambda:UntagResource
                   - lambda:UpdateEventSourceMapping
                   - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionUrlConfig
                   - lambda:UpdateFunctionConfiguration
                 Resource: "*"
 

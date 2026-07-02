@@ -184,6 +184,13 @@
         "wire-notification"
       ],
       "notes": "ENC-TSK-J65: environment chosen from environment_suffix input (-gamma -> v4-gamma, '' -> v3-prod). Caught by the guard's own first fail-closed run."
+    },
+    "iam-cfn-deploy-role-fnurlconfig-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-K09: environment: v3-prod \u2014 patches the SHARED CFN deploy role object with lambda:*FunctionUrlConfig on enceladus-mcp-code-gamma (ENC-TSK-K07 unblock)."
     }
   }
 }
