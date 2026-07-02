@@ -1,0 +1,7 @@
+[
+  {
+    "ResourceType": "AWS::Lambda::Function",
+    "LogicalResourceId": "CheckoutServiceFunction",
+    "ResourceIdentifier": { "FunctionName": "enceladus-checkout-service-gamma" }
+  }
+]
