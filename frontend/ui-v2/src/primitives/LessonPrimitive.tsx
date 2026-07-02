@@ -46,10 +46,10 @@ export function LessonPrimitive({ record }: { record: Lesson }) {
         {record.insight}
       </blockquote>
       <MetaRow label="Confidence">
-        <Metric>{record.confidence.toFixed(2)}</Metric>
+        <Metric>{(record.confidence ?? 0).toFixed(2)}</Metric>
       </MetaRow>
       <MetaRow label="Resonance">
-        <Metric>{record.resonance_score.toFixed(2)}</Metric>
+        <Metric>{(record.resonance_score ?? 0).toFixed(2)}</Metric>
       </MetaRow>
       <MetaRow label="Provenance">{record.provenance}</MetaRow>
     </PrimitiveCard>
