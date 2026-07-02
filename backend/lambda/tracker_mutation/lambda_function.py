@@ -319,8 +319,8 @@ def _publish_lesson_scoring_request(project_id: str, record_id: str, item_id: st
 _RECORD_TYPES = {"task", "issue", "feature", "lesson", "plan", "generation"}
 _CLOSED_STATUS = {"task": "closed", "issue": "closed", "feature": "completed", "lesson": "archived", "plan": "complete", "generation": "archived"}
 _DEFAULT_STATUS = {"task": "open", "issue": "open", "feature": "planned", "lesson": "draft", "plan": "drafted", "generation": "drafted"}
-_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN", "generation": "GEN"}
-_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan", "GEN": "generation"}
+_TRACKER_TYPE_SUFFIX = {"task": "TSK", "issue": "ISS", "feature": "FTR", "lesson": "LSN", "plan": "PLN", "generation": "GEN", "escalation": "ESC"}
+_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan", "GEN": "generation", "ESC": "escalation"}
 
 # Category validation per record type
 _VALID_CATEGORIES = {
@@ -409,6 +409,111 @@ _REVERT_TRANSITIONS = {
         "started": {"incomplete"},
     },
 }
+
+# ---------------------------------------------------------------------------
+# ENC-FTR-121 / ENC-TSK-J68 — Escalations: Human-Gated Mutation Override
+# Surface (DOC-5B888FCA43B8), Phase 1: entity + request/read surface.
+#
+# Escalation items live in the EXISTING tracker table (record_id =
+# "escalation#ENC-ESC-…"; no new table or GSI — Channel B purity). They are
+# deliberately NOT a member of _RECORD_TYPES: the generic record CRUD,
+# checkout, lifecycle, and tracker.set surfaces cannot touch them. The
+# escalation FSM below is enforced normally — escalations are not themselves
+# escalatable (§5.2). ENC-ESC IDs are minted by _next_record_id via the
+# "escalation" entry in _TRACKER_TYPE_SUFFIX (ID Boundary Rule holds).
+# ---------------------------------------------------------------------------
+ENABLE_ESCALATION_PRIMITIVE = _appconfig_flag(
+    "enable_escalation_primitive",
+    env_fallback="ENABLE_ESCALATION_PRIMITIVE",
+    default=True,
+)
+
+# §5.2 escalation status lifecycle. `failed` is terminal: a corrective
+# request is a NEW escalation (exactly-once semantics stay trivial).
+_ESCALATION_FSM = {
+    "requested": {"approved", "denied", "denied_with_guidance"},
+    "approved": {"applying"},
+    "applying": {"applied", "failed"},
+    "denied": set(),
+    "denied_with_guidance": set(),
+    "applied": set(),
+    "failed": set(),
+}
+_ESCALATION_STATUSES = set(_ESCALATION_FSM.keys())
+_ESCALATION_TARGET_TYPES = {"task", "issue", "feature"}
+
+
+def _statuses_for_record_type(record_type: str) -> set:
+    """Full dictionary-legal status universe for a record type.
+
+    Derived from the normal transition graph (keys ∪ targets) plus the
+    create-time default and the ENC-FTR-115 `superseded` alt-terminal.
+    Used by direct_state_override validation, which checks status LEGALITY
+    only — path legality is deliberately unchecked (§5.3): the path is
+    precisely what io's approval overrides.
+    """
+    graph = _VALID_TRANSITIONS.get(record_type, {})
+    statuses = set(graph.keys())
+    for targets in graph.values():
+        statuses |= set(targets)
+    default_status = _DEFAULT_STATUS.get(record_type)
+    if default_status:
+        statuses.add(default_status)
+    if record_type in ("task", "issue", "lesson"):
+        statuses.add("superseded")
+    return statuses
+
+
+def _validate_deploy_arc_change_payload(payload: Dict, target_record_type: str) -> str:
+    """§5.3 handler 1: request-time validation for deploy_arc_change."""
+    if target_record_type != "task":
+        return (
+            "deploy_arc_change targets must be task records; "
+            f"'{target_record_type}' records have no deploy arc."
+        )
+    new_arc = str(payload.get("new_deploy_arc_type") or "").strip()
+    if not new_arc:
+        return "Field 'payload.new_deploy_arc_type' is required for deploy_arc_change."
+    if new_arc not in VALID_TRANSITION_TYPES:
+        return (
+            f"Invalid new_deploy_arc_type '{new_arc}'. "
+            f"Allowed: {sorted(VALID_TRANSITION_TYPES)}"
+        )
+    return ""
+
+
+def _validate_direct_state_override_payload(payload: Dict, target_record_type: str) -> str:
+    """§5.3 handler 2: request-time validation for direct_state_override.
+
+    Confirms target_status is dictionary-legal for the record type. Path
+    legality is deliberately NOT checked here — that is what io approval
+    overrides.
+    """
+    target_status = str(payload.get("target_status") or "").strip()
+    if not target_status:
+        return "Field 'payload.target_status' is required for direct_state_override."
+    legal = _statuses_for_record_type(target_record_type)
+    if target_status not in legal:
+        return (
+            f"Invalid target_status '{target_status}' for record type "
+            f"'{target_record_type}'. Allowed: {sorted(legal)}"
+        )
+    field_values = payload.get("field_values")
+    if field_values is not None and not isinstance(field_values, dict):
+        return "Field 'payload.field_values' must be an object when supplied."
+    return ""
+
+
+# §5.3 mutation handler registry (v4-shaped). Each handler grows three
+# functions across the feature: validate_payload (request time, this phase),
+# render_diff (approval time, Ph3/ENC-TSK-J70), and apply (invoked ONLY by
+# applyEscalatedMutation after io approval, Ph2/ENC-TSK-J69). Adding a third
+# mutation type is a registry entry plus handler, not an architectural change.
+_ESCALATION_MUTATION_HANDLERS = {
+    "deploy_arc_change": {"validate_payload": _validate_deploy_arc_change_payload},
+    "direct_state_override": {"validate_payload": _validate_direct_state_override_payload},
+}
+
 
 # ENC-FTR-076 / ENC-TSK-E08: Component lifecycle transitions.
 # Components are registered in the component-registry table (separate from
@@ -6467,6 +6572,285 @@ def _handle_dedup_auto_merge(project_id: str, body: Dict, claims: Optional[Dict]
 
 
 # ---------------------------------------------------------------------------
+# ENC-FTR-121 Ph1 / ENC-TSK-J68 — escalation request/read handlers
+# ---------------------------------------------------------------------------
+
+def _parse_escalation_target(target_record_id: str):
+    """Resolve (record_type, sort_key, error) for an escalation target ID.
+
+    Target IDs look like PREFIX-SEG-SEQ (e.g. ENC-TSK-J68); SEG resolves the
+    record type via _ID_SEGMENT_TO_TYPE and must be an escalatable type.
+    """
+    parts = str(target_record_id or "").strip().split("-")
+    if len(parts) < 3:
+        return None, None, (
+            "Field 'target_record_id' must look like PREFIX-SEG-SEQ "
+            "(e.g. ENC-TSK-123)."
+        )
+    segment = parts[1].upper()
+    record_type = _ID_SEGMENT_TO_TYPE.get(segment)
+    if record_type is None or record_type not in _ESCALATION_TARGET_TYPES:
+        return None, None, (
+            f"target_record_id type '{segment}' is not escalatable. "
+            "Allowed: task (TSK), issue (ISS), feature (FTR)."
+        )
+    return record_type, f"{record_type}#{target_record_id}", ""
+
+
+def _escalation_event(event_type: str, actor: str, detail: Optional[Dict] = None,
+                      guidance_note: str = "") -> Dict:
+    """Build one §11.2 event object in DynamoDB attribute shape (append-only)."""
+    event_attrs = {
+        "event_type": _ser_s(event_type),
+        "at": _ser_s(_now_z()),
+        "actor": _ser_s(actor or "system"),
+    }
+    if detail:
+        event_attrs["detail"] = _ser_s(json.dumps(detail, default=str))
+    if guidance_note:
+        event_attrs["guidance_note"] = _ser_s(guidance_note)
+    return {"M": event_attrs}
+
+
+def _escalation_public(item: Dict) -> Dict:
+    """Deserialize an escalation item for API responses (payload back to JSON)."""
+    record = _deser_item(item)
+    raw_payload = record.get("payload")
+    if isinstance(raw_payload, str):
+        try:
+            record["payload"] = json.loads(raw_payload)
+        except (ValueError, TypeError):
+            pass
+    for event in record.get("events") or []:
+        raw_detail = event.get("detail") if isinstance(event, dict) else None
+        if isinstance(raw_detail, str):
+            try:
+                event["detail"] = json.loads(raw_detail)
+            except (ValueError, TypeError):
+                pass
+    return record
+
+
+def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
+    """POST /{project}/escalation — governed escalation.request (§5.4).
+
+    Validates the §11.1 envelope via the mutation-handler registry, mints an
+    ENC-ESC id server-side, writes the item with status=requested, and appends
+    the `requested` event. Malformed requests fail fast and write NOTHING —
+    they never reach io's queue.
+    """
+    if not ENABLE_ESCALATION_PRIMITIVE:
+        return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
+
+    target_record_id = str(body.get("target_record_id") or "").strip()
+    mutation_type = str(body.get("mutation_type") or "").strip()
+    payload = body.get("payload")
+    justification = str(body.get("justification") or "").strip()
+    expected_version = str(body.get("expected_version") or "").strip()
+
+    if not target_record_id:
+        return _error(400, "Field 'target_record_id' is required.")
+    handler = _ESCALATION_MUTATION_HANDLERS.get(mutation_type)
+    if handler is None:
+        return _error(
+            400,
+            f"Unknown mutation_type '{mutation_type}'. "
+            f"Allowed: {sorted(_ESCALATION_MUTATION_HANDLERS)}.",
+        )
+    if not isinstance(payload, dict) or not payload:
+        return _error(400, "Field 'payload' is required and must be a non-empty object.")
+    if not justification:
+        return _error(400, "Field 'justification' is required (free-text rationale for io).")
+
+    target_type, target_sk, target_err = _parse_escalation_target(target_record_id)
+    if target_err:
+        return _error(400, target_err)
+
+    requested_by_raw = body.get("requested_by")
+    requested_by = requested_by_raw if isinstance(requested_by_raw, dict) else {}
+    session_id = str(
+        requested_by.get("session_id")
+        or (body.get("write_source") or {}).get("provider")
+        or ""
+    ).strip()
+    if not session_id:
+        return _error(
+            400,
+            "Field 'requested_by.session_id' is required "
+            "(server-minted ENC-SES session id).",
+        )
+    agent_type_id = str(requested_by.get("agent_type_id") or "").strip()
+    sci_present = bool(requested_by.get("sci_present", False))
+
+    validation_error = handler["validate_payload"](payload, target_type)
+    if validation_error:
+        return _error(400, validation_error)
+
+    # Target must exist — read fresh, never trust the caller's snapshot.
+    ddb = _get_ddb()
+    try:
+        target_item = ddb.get_item(
+            TableName=DYNAMODB_TABLE,
+            Key={"project_id": _ser_s(project_id), "record_id": _ser_s(target_sk)},
+            ConsistentRead=True,
+        ).get("Item")
+    except Exception as exc:
+        logger.error("escalation target read failed: %s", exc)
+        return _error(500, "Database read failed while validating target record.")
+    if not target_item:
+        return _error(404, f"Target record not found: {target_record_id}")
+
+    prefix = _get_project_prefix(project_id)
+    if not prefix:
+        return _error(404, f"Project '{project_id}' not found or has no prefix.")
+
+    escalation_id = _next_record_id(project_id, prefix, "escalation")
+    now = _now_z()
+    item = {
+        "project_id": _ser_s(project_id),
+        "record_id": _ser_s(f"escalation#{escalation_id}"),
+        "item_id": _ser_s(escalation_id),
+        "record_type": _ser_s("escalation"),
+        "target_record_id": _ser_s(target_record_id),
+        "target_record_type": _ser_s(target_type),
+        "mutation_type": _ser_s(mutation_type),
+        "payload": _ser_s(json.dumps(payload, default=str)),
+        "justification": _ser_s(justification),
+        "requested_by": {"M": {
+            "session_id": _ser_s(session_id),
+            "agent_type_id": _ser_s(agent_type_id),
+            "sci_present": {"BOOL": sci_present},
+        }},
+        "status": _ser_s("requested"),
+        "events": {"L": [_escalation_event(
+            "requested",
+            session_id,
+            detail={"mutation_type": mutation_type, "target_record_id": target_record_id},
+        )]},
+        "created_at": _ser_s(now),
+        "updated_at": _ser_s(now),
+        "write_source": _build_write_source(body),
+    }
+    if expected_version:
+        item["expected_version"] = _ser_s(expected_version)
+
+    try:
+        ddb.put_item(
+            TableName=DYNAMODB_TABLE,
+            Item=item,
+            ConditionExpression="attribute_not_exists(record_id)",
+        )
+    except Exception as exc:
+        logger.error("escalation put_item failed: %s", exc)
+        return _error(500, "Database write failed while creating escalation.")
+
+    return _response(201, {
+        "success": True,
+        "escalation_id": escalation_id,
+        "status": "requested",
+        "target_record_id": target_record_id,
+        "target_record_type": target_type,
+        "mutation_type": mutation_type,
+        "created_at": now,
+    })
+
+
+def _handle_escalation_get(project_id: str, escalation_id: str) -> Dict:
+    """GET /{project}/escalation/{id} — full escalation item (§5.4)."""
+    if not ENABLE_ESCALATION_PRIMITIVE:
+        return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
+    ddb = _get_ddb()
+    try:
+        item = ddb.get_item(
+            TableName=DYNAMODB_TABLE,
+            Key={
+                "project_id": _ser_s(project_id),
+                "record_id": _ser_s(f"escalation#{escalation_id}"),
+            },
+            ConsistentRead=True,
+        ).get("Item")
+    except Exception as exc:
+        logger.error("escalation get_item failed: %s", exc)
+        return _error(500, "Database read failed.")
+    if not item:
+        return _error(404, f"Escalation not found: {escalation_id}")
+    return _response(200, {"success": True, "escalation": _escalation_public(item)})
+
+
+def _handle_escalation_list(project_id: str, query_params: Dict) -> Dict:
+    """GET /{project}/escalation — list with status/target/session filters (§5.4)."""
+    if not ENABLE_ESCALATION_PRIMITIVE:
+        return _error(503, "Escalation primitive is disabled (enable_escalation_primitive).")
+
+    status_filter = str(query_params.get("status") or "").strip()
+    target_filter = str(query_params.get("target_record_id") or "").strip()
+    session_filter = str(query_params.get("session_id") or "").strip()
+    if status_filter and status_filter not in _ESCALATION_STATUSES:
+        return _error(
+            400,
+            f"Invalid status filter '{status_filter}'. "
+            f"Allowed: {sorted(_ESCALATION_STATUSES)}",
+        )
+    try:
+        page_size = max(1, min(int(query_params.get("page_size", "50")), 200))
+    except (TypeError, ValueError):
+        page_size = 50
+
+    ddb = _get_ddb()
+    key_values = {
+        ":pid": _ser_s(project_id),
+        ":esc_prefix": _ser_s("escalation#"),
+    }
+    filter_clauses = []
+    expression_names = {}
+    if status_filter:
+        filter_clauses.append("#st = :status_filter")
+        expression_names["#st"] = "status"
+        key_values[":status_filter"] = _ser_s(status_filter)
+    if target_filter:
+        filter_clauses.append("target_record_id = :target_filter")
+        key_values[":target_filter"] = _ser_s(target_filter)
+    if session_filter:
+        filter_clauses.append("requested_by.session_id = :session_filter")
+        key_values[":session_filter"] = _ser_s(session_filter)
+
+    kwargs = {
+        "TableName": DYNAMODB_TABLE,
+        "KeyConditionExpression": (
+            "project_id = :pid AND begins_with(record_id, :esc_prefix)"
+        ),
+        "ExpressionAttributeValues": key_values,
+    }
+    if filter_clauses:
+        kwargs["FilterExpression"] = " AND ".join(filter_clauses)
+    if expression_names:
+        kwargs["ExpressionAttributeNames"] = expression_names
+
+    escalations = []
+    try:
+        while True:
+            resp = ddb.query(**kwargs)
+            escalations.extend(
+                _escalation_public(raw) for raw in resp.get("Items", [])
+            )
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key or len(escalations) >= page_size:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+    except Exception as exc:
+        logger.error("escalation list query failed: %s", exc)
+        return _error(500, "Database query failed.")
+
+    escalations.sort(key=lambda esc: esc.get("created_at", ""), reverse=True)
+    escalations = escalations[:page_size]
+    return _response(200, {
+        "success": True,
+        "escalations": escalations,
+        "count": len(escalations),
+    })
+
+
+# ---------------------------------------------------------------------------
 # Path parsing & routing
 # ---------------------------------------------------------------------------
 
@@ -6474,6 +6858,9 @@ def _handle_dedup_auto_merge(project_id: str, body: Dict, claims: Optional[Dict]
 _RE_PENDING_UPDATES = re.compile(r"^(?:/api/v1/tracker)?/pending-updates$")
 _RE_DEDUP_REVIEW = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-z0-9_-]+)/dedup-review$"
+)
+_RE_ESCALATION = re.compile(
+    r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/escalation(?:/(?P<id>[A-Za-z0-9_-]+))?$"
 )
 _RE_RELATIONSHIP = re.compile(
     r"^(?:/api/v1/tracker)?/(?P<project>[a-zA-Z0-9_-]+)/relationship$"
@@ -6542,6 +6929,33 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             return _handle_dedup_auto_merge(project_id, body, claims)
         else:
             return _error(400, "Field 'op' must be 'propose', 'approve', or 'auto-merge'.")
+
+    # --- Route: escalations (ENC-FTR-121 Ph1 / ENC-TSK-J68) ---
+    m_escalation = _RE_ESCALATION.match(path)
+    if m_escalation:
+        project_id = m_escalation.group("project")
+        escalation_id = m_escalation.group("id")
+        claims, auth_err = _authenticate(
+            event,
+            ["tracker:read"] if method == "GET" else ["tracker:write"],
+        )
+        if auth_err:
+            return auth_err
+        project_err = _validate_project_exists(project_id)
+        if project_err:
+            return _error(404, project_err)
+        if method == "POST" and not escalation_id:
+            try:
+                body = json.loads(event.get("body") or "{}")
+            except (ValueError, TypeError):
+                return _error(400, "Invalid JSON body.")
+            _normalize_write_source(body, claims)
+            return _handle_escalation_request(project_id, body)
+        elif method == "GET" and escalation_id:
+            return _handle_escalation_get(project_id, escalation_id)
+        elif method == "GET":
+            return _handle_escalation_list(project_id, query_params)
+        return _error(405, f"Method {method} not allowed on /escalation.")
 
     # --- Route: typed relationship edges (ENC-FTR-049) ---
     m_rel = _RE_RELATIONSHIP.match(path)

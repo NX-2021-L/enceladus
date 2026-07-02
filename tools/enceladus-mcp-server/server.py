@@ -234,6 +234,10 @@ ENABLE_LESSON_PRIMITIVE = _appconfig_flag("enable_lesson_primitive", env_fallbac
 ENABLE_HANDOFF_PRIMITIVE = _appconfig_flag("enable_handoff_primitive", env_fallback="ENABLE_HANDOFF_PRIMITIVE")
 # ENC-FTR-076 / ENC-TSK-E08
 ENABLE_COMPONENT_PROPOSAL = _appconfig_flag("enable_component_proposal", env_fallback="ENABLE_COMPONENT_PROPOSAL")
+# ENC-FTR-121 / ENC-TSK-J68: Escalations — human-gated mutation override surface
+# (DOC-5B888FCA43B8). Default ON: the request/read surface is inert unless
+# called and carries no privileged write path (the applier is io-approval-gated).
+ENABLE_ESCALATION_PRIMITIVE = _appconfig_flag("enable_escalation_primitive", env_fallback="ENABLE_ESCALATION_PRIMITIVE", default=True)
 
 TRACKER_API_INTERNAL_API_KEY = os.environ.get(
     "ENCELADUS_TRACKER_API_INTERNAL_API_KEY",
@@ -6084,6 +6088,61 @@ async def _tracker_create(args: dict) -> list[TextContent]:
     resp = _tracker_api_request("POST", f"/{project_id}/{record_type}", payload=payload)
     return _result_text(resp)
 
+
+# --- ENC-FTR-121 / ENC-TSK-J68: Escalations request/read surface ------------
+# escalation.request proposes a lifecycle-forbidden mutation for io approval.
+# The backend validates the envelope via its mutation-handler registry and
+# mints the ENC-ESC id server-side (ID Boundary Rule). approve/deny have NO
+# MCP surface by design — they exist only behind the Cognito human path (§6).
+
+
+async def _escalation_request(args: dict) -> list[TextContent]:
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    project_id = args["project_id"]
+    payload: Dict[str, Any] = {
+        "target_record_id": args.get("target_record_id", ""),
+        "mutation_type": args.get("mutation_type", ""),
+        "payload": args.get("payload"),
+        "justification": args.get("justification", ""),
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    for optional_key in ("expected_version", "requested_by", "provider",
+                         "coordination_request_id", "dispatch_id"):
+        if args.get(optional_key) is not None:
+            payload[optional_key] = args[optional_key]
+
+    resp = _tracker_api_request("POST", f"/{project_id}/escalation", payload=payload)
+    return _result_text(resp)
+
+
+async def _escalation_get(args: dict) -> list[TextContent]:
+    project_id = args.get("project_id", "")
+    escalation_id = str(args.get("escalation_id", "")).strip()
+    if not escalation_id:
+        return _result_text({"error": "Field 'escalation_id' is required."})
+    if not project_id:
+        return _result_text({"error": "Field 'project_id' is required."})
+    resp = _tracker_api_request("GET", f"/{project_id}/escalation/{escalation_id}")
+    return _result_text(resp)
+
+
+async def _escalation_list(args: dict) -> list[TextContent]:
+    project_id = args.get("project_id", "")
+    if not project_id:
+        return _result_text({"error": "Field 'project_id' is required."})
+    query = {
+        "status": args.get("status"),
+        "target_record_id": args.get("target_record_id"),
+        "session_id": args.get("session_id"),
+        "page_size": args.get("page_size"),
+    }
+    resp = _tracker_api_request("GET", f"/{project_id}/escalation", query=query)
+    return _result_text(resp)
+
+
 # --- Acceptance Criteria Evidence Handshake (§7.1.1) ---
 
 
@@ -7656,6 +7715,20 @@ if ENABLE_TYPED_RELATIONSHIPS:
     }
     _SEARCH_ACTIONS["tracker.list_relationships"] = {
         "tool": "tracker_list_relationships",
+    }
+
+# ENC-FTR-121 / ENC-TSK-J68: Escalations — governed request/read surface.
+# escalation.request proposes a lifecycle-forbidden mutation for io approval;
+# approve/deny deliberately have NO MCP action (Cognito human path only, §6).
+if ENABLE_ESCALATION_PRIMITIVE:
+    _EXECUTE_ACTIONS["escalation.request"] = {
+        "tool": "escalation_request", "requires_governance_hash": True,
+    }
+    _SEARCH_ACTIONS["escalation.get"] = {
+        "tool": "escalation_get",
+    }
+    _SEARCH_ACTIONS["escalation.list"] = {
+        "tool": "escalation_list",
     }
 
 # ENC-FTR-052: Conditionally register lesson actions behind feature flag
@@ -10566,6 +10639,10 @@ _TOOL_HANDLERS = {
     "github_create_issue": _github_create_issue,
     "github_projects_sync": _github_projects_sync,
     "github_projects_list": _github_projects_list,
+    # ENC-FTR-121 / ENC-TSK-J68: Escalations request/read surface
+    "escalation_request": _escalation_request,
+    "escalation_get": _escalation_get,
+    "escalation_list": _escalation_list,
     # ENC-FTR-047: Graph search
     "tracker_graphsearch": _tracker_graphsearch,
     # ENC-FTR-089 / ENC-TSK-I89: admin-scoped raw-embedding egress
