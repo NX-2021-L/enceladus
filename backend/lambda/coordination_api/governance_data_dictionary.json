@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.24",
-  "updated_at": "2026-07-02T11:25:00Z",
-  "last_change_summary": "ENC-TSK-K02 (FTR-084 Ph2): intent-classifier training loop — weekly EventBridge job, versioned S3 record_boosts, TRAINING_HARD_DISABLED kill switch (default ON), holdout degradation guard, one-call rollback, cost-preflight ~$0.04/mo.",
+  "version": "2026-07-02.25",
+  "updated_at": "2026-07-02T11:50:00Z",
+  "last_change_summary": "ENC-TSK-K12: add mcp_streamable to Gen2 MCP runtime packaging (lambda_function.py shim + _build.yml) so enceladus-mcp-streamable-gamma receives server.py siblings on deploy.",
   "owners": [
     "enceladus-platform"
   ],

@@ -125,10 +125,11 @@ jobs:
             # Copy source.
             rsync -a --exclude='__pycache__' --exclude='*.pyc' "$srcdir/" "$workdir/"
 
-            # ENC-TSK-K11/K12: coordination_api and mcp_code load server.py from the
-            # function zip root (ENCELADUS_MCP_SERVER_PATH=server.py). Package the full
-            # MCP server runtime module set — telemetry_rank and siblings are required.
-            if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ]; then
+            # ENC-TSK-K11/K12: coordination_api, mcp_code, and mcp_streamable load
+            # server.py from the function zip root (ENCELADUS_MCP_SERVER_PATH=server.py).
+            # Package the full MCP server runtime module set — telemetry_rank and siblings
+            # are required (mcp.jreese.net Function URL -> enceladus-mcp-streamable*).
+            if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ] || [ "$fn" = "mcp_streamable" ]; then
               for py in tools/enceladus-mcp-server/*.py; do
                 base=$(basename "$py")
                 case "$base" in
