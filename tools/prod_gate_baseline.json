@@ -71,6 +71,13 @@
       ],
       "notes": "ENC-TSK-J63 plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod); ROLLBACK_COMPLETE cleanup is gamma-self-heal / prod-fail-closed"
     },
+    "cloudformation-ui-cdn-stack-deploy.yml": {
+      "class": "conditional",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-K52 / T1 (v4 UI Deploy Pipeline, DOC-3EE4F709EC98) plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod). Deploys the 07-ui-cdn S3+CloudFront stack for frontend/ui-v2; gamma stands up on merge to v4/main, prod is a gated flip later"
+    },
     "component-registry-guard.yml": {
       "class": "inert",
       "notes": "guard"
