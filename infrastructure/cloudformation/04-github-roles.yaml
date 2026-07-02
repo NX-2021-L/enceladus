@@ -181,6 +181,28 @@ Resources:
                   - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/enceladus-*"
                   - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/on-project-json-sync*"
 
+              # ENC-PLN-068: Rhythm Cycle EventBridge Scheduler groups/schedules
+              # (AWS::Scheduler::ScheduleGroup + AWS::Scheduler::Schedule in 02-compute).
+              - Sid: EventBridgeSchedulerOps
+                Effect: Allow
+                Action:
+                  - scheduler:CreateScheduleGroup
+                  - scheduler:DeleteScheduleGroup
+                  - scheduler:GetScheduleGroup
+                  - scheduler:ListScheduleGroups
+                  - scheduler:CreateSchedule
+                  - scheduler:DeleteSchedule
+                  - scheduler:GetSchedule
+                  - scheduler:UpdateSchedule
+                  - scheduler:ListSchedules
+                  - scheduler:TagResource
+                  - scheduler:UntagResource
+                Resource:
+                  - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule-group/rhythm-*"
+                  - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule/rhythm-*/*"
+                  - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule-group/enceladus-*"
+                  - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule/enceladus-*/*"
+
               - Sid: PipesOps
                 Effect: Allow
                 Action:
