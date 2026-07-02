@@ -47,7 +47,9 @@ describe('client api helpers', () => {
     expect(data.tasks).toEqual([])
 
     const [url] = fetchMock.mock.calls[0] as [string]
-    expect(url).toBe('/mobile/v1/tasks.json')
+    // fetchFeed appends a cache-busting `_t` query param (Date.now()), so match
+    // the path prefix rather than an exact URL.
+    expect(url.startsWith('/mobile/v1/tasks.json?_t=')).toBe(true)
   })
 
   it('probeSession throws when probe endpoint is non-2xx', async () => {

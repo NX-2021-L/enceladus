@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DownloadMarkdownButton } from './DownloadMarkdownButton'
 import type { Document } from '../../types/feeds'
@@ -94,6 +95,30 @@ describe('DownloadMarkdownButton', () => {
 
     // Blob content should reflect the doc object passed as a prop, proving
     // no additional fetch/generation happened client-side.
+    expect(createObjectURLSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('is keyboard-activatable: Tab focuses the control and Enter triggers the download (ENC-FTR-051 AC5)', async () => {
+    const user = userEvent.setup()
+    render(<DownloadMarkdownButton document={makeDoc()} />)
+
+    await user.tab()
+    const button = screen.getByRole('button', { name: 'Download markdown' })
+    expect(button).toHaveFocus()
+
+    await user.keyboard('{Enter}')
+
+    expect(createObjectURLSpy).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Downloaded' })).toBeInTheDocument()
+  })
+
+  it('is keyboard-activatable via Space as well as Enter', async () => {
+    const user = userEvent.setup()
+    render(<DownloadMarkdownButton document={makeDoc()} />)
+
+    await user.tab()
+    await user.keyboard(' ')
+
     expect(createObjectURLSpy).toHaveBeenCalledTimes(1)
   })
 })
