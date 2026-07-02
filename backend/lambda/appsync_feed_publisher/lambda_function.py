@@ -304,6 +304,19 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
     if not record_id:
         return None
 
+    # ENC-TSK-K74: the tracker's composite record_id ("task#ENC-TSK-004")
+    # contains '#', which AppSync Events rejects as a channel segment
+    # (400 Invalid Channel Format — verified live during K56 provisioning:
+    # feed/updates and projects/{id} publish 200, records/task#... 400).
+    # Use the bare item_id ("ENC-TSK-004") for the per-record channel, the
+    # payload recordId, and the pre-rendered summary — this also matches the
+    # ui-v2 client's /records/{recordId} subscription contract, which
+    # subscribes with bare item ids from route params.
+    item_id = _first_nonempty(
+        primary.get("item_id"),
+        record_id.split("#")[-1],
+    )
+
     record_type = _first_nonempty(primary.get("record_type"), "record")
     project_id = _first_nonempty(primary.get("project_id"), keys.get("project_id")) or DEFAULT_PROJECT_ID
     title = _first_nonempty(primary.get("title"), primary.get("name"))
@@ -317,12 +330,12 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
     cursor = derive_cursor(approx_ms, batch_counter)
     event_id = uuid7(approx_ms)
 
-    summary = build_summary(actor_id, action, record_type, record_id, title)
+    summary = build_summary(actor_id, action, record_type, item_id, title)
 
     # Short-ish but readable keys; no raw item image inlined.
     payload: Dict[str, Any] = {
         "eventId": event_id,
-        "recordId": record_id,
+        "recordId": item_id,
         "record_type": record_type,
         "action": action,
         "actorType": actor_type,
@@ -331,7 +344,7 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
         "cursor": cursor,
         "channels": [
             "/feed/updates",
-            f"/records/{record_id}",
+            f"/records/{item_id}",
             f"/projects/{project_id}",
         ],
     }

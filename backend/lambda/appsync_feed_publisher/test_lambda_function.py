@@ -274,3 +274,63 @@ def test_handler_skips_unresolvable_record_without_failing():
     with patch.object(mod, "DRY_RUN", True):
         result = mod.handler(event, None)
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-K74 regression: composite record_id must never leak '#' into the
+# per-record channel (AppSync rejects it: 400 Invalid Channel Format —
+# verified live during K56 gamma provisioning), nor into recordId/summary.
+# Real tracker rows carry composite record_id ("task#ENC-TSK-004") plus a
+# bare item_id attribute; the original fixture above used a bare record_id,
+# which is why this bug escaped the suite.
+# ---------------------------------------------------------------------------
+
+
+def test_composite_record_id_uses_bare_item_id_everywhere():
+    rec = _stream_record(
+        event_name="MODIFY",
+        new_image={
+            "record_id": "task#ENC-TSK-004",
+            "item_id": "ENC-TSK-004",
+            "record_type": "task",
+            "project_id": "enceladus",
+            "title": "Composite id row",
+        },
+        old_image={
+            "record_id": "task#ENC-TSK-004",
+            "item_id": "ENC-TSK-004",
+            "record_type": "task",
+            "project_id": "enceladus",
+            "title": "Composite id row",
+            "status": "open",
+        },
+    )
+    payload = mod.build_event_payload(rec, 0)
+    assert payload is not None
+    assert payload["recordId"] == "ENC-TSK-004"
+    assert payload["channels"] == [
+        "/feed/updates",
+        "/records/ENC-TSK-004",
+        "/projects/enceladus",
+    ]
+    assert "#" not in payload["summary"]
+    for channel in payload["channels"]:
+        assert "#" not in channel
+
+
+def test_composite_record_id_without_item_id_falls_back_to_suffix():
+    # Older rows may lack the bare item_id attribute — the suffix after the
+    # last '#' is the bare id.
+    rec = _stream_record(
+        event_name="INSERT",
+        new_image={
+            "record_id": "lesson#ENC-LSN-057",
+            "record_type": "lesson",
+            "project_id": "enceladus",
+            "title": "No item_id attribute",
+        },
+    )
+    payload = mod.build_event_payload(rec, 0)
+    assert payload is not None
+    assert payload["recordId"] == "ENC-LSN-057"
+    assert "/records/ENC-LSN-057" in payload["channels"]
