@@ -2361,6 +2361,43 @@ Resources:
       RouteKey: "POST /api/v1/coordination/lesson-candidates/{documentId}/reject"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-J70 / ENC-FTR-121 Ph3: Escalations approval surface (gamma-only per
+  # DOC-499FA089EC30 -- v3-prod promotion is io-gated per DOC-B716E8FB10B6).
+  # GET feed + Cognito-gated approve/deny on coordination_api; the tracker apply
+  # route is the HTTP lane to applyEscalatedMutation (ENC-TSK-J69) -- idempotent,
+  # only actionable while the escalation is io-approved and unapplied.
+  RouteEscalationsFeed:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/escalations"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteEscalationsApprove:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteEscalationsDeny:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteTrackerEscalationApply:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply"
+      Target: !Sub integrations/${TrackerMutationIntegration}
+
 Outputs:
   ApiEndpoint:
     Value: !GetAtt HttpApi.ApiEndpoint

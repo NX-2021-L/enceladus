@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.02",
-  "updated_at": "2026-07-02T04:35:00Z",
-  "last_change_summary": "ENC-TSK-J69 (ENC-FTR-121 Ph2, DOC-5B888FCA43B8): applyEscalatedMutation applier - the single privileged code path applying io-approved escalations. applied_at idempotency guard + conditional approved->applying concurrency gate; both handler applies (deploy_arc_change preserving active checkouts; direct_state_override with escalation_waived sentinels, escalated_closure, verbatim field_values) execute one atomic UpdateItem on the target with escalation_provenance + [ESCALATION-APPLIED] worklog riding the same write (no-partial-write). applying->failed captures errors in result; corrective requests are new escalations. record.escalation.applied audit event. Also: escalation.list pseudo-id alias GET /{project}/escalation/list for explicit APIGW route tables (found in J68 gamma validation). Validators unchanged - no bypass flags.",
+  "version": "2026-07-02.03",
+  "updated_at": "2026-07-02T04:50:00Z",
+  "last_change_summary": "ENC-TSK-J70 (ENC-FTR-121 Ph3, DOC-5B888FCA43B8): Cognito approval API + PWA Escalations page. coordination.escalations entity: Cognito-human-only feed/approve/deny routes (403 for internal-key/SCI/managed-token; no MCP action), requested->approved|denied|denied_with_guidance decision writes with race guards, approve drives applyEscalatedMutation via Lambda invoke with a fail-soft approved-but-unapplied path, section-5.7 render_diff with drift flag computed from the live target at render time. PWA: hamburger menu item + /escalations page (pending cards with diff + drift warning, approve/deny/deny-with-guidance, collapsed History audit section). APIGW routes gamma-only in 03-api.yaml; TRACKER_MUTATION_LAMBDA_NAME env + InvokeTrackerMutationEscalationApply role grant in 02-compute.yaml.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6524,6 +6524,25 @@
           "definition": "List escalations filterable by status, target_record_id, session_id; page_size 1-200 (default 50), newest first. ENC-TSK-J69: the MCP server calls GET /{project}/escalation/list (pseudo-id alias riding the registered {recordType}/{recordId} API Gateway route) because explicit gamma-style route tables register no bare {recordType} collection path; 'list' can never collide with a server-minted ENC-ESC-* id."
         }
       }
+    },
+    "coordination.escalations": {
+      "description": "ENC-FTR-121 Ph3 (ENC-TSK-J70, DOC-5B888FCA43B8 sections 5.7 + 6): io's escalation approval surface on coordination_api - the SOLE origin of override authorization in the platform. Every route verifies a genuine Cognito human session server-side per call (_is_cognito_session); internal-key, SCI, and managed-token credentials are structurally rejected with 403. No MCP action maps to approve or deny. Approve stamps approved_by {sub, email}, walks requested->approved under a ConditionExpression race guard, and drives applyEscalatedMutation (ENC-TSK-J69) in tracker_mutation via direct Lambda invoke (TRACKER_MUTATION_LAMBDA_NAME + X-Coordination-Internal-Key); the approval is durable even if the applier invoke fails (fail-soft: the escalation stays approved and the idempotent apply route can be re-driven - the agent never resubmits the cached mutation). Deny walks requested->denied, or requested->denied_with_guidance when a guidance_note is supplied; the note is stored on the item AND rides the denial event so watch polling (Ph4) delivers it to the agent.",
+      "fields": {
+        "GET /api/v1/coordination/escalations": {
+          "type": "route",
+          "definition": "io approval queue feed. Query params: project_id (default enceladus), status. Pending (requested) escalations carry a fresh section-5.7 render_diff computed from the LIVE target record at render time - never the cached request - including a drift object {expected_version, current_sync_version, current_updated_at, detected} when expected_version was supplied. Terminal escalations return in a separate array for the collapsed audit section. Cognito-only."
+        },
+        "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve": {
+          "type": "route",
+          "definition": "Non-delegable approve: requested->approved + approved_by + event, then drives the applier. Returns applied:true|false with apply_result or apply_error+retry."
+        },
+        "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny": {
+          "type": "route",
+          "definition": "Non-delegable deny: requested->denied (or denied_with_guidance when body.guidance_note is non-empty). Denied escalations are never applied."
+        }
+      },
+      "pwa_surface": "Escalations item in the PWA hamburger menu -> /escalations page: pending feed newest-first (target id/title, mutation type, requesting session, justification, fresh diff, prominent drift warning that still permits informed approve/deny), Approve / Deny / Deny-with-Guidance actions, terminal escalations in a collapsed History section. Ships via the comp-enceladus-pwa gamma pipeline.",
+      "apigw_routes": "03-api.yaml (Condition: IsGamma, prod promotion io-gated per DOC-B716E8FB10B6): RouteEscalationsFeed, RouteEscalationsApprove, RouteEscalationsDeny -> CoordinationApiIntegration; RouteTrackerEscalationApply (POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply) -> TrackerMutationIntegration as the HTTP lane to the idempotent applier."
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -6602,6 +6621,11 @@
       "version": "2026-07-02.02",
       "task": "ENC-TSK-J69",
       "summary": "ENC-TSK-J69 (ENC-FTR-121 Ph2, DOC-5B888FCA43B8): applyEscalatedMutation applier - the single privileged code path applying io-approved escalations. applied_at idempotency guard + conditional approved->applying concurrency gate; both handler applies (deploy_arc_change preserving active checkouts; direct_state_override with escalation_waived sentinels, escalated_closure, verbatim field_values) execute one atomic UpdateItem on the target with escalation_provenance + [ESCALATION-APPLIED] worklog riding the same write (no-partial-write). applying->failed captures errors in result; corrective requests are new escalations. record.escalation.applied audit event. Also: escalation.list pseudo-id alias GET /{project}/escalation/list for explicit APIGW route tables (found in J68 gamma validation). Validators unchanged - no bypass flags."
+    },
+    {
+      "version": "2026-07-02.03",
+      "task": "ENC-TSK-J70",
+      "summary": "ENC-TSK-J70 (ENC-FTR-121 Ph3, DOC-5B888FCA43B8): Cognito approval API + PWA Escalations page. coordination.escalations entity: Cognito-human-only feed/approve/deny routes (403 for internal-key/SCI/managed-token; no MCP action), requested->approved|denied|denied_with_guidance decision writes with race guards, approve drives applyEscalatedMutation via Lambda invoke with a fail-soft approved-but-unapplied path, section-5.7 render_diff with drift flag computed from the live target at render time. PWA: hamburger menu item + /escalations page (pending cards with diff + drift warning, approve/deny/deny-with-guidance, collapsed History audit section). APIGW routes gamma-only in 03-api.yaml; TRACKER_MUTATION_LAMBDA_NAME env + InvokeTrackerMutationEscalationApply role grant in 02-compute.yaml."
     }
   ]
 }
