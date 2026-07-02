@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.21",
-  "updated_at": "2026-07-02T11:02:00Z",
-  "last_change_summary": "ENC-TSK-J52 (FTR-104 Ph3): promote I99-tuned energy lambda weights (lambda_graph=1.0, lambda_kw=0.1) to live hybrid retrieval defaults + gamma ENERGY_LAMBDA_* env vars; optional include_energy query flag exposes energy_score + energy_breakdown on hybrid nodes.",
+  "version": "2026-07-02.22",
+  "updated_at": "2026-07-02T11:20:00Z",
+  "last_change_summary": "ENC-TSK-K11: enceladus-mcp-code Gen2 build packaging — mcp_code/lambda_function.py shim + _build.yml copies tools/enceladus-mcp-server runtime modules (telemetry_rank) into enceladus-mcp-code-gamma artifact.",
   "owners": [
     "enceladus-platform"
   ],
