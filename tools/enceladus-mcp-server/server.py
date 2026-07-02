@@ -6139,7 +6139,10 @@ async def _escalation_list(args: dict) -> list[TextContent]:
         "session_id": args.get("session_id"),
         "page_size": args.get("page_size"),
     }
-    resp = _tracker_api_request("GET", f"/{project_id}/escalation", query=query)
+    # ENC-TSK-J69: the "list" pseudo-id rides the API Gateway route
+    # GET /{projectId}/{recordType}/{recordId} — the bare collection path has
+    # no registered route on the explicit (gamma-style) route tables.
+    resp = _tracker_api_request("GET", f"/{project_id}/escalation/list", query=query)
     return _result_text(resp)
 
 

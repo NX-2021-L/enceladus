@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.01",
-  "updated_at": "2026-07-02T04:10:00Z",
-  "last_change_summary": "ENC-TSK-J68 (ENC-FTR-121 Ph1, DOC-5B888FCA43B8): Escalations entity + governed request/read surface. New tracker.escalation item type in the existing tracker table (escalation#{ENC-ESC-*} sort key, server-minted via the escalation counter; NOT a generic _RECORD_TYPES member \u2014 generic CRUD/checkout cannot touch it), seven-state escalation FSM, mutation-handler registry with request-time validate_payload for deploy_arc_change and direct_state_override (status legality checked, path legality deliberately not \u2014 that is what io approval overrides), and MCP actions escalation.request/get/list behind ENABLE_ESCALATION_PRIMITIVE. Approve/deny have no MCP surface by design (Cognito human path only).",
+  "version": "2026-07-02.02",
+  "updated_at": "2026-07-02T04:35:00Z",
+  "last_change_summary": "ENC-TSK-J69 (ENC-FTR-121 Ph2, DOC-5B888FCA43B8): applyEscalatedMutation applier - the single privileged code path applying io-approved escalations. applied_at idempotency guard + conditional approved->applying concurrency gate; both handler applies (deploy_arc_change preserving active checkouts; direct_state_override with escalation_waived sentinels, escalated_closure, verbatim field_values) execute one atomic UpdateItem on the target with escalation_provenance + [ESCALATION-APPLIED] worklog riding the same write (no-partial-write). applying->failed captures errors in result; corrective requests are new escalations. record.escalation.applied audit event. Also: escalation.list pseudo-id alias GET /{project}/escalation/list for explicit APIGW route tables (found in J68 gamma validation). Validators unchanged - no bypass flags.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6448,6 +6448,16 @@
             "format": "iso8601"
           },
           "definition": "Server-stamped on every mutation."
+        },
+        "escalation_provenance": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-TSK-J69: append-only list of escalation IDs applied to a TARGET record (stamped on the target, not the escalation, inside the applier's atomic write together with the [ESCALATION-APPLIED] worklog entry carrying requesting session, approving human, before/after states, and waived fields). Artifact-Genesis: every override leaves an artifact."
         }
       },
       "dynamodb_key_schema": {
@@ -6481,11 +6491,20 @@
             "escalation_id": "ENC-ESC-NNN",
             "waived_at": "iso8601"
           },
-          "definition": "\u00a75.6: when direct_state_override lands a record in a state whose invariant fields are unsupplied, each such field is written with this sentinel rather than left null. Downstream consumers read 'known-absent by human decision', which is semantically distinct from 'never reached' or 'data loss'. Writer ships in Ph2 (ENC-TSK-J69)."
+          "definition": "Section 5.6: when direct_state_override lands a record in a state whose invariant fields are unsupplied, each such field is written with this sentinel rather than left null. Downstream consumers read 'known-absent by human decision', semantically distinct from 'never reached' or 'data loss'. LIVE as of ENC-TSK-J69: written by _apply_direct_state_override. Null-handling audit finding (2026-07-02): the deploy/closed evidence validators in tracker_mutation validate REQUEST transition_evidence, not stored record state, so sentinel-bearing records do not break them; the sentinel is a dict, making accidental string ops fail loudly and grep-ably rather than silently."
         },
         "escalated_closure": {
           "type": "boolean",
-          "definition": "Set true on any record closed via direct_state_override so ENC-FTR-118 empirical-runtime metrics and close-quality reporting can filter override closures out of organic-completion datasets. Writer ships in Ph2 (ENC-TSK-J69)."
+          "definition": "Set true on any record closed via direct_state_override so ENC-FTR-118 empirical-runtime metrics and close-quality reporting can filter override closures out of organic-completion datasets. LIVE as of ENC-TSK-J69 (written by _apply_direct_state_override; task closures also increment closed_count so DESIGNS-edge and subtask gates keep organic parity)."
+        }
+      },
+      "applier": {
+        "function": "applyEscalatedMutation (_handle_escalation_apply, tracker_mutation)",
+        "route": "POST /{projectId}/escalation/{escalationId}/apply (rides the registered {recordType}/{recordId}/{sub} route shape; tracker:write scope)",
+        "definition": "ENC-TSK-J69 (Ph2): the SINGLE privileged code path that may write transitions the normal FSM forbids (Tenet 2). Sequence per section 5.5: approved+applied_at-null guard (repeat/concurrent invocation no-ops); conditional approved->applying transition is the concurrency gate (ConditionExpression status=approved AND attribute_not_exists(applied_at)); fresh consistent target read; registry handler apply executes exactly ONE atomic UpdateItem on the target (provenance worklog + escalation_provenance append ride the same write, so a handler exception leaves the target untouched); applying->applied stamps applied_at + result; on failure applying->failed captures the error in result and a corrective request is a NEW escalation. Reachability: application requires status=approved, which only the Cognito-human approval route (Ph3/ENC-TSK-J70) can write - no MCP action, SCI token, or internal key maps to approve. Normal validators in _handle_update_field are untouched and carry no bypass flags. Emits record.escalation.applied to the enceladus.tracker audit event bus.",
+        "handler_applies": {
+          "deploy_arc_change": "rewrites transition_type (and checkout_transition_type when present, which recomputes arc-derived gate expectations) in place; checkout fields untouched so an active checkout survives.",
+          "direct_state_override": "writes target_status regardless of path legality; supplied field_values written verbatim; unsupplied required-for-state fields (from the transition-matrix gate contracts: committed->commit_sha, deploy-success->arc evidence key, closed->arc closed-evidence key, issue closed->evidence) get the escalation_waived sentinel; closures set escalated_closure=true and increment closed_count for tasks (organic-gate parity)."
         }
       }
     },
@@ -6502,7 +6521,7 @@
         },
         "escalation.list": {
           "type": "search_action",
-          "definition": "List escalations filterable by status, target_record_id, session_id; page_size 1-200 (default 50), newest first."
+          "definition": "List escalations filterable by status, target_record_id, session_id; page_size 1-200 (default 50), newest first. ENC-TSK-J69: the MCP server calls GET /{project}/escalation/list (pseudo-id alias riding the registered {recordType}/{recordId} API Gateway route) because explicit gamma-style route tables register no bare {recordType} collection path; 'list' can never collide with a server-minted ENC-ESC-* id."
         }
       }
     }
@@ -6578,6 +6597,11 @@
       "version": "2026-07-02.01",
       "task": "ENC-TSK-J68",
       "summary": "ENC-TSK-J68 (ENC-FTR-121 Ph1, DOC-5B888FCA43B8): Escalations entity + governed request/read surface. New tracker.escalation item type in the existing tracker table (escalation#{ENC-ESC-*} sort key, server-minted via the escalation counter; NOT a generic _RECORD_TYPES member \u2014 generic CRUD/checkout cannot touch it), seven-state escalation FSM, mutation-handler registry with request-time validate_payload for deploy_arc_change and direct_state_override (status legality checked, path legality deliberately not \u2014 that is what io approval overrides), and MCP actions escalation.request/get/list behind ENABLE_ESCALATION_PRIMITIVE. Approve/deny have no MCP surface by design (Cognito human path only)."
+    },
+    {
+      "version": "2026-07-02.02",
+      "task": "ENC-TSK-J69",
+      "summary": "ENC-TSK-J69 (ENC-FTR-121 Ph2, DOC-5B888FCA43B8): applyEscalatedMutation applier - the single privileged code path applying io-approved escalations. applied_at idempotency guard + conditional approved->applying concurrency gate; both handler applies (deploy_arc_change preserving active checkouts; direct_state_override with escalation_waived sentinels, escalated_closure, verbatim field_values) execute one atomic UpdateItem on the target with escalation_provenance + [ESCALATION-APPLIED] worklog riding the same write (no-partial-write). applying->failed captures errors in result; corrective requests are new escalations. record.escalation.applied audit event. Also: escalation.list pseudo-id alias GET /{project}/escalation/list for explicit APIGW route tables (found in J68 gamma validation). Validators unchanged - no bypass flags."
     }
   ]
 }
