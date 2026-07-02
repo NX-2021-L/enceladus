@@ -3232,11 +3232,153 @@ def _handle_wave_close_drift(event: Dict[str, Any]) -> Dict[str, Any]:
     return _response(200, {"emitted": record})
 
 
+def _iter_wave_pathway_telemetry_records(wave_id: str) -> tuple[List[Dict[str, Any]], int, int]:
+    """ENC-TSK-J90 — read back every pathway-telemetry object emitted for a wave.
+
+    Lists ``s3://{PATHWAY_TELEMETRY_BUCKET}/{PATHWAY_TELEMETRY_PREFIX}/wave_id=<wid>/``
+    (the exact partition ``_emit_pathway_telemetry`` writes to) via a paginated
+    ``list_objects_v2`` and parses each object's body. Each object holds one JSON
+    telemetry record per line (the emitter writes a single line today, but the
+    ``.jsonl`` / ``application/x-ndjson`` contract permits multiple, so we parse
+    line-by-line defensively). Blank lines and individually malformed lines are
+    skipped rather than aborting the whole wave.
+
+    Returns ``(records, objects_seen, objects_failed)`` where ``records`` is the
+    flat list of every parsed telemetry record. Fully defensive: on any S3 error
+    (bucket unset, list/get failure) it degrades to ``([], 0, 0)`` / partial
+    results rather than raising, mirroring ``_emit_pathway_telemetry``'s
+    "never crash the request path" philosophy — while still reporting the counts
+    so the caller can be transparent about how much telemetry it actually saw.
+    """
+    records: List[Dict[str, Any]] = []
+    objects_seen = 0
+    objects_failed = 0
+    if not PATHWAY_TELEMETRY_BUCKET:
+        return records, objects_seen, objects_failed
+
+    wid = str(wave_id or "unassigned").replace("/", "_") or "unassigned"
+    prefix = f"{PATHWAY_TELEMETRY_PREFIX}/wave_id={wid}/"
+    try:
+        s3 = _get_s3()
+        paginator = s3.get_paginator("list_objects_v2")
+        keys: List[str] = []
+        for page in paginator.paginate(Bucket=PATHWAY_TELEMETRY_BUCKET, Prefix=prefix):
+            for obj in page.get("Contents", []) or []:
+                key = obj.get("Key")
+                if key:
+                    keys.append(key)
+    except Exception:
+        logger.exception("[ERROR] close_wave list_objects_v2 failed (degrading to empty)")
+        return records, objects_seen, objects_failed
+
+    for key in keys:
+        objects_seen += 1
+        try:
+            resp = s3.get_object(Bucket=PATHWAY_TELEMETRY_BUCKET, Key=key)
+            body = resp["Body"].read()
+            if isinstance(body, bytes):
+                body = body.decode("utf-8")
+            for line in body.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except (ValueError, TypeError):
+                    logger.warning("[WARNING] close_wave: skipping malformed JSONL line in %s", key)
+        except Exception:
+            objects_failed += 1
+            logger.warning("[WARNING] close_wave: failed to read telemetry object %s", key, exc_info=True)
+
+    return records, objects_seen, objects_failed
+
+
+def _handle_close_wave(event: Dict[str, Any]) -> Dict[str, Any]:
+    """ENC-TSK-J90 (ENC-FTR-105 AC-7 / ENC-FTR-087) — wave-close orchestrator.
+
+    Reads back the per-wave pathway-telemetry JSONL objects that every
+    ``_query_hybrid`` call appended to S3 (``_emit_pathway_telemetry``),
+    aggregates their ``energy.records[]`` arrays (the
+    ``energy_function.build_retrieval_record`` shape carrying
+    ``avg_retrieval_energy`` / ``retrieval_energy``) into one combined
+    ``retrieval_records`` list for the wave, and drives the existing
+    ``drift_telemetry.compute_and_emit_wave_close_drift`` with it — closing the
+    gap where nothing fed real telemetry into ``spurious_attractor_rate``.
+
+    Payload (event) fields:
+      project_id (required), wave_id (required), prev_wave_id (optional).
+
+    Scope: only the ``spurious_attractor_rate`` (retrieval_records) path.
+    ``d_centroid_L2`` / ``d_spectral`` intentionally degrade to null here — this
+    handler sources no embeddings/adjacency (per the drift_telemetry independent-
+    degrade contract). OGTM: reads S3 + writes an existing DynamoDB series only;
+    no new Neo4j edge type or node label is introduced.
+
+    Empty-wave / S3-unavailable degrade cleanly: the aggregated list is empty and
+    ``compute_spurious_attractor_rate`` returns its null-stub value. The response
+    reports ``objects_seen`` / ``records_aggregated`` for transparency rather than
+    pretending telemetry existed.
+    """
+    import drift_telemetry
+
+    project_id = str(event.get("project_id", "")).strip()
+    wave_id = str(event.get("wave_id", "")).strip()
+    if not project_id or not wave_id:
+        return _error(400, "close_wave requires project_id and wave_id")
+    if not DRIFT_TELEMETRY_TABLE:
+        return _error(503, "DRIFT_TELEMETRY_TABLE is not configured")
+
+    telemetry_records, objects_seen, objects_failed = _iter_wave_pathway_telemetry_records(wave_id)
+
+    combined_records: List[Dict[str, Any]] = []
+    for rec in telemetry_records:
+        if not isinstance(rec, dict):
+            continue
+        energy = rec.get("energy") or {}
+        if not isinstance(energy, dict):
+            continue
+        for er in energy.get("records") or []:
+            if isinstance(er, dict):
+                combined_records.append(er)
+
+    try:
+        record = drift_telemetry.compute_and_emit_wave_close_drift(
+            ddb_client=_get_dynamodb(),
+            table_name=DRIFT_TELEMETRY_TABLE,
+            project_id=project_id,
+            wave_id=wave_id,
+            prev_wave_id=event.get("prev_wave_id"),
+            retrieval_records=combined_records,
+        )
+    except ValueError as exc:
+        return _error(400, f"close_wave payload error: {exc}")
+    except Exception as exc:  # noqa: BLE001 — emission failures must not crash the invoke
+        logger.exception("[ERROR] close_wave emission failed")
+        return _error(500, f"close_wave emission failed: {exc}")
+
+    return _response(200, {
+        "emitted": record,
+        "wave_id": wave_id,
+        "project_id": project_id,
+        "objects_seen": objects_seen,
+        "objects_failed": objects_failed,
+        "records_aggregated": len(combined_records),
+    })
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """API Gateway v2 proxy handler."""
     # ENC-FTR-087 Phase 1: wave-close drift emission via direct invoke / event.
     if isinstance(event, dict) and event.get("action") == "wave_close_drift":
         return _handle_wave_close_drift(event)
+
+    # ENC-TSK-J90 (ENC-FTR-105 AC-7): wave-close orchestrator — reads back the
+    # wave's pathway-telemetry JSONL from S3, aggregates energy.records[] into a
+    # combined retrieval_records list, and drives compute_and_emit_wave_close_drift
+    # (feeding spurious_attractor_rate with real telemetry). Checked before the
+    # generic Scheduled-Event fallback below.
+    if isinstance(event, dict) and event.get("action") == "close_wave":
+        return _handle_close_wave(event)
 
     # ENC-FTR-108 Ph2 (ENC-TSK-J02): out-of-band flow_weight refresh. Checked
     # before the generic aws.events/Scheduled-Event fallback below so an
