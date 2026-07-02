@@ -239,11 +239,19 @@ if [[ "${HEALTH_GATE_SKIP_DRIFT:-0}" == "1" ]]; then
     echo "[CHECK 7/7] SKIPPED — HEALTH_GATE_SKIP_DRIFT=1 (change-set IMPORT context;"
     echo "            assert_changeset_safe.py mode=import is the compensating control)."
 else
-    echo "[CHECK 7/7] Validating no live CFN drift (environment=${DRIFT_ENV}, fail-on-drift)..."
+    echo "[CHECK 7/7] Validating no live CFN drift (environment=${DRIFT_ENV}, fail-on-drift, pre-deploy)..."
+    # ENC-ISS-467: --pre-deploy relaxes the fail-on-drift decision to live_only
+    # only. A pure-ADD cfn_only delta (a branch declaring a new route/rule that
+    # isn't live yet) is exactly what the FTR-120 plan/apply change-set review
+    # approves; failing this pre-deploy gate on it forced a redundant two-phase
+    # io approval for every route-adding PR (CI run 28572125111). live_only
+    # stays fail-closed -- that's the AWS::EarlyValidation::ResourceExistenceCheck
+    # wedge guard this check exists for.
     if python3 "${REPO_ROOT}/tools/audit_cfn_drift.py" \
             --environment "${DRIFT_ENV}" \
             --output-json "${DRIFT_REPORT}" \
-            --fail-on-drift; then
+            --fail-on-drift \
+            --pre-deploy; then
         echo "[PASS] No CFN drift detected for ${DRIFT_ENV}"
         DRIFT_RC=0
     else

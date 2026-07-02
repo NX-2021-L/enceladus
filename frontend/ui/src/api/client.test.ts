@@ -47,7 +47,9 @@ describe('client api helpers', () => {
     expect(data.tasks).toEqual([])
 
     const [url] = fetchMock.mock.calls[0] as [string]
-    expect(url).toBe('/mobile/v1/tasks.json')
+    const [path, query] = url.split('?')
+    expect(path).toBe('/mobile/v1/tasks.json')
+    expect(query).toMatch(/^_t=\d+$/)
   })
 
   it('probeSession throws when probe endpoint is non-2xx', async () => {
