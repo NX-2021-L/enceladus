@@ -94,3 +94,4 @@ function_name_map:
   scoring_service: enceladus-scoring-service-gamma
   recompute_governance: devops-recompute-governance-gamma
   corpus_entropy_engine: enceladus-corpus-entropy-engine-gamma
+  corpus_entropy_gdmp_remediation: enceladus-corpus-entropy-gdmp-remediation-gamma

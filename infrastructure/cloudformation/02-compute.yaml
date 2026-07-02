@@ -1960,6 +1960,98 @@ Resources:
       SourceArn: !GetAtt CorpusEntropyEngineSchedule.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-K42 / B66 Ph5: GDMP Stage-1 auto-remediation Lambda. Consumes K41's
+  # Compliance/Semantic detector output and deterministically resolves a
+  # whitelist of compliance_warnings classes via documents.patch, advancing
+  # raw documents to compliant maturity_state with no agent involvement.
+  # DATA-SAFETY: GDMP_DRY_RUN=1, GDMP_MUTATION_ENABLED=0, GDMP_IO_APPROVAL_RUNS=3
+  # (FTR-106 AC-4 io-approval-ramp pattern, same shape as UnlearningFunction).
+  # CEE_GDMP_HARD_DISABLED is the mandatory kill switch (ISS-465 cost-preflight
+  # precedent), checked first thing in the handler. Gamma-only (Condition:
+  # IsGamma): v3-prod is frozen (DOC-499FA089EC30).
+  # ---------------------------------------------------------------------------
+  CorpusEntropyGdmpRemediationFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-corpus-entropy-gdmp-remediation${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt CorpusEntropyGdmpRemediationRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          DOCUMENT_API_BASE: !Sub "https://enceladus-gamma.jreese.net/api/v1/documents"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
+          PROJECT_ID: enceladus
+          COMPLIANCE_SCORE_THRESHOLD: "70"
+          GDMP_STATE_BUCKET: !Ref S3Bucket
+          GDMP_STATE_PREFIX: !Sub "${S3EnvPrefix}gdmp-remediation-state"
+          GDMP_MAX_DOCS_PER_RUN: "200"
+          # DATA-SAFETY defaults -- io clears CEE_GDMP_HARD_DISABLED and later
+          # flips GDMP_MUTATION_ENABLED only after IO_APPROVAL_RUNS candidate
+          # reports have been reviewed. Mirrors UNLEARNING_* (K03) convention.
+          GDMP_DRY_RUN: "1"
+          GDMP_MUTATION_ENABLED: "0"
+          GDMP_IO_APPROVAL_RUNS: "3"
+          # ISS-465-style kill switch -- installed disabled by default; io
+          # clears to "0" to enable. Mirrors CEE_HARD_DISABLED (K41) /
+          # UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
+          CEE_GDMP_HARD_DISABLED: "1"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: corpus-entropy-gdmp-remediation
+        - Key: Feature
+          Value: ENC-TSK-K42
+
+  # Nightly at 06:00 UTC -- after the CEE detection scan (05:00), so
+  # remediation always sees the freshest Compliance/Semantic findings.
+  CorpusEntropyGdmpRemediationSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-corpus-entropy-gdmp-nightly${EnvironmentSuffix}"
+      Description: "Nightly GDMP Stage-1 auto-remediation pass (ENC-TSK-K42 / B66 Ph5)"
+      ScheduleExpression: "cron(0 6 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CorpusEntropyGdmpRemediationFunction.Arn
+          Id: corpus-entropy-gdmp-nightly
+
+  CorpusEntropyGdmpRemediationPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref CorpusEntropyGdmpRemediationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CorpusEntropyGdmpRemediationSchedule.Arn
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-H86 / ENC-FTR-111 Phase 1 (T5): Universal Arc-Walker telemetry +
   # convergence-probe Lambda. Read-only — scans the tracker table and publishes
   # CloudWatch metrics (Enceladus/ArcWalk).
@@ -2353,6 +2445,30 @@ Resources:
       Dimensions:
         - Name: RuleName
           Value: !Sub "enceladus-corpus-entropy-nightly${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 604800
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # ENC-TSK-K42 / B66 Ph5: GDMP Stage-1 remediation cost-preflight guard
+  # (ISS-465). Nightly cadence (1/day, EventBridge per-invocation, no standing
+  # compute) is far below the threshold. 7-day invocation window mirrors the
+  # K03/K41 sibling alarms; breach indicates a runaway/duplicate schedule.
+  CorpusEntropyGdmpRemediationCostHeadroomAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-corpus-entropy-gdmp-invocations${EnvironmentSuffix}"
+      AlarmDescription: >-
+        ENC-TSK-K42 cost-preflight guard: 7-day invocation window; nightly cadence
+        should be <=7/week (threshold 10 allows buffer). Breach indicates runaway schedule.
+      Namespace: AWS/Events
+      MetricName: Invocations
+      Dimensions:
+        - Name: RuleName
+          Value: !Sub "enceladus-corpus-entropy-gdmp-nightly${EnvironmentSuffix}"
       Statistic: Sum
       Period: 604800
       EvaluationPeriods: 1
@@ -5006,6 +5122,59 @@ Resources:
                 Action:
                   - cloudwatch:PutMetricData
                 Resource: "*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ENC-TSK-K42 / B66 Ph5: GDMP Stage-1 remediation Lambda IAM Role
+  # (gamma-only). No direct DynamoDB/S3 document access -- all document
+  # reads/writes go through the governed document_api HTTP surface
+  # (internal API key auth). S3 access is scoped ONLY to this Lambda's own
+  # io-approval-ramp run-counter state prefix, mirroring UnlearningRole's
+  # narrow-prefix S3 scoping convention.
+  CorpusEntropyGdmpRemediationRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-corpus-entropy-gdmp-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CorpusEntropyGdmpRemediationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: GdmpRampStateS3
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}gdmp-remediation-state/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

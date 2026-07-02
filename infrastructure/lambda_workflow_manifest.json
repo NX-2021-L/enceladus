@@ -276,6 +276,12 @@
       "lambda_dir": "backend/lambda/corpus_entropy_engine",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/corpus_entropy_engine/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-corpus-entropy-gdmp-remediation",
+      "lambda_dir": "backend/lambda/corpus_entropy_gdmp_remediation",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/corpus_entropy_gdmp_remediation/deploy.sh"
     }
   ]
 }
