@@ -57,6 +57,12 @@
     },
     {
       "entry_file": "lambda_function.py",
+      "function_name": "devops-appsync-feed-publisher",
+      "region": "us-west-2",
+      "repo_entry_path": "backend/lambda/appsync_feed_publisher/lambda_function.py"
+    },
+    {
+      "entry_file": "lambda_function.py",
       "function_name": "devops-feed-query-api",
       "region": "us-west-2",
       "repo_entry_path": "backend/lambda/feed_query/lambda_function.py"
