@@ -8934,6 +8934,47 @@ def _create_lesson_record(
     raise RuntimeError("Failed allocating lesson record id after retries")
 
 
+def _finalize_lesson_candidate_decision(
+    document_id: str, new_handoff_status: str, decider: str, note: str
+) -> None:
+    """Atomically transition a lesson-candidate's handoff_status and append a
+    structured decision_log entry, directly against DOCUMENTS_TABLE.
+
+    Written directly (DocumentsTableCandidateDecisionWrite in 02-compute.yaml)
+    rather than proxied through document_api's PATCH: that endpoint's
+    internal-key auth is shared with the MCP server's agent-facing
+    documents.patch relay, so it cannot distinguish an already-Cognito-verified
+    coordination_api call from a bare agent session -- routing through it would
+    silently reopen the exact autonomous-promotion hole AC4 forbids. Writing
+    here keeps the Cognito gate solely at this Lambda's own HTTP layer (checked
+    by the caller before this function runs), where it is actually enforceable.
+    Raises botocore.exceptions.ClientError (ConditionalCheckFailedException) if
+    the candidate is no longer pending (race with a concurrent decision).
+    """
+    ddb = _get_ddb()
+    now = _now_z()
+    entry = [{"status": new_handoff_status, "note": note, "by": decider, "at": now}]
+    ddb.update_item(
+        TableName=DOCUMENTS_TABLE,
+        Key={"document_id": _serialize(document_id)},
+        UpdateExpression=(
+            "SET handoff_status = :new, updated_at = :now, "
+            "decision_log = list_append(if_not_exists(decision_log, :empty), :entry)"
+        ),
+        ConditionExpression=(
+            "attribute_exists(document_id) AND document_subtype = :subtype AND handoff_status = :pending"
+        ),
+        ExpressionAttributeValues={
+            ":new": _serialize(new_handoff_status),
+            ":now": _serialize(now),
+            ":empty": _serialize([]),
+            ":entry": _serialize(entry),
+            ":subtype": _serialize("lesson-candidate"),
+            ":pending": _serialize("pending"),
+        },
+    )
+
+
 def _handle_lesson_candidate_approve(
     document_id: str, event: Dict[str, Any], claims: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -9018,22 +9059,24 @@ def _handle_lesson_candidate_approve(
 
     approved_by = _resolve_decider_identity(claims)
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    patch_resp = _invoke_document_api(
-        "PATCH",
-        document_id,
-        {
-            "handoff_status": "approved",
-            "append_content": (
-                f"---\nApproved by {approved_by} at {now}. Promoted to {lesson_id} "
-                f"(ENC-TSK-J46 lesson-candidate curation)."
-            ),
-        },
-    )
-    if patch_resp.get("_status_code") not in (200, 201):
-        logger.warning(
-            "lesson_candidate_approve: %s created but candidate patch failed: %s",
-            lesson_id, patch_resp,
+    try:
+        _finalize_lesson_candidate_decision(
+            document_id,
+            "approved",
+            approved_by,
+            f"Promoted to {lesson_id} (ENC-TSK-J46 lesson-candidate curation).",
         )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.warning(
+                "lesson_candidate_approve: %s created but candidate %s was decided "
+                "concurrently -- candidate handoff_status left unchanged.",
+                lesson_id, document_id,
+            )
+        else:
+            logger.exception(
+                "lesson_candidate_approve: %s created but candidate patch failed", lesson_id
+            )
 
     return _response(
         200,
@@ -9054,8 +9097,9 @@ def _handle_lesson_candidate_reject(
     """POST /api/v1/coordination/lesson-candidates/{documentId}/reject
 
     ENC-TSK-J46 / ENC-FTR-096 Ph2. Marks a pending lesson-candidate document
-    handoff_status='stale' with an appended rejection note — the candidate is
-    never deleted (append-only discipline). Cognito session required.
+    handoff_status='stale' and appends the rejection reason to its append-only
+    decision_log (list_append; the document itself is never deleted or
+    overwritten). Cognito session required.
     """
     if not _is_cognito_session(claims):
         return _error(
@@ -9086,19 +9130,16 @@ def _handle_lesson_candidate_reject(
 
     rejected_by = _resolve_decider_identity(claims)
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    patch_resp = _invoke_document_api(
-        "PATCH",
-        document_id,
-        {
-            "handoff_status": "stale",
-            "append_content": f"---\nRejected by {rejected_by} at {now}. Reason: {rejection_reason}",
-        },
-    )
-    if patch_resp.get("_status_code") not in (200, 201):
-        return _error(
-            502,
-            f"Candidate document patch failed (status={patch_resp.get('_status_code')}): {patch_resp}",
-        )
+    try:
+        _finalize_lesson_candidate_decision(document_id, "stale", rejected_by, rejection_reason)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return _error(
+                409,
+                f"Lesson candidate '{document_id}' was decided concurrently by another request.",
+            )
+        logger.exception("lesson_candidate_reject: candidate write failed")
+        return _error(500, f"Failed to reject lesson candidate: {exc}")
 
     return _response(
         200,

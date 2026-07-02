@@ -2253,6 +2253,18 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+              # ENC-TSK-J46 / ENC-FTR-096 Ph2: lesson-candidate approve/reject writes the
+              # curation decision directly (documents.patch's internal-key auth is shared
+              # with the MCP server's agent-facing path, so it cannot distinguish an
+              # already-Cognito-verified coordination_api relay from a bare agent call --
+              # direct-write here keeps the Cognito gate solely at coordination_api's own
+              # HTTP layer, where it is actually enforceable).
+              - Sid: DocumentsTableCandidateDecisionWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
               - Sid: ComponentRegistryTableAccess
                 Effect: Allow
                 Action:

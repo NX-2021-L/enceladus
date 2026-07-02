@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-01.06",
-  "updated_at": "2026-07-02T02:00:00Z",
-  "last_change_summary": "ENC-TSK-J46: lesson-candidate curation surface (list filter + io-gated approve/reject with LEARNED_FROM provenance).",
+  "version": "2026-07-01.07",
+  "updated_at": "2026-07-02T02:20:00Z",
+  "last_change_summary": "ENC-TSK-J46 fix: lesson-candidate approve/reject now finalize via a direct DynamoDB write, not document_api's PATCH (whose internal-key auth was indistinguishable from the MCP server's agent-facing relay, which silently reopened the io-gate).",
   "owners": [
     "enceladus-platform"
   ],
@@ -6310,6 +6310,10 @@
             "min_length": 10
           },
           "definition": "Human-readable reason appended (append-only) to the candidate document content when marking it stale."
+        },
+        "decision_write_mechanism": {
+          "type": "string",
+          "definition": "Approve/reject finalize the candidate's handoff_status via a direct DynamoDB UpdateItem against the documents table (DocumentsTableCandidateDecisionWrite IAM statement, 02-compute.yaml), atomically conditioned on document_subtype='lesson-candidate' AND handoff_status='pending', and append a structured {status,note,by,at} entry to decision_log via list_append. This is NOT proxied through document_api's PATCH: that endpoint authenticates internal-key callers identically whether the caller is coordination_api (already Cognito-verified at its own HTTP layer) or the MCP server relaying a bare agent session's documents.patch call -- routing through it would silently readmit the exact autonomous-promotion path AC4 forbids. A ConditionalCheckFailedException (candidate already decided by a concurrent request) surfaces as HTTP 409."
         }
       }
     }
@@ -6370,6 +6374,11 @@
       "version": "2026-07-01.06",
       "task": "ENC-TSK-J46",
       "summary": "Added document.lesson-candidate and coordination.lesson_candidates entities: candidate list filter (document_api handoff_status query param) and io-gated approve/reject (coordination_api, Cognito-only), approve creates a governed ENC-LSN via the tracker.create_lesson validation surface with evidence_chain provenance back to the candidate."
+    },
+    {
+      "version": "2026-07-01.07",
+      "task": "ENC-TSK-J46",
+      "summary": "Fixed a gamma E2E finding: lesson-candidate approve/reject were calling document_api's PATCH via the shared internal-key service credential, which document_api's Cognito-only gate for candidate transitions correctly rejected (that credential is indistinguishable from the MCP server's agent-facing documents.patch path). Replaced with a direct, atomically-conditioned DynamoDB write plus an append-only decision_log, gated solely by coordination_api's own Cognito check. Added DocumentsTableCandidateDecisionWrite (dynamodb:UpdateItem) to CoordinationApiRole."
     }
   ]
 }
