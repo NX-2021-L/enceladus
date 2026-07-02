@@ -1642,7 +1642,7 @@ Resources:
           DYNAMODB_TABLE_NAME: !Sub "devops-project-tracker${EnvironmentSuffix}"
           NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
           S3_HEALTH_BUCKET: !Ref S3Bucket
-          SQS_QUEUE_URL: !ImportValue
+          GRAPH_SYNC_QUEUE_URL: !ImportValue
             Fn::Sub: ${DataStackName}-GraphSyncQueueUrl
           SECRETS_REGION: !Ref "AWS::Region"
       Tags:

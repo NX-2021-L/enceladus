@@ -5288,7 +5288,7 @@
         "graph_sync_lag_metric": {
           "type": "string",
           "definition": "ENC-TSK-K44: CloudWatch metric reporting devops-graph-sync-queue approximate depth as a graph_sync backlog/lag proxy for the B66 dashboard.",
-          "usage_guidance": "Fixed value: GraphSyncLag. Dimension: QueueName. SQS_QUEUE_URL env var (imported from the 01-data GraphSyncQueueUrl export) selects the checked queue."
+          "usage_guidance": "Fixed value: GraphSyncLag. Dimension: QueueName. GRAPH_SYNC_QUEUE_URL env var (imported from the 01-data GraphSyncQueueUrl export) selects the checked queue. Named distinctly from devops-deploy-intake's SQS_QUEUE_URL (env_drift_registry.json deploy-critical var) so the ENC-TSK-H22 per-function env-parity strip-proof attribution stays unambiguous."
         },
         "mcp_cold_start_metric": {
           "type": "string",

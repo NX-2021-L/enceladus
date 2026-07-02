@@ -24,7 +24,11 @@ Environment variables:
   DYNAMODB_TABLE_NAME     DynamoDB table checked for health + throttle signal
   NEO4J_SECRET_NAME       Secrets Manager secret id holding NEO4J_URI/creds
   S3_HEALTH_BUCKET        S3 bucket checked for reachability
-  SQS_QUEUE_URL            SQS queue URL checked for depth (graph_sync lag proxy)
+  GRAPH_SYNC_QUEUE_URL    SQS queue URL checked for depth (graph_sync lag proxy).
+                          Named distinctly from devops-deploy-intake's
+                          SQS_QUEUE_URL (env_drift_registry.json deploy-critical
+                          var) so the ENC-TSK-H22 per-function env-parity
+                          strip-proof attribution stays unambiguous.
   AWS_REGION               AWS region (default: us-west-2)
 """
 
@@ -49,7 +53,7 @@ COLD_START_FUNCTIONS: List[str] = json.loads(
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "")
 NEO4J_SECRET_NAME = os.environ.get("NEO4J_SECRET_NAME", "")
 S3_HEALTH_BUCKET = os.environ.get("S3_HEALTH_BUCKET", "")
-SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
+GRAPH_SYNC_QUEUE_URL = os.environ.get("GRAPH_SYNC_QUEUE_URL", "")
 
 # ENC-ISS-465: hard kill switch. Set to "1" to skip all AWS calls (cost guard).
 HARD_DISABLED = os.environ.get("HEALTH_MONITOR_HARD_DISABLED", "0") == "1"
@@ -240,7 +244,7 @@ def check_s3(bucket: str) -> Dict[str, Any]:
 def check_sqs(queue_url: str) -> Dict[str, Any]:
     """Check SQS queue reachability and return approximate depth (graph_sync lag proxy)."""
     if not queue_url:
-        return {"service": "sqs", "healthy": False, "error": "SQS_QUEUE_URL not configured", "depth": 0}
+        return {"service": "sqs", "healthy": False, "error": "GRAPH_SYNC_QUEUE_URL not configured", "depth": 0}
     try:
         resp = _get_sqs().get_queue_attributes(
             QueueUrl=queue_url,
@@ -397,7 +401,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "dynamodb": check_dynamodb(DYNAMODB_TABLE_NAME),
         "neo4j": check_neo4j(NEO4J_SECRET_NAME),
         "s3": check_s3(S3_HEALTH_BUCKET),
-        "sqs": check_sqs(SQS_QUEUE_URL),
+        "sqs": check_sqs(GRAPH_SYNC_QUEUE_URL),
         "lambda_cold_start": check_lambda_cold_start(COLD_START_FUNCTIONS),
     }
     metric_data.extend(_health_check_metrics(results, now))
