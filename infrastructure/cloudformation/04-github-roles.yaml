@@ -214,6 +214,30 @@ Resources:
               # unblocked by an out-of-band inline patch (enceladus-cfn-deploy-gamma-
               # ddb-sns-v1, gamma-only); codified here as the durable capability
               # contract, scoped to enceladus-*/devops-* (both prod and gamma).
+              # ENC-TSK-J85 / ENC-ISS-298 — the role deploys 07-codedeploy.yaml
+              # (CodeDeploy application + per-function DeploymentGroups) but held
+              # zero codedeploy actions, so the 2026-04-28 stack update AND its
+              # rollback both failed AccessDenied, wedging enceladus-codedeploy in
+              # UPDATE_ROLLBACK_FAILED. Scoped to the enceladus-lambda application
+              # namespace and its deployment groups/configs.
+              - Sid: CodeDeployStackOps
+                Effect: Allow
+                Action:
+                  - codedeploy:CreateApplication
+                  - codedeploy:DeleteApplication
+                  - codedeploy:GetApplication
+                  - codedeploy:CreateDeploymentGroup
+                  - codedeploy:DeleteDeploymentGroup
+                  - codedeploy:GetDeploymentGroup
+                  - codedeploy:UpdateDeploymentGroup
+                  - codedeploy:ListTagsForResource
+                  - codedeploy:TagResource
+                  - codedeploy:UntagResource
+                Resource:
+                  - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:application:enceladus-lambda*"
+                  - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentgroup:enceladus-lambda*"
+                  - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentconfig:*"
+
               - Sid: SqsQueueOps
                 Effect: Allow
                 Action:
