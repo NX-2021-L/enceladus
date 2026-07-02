@@ -1,0 +1,66 @@
+name: IAM CFN Deploy Role — CloudWatch Dashboard Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "Grant cloudwatch:PutDashboard (+ Get/Delete/List) on the gamma v4 architecture dashboard to the CFN deploy role (ENC-TSK-K46 / ENC-TSK-K59, enceladus-monitoring-gamma UPDATE_ROLLBACK_COMPLETE due to missing permission)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with gamma CloudWatch Dashboard permissions
+    # ENC-TSK-K59 / ENC-FTR-120: live IAM mutation (shared/global role object) — pauses on the v3-prod required-reviewer rule.
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy — gamma CloudWatch Dashboard bootstrap
+        run: |
+          set -euo pipefail
+          cat > /tmp/gamma-cloudwatch-dashboard-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "GammaCloudWatchDashboardBootstrap",
+                "Effect": "Allow",
+                "Action": [
+                  "cloudwatch:PutDashboard",
+                  "cloudwatch:GetDashboard",
+                  "cloudwatch:DeleteDashboards",
+                  "cloudwatch:ListDashboards"
+                ],
+                "Resource": "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture-gamma"
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1" \
+            --policy-document "file:///tmp/gamma-cloudwatch-dashboard-policy.json"
+
+      - name: Verify inline policy attached
+        run: |
+          aws iam get-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table
