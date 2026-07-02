@@ -96,6 +96,24 @@ jobs:
         env:
           # Same-origin API base (07-ui-cdn /api/* behavior proxies to API GW).
           VITE_API_BASE: /api/v1
+          # Same-origin feed snapshot base — the gamma feed publisher writes
+          # mobile/v1/tasks.json into the UI origin bucket (ENC-TSK-K72).
+          VITE_FEED_BASE_URL: /mobile/v1
+          # ENC-TSK-K70: AppSync Events realtime config. Sourced from GitHub
+          # repo VARIABLES (not CFN describe-stacks) because this build job is
+          # deliberately credential-less and ungated — granting it AWS access
+          # to resolve stack outputs would weaken the FTR-120 gating model.
+          # Set once after 06-appsync-events.yaml provisions (K56):
+          #   gh variable set VITE_APPSYNC_HTTP_HOST     --body <HttpEndpoint host>
+          #   gh variable set VITE_APPSYNC_REALTIME_HOST --body <RealtimeEndpoint host>
+          #   gh variable set VITE_APPSYNC_API_KEY       --body <ApiKey>
+          # Empty/unset => appsyncConfig.ts disables realtime and the feed pane
+          # degrades to S3-snapshot mode (skip-if-absent by construction). The
+          # API key is public-by-design (it ships in the JS bundle either way).
+          VITE_APPSYNC_HTTP_HOST: ${{ vars.VITE_APPSYNC_HTTP_HOST }}
+          VITE_APPSYNC_REALTIME_HOST: ${{ vars.VITE_APPSYNC_REALTIME_HOST }}
+          VITE_APPSYNC_API_KEY: ${{ vars.VITE_APPSYNC_API_KEY }}
+          VITE_APPSYNC_REGION: us-west-2
         run: npm run build
 
       - name: Upload dist artifact
