@@ -107,6 +107,13 @@
       ],
       "notes": "ENC-TSK-J64: environment: v3-prod (shared/global IAM role objects)"
     },
+    "iam-cfn-deploy-role-scheduler-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-PLN-068: environment: v3-prod — grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
+    },
     "iam-cfn-deploy-role-gamma-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
