@@ -1650,6 +1650,15 @@ Resources:
           Value: enceladus
         - Key: Component
           Value: health-monitor
+        - Key: ReconciledBy
+          # ENC-TSK-K44 follow-up (2026-07-02): forces CFN to recompute a real
+          # diff on this resource. Post-IMPORT, `aws cloudformation deploy`'s
+          # change-set shortcut saw "template text unchanged" and skipped
+          # reconciling this function's Layers/Environment against the live
+          # (pre-import) values -- this tag bump is a real property change so
+          # the next Apply picks up SharedLayerArn + the DynamoDB/Neo4j/S3/SQS
+          # env vars that were already correct in the template but never applied.
+          Value: "ENC-TSK-K44-reconcile-20260702"
 
   ProdHealthMonitorRole:
     Type: AWS::IAM::Role
@@ -1922,7 +1931,9 @@ Resources:
           # ISS-465-style kill switch -- installed before the first scheduled
           # run; io clears to "0" to enable. Mirrors TRAINING_HARD_DISABLED
           # (K02) / UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
-          CEE_HARD_DISABLED: "1"
+          # Cleared 2026-07-02 per io: telemetry-only detector, no corpus
+          # mutation -- safe to run on its initial nightly schedule (ENC-TSK-K41).
+          CEE_HARD_DISABLED: "0"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -2014,7 +2025,11 @@ Resources:
           # ISS-465-style kill switch -- installed disabled by default; io
           # clears to "0" to enable. Mirrors CEE_HARD_DISABLED (K41) /
           # UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
-          CEE_GDMP_HARD_DISABLED: "1"
+          # Cleared 2026-07-02 per io: lets the Lambda run on its initial
+          # nightly schedule. GDMP_DRY_RUN stays "1" / GDMP_MUTATION_ENABLED
+          # stays "0" -- this produces real candidate reports without
+          # mutating any documents yet (ENC-TSK-K42).
+          CEE_GDMP_HARD_DISABLED: "0"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
