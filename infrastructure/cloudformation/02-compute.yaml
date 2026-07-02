@@ -189,6 +189,12 @@ Resources:
           COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
           TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
+          # ENC-TSK-J57: DocumentsTableRead/DocumentsTableCandidateDecisionWrite grant
+          # access to documents${EnvironmentSuffix}, but this env var was never wired
+          # up -- the code's os.environ.get("DOCUMENTS_TABLE", "documents") fallback
+          # silently pointed every environment at the unsuffixed prod table name,
+          # which gamma's IAM (correctly scoped to documents-gamma) then denied.
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           SSM_REGION: !Ref AWS::Region
           SECRETS_REGION: !Ref AWS::Region
