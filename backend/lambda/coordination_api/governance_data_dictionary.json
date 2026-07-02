@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.04",
-  "updated_at": "2026-07-02T06:00:00Z",
-  "last_change_summary": "ENC-TSK-J71 (ENC-FTR-121 Ph4, DOC-5B888FCA43B8): escalation.watch session-scoped cursor polling. Count-based opaque cursor (base64url JSON {escalation_id: events_consumed}) against the append-only events array - lossless under second-granular event timestamps where a timestamp cursor would drop same-second FSM edges; stable on empty polls; malformed cursors replay safely. Every poll refreshes the session's new last_activity_at heartbeat and the idle sweep's _idle_reference prefers it (listening agents survive the sweep; section 5.9 preferred formulation). MCP coordination action escalation.watch behind ENABLE_ESCALATION_PRIMITIVE; gamma APIGW route RouteEscalationsWatch. Polling guidance: 15-30s, backoff after two idle hours; polling only.",
+  "version": "2026-07-02.05",
+  "updated_at": "2026-07-02T06:10:00Z",
+  "last_change_summary": "ENC-TSK-J72 (ENC-FTR-121 Ph5, DOC-5B888FCA43B8): SNS [ESCALATION] notifications to io. Publishes on requested (post-write) and terminal applied/failed; failure-isolated (never fails the escalation write); reuses devops-feed-alerts{suffix} via ESCALATION_ALERTS_TOPIC_ARN env + PublishEscalationAlerts role grant (02-compute.yaml, gamma lane; prod via Ph7a). Sub-dollar budget; email subscription confirmation is an io residual for Ph8.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6516,6 +6516,9 @@
           "deploy_arc_change": "rewrites transition_type (and checkout_transition_type when present, which recomputes arc-derived gate expectations) in place; checkout fields untouched so an active checkout survives.",
           "direct_state_override": "writes target_status regardless of path legality; supplied field_values written verbatim; unsupplied required-for-state fields (from the transition-matrix gate contracts: committed->commit_sha, deploy-success->arc evidence key, closed->arc closed-evidence key, issue closed->evidence) get the escalation_waived sentinel; closures set escalated_closure=true and increment closed_count for tasks (organic-gate parity)."
         }
+      },
+      "notifications": {
+        "definition": "ENC-TSK-J72 (Ph5, section 5.8): tracker_mutation publishes an SNS notification with subject prefix [ESCALATION] on requested (after the durable item write) and on the terminal applied/failed transitions (closure telemetry). Topic: ESCALATION_ALERTS_TOPIC_ARN env, defaulting via CFN to the existing devops-feed-alerts{EnvironmentSuffix} topic (reuse - zero new infrastructure). FAILURE-ISOLATED by contract: an SNS error or unset ARN is logged and swallowed; notification can never fail the escalation write or the applier. Payload: escalation_id, target_record_id, mutation_type, requesting session, justification/result excerpt. Cost: tens of emails/month inside the SNS email free tier - combined feature incremental cost under one dollar per month. RESIDUAL (Ph8): the topic has no email subscription yet; io must subscribe + confirm to actually receive mail. IAM: PublishEscalationAlerts Sid on TrackerMutationRole (gamma via the compute stack; prod via Ph7a backport)."
       }
     },
     "mcp_server.escalation_actions": {
@@ -6649,6 +6652,11 @@
       "version": "2026-07-02.04",
       "task": "ENC-TSK-J71",
       "summary": "ENC-TSK-J71 (ENC-FTR-121 Ph4, DOC-5B888FCA43B8): escalation.watch session-scoped cursor polling. Count-based opaque cursor (base64url JSON {escalation_id: events_consumed}) against the append-only events array - lossless under second-granular event timestamps where a timestamp cursor would drop same-second FSM edges; stable on empty polls; malformed cursors replay safely. Every poll refreshes the session's new last_activity_at heartbeat and the idle sweep's _idle_reference prefers it (listening agents survive the sweep; section 5.9 preferred formulation). MCP coordination action escalation.watch behind ENABLE_ESCALATION_PRIMITIVE; gamma APIGW route RouteEscalationsWatch. Polling guidance: 15-30s, backoff after two idle hours; polling only."
+    },
+    {
+      "version": "2026-07-02.05",
+      "task": "ENC-TSK-J72",
+      "summary": "ENC-TSK-J72 (ENC-FTR-121 Ph5, DOC-5B888FCA43B8): SNS [ESCALATION] notifications to io. Publishes on requested (post-write) and terminal applied/failed; failure-isolated (never fails the escalation write); reuses devops-feed-alerts{suffix} via ESCALATION_ALERTS_TOPIC_ARN env + PublishEscalationAlerts role grant (02-compute.yaml, gamma lane; prod via Ph7a). Sub-dollar budget; email subscription confirmation is an io residual for Ph8."
     }
   ]
 }

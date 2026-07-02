@@ -890,6 +890,10 @@ def _validate_pillar_scores(raw_pillar_scores, record_type="lesson"):
 # EventBridge event config for reopen notifications
 EVENT_BUS = os.environ.get("EVENT_BUS", "default")
 EVENT_SOURCE = "enceladus.tracker"
+# ENC-FTR-121 Ph5 / ENC-TSK-J72: SNS topic for io's escalation email (§5.8).
+# Reuses the existing devops-feed-alerts topic (subject-prefixed [ESCALATION]);
+# empty/unset ARN disables publishing (logged skip — never fails the write).
+ESCALATION_ALERTS_TOPIC_ARN = os.environ.get("ESCALATION_ALERTS_TOPIC_ARN", "")
 EVENT_DETAIL_TYPE_REOPENED = "record.status.reopened"
 # ENC-FTR-111 / ENC-TSK-H83: Artifact-Genesis telemetry for an auto_walk_opt_out latch
 # (feeds ENC-TSK-B66 / the T5 ARC_WALK telemetry consumer).
@@ -969,6 +973,48 @@ def _get_events():
     if _events_client is None:
         _events_client = boto3.client("events")
     return _events_client
+
+
+_sns_client = None
+
+
+def _get_sns():
+    global _sns_client
+    if _sns_client is None:
+        _sns_client = boto3.client("sns", region_name=DYNAMODB_REGION)
+    return _sns_client
+
+
+def _notify_escalation_event(kind: str, escalation_id: str, target_record_id: str,
+                             mutation_type: str, session_id: str, note: str = "") -> None:
+    """§5.8 io notification: best-effort SNS publish, failure-isolated by contract.
+
+    An SNS error (or an unset topic ARN) is logged and swallowed — notification
+    must never fail the escalation write. Subject is [ESCALATION]-prefixed for
+    inbox routing; expected volume is tens/month, inside the SNS email free
+    tier (sub-dollar budget).
+    """
+    if not ESCALATION_ALERTS_TOPIC_ARN:
+        logger.info("escalation notify skipped (%s %s): ESCALATION_ALERTS_TOPIC_ARN unset",
+                    kind, escalation_id)
+        return
+    try:
+        lines = [
+            f"Escalation {kind}: {escalation_id}",
+            f"Target: {target_record_id}",
+            f"Mutation: {mutation_type}",
+            f"Requested by: {session_id}",
+        ]
+        if note:
+            lines.append(f"Note: {note[:500]}")
+        lines.append("Review queue: PWA menu → Escalations")
+        _get_sns().publish(
+            TopicArn=ESCALATION_ALERTS_TOPIC_ARN,
+            Subject=f"[ESCALATION] {kind}: {escalation_id} ({mutation_type})"[:100],
+            Message="\n".join(lines),
+        )
+    except Exception as exc:  # noqa: BLE001 — §5.8 failure isolation
+        logger.error("escalation notify failed (%s %s): %s", kind, escalation_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -6957,6 +7003,12 @@ def _handle_escalation_request(project_id: str, body: Dict) -> Dict:
         logger.error("escalation put_item failed: %s", exc)
         return _error(500, "Database write failed while creating escalation.")
 
+    # ENC-TSK-J72 (§5.8): push io's email AFTER the durable write; never fails it.
+    _notify_escalation_event(
+        "requested", escalation_id, target_record_id, mutation_type,
+        session_id, note=justification,
+    )
+
     return _response(201, {
         "success": True,
         "escalation_id": escalation_id,
@@ -7247,6 +7299,15 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
             extra_names={"#res": "result"},
             extra_values={":result": _ser_value({"success": False, "error": failure})},
         )
+        # ENC-TSK-J72 (§5.8 optional terminal notification): closure telemetry
+        # for io without opening the PWA; same failure-isolation contract.
+        _notify_escalation_event(
+            "failed", escalation_id,
+            str(escalation.get("target_record_id") or ""),
+            str(escalation.get("mutation_type") or ""),
+            str((escalation.get("requested_by") or {}).get("session_id") or ""),
+            note=failure,
+        )
         return _error(409, f"Escalation application failed (no partial write): {failure}")
 
     _escalation_fsm_transition(
@@ -7260,6 +7321,14 @@ def _handle_escalation_apply(project_id: str, escalation_id: str, body: Dict) ->
         },
     )
     _emit_escalation_applied_event(project_id, escalation, result_detail or {})
+    # ENC-TSK-J72 (§5.8 optional terminal notification): applied closure telemetry.
+    _notify_escalation_event(
+        "applied", escalation_id,
+        str(escalation.get("target_record_id") or ""),
+        str(escalation.get("mutation_type") or ""),
+        str((escalation.get("requested_by") or {}).get("session_id") or ""),
+        note=json.dumps(result_detail or {}, default=str)[:300],
+    )
     return _response(200, {
         "success": True,
         "escalation_id": escalation_id,
