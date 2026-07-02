@@ -213,6 +213,11 @@ _GDS_HARD_DISABLED = os.environ.get("GDS_HARD_DISABLED", "").strip().lower() in 
 _GDS_SESSION_MEMORY = os.environ.get("GDS_SESSION_MEMORY", "2GB").strip() or "2GB"
 _GDS_WEIGHT_PROPERTY = os.environ.get("GDS_WEIGHT_PROPERTY", "weight").strip() or "weight"
 _GDS_FLOW_WEIGHT_PROPERTY = "flow_weight"
+# ENC-TSK-J03: PPR/PageRank reads flow_weight (not static type weight) when set.
+_GDS_PPR_WEIGHT_PROPERTY = (
+    os.environ.get("GDS_PPR_WEIGHT_PROPERTY", _GDS_FLOW_WEIGHT_PROPERTY).strip()
+    or _GDS_FLOW_WEIGHT_PROPERTY
+)
 _GDS_PROJECTION_META_LABEL = "GdsProjectionMeta"
 try:
     _GDS_PROJECTION_MAX_AGE_S = int(os.environ.get("GDS_PROJECTION_MAX_AGE_S", "3600"))
@@ -1259,7 +1264,7 @@ def _hybrid_graph_ranks_gds(
                     $name,
                     src,
                     tgt,
-                    {{relationshipProperties: {{weight: {weight_case_sql}}}}},
+                    {{relationshipProperties: {{weight: {weight_case_sql}, {_GDS_FLOW_WEIGHT_PROPERTY}: coalesce(r.{_GDS_FLOW_WEIGHT_PROPERTY}, 1.0)}}}},
                     {{memory: '2GB'}}
                 ) AS g
                 RETURN g.graphName
@@ -1292,7 +1297,7 @@ def _hybrid_graph_ranks_gds(
                         sourceNodes: [$anchorId],
                         dampingFactor: $damping,
                         maxIterations: $maxIter,
-                        relationshipWeightProperty: 'weight'
+                        relationshipWeightProperty: $weightProp
                     }
                 )
                 YIELD nodeId, score
@@ -1304,6 +1309,7 @@ def _hybrid_graph_ranks_gds(
                 anchorId=anchor_rec["nodeId"],
                 damping=PPR_DAMPING_FACTOR,
                 maxIter=PPR_MAX_ITERATIONS,
+                weightProp=_GDS_PPR_WEIGHT_PROPERTY,
                 limit=top_n,
             )
             node_rows: List[tuple] = [(r.get("nodeId"), float(r.get("score") or 0.0)) for r in stream_result]
@@ -1379,7 +1385,8 @@ def _hybrid_graph_ranks_cypher_fallback(
         f"AND neighbor.project_id = $project_id "
         f"AND neighbor.record_id <> $rid "
         f"WITH neighbor, path, "
-        f"  reduce(s = 0.0, rel IN relationships(path) | s + {weight_case_sql}) "
+        f"  reduce(s = 0.0, rel IN relationships(path) | "
+        f"    s + ({weight_case_sql}) * coalesce(rel.{_GDS_FLOW_WEIGHT_PROPERTY}, 1.0)) "
         f"  * ({decay} ^ length(path)) AS path_score "
         f"WITH neighbor.record_id AS rid, sum(path_score) AS score "
         f"RETURN rid, score ORDER BY score DESC LIMIT $limit"
@@ -1490,7 +1497,7 @@ def _hybrid_graph_ranks_gds_warm(
                 anchorId=anchor_rec["nodeId"],
                 damping=PPR_DAMPING_FACTOR,
                 maxIter=PPR_MAX_ITERATIONS,
-                weightProp=_GDS_WEIGHT_PROPERTY,
+                weightProp=_GDS_PPR_WEIGHT_PROPERTY,
                 limit=top_n,
             )
             node_rows = [(r.get("nodeId"), float(r.get("score") or 0.0)) for r in stream_result]
@@ -1532,8 +1539,9 @@ def _refresh_standing_projection(driver, project_id: str) -> Dict[str, Any]:
     — never from the request path — so the FlightRuntimeException
     'already a job running' same-graph-name race (DOC-D4CB8048798B, Concurrency
     Hazards) cannot occur. Drops any prior projection of the same name, projects
-    the project's nodes/edges with BOTH a per-type 'weight' and a flow_weight=1.0
-    slot (ENC-FTR-101 AC-5), then stamps a GdsProjectionMeta marker carrying the
+    the project's nodes/edges with BOTH a per-type 'weight' and a flow_weight
+    property read from each relationship (ENC-TSK-J03 / FTR-108 Ph3), then stamps
+    a GdsProjectionMeta marker carrying the
     last-refresh epoch for staleness telemetry (AC-3). Never raises.
     """
     if _GDS_HARD_DISABLED:
@@ -1568,7 +1576,7 @@ def _refresh_standing_projection(driver, project_id: str) -> Dict[str, Any]:
                     $name,
                     src,
                     tgt,
-                    {{relationshipProperties: {{weight: {weight_case_sql}, {_GDS_FLOW_WEIGHT_PROPERTY}: 1.0}}}},
+                    {{relationshipProperties: {{weight: {weight_case_sql}, {_GDS_FLOW_WEIGHT_PROPERTY}: coalesce(r.{_GDS_FLOW_WEIGHT_PROPERTY}, 1.0)}}}},
                     {{memory: $memory}}
                 ) AS g
                 RETURN g.graphName AS graphName, g.nodeCount AS nodeCount, g.relationshipCount AS relationshipCount
@@ -2574,6 +2582,17 @@ def _query_adjacency(driver, project_id: str, params: Dict) -> Dict:
         result["node_count"] = node_count
         result["edge_count"] = edge_count
         result["spurious_attractor_rate"] = _recent_spurious_attractor_rate(project_id)
+        try:
+            import flow_weight_entropy as _fwe
+            with driver.session() as entropy_session:
+                entropy_info = _fwe.compute_from_session(entropy_session, project_id)
+            result.update(entropy_info)
+        except Exception:  # noqa: BLE001 — enrichment must never break adjacency reads
+            logger.warning(
+                "[WARNING] flow_weight_entropy enrichment failed project_id=%s",
+                project_id,
+                exc_info=True,
+            )
     return result
 # ---------------------------------------------------------------------------
 # ENC-FTR-095 / ENC-TSK-I90: Sheaf Laplacian H1 inconsistency detection

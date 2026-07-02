@@ -121,7 +121,7 @@ class FetchGraphSpuriousAttractorRateTest(unittest.TestCase):
         with mock.patch.object(pm, "_graphsearch", return_value=self._single_page_body(
             {"spurious_attractor_rate": 0.37}
         )):
-            node_count, edges, rate = pm._fetch_graph()
+            node_count, edges, rate, _entropy = pm._fetch_graph()
         self.assertEqual(node_count, 2)
         self.assertEqual(edges, [("A", "B")])
         self.assertAlmostEqual(rate, 0.37)
@@ -130,14 +130,14 @@ class FetchGraphSpuriousAttractorRateTest(unittest.TestCase):
         """Backward compatibility: an older graph_query_api deploy that
         predates ENC-TSK-I91 simply omits the key."""
         with mock.patch.object(pm, "_graphsearch", return_value=self._single_page_body()):
-            _node_count, _edges, rate = pm._fetch_graph()
+            _node_count, _edges, rate, _entropy = pm._fetch_graph()
         self.assertIsNone(rate)
 
     def test_rate_is_none_when_explicitly_null(self):
         with mock.patch.object(pm, "_graphsearch", return_value=self._single_page_body(
             {"spurious_attractor_rate": None}
         )):
-            _node_count, _edges, rate = pm._fetch_graph()
+            _node_count, _edges, rate, _entropy = pm._fetch_graph()
         self.assertIsNone(rate)
 
     def test_rate_taken_from_first_page_only(self):
@@ -148,7 +148,7 @@ class FetchGraphSpuriousAttractorRateTest(unittest.TestCase):
             "has_more": False,
         }
         with mock.patch.object(pm, "_graphsearch", side_effect=[first, second]):
-            node_count, edges, rate = pm._fetch_graph()
+            node_count, edges, rate, _entropy = pm._fetch_graph()
         self.assertEqual(node_count, 2)
         self.assertEqual(edges, [("A", "B"), ("B", "C")])
         self.assertAlmostEqual(rate, 0.6)
