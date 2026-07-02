@@ -6163,8 +6163,10 @@ async def _escalation_watch(args: dict) -> list[TextContent]:
         "since": args.get("since"),
         "project_id": args.get("project_id"),
     }
+    # ENC-TSK-J89: path is RELATIVE to COORDINATION_API_BASE (which already ends
+    # in /api/v1/coordination) — the absolute form double-prefixed and 404'd.
     resp = _coordination_api_request(
-        "GET", "/api/v1/coordination/escalations/watch", query=query)
+        "GET", "/escalations/watch", query=query)
     return _result_text(resp)
 
 
