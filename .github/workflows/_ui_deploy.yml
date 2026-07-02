@@ -212,7 +212,12 @@ jobs:
           #    Default cache-control here is conservative; the app-shell files
           #    are re-put with no-cache below, and hashed assets/ are re-put
           #    immutable below, so the ordering does not matter for those.
+          #    ENC-TSK-K69: mobile/* is EXCLUDED from the delete-mirror — the
+          #    gamma feed publisher (devops-feed-publisher-gamma) writes the
+          #    /mobile/v1 snapshot JSON into this bucket for same-origin
+          #    serving; a UI deploy must never wipe it.
           aws s3 sync "${DIST_DIR}/" "s3://${BUCKET}/" --delete \
+            --exclude "mobile/*" \
             --cache-control "public,max-age=0,must-revalidate"
 
           # 2. Hashed, content-addressed build output under assets/ — safe to

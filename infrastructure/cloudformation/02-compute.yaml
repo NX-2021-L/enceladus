@@ -1017,8 +1017,32 @@ Resources:
           TRACKER_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           PROJECTS_REGION: !Ref AWS::Region
-          FEED_BUCKET: !Ref S3Bucket
-          FEED_PREFIX: !Sub "${S3EnvPrefix}mobile/v1"
+          # ENC-TSK-K69: without this the code default is the PROD "documents"
+          # table (feed_utils.DEFAULT_DOCUMENTS_TABLE) — the gamma publisher
+          # was reading prod documents cross-env. Prod rendering: "documents"
+          # (identical to the code default; no-op).
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          # ENC-TSK-K69 gamma env isolation: publish snapshots into the ui-v2
+          # origin bucket (07-ui-cdn.yaml exports) so the PWA's same-origin
+          # VITE_FEED_BASE_URL=/mobile/v1 fetch resolves through the gamma
+          # distribution, and invalidate THAT distribution — not the prod
+          # E2BOQXCW1TA6Y4 code default (whose grant is IsProduction-gated
+          # anyway, so gamma invalidations were failing silently). Prod
+          # branches render byte-identical to the previous template
+          # (jreese-net + ${S3EnvPrefix}mobile/v1 + CF_DISTRIBUTION absent ->
+          # code default).
+          FEED_BUCKET: !If
+            - IsGamma
+            - !ImportValue "enceladus-ui-cdn-gamma-UiBucketName"
+            - !Ref S3Bucket
+          FEED_PREFIX: !If
+            - IsGamma
+            - "mobile/v1"
+            - !Sub "${S3EnvPrefix}mobile/v1"
+          CF_DISTRIBUTION: !If
+            - IsGamma
+            - !ImportValue "enceladus-ui-cdn-gamma-UiDistributionId"
+            - !Ref "AWS::NoValue"
           EVENT_BUS: default
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
@@ -4159,7 +4183,13 @@ Resources:
                 Action:
                   - s3:PutObject
                   - s3:GetObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
+                # ENC-TSK-K69: gamma publishes into the ui-v2 origin bucket
+                # (same-origin /mobile/v1 serving through the gamma
+                # distribution); prod resource unchanged.
+                Resource: !If
+                  - IsGamma
+                  - !Sub "arn:aws:s3:::enceladus-ui-v2${EnvironmentSuffix}/mobile/v1/*"
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
               - Sid: EventBridgePut
                 Effect: Allow
                 Action: events:PutEvents
@@ -4177,6 +4207,20 @@ Resources:
                   Effect: Allow
                   Action: cloudfront:CreateInvalidation
                   Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/E2BOQXCW1TA6Y4"
+                - !Ref AWS::NoValue
+              # ENC-TSK-K69: gamma invalidates the ui-v2 gamma distribution
+              # after each snapshot publish (CF_DISTRIBUTION env). Previously
+              # gamma had NO invalidation grant and the code default pointed at
+              # the prod distribution — every gamma invalidation attempt failed.
+              - !If
+                - IsGamma
+                - Sid: CloudFrontInvalidationGamma
+                  Effect: Allow
+                  Action: cloudfront:CreateInvalidation
+                  Resource: !Join
+                    - ""
+                    - - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/"
+                      - !ImportValue "enceladus-ui-cdn-gamma-UiDistributionId"
                 - !Ref AWS::NoValue
               - !If
                 - IsProduction
