@@ -1,0 +1,83 @@
+name: IAM CFN Deploy Role — EventBridge Scheduler Patch
+
+# ENC-PLN-068: CloudFormationDeployRole lacked scheduler:GetScheduleGroup (and related
+# Scheduler API actions), blocking Rhythm Cycle ScheduleGroup creation on gamma compute
+# deploy (UPDATE_ROLLBACK_COMPLETE 2026-07-02). Durable fix in 04-github-roles.yaml;
+# this one-off dispatch applies the grant live ahead of the next github-roles stack deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "ENC-PLN-068 — grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with scheduler:* for rhythm groups
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy — EventBridge Scheduler
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          cat > /tmp/cfn-deploy-role-scheduler.json <<JSON
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "RhythmCycleSchedulerOps",
+                "Effect": "Allow",
+                "Action": [
+                  "scheduler:CreateScheduleGroup",
+                  "scheduler:DeleteScheduleGroup",
+                  "scheduler:GetScheduleGroup",
+                  "scheduler:ListScheduleGroups",
+                  "scheduler:CreateSchedule",
+                  "scheduler:DeleteSchedule",
+                  "scheduler:GetSchedule",
+                  "scheduler:UpdateSchedule",
+                  "scheduler:ListSchedules",
+                  "scheduler:TagResource",
+                  "scheduler:UntagResource"
+                ],
+                "Resource": [
+                  "arn:aws:scheduler:us-west-2:${ACCOUNT_ID}:schedule-group/rhythm-*",
+                  "arn:aws:scheduler:us-west-2:${ACCOUNT_ID}:schedule/rhythm-*/*",
+                  "arn:aws:scheduler:us-west-2:${ACCOUNT_ID}:schedule-group/enceladus-*",
+                  "arn:aws:scheduler:us-west-2:${ACCOUNT_ID}:schedule/enceladus-*/*"
+                ]
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-scheduler-v1" \
+            --policy-document "file:///tmp/cfn-deploy-role-scheduler.json"
+
+      - name: Verify inline policy attached
+        run: |
+          aws iam get-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-scheduler-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table
