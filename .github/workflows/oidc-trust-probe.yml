@@ -1,0 +1,62 @@
+name: OIDC Trust Probe
+
+# ENC-TSK-J61 / ENC-FTR-120: on-demand proof that an environment-scoped job's
+# OIDC token (sub=repo:...:environment:<name>) can assume the CFN deploy role
+# after the trust-policy extension. Read-only: decodes its own token's claims
+# and calls sts get-caller-identity. Dispatch with the environment to probe;
+# v3-prod dispatches pause on the required-reviewer gate like any other
+# v3-prod job, which is itself part of what this workflow proves.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "GitHub Environment whose OIDC sub to probe"
+        type: choice
+        options: [v4-gamma, v3-prod]
+        required: true
+        default: v4-gamma
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  probe:
+    name: Probe ${{ inputs.target_environment }} OIDC trust
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ${{ inputs.target_environment }}
+
+    steps:
+      - name: Decode own OIDC token claims
+        run: |
+          set -euo pipefail
+          token=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')
+          payload=$(printf '%s' "$token" | python3 -c "
+          import base64, json, sys
+          seg = sys.stdin.read().split('.')[1]
+          seg += '=' * (-len(seg) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(seg))
+          print(json.dumps({k: claims.get(k) for k in ('sub', 'environment', 'ref', 'aud')}))
+          ")
+          echo "claims: $payload"
+          {
+            echo "## OIDC Trust Probe — ${{ inputs.target_environment }}"
+            echo '```json'
+            echo "$payload"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Assume CFN deploy role via environment-scoped token
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/enceladus-cloudformation-deploy-github-role
+          aws-region: us-west-2
+
+      - name: Verify assumed identity
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity
+          echo "role assumption via environment-scoped sub: OK" >> "$GITHUB_STEP_SUMMARY"
