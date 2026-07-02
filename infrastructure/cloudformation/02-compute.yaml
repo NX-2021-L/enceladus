@@ -153,7 +153,7 @@ Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
   RhythmActive: !And
-    - !Condition IsGamma
+    - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
     - !Equals [!Ref RhythmCycleEnabled, "true"]
   # ENC-TSK-F63 AC-2: SnapStart enabled only when EnableSnapStart=true (arm64/py3.12 targets).
   # Replaces the old IsProduction-negation pattern (was: !If [IsProduction, NoValue, SnapStart]).
