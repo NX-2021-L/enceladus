@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.22",
-  "updated_at": "2026-07-02T11:20:00Z",
-  "last_change_summary": "ENC-TSK-K11: enceladus-mcp-code Gen2 build packaging — mcp_code/lambda_function.py shim + _build.yml copies tools/enceladus-mcp-server runtime modules (telemetry_rank) into enceladus-mcp-code-gamma artifact.",
+  "version": "2026-07-02.23",
+  "updated_at": "2026-07-02T11:25:00Z",
+  "last_change_summary": "ENC-TSK-K12: Gen2 build packages tools/enceladus-mcp-server runtime modules into coordination_api and mcp_code artifacts so gamma MCP gateway can load server.py (ISS-473/474 live smoke).",
   "owners": [
     "enceladus-platform"
   ],

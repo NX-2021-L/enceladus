@@ -125,10 +125,10 @@ jobs:
             # Copy source.
             rsync -a --exclude='__pycache__' --exclude='*.pyc' "$srcdir/" "$workdir/"
 
-            # ENC-TSK-K11: enceladus-mcp-code-gamma runs server.py at the zip root
-            # (Handler=server.lambda_handler). Package the MCP server runtime modules
-            # alongside requirements — telemetry_rank and siblings are not optional.
-            if [ "$fn" = "mcp_code" ]; then
+            # ENC-TSK-K11/K12: coordination_api and mcp_code load server.py from the
+            # function zip root (ENCELADUS_MCP_SERVER_PATH=server.py). Package the full
+            # MCP server runtime module set — telemetry_rank and siblings are required.
+            if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ]; then
               for py in tools/enceladus-mcp-server/*.py; do
                 base=$(basename "$py")
                 case "$base" in
@@ -136,7 +136,7 @@ jobs:
                 esac
                 cp "$py" "$workdir/$base"
               done
-              echo "  [mcp_code] packaged tools/enceladus-mcp-server runtime modules"
+              echo "  [$fn] packaged tools/enceladus-mcp-server runtime modules"
             fi
 
             # ENC-TSK-G43: cross-Lambda module sharing via .build_extras manifest.
