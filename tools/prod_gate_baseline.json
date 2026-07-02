@@ -17,6 +17,13 @@
       ],
       "notes": "environment: parametrized per target (v3-prod reviewer-gated, v4-gamma ungated); dedicated per-env OIDC roles (PR #407)"
     },
+    "_ui_deploy.yml": {
+      "class": "already-gated",
+      "gated_jobs": [
+        "deploy"
+      ],
+      "notes": "ENC-TSK-K53 / T2 (v4 UI Deploy Pipeline, DOC-3EE4F709EC98 L2). Ships frontend/ui-v2 to the T1 07-ui-cdn S3+CloudFront stack. The deploy job (the sole AWS-mutating job) carries environment by ref: startsWith(github.ref,'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' (v4/** ungated gamma, main io-reviewer-gated). Bucket + distribution id resolved at runtime from the enceladus-ui-cdn${suffix} CFN exports; role AWS_UI_DEPLOY_ROLE_TO_ASSUME with AWS_CLOUDFORMATION_ROLE_TO_ASSUME fallback"
+    },
     "build-lambda-artifacts.yml": {
       "class": "inert",
       "notes": "S3 artifact staging bucket writes only; no live function/stack mutation"
