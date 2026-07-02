@@ -60,6 +60,13 @@ Resources:
                 token.actions.githubusercontent.com:sub:
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/v4/*"
+                  # ENC-TSK-J61 / ENC-FTR-120: a job that declares a GitHub
+                  # Environment emits sub=repo:...:environment:<name> instead of
+                  # the ref-based sub, so the gated CFN deploy lanes (plan/apply
+                  # split, apply job runs inside the environment) need these.
+                  # Additive: ref-based subs stay for ungated/legacy callers.
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:v3-prod"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:v4-gamma"
       Policies:
         - PolicyName: CloudFormationDeployPolicy
           PolicyDocument:
@@ -94,6 +101,15 @@ Resources:
                   - apigateway:PUT
                   - apigateway:PATCH
                   - apigateway:DELETE
+                  # ENC-TSK-H64: CFn tags stages with stack tags on create; the
+                  # 2026-04-28 ApiDefaultStage CREATE_FAILED was an apigateway:TagResource
+                  # AccessDenied (not CreateStage). Required for the deploy role to
+                  # manage the gamma $default stage going forward.
+                  # (ENC-TSK-J61: restored on v4/main -- present live + on main, but
+                  # missing from this branch; a stack deploy from v4/main without it
+                  # would strip the live permission, the PLN-047 regression class.)
+                  - apigateway:TagResource
+                  - apigateway:UntagResource
                 Resource:
                   - !Sub "arn:aws:apigateway:us-west-2::/*"
 
