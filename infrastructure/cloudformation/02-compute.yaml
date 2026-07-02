@@ -5515,6 +5515,14 @@ Resources:
           ENCELADUS_COGNITO_DOMAIN: https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com
           MCP_AUDIT_CALLER_IDENTITY: devops-coordination-api-gamma
           MCP_SERVER_LOG_GROUP: /enceladus/mcp/server
+          # ENC-TSK-K77 / ENC-PLN-067: codify the OAuth issuer/callback host so a CFN compute
+          # deploy cannot strip the manually-set CUSTOM_DOMAIN (ENC-TSK-K75). Without it the MCP
+          # derives its OAuth issuer from the incoming Host header — which CloudFront sets to the
+          # origin Function-URL host (Managed-AllViewerExceptHostHeader) — so it advertised
+          # issuer=https://<raw-furl> and proxied /authorize to Cognito with an UNREGISTERED
+          # redirect_uri=https://<raw-furl>/callback, producing the Hosted-UI error (2026-07-02
+          # gamma auth outage). Mirrors prod enceladus-mcp-code's CUSTOM_DOMAIN=mcp.jreese.net.
+          CUSTOM_DOMAIN: mcp-gamma.jreese.net
           # ENC-ISS-410 / ENC-TSK-I14: gamma backend bases. The MCP front-end (server.py)
           # proxies the coordination, tracker, and graph planes to these hosts; if unset it
           # falls back to hardcoded prod defaults (https://jreese.net/... and the prod
