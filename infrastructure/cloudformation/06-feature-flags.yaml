@@ -109,7 +109,7 @@ Resources:
       ApplicationId: !Ref FeatureFlagsApplication
       ConfigurationProfileId: !Ref FeatureFlagsProfile
       ContentType: application/json
-      Description: "Initial version — all flags enabled (migrated from ENABLE_* env vars)"
+      Description: "Initial version - all flags enabled (migrated from ENABLE_* env vars)"
       Content: |
         {
           "enable_claude_headless": true,
@@ -129,7 +129,7 @@ Resources:
     Type: AWS::AppConfig::DeploymentStrategy
     Properties:
       Name: !Sub "enceladus-immediate${EnvironmentSuffix}"
-      Description: Immediate activation, no bake time — safe for boolean feature flags
+      Description: Immediate activation, no bake time - safe for boolean feature flags
       ReplicateTo: NONE
       DeploymentDurationInMinutes: 0
       FinalBakeTimeInMinutes: 0
@@ -148,7 +148,7 @@ Resources:
       ConfigurationProfileId: !Ref FeatureFlagsProfile
       ConfigurationVersion: !Ref FeatureFlagsInitialVersion
       DeploymentStrategyId: !Ref FeatureFlagsDeploymentStrategy
-      Description: "Initial activation — migrated from ENABLE_* env vars (ENC-TSK-F63)"
+      Description: "Initial activation - migrated from ENABLE_* env vars (ENC-TSK-F63)"
 
 Outputs:
   ApplicationId:
