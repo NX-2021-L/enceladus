@@ -284,6 +284,202 @@ Resources:
         - !Ref "AWS::NoValue"
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-K78 / ENC-PLN-067 — Gamma MCP edge synthetic monitor.
+  # Self-contained synthetic canary that periodically probes the gamma MCP
+  # edge (https://mcp-gamma.jreese.net) from outside the Lambda service mesh
+  # and publishes health to the Enceladus/Synthetic namespace so a silent
+  # break of the gamma edge (the 2026-07-02 outage class) is caught in
+  # minutes. Unlike the ProdHealthMonitor above (function lives in
+  # 02-compute.yaml), this canary is intentionally self-contained here: its
+  # Lambda + role + schedule + alarm are all in this template so the whole
+  # probe can ship/rollback as one unit. The probe targets a FIXED gamma
+  # hostname, so it renders identically on all environments — it always
+  # checks the gamma URL regardless of ${EnvironmentSuffix}; the suffix only
+  # namespaces the AWS resource identifiers to avoid prod/gamma collisions.
+  # ---------------------------------------------------------------------------
+  McpGammaSyntheticRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-mcp-gamma-synthetic${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: mcp-gamma-synthetic-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: Enceladus/Synthetic
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Task
+          Value: ENC-TSK-K78
+
+  McpGammaSyntheticFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "enceladus-mcp-gamma-synthetic${EnvironmentSuffix}"
+      Description: >
+        Synthetic canary probing the gamma MCP edge
+        (https://mcp-gamma.jreese.net) every 5 minutes; publishes
+        Enceladus/Synthetic MCPGammaHealth + MCPGammaTransportStatus
+        (ENC-TSK-K78 / ENC-PLN-067).
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 15
+      Role: !GetAtt McpGammaSyntheticRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import urllib.error
+          import boto3
+
+          BASE = "https://mcp-gamma.jreese.net"
+          ENDPOINT = "mcp-gamma.jreese.net"
+          NAMESPACE = "Enceladus/Synthetic"
+          BROKEN_STATUSES = (403, 500, 502, 503, 504)
+
+
+          def _check_issuer():
+              url = BASE + "/.well-known/oauth-authorization-server"
+              req = urllib.request.Request(url, method="GET")
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  body = resp.read().decode("utf-8")
+              doc = json.loads(body)
+              return doc.get("issuer") == BASE
+
+
+          def _check_transport():
+              payload = json.dumps(
+                  {"jsonrpc": "2.0", "method": "initialize", "id": 1}
+              ).encode("utf-8")
+              req = urllib.request.Request(
+                  BASE + "/",
+                  data=payload,
+                  method="POST",
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as resp:
+                      return resp.status
+              except urllib.error.HTTPError as e:
+                  # A healthy edge that requires auth raises HTTPError (e.g. 401).
+                  return e.code
+
+
+          def _publish(cw, name, value):
+              cw.put_metric_data(
+                  Namespace=NAMESPACE,
+                  MetricData=[
+                      {
+                          "MetricName": name,
+                          "Dimensions": [
+                              {"Name": "Endpoint", "Value": ENDPOINT}
+                          ],
+                          "Value": float(value),
+                      }
+                  ],
+              )
+
+
+          def handler(event, context):
+              cw = boto3.client("cloudwatch")
+              try:
+                  issuer_ok = _check_issuer()
+                  status = _check_transport()
+                  transport_ok = status not in BROKEN_STATUSES
+                  health = 1.0 if (transport_ok and issuer_ok) else 0.0
+                  _publish(cw, "MCPGammaHealth", health)
+                  _publish(cw, "MCPGammaTransportStatus", float(status))
+                  return {
+                      "healthy": health == 1.0,
+                      "issuer_ok": issuer_ok,
+                      "transport_ok": transport_ok,
+                      "status": status,
+                  }
+              except Exception as exc:  # noqa: BLE001 - canary must never page on its own error
+                  try:
+                      _publish(cw, "MCPGammaHealth", 0.0)
+                  except Exception:
+                      pass
+                  return {"healthy": False, "error": str(exc)}
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Task
+          Value: ENC-TSK-K78
+
+  McpGammaSyntheticSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-mcp-gamma-synthetic-schedule${EnvironmentSuffix}"
+      Description: >
+        Triggers the gamma MCP edge synthetic canary every 5 minutes
+        (ENC-TSK-K78 / ENC-PLN-067)
+      ScheduleExpression: "rate(5 minutes)"
+      State: ENABLED
+      Targets:
+        - Id: McpGammaSyntheticTarget
+          Arn: !GetAtt McpGammaSyntheticFunction.Arn
+
+  McpGammaSyntheticInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref McpGammaSyntheticFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt McpGammaSyntheticSchedule.Arn
+
+  McpGammaHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "enceladus-mcp-gamma-health${EnvironmentSuffix}"
+      AlarmDescription: >
+        ENC-TSK-K78 — gamma MCP edge (mcp-gamma.jreese.net) health. Fires when
+        the synthetic canary reports the edge unhealthy (issuer mismatch or
+        broken transport status) across 2 consecutive 5-minute windows, so a
+        silent break of the gamma MCP edge (2026-07-02 outage class) is caught
+        in minutes. Missing data is treated as breaching — the canary going
+        dark is itself a regression.
+      Namespace: Enceladus/Synthetic
+      MetricName: MCPGammaHealth
+      Dimensions:
+        - Name: Endpoint
+          Value: mcp-gamma.jreese.net
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: !If
+        - HasSnsTopic
+        - [!Ref SnsTopicArn]
+        - !Ref "AWS::NoValue"
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-K46 (B66 Ph5 AC-2/AC-6/AC-7) — v4 architecture CloudWatch dashboard.
   # Binds live panels for every metric source Wave A (K41/K43/K44/K45) and the
   # already-shipped H86 arc-walk telemetry Lambda publish to. No new metric
