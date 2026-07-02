@@ -21,6 +21,8 @@ permissions:
 jobs:
   wire-notification:
     name: Wire S3 → SNS (us-west-1) → Lambda (us-west-2) for governance/live/*
+    # ENC-TSK-J65 / ENC-FTR-120: bucket-notification wiring -- gamma-suffixed dispatches flow via v4-gamma; prod pauses at v3-prod.
+    environment: ${{ github.event.inputs.environment_suffix == '-gamma' && 'v4-gamma' || 'v3-prod' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

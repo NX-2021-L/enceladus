@@ -16,6 +16,8 @@ permissions:
 jobs:
   add-gsis:
     name: Add status-created, generation-created, target-created GSIs
+    # ENC-TSK-J65 / ENC-FTR-120: mutates the prod deployment-manager table -- pauses on the v3-prod required-reviewer rule.
+    environment: v3-prod
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
