@@ -531,6 +531,7 @@ _DEFAULT_STATUS = {
     "issue": "open",
     "feature": "planned",
     "plan": "drafted",
+    "lesson": "draft",
 }
 
 
@@ -8830,6 +8831,288 @@ def _handle_components_reject(
     )
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-J46 / ENC-FTR-096 Ph2: lesson-candidate curation (approve/reject)
+# ---------------------------------------------------------------------------
+
+_LESSON_REQUIRED_PILLARS = {"efficiency", "human_protection", "intention", "alignment"}
+_LESSON_VALID_PROVENANCE = ("agent", "human", "mining", "system")
+
+
+def _validate_lesson_pillar_scores(raw: Any) -> Tuple[Optional[Dict[str, float]], Optional[str]]:
+    """Validate a pillar_scores payload, mirroring tracker_mutation's ENC-FTR-054 check."""
+    if not isinstance(raw, dict):
+        return None, (
+            "pillar_scores is required: an object with efficiency, human_protection, "
+            "intention, alignment, each a number in [0.0, 1.0]."
+        )
+    missing = _LESSON_REQUIRED_PILLARS - set(raw.keys())
+    if missing:
+        return None, f"pillar_scores missing required keys: {sorted(missing)}."
+    parsed: Dict[str, float] = {}
+    for pillar in _LESSON_REQUIRED_PILLARS:
+        try:
+            val = float(raw[pillar])
+        except (TypeError, ValueError):
+            return None, f"pillar_scores.{pillar} must be a number in [0.0, 1.0]. Got: {raw[pillar]!r}"
+        if not (0.0 <= val <= 1.0):
+            return None, f"pillar_scores.{pillar} must be in [0.0, 1.0]. Got: {val}"
+        parsed[pillar] = val
+    return parsed, None
+
+
+def _create_lesson_record(
+    project_id: str,
+    prefix: str,
+    title: str,
+    observation: str,
+    insight: str,
+    evidence_chain: List[str],
+    pillar_scores: Dict[str, float],
+    *,
+    provenance: str = "human",
+    category: Optional[str] = None,
+    confidence: Optional[float] = None,
+    description: Optional[str] = None,
+) -> str:
+    """Create a governed ENC-LSN record directly against TRACKER_TABLE.
+
+    Mirrors tracker_mutation's ENC-FTR-052 tracker.create_lesson validation
+    (observation/insight/evidence_chain/provenance/pillar_scores) so a lesson
+    created here is indistinguishable from one created through that surface.
+    evidence_chain entries become LEARNED_FROM edges at graph_sync time
+    (backend/lambda/graph_sync/lambda_function.py), so passing the source
+    lesson-candidate document_id there is what stamps its provenance.
+    """
+    ddb = _get_ddb()
+    now = _now_z()
+    for _ in range(5):
+        seq = _next_tracker_sequence(project_id, "lesson")
+        record_id = _build_record_id(prefix, "lesson", seq)
+        item: Dict[str, Any] = {
+            "project_id": project_id,
+            "record_id": f"lesson#{record_id}",
+            "record_type": "lesson",
+            "item_id": record_id,
+            "title": title,
+            "description": description or "",
+            "observation": observation,
+            "insight": insight,
+            "evidence_chain": evidence_chain,
+            "provenance": provenance,
+            "pillar_scores": pillar_scores,
+            "status": _DEFAULT_STATUS["lesson"],
+            "created_at": now,
+            "updated_at": now,
+            "sync_version": 1,
+            "last_update_note": "Created via coordination API: lesson-candidate approval (ENC-TSK-J46)",
+            "history": [
+                {
+                    "timestamp": now,
+                    "status": "created",
+                    "description": f"Created via coordination API: {title}",
+                }
+            ],
+        }
+        if category:
+            item["category"] = category
+        if confidence is not None:
+            item["confidence"] = float(confidence)
+
+        try:
+            ddb.put_item(
+                TableName=TRACKER_TABLE,
+                Item={k: _serialize(v) for k, v in item.items()},
+                ConditionExpression="attribute_not_exists(record_id)",
+            )
+            return record_id
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                continue
+            raise
+
+    raise RuntimeError("Failed allocating lesson record id after retries")
+
+
+def _handle_lesson_candidate_approve(
+    document_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/lesson-candidates/{documentId}/approve
+
+    ENC-TSK-J46 / ENC-FTR-096 Ph2. Promotes a pending lesson-candidate document
+    (drafted by the I84 memory_consolidation Lambda) to a governed ENC-LSN
+    record via the same creation surface as tracker.create_lesson, stamping the
+    candidate document_id into evidence_chain for LEARNED_FROM provenance, then
+    marks the candidate handoff_status='approved'. Cognito session required —
+    no agent session may promote a lesson candidate autonomously.
+    """
+    if not _is_cognito_session(claims):
+        return _error(
+            403,
+            "Approving a lesson candidate requires Cognito authentication (PWA session only).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "Invalid JSON body")
+
+    candidate = _invoke_document_api("GET", document_id)
+    if candidate.get("_status_code") != 200:
+        return _error(404, f"Lesson candidate '{document_id}' not found or unreadable.")
+    if candidate.get("document_subtype") != "lesson-candidate":
+        return _error(400, f"Document '{document_id}' is not a lesson-candidate.")
+    if candidate.get("handoff_status") != "pending":
+        return _error(
+            409,
+            f"Lesson candidate '{document_id}' is not pending (handoff_status="
+            f"{candidate.get('handoff_status')!r}); it may already have been decided.",
+        )
+
+    title = str(body.get("title") or candidate.get("title") or "").strip()
+    observation = str(body.get("observation") or "").strip()
+    insight = str(body.get("insight") or "").strip()
+    if not title:
+        return _error(400, "title is required (candidate title was empty).")
+    if not observation:
+        return _error(400, "observation is required: what was observed in the candidate data.")
+    if not insight:
+        return _error(400, "insight is required: what was learned from the observation.")
+
+    pillar_scores, pillar_err = _validate_lesson_pillar_scores(body.get("pillar_scores"))
+    if pillar_err:
+        return _error(400, pillar_err)
+
+    provenance = str(body.get("provenance") or "human").strip()
+    if provenance not in _LESSON_VALID_PROVENANCE:
+        return _error(400, f"Invalid provenance '{provenance}'. Allowed: {list(_LESSON_VALID_PROVENANCE)}")
+
+    evidence_chain = [document_id]
+    extra_evidence = body.get("evidence_chain")
+    if isinstance(extra_evidence, list):
+        evidence_chain.extend(str(e).strip() for e in extra_evidence if str(e).strip())
+
+    project_id = str(candidate.get("project_id") or GOVERNANCE_PROJECT_ID)
+    try:
+        meta = _load_project_meta(project_id)
+    except (ValueError, RuntimeError) as exc:
+        return _error(400, str(exc))
+
+    try:
+        lesson_id = _create_lesson_record(
+            project_id,
+            meta.prefix,
+            title,
+            observation,
+            insight,
+            evidence_chain,
+            pillar_scores,
+            provenance=provenance,
+            category=body.get("category"),
+            confidence=body.get("confidence"),
+            description=body.get("description"),
+        )
+    except ClientError as exc:
+        logger.exception("lesson_candidate_approve: lesson create failed")
+        return _error(500, f"Failed to create lesson record: {exc}")
+
+    approved_by = _resolve_decider_identity(claims)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    patch_resp = _invoke_document_api(
+        "PATCH",
+        document_id,
+        {
+            "handoff_status": "approved",
+            "append_content": (
+                f"---\nApproved by {approved_by} at {now}. Promoted to {lesson_id} "
+                f"(ENC-TSK-J46 lesson-candidate curation)."
+            ),
+        },
+    )
+    if patch_resp.get("_status_code") not in (200, 201):
+        logger.warning(
+            "lesson_candidate_approve: %s created but candidate patch failed: %s",
+            lesson_id, patch_resp,
+        )
+
+    return _response(
+        200,
+        {
+            "success": True,
+            "document_id": document_id,
+            "lesson_id": lesson_id,
+            "handoff_status": "approved",
+            "approved_by": approved_by,
+            "approved_at": now,
+        },
+    )
+
+
+def _handle_lesson_candidate_reject(
+    document_id: str, event: Dict[str, Any], claims: Dict[str, Any]
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/lesson-candidates/{documentId}/reject
+
+    ENC-TSK-J46 / ENC-FTR-096 Ph2. Marks a pending lesson-candidate document
+    handoff_status='stale' with an appended rejection note — the candidate is
+    never deleted (append-only discipline). Cognito session required.
+    """
+    if not _is_cognito_session(claims):
+        return _error(
+            403,
+            "Rejecting a lesson candidate requires Cognito authentication (PWA session only).",
+        )
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "Invalid JSON body")
+
+    rejection_reason = str(body.get("rejection_reason") or "").strip()
+    if len(rejection_reason) < 10:
+        return _error(400, "rejection_reason is required and must be at least 10 characters")
+
+    candidate = _invoke_document_api("GET", document_id)
+    if candidate.get("_status_code") != 200:
+        return _error(404, f"Lesson candidate '{document_id}' not found or unreadable.")
+    if candidate.get("document_subtype") != "lesson-candidate":
+        return _error(400, f"Document '{document_id}' is not a lesson-candidate.")
+    if candidate.get("handoff_status") != "pending":
+        return _error(
+            409,
+            f"Lesson candidate '{document_id}' is not pending (handoff_status="
+            f"{candidate.get('handoff_status')!r}); it may already have been decided.",
+        )
+
+    rejected_by = _resolve_decider_identity(claims)
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    patch_resp = _invoke_document_api(
+        "PATCH",
+        document_id,
+        {
+            "handoff_status": "stale",
+            "append_content": f"---\nRejected by {rejected_by} at {now}. Reason: {rejection_reason}",
+        },
+    )
+    if patch_resp.get("_status_code") not in (200, 201):
+        return _error(
+            502,
+            f"Candidate document patch failed (status={patch_resp.get('_status_code')}): {patch_resp}",
+        )
+
+    return _response(
+        200,
+        {
+            "success": True,
+            "document_id": document_id,
+            "handoff_status": "stale",
+            "rejected_by": rejected_by,
+            "rejected_at": now,
+            "rejection_reason": rejection_reason,
+        },
+    )
+
+
 def _handle_components_cloudwatch_event(
     component_id: str, event: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -12719,6 +13002,62 @@ def _cursor_create_document_via_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     return inner
 
 
+def _invoke_document_api(
+    method: str, document_id: str, body: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """GET/PATCH a single document via the SAME internal Lambda-invoke mechanism as
+    _cursor_create_document_via_api, generalized past PUT. Used by the ENC-TSK-J46
+    lesson-candidate approve/reject handlers to read and update the candidate
+    document without direct DynamoDB/S3 access to the document store.
+    """
+    fn_name = DOCUMENT_API_LAMBDA_NAME
+    if not fn_name:
+        raise RuntimeError("DOCUMENT_API_LAMBDA_NAME not configured")
+
+    path = f"/api/v1/documents/{document_id}"
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    internal_key = (COORDINATION_INTERNAL_API_KEY or "").strip()
+    if internal_key:
+        headers["X-Coordination-Internal-Key"] = internal_key
+
+    invoke_event = {
+        "version": "2.0",
+        "routeKey": f"{method.upper()} {path}",
+        "rawPath": path,
+        "requestContext": {"http": {"method": method.upper(), "path": path}},
+        "httpMethod": method.upper(),
+        "headers": headers,
+        "isBase64Encoded": False,
+        "body": json.dumps(body) if body is not None else None,
+    }
+
+    resp = _get_lambda_client().invoke(
+        FunctionName=fn_name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(invoke_event).encode("utf-8"),
+    )
+    raw = resp.get("Payload")
+    payload_text = raw.read().decode("utf-8") if raw is not None else ""
+    envelope = json.loads(payload_text) if payload_text else {}
+    if resp.get("FunctionError"):
+        raise RuntimeError(f"document API invoke error: {envelope}")
+
+    status_code = int(envelope.get("statusCode") or 0)
+    inner_raw = envelope.get("body")
+    inner: Dict[str, Any] = {}
+    if isinstance(inner_raw, str) and inner_raw:
+        try:
+            inner = json.loads(inner_raw)
+        except json.JSONDecodeError:
+            inner = {}
+    elif isinstance(inner_raw, dict):
+        inner = inner_raw
+    inner["_status_code"] = status_code
+    return inner
+
+
 def _cursor_create_issue(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Create a tracker issue via the SAME internal mechanism existing handlers use.
 
@@ -14277,6 +14616,18 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         if decision == "approve":
             return _handle_components_approve(comp_id, event, claims or {})
         return _handle_components_reject(comp_id, event, claims or {})
+
+    # POST /api/v1/coordination/lesson-candidates/{documentId}/approve|reject
+    # (ENC-TSK-J46 / ENC-FTR-096 Ph2). Cognito-gated inside the handlers.
+    match_candidate_decision = re.fullmatch(
+        r"/api/v1/coordination/lesson-candidates/([A-Za-z0-9_\-]+)/(approve|reject)", path
+    )
+    if method == "POST" and match_candidate_decision:
+        candidate_doc_id = match_candidate_decision.group(1)
+        decision = match_candidate_decision.group(2)
+        if decision == "approve":
+            return _handle_lesson_candidate_approve(candidate_doc_id, event, claims or {})
+        return _handle_lesson_candidate_reject(candidate_doc_id, event, claims or {})
 
     # POST /api/v1/coordination/components/{componentId}/{action} where action is
     # one of the ENC-FTR-076 v2 / ENC-TSK-F40 state-machine actions.

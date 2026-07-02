@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-01.05",
-  "updated_at": "2026-07-01T22:10:00Z",
-  "last_change_summary": "ENC-TSK-J44: fixed graph_sync record-type synthesis probe order (session_id before credential_id) to prevent credential-bound sessions from corrupting the credential's Neo4j node.",
+  "version": "2026-07-01.06",
+  "updated_at": "2026-07-02T02:00:00Z",
+  "last_change_summary": "ENC-TSK-J46: lesson-candidate curation surface (list filter + io-gated approve/reject with LEARNED_FROM provenance).",
   "owners": [
     "enceladus-platform"
   ],
@@ -3291,7 +3291,7 @@
       }
     },
     "tracker.graphsearch": {
-      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges. ENC-FTR-098 / ENC-TSK-G36: MENTIONS added to graph_query_api._ALLOWED_EDGE_TYPES so tracker.graphsearch queries with edge_types=['MENTIONS'] no longer reject at the API gate. ENC-PLN-046 hybrid-retrieval remediation: the keyword signal tokenizes multi-word queries and scores per-token field-weighted CONTAINS (ENC-ISS-310); the anchored graph signal is deadline-bounded (_GRAPH_SIGNAL_DEADLINE_S) and degrades to graph_algorithm='timeout' rather than timing out the response (ENC-ISS-311); the /health endpoint reports per-signal availability via a functional probe (ENC-ISS-312). ENC-FTR-101 (Option B, ENC-TSK-H35): an optional pre-materialized standing named projection (enabled via env GDS_STANDING_PROJECTION_PREFIX), refreshed out-of-band by a single-writer action=refresh_projection invoke, lets anchored hybrid queries run gds.pageRank.stream warm against the standing projection (graph_algorithm='gds_pagerank') instead of building a per-query AGA session; the request path falls back to the existing per-query projection then the cypher proxy under _GRAPH_SIGNAL_DEADLINE_S when the standing projection is unconfigured or absent (no regression), and /health gains a graph_projection block reporting projection existence + last-refresh staleness. The standing projection carries weight + flow_weight=1.0 relationship properties (flow_weight is the ENC-FTR-108 adaptive-weight slot). ENC-FTR-108 Ph2 (ENC-TSK-J02): action=refresh_flow_weight invokes graph_query_api.flow_weight_refresh.run_refresh, which reads FTR-082's existing edge_participation[] pathway-telemetry (retrieval_outcome=='hit' entries) from S3 since a persisted watermark, aggregates traversal counts per edge_id, and applies the Ph1 Tero current-reinforcement law (flow_weight = flow_weight + delta*flow - mu*flow_weight, delta=mu=0.2 by default, env-overridable via FLOW_WEIGHT_DELTA/FLOW_WEIGHT_MU) via a single chunked UNWIND-batched Cypher write for touched edges plus one full-corpus decay-only statement (scoped to GRAPH_EDGE_WEIGHTS relationship types, excluding touched edge_ids) for untouched edges — never per-edge transactions. The whole cycle is a no-op when no new telemetry exists since the watermark (idempotent). The watermark is stored as a property on the pre-existing GdsProjectionMeta marker node (name='flow_weight_refresh') rather than a new label, and no new relationship type or node label is introduced anywhere in the write path (OGTM preflight for ENC-TSK-J02: _ALLOWED_EDGE_TYPES and GRAPH_EDGE_WEIGHTS are unchanged before/after).",
+      "description": "Graph-indexed tracker search endpoint (ENC-FTR-047). Read-only Neo4j AuraDB derived projection over DynamoDB tracker records, exposed via GET /api/v1/tracker/graphsearch and MCP search(action='tracker.graphsearch'). ENC-FTR-049: Supports edge-type filtering (edge_types, edge_type params) and weight thresholds (min_weight) for typed relationship edges. ENC-FTR-098 / ENC-TSK-G36: MENTIONS added to graph_query_api._ALLOWED_EDGE_TYPES so tracker.graphsearch queries with edge_types=['MENTIONS'] no longer reject at the API gate. ENC-PLN-046 hybrid-retrieval remediation: the keyword signal tokenizes multi-word queries and scores per-token field-weighted CONTAINS (ENC-ISS-310); the anchored graph signal is deadline-bounded (_GRAPH_SIGNAL_DEADLINE_S) and degrades to graph_algorithm='timeout' rather than timing out the response (ENC-ISS-311); the /health endpoint reports per-signal availability via a functional probe (ENC-ISS-312). ENC-FTR-101 (Option B, ENC-TSK-H35): an optional pre-materialized standing named projection (enabled via env GDS_STANDING_PROJECTION_PREFIX), refreshed out-of-band by a single-writer action=refresh_projection invoke, lets anchored hybrid queries run gds.pageRank.stream warm against the standing projection (graph_algorithm='gds_pagerank') instead of building a per-query AGA session; the request path falls back to the existing per-query projection then the cypher proxy under _GRAPH_SIGNAL_DEADLINE_S when the standing projection is unconfigured or absent (no regression), and /health gains a graph_projection block reporting projection existence + last-refresh staleness. The standing projection carries weight + flow_weight=1.0 relationship properties (flow_weight is the ENC-FTR-108 adaptive-weight slot). ENC-FTR-108 Ph2 (ENC-TSK-J02): action=refresh_flow_weight invokes graph_query_api.flow_weight_refresh.run_refresh, which reads FTR-082's existing edge_participation[] pathway-telemetry (retrieval_outcome=='hit' entries) from S3 since a persisted watermark, aggregates traversal counts per edge_id, and applies the Ph1 Tero current-reinforcement law (flow_weight = flow_weight + delta*flow - mu*flow_weight, delta=mu=0.2 by default, env-overridable via FLOW_WEIGHT_DELTA/FLOW_WEIGHT_MU) via a single chunked UNWIND-batched Cypher write for touched edges plus one full-corpus decay-only statement (scoped to GRAPH_EDGE_WEIGHTS relationship types, excluding touched edge_ids) for untouched edges \u2014 never per-edge transactions. The whole cycle is a no-op when no new telemetry exists since the watermark (idempotent). The watermark is stored as a property on the pre-existing GdsProjectionMeta marker node (name='flow_weight_refresh') rather than a new label, and no new relationship type or node label is introduced anywhere in the write path (OGTM preflight for ENC-TSK-J02: _ALLOWED_EDGE_TYPES and GRAPH_EDGE_WEIGHTS are unchanged before/after).",
       "fields": {
         "search_type": {
           "type": "enum",
@@ -6230,6 +6230,88 @@
           "definition": "ENC-TSK-J43. Optional. When supplied, binds the minted session to an existing active AgentCredential (coordination.agent_credential); the underlying coordination_api call rejects (400) an unknown or non-active credential_id."
         }
       }
+    },
+    "document.lesson-candidate": {
+      "description": "Lesson-candidate document subtype (ENC-FTR-096). Drafted directly to DynamoDB by the memory_consolidation Lambda (ENC-TSK-I84) from recurring co-citation clusters -- NOT created via document_api PUT, so it is absent from the document_subtype allow-list enforced there. Curated (approved/rejected) via ENC-TSK-J46: coordination_api POST /api/v1/coordination/lesson-candidates/{documentId}/approve|reject, both Cognito-gated.",
+      "fields": {
+        "document_subtype": {
+          "type": "string",
+          "literal_value": "lesson-candidate",
+          "definition": "Fixed subtype value for candidate documents. Written directly by memory_consolidation Lambda; document_api's PUT/PATCH document_subtype allow-list does not include it (candidates are never created or re-subtyped through that surface)."
+        },
+        "handoff_status": {
+          "type": "enum",
+          "enum": [
+            "pending",
+            "approved",
+            "stale"
+          ],
+          "transitions": {
+            "pending": [
+              "approved",
+              "stale"
+            ],
+            "approved": [],
+            "stale": []
+          },
+          "definition": "Curation-state field, reusing the handoff_status attribute name (document_api CANDIDATE_STATUSES / CANDIDATE_STATUS_TRANSITIONS, ENC-TSK-J46). 'approved' is only a legal value for lesson-candidate documents -- handoff documents keep their own {pending,claimed,completed,stale} vocabulary.",
+          "write_authority": "document_api Lambda PATCH. Transitions to 'approved' or 'stale' require a Cognito-authenticated session (document_api._is_cognito_session); an internal-key (agent) session is rejected with 403. This is the enforced io-gate: no agent session can promote or reject a lesson candidate autonomously.",
+          "usage_guidance": "List pending candidates via documents.list(document_subtype='lesson-candidate', handoff_status='pending', sort='created_at'). Approve/reject through coordination_api's lesson-candidates routes (see coordination.lesson_candidates), not a raw PATCH -- approval also creates the governed ENC-LSN record."
+        },
+        "related_items": {
+          "type": "array",
+          "definition": "Source Handoff document IDs the candidate's co-citation cluster was drawn from (ENC-TSK-I84 AC-3)."
+        },
+        "cluster_member_ids": {
+          "type": "array",
+          "definition": "Tracker record IDs that recur together as the co-citation cluster underlying this candidate."
+        },
+        "frequency_count": {
+          "type": "number",
+          "definition": "Count of distinct Handoff documents in which the cluster co-cited within the lookback window."
+        }
+      }
+    },
+    "coordination.lesson_candidates": {
+      "description": "ENC-TSK-J46 / ENC-FTR-096 Ph2: coordination_api HTTP surface that promotes or rejects a pending lesson-candidate document. Approve creates a governed ENC-LSN record via the same validation as tracker.create_lesson (observation/insight/evidence_chain/provenance/pillar_scores), stamping the candidate's document_id into evidence_chain (LEARNED_FROM provenance at graph_sync), then marks the candidate handoff_status='approved'. Reject marks handoff_status='stale' with an appended rejection note -- the candidate document is never deleted (append-only discipline).",
+      "fields": {
+        "route": {
+          "type": "string",
+          "enum": [
+            "POST /api/v1/coordination/lesson-candidates/{documentId}/approve",
+            "POST /api/v1/coordination/lesson-candidates/{documentId}/reject"
+          ],
+          "definition": "Both routes require a Cognito-authenticated session (_is_cognito_session); an internal-key (agent) session receives 403. Gamma-only (Condition: IsGamma in 03-api.yaml) per DOC-499FA089EC30 -- v3-prod is frozen pending the io-gated cutover."
+        },
+        "approve.body.observation": {
+          "type": "string",
+          "required": true,
+          "definition": "What was observed in the candidate data. Required on the created lesson (ENC-FTR-052); immutable after creation."
+        },
+        "approve.body.insight": {
+          "type": "string",
+          "required": true,
+          "definition": "What was learned from the observation. Required on the created lesson."
+        },
+        "approve.body.pillar_scores": {
+          "type": "object",
+          "required": true,
+          "definition": "efficiency, human_protection, intention, alignment, each a number in [0.0, 1.0] (ENC-FTR-054). Validated identically to tracker_mutation's create-lesson check."
+        },
+        "approve.body.evidence_chain": {
+          "type": "array",
+          "required": false,
+          "definition": "Optional additional evidence record IDs. The candidate document_id is always prepended automatically -- this is what stamps LEARNED_FROM provenance back to the candidate."
+        },
+        "reject.body.rejection_reason": {
+          "type": "string",
+          "required": true,
+          "constraints": {
+            "min_length": 10
+          },
+          "definition": "Human-readable reason appended (append-only) to the candidate document content when marking it stale."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -6283,6 +6365,11 @@
       "version": "2026-07-01.05",
       "task": "ENC-TSK-J44",
       "summary": "Fixed graph_sync._normalize_record_for_graph probe order bug (credential-bound sessions misclassified as agent_credential)."
+    },
+    {
+      "version": "2026-07-01.06",
+      "task": "ENC-TSK-J46",
+      "summary": "Added document.lesson-candidate and coordination.lesson_candidates entities: candidate list filter (document_api handoff_status query param) and io-gated approve/reject (coordination_api, Cognito-only), approve creates a governed ENC-LSN via the tracker.create_lesson validation surface with evidence_chain provenance back to the candidate."
     }
   ]
 }

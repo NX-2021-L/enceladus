@@ -2343,6 +2343,24 @@ Resources:
       RouteKey: "PUT /api/v1/governance/{fileName+}"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-J46 / ENC-FTR-096 Ph2: lesson-candidate curation (gamma-only per
+  # DOC-499FA089EC30 -- v3-prod is frozen pending the io-gated cutover).
+  RouteLessonCandidatesApprove:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/lesson-candidates/{documentId}/approve"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteLessonCandidatesReject:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/coordination/lesson-candidates/{documentId}/reject"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
 Outputs:
   ApiEndpoint:
     Value: !GetAtt HttpApi.ApiEndpoint
