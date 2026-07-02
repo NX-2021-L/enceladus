@@ -2331,7 +2331,7 @@
         "memory_20250818": {
           "type": "tool",
           "definition": "Anthropic memory tool registered on the tools array when context management is enabled.",
-          "usage_guidance": "Enceladus memory file schema (_ENCELADUS_MEMORY_FILE_SCHEMA) defines plan anchors, governance_hash, active task state. Durable S3/local backend is a follow-up."
+          "usage_guidance": "Enceladus memory file schema (_ENCELADUS_MEMORY_FILE_SCHEMA) defines plan anchors, governance_hash, active task state. Runtime persistence: S3 via agent_session_memory.S3MemoryToolHandler at coordination-agent-memory/{project_id}/{scope_id}/memories/."
         },
         "anthropic_beta_headers": {
           "type": "array",
