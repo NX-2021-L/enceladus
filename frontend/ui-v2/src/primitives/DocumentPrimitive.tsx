@@ -21,10 +21,10 @@ export function DocumentPrimitive({ record }: { record: Document }) {
         <MetaRow label="Subtype">{record.document_subtype}</MetaRow>
       ) : null}
       <MetaRow label="Version">
-        <Metric>v{record.version}</Metric>
+        <Metric>v{record.version ?? '?'}</Metric>
       </MetaRow>
       <MetaRow label="Keywords">
-        {record.keywords.length > 0 ? record.keywords.join(', ') : 'None'}
+        {(record.keywords ?? []).length > 0 ? (record.keywords ?? []).join(', ') : 'None'}
       </MetaRow>
       <MetaRow label="Created by">{record.created_by}</MetaRow>
     </PrimitiveCard>

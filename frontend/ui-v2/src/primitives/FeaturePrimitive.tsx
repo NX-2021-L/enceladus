@@ -12,16 +12,16 @@ export function FeaturePrimitive({ record }: { record: Feature }) {
     >
       <Prose>{record.description}</Prose>
       <MetaRow label="Owners">
-        {record.owners.length > 0 ? record.owners.join(', ') : 'Unowned'}
+        {(record.owners ?? []).length > 0 ? (record.owners ?? []).join(', ') : 'Unowned'}
       </MetaRow>
       <MetaRow label="Success metrics">
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
           <Sparkles size={14} strokeWidth={1.5} color="var(--accent)" />
-          <Metric>{record.success_metrics.length}</Metric>
+          <Metric>{record.success_metrics?.length ?? 0}</Metric>
         </span>
       </MetaRow>
       <MetaRow label="Related tasks">
-        <Metric>{record.related_task_ids.length}</Metric>
+        <Metric>{record.related_task_ids?.length ?? 0}</Metric>
       </MetaRow>
     </PrimitiveCard>
   )

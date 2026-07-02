@@ -16,11 +16,11 @@ export function PlanPrimitive({ record }: { record: Plan }) {
       <MetaRow label="Objectives">
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
           <MapIcon size={14} strokeWidth={1.5} color="var(--accent)" />
-          <Metric>{record.objectives_set.length}</Metric>
+          <Metric>{record.objectives_set?.length ?? 0}</Metric>
         </span>
       </MetaRow>
       <MetaRow label="Attached docs">
-        <Metric>{record.attached_documents.length}</Metric>
+        <Metric>{record.attached_documents?.length ?? 0}</Metric>
       </MetaRow>
     </PrimitiveCard>
   )
