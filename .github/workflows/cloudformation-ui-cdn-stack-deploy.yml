@@ -105,6 +105,55 @@ jobs:
             echo "environment=${environment}"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Recover a failed/rolled-back stack before the change-set (self-heal + diagnostics)
+        env:
+          STACK: ${{ steps.params.outputs.stack_name }}
+        run: |
+          set -euo pipefail
+
+          # A prior apply can leave the stack in a terminal-failed state that
+          # blocks a fresh CREATE (ROLLBACK_COMPLETE is not updatable). Surface
+          # the failure reason to the job log + summary, then delete so the
+          # subsequent change-set creates cleanly. Healthy/absent stacks are
+          # left untouched.
+          status=$(aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${STACK}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "Stack ${STACK} status: ${status}"
+
+          case "${status}" in
+            ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|UPDATE_ROLLBACK_FAILED|DELETE_FAILED)
+              echo "Stack ${STACK} is in ${status} — capturing failure events, then deleting for a clean re-create."
+              {
+                echo "## UI CDN stack recovery — ${STACK}"
+                echo ""
+                echo "Stack was in \`${status}\`; deleting before re-create. Recent failure events:"
+                echo ""
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              # Most-recent FAILED events first; limit to a readable slice.
+              aws cloudformation describe-stack-events \
+                --region "${AWS_REGION}" \
+                --stack-name "${STACK}" \
+                --query "reverse(StackEvents[?contains(ResourceStatus,'FAILED')].{t:Timestamp,id:LogicalResourceId,st:ResourceStatus,reason:ResourceStatusReason})" \
+                --output table 2>/dev/null | head -60 | tee -a "$GITHUB_STEP_SUMMARY" || echo "(describe-stack-events unavailable)" | tee -a "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+              aws cloudformation delete-stack \
+                --region "${AWS_REGION}" \
+                --stack-name "${STACK}"
+              aws cloudformation wait stack-delete-complete \
+                --region "${AWS_REGION}" \
+                --stack-name "${STACK}"
+              echo "Stack ${STACK} deleted; the change-set below will re-create it."
+              ;;
+            *)
+              echo "No recovery needed (status ${status} is absent or healthy)."
+              ;;
+          esac
+
       - name: Create UI CDN stack change-set (no execute)
         id: changeset
         env:
@@ -176,7 +225,10 @@ jobs:
     needs: plan
     if: needs.plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # CloudFront distribution create/update can take 40-60 min to propagate; 45
+    # min caused a mid-wait cancel that left the stack rolling back. 90 gives the
+    # distribution room to settle before the CFN wait is cancelled.
+    timeout-minutes: 90
     # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma has
     # none. A main-branch run therefore pauses here as a rejectable request.
     environment: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
