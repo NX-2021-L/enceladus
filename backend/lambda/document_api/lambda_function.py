@@ -162,6 +162,20 @@ HANDOFF_STATUS_TRANSITIONS = {
 }
 HANDOFF_REQUIRED_FIELDS = {"source_record_id"}  # required when subtype=handoff
 
+# ENC-TSK-J46 / ENC-FTR-096 Ph2: lesson-candidate documents (drafted by the I84
+# memory_consolidation Lambda, written directly via DynamoDB) reuse the
+# handoff_status attribute as their curation-state field. "approved" is only
+# valid for this subtype -- handoff documents keep their own vocabulary above.
+CANDIDATE_STATUSES = {"pending", "approved", "stale"}
+CANDIDATE_STATUS_TRANSITIONS = {
+    "pending": {"approved", "stale"},
+    "approved": set(),
+    "stale": set(),
+}
+# Curation-state transitions that constitute promoting/rejecting a lesson
+# candidate must come from an io-Cognito PWA session -- never an agent session.
+CANDIDATE_GATED_TRANSITIONS = {"approved", "stale"}
+
 # ---------------------------------------------------------------------------
 # COE (correction-of-errors) document schema (ENC-FTR-077)
 # ---------------------------------------------------------------------------
@@ -540,6 +554,12 @@ def _authenticate(event: Dict, required_scopes: Optional[List[str]] = None) -> T
     except ValueError as exc:
         logger.warning("auth failed: %s", exc)
         return None, _error(401, str(exc))
+
+
+def _is_cognito_session(claims: Dict[str, Any]) -> bool:
+    """Return True if the request was authenticated via a Cognito JWT cookie (not internal key)."""
+    mode = str((claims or {}).get("auth_mode") or "").strip().lower()
+    return mode not in ("internal-key", "managed-token")
 
 
 # ---------------------------------------------------------------------------
@@ -2161,7 +2181,19 @@ def _list_by_project(qs: Dict) -> Dict:
     if maturity_filter:
         docs = [d for d in docs if d.get("document_maturity_state", "") == maturity_filter]
 
-    docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
+    # ENC-TSK-J46 / ENC-FTR-096 Ph2: handoff_status filter (also covers the
+    # lesson-candidate curation-state field, which reuses this attribute).
+    handoff_status_filter = qs.get("handoff_status", "").strip().lower()
+    if handoff_status_filter:
+        docs = [d for d in docs if d.get("handoff_status", "") == handoff_status_filter]
+
+    # ENC-TSK-J46: candidate curation lists sort oldest-drafted-first so the
+    # queue is worked in draft order; every other list keeps the existing
+    # most-recently-updated-first ordering.
+    if qs.get("sort", "").strip().lower() == "created_at":
+        docs.sort(key=lambda d: d.get("created_at", "") or "")
+    else:
+        docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
     sliced = docs[:PAGE_SIZE]
     return _response(
         200,
@@ -2409,16 +2441,26 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         expr_parts.append("document_maturity_state = :dms")
         attr_values[":dms"] = {"S": dms}
 
-    # Handoff status transitions (ENC-FTR-061)
+    # Handoff status transitions (ENC-FTR-061); lesson-candidate curation-state
+    # transitions (ENC-TSK-J46 / ENC-FTR-096 Ph2) reuse the same attribute.
     current_subtype = existing.get("document_subtype", {}).get("S", "general")
     if "handoff_status" in body:
-        if current_subtype != "handoff":
-            return _error(400, "Cannot set handoff_status on a non-handoff document.")
+        is_candidate = current_subtype == "lesson-candidate"
+        if current_subtype != "handoff" and not is_candidate:
+            return _error(400, "Cannot set handoff_status on a document of this subtype.")
+        valid_statuses = CANDIDATE_STATUSES if is_candidate else HANDOFF_STATUSES
+        transitions = CANDIDATE_STATUS_TRANSITIONS if is_candidate else HANDOFF_STATUS_TRANSITIONS
         new_handoff_status = str(body["handoff_status"]).strip().lower()
-        if new_handoff_status not in HANDOFF_STATUSES:
-            return _error(400, f"Invalid handoff_status '{new_handoff_status}'. Must be one of: {', '.join(sorted(HANDOFF_STATUSES))}")
+        if is_candidate and new_handoff_status in CANDIDATE_GATED_TRANSITIONS and not _is_cognito_session(claims):
+            return _error(
+                403,
+                "Approving or rejecting a lesson candidate requires Cognito authentication "
+                "(PWA session only) -- no agent session may promote a lesson candidate autonomously.",
+            )
+        if new_handoff_status not in valid_statuses:
+            return _error(400, f"Invalid handoff_status '{new_handoff_status}'. Must be one of: {', '.join(sorted(valid_statuses))}")
         current_handoff_status = existing.get("handoff_status", {}).get("S", "pending")
-        allowed = HANDOFF_STATUS_TRANSITIONS.get(current_handoff_status, set())
+        allowed = transitions.get(current_handoff_status, set())
         if new_handoff_status != current_handoff_status and new_handoff_status not in allowed:
             return _error(
                 400,

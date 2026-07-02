@@ -6152,7 +6152,15 @@ async def _documents_list(args: dict) -> list[TextContent]:
     project_id = args["project_id"]
     page_size = int(args.get("page_size", 25))
     cursor = args.get("cursor")
-    resp = _document_api_request("GET", query={"project": project_id})
+    query: Dict[str, Any] = {"project": project_id}
+    # ENC-TSK-J46 / ENC-FTR-096 Ph2: thread through document_subtype /
+    # handoff_status filters (the latter also covers the lesson-candidate
+    # curation-state field) and the created_at sort used by candidate queues.
+    for passthrough_key in ("document_subtype", "handoff_status", "maturity_state", "sort"):
+        value = args.get(passthrough_key)
+        if value:
+            query[passthrough_key] = value
+    resp = _document_api_request("GET", query=query)
     if isinstance(resp, dict) and resp.get("error"):
         return _result_text(resp)
     # Response is typically {"documents": [...]} or a list
