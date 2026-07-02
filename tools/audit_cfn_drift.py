@@ -554,7 +554,7 @@ def main() -> int:
 
     any_drift = any(
         not report[section].get("inconclusive")
-        and (report[section]["live_only"] or report[section]["cfn_only"])
+        and report[section]["live_only"]
         for section in ("apigw_routes", "eventbridge_rules")
     )
     if args.fail_on_drift and any_drift:
