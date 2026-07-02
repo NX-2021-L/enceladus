@@ -250,6 +250,9 @@ except (TypeError, ValueError):
 # the per-project DynamoDB time series (queryable via the project-timestamp-index GSI).
 DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
 
+# ENC-FTR-109 / ENC-TSK-K05 — stigmergic exploration trace sink (telemetry-only).
+STIGMERGIC_TRACE_TABLE = os.environ.get("STIGMERGIC_TRACE_TABLE", "").strip()
+
 _s3 = None
 _dynamodb = None
 
@@ -2052,6 +2055,61 @@ def _emit_pathway_telemetry(record: Dict[str, Any]) -> None:
         logger.exception("[ERROR] pathway telemetry emit failed (suppressed)")
 
 
+def _emit_stigmergic_trace(record: Dict[str, Any]) -> None:
+    """ENC-FTR-109 / ENC-TSK-K05 sink. Persist one trace to DynamoDB when configured;
+    otherwise emit a structured CloudWatch line. Never raises into the request path."""
+    try:
+        line = json.dumps(record, default=str)
+        if STIGMERGIC_TRACE_TABLE:
+            try:
+                import stigmergic_trace
+
+                stigmergic_trace.emit_stigmergic_trace(
+                    _get_dynamodb(), STIGMERGIC_TRACE_TABLE, record,
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "[WARNING] stigmergic trace DDB put failed (%s); CloudWatch fallback",
+                    exc,
+                )
+        logger.info("STIGMERGIC_TRACE %s", line)
+    except Exception:
+        logger.exception("[ERROR] stigmergic trace emit failed (suppressed)")
+
+
+def _session_id_from_params(params: Dict[str, Any]) -> str:
+    for key in ("session_id", "agent_session_id", "wave_id"):
+        value = str(params.get(key) or "").strip()
+        if value:
+            return value
+    return "unassigned"
+
+
+def _maybe_emit_stigmergic_trace(
+    *,
+    project_id: str,
+    params: Dict[str, Any],
+    event_type: str,
+    result: Dict[str, Any],
+    outcome_signal: Dict[str, Any],
+) -> None:
+    """Build and emit one stigmergic trace record (telemetry-only)."""
+    try:
+        import stigmergic_trace
+
+        record = stigmergic_trace.build_trace_record(
+            project_id=project_id,
+            session_id=_session_id_from_params(params),
+            event_type=event_type,
+            record_id_path=stigmergic_trace.record_id_path_from_graph_result(result),
+            outcome_signal=outcome_signal,
+        )
+        _emit_stigmergic_trace(record)
+    except Exception:
+        logger.exception("[ERROR] stigmergic trace build failed (suppressed)")
+
+
 def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
     """Phase 1 hybrid retrieval: vector + graph + keyword fused via RRF.
 
@@ -2240,6 +2298,17 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             signal_availability=_sig_avail, retrieval_records=[],
             lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
         ))
+        _maybe_emit_stigmergic_trace(
+            project_id=project_id,
+            params=params,
+            event_type="retrieval",
+            result={"pathway": {"node_sequence": []}, "nodes": []},
+            outcome_signal={
+                "result_count": 0,
+                "graph_algorithm": graph_algorithm,
+                "signal_availability": _sig_avail,
+            },
+        )
         return {
             "nodes": [],
             "edges": [],
@@ -2439,6 +2508,21 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         signal_availability=_sig_avail, retrieval_records=retrieval_records,
         lambda_graph=energy_lambda_graph, lambda_kw=energy_lambda_kw,
     ))
+    _maybe_emit_stigmergic_trace(
+        project_id=project_id,
+        params=params,
+        event_type="retrieval",
+        result={
+            "pathway": {"node_sequence": node_sequence},
+            "nodes": nodes,
+            "edges": edges_traversed,
+        },
+        outcome_signal={
+            "result_count": len(nodes),
+            "graph_algorithm": graph_algorithm,
+            "signal_availability": _sig_avail,
+        },
+    )
 
     return {
         "nodes": nodes,
@@ -2824,6 +2908,21 @@ def _handle_search(event: Dict) -> Dict:
             "query_cypher": result.get("query_cypher", ""),
         })
     )
+
+    if search_type != "hybrid":
+        _maybe_emit_stigmergic_trace(
+            project_id=project_id,
+            params=qs,
+            event_type="traversal",
+            result=result,
+            outcome_signal={
+                "search_type": search_type,
+                "node_count": len(result.get("nodes", [])),
+                "edge_count": len(result.get("edges", [])),
+                "path_count": len(result.get("paths", [])),
+                "duration_ms": duration_ms,
+            },
+        )
 
     response_body: Dict[str, Any] = {
         "success": True,
