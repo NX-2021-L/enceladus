@@ -3,12 +3,16 @@
 Validates:
 - Cognito-only enforcement (403 for internal-key sessions) on both approve and reject.
 - Approve requires observation/insight/pillar_scores; creates a lesson record with
-  evidence_chain including the candidate document_id, then patches the candidate to
-  handoff_status='approved'.
-- Reject requires rejection_reason >= 10 chars; patches the candidate to
-  handoff_status='stale' with an appended note (append-only, never deleted).
+  evidence_chain including the candidate document_id, then finalizes the candidate
+  to handoff_status='approved' via a direct DynamoDB write (NOT document_api's PATCH
+  -- that endpoint's internal-key auth is shared with the MCP server's agent-facing
+  documents.patch relay, so it can't distinguish this already-Cognito-verified call
+  from a bare agent session; see _finalize_lesson_candidate_decision).
+- Reject requires rejection_reason >= 10 chars; finalizes the candidate to
+  handoff_status='stale' with the reason appended to its decision_log (append-only,
+  never deleted).
 - 404 when the candidate document is missing; 400 when it isn't a lesson-candidate;
-  409 when it isn't pending (already decided).
+  409 when it isn't pending (already decided), including the concurrent-decision race.
 """
 
 import importlib.util
@@ -113,22 +117,15 @@ class LessonCandidateApproveTests(unittest.TestCase):
             )
         self.assertEqual(resp["statusCode"], 400)
 
-    def test_happy_path_creates_lesson_and_patches_candidate(self):
-        calls = []
-
-        def fake_invoke(method, document_id, body=None):
-            calls.append((method, document_id, body))
-            if method == "GET":
-                return PENDING_CANDIDATE
-            return {"_status_code": 200}
-
-        with mock.patch.object(coordination_lambda, "_invoke_document_api", side_effect=fake_invoke), \
+    def test_happy_path_creates_lesson_and_finalizes_candidate(self):
+        with mock.patch.object(coordination_lambda, "_invoke_document_api", return_value=PENDING_CANDIDATE), \
              mock.patch.object(
                  coordination_lambda,
                  "_load_project_meta",
                  return_value=coordination_lambda.ProjectMeta(project_id="enceladus", prefix="ENC"),
              ), \
-             mock.patch.object(coordination_lambda, "_create_lesson_record", return_value="ENC-LSN-042") as create_mock:
+             mock.patch.object(coordination_lambda, "_create_lesson_record", return_value="ENC-LSN-042") as create_mock, \
+             mock.patch.object(coordination_lambda, "_finalize_lesson_candidate_decision") as finalize_mock:
             resp = coordination_lambda._handle_lesson_candidate_approve(
                 "DOC-CANDIDATE01",
                 _event({
@@ -149,13 +146,13 @@ class LessonCandidateApproveTests(unittest.TestCase):
         evidence_chain = create_args[5]
         self.assertIn("DOC-CANDIDATE01", evidence_chain)
 
-        # The candidate document must be patched to approved with an append-only note.
-        patch_calls = [c for c in calls if c[0] == "PATCH"]
-        self.assertEqual(len(patch_calls), 1)
-        _, patched_doc_id, patch_body = patch_calls[0]
-        self.assertEqual(patched_doc_id, "DOC-CANDIDATE01")
-        self.assertEqual(patch_body["handoff_status"], "approved")
-        self.assertIn("append_content", patch_body)
+        # The candidate must be finalized to approved via the direct-write path
+        # (never via document_api's shared-internal-key PATCH -- see
+        # _finalize_lesson_candidate_decision's docstring for why).
+        finalize_mock.assert_called_once()
+        finalize_args = finalize_mock.call_args.args
+        self.assertEqual(finalize_args[0], "DOC-CANDIDATE01")
+        self.assertEqual(finalize_args[1], "approved")
 
 
 class LessonCandidateRejectTests(unittest.TestCase):
@@ -188,16 +185,9 @@ class LessonCandidateRejectTests(unittest.TestCase):
             )
         self.assertEqual(resp["statusCode"], 409)
 
-    def test_happy_path_marks_stale_with_append_only_note(self):
-        calls = []
-
-        def fake_invoke(method, document_id, body=None):
-            calls.append((method, document_id, body))
-            if method == "GET":
-                return PENDING_CANDIDATE
-            return {"_status_code": 200}
-
-        with mock.patch.object(coordination_lambda, "_invoke_document_api", side_effect=fake_invoke):
+    def test_happy_path_marks_stale_via_direct_write(self):
+        with mock.patch.object(coordination_lambda, "_invoke_document_api", return_value=PENDING_CANDIDATE), \
+             mock.patch.object(coordination_lambda, "_finalize_lesson_candidate_decision") as finalize_mock:
             resp = coordination_lambda._handle_lesson_candidate_reject(
                 "DOC-CANDIDATE01",
                 _event({"rejection_reason": "Cluster is coincidental, not a real pattern."}),
@@ -208,13 +198,27 @@ class LessonCandidateRejectTests(unittest.TestCase):
         body = json.loads(resp["body"])
         self.assertEqual(body["handoff_status"], "stale")
 
-        patch_calls = [c for c in calls if c[0] == "PATCH"]
-        self.assertEqual(len(patch_calls), 1)
-        _, patched_doc_id, patch_body = patch_calls[0]
-        self.assertEqual(patched_doc_id, "DOC-CANDIDATE01")
-        self.assertEqual(patch_body["handoff_status"], "stale")
-        self.assertIn("append_content", patch_body)
-        self.assertNotIn("content", patch_body)  # never overwrites, only appends
+        finalize_mock.assert_called_once_with(
+            "DOC-CANDIDATE01", "stale", "lead@example.com",
+            "Cluster is coincidental, not a real pattern.",
+        )
+
+    def test_concurrent_decision_race_returns_409(self):
+        class _CCFE(Exception):
+            pass
+
+        error_response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+        with mock.patch.object(coordination_lambda, "_invoke_document_api", return_value=PENDING_CANDIDATE), \
+             mock.patch.object(
+                 coordination_lambda, "_finalize_lesson_candidate_decision",
+                 side_effect=coordination_lambda.ClientError(error_response, "UpdateItem"),
+             ):
+            resp = coordination_lambda._handle_lesson_candidate_reject(
+                "DOC-CANDIDATE01",
+                _event({"rejection_reason": "Cluster is coincidental, not a real pattern."}),
+                COGNITO_CLAIMS,
+            )
+        self.assertEqual(resp["statusCode"], 409)
 
 
 if __name__ == "__main__":
