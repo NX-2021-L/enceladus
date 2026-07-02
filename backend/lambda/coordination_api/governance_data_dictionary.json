@@ -2272,6 +2272,39 @@
         }
       }
     },
+    "coordination_api.anthropic_batch": {
+      "description": "Anthropic Message Batches API routing for non-interactive workloads (ENC-TSK-G19 / FTR-099 Strategy #8). Submits via POST /v1/messages/batches when provider_preferences.batch_eligible=true; EventBridge poller (rate 1 minute, 60s min interval) finalizes via batch-results callback.",
+      "fields": {
+        "batch_eligible": {
+          "type": "boolean",
+          "definition": "Provider preference signaling deferred batch execution (50% Anthropic batch pricing). Incompatible with execution_mode=preflight.",
+          "usage_guidance": "Set in provider_preferences on coordination request intake or dispatch body. Routes claude_agent_sdk dispatches through _dispatch_claude_batch_api instead of synchronous Messages API."
+        },
+        "batch_workload_type": {
+          "type": "enum",
+          "enum": [
+            "nightly_changelog_generation",
+            "governance_audit_doc_patching",
+            "compliance_doc_creation",
+            "memory_consolidation_bulk"
+          ],
+          "definition": "Optional workload classifier for telemetry and cost attribution. See NON_INTERACTIVE_WORKLOADS in anthropic_batch.py."
+        },
+        "ephemeral_1h_cache": {
+          "type": "object",
+          "definition": "cache_control {type: ephemeral, ttl: 1h} on system prompt and mcp_toolset prefix blocks in batch params.",
+          "usage_guidance": "Stacks with batch 50% discount for ~95% effective cost on recurring static-prefix workloads (NIGHTLY_CHANGELOG_COST_COMPARISON in anthropic_batch.py)."
+        },
+        "poll_interval_seconds": {
+          "type": "integer",
+          "definition": "Minimum 60 seconds between Anthropic batch status polls per request (BATCH_POLL_INTERVAL_SECONDS)."
+        },
+        "batch_subrequest_failure_alert": {
+          "type": "observability",
+          "definition": "Structured CloudWatch event batch_subrequest_failure with alert=true emitted for each errored batch result line."
+        }
+      }
+    },
     "mcp_server.cognito_oauth": {
       "description": "Cognito-direct OAuth authentication mode for MCP endpoints (ENC-FTR-045). When active, OAuth metadata points authorization_endpoint and token_endpoint directly to Cognito Hosted UI, DCR returns pre-configured Cognito app client credentials, and bearer tokens are validated as Cognito JWTs.",
       "fields": {
