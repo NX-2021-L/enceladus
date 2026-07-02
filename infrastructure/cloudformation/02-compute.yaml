@@ -1377,6 +1377,66 @@ Resources:
           Value: memory-consolidation
 
   # ---------------------------------------------------------------------------
+  # ENC-FTR-106 / ENC-TSK-K03: Unlearning Lambda (Crick-Mitchison reverse-consolidation)
+  # Nightly per-invocation pass: stigmergic-trace miss clusters + drift SAR waves ->
+  # unlearning-candidate reports; optional archive of reference records via graph_sync.
+  # DATA-SAFETY: UNLEARNING_DRY_RUN=1, UNLEARNING_MUTATION_ENABLED=0, IO_APPROVAL_RUNS=3.
+  # ---------------------------------------------------------------------------
+  UnlearningFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-unlearning${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt UnlearningRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          DRIFT_TELEMETRY_TABLE: !Sub "enceladus-drift-telemetry${EnvironmentSuffix}"
+          STIGMERGIC_TRACE_TABLE: !Sub "enceladus-stigmergic-trace${EnvironmentSuffix}"
+          UNLEARNING_BUCKET: !Ref S3Bucket
+          UNLEARNING_PREFIX: !Sub "${S3EnvPrefix}unlearning-tombstones"
+          UNLEARNING_STATE_PREFIX: !Sub "${S3EnvPrefix}unlearning-state"
+          DEFAULT_PROJECT_ID: enceladus
+          UNLEARNING_DRY_RUN: "1"
+          UNLEARNING_MUTATION_ENABLED: "0"
+          IO_APPROVAL_RUNS: "3"
+          TOMBSTONE_RECOVERY_DAYS: "30"
+          UNLEARNING_LOOKBACK_HOURS: "24"
+          UNLEARNING_SPURIOUS_ATTRACTOR_THRESHOLD: "0.5"
+          UNLEARNING_MIN_MISS_COUNT: "3"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: unlearning
+        - Key: Feature
+          Value: ENC-FTR-106
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-F73 / ENC-ISS-283: Env Drift Auditor Lambda (F57 AC-3/4 CFN adoption)
   # Live resource created out-of-band for ENC-ISS-283; imported under this stack
   # via create-change-set --change-set-type=IMPORT. EventBridge schedule
@@ -1671,7 +1731,6 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt PercolationMonitorSchedule.Arn
-
 
   # ---------------------------------------------------------------------------
   # ENC-TSK-H86 / ENC-FTR-111 Phase 1 (T5): Universal Arc-Walker telemetry +
@@ -2028,6 +2087,27 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
+  # ENC-TSK-K03 / FTR-106: nightly unlearning cost-preflight (gamma only).
+  UnlearningCostHeadroomAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-unlearning-invocations${EnvironmentSuffix}"
+      AlarmDescription: >-
+        ENC-TSK-K03 cost-preflight guard: 7-day invocation window; nightly cadence
+        should be <=7/week (threshold 10 allows buffer). Breach indicates runaway schedule.
+      Namespace: AWS/Events
+      MetricName: Invocations
+      Dimensions:
+        - Name: RuleName
+          Value: !Sub "enceladus-unlearning-nightly${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 604800
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
   DeployCodeBuildFinalizeRule:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
@@ -2086,6 +2166,29 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt MemoryConsolidationSchedule.Arn
+
+  # ENC-FTR-106 / ENC-TSK-K03: nightly unlearning trigger (04:00 UTC, after percolation)
+  UnlearningSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-unlearning-nightly${EnvironmentSuffix}"
+      Description: "Nightly Crick-Mitchison unlearning pass (ENC-FTR-106 / ENC-TSK-K03)"
+      ScheduleExpression: "cron(0 4 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt UnlearningFunction.Arn
+          Id: unlearning-nightly
+
+  UnlearningPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref UnlearningFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UnlearningSchedule.Arn
 
   ProjectJsonSyncRule:
     Type: AWS::Events::Rule
@@ -4364,6 +4467,85 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                 Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}agent-documents/*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ENC-FTR-106 / ENC-TSK-K03: Unlearning Lambda IAM Role (gamma-only)
+  UnlearningRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-unlearning-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: unlearning-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: DriftTelemetryQuery
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-drift-telemetry${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-drift-telemetry${EnvironmentSuffix}/index/*"
+              - Sid: StigmergicTraceQuery
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-stigmergic-trace${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-stigmergic-trace${EnvironmentSuffix}/index/*"
+              - Sid: DocumentsTableReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+              - Sid: TrackerReferenceArchive
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+              - Sid: UnlearningS3Tombstones
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}"
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}unlearning-tombstones/*"
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}unlearning-state/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

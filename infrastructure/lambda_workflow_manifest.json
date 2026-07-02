@@ -163,6 +163,12 @@
       "deploy_script": "backend/lambda/percolation_monitor/deploy.sh"
     },
     {
+      "function_name": "enceladus-unlearning",
+      "lambda_dir": "backend/lambda/unlearning",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/unlearning/deploy.sh"
+    },
+    {
       "function_name": "devops-github-integration",
       "lambda_dir": "backend/lambda/github_integration",
       "workflow_file": ".github/workflows/_deploy.yml",

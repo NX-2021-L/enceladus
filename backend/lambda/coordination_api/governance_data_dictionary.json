@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.25",
-  "updated_at": "2026-07-02T11:50:00Z",
-  "last_change_summary": "ENC-TSK-K12: add mcp_streamable to Gen2 MCP runtime packaging (lambda_function.py shim + _build.yml) so enceladus-mcp-streamable-gamma receives server.py siblings on deploy.",
+  "version": "2026-07-02.26",
+  "updated_at": "2026-07-02T12:30:00Z",
+  "last_change_summary": "ENC-TSK-K03 (FTR-106): nightly unlearning Lambda — stigmergic-trace miss clusters, drift SAR waves, unlearning-candidate reports, reversible S3 tombstones, reference archive via graph_sync; dry-run + io-approval ramp defaults.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6174,6 +6174,34 @@
       "source": "ENC-TSK",
       "telemetry_eligible": false
     },
+    "unlearning.lambda": {
+      "description": "ENC-FTR-106 / ENC-TSK-K03: nightly Crick-Mitchison unlearning Lambda (enceladus-unlearning). EventBridge UnlearningSchedule (gamma, cron 04:00 UTC) invokes lambda_handler per project. Identifies prune candidates from stigmergic-trace miss clusters (UNLEARNING_MIN_MISS_COUNT default 3) cross-referenced with drift-telemetry spurious_attractor_rate waves (UNLEARNING_SPURIOUS_ATTRACTOR_THRESHOLD default 0.5). DATA-SAFETY rails: UNLEARNING_DRY_RUN=1 (default) blocks all mutations; UNLEARNING_MUTATION_ENABLED=0 (default) report-only; IO_APPROVAL_RUNS=3 first live runs emit unlearning-candidate draft docs (subtypepattern=unlearning-candidate) only — io must approve before mutation. Mutation path (when enabled): writes reversible S3 tombstones under UNLEARNING_PREFIX (default gamma/unlearning-tombstones) with TOMBSTONE_RECOVERY_DAYS=30 recovery window, archives eligible reference tracker records (status=archived) so graph_sync removes Neo4j projection — no new edge types (OGTM). Run counter persisted at UNLEARNING_STATE_PREFIX/run_counter.json. Cost-preflight ~$0.25/mo; UnlearningCostHeadroomAlarm guards EventBridge invocations.",
+      "owner": "graph-sync",
+      "source": "ENC-TSK-K03 / ENC-FTR-106",
+      "telemetry_eligible": false,
+      "fields": {
+        "UNLEARNING_DRY_RUN": {
+          "type": "feature_flag",
+          "default": "1",
+          "definition": "When truthy, handler never archives tracker records, writes tombstones, or deletes expired tombstones; still emits candidate reports."
+        },
+        "UNLEARNING_MUTATION_ENABLED": {
+          "type": "feature_flag",
+          "default": "0",
+          "definition": "Second mutation gate. Must be enabled by io after reviewing prune-candidate reports; still subject to IO_APPROVAL_RUNS ramp and dry-run."
+        },
+        "IO_APPROVAL_RUNS": {
+          "type": "integer",
+          "default": 3,
+          "definition": "First N non-dry-run invocations are report-only even when UNLEARNING_MUTATION_ENABLED=1."
+        },
+        "TOMBSTONE_RECOVERY_DAYS": {
+          "type": "integer",
+          "default": 30,
+          "definition": "S3 tombstone recover_until window before hard-delete path may remove expired keys."
+        }
+      }
+    },
     "coordination_api.bhc_alert": {
       "description": "See source task.",
       "source": "ENC-TSK",
@@ -7026,6 +7054,11 @@
       "version": "2026-07-02.22",
       "date": "2026-07-02",
       "summary": "ENC-TSK-K02 (FTR-084 Ph2): intent-classifier training loop — intent_training.py + weekly EventBridge schedule on coordination_api (gamma), versioned S3 record_boosts with rollback action, TRAINING_HARD_DISABLED kill switch default ON, holdout degradation auto-disable, cost-preflight alarm. Inference path applies trained boosts in classify_session_intent; applied_entelechy_override still wins. New entity coordination_api.intent_training. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-07-02.26",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K03 (FTR-106): unlearning Lambda — nightly EventBridge (gamma 03:00 UTC), stigmergic-trace miss clustering + drift SAR cross-ref, unlearning-candidate draft reports, reversible S3 tombstones, reference archive via graph_sync stream; dry-run + io-approval ramp defaults. New entity unlearning.lambda. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }

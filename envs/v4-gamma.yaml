@@ -80,6 +80,7 @@ function_name_map:
   memory_consolidation: enceladus-memory-consolidation-gamma
   neo4j_backup: enceladus-neo4j-backup-gamma
   percolation_monitor: enceladus-percolation-monitor-gamma
+  unlearning: enceladus-unlearning-gamma
   prod_health_monitor: enceladus-prod-health-monitor-gamma
   project_service: devops-project-service-gamma
   reference_search: devops-reference-search-gamma
