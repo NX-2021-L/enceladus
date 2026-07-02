@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.28",
-  "updated_at": "2026-07-02T13:50:00Z",
-  "last_change_summary": "ENC-TSK-K43 (B66 Ph5): Fiedler lambda2 GraphHealth CloudWatch metric (gamma re-delivery of v3 ENC-TSK-C10) via the existing FTR-088 graph_laplacian CSR/Fiedler path (ISS-465-compliant, no GDS projection) + F_governance percentile normalization (DOC-A3D0CDF91CE9 Q3.1) in the Scoring Service. New entities graph_query_api.publish_graph_health and scoring_service.f_governance.",
+  "version": "2026-07-02.29",
+  "updated_at": "2026-07-02T13:52:00Z",
+  "last_change_summary": "ENC-TSK-K44 (ENC-FTR-071 / B66 Ph5): prod_health_monitor Lambda extended with per-service health checks (DynamoDB, Neo4j AuraDB, S3, SQS, Lambda cold-start baseline) publishing DynamoDBThrottle / GraphSyncLag / MCPColdStart / ServiceHealthCheck metrics feeding the B66 CloudWatch dashboard. Updated entity monitoring.health_probe.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5260,27 +5260,55 @@
       "governing_plan": "ENC-PLN-014"
     },
     "monitoring.health_probe": {
-      "description": "Production health monitoring Lambda that publishes per-function CodeSize metrics to CloudWatch. Detects CFN stomp incidents (CodeSize < 1024) within 15 minutes. Part of ENC-PLN-020 Phase 4.",
+      "description": "Production health monitoring Lambda (enceladus-prod-health-monitor). EventBridge HealthProbeScheduleRule (every 15 minutes) invokes the handler. Publishes per-function CodeSize metrics to CloudWatch, detecting CFN stomp incidents (CodeSize < 1024) within 15 minutes (ENC-PLN-020 Phase 4 / ENC-TSK-D20). ENC-TSK-K44 (ENC-FTR-071 / B66 Ph5): extended with per-service health checks feeding the B66 CloudWatch dashboard \u2014 DynamoDB (describe_table + throttle signal), Neo4j AuraDB (bolt verify_connectivity via Secrets Manager), S3 (head_bucket), SQS (devops-graph-sync-queue depth as the graph_sync-lag proxy), and a Lambda cold-start baseline (State/LastUpdateStatus sampling across COLD_START_FUNCTIONS). The Lambda resource + its IAM role moved from infrastructure/cloudformation/05-monitoring.yaml into 02-compute.yaml so the Lambda Workflow Coverage Guard tracks it; 05-monitoring.yaml retains the EventBridge schedule, invoke permission, and CloudWatch Alarms (referencing the function by ARN). HEALTH_MONITOR_HARD_DISABLED env var is an ISS-465 cost kill switch.",
       "fields": {
         "function_names": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "definition": "List of Lambda function names to monitor, sourced from lambda_workflow_manifest.json at deploy time.",
+          "definition": "List of Lambda function names to monitor for the CodeSize sentinel, sourced from lambda_workflow_manifest.json at deploy time.",
           "usage_guidance": "Set via FUNCTION_NAMES environment variable by deploy.sh. Updated when manifest changes."
         },
         "namespace": {
           "type": "string",
-          "definition": "CloudWatch namespace for published metrics.",
+          "definition": "CloudWatch namespace for all metrics published by this Lambda.",
           "usage_guidance": "Fixed value: Enceladus/Prod"
         },
         "metric_name": {
           "type": "string",
-          "definition": "CloudWatch metric name for per-function code size.",
+          "definition": "CloudWatch metric name for per-function code size (ENC-TSK-D20 CFN-stomp sentinel).",
           "usage_guidance": "Fixed value: LambdaCodeSize. Dimension: FunctionName."
+        },
+        "dynamodb_throttle_metric": {
+          "type": "string",
+          "definition": "ENC-TSK-K44: CloudWatch metric surfacing a DynamoDB throttle/health signal for the tracker table. 1.0 on throttle or unreachable table, 0.0 otherwise.",
+          "usage_guidance": "Fixed value: DynamoDBThrottle. Dimension: TableName. DYNAMODB_TABLE_NAME env var selects the checked table (devops-project-tracker${EnvironmentSuffix})."
+        },
+        "graph_sync_lag_metric": {
+          "type": "string",
+          "definition": "ENC-TSK-K44: CloudWatch metric reporting devops-graph-sync-queue approximate depth as a graph_sync backlog/lag proxy for the B66 dashboard.",
+          "usage_guidance": "Fixed value: GraphSyncLag. Dimension: QueueName. GRAPH_SYNC_QUEUE_URL env var (imported from the 01-data GraphSyncQueueUrl export) selects the checked queue. Named distinctly from devops-deploy-intake's SQS_QUEUE_URL (env_drift_registry.json deploy-critical var) so the ENC-TSK-H22 per-function env-parity strip-proof attribution stays unambiguous."
+        },
+        "mcp_cold_start_metric": {
+          "type": "string",
+          "definition": "ENC-TSK-K44: CloudWatch metric flagging Lambda cold-start / update risk per sampled function (1.0 unhealthy, 0.0 healthy) based on State/LastUpdateStatus.",
+          "usage_guidance": "Fixed value: MCPColdStart. Dimension: FunctionName. COLD_START_FUNCTIONS env var (JSON array) selects sampled functions; defaults to FUNCTION_NAMES."
+        },
+        "service_health_check_metric": {
+          "type": "string",
+          "definition": "ENC-TSK-K44: per-service boolean health metric (1.0 healthy, 0.0 unhealthy) emitted for each of dynamodb, neo4j, s3, sqs, lambda_cold_start.",
+          "usage_guidance": "Fixed value: ServiceHealthCheck. Dimension: Service."
+        },
+        "hard_disabled_flag": {
+          "type": "feature_flag",
+          "default": "0",
+          "definition": "ENC-ISS-465 cost kill switch. When truthy, the handler skips all AWS calls and all metric publication for that invocation.",
+          "usage_guidance": "Set via HEALTH_MONITOR_HARD_DISABLED environment variable."
         }
-      }
+      },
+      "owner": "devops-monitoring",
+      "source": "ENC-TSK-D20 / ENC-TSK-K44 (ENC-FTR-071)"
     },
     "monitoring.deploy_capability_auditor": {
       "description": "Scheduled Lambda (ENC-TSK-E69 / ENC-PLN-031 Phase 4) that reads component registry capability declarations, snapshots live AWS state, computes drift across IAM actions / API GW routes / Lambda env vars, and emits drift ENC-ISS records idempotently. Paired with the pre-merge capability guard (ENC-TSK-E70) as defense-in-depth for capability-drift incidents. Implemented in backend/lambda/deploy_capability_auditor/lambda_function.py; EventBridge schedule provisioned via infrastructure/cloudformation/05-monitoring.yaml DeployCapabilityAuditorScheduleRule; governed writes route through coordination/document/tracker HTTP APIs and read-only AWS snapshots use boto3 under the Lambda's self-managed IAM role.",
@@ -6175,7 +6203,7 @@
       "telemetry_eligible": false
     },
     "unlearning.lambda": {
-      "description": "ENC-FTR-106 / ENC-TSK-K03: nightly Crick-Mitchison unlearning Lambda (enceladus-unlearning). EventBridge UnlearningSchedule (gamma, cron 04:00 UTC) invokes lambda_handler per project. Identifies prune candidates from stigmergic-trace miss clusters (UNLEARNING_MIN_MISS_COUNT default 3) cross-referenced with drift-telemetry spurious_attractor_rate waves (UNLEARNING_SPURIOUS_ATTRACTOR_THRESHOLD default 0.5). DATA-SAFETY rails: UNLEARNING_DRY_RUN=1 (default) blocks all mutations; UNLEARNING_MUTATION_ENABLED=0 (default) report-only; IO_APPROVAL_RUNS=3 first live runs emit unlearning-candidate draft docs (subtypepattern=unlearning-candidate) only — io must approve before mutation. Mutation path (when enabled): writes reversible S3 tombstones under UNLEARNING_PREFIX (default gamma/unlearning-tombstones) with TOMBSTONE_RECOVERY_DAYS=30 recovery window, archives eligible reference tracker records (status=archived) so graph_sync removes Neo4j projection — no new edge types (OGTM). Run counter persisted at UNLEARNING_STATE_PREFIX/run_counter.json. Cost-preflight ~$0.25/mo; UnlearningCostHeadroomAlarm guards EventBridge invocations.",
+      "description": "ENC-FTR-106 / ENC-TSK-K03: nightly Crick-Mitchison unlearning Lambda (enceladus-unlearning). EventBridge UnlearningSchedule (gamma, cron 04:00 UTC) invokes lambda_handler per project. Identifies prune candidates from stigmergic-trace miss clusters (UNLEARNING_MIN_MISS_COUNT default 3) cross-referenced with drift-telemetry spurious_attractor_rate waves (UNLEARNING_SPURIOUS_ATTRACTOR_THRESHOLD default 0.5). DATA-SAFETY rails: UNLEARNING_DRY_RUN=1 (default) blocks all mutations; UNLEARNING_MUTATION_ENABLED=0 (default) report-only; IO_APPROVAL_RUNS=3 first live runs emit unlearning-candidate draft docs (subtypepattern=unlearning-candidate) only \u2014 io must approve before mutation. Mutation path (when enabled): writes reversible S3 tombstones under UNLEARNING_PREFIX (default gamma/unlearning-tombstones) with TOMBSTONE_RECOVERY_DAYS=30 recovery window, archives eligible reference tracker records (status=archived) so graph_sync removes Neo4j projection \u2014 no new edge types (OGTM). Run counter persisted at UNLEARNING_STATE_PREFIX/run_counter.json. Cost-preflight ~$0.25/mo; UnlearningCostHeadroomAlarm guards EventBridge invocations.",
       "owner": "graph-sync",
       "source": "ENC-TSK-K03 / ENC-FTR-106",
       "telemetry_eligible": false,
@@ -7182,22 +7210,27 @@
     {
       "version": "2026-07-02.22",
       "date": "2026-07-02",
-      "summary": "ENC-TSK-K02 (FTR-084 Ph2): intent-classifier training loop — intent_training.py + weekly EventBridge schedule on coordination_api (gamma), versioned S3 record_boosts with rollback action, TRAINING_HARD_DISABLED kill switch default ON, holdout degradation auto-disable, cost-preflight alarm. Inference path applies trained boosts in classify_session_intent; applied_entelechy_override still wins. New entity coordination_api.intent_training. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+      "summary": "ENC-TSK-K02 (FTR-084 Ph2): intent-classifier training loop \u2014 intent_training.py + weekly EventBridge schedule on coordination_api (gamma), versioned S3 record_boosts with rollback action, TRAINING_HARD_DISABLED kill switch default ON, holdout degradation auto-disable, cost-preflight alarm. Inference path applies trained boosts in classify_session_intent; applied_entelechy_override still wins. New entity coordination_api.intent_training. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     },
     {
       "version": "2026-07-02.26",
       "date": "2026-07-02",
-      "summary": "ENC-TSK-K03 (FTR-106): unlearning Lambda — nightly EventBridge (gamma 03:00 UTC), stigmergic-trace miss clustering + drift SAR cross-ref, unlearning-candidate draft reports, reversible S3 tombstones, reference archive via graph_sync stream; dry-run + io-approval ramp defaults. New entity unlearning.lambda. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+      "summary": "ENC-TSK-K03 (FTR-106): unlearning Lambda \u2014 nightly EventBridge (gamma 03:00 UTC), stigmergic-trace miss clustering + drift SAR cross-ref, unlearning-candidate draft reports, reversible S3 tombstones, reference archive via graph_sync stream; dry-run + io-approval ramp defaults. New entity unlearning.lambda. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     },
     {
+      "version": "2026-07-02.27",
       "date": "2026-07-02",
-      "summary": "ENC-TSK-K20 (PWA 2.0 / B67 AC-10): AppSync-Events FeedPublisher — new devops-appsync-feed-publisher Lambda (gamma arm64) consuming devops-project-tracker DynamoDB Streams (NEW_AND_OLD_IMAGES) and fanning out lightweight real-time event payloads to AppSync Events on /feed/updates, /records/{recordId}, /projects/{projectId}. New CFN 06-appsync-events.yaml (AppSync::Api EVENT + ChannelNamespaces + ApiKey + EventSourceMapping BatchSize=1/window=0/LATEST/ReportBatchItemFailures). New entities appsync_feed_publisher.lambda and appsync_feed.event (UUID v7 eventId, monotonic cursor, server-pre-rendered summary; median payload <= 500 bytes per AC-23). Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
-      "version": "2026-07-02.27"
+      "summary": "ENC-TSK-K20 (PWA 2.0 / B67 AC-10): AppSync-Events FeedPublisher \u2014 new devops-appsync-feed-publisher Lambda (gamma arm64) consuming devops-project-tracker DynamoDB Streams (NEW_AND_OLD_IMAGES) and fanning out lightweight real-time event payloads to AppSync Events on /feed/updates, /records/{recordId}, /projects/{projectId}. New CFN 06-appsync-events.yaml (AppSync::Api EVENT + ChannelNamespaces + ApiKey + EventSourceMapping BatchSize=1/window=0/LATEST/ReportBatchItemFailures). New entities appsync_feed_publisher.lambda and appsync_feed.event (UUID v7 eventId, monotonic cursor, server-pre-rendered summary; median payload <= 500 bytes per AC-23). Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     },
     {
       "version": "2026-07-02.28",
       "date": "2026-07-02",
-      "summary": "ENC-TSK-K43 (B66 Ph5): Fiedler lambda2 GraphHealth CloudWatch metric (gamma re-delivery of v3 ENC-TSK-C10) via the existing FTR-088 graph_laplacian CSR/Fiedler path (ISS-465-compliant, no GDS projection), new action='publish_graph_health' dispatch entry in graph_query_api publishing to Enceladus/GraphHealth. F_governance percentile normalization (DOC-A3D0CDF91CE9 Q3.1) integrated into scoring_service _compute_resonance_score as an optional governance-compliance weighting term. New entities graph_query_api.publish_graph_health and scoring_service.f_governance. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+      "summary": "ENC-TSK-K43 (B66 Ph5): Fiedler lambda2 GraphHealth CloudWatch metric (gamma re-delivery of v3 ENC-TSK-C10) via the existing FTR-088 graph_laplacian CSR/Fiedler path (ISS-465-compliant, no GDS projection), new action='publish_graph_health' dispatch entry in graph_query_api publishing to Enceladus/GraphHealth. F_governance percentile normalization (DOC-A3D0CDF91CE9 Q3.1) integrated into scoring_service _compute_resonance_score as an optional governance-compliance weighting term. New entities graph_query_api.publish_graph_health and scoring_service.f_governance. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-07-02.29",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K44 (ENC-FTR-071 / B66 Ph5): prod_health_monitor Lambda extended with per-service health checks (DynamoDB, Neo4j AuraDB, S3, SQS, Lambda cold-start baseline) publishing DynamoDBThrottle / GraphSyncLag / MCPColdStart / ServiceHealthCheck metrics (Enceladus/Prod namespace) feeding the B66 CloudWatch dashboard. Lambda resource + IAM role moved from 05-monitoring.yaml into 02-compute.yaml (Lambda Workflow Coverage Guard visibility); lambda_workflow_manifest.json cfn_managed flipped false->true for enceladus-prod-health-monitor. Updated entity monitoring.health_probe. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }

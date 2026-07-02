@@ -222,7 +222,7 @@
       "lambda_dir": "backend/lambda/prod_health_monitor",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/prod_health_monitor/deploy.sh",
-      "cfn_managed": false
+      "cfn_managed": true
     },
     {
       "function_name": "enceladus-deploy-capability-auditor",
