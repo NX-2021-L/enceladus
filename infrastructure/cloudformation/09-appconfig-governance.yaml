@@ -47,13 +47,13 @@ Resources:
         - Type: JSON_SCHEMA
           Content: |
             {
-              "$schema": "https://json-schema.org/draft/2019-09/schema",
+              "$schema": "http://json-schema.org/draft-04/schema#",
               "type": "object",
               "properties": {
-                "budget_session_tokens": { "type": "number", "exclusiveMinimum": 0 },
-                "budget_wave_tokens":    { "type": "number", "exclusiveMinimum": 0 },
-                "budget_project_tokens": { "type": "number", "exclusiveMinimum": 0 },
-                "budget_corpus_tokens":  { "type": "number", "exclusiveMinimum": 0 }
+                "budget_session_tokens": { "type": "number", "minimum": 0, "exclusiveMinimum": true },
+                "budget_wave_tokens":    { "type": "number", "minimum": 0, "exclusiveMinimum": true },
+                "budget_project_tokens": { "type": "number", "minimum": 0, "exclusiveMinimum": true },
+                "budget_corpus_tokens":  { "type": "number", "minimum": 0, "exclusiveMinimum": true }
               },
               "additionalProperties": { "type": "number" }
             }
