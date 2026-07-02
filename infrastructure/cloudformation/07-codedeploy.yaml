@@ -20,7 +20,7 @@ Parameters:
     Description: Name of the 02-compute stack; used for cross-stack Lambda ARN imports.
   CanaryPreference:
     Type: String
-    Default: Linear10PercentEvery10Minutes
+    Default: Canary10Percent5Minutes
     AllowedValues:
       - Canary10Percent5Minutes
       - Canary10Percent10Minutes
