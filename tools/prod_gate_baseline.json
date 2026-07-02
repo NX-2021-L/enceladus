@@ -37,9 +37,11 @@
       "notes": "lint/tests/guards"
     },
     "cloudformation-agent-auth-stack-deploy.yml": {
-      "class": "prod-mutating",
-      "gated_jobs": [],
-      "notes": "UNGATED \u2014 remediation owned by ENC-TSK-J63 (Ph2b); guard grace entry, must be gated before J63 closes"
+      "class": "already-gated",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "v4/main-only file; gamma-only by construction (guard-gamma-only job refuses non-gamma, v3-prod FROZEN per DOC-499FA089EC30); ENC-TSK-J63 plan/apply split with apply environment: v4-gamma"
     },
     "cloudformation-api-stack-deploy.yml": {
       "class": "conditional",
@@ -50,8 +52,10 @@
     },
     "cloudformation-codedeploy-stack-deploy.yml": {
       "class": "prod-mutating",
-      "gated_jobs": [],
-      "notes": "UNGATED \u2014 remediation owned by ENC-TSK-J63 (Ph2b)"
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-J63 plan/apply split; prod-only stack so apply is always environment: v3-prod; plan fails closed on stuck stack states"
     },
     "cloudformation-compute-stack-deploy.yml": {
       "class": "conditional",
@@ -61,9 +65,11 @@
       "notes": "ENC-TSK-J62 plan/apply split; apply environment by ref"
     },
     "cloudformation-monitoring-stack-deploy.yml": {
-      "class": "prod-mutating",
-      "gated_jobs": [],
-      "notes": "UNGATED \u2014 remediation owned by ENC-TSK-J63 (Ph2b)"
+      "class": "conditional",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-J63 plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod); ROLLBACK_COMPLETE cleanup is gamma-self-heal / prod-fail-closed"
     },
     "component-registry-guard.yml": {
       "class": "inert",

@@ -4,6 +4,15 @@ name: CloudFormation Agent Auth Stack Deploy
 # DEPLOY TARGET: gamma (v4) ONLY. v3-prod is FROZEN (DOC-499FA089EC30). This workflow
 # therefore triggers exclusively on v4/** branches and resolves ENVIRONMENT_SUFFIX to
 # "-gamma"; it must never run against main / the production stack.
+#
+# ENC-TSK-J63 / ENC-FTR-120: plan/apply split (the ENC-TSK-J62 pattern). The
+# stack is gamma-only by construction (guard-gamma-only refuses anything else),
+# so the apply job runs in the v4-gamma environment — no reviewer pause, but
+# the lane is structurally identical to its gated siblings.
+# Change-set creation uses `aws cloudformation deploy --no-execute-changeset`
+# deliberately: it preserves deploy's parameter-override semantics (unlisted
+# params reuse the stack's stored values), which the ENC-LSN-053 NoEcho
+# strip-class guards depend on.
 
 on:
   push:
@@ -29,6 +38,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: cloudformation-agent-auth-stack-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
 env:
   AWS_REGION: us-west-2
   TEMPLATE_FILE: infrastructure/cloudformation/08-agent-auth.yaml
@@ -49,14 +62,15 @@ jobs:
           fi
           echo "Gamma target confirmed (ENVIRONMENT_SUFFIX=${ENVIRONMENT_SUFFIX})."
 
-  deploy:
-    name: Deploy Agent Auth CloudFormation stack
+  plan:
+    name: Plan Agent Auth stack change-set
     needs: guard-gamma-only
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    concurrency:
-      group: cloudformation-agent-auth-stack-deploy-${{ github.ref_name }}
-      cancel-in-progress: false
+    timeout-minutes: 20
+    outputs:
+      stack_name: ${{ steps.params.outputs.stack_name }}
+      has_changes: ${{ steps.changeset.outputs.has_changes }}
+      changeset_arn: ${{ steps.changeset.outputs.changeset_arn }}
 
     steps:
       - name: Checkout
@@ -78,7 +92,7 @@ jobs:
           stack_name="${{ github.event.inputs.stack_name || env.DEFAULT_STACK_NAME }}${ENVIRONMENT_SUFFIX}"
           echo "stack_name=${stack_name}" >> "${GITHUB_OUTPUT}"
 
-      - name: Clean up ROLLBACK_COMPLETE stack if present
+      - name: Clean up ROLLBACK_COMPLETE stack if present (gamma self-heal)
         run: |
           set -euo pipefail
           stack_name="${{ steps.params.outputs.stack_name }}"
@@ -88,7 +102,7 @@ jobs:
             --query 'Stacks[0].StackStatus' \
             --output text 2>/dev/null || echo "DOES_NOT_EXIST")
           if [ "${status}" = "ROLLBACK_COMPLETE" ]; then
-            echo "Stack ${stack_name} is in ROLLBACK_COMPLETE — deleting before redeploy"
+            echo "Stack ${stack_name} is in ROLLBACK_COMPLETE — deleting before redeploy (gamma self-heal)"
             aws cloudformation delete-stack \
               --region "${AWS_REGION}" \
               --stack-name "${stack_name}"
@@ -98,25 +112,112 @@ jobs:
             echo "Stack deleted successfully"
           fi
 
-      - name: Deploy Agent Auth stack (08-agent-auth)
+      - name: Create Agent Auth stack change-set (no execute)
+        id: changeset
         run: |
           set -euo pipefail
+
           aws cloudformation deploy \
             --region "${AWS_REGION}" \
             --stack-name "${{ steps.params.outputs.stack_name }}" \
             --template-file "${TEMPLATE_FILE}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
+            --no-execute-changeset \
             --s3-bucket enceladus-cfn-staging-us-west-2 \
             --s3-prefix 08-agent-auth/ \
             --parameter-overrides \
-              EnvironmentSuffix="${ENVIRONMENT_SUFFIX}"
+              EnvironmentSuffix="${ENVIRONMENT_SUFFIX}" 2>&1 | tee /tmp/plan.log
 
-      - name: Verify deployed stack state
+          if grep -q "No changes to deploy" /tmp/plan.log; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "changeset_arn=" >> "${GITHUB_OUTPUT}"
+            {
+              echo "## Agent Auth stack plan — ${{ steps.params.outputs.stack_name }}"
+              echo "No changes to deploy."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          changeset_arn=$(grep -oE 'arn:aws:cloudformation:[^ "]*changeSet/[^ "]*' /tmp/plan.log | head -1)
+          if [ -z "${changeset_arn}" ]; then
+            echo "::error::Change-set creation output did not contain a change-set ARN."
+            exit 1
+          fi
+          echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          echo "changeset_arn=${changeset_arn}" >> "${GITHUB_OUTPUT}"
+
+      - name: Write change-set summary
+        if: steps.changeset.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## Agent Auth stack plan — ${{ steps.params.outputs.stack_name }}"
+            echo ""
+            echo "Change-set: \`${{ steps.changeset.outputs.changeset_arn }}\`"
+            echo ""
+            echo '```'
+            aws cloudformation describe-change-set \
+              --region "${AWS_REGION}" \
+              --change-set-name "${{ steps.changeset.outputs.changeset_arn }}" \
+              --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}' \
+              --output table
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Apply Agent Auth stack change-set
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Gamma-only lane; environment kept for structural parity with the gated
+    # CFN siblings (ENC-FTR-120).
+    environment: v4-gamma
+
+    steps:
+      - name: Configure AWS credentials (environment-scoped OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Execute reviewed change-set
+        id: deploy
+        run: |
+          set -euo pipefail
+          changeset_type=$(aws cloudformation describe-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}" \
+            --query 'ChangeSetType' --output text 2>/dev/null || echo "UPDATE")
+          aws cloudformation execute-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}"
+          if [ "${changeset_type}" = "CREATE" ]; then
+            aws cloudformation wait stack-create-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${{ needs.plan.outputs.stack_name }}"
+          else
+            aws cloudformation wait stack-update-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${{ needs.plan.outputs.stack_name }}"
+          fi
+
+      - name: Report stack events on failure
+        if: failure() && steps.deploy.conclusion == 'failure'
+        run: |
+          echo "=== Stack events (last 20) ==="
+          aws cloudformation describe-stack-events \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'StackEvents[:20].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+            --output table || echo "(describe-stack-events unavailable)"
+
+      - name: Report deployed stack state
         run: |
           set -euo pipefail
           aws cloudformation describe-stacks \
             --region "${AWS_REGION}" \
-            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
             --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
             --output table
