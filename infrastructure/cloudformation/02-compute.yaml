@@ -239,6 +239,10 @@ Resources:
           # ENC-TSK-J80 / ENC-FTR-121 Ph5 backport: io's [ESCALATION] email rides
           # the existing feed-alerts topic (DOC-5B888FCA43B8 §5.8; empty = skip).
           ESCALATION_ALERTS_TOPIC_ARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-feed-alerts${EnvironmentSuffix}"
+          # ENC-TSK-J86 / ENC-LSN-053: codify the flag's env_fallback so compute deploys
+          # stop stripping it out-of-band. appconfig_flags resolves AppConfig-first with
+          # default=False, so this fallback is load-bearing whenever AppConfig is unreachable.
+          ENABLE_LESSON_PRIMITIVE: "true"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
