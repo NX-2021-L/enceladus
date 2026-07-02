@@ -24,7 +24,7 @@ function defaultObservation(candidate: LessonCandidate): string {
 }
 
 function defaultInsight(candidate: LessonCandidate): string {
-  const members = (candidate as { cluster_member_ids?: string[] }).cluster_member_ids
+  const members = candidate.cluster_member_ids
   if (members?.length) {
     return `Recurring co-citation cluster across handoffs suggests a transferable pattern involving ${members.join(', ')}.`
   }
@@ -151,7 +151,7 @@ export function LessonCandidatesPage() {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
-  const { data: candidates = [], isLoading, isError, refetch } = useQuery({
+  const { data: candidates = [], isLoading, isError } = useQuery({
     queryKey: lessonCandidateKeys.pending(PROJECT_ID),
     queryFn: () => fetchPendingLessonCandidates(PROJECT_ID),
   })
@@ -228,7 +228,7 @@ export function LessonCandidatesPage() {
   })
 
   if (isLoading) return <LoadingState />
-  if (isError) return <ErrorState message="Failed to load lesson candidates." onRetry={refetch} />
+  if (isError) return <ErrorState message="Failed to load lesson candidates." />
 
   return (
     <div className="p-4 max-w-3xl mx-auto space-y-4">
