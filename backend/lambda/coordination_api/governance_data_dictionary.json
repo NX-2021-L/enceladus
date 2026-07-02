@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.26",
-  "updated_at": "2026-07-02T12:30:00Z",
-  "last_change_summary": "ENC-TSK-K03 (FTR-106): nightly unlearning Lambda — stigmergic-trace miss clusters, drift SAR waves, unlearning-candidate reports, reversible S3 tombstones, reference archive via graph_sync; dry-run + io-approval ramp defaults.",
+  "version": "2026-07-02.28",
+  "updated_at": "2026-07-02T13:00:00Z",
+  "last_change_summary": "ENC-TSK-K41 (B66 Ph5, ENC-PLN-064): Corpus Entropy Engine (CEE) Lambda -- nightly EventBridge (gamma, cron 05:00 UTC) telemetry-only scan for five entropy categories: orphan (no parent_task_id/related_task_ids or wave doc missing plan_anchor_id), stagnation (open tasks with no worklog within STAGNATION_THRESHOLD_DAYS=14), relational (declared related_*_ids with no corresponding graph_query_api adjacency edge), retention (Lesson stability < FSRS_T3_THRESHOLD=0.7, falling back to resonance_score), and compliance/semantic (document compliance_score below COMPLIANCE_SCORE_THRESHOLD=70 AND document_maturity_state=raw). Reads exclusively through the tracker/document/graph_query_api HTTP surface (no direct DynamoDB access, no new edge types -- OGTM). CEE_HARD_DISABLED=1 kill switch ships ON by default; io clears to 0 to enable the first scheduled run. Emits per-category EntropyFindingCount to CloudWatch namespace Enceladus/CEE. Cost-preflight (ISS-465): nightly cadence, 512MB/300s ceiling, well under $1/mo; CorpusEntropyEngineCostHeadroomAlarm guards EventBridge invocation count. New entity corpus_entropy_engine.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "owners": [
     "enceladus-platform"
   ],
@@ -6175,7 +6175,7 @@
       "telemetry_eligible": false
     },
     "unlearning.lambda": {
-      "description": "ENC-FTR-106 / ENC-TSK-K03: nightly Crick-Mitchison unlearning Lambda (enceladus-unlearning). EventBridge UnlearningSchedule (gamma, cron 04:00 UTC) invokes lambda_handler per project. Identifies prune candidates from stigmergic-trace miss clusters (UNLEARNING_MIN_MISS_COUNT default 3) cross-referenced with drift-telemetry spurious_attractor_rate waves (UNLEARNING_SPURIOUS_ATTRACTOR_THRESHOLD default 0.5). DATA-SAFETY rails: UNLEARNING_DRY_RUN=1 (default) blocks all mutations; UNLEARNING_MUTATION_ENABLED=0 (default) report-only; IO_APPROVAL_RUNS=3 first live runs emit unlearning-candidate draft docs (subtypepattern=unlearning-candidate) only — io must approve before mutation. Mutation path (when enabled): writes reversible S3 tombstones under UNLEARNING_PREFIX (default gamma/unlearning-tombstones) with TOMBSTONE_RECOVERY_DAYS=30 recovery window, archives eligible reference tracker records (status=archived) so graph_sync removes Neo4j projection — no new edge types (OGTM). Run counter persisted at UNLEARNING_STATE_PREFIX/run_counter.json. Cost-preflight ~$0.25/mo; UnlearningCostHeadroomAlarm guards EventBridge invocations.",
+      "description": "ENC-FTR-106 / ENC-TSK-K03: nightly Crick-Mitchison unlearning Lambda (enceladus-unlearning). EventBridge UnlearningSchedule (gamma, cron 04:00 UTC) invokes lambda_handler per project. Identifies prune candidates from stigmergic-trace miss clusters (UNLEARNING_MIN_MISS_COUNT default 3) cross-referenced with drift-telemetry spurious_attractor_rate waves (UNLEARNING_SPURIOUS_ATTRACTOR_THRESHOLD default 0.5). DATA-SAFETY rails: UNLEARNING_DRY_RUN=1 (default) blocks all mutations; UNLEARNING_MUTATION_ENABLED=0 (default) report-only; IO_APPROVAL_RUNS=3 first live runs emit unlearning-candidate draft docs (subtypepattern=unlearning-candidate) only \u2014 io must approve before mutation. Mutation path (when enabled): writes reversible S3 tombstones under UNLEARNING_PREFIX (default gamma/unlearning-tombstones) with TOMBSTONE_RECOVERY_DAYS=30 recovery window, archives eligible reference tracker records (status=archived) so graph_sync removes Neo4j projection \u2014 no new edge types (OGTM). Run counter persisted at UNLEARNING_STATE_PREFIX/run_counter.json. Cost-preflight ~$0.25/mo; UnlearningCostHeadroomAlarm guards EventBridge invocations.",
       "owner": "graph-sync",
       "source": "ENC-TSK-K03 / ENC-FTR-106",
       "telemetry_eligible": false,
@@ -6921,9 +6921,123 @@
           "definition": "Optional anchor query limiting computation to a connected subgraph."
         }
       }
+    },
+    "appsync_feed_publisher.lambda": {
+      "description": "ENC-TSK-K20 (PWA 2.0 / B67 AC-10): AppSync-Events FeedPublisher Lambda (devops-appsync-feed-publisher; gamma twin devops-appsync-feed-publisher-gamma, arm64/python3.12). DISTINCT from the v1 SQS->S3 mobile-feed publisher (devops-feed-publisher). A DynamoDB Streams consumer on devops-project-tracker (NEW_AND_OLD_IMAGES) wired by an EventSourceMapping (BatchSize=1, MaximumBatchingWindowInSeconds=0, StartingPosition LATEST, FunctionResponseTypes=[ReportBatchItemFailures]). For each INSERT/MODIFY/REMOVE it builds a lightweight appsync_feed.event payload and POSTs it to the AppSync Events HTTP endpoint on three channels (/feed/updates, /records/{recordId}, /projects/{projectId}) using stdlib urllib + boto3 only (no new pip deps). Auth: X-Api-Key (APPSYNC_EVENTS_API_KEY) primary, SigV4 (AWS_IAM) alternative. Provisioned by infrastructure/cloudformation/06-appsync-events.yaml.",
+      "fields": {
+        "APPSYNC_EVENTS_HTTP_ENDPOINT": {
+          "definition": "AppSync Events HTTP endpoint host or URL; required to publish.",
+          "type": "string"
+        },
+        "APPSYNC_EVENTS_API_KEY": {
+          "definition": "AppSync API key for the X-Api-Key auth path; when unset the Lambda uses SigV4 (AWS_IAM).",
+          "type": "string"
+        },
+        "APPSYNC_EVENTS_REGION": {
+          "definition": "Region used for SigV4 signing of the publish request.",
+          "default": "us-west-2",
+          "type": "string"
+        },
+        "DEFAULT_PROJECT_ID": {
+          "definition": "Fallback project id for the /projects channel when a stream record lacks project_id.",
+          "default": "enceladus",
+          "type": "string"
+        },
+        "DRY_RUN": {
+          "definition": "When truthy, the handler builds payloads and logs but skips the HTTP POST (unit/local runs).",
+          "default": "0",
+          "type": "feature_flag"
+        }
+      },
+      "owner": "pwa-realtime",
+      "source": "ENC-TSK-K20 / B67 AC-10",
+      "telemetry_eligible": false
+    },
+    "appsync_feed.event": {
+      "description": "ENC-TSK-K20 (B67 AC-10 / AC-23): lightweight real-time event payload emitted by devops-appsync-feed-publisher to AppSync Events. Server-pre-rendered (summary is computed in the Lambda). Raw DynamoDB item images are NOT inlined; median payload <= 500 bytes (AC-23). Published to /feed/updates, /records/{recordId}, and /projects/{projectId}.",
+      "fields": {
+        "eventId": {
+          "definition": "UUID v7 (time-ordered, RFC 9562 \u00a75.7) generated in-Lambda; leading 48 ms bits make it sort by creation time.",
+          "type": "string"
+        },
+        "recordId": {
+          "definition": "Tracker record_id the event is about (e.g. ENC-TSK-K20).",
+          "type": "string"
+        },
+        "record_type": {
+          "definition": "Tracker record_type (task/issue/feature/plan/document/...).",
+          "type": "string"
+        },
+        "action": {
+          "definition": "Coarse verb: created on INSERT; removed on REMOVE; closed when status transitions into a terminal (closed/deploy-success/...); else updated.",
+          "type": "string",
+          "enum": [
+            "created",
+            "updated",
+            "closed",
+            "removed"
+          ]
+        },
+        "actorType": {
+          "definition": "human or agent, inferred from write_source: provider ENC-SES-* or channel mcp_server/arc-walker => agent; Cognito username on a human channel => human; default agent.",
+          "type": "string",
+          "enum": [
+            "human",
+            "agent"
+          ]
+        },
+        "actorId": {
+          "definition": "write_source.provider (session id or Cognito username), falling back to updated_by/owner/assignee, else 'unknown'.",
+          "type": "string"
+        },
+        "summary": {
+          "definition": "Server-pre-rendered display string: '<actorId> <action> <record_type> <recordId>: <title>'.",
+          "type": "string"
+        },
+        "cursor": {
+          "definition": "Monotonic-ish integer for client ordering/resume: stream ApproximateCreationDateTime epoch-millis * 1000 + per-batch counter (ties broken in stream order).",
+          "type": "integer"
+        },
+        "channels": {
+          "definition": "Target AppSync channel paths the event is published to: /feed/updates, /records/{recordId}, /projects/{projectId}.",
+          "type": "array",
+          "item_type": "string"
+        }
+      },
+      "owner": "pwa-realtime",
+      "source": "ENC-TSK-K20 / B67 AC-10",
+      "telemetry_eligible": false
+    },
+    "corpus_entropy_engine.lambda": {
+      "description": "ENC-TSK-K41 / B66 Ph5 (ENC-PLN-064): nightly Corpus Entropy Engine Lambda (enceladus-corpus-entropy-engine). EventBridge CorpusEntropyEngineSchedule (gamma, cron 05:00 UTC) invokes lambda_handler per project. Five telemetry-only detectors run every invocation and emit structured findings (no corpus mutation -- GDMP Stage-1 auto-remediation is a separate downstream task): orphan entropy (tracker task/issue/feature with no parent_task_id and no related_task_ids; wave document with no plan_anchor_id), stagnation entropy (open task with no worklog history entry newer than STAGNATION_THRESHOLD_DAYS), relational entropy (declared related_task_ids/related_issue_ids/related_feature_ids with no matching graph_query_api adjacency edge), retention entropy (Lesson FSRS-6 stability below FSRS_T3_THRESHOLD=0.7, resonance_score fallback for pre-FSRS-6 records), and compliance/semantic entropy (document compliance_score below COMPLIANCE_SCORE_THRESHOLD AND document_maturity_state=raw). Read boundary: all corpus reads go through TRACKER_API_BASE / DOCUMENT_API_BASE / GRAPH_QUERY_API_BASE (internal-key HTTP auth), never direct DynamoDB access -- the same governed surface the MCP server wraps. CEE_HARD_DISABLED kill switch (default \"1\") is checked first in the handler; when set, no fetch is attempted and the invocation short-circuits. Publishes EntropyFindingCount to CloudWatch Enceladus/CEE, dimensioned by FunctionName + Category (5 datapoints per run). Cost-preflight ISS-465: nightly-only cadence, well under $1/mo; CorpusEntropyEngineCostHeadroomAlarm guards EventBridge invocation count (7-day window, threshold 10).",
+      "owner": "enceladus-platform",
+      "source": "ENC-TSK-K41 / ENC-TSK-B66",
+      "telemetry_eligible": true,
+      "fields": {
+        "CEE_HARD_DISABLED": {
+          "type": "feature_flag",
+          "default": "1",
+          "definition": "Mandatory kill switch, installed ON before first scheduled run. When truthy (1/true/yes), handler skips all governed reads and CloudWatch emission for that invocation."
+        },
+        "STAGNATION_THRESHOLD_DAYS": {
+          "type": "integer",
+          "default": 14,
+          "definition": "Open tasks with no worklog history entry newer than this many days are flagged as stagnation entropy."
+        },
+        "COMPLIANCE_SCORE_THRESHOLD": {
+          "type": "integer",
+          "default": 70,
+          "definition": "Documents with compliance_score below this value AND document_maturity_state=raw are flagged as compliance/semantic entropy."
+        },
+        "FSRS_T3_THRESHOLD": {
+          "type": "float",
+          "default": 0.7,
+          "definition": "Lessons with FSRS-6 stability (or resonance_score fallback) below this value are flagged as retention entropy. Matches the canonical T3 threshold already used by graph_query_api._apply_fsrs_t3_filter."
+        }
+      }
     }
   },
-  "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
+  "change_summary": "ENC-TSK-K41 (B66 Ph5, ENC-PLN-064): Corpus Entropy Engine (CEE) Lambda -- nightly EventBridge (gamma, cron 05:00 UTC) telemetry-only scan for five entropy categories: orphan (no parent_task_id/related_task_ids or wave doc missing plan_anchor_id), stagnation (open tasks with no worklog within STAGNATION_THRESHOLD_DAYS=14), relational (declared related_*_ids with no corresponding graph_query_api adjacency edge), retention (Lesson stability < FSRS_T3_THRESHOLD=0.7, falling back to resonance_score), and compliance/semantic (document compliance_score below COMPLIANCE_SCORE_THRESHOLD=70 AND document_maturity_state=raw). Reads exclusively through the tracker/document/graph_query_api HTTP surface (no direct DynamoDB access, no new edge types -- OGTM). CEE_HARD_DISABLED=1 kill switch ships ON by default; io clears to 0 to enable the first scheduled run. Emits per-category EntropyFindingCount to CloudWatch namespace Enceladus/CEE. Cost-preflight (ISS-465): nightly cadence, 512MB/300s ceiling, well under $1/mo; CorpusEntropyEngineCostHeadroomAlarm guards EventBridge invocation count. New entity corpus_entropy_engine.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "change_log": [
     {
       "version": "2026-06-27.05",
@@ -7053,12 +7167,22 @@
     {
       "version": "2026-07-02.22",
       "date": "2026-07-02",
-      "summary": "ENC-TSK-K02 (FTR-084 Ph2): intent-classifier training loop — intent_training.py + weekly EventBridge schedule on coordination_api (gamma), versioned S3 record_boosts with rollback action, TRAINING_HARD_DISABLED kill switch default ON, holdout degradation auto-disable, cost-preflight alarm. Inference path applies trained boosts in classify_session_intent; applied_entelechy_override still wins. New entity coordination_api.intent_training. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+      "summary": "ENC-TSK-K02 (FTR-084 Ph2): intent-classifier training loop \u2014 intent_training.py + weekly EventBridge schedule on coordination_api (gamma), versioned S3 record_boosts with rollback action, TRAINING_HARD_DISABLED kill switch default ON, holdout degradation auto-disable, cost-preflight alarm. Inference path applies trained boosts in classify_session_intent; applied_entelechy_override still wins. New entity coordination_api.intent_training. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     },
     {
       "version": "2026-07-02.26",
       "date": "2026-07-02",
-      "summary": "ENC-TSK-K03 (FTR-106): unlearning Lambda — nightly EventBridge (gamma 03:00 UTC), stigmergic-trace miss clustering + drift SAR cross-ref, unlearning-candidate draft reports, reversible S3 tombstones, reference archive via graph_sync stream; dry-run + io-approval ramp defaults. New entity unlearning.lambda. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+      "summary": "ENC-TSK-K03 (FTR-106): unlearning Lambda \u2014 nightly EventBridge (gamma 03:00 UTC), stigmergic-trace miss clustering + drift SAR cross-ref, unlearning-candidate draft reports, reversible S3 tombstones, reference archive via graph_sync stream; dry-run + io-approval ramp defaults. New entity unlearning.lambda. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K20 (PWA 2.0 / B67 AC-10): AppSync-Events FeedPublisher \u2014 new devops-appsync-feed-publisher Lambda (gamma arm64) consuming devops-project-tracker DynamoDB Streams (NEW_AND_OLD_IMAGES) and fanning out lightweight real-time event payloads to AppSync Events on /feed/updates, /records/{recordId}, /projects/{projectId}. New CFN 06-appsync-events.yaml (AppSync::Api EVENT + ChannelNamespaces + ApiKey + EventSourceMapping BatchSize=1/window=0/LATEST/ReportBatchItemFailures). New entities appsync_feed_publisher.lambda and appsync_feed.event (UUID v7 eventId, monotonic cursor, server-pre-rendered summary; median payload <= 500 bytes per AC-23). Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+      "version": "2026-07-02.27"
+    },
+    {
+      "version": "2026-07-02.28",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K41 (B66 Ph5, ENC-PLN-064): Corpus Entropy Engine (CEE) Lambda -- nightly EventBridge (gamma, cron 05:00 UTC) telemetry-only scan for five entropy categories: orphan (no parent_task_id/related_task_ids or wave doc missing plan_anchor_id), stagnation (open tasks with no worklog within STAGNATION_THRESHOLD_DAYS=14), relational (declared related_*_ids with no corresponding graph_query_api adjacency edge), retention (Lesson stability < FSRS_T3_THRESHOLD=0.7, falling back to resonance_score), and compliance/semantic (document compliance_score below COMPLIANCE_SCORE_THRESHOLD=70 AND document_maturity_state=raw). Reads exclusively through the tracker/document/graph_query_api HTTP surface (no direct DynamoDB access, no new edge types -- OGTM). CEE_HARD_DISABLED=1 kill switch ships ON by default; io clears to 0 to enable the first scheduled run. Emits per-category EntropyFindingCount to CloudWatch namespace Enceladus/CEE. Cost-preflight (ISS-465): nightly cadence, 512MB/300s ceiling, well under $1/mo; CorpusEntropyEngineCostHeadroomAlarm guards EventBridge invocation count. New entity corpus_entropy_engine.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }

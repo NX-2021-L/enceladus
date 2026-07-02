@@ -91,6 +91,13 @@
       ]
     },
     {
+      "function_name": "devops-appsync-feed-publisher",
+      "lambda_dir": "backend/lambda/appsync_feed_publisher",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/appsync_feed_publisher/deploy.sh",
+      "cfn_managed": false
+    },
+    {
       "function_name": "devops-feed-query-api",
       "lambda_dir": "backend/lambda/feed_query",
       "workflow_file": ".github/workflows/_deploy.yml",
@@ -263,6 +270,12 @@
         "canonicalize.py",
         "counter_store.py"
       ]
+    },
+    {
+      "function_name": "enceladus-corpus-entropy-engine",
+      "lambda_dir": "backend/lambda/corpus_entropy_engine",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/corpus_entropy_engine/deploy.sh"
     }
   ]
 }
