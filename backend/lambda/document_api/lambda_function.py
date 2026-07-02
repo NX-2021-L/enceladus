@@ -128,13 +128,6 @@ _INTERNAL_SCOPE_MAP_RAW = (
 GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file").strip().lower()
 PROJECT_REFERENCE_KEYWORD = os.environ.get("PROJECT_REFERENCE_KEYWORD", "project-reference").strip().lower()
-# ENC-TSK-I63 / ENC-TSK-I62: governance-policies DDB record that serves the live
-# governance.dictionary. A governance_data_dictionary.json sync must propagate into
-# this record (discrete `version` + `updated_at` + the served `dictionary_json` blob),
-# eliminating the manual `aws dynamodb update-item` gap discovered in ENC-TSK-I61.
-GOVERNANCE_POLICIES_TABLE = os.environ.get("GOVERNANCE_POLICIES_TABLE", "governance-policies")
-GOVERNANCE_DICTIONARY_POLICY_ID = "governance_data_dictionary"
-GOVERNANCE_DICTIONARY_FILE = "governance_data_dictionary.json"
 SYNC_CREATED_BY = "document-api-sync"
 CORS_ORIGIN = "https://jreese.net"
 MAX_CONTENT_SIZE = 1_048_576  # 1 MB max document content
@@ -1297,93 +1290,6 @@ def _list_governance_live_files() -> List[str]:
     return sorted(set(files))
 
 
-def _propagate_dictionary_to_governance_policies(s3_body: bytes) -> None:
-    """Propagate a governance_data_dictionary.json S3 sync into the governance-policies
-    DDB record so the three storage surfaces stay in lockstep (ENC-TSK-I63 / ENC-TSK-I62):
-
-      1. S3 live object  ........................ governance/live/governance_data_dictionary.json
-      2. governance-policies discrete `version` .. -> governance.dictionary source.version
-      3. governance-policies `dictionary_json` ... -> governance.dictionary dictionary_version
-                                                      (the live-served entities blob)
-
-    This closes the ENC-TSK-I61 gap where _governance_sync_push refreshed the docstore but
-    left the DDB record untouched, forcing a manual `aws dynamodb update-item`.
-
-    Implementation notes (gotchas from the source incident):
-      * Writes the *verified raw S3 bytes* as dictionary_json — byte-identical to the live
-        object, so it is inherently within the 400KB DynamoDB item limit (a pretty-print
-        round-trip would add ~65KB and risk ItemSizeLimitExceeded).
-      * `version` is a DynamoDB reserved word -> aliased as #v.
-      * Drift pre-check: the new S3 dictionary's `entities` MUST equal the live DDB blob's
-        `entities`. The discrete version and the blob are independent copies that can drift;
-        a version/metadata bump must never silently rewrite the served entities. On mismatch
-        we abort loudly rather than clobber.
-    """
-    try:
-        new_dict = json.loads(s3_body)
-    except (ValueError, TypeError) as exc:
-        raise ValueError(f"governance dictionary S3 object is not valid JSON: {exc}") from exc
-    if not isinstance(new_dict, dict):
-        raise ValueError("governance dictionary S3 object must be a JSON object")
-    new_version = str(new_dict.get("version") or "").strip()
-    if not new_version:
-        raise ValueError("governance dictionary S3 object missing top-level 'version'")
-
-    ddb = _get_ddb()
-    resp = ddb.get_item(
-        TableName=GOVERNANCE_POLICIES_TABLE,
-        Key={"policy_id": {"S": GOVERNANCE_DICTIONARY_POLICY_ID}},
-    )
-    item = resp.get("Item")
-    if not item:
-        raise RuntimeError(
-            f"governance-policies record '{GOVERNANCE_DICTIONARY_POLICY_ID}' not found; "
-            "refusing to create it from a background sync"
-        )
-
-    current_version = str((item.get("version") or {}).get("S") or "")
-    current_blob = str((item.get("dictionary_json") or {}).get("S") or "")
-    blob_str = s3_body.decode("utf-8")
-
-    # Idempotent: nothing to do when the discrete version and served blob already match S3.
-    if current_version == new_version and current_blob == blob_str:
-        logger.info(
-            "[GOVERNANCE_SYNC] dictionary already in lockstep at version %s", new_version
-        )
-        return
-
-    # Drift pre-check — entities must be identical across surfaces before we overwrite.
-    if current_blob:
-        try:
-            current_dict = json.loads(current_blob)
-        except (ValueError, TypeError) as exc:
-            raise RuntimeError(
-                f"existing governance dictionary_json blob is not valid JSON: {exc}"
-            ) from exc
-        if current_dict.get("entities") != new_dict.get("entities"):
-            raise RuntimeError(
-                "DICTIONARY DRIFT: governance_data_dictionary.json S3 entities != "
-                "governance-policies dictionary_json entities. Aborting propagation to avoid "
-                "clobbering divergent served entities — reconcile entities before the version bump."
-            )
-
-    ddb.update_item(
-        TableName=GOVERNANCE_POLICIES_TABLE,
-        Key={"policy_id": {"S": GOVERNANCE_DICTIONARY_POLICY_ID}},
-        UpdateExpression="SET #v = :ver, updated_at = :ts, dictionary_json = :blob",
-        ExpressionAttributeNames={"#v": "version"},
-        ExpressionAttributeValues={
-            ":ver": {"S": new_version},
-            ":ts": {"S": _now_z()},
-            ":blob": {"S": blob_str},
-        },
-    )
-    logger.info(
-        "[GOVERNANCE_SYNC] dictionary propagated to %s: version %s -> %s (blob=%d bytes)",
-        GOVERNANCE_POLICIES_TABLE, current_version or "(none)", new_version, len(blob_str),
-    )
-
-
 def _sync_governance_documents() -> None:
     docs = _query_project_documents(GOVERNANCE_PROJECT_ID)
     doc_by_file: Dict[str, Dict[str, Any]] = {}
@@ -1399,14 +1305,6 @@ def _sync_governance_documents() -> None:
     for rel_file in _list_governance_live_files():
         key = f"{S3_GOVERNANCE_PREFIX.rstrip('/')}/{rel_file}"
         existing = doc_by_file.get(rel_file)
-
-        # ENC-TSK-I63: the dictionary's DDB lockstep is propagated regardless of the
-        # docstore fast-path below — the docstore copy can be current while the
-        # governance-policies record is stale (the exact ENC-TSK-I61 drift). Fetch the
-        # live object and propagate before any content short-circuit.
-        if rel_file == GOVERNANCE_DICTIONARY_FILE:
-            dict_body = _get_s3().get_object(Bucket=S3_BUCKET, Key=key)["Body"].read()
-            _propagate_dictionary_to_governance_policies(dict_body)
 
         # Fast path: compare metadata hash when available.
         metadata_hash = ""
