@@ -1172,6 +1172,34 @@ def _is_conditional_check_failed(exc: Exception) -> bool:
 # deploys (PLN-047 / ENC-LSN-053 Sev1 class).
 SCI_ENFORCEMENT_EPOCH = "2026-07-02T12:00:00Z"
 
+# ENC-ISS-441 / ENC-TSK-J96: terminal-state retirement nudge (part 3 of the io-designed
+# session retirement lifecycle). Injected verbatim into terminal-state success envelopes;
+# the acting agent either retires its session autonomously (scope exhausted) or surfaces
+# the prompt to io. Exact io-specified text from the ENC-ISS-441 worklog.
+RETIREMENT_PROMPT = (
+    "Prompt the user if this session can now be retired, or retire the session if it "
+    "is certain that the full scope of the current session assignment is complete."
+)
+
+# Final lifecycle states per record type (io design decision on ENC-ISS-441: task closed,
+# issue closed, feature production/deprecated, plan complete). 'superseded' is set only by
+# the supersession op, not a direct status write, so it never reaches this map.
+_TERMINAL_STATUSES_BY_TYPE = {
+    "task": {"closed"},
+    "issue": {"closed"},
+    "feature": {"production", "deprecated"},
+    "plan": {"complete"},
+}
+
+
+def _is_terminal_transition(record_type: Any, value: Any) -> bool:
+    """True when a status write lands a record in its final lifecycle state (ENC-TSK-J96)."""
+    return (
+        str(value or "").strip().lower()
+        in _TERMINAL_STATUSES_BY_TYPE.get(str(record_type or "").strip().lower(), set())
+    )
+
+
 # J92 token shape: pk = "SCI-{uuid4_hex}"
 _SCI_TOKEN_RE = re.compile(r"^SCI-[0-9a-f]{32}$")
 # I37 minted session ids: ENC-SES-NNN (base-36, uppercase)
@@ -5124,6 +5152,11 @@ def _handle_update_field(
     }
     if warnings:
         result["warnings"] = warnings
+
+    # ENC-ISS-441 / ENC-TSK-J96: record reached its final lifecycle state — nudge the
+    # acting session toward retirement (additive-only envelope field).
+    if field == "status" and _is_terminal_transition(record_type, value):
+        result["retirement_prompt"] = RETIREMENT_PROMPT
 
     # ENC-TSK-H85 / ENC-FTR-111 Phase 1: after a successful FORWARD task status advance, hand off to
     # the Universal Arc-Walker to walk forward across the mechanical gates in the same invocation
