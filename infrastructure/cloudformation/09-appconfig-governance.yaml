@@ -70,7 +70,7 @@ Resources:
       ConfigurationProfileId: !Ref BudgetHierarchyProfile
       ContentType: application/json
       Description: >-
-        Initial version — mirrors DEFAULT_SCALE_BUDGETS_TOKENS in
+        Initial version - mirrors DEFAULT_SCALE_BUDGETS_TOKENS in
         budget_hierarchy.py exactly, so activation is a no-op until someone
         deliberately pushes a change.
       Content: |
@@ -85,7 +85,7 @@ Resources:
     Type: AWS::AppConfig::DeploymentStrategy
     Properties:
       Name: !Sub "enceladus-governance-immediate${EnvironmentSuffix}"
-      Description: Immediate activation, no bake time — matches feature-flags precedent.
+      Description: Immediate activation, no bake time - matches feature-flags precedent.
       ReplicateTo: NONE
       DeploymentDurationInMinutes: 0
       FinalBakeTimeInMinutes: 0
@@ -100,7 +100,7 @@ Resources:
       ConfigurationProfileId: !Ref BudgetHierarchyProfile
       ConfigurationVersion: !Ref BudgetHierarchyInitialVersion
       DeploymentStrategyId: !Ref BudgetHierarchyDeploymentStrategy
-      Description: "Initial activation — ENC-TSK-K33, defaults match hardcoded fallback"
+      Description: "Initial activation - ENC-TSK-K33, defaults match hardcoded fallback"
 
   # ---------------------------------------------------------------------------
   # governance-doctrine — string/number/boolean doctrine levers. No named
@@ -117,7 +117,7 @@ Resources:
       LocationUri: hosted
       Description: >-
         Typed-open doctrine levers (string/number/boolean) that are neither a
-        boolean feature gate nor a budget number — e.g. a canary preference
+        boolean feature gate nor a budget number - e.g. a canary preference
         name, an SLA minute count. Placeholder until a first real consumer
         lands; see DOC-623CAFD9D1F6.
       Validators:
@@ -140,7 +140,7 @@ Resources:
       ApplicationId: !Ref AppConfigApplicationId
       ConfigurationProfileId: !Ref GovernanceDoctrineProfile
       ContentType: application/json
-      Description: "Placeholder — synthetic canary key only, no real consumer yet (ENC-TSK-K33)"
+      Description: "Placeholder - synthetic canary key only, no real consumer yet (ENC-TSK-K33)"
       Content: |
         {
           "_canary": "k33-verification-placeholder"
@@ -154,7 +154,7 @@ Resources:
       ConfigurationProfileId: !Ref GovernanceDoctrineProfile
       ConfigurationVersion: !Ref GovernanceDoctrineInitialVersion
       DeploymentStrategyId: !Ref BudgetHierarchyDeploymentStrategy
-      Description: "Initial activation — placeholder, ENC-TSK-K33"
+      Description: "Initial activation - placeholder, ENC-TSK-K33"
 
 Outputs:
   BudgetHierarchyProfileId:
