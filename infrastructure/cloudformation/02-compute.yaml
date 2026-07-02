@@ -270,6 +270,9 @@ Resources:
           # ENC-TSK-H47: the lesson-scoring SNS topic tracker_mutation publishes to when
           # enable_scoring_service_extraction is ON. Inert until the (default-OFF) flag is flipped.
           LESSON_SCORING_TOPIC_ARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-lesson-scoring${EnvironmentSuffix}"
+          # ENC-TSK-J72 / ENC-FTR-121 Ph5: io's [ESCALATION] email rides the existing
+          # feed-alerts topic (§5.8 topic reuse; sub-dollar budget). Empty = publish skipped.
+          ESCALATION_ALERTS_TOPIC_ARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-feed-alerts${EnvironmentSuffix}"
       Tags:
         - Key: Project
           Value: enceladus
@@ -2521,6 +2524,14 @@ Resources:
                   - sns:Publish
                 Resource:
                   - !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-lesson-scoring${EnvironmentSuffix}"
+              # ENC-TSK-J72 / ENC-FTR-121 Ph5: escalation notifications to io
+              # ride the existing feed-alerts topic (DOC-5B888FCA43B8 §5.8).
+              - Sid: PublishEscalationAlerts
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:devops-feed-alerts${EnvironmentSuffix}"
 
   # ENC-TSK-H46 / B63 Phase 2A — execution role for the Lifecycle Service. Read-only:
   # tracker table (subtask gate child lookups) + component-registry (STRICTNESS_RANK).
