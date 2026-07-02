@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.19",
-  "updated_at": "2026-07-02T10:40:00Z",
-  "last_change_summary": "ENC-TSK-K10 (ENC-ISS-441 Ph7b, ENC-FTR-122, supersedes J97): MCP server sci pass-through - optional sci property on checkout_task/advance_task_status/append_worklog schemas, strip-and-forward at 7 mutation-forwarding sites (checkout/advance/log, plan checkout/advance, tracker set/log; tracker_create via F76 passthrough), agent.claim raw response passthrough confirmed (sci/sci_issued_at/sci_ttl_seconds flow unchanged). No MCP-layer validation. New entity mcp_server.sci_passthrough. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "version": "2026-07-02.20",
+  "updated_at": "2026-07-02T10:57:05Z",
+  "last_change_summary": "ENC-TSK-K12 (ENC-ISS-473, ENC-ISS-474): MCP server restores truncated tracker_embeddings_for and tracker_sheaf_cohomology handlers (search actions tracker.embeddings_for / tracker.sheaf_cohomology forwarding to graph_query_api embeddings_for and sheaf_cohomology search_types); coordination_api .build_extras now packages tools/enceladus-mcp-server/telemetry_rank.py so dispatch_plan / coordination paths can import telemetry.rank helpers. New entities mcp_server.tracker_embeddings_for and mcp_server.tracker_sheaf_cohomology. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "owners": [
     "enceladus-platform"
   ],
@@ -5842,7 +5842,7 @@
       }
     },
     "telemetry.eligible_fields": {
-      "description": "ENC-FTR-086 / ENC-TSK-I83 (Convergence Surface Phase 2): the registry of attribute fields the telemetry.rank read action ranks, derived from the per-field telemetry_eligible flags (governance.per_field_metadata). This entity is the policy source of truth that the Convergence Surface executes; the MCP server carries an in-process mirror so the read surface is functional on gamma before the live dictionary sync lands. Per Locked Design Decision D1 (DOC-E3F5E025B3D9) this surface is a SOFT prior only \u2014 it is queryable by agents but is structurally invisible to every governance gate (no validator, preflight, tracker.set handler, checkout.advance gate, or deploy guard ever consults it). Architectural separation (feature AC-1) is enforced by topology: the ranking logic lives in the isolated tools/enceladus-mcp-server/telemetry_rank.py module which imports nothing from governance Lambdas, and no governance Lambda (coordination_api, governance_audit, governance_drift_check, recompute_governance) imports it or the convergence-telemetry counter table. OGTM (ENC-FTR-066) is N/A: telemetry.rank is a read-only frequency projection and introduces no new record type, relational field, or graph edge.",
+      "description": "ENC-FTR-086 / ENC-TSK-I83 (Convergence Surface Phase 2): the registry of attribute fields the telemetry.rank read action ranks, derived from the per-field telemetry_eligible flags (governance.per_field_metadata). This entity is the policy source of truth that the Convergence Surface executes; the MCP server carries an in-process mirror so the read surface is functional on gamma before the live dictionary sync lands. Per Locked Design Decision D1 (DOC-E3F5E025B3D9) this surface is a SOFT prior only \u2014 it is queryable by agents but is structurally invisible to every governance gate (no validator, preflight, tracker.set handler, checkout.advance gate, or deploy guard ever consults it). Architectural separation (feature AC-1) is enforced by topology: the ranking logic lives in the isolated tools/enceladus-mcp-server/telemetry_rank.py module which imports nothing from governance Lambdas, and no governance Lambda (coordination_api, governance_audit, governance_drift_check, recompute_governance) imports it or the convergence-telemetry counter table. OGTM (ENC-FTR-066) is N/A: telemetry.rank is a read-only frequency projection and introduces no new record type, relational field, or graph edge. ENC-TSK-K12 / ENC-ISS-474: coordination_api .build_extras now copies tools/enceladus-mcp-server/telemetry_rank.py into the Lambda bundle so coordination dispatch paths can import the isolated ranking module at runtime.",
       "governing_feature": "ENC-FTR-086",
       "governing_task": "ENC-TSK-I83",
       "design_source": "DOC-E3F5E025B3D9",
@@ -6832,6 +6832,33 @@
           "definition": "Optional on checkout_task / advance_task_status / append_worklog (and honored on plan/tracker mutation paths). Session Claim ID issued by coordination agent.claim (ENC-ISS-441). Required by the backend for agent sessions claimed after SCI_ENFORCEMENT_EPOCH; strip-and-forwarded, never validated at the MCP layer."
         }
       }
+    },
+    "mcp_server.tracker_embeddings_for": {
+      "description": "ENC-TSK-K12 / ENC-ISS-473: MCP raw tool tracker_embeddings_for (code-mode action tracker.embeddings_for) restored after a merge truncation left the handler body incomplete. Proxies GET graph_query_api with search_type=embeddings_for (ENC-FTR-089 / ENC-TSK-I89): accepts project_id and record_ids (list or comma-separated string), returns embeddings[], Nx256 matrix, and missing[] from stored Titan V2 node properties. Admin/io-dev-admin scoped downstream; read-only, OGTM N/A.",
+      "fields": {
+        "project_id": {
+          "type": "string",
+          "definition": "Required. Project whose graph node embeddings are fetched."
+        },
+        "record_ids": {
+          "type": "array|string",
+          "definition": "Required. One or more ENC-* or DOC-* record IDs; comma-separated string accepted."
+        }
+      }
+    },
+    "mcp_server.tracker_sheaf_cohomology": {
+      "description": "ENC-TSK-K12 / ENC-ISS-473: MCP raw tool tracker_sheaf_cohomology (code-mode action tracker.sheaf_cohomology) restored after merge truncation. Proxies graph_query_api search_type=sheaf_cohomology (ENC-FTR-095 / ENC-TSK-I90): requires project_id; optional vertex_set_query restricts the induced subgraph. Returns h1_dim, inconsistency_nodes[], inconsistency_edges[], computation_ms. Read-only sheaf Laplacian H1 probe; OGTM N/A.",
+      "fields": {
+        "project_id": {
+          "type": "string",
+          "definition": "Required. Project graph to analyze."
+        },
+        "vertex_set_query": {
+          "type": "string",
+          "required": false,
+          "definition": "Optional anchor query limiting computation to a connected subgraph."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -6955,6 +6982,11 @@
       "version": "2026-07-02.19",
       "date": "2026-07-02",
       "summary": "ENC-TSK-K10 (ENC-ISS-441 Ph7b, ENC-FTR-122, supersedes J97): MCP server sci pass-through - optional sci property on checkout_task/advance_task_status/append_worklog schemas, strip-and-forward at 7 mutation-forwarding sites (checkout/advance/log, plan checkout/advance, tracker set/log; tracker_create via F76 passthrough), agent.claim raw response passthrough confirmed (sci/sci_issued_at/sci_ttl_seconds flow unchanged). No MCP-layer validation. New entity mcp_server.sci_passthrough. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-07-02.20",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K12 (ENC-ISS-473, ENC-ISS-474): MCP server restores truncated tracker_embeddings_for and tracker_sheaf_cohomology handlers (search actions tracker.embeddings_for / tracker.sheaf_cohomology forwarding to graph_query_api embeddings_for and sheaf_cohomology search_types); coordination_api .build_extras now packages tools/enceladus-mcp-server/telemetry_rank.py so dispatch_plan / coordination paths can import telemetry.rank helpers. New entities mcp_server.tracker_embeddings_for and mcp_server.tracker_sheaf_cohomology. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }
