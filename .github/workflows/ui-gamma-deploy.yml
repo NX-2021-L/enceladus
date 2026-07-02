@@ -1,0 +1,73 @@
+name: UI Gamma Deploy
+
+on:
+  push:
+    branches:
+      - v4/main
+    paths:
+      - "frontend/ui/**"
+      - ".github/workflows/ui-gamma-deploy.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-west-2
+  S3_BUCKET: jreese-net
+  S3_PREFIX: enceladus-gamma
+  CLOUDFRONT_DISTRIBUTION_ID: E2CO2UXUONVQZH
+
+jobs:
+  deploy:
+    name: Build + Deploy PWA to gamma
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: v4-gamma
+    concurrency:
+      group: ui-gamma-deploy
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: frontend/ui
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Configure AWS credentials (OIDC, v4-gamma environment)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::356364570033:role/GitHubActions-V4Gamma-DeployRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Sync build output to S3
+        run: |
+          aws s3 sync dist/ "s3://${S3_BUCKET}/${S3_PREFIX}/" --delete \
+            --cache-control "max-age=0,s-maxage=300" \
+            --exclude "assets/*" --exclude "workbox-*"
+          aws s3 sync dist/assets/ "s3://${S3_BUCKET}/${S3_PREFIX}/assets/" --delete \
+            --cache-control "max-age=31536000,immutable"
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" \
+            --paths "/*"
