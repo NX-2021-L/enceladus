@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.21",
-  "updated_at": "2026-07-02T11:02:00Z",
-  "last_change_summary": "ENC-TSK-J52 (FTR-104 Ph3): promote I99-tuned energy lambda weights (lambda_graph=1.0, lambda_kw=0.1) to live hybrid retrieval defaults + gamma ENERGY_LAMBDA_* env vars; optional include_energy query flag exposes energy_score + energy_breakdown on hybrid nodes.",
+  "version": "2026-07-02.23",
+  "updated_at": "2026-07-02T11:25:00Z",
+  "last_change_summary": "ENC-TSK-K12: Gen2 build packages tools/enceladus-mcp-server runtime modules into coordination_api and mcp_code artifacts so gamma MCP gateway can load server.py (ISS-473/474 live smoke).",
   "owners": [
     "enceladus-platform"
   ],
