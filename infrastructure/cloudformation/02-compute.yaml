@@ -190,8 +190,17 @@ Resources:
           AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
           AGENT_TYPES_TABLE: !Sub "agent-types${EnvironmentSuffix}"
           # ENC-TSK-I71 / ENC-FTR-117 AC#8: idle-sweep backstop (scheduled append-only retire)
+          # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J94): threshold tightened from
+          # 86400 (24h) to 7200 (2h); the idle reference prefers last_activity_at (J83), so
+          # polling listeners stay exempt.
           AGENT_SESSIONS_IDLE_SWEEP_ENABLED: "true"
-          AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS: "86400"
+          AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS: "7200"
+          # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J94): unclaim TTL sweep config.
+          AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED: "true"
+          AGENT_SESSIONS_UNCLAIM_TTL_MINUTES: "10"
+          # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J92): SCI tokens share the
+          # checkout service's token table (pk = token id, token_type=SCI).
+          CHECKOUT_TOKENS_TABLE: !Sub "enceladus-checkout-tokens${EnvironmentSuffix}"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -1384,6 +1393,32 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt AgentSessionIdleSweepSchedule.Arn
 
+  # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J94, ENC-FTR-122): 10-minute unclaim
+  # TTL sweep. Reaps ghost registrations — sessions that called agent.register but never
+  # agent.claim within AGENT_SESSIONS_UNCLAIM_TTL_MINUTES of created_at (10 of 24 prod
+  # sessions showed this pattern, the ENC-ISS-441 evidence). Same append-only retire flip
+  # + Lambda::Permission discipline as the I71 rule above; both sweeps also revoke SCIs.
+  AgentSessionUnclaimSweepSchedule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-agent-session-unclaim-sweep${EnvironmentSuffix}"
+      Description: "ENC-ISS-441/ENC-TSK-J94: reap never-claimed (ghost) agent sessions after the 10-min unclaim TTL and revoke their SCIs"
+      ScheduleExpression: rate(10 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CoordinationApiFunction.Arn
+          Id: agent-session-unclaim-sweep
+          Input: '{"action": "agent_session_unclaim_sweep"}'
+
+  AgentSessionUnclaimSweepPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CoordinationApiFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AgentSessionUnclaimSweepSchedule.Arn
+
   DeployCodeBuildFinalizeRule:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
@@ -1683,6 +1718,17 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-types${EnvironmentSuffix}"
+              # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J92): agent.claim mints SCI
+              # tokens into the checkout-tokens table; agent.retire + the J94 sweeps revoke
+              # them. Minimal grant — no Scan/Query/Delete.
+              - Sid: SciTokenAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-checkout-tokens${EnvironmentSuffix}"
               - Sid: GovernanceAndReferenceS3Read
                 Effect: Allow
                 Action:
@@ -3516,6 +3562,61 @@ Resources:
           Value: mcp-code
         - Key: Environment
           Value: gamma
+
+  # ---------------------------------------------------------------------------
+  # ENC-ISS-469 / ENC-TSK-K07: Give enceladus-mcp-code-gamma a QUALIFIED `live`
+  # Lambda Function URL, mirroring EnceladusMcpCodeLiveFunctionUrl below
+  # (ENC-ISS-306 / ENC-TSK-I24) exactly. Prior to this resource, code-gamma had
+  # ZERO Function URLs at all (confirmed via list-function-url-configs) and no
+  # discoverable invoker (ENC-ISS-470) -- unlike prod's enceladus-mcp-code, gamma
+  # never got the ISS-306 alias-qualified public surface. This is a pure ADD, not
+  # an import: no physical Function URL existed on enceladus-mcp-code-gamma before
+  # this change, so there is nothing for AWS::EarlyValidation::ResourceExistenceCheck
+  # to collide with.
+  #
+  # Literal prod-only name (Condition: IsProduction), same as the sibling
+  # EnceladusMcpCodeGammaFunction resource above: this Lambda is a GAMMA-purposed
+  # function but is prod-stack-owned (H29/ISS-386 name-collision guard), so its
+  # Url resource must render in the same stack as the function or the gamma stack
+  # will also try to create it and collide.
+  #
+  # The `live` ALIAS is deliberately NOT codified here, matching the
+  # EnceladusMcpCodeLiveFunctionUrl precedent and the ENC-ISS-313 / PLN-047
+  # CFN-stomp rationale: AWS::Lambda::Alias pins a FunctionVersion that ops moves
+  # on every code-gamma promotion; a CFN-pinned version would revert gamma to a
+  # stale version on the next prod compute deploy. The Url references the alias
+  # by name ("live") and the alias stays operationally managed (created via CLI
+  # ahead of this deploy, ENC-TSK-K07 worklog).
+  #
+  # The FunctionUrlAuthType=NONE public-invoke permission is likewise NOT codified
+  # here, matching the established pattern for this class of resource (see the
+  # CheckoutAutoScheduleRule note below: Function-URL/event permissions stay
+  # out-of-band) -- added via CLI alongside the alias.
+  # ---------------------------------------------------------------------------
+  EnceladusMcpCodeGammaLiveFunctionUrl:
+    Type: AWS::Lambda::Url
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TargetFunctionArn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-code-gamma"
+      Qualifier: live
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowCredentials: true
+        AllowHeaders:
+          - content-type
+          - authorization
+          - accept
+          - mcp-session-id
+        AllowMethods:
+          - "*"
+        AllowOrigins:
+          - "https://claude.ai"
+        ExposeHeaders:
+          - mcp-session-id
+        MaxAge: 86400
 
   # ---------------------------------------------------------------------------
   # ENC-ISS-306 / ENC-TSK-I24: Adopt the prod enceladus-mcp-code QUALIFIED `live`
