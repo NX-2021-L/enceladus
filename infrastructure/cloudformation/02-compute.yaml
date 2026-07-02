@@ -4411,6 +4411,19 @@ Resources:
                   StringLike:
                     s3:prefix:
                       - !Sub "${S3EnvPrefix}pathway-telemetry/*"
+        # ENC-TSK-K43 (B66 Ph5): publish the Fiedler lambda2 GraphHealth metric.
+        # PutMetricData has no resource-level restriction in the CloudWatch API
+        # (metric namespaces are not ARN-addressable), matching the identical
+        # unscoped grant on ProdHealthMonitorPolicy (05-monitoring.yaml).
+        - PolicyName: GraphHealthMetricPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GraphHealthPutMetricData
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus
