@@ -244,6 +244,81 @@ jobs:
             --distribution-id "${DIST}" \
             --paths /index.html /sw.js /manifest.webmanifest
 
+      # Post-deploy smoke test against the live distribution. Proves three
+      # things end-to-end: (1) the app shell serves 200 text/html from the S3
+      # origin, (2) /api/* routes to the API-Gateway origin (a 401 from the
+      # unauthenticated /api/v1/projects means the behavior reaches API GW and
+      # Cognito auth is enforced — a 200 would mean auth is OFF; a 404/000 means
+      # /api/* routing is broken). Health is a soft check (warning only). The
+      # resolved DOMAIN is echoed as LIVE_UI_URL= so it is greppable in the log.
+      - name: Validate live distribution (shell + /api routing)
+        env:
+          STACK: ${{ steps.resolve.outputs.stack_name }}
+        run: |
+          set -euo pipefail
+          DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK}" --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='UiDistributionDomainName'].OutputValue" \
+            --output text)
+          if [ -z "${DOMAIN}" ] || [ "${DOMAIN}" = "None" ]; then
+            echo "::error::UI CDN stack '${STACK}' is missing the UiDistributionDomainName output — cannot validate the live distribution."
+            exit 1
+          fi
+          echo "LIVE_UI_URL=https://${DOMAIN}/"
+
+          # Give the invalidation a moment to propagate before curling.
+          sleep 20
+
+          # Capture each result defensively so a curl failure surfaces as a
+          # 000 code under set -e rather than aborting the step early.
+          SHELL_RESULT=$(curl -sS -o /dev/null -w '%{http_code} %{content_type}' "https://${DOMAIN}/" || true)
+          SHELL_CODE=$(echo "${SHELL_RESULT}" | awk '{print $1}')
+          SHELL_CT=$(echo "${SHELL_RESULT}" | awk '{print $2}')
+          HEALTH=$(curl -sS -o /dev/null -w '%{http_code}' "https://${DOMAIN}/api/v1/health" || true)
+          PROJ=$(curl -sS -o /dev/null -w '%{http_code}' "https://${DOMAIN}/api/v1/projects" || true)
+
+          # Evaluate expectations.
+          shell_ok="FAIL"; [ "${SHELL_CODE}" = "200" ] && case "${SHELL_CT}" in text/html*) shell_ok="PASS";; esac
+          health_ok="WARN"; [ "${HEALTH}" = "200" ] && health_ok="PASS"
+          proj_ok="FAIL";  [ "${PROJ}" = "401" ] && proj_ok="PASS"
+
+          {
+            echo "## UI live-distribution validation — ${STACK}"
+            echo ""
+            echo "LIVE_UI_URL: https://${DOMAIN}/"
+            echo ""
+            echo "| Check | Endpoint | Result | Expected | Status |"
+            echo "| --- | --- | --- | --- | --- |"
+            echo "| Shell | \`/\` | \`${SHELL_CODE} ${SHELL_CT}\` | 200 + text/html | ${shell_ok} |"
+            echo "| Health | \`/api/v1/health\` | \`${HEALTH}\` | 200 | ${health_ok} |"
+            echo "| API routing/auth | \`/api/v1/projects\` | \`${PROJ}\` | 401 (auth enforced) | ${proj_ok} |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "Shell:  ${SHELL_CODE} ${SHELL_CT}  -> ${shell_ok}"
+          echo "Health: ${HEALTH}  -> ${health_ok}"
+          echo "API:    ${PROJ}  -> ${proj_ok}"
+
+          # FAIL conditions: shell not 200/text/html, OR /api/v1/projects not 401
+          # (200 = auth not enforced; 404/000 = /api/* routing broken). A
+          # non-200 health is only a warning and never fails the step.
+          fatal=0
+          if [ "${shell_ok}" != "PASS" ]; then
+            echo "::error::App shell did not return 200 text/html (got '${SHELL_CODE} ${SHELL_CT}') at https://${DOMAIN}/"
+            fatal=1
+          fi
+          if [ "${proj_ok}" != "PASS" ]; then
+            echo "::error::/api/v1/projects returned '${PROJ}', expected 401. A 200 means Cognito auth is not enforced; a 404/000 means the /api/* behavior is not routing to the API-Gateway origin."
+            fatal=1
+          fi
+          if [ "${health_ok}" != "PASS" ]; then
+            echo "::warning::/api/v1/health returned '${HEALTH}' (expected 200) — non-fatal warning."
+          fi
+          if [ "${fatal}" -ne 0 ]; then
+            echo "Live-distribution validation: FAIL"
+            exit 1
+          fi
+          echo "Live-distribution validation: PASS"
+
   # ---------------------------------------------------------------------------
   # RECORD_DEPLOY — write a DPL record so deploy.history stays current
   # (ENC-ISS-451 mechanism, mirrored from _deploy.yml). Only runs after a
