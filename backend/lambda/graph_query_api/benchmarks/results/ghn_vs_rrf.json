@@ -1,0 +1,374 @@
+{
+  "task": "ENC-TSK-I99",
+  "feature": "ENC-FTR-104 Ph2 (AC-3 GHN energy-descent, AC-4 recall@k eval)",
+  "generated_at_epoch": 1782981902,
+  "dataset_source": "SYNTHETIC \u2014 real MuSiQue/2Wiki/HotpotQA splits unfetchable (no network, datasets lib absent). See synthetic_multihop.py module docstring.",
+  "config": {
+    "seed": 1099,
+    "beta": 8.0,
+    "lambda_graph": 0.5,
+    "lambda_kw": 0.25,
+    "rrf_k": 60,
+    "ppr_damping": 0.85,
+    "k_list": [
+      1,
+      2,
+      3,
+      5,
+      10,
+      20
+    ]
+  },
+  "methods": {
+    "rrf": "lambda_function._rrf_fuse (production, imported read-only)",
+    "ghn": "benchmarks.ghn graph-coupled Hopfield energy descent (field h = -energy_function.compute_retrieval_energy)"
+  },
+  "per_dataset": [
+    {
+      "dataset": "HotpotQA",
+      "stats": {
+        "name": "HotpotQA",
+        "n_documents": 1000,
+        "n_questions": 100,
+        "n_edges": 155,
+        "hop_distribution": {
+          "2": 100
+        },
+        "qtype_distribution": {
+          "bridge": 67,
+          "comparison": 33
+        },
+        "synthetic": true
+      },
+      "rrf": {
+        "recall_at_k": {
+          "1": 0.49,
+          "2": 0.98,
+          "3": 1.0,
+          "5": 1.0,
+          "10": 1.0,
+          "20": 1.0
+        },
+        "answerable_at_k": {
+          "1": 0,
+          "2": 0.96,
+          "3": 1,
+          "5": 1,
+          "10": 1,
+          "20": 1
+        },
+        "recall_at_10_by_hops": {
+          "2": 1.0
+        },
+        "fusion_latency_ms": {
+          "mean": 0.0551,
+          "p95": 0.0719
+        }
+      },
+      "ghn": {
+        "recall_at_k": {
+          "1": 0.49,
+          "2": 0.95,
+          "3": 1.0,
+          "5": 1.0,
+          "10": 1.0,
+          "20": 1.0
+        },
+        "answerable_at_k": {
+          "1": 0,
+          "2": 0.9,
+          "3": 1,
+          "5": 1,
+          "10": 1,
+          "20": 1
+        },
+        "recall_at_10_by_hops": {
+          "2": 1.0
+        },
+        "fusion_latency_ms": {
+          "mean": 3.3308,
+          "p95": 8.2689
+        }
+      },
+      "delta_ghn_minus_rrf": {
+        "recall_at_k": {
+          "1": 0.0,
+          "2": -0.03,
+          "3": 0.0,
+          "5": 0.0,
+          "10": 0.0,
+          "20": 0.0
+        },
+        "answerable_at_k": {
+          "1": 0,
+          "2": -0.06,
+          "3": 0,
+          "5": 0,
+          "10": 0,
+          "20": 0
+        }
+      }
+    },
+    {
+      "dataset": "2WikiMultiHopQA",
+      "stats": {
+        "name": "2WikiMultiHopQA",
+        "n_documents": 1025,
+        "n_questions": 100,
+        "n_edges": 255,
+        "hop_distribution": {
+          "2": 75,
+          "3": 25
+        },
+        "qtype_distribution": {
+          "comparison": 25,
+          "bridge": 75
+        },
+        "synthetic": true
+      },
+      "rrf": {
+        "recall_at_k": {
+          "1": 0.4583,
+          "2": 0.65,
+          "3": 0.83,
+          "5": 0.97,
+          "10": 1.0,
+          "20": 1.0
+        },
+        "answerable_at_k": {
+          "1": 0,
+          "2": 0.33,
+          "3": 0.67,
+          "5": 0.92,
+          "10": 1,
+          "20": 1
+        },
+        "recall_at_10_by_hops": {
+          "2": 1.0,
+          "3": 1.0
+        },
+        "fusion_latency_ms": {
+          "mean": 0.0552,
+          "p95": 0.0742
+        }
+      },
+      "ghn": {
+        "recall_at_k": {
+          "1": 0.4533,
+          "2": 0.8033,
+          "3": 0.87,
+          "5": 0.8933,
+          "10": 0.975,
+          "20": 1.0
+        },
+        "answerable_at_k": {
+          "1": 0,
+          "2": 0.55,
+          "3": 0.68,
+          "5": 0.75,
+          "10": 0.93,
+          "20": 1
+        },
+        "recall_at_10_by_hops": {
+          "2": 0.9933,
+          "3": 0.92
+        },
+        "fusion_latency_ms": {
+          "mean": 2.0013,
+          "p95": 3.0909
+        }
+      },
+      "delta_ghn_minus_rrf": {
+        "recall_at_k": {
+          "1": -0.005,
+          "2": 0.1533,
+          "3": 0.04,
+          "5": -0.0767,
+          "10": -0.025,
+          "20": 0.0
+        },
+        "answerable_at_k": {
+          "1": 0,
+          "2": 0.22,
+          "3": 0.01,
+          "5": -0.17,
+          "10": -0.07,
+          "20": 0
+        }
+      }
+    },
+    {
+      "dataset": "MuSiQue",
+      "stats": {
+        "name": "MuSiQue",
+        "n_documents": 1301,
+        "n_questions": 100,
+        "n_edges": 384,
+        "hop_distribution": {
+          "2": 29,
+          "3": 41,
+          "4": 30
+        },
+        "qtype_distribution": {
+          "bridge": 100
+        },
+        "synthetic": true
+      },
+      "rrf": {
+        "recall_at_k": {
+          "1": 0.3567,
+          "2": 0.4075,
+          "3": 0.5517,
+          "5": 0.8508,
+          "10": 1.0,
+          "20": 1.0
+        },
+        "answerable_at_k": {
+          "1": 0,
+          "2": 0.05,
+          "3": 0.2,
+          "5": 0.65,
+          "10": 1,
+          "20": 1
+        },
+        "recall_at_10_by_hops": {
+          "2": 1.0,
+          "3": 1.0,
+          "4": 1.0
+        },
+        "fusion_latency_ms": {
+          "mean": 0.0532,
+          "p95": 0.0662
+        }
+      },
+      "ghn": {
+        "recall_at_k": {
+          "1": 0.3567,
+          "2": 0.5525,
+          "3": 0.6383,
+          "5": 0.685,
+          "10": 0.7167,
+          "20": 0.905
+        },
+        "answerable_at_k": {
+          "1": 0,
+          "2": 0.13,
+          "3": 0.22,
+          "5": 0.29,
+          "10": 0.31,
+          "20": 0.7
+        },
+        "recall_at_10_by_hops": {
+          "2": 0.8966,
+          "3": 0.6992,
+          "4": 0.5667
+        },
+        "fusion_latency_ms": {
+          "mean": 1.6576,
+          "p95": 2.0289
+        }
+      },
+      "delta_ghn_minus_rrf": {
+        "recall_at_k": {
+          "1": 0.0,
+          "2": 0.145,
+          "3": 0.0866,
+          "5": -0.1658,
+          "10": -0.2833,
+          "20": -0.095
+        },
+        "answerable_at_k": {
+          "1": 0,
+          "2": 0.08,
+          "3": 0.02,
+          "5": -0.36,
+          "10": -0.69,
+          "20": -0.3
+        }
+      }
+    }
+  ],
+  "tuning_sweep": {
+    "target_k": 10,
+    "grid": [
+      {
+        "lambda_graph": 0.25,
+        "lambda_kw": 0.1,
+        "mean_recall_at_10": 0.8797,
+        "mean_answerable_at_10": 0.7133
+      },
+      {
+        "lambda_graph": 0.25,
+        "lambda_kw": 0.25,
+        "mean_recall_at_10": 0.8547,
+        "mean_answerable_at_10": 0.68
+      },
+      {
+        "lambda_graph": 0.25,
+        "lambda_kw": 0.5,
+        "mean_recall_at_10": 0.8169,
+        "mean_answerable_at_10": 0.6267
+      },
+      {
+        "lambda_graph": 0.5,
+        "lambda_kw": 0.1,
+        "mean_recall_at_10": 0.9056,
+        "mean_answerable_at_10": 0.76
+      },
+      {
+        "lambda_graph": 0.5,
+        "lambda_kw": 0.25,
+        "mean_recall_at_10": 0.8972,
+        "mean_answerable_at_10": 0.7467
+      },
+      {
+        "lambda_graph": 0.5,
+        "lambda_kw": 0.5,
+        "mean_recall_at_10": 0.8478,
+        "mean_answerable_at_10": 0.67
+      },
+      {
+        "lambda_graph": 0.75,
+        "lambda_kw": 0.1,
+        "mean_recall_at_10": 0.9406,
+        "mean_answerable_at_10": 0.8333
+      },
+      {
+        "lambda_graph": 0.75,
+        "lambda_kw": 0.25,
+        "mean_recall_at_10": 0.9206,
+        "mean_answerable_at_10": 0.7933
+      },
+      {
+        "lambda_graph": 0.75,
+        "lambda_kw": 0.5,
+        "mean_recall_at_10": 0.8958,
+        "mean_answerable_at_10": 0.75
+      },
+      {
+        "lambda_graph": 1.0,
+        "lambda_kw": 0.1,
+        "mean_recall_at_10": 0.9664,
+        "mean_answerable_at_10": 0.8933
+      },
+      {
+        "lambda_graph": 1.0,
+        "lambda_kw": 0.25,
+        "mean_recall_at_10": 0.9536,
+        "mean_answerable_at_10": 0.8633
+      },
+      {
+        "lambda_graph": 1.0,
+        "lambda_kw": 0.5,
+        "mean_recall_at_10": 0.9242,
+        "mean_answerable_at_10": 0.8
+      }
+    ],
+    "recommended": {
+      "lambda_graph": 1.0,
+      "lambda_kw": 0.1,
+      "mean_recall_at_10": 0.9664,
+      "mean_answerable_at_10": 0.8933
+    }
+  }
+}
