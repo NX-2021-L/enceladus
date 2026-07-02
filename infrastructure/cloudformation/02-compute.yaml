@@ -190,8 +190,17 @@ Resources:
           AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
           AGENT_TYPES_TABLE: !Sub "agent-types${EnvironmentSuffix}"
           # ENC-TSK-I71 / ENC-FTR-117 AC#8: idle-sweep backstop (scheduled append-only retire)
+          # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J94): threshold tightened from
+          # 86400 (24h) to 7200 (2h); the idle reference prefers last_activity_at (J83), so
+          # polling listeners stay exempt.
           AGENT_SESSIONS_IDLE_SWEEP_ENABLED: "true"
-          AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS: "86400"
+          AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS: "7200"
+          # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J94): unclaim TTL sweep config.
+          AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED: "true"
+          AGENT_SESSIONS_UNCLAIM_TTL_MINUTES: "10"
+          # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J92): SCI tokens share the
+          # checkout service's token table (pk = token id, token_type=SCI).
+          CHECKOUT_TOKENS_TABLE: !Sub "enceladus-checkout-tokens${EnvironmentSuffix}"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -1384,6 +1393,32 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt AgentSessionIdleSweepSchedule.Arn
 
+  # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J94, ENC-FTR-122): 10-minute unclaim
+  # TTL sweep. Reaps ghost registrations — sessions that called agent.register but never
+  # agent.claim within AGENT_SESSIONS_UNCLAIM_TTL_MINUTES of created_at (10 of 24 prod
+  # sessions showed this pattern, the ENC-ISS-441 evidence). Same append-only retire flip
+  # + Lambda::Permission discipline as the I71 rule above; both sweeps also revoke SCIs.
+  AgentSessionUnclaimSweepSchedule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-agent-session-unclaim-sweep${EnvironmentSuffix}"
+      Description: "ENC-ISS-441/ENC-TSK-J94: reap never-claimed (ghost) agent sessions after the 10-min unclaim TTL and revoke their SCIs"
+      ScheduleExpression: rate(10 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CoordinationApiFunction.Arn
+          Id: agent-session-unclaim-sweep
+          Input: '{"action": "agent_session_unclaim_sweep"}'
+
+  AgentSessionUnclaimSweepPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CoordinationApiFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AgentSessionUnclaimSweepSchedule.Arn
+
   DeployCodeBuildFinalizeRule:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
@@ -1683,6 +1718,17 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-sessions${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/agent-types${EnvironmentSuffix}"
+              # ENC-ISS-441 / ENC-TSK-J95 (mirror of v4 ENC-TSK-J92): agent.claim mints SCI
+              # tokens into the checkout-tokens table; agent.retire + the J94 sweeps revoke
+              # them. Minimal grant — no Scan/Query/Delete.
+              - Sid: SciTokenAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-checkout-tokens${EnvironmentSuffix}"
               - Sid: GovernanceAndReferenceS3Read
                 Effect: Allow
                 Action:
