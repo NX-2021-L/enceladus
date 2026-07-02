@@ -2100,7 +2100,7 @@ Resources:
       MetricName: Invocations
       Dimensions:
         - Name: RuleName
-          Value: !Sub "enceladus-unlearning-nightly${EnvironmentSuffix}"
+          Value: !Sub "devops-unlearning-nightly${EnvironmentSuffix}"
       Statistic: Sum
       Period: 604800
       EvaluationPeriods: 1
@@ -2173,7 +2173,7 @@ Resources:
     Condition: IsGamma
     DeletionPolicy: Retain
     Properties:
-      Name: !Sub "enceladus-unlearning-nightly${EnvironmentSuffix}"
+      Name: !Sub "devops-unlearning-nightly${EnvironmentSuffix}"
       Description: "Nightly Crick-Mitchison unlearning pass (ENC-FTR-106 / ENC-TSK-K03)"
       ScheduleExpression: "cron(0 4 * * ? *)"
       State: ENABLED
