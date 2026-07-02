@@ -405,6 +405,64 @@ Resources:
         - Key: Component
           Value: lifecycle
 
+  # ENC-TSK-K45 / B66 Ph5 AC-1: Checkout Service — adopted into CFN management via
+  # change-set-type=IMPORT (.github/workflows/cfn-resource-import.yml, gamma-only,
+  # no reviewer gate) to bring the last of the five v4 services under CFN so it can
+  # carry TracingConfig.Mode=Active. Live resource previously deployed entirely
+  # out-of-band via backend/lambda/checkout_service/deploy.sh (tombstone) + the
+  # _deploy.yml matrix build — see infrastructure/lambda_workflow_manifest.json
+  # (cfn_managed flipped false->true here). IAM role
+  # enceladus-checkout-service-role-gamma is intentionally NOT declared as a CFN
+  # resource in this stack — it remains out-of-band and is referenced by raw ARN,
+  # mirroring the EnceladusMcpCodeGammaFunction pattern below (this agent identity
+  # has an explicit IAM deny on iam:GetRole/ListRolePolicies, so the live role's
+  # exact policy document cannot be read to safely re-author it as a managed
+  # resource; importing only the Function avoids any risk of CFN silently
+  # clobbering live checkout-service permissions on a future stack update).
+  CheckoutServiceFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-checkout-service${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      # Out-of-band role (see comment above) — referenced by ARN, not CFN-managed.
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-checkout-service-role${EnvironmentSuffix}"
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing (Checkout service).
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          CHECKOUT_TOKENS_REGION: !Ref AWS::Region
+          CHECKOUT_TOKENS_TABLE: !Sub "enceladus-checkout-tokens${EnvironmentSuffix}"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          ENCELADUS_COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          GITHUB_PRIVATE_KEY_SECRET: devops/github-app/enceladus-private-key
+          GITHUB_APP_ID: "2946766"
+          GITHUB_INSTALLATION_ID: "112392089"
+          GITHUB_TOKEN: !If [IsGamma, "disabled-for-gamma", !Ref "AWS::NoValue"]
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          CORS_ORIGIN: https://jreese.net
+          TRACKER_API_BASE: !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: checkout
+
   # ENC-TSK-H47 / B63 Phase 2B — Scoring Service. Standalone, SNS-triggered ASYNC consumer that owns
   # lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson
   # scoring_status: pending -> scored lifecycle. Subscribes to LessonScoringTopic; pure DynamoDB

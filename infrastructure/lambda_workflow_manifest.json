@@ -187,7 +187,7 @@
       "lambda_dir": "backend/lambda/checkout_service",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/checkout_service/deploy.sh",
-      "cfn_managed": false
+      "cfn_managed": true
     },
     {
       "function_name": "enceladus-stale-checkout-monitor",
