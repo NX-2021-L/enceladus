@@ -478,8 +478,63 @@ def _self_check() -> bool:
             "enceladus-prod-only" not in gamma_rules,
         )
 
+    # ENC-ISS-467: pure-ADD cfn_only must pass --pre-deploy --fail-on-drift,
+    # but still fail strict (scheduled reconcile) mode; live_only must fail
+    # closed in BOTH modes (the EarlyValidation-wedge guard).
+    pure_add_report = {
+        "apigw_routes": {"inconclusive": False, "live_only": [], "cfn_only": ["GET /new"]},
+        "eventbridge_rules": {"inconclusive": False, "live_only": [], "cfn_only": []},
+    }
+    check(
+        "pure-ADD cfn_only passes pre-deploy mode",
+        not _has_failing_drift(pure_add_report, pre_deploy=True),
+    )
+    check(
+        "pure-ADD cfn_only still fails strict mode",
+        _has_failing_drift(pure_add_report, pre_deploy=False),
+    )
+    live_only_report = {
+        "apigw_routes": {"inconclusive": False, "live_only": ["GET /orphan"], "cfn_only": []},
+        "eventbridge_rules": {"inconclusive": False, "live_only": [], "cfn_only": []},
+    }
+    check(
+        "live_only fails pre-deploy mode (EarlyValidation-wedge guard)",
+        _has_failing_drift(live_only_report, pre_deploy=True),
+    )
+    check(
+        "live_only fails strict mode",
+        _has_failing_drift(live_only_report, pre_deploy=False),
+    )
+
     print(f"[{'PASS' if not failures else 'FAIL'}] self-check: {len(failures)} failure(s)")
     return not failures
+
+
+def _has_failing_drift(report: Dict[str, Dict[str, object]], pre_deploy: bool = False) -> bool:
+    """Does ``report`` contain drift severe enough to fail --fail-on-drift?
+
+    Strict mode (``pre_deploy=False`` — the scheduled reconcile audit, GH
+    workflow cfn-drift-audit.yml) fails on ANY live_only or cfn_only delta,
+    matching prior behavior: post-merge main should eventually match live.
+
+    Pre-deploy mode (ENC-ISS-467) fails ONLY on live_only. A pure-ADD cfn_only
+    delta — a resource newly declared in CFN that doesn't exist live yet — is
+    exactly what the FTR-120 plan/apply change-set review approves; failing
+    pre-deploy contexts on it forced a redundant two-phase io approval for
+    every route-adding PR (CI run 28572125111). live_only stays fail-closed in
+    BOTH modes — it is the AWS::EarlyValidation::ResourceExistenceCheck wedge
+    guard (a plan that ADDs/adopts something already live out-of-band wedges
+    the stack), and relaxing it would reintroduce that class of incident.
+    """
+    for section in ("apigw_routes", "eventbridge_rules"):
+        data = report[section]
+        if data.get("inconclusive"):
+            continue
+        if data["live_only"]:
+            return True
+        if not pre_deploy and data["cfn_only"]:
+            return True
+    return False
 
 
 def main() -> int:
@@ -511,6 +566,19 @@ def main() -> int:
     )
     ap.add_argument("--output-json", default=None)
     ap.add_argument("--fail-on-drift", action="store_true")
+    ap.add_argument(
+        "--pre-deploy",
+        action="store_true",
+        help=(
+            "Relax --fail-on-drift to fail only on live_only (pure-ADD cfn_only "
+            "deltas are still reported, just don't fail the gate). Use in "
+            "pre-deploy contexts (pre-deploy-health-gate.sh Check 7, the "
+            "compute-stack plan job) where a plan/apply change-set review is "
+            "the compensating control for newly declared-but-not-yet-live "
+            "resources (ENC-ISS-467). Default (unset) is unchanged strict mode "
+            "for the scheduled reconcile audit (cfn-drift-audit.yml)."
+        ),
+    )
     args = ap.parse_args()
 
     if args.self_check:
@@ -552,12 +620,7 @@ def main() -> int:
             "failing closed as 'CFN drift detected' (ENC-TSK-J22 / GH#672)."
         )
 
-    any_drift = any(
-        not report[section].get("inconclusive")
-        and (report[section]["live_only"] or report[section]["cfn_only"])
-        for section in ("apigw_routes", "eventbridge_rules")
-    )
-    if args.fail_on_drift and any_drift:
+    if args.fail_on_drift and _has_failing_drift(report, pre_deploy=args.pre_deploy):
         return 1
     if inconclusive_sections:
         return 2
