@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.18",
+  "version": "2026-07-02.19",
   "updated_at": "2026-07-02T10:40:00Z",
-  "last_change_summary": "ENC-TSK-K05 (ENC-FTR-109): stigmergic exploration trace emission — graph_query_api.stigmergic_trace entity documents DynamoDB sink enceladus-stigmergic-trace${EnvironmentSuffix}, STIGMERGIC_TRACE_TABLE env var, 90-day TTL, telemetry-only retrieval/traversal events.",
+  "last_change_summary": "ENC-TSK-K10 (ENC-ISS-441 Ph7b, ENC-FTR-122, supersedes J97): MCP server sci pass-through - optional sci property on checkout_task/advance_task_status/append_worklog schemas, strip-and-forward at 7 mutation-forwarding sites (checkout/advance/log, plan checkout/advance, tracker set/log; tracker_create via F76 passthrough), agent.claim raw response passthrough confirmed (sci/sci_issued_at/sci_ttl_seconds flow unchanged). No MCP-layer validation. New entity mcp_server.sci_passthrough. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "owners": [
     "enceladus-platform"
   ],
@@ -4914,7 +4914,7 @@
       }
     },
     "graph_query_api.stigmergic_trace": {
-      "description": "ENC-FTR-109 / ENC-TSK-K05: Stigmergic exploration trace emission (telemetry-only). On every hybrid retrieval (_query_hybrid) and non-hybrid graphsearch traversal (_handle_search), graph_query_api writes one per-event trace to enceladus-stigmergic-trace${EnvironmentSuffix} (PAY_PER_REQUEST; base key trace_id [HASH]; project-timestamp-index GSI on project_id [HASH] + timestamp [RANGE]; TTL expires_at 90 days). Record schema enceladus.stigmergic.trace.v1 carries session_id, pipe-delimited record_id_path, ISO timestamp, JSON outcome_signal, and event_type retrieval|traversal. No retrieval-behavior mutation — exploration-weighting is deferred per io approval (FTR-106 AC-4 gate). OGTM: DynamoDB-only sink, no new Neo4j edge type.",
+      "description": "ENC-FTR-109 / ENC-TSK-K05: Stigmergic exploration trace emission (telemetry-only). On every hybrid retrieval (_query_hybrid) and non-hybrid graphsearch traversal (_handle_search), graph_query_api writes one per-event trace to enceladus-stigmergic-trace${EnvironmentSuffix} (PAY_PER_REQUEST; base key trace_id [HASH]; project-timestamp-index GSI on project_id [HASH] + timestamp [RANGE]; TTL expires_at 90 days). Record schema enceladus.stigmergic.trace.v1 carries session_id, pipe-delimited record_id_path, ISO timestamp, JSON outcome_signal, and event_type retrieval|traversal. No retrieval-behavior mutation \u2014 exploration-weighting is deferred per io approval (FTR-106 AC-4 gate). OGTM: DynamoDB-only sink, no new Neo4j edge type.",
       "fields": {
         "table": {
           "type": "string",
@@ -6823,6 +6823,15 @@
           "definition": "Fixed io-specified nudge text, present ONLY on terminal-state success envelopes. Complements the ENC-TSK-J94 sweeps: the prompt handles well-behaved agents, the sweeps catch the rest."
         }
       }
+    },
+    "mcp_server.sci_passthrough": {
+      "description": "ENC-ISS-441 / ENC-TSK-K10 (ENC-FTR-122, supersedes ENC-TSK-J97): the MCP server (tools/enceladus-mcp-server/server.py, enceladus-mcp-code Lambda) carries the caller's Session Claim ID to the ENC-TSK-J93 backend enforcement points. checkout_task, advance_task_status and append_worklog tool schemas expose an OPTIONAL string property 'sci' (the SCI-{uuid4_hex} issued by coordination agent.claim); handlers strip-and-forward it into the backend payload ONLY when non-empty, so requests from grandfathered (pre-epoch) sessions stay byte-identical. The same guard covers _plan_checkout/_plan_advance and _tracker_set/_tracker_log; _tracker_create's ENC-TSK-F76 denylist passthrough forwards a caller-supplied sci automatically. The coordination agent.claim response is a RAW backend passthrough (do not reshape): the J92 fields sci / sci_issued_at / sci_ttl_seconds reach the calling agent unchanged. The MCP layer NEVER validates SCI - enforcement is backend-only (checkout_service + tracker_mutation, ENC-TSK-J93). Code-mode execute steps flow arguments verbatim (no per-action allowlist), so sci passes through execute(checkout.*/tracker.*/plan.*) unchanged. NOTE: enceladus-mcp-code has no auto-deploy lane; live deploys ride the ENC-FTR-077 handoff (DOC-359655466119 pattern) and must advance the :live alias (ISS-306 qualified-URL discipline).",
+      "fields": {
+        "sci": {
+          "type": "string",
+          "definition": "Optional on checkout_task / advance_task_status / append_worklog (and honored on plan/tracker mutation paths). Session Claim ID issued by coordination agent.claim (ENC-ISS-441). Required by the backend for agent sessions claimed after SCI_ENFORCEMENT_EPOCH; strip-and-forwarded, never validated at the MCP layer."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -6941,6 +6950,11 @@
       "version": "2026-07-02.17",
       "date": "2026-07-02",
       "summary": "ENC-TSK-J96 (ENC-ISS-441 Ph6, ENC-FTR-122): retirement_prompt injected verbatim into terminal-state success envelopes - checkout_service task->closed + plan->complete advances, tracker_mutation status writes to task/issue closed, feature production/deprecated, plan complete. Additive-only; non-terminal envelopes byte-identical. New entity tracker.retirement_prompt. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-07-02.19",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K10 (ENC-ISS-441 Ph7b, ENC-FTR-122, supersedes J97): MCP server sci pass-through - optional sci property on checkout_task/advance_task_status/append_worklog schemas, strip-and-forward at 7 mutation-forwarding sites (checkout/advance/log, plan checkout/advance, tracker set/log; tracker_create via F76 passthrough), agent.claim raw response passthrough confirmed (sci/sci_issued_at/sci_ttl_seconds flow unchanged). No MCP-layer validation. New entity mcp_server.sci_passthrough. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }
