@@ -3518,6 +3518,61 @@ Resources:
           Value: gamma
 
   # ---------------------------------------------------------------------------
+  # ENC-ISS-469 / ENC-TSK-K07: Give enceladus-mcp-code-gamma a QUALIFIED `live`
+  # Lambda Function URL, mirroring EnceladusMcpCodeLiveFunctionUrl below
+  # (ENC-ISS-306 / ENC-TSK-I24) exactly. Prior to this resource, code-gamma had
+  # ZERO Function URLs at all (confirmed via list-function-url-configs) and no
+  # discoverable invoker (ENC-ISS-470) -- unlike prod's enceladus-mcp-code, gamma
+  # never got the ISS-306 alias-qualified public surface. This is a pure ADD, not
+  # an import: no physical Function URL existed on enceladus-mcp-code-gamma before
+  # this change, so there is nothing for AWS::EarlyValidation::ResourceExistenceCheck
+  # to collide with.
+  #
+  # Literal prod-only name (Condition: IsProduction), same as the sibling
+  # EnceladusMcpCodeGammaFunction resource above: this Lambda is a GAMMA-purposed
+  # function but is prod-stack-owned (H29/ISS-386 name-collision guard), so its
+  # Url resource must render in the same stack as the function or the gamma stack
+  # will also try to create it and collide.
+  #
+  # The `live` ALIAS is deliberately NOT codified here, matching the
+  # EnceladusMcpCodeLiveFunctionUrl precedent and the ENC-ISS-313 / PLN-047
+  # CFN-stomp rationale: AWS::Lambda::Alias pins a FunctionVersion that ops moves
+  # on every code-gamma promotion; a CFN-pinned version would revert gamma to a
+  # stale version on the next prod compute deploy. The Url references the alias
+  # by name ("live") and the alias stays operationally managed (created via CLI
+  # ahead of this deploy, ENC-TSK-K07 worklog).
+  #
+  # The FunctionUrlAuthType=NONE public-invoke permission is likewise NOT codified
+  # here, matching the established pattern for this class of resource (see the
+  # CheckoutAutoScheduleRule note below: Function-URL/event permissions stay
+  # out-of-band) -- added via CLI alongside the alias.
+  # ---------------------------------------------------------------------------
+  EnceladusMcpCodeGammaLiveFunctionUrl:
+    Type: AWS::Lambda::Url
+    Condition: IsProduction
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TargetFunctionArn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-code-gamma"
+      Qualifier: live
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowCredentials: true
+        AllowHeaders:
+          - content-type
+          - authorization
+          - accept
+          - mcp-session-id
+        AllowMethods:
+          - "*"
+        AllowOrigins:
+          - "https://claude.ai"
+        ExposeHeaders:
+          - mcp-session-id
+        MaxAge: 86400
+
+  # ---------------------------------------------------------------------------
   # ENC-ISS-306 / ENC-TSK-I24: Adopt the prod enceladus-mcp-code QUALIFIED `live`
   # Lambda Function URL so the Sev1-safe (alias-qualified) public surface for
   # mcp.jreese.net is stack-managed and cannot be silently deleted.
