@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import unittest
+from decimal import Decimal
 from unittest import mock
 
 
@@ -219,6 +220,33 @@ class LessonCandidateRejectTests(unittest.TestCase):
                 COGNITO_CLAIMS,
             )
         self.assertEqual(resp["statusCode"], 409)
+
+
+class CreateLessonRecordSerializationTests(unittest.TestCase):
+    """ENC-TSK-J58 gamma finding: DynamoDB's TypeSerializer rejects native float
+    Number values (boto3 requires Decimal). pillar_scores/confidence arrive as
+    plain floats from _validate_lesson_pillar_scores/json body parsing, so
+    _create_lesson_record must convert them before put_item -- these tests
+    exercise the real serialization path (no mocking of _serialize/ddb.put_item
+    internals) so a regression here fails loudly instead of only in gamma.
+    """
+
+    def test_pillar_scores_and_confidence_serialize_without_typeerror(self):
+        fake_ddb = mock.MagicMock()
+        with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake_ddb), \
+             mock.patch.object(coordination_lambda, "_next_tracker_sequence", return_value=42):
+            lesson_id = coordination_lambda._create_lesson_record(
+                "enceladus", "ENC", "Test lesson", "obs", "insight",
+                ["DOC-CANDIDATE01"], dict(PILLAR_SCORES), confidence=0.75,
+            )
+        self.assertEqual(lesson_id, "ENC-LSN-042")
+        fake_ddb.put_item.assert_called_once()
+        item = fake_ddb.put_item.call_args.kwargs["Item"]
+        pillar_scores_stored = item["pillar_scores"]["M"]
+        for key in PILLAR_SCORES:
+            self.assertIsInstance(pillar_scores_stored[key]["N"], str)
+            self.assertEqual(Decimal(pillar_scores_stored[key]["N"]), Decimal(str(PILLAR_SCORES[key])))
+        self.assertEqual(Decimal(item["confidence"]["N"]), Decimal("0.75"))
 
 
 if __name__ == "__main__":

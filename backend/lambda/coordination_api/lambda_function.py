@@ -8900,7 +8900,10 @@ def _create_lesson_record(
             "insight": insight,
             "evidence_chain": evidence_chain,
             "provenance": provenance,
-            "pillar_scores": pillar_scores,
+            # DynamoDB's TypeSerializer rejects native float (Number values must be
+            # Decimal) -- str() round-trip avoids the binary-float precision drift
+            # Decimal(float) would introduce.
+            "pillar_scores": {k: Decimal(str(v)) for k, v in pillar_scores.items()},
             "status": _DEFAULT_STATUS["lesson"],
             "created_at": now,
             "updated_at": now,
@@ -8917,7 +8920,7 @@ def _create_lesson_record(
         if category:
             item["category"] = category
         if confidence is not None:
-            item["confidence"] = float(confidence)
+            item["confidence"] = Decimal(str(confidence))
 
         try:
             ddb.put_item(
