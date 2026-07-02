@@ -242,6 +242,8 @@ jobs:
 
       - name: Execute reviewed change-set
         id: deploy
+        env:
+          STACK: ${{ needs.plan.outputs.stack_name }}
         run: |
           set -euo pipefail
           changeset_type=$(aws cloudformation describe-change-set \
@@ -251,15 +253,63 @@ jobs:
           aws cloudformation execute-change-set \
             --region "${AWS_REGION}" \
             --change-set-name "${{ needs.plan.outputs.changeset_arn }}"
+
+          # Terminal SUCCESS states depend on the change-set type; a fresh
+          # CREATE ends CREATE_COMPLETE, an UPDATE ends UPDATE_COMPLETE.
           if [ "${changeset_type}" = "CREATE" ]; then
-            aws cloudformation wait stack-create-complete \
-              --region "${AWS_REGION}" \
-              --stack-name "${{ needs.plan.outputs.stack_name }}"
+            success_state="CREATE_COMPLETE"
           else
-            aws cloudformation wait stack-update-complete \
-              --region "${AWS_REGION}" \
-              --stack-name "${{ needs.plan.outputs.stack_name }}"
+            success_state="UPDATE_COMPLETE"
           fi
+          echo "Change-set type ${changeset_type}; waiting for ${success_state} on ${STACK}."
+
+          # Bounded fail-fast poll instead of `aws cloudformation wait`. The
+          # blocking waiter kept polling through a rollback until the OIDC token
+          # expired (~60 min ExpiredToken); this exits IMMEDIATELY the moment a
+          # rollback/terminal-failed status appears, and has an ~80 min wall
+          # clock guard so it can never outlive the 90-min job timeout.
+          deadline=$(( $(date +%s) + 80*60 ))
+          while true; do
+            st=$(aws cloudformation describe-stacks \
+              --region "${AWS_REGION}" \
+              --stack-name "${STACK}" \
+              --query 'Stacks[0].StackStatus' \
+              --output text 2>/dev/null || echo "DESCRIBE_FAILED")
+            echo "$(date -u +%H:%M:%S) ${STACK} status: ${st}"
+
+            case "${st}" in
+              "${success_state}")
+                echo "Stack ${STACK} reached ${st}."
+                exit 0
+                ;;
+              CREATE_COMPLETE|UPDATE_COMPLETE)
+                # Tolerate the sibling success state defensively.
+                echo "Stack ${STACK} reached ${st}."
+                exit 0
+                ;;
+              ROLLBACK_IN_PROGRESS|ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE|UPDATE_ROLLBACK_FAILED|DELETE_FAILED)
+                echo "::error::Stack ${STACK} entered terminal-failed status ${st} — failing fast (recent CREATE_FAILED events below)."
+                aws cloudformation describe-stack-events \
+                  --region "${AWS_REGION}" \
+                  --stack-name "${STACK}" \
+                  --query "reverse(StackEvents[?contains(ResourceStatus,'FAILED')].{t:Timestamp,id:LogicalResourceId,st:ResourceStatus,reason:ResourceStatusReason})" \
+                  --output table 2>/dev/null | head -60 || echo "(describe-stack-events unavailable)"
+                exit 1
+                ;;
+              *_IN_PROGRESS)
+                : # create/update still running — keep polling.
+                ;;
+              *)
+                echo "::warning::Unexpected stack status '${st}' for ${STACK} — continuing to poll."
+                ;;
+            esac
+
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Timed out after ~80 min waiting for ${STACK} to reach ${success_state} (last status ${st})."
+              exit 1
+            fi
+            sleep 15
+          done
 
       - name: Report stack events on failure
         if: failure() && steps.deploy.conclusion == 'failure'
