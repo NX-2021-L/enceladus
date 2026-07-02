@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.31",
-  "updated_at": "2026-07-02T14:00:00Z",
-  "last_change_summary": "ENC-TSK-K43 (B66 Ph5) follow-up: FiedlerAlgebraicConnectivity (Enceladus/GraphHealth, ENC-TSK-C10) now carries the REAL Fiedler lambda2 via a cross-Lambda invoke from graph_health_metrics into graph_query_api's action='publish_graph_health' (FTR-088 CSR/Fiedler path, ISS-465-compliant), replacing the pre-K43 GraphEdgeDensity placeholder. New entity graph_health_metrics.real_fiedler_lambda2.",
+  "version": "2026-07-02.32",
+  "updated_at": "2026-07-02T14:44:00Z",
+  "last_change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda (enceladus-corpus-entropy-gdmp-remediation) added. Consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (missing fence language identifier, missing metadata field label) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent involvement. Dry-run default-on plus a 3-run io-approval ramp (FTR-106 AC-4 pattern reuse) gate mutation mode; CEE_GDMP_HARD_DISABLED kill switch ships ON by default. New entity corpus_entropy_gdmp_remediation.lambda.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7115,10 +7115,48 @@
           "definition": "Lessons with FSRS-6 stability (or resonance_score fallback) below this value are flagged as retention entropy. Matches the canonical T3 threshold already used by graph_query_api._apply_fsrs_t3_filter."
         }
       }
+    },
+    "corpus_entropy_gdmp_remediation.lambda": {
+      "description": "ENC-TSK-K42 / B66 Ph5 (ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda (enceladus-corpus-entropy-gdmp-remediation). EventBridge CorpusEntropyGdmpRemediationSchedule (gamma, cron 06:00 UTC, after K41's 05:00 detection scan) invokes lambda_handler per project. Reuses K41's corpus_entropy_core.detect_compliance_semantic_entropy unmodified (shared via .build_extras) to find raw documents with compliance_warnings, then classifies each warning against a fixed deterministic whitelist (gdmp_remediation_core.DETERMINISTIC_WARNING_CLASSIFIERS: fence_missing_language, metadata_field_missing) -- ambiguous/content-changing warnings (title format, empty document, heading hierarchy, list-marker consistency, table dividers, malformed alerts, COE section gaps) are left for agent/human review. For whitelisted findings, applies an additive pure-function text remediation (never deletes original content) and PATCHes the document via the governed document_api HTTP surface (documents.patch: content, then document_maturity_state=compliant once compliance_score clears COMPLIANCE_SCORE_THRESHOLD with zero remaining warnings) -- never direct DynamoDB/S3 document writes. Idempotency guard (is_already_compliant) skips any document already at compliant maturity or with zero compliance_warnings, so re-running Stage-1 on a compliant document is a no-op with no version churn. io-approval ramp (FTR-106 AC-4 / ENC-TSK-K03 pattern reuse, same S3 run-counter shape as UnlearningFunction): GDMP_DRY_RUN=1 (default) prevents all mutation; GDMP_MUTATION_ENABLED=0 (default) keeps report-only even when dry-run is off; GDMP_IO_APPROVAL_RUNS=3 gates the first three live (non-dry-run) invocations to candidate-report-only regardless of GDMP_MUTATION_ENABLED. CEE_GDMP_HARD_DISABLED kill switch (default \"1\") is checked first in the handler, mirroring CEE_HARD_DISABLED (K41). Every applied patch is logged with before/after compliance_score. Cost-preflight ISS-465: nightly-only cadence, well under $1/mo; CorpusEntropyGdmpRemediationCostHeadroomAlarm guards EventBridge invocation count (7-day window, threshold 10).",
+      "owner": "enceladus-platform",
+      "source": "ENC-TSK-K42 / ENC-TSK-B66",
+      "telemetry_eligible": true,
+      "fields": {
+        "CEE_GDMP_HARD_DISABLED": {
+          "type": "feature_flag",
+          "default": "1",
+          "definition": "Mandatory kill switch, installed ON before first scheduled run. When truthy (1/true/yes), handler skips all governed reads/writes for that invocation. Mirrors CEE_HARD_DISABLED (K41)."
+        },
+        "GDMP_DRY_RUN": {
+          "type": "feature_flag",
+          "default": "1",
+          "definition": "When truthy (default), the handler never PATCHes any document -- it only computes and reports remediation candidates. Dry-run default-on is a hard DATA-SAFETY requirement."
+        },
+        "GDMP_MUTATION_ENABLED": {
+          "type": "feature_flag",
+          "default": "0",
+          "definition": "When falsy (default), the handler stays report-only even if GDMP_DRY_RUN is explicitly disabled. Must be explicitly enabled by io after reviewing candidate reports."
+        },
+        "GDMP_IO_APPROVAL_RUNS": {
+          "type": "integer",
+          "default": 3,
+          "definition": "Number of live (non-dry-run) invocations that must complete in report-only mode before mutation mode can activate, regardless of GDMP_MUTATION_ENABLED. Tracked via a persisted S3 run counter (GDMP_STATE_BUCKET/GDMP_STATE_PREFIX), mirroring IO_APPROVAL_RUNS (K03 unlearning)."
+        },
+        "COMPLIANCE_SCORE_THRESHOLD": {
+          "type": "integer",
+          "default": 70,
+          "definition": "A remediated document only advances document_maturity_state to compliant once its post-PATCH compliance_score is at or above this value AND zero compliance_warnings remain. Matches CEE's (K41) COMPLIANCE_SCORE_THRESHOLD."
+        }
+      }
     }
   },
-  "change_summary": "ENC-TSK-K41 (B66 Ph5, ENC-PLN-064): Corpus Entropy Engine (CEE) Lambda -- nightly EventBridge (gamma, cron 05:00 UTC) telemetry-only scan for five entropy categories: orphan (no parent_task_id/related_task_ids or wave doc missing plan_anchor_id), stagnation (open tasks with no worklog within STAGNATION_THRESHOLD_DAYS=14), relational (declared related_*_ids with no corresponding graph_query_api adjacency edge), retention (Lesson stability < FSRS_T3_THRESHOLD=0.7, falling back to resonance_score), and compliance/semantic (document compliance_score below COMPLIANCE_SCORE_THRESHOLD=70 AND document_maturity_state=raw). Reads exclusively through the tracker/document/graph_query_api HTTP surface (no direct DynamoDB access, no new edge types -- OGTM). CEE_HARD_DISABLED=1 kill switch ships ON by default; io clears to 0 to enable the first scheduled run. Emits per-category EntropyFindingCount to CloudWatch namespace Enceladus/CEE. Cost-preflight (ISS-465): nightly cadence, 512MB/300s ceiling, well under $1/mo; CorpusEntropyEngineCostHeadroomAlarm guards EventBridge invocation count. New entity corpus_entropy_engine.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda -- nightly EventBridge (gamma, cron 06:00 UTC, after K41's 05:00 CEE scan) consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (fence_missing_language, metadata_field_missing) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent session involvement. DATA-SAFETY: only the deterministic whitelist is auto-remediated; ambiguous/content-changing warnings are left for agent review; every auto-patch is logged with before/after compliance_score. Dry-run default-on (GDMP_DRY_RUN=1) plus a 3-run io-approval ramp (GDMP_IO_APPROVAL_RUNS=3, GDMP_MUTATION_ENABLED=0) reuse the FTR-106 / ENC-TSK-K03 unlearning Lambda's S3 run-counter pattern verbatim. CEE_GDMP_HARD_DISABLED=1 kill switch ships ON by default. Idempotent: is_already_compliant guards against re-patching already-compliant documents. New entity corpus_entropy_gdmp_remediation.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "change_log": [
+    {
+      "version": "2026-07-02.32",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda added -- nightly EventBridge (gamma, cron 06:00 UTC) deterministic whitelist remediation of compliance_warnings via document_api PATCH, io-approval ramp (FTR-106 AC-4 pattern), CEE_GDMP_HARD_DISABLED kill switch. New entity corpus_entropy_gdmp_remediation.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
     {
       "version": "2026-06-27.05",
       "date": "2026-06-27",
