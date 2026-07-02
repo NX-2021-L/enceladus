@@ -145,29 +145,22 @@ Resources:
               # Lambda compute-stack mutations cover functions, permissions,
               # event-source mappings, and layer validation.
               #
-              # ENC-TSK-K09 / ENC-ISS-469: lambda:*FunctionUrlConfig actions added.
-              # ENC-TSK-K07's EnceladusMcpCodeGammaLiveFunctionUrl (AWS::Lambda::Url)
-              # apply failed AccessDenied 2026-07-02T10:00:43Z -- this Sid never
-              # granted Function URL config actions (stack rolled back cleanly,
-              # no wedge). Immediately unblocked by a manual aws iam put-role-policy
-              # patch to the live role (same session, product-lead IAM); this change
-              # codifies that identical patch so a future github-roles deploy
-              # reconciles cleanly instead of reverting it, and it stops being
-              # invisible to drift auditing.
+              # ENC-TSK-K09 / ENC-ISS-469: lambda:*FunctionUrlConfig actions were
+              # first attempted HERE (inline), but the role's aggregate inline-policy
+              # quota (10,240 bytes) is exhausted -- same failure class as ENC-TSK-J85
+              # below (LimitExceeded). Shipped instead as the attached MANAGED
+              # LambdaFunctionUrlConfigPolicy resource further down this file.
               - Sid: LambdaComputeOps
                 Effect: Allow
                 Action:
                   - lambda:AddPermission
                   - lambda:CreateEventSourceMapping
                   - lambda:CreateFunction
-                  - lambda:CreateFunctionUrlConfig
                   - lambda:DeleteEventSourceMapping
                   - lambda:DeleteFunction
-                  - lambda:DeleteFunctionUrlConfig
                   - lambda:GetEventSourceMapping
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
-                  - lambda:GetFunctionUrlConfig
                   - lambda:GetLayerVersion
                   - lambda:PublishVersion
                   - lambda:RemovePermission
@@ -175,7 +168,6 @@ Resources:
                   - lambda:UntagResource
                   - lambda:UpdateEventSourceMapping
                   - lambda:UpdateFunctionCode
-                  - lambda:UpdateFunctionUrlConfig
                   - lambda:UpdateFunctionConfiguration
                 Resource: "*"
 
@@ -390,6 +382,38 @@ Resources:
               - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:application:enceladus-lambda*"
               - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentgroup:enceladus-lambda*"
               - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentconfig:*"
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-K09 / ENC-ISS-469 -- same failure class as CodeDeployStackOpsPolicy
+  # above (ENC-TSK-J85): ENC-TSK-K07's EnceladusMcpCodeGammaLiveFunctionUrl
+  # (AWS::Lambda::Url) apply failed AccessDenied 2026-07-02T10:00:43Z on
+  # lambda:CreateFunctionUrlConfig -- LambdaComputeOps never granted Function
+  # URL config actions, and the role's aggregate inline-policy quota (10,240
+  # bytes) is already exhausted, so a further inline grant LimitExceeded
+  # (confirmed live 2026-07-02T10:30:26Z via the ENC-TSK-K09 patch workflow's
+  # first attempt). Shipped as an attached MANAGED policy instead, mirroring
+  # CodeDeployStackOpsPolicy exactly. Scoped to enceladus-mcp-code-gamma only
+  # (tighter than LambdaComputeOps's Resource: "*").
+  # ---------------------------------------------------------------------------
+  LambdaFunctionUrlConfigPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-lambda-fnurlconfig-v1
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LambdaFunctionUrlConfigMcpCodeGamma
+            Effect: Allow
+            Action:
+              - lambda:CreateFunctionUrlConfig
+              - lambda:GetFunctionUrlConfig
+              - lambda:UpdateFunctionUrlConfig
+              - lambda:DeleteFunctionUrlConfig
+            Resource:
+              - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-mcp-code-gamma"
+              - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-mcp-code-gamma:*"
 
   BackendDeployRole:
     Type: AWS::IAM::Role
