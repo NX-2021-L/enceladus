@@ -2014,17 +2014,17 @@ Resources:
     Properties:
       AlarmName: !Sub "enceladus-intent-training-invocations${EnvironmentSuffix}"
       AlarmDescription: >-
-        ENC-TSK-K02 cost-preflight guard: weekly cadence expects <=5 training
-        invocations/month (~$0.04 projected). Breach indicates runaway schedule.
+        ENC-TSK-K02 cost-preflight guard: 7-day invocation window; weekly cadence
+        should be <=1/week (threshold 2 allows buffer). Breach indicates runaway schedule.
       Namespace: AWS/Events
       MetricName: Invocations
       Dimensions:
         - Name: RuleName
           Value: !Sub "devops-intent-classifier-training${EnvironmentSuffix}"
       Statistic: Sum
-      Period: 2592000
+      Period: 604800
       EvaluationPeriods: 1
-      Threshold: 6
+      Threshold: 2
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
