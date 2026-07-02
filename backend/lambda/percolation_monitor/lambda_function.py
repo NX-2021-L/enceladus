@@ -110,8 +110,8 @@ def _graphsearch(params: Dict[str, Any]) -> Dict[str, Any]:
     return body
 
 
-def _fetch_graph() -> Tuple[int, List[Tuple[str, str]], Optional[float]]:
-    """Page the adjacency export; return (node_count, edge_list, spurious_attractor_rate).
+def _fetch_graph() -> Tuple[int, List[Tuple[str, str]], Optional[float], Optional[float]]:
+    """Page the adjacency export; return (node_count, edge_list, spurious_attractor_rate, flow_weight_entropy).
 
     node_count is the total number of governed nodes (including isolated ones),
     so LCC ratios and degree means are taken relative to the whole graph.
@@ -125,10 +125,14 @@ def _fetch_graph() -> Tuple[int, List[Tuple[str, str]], Optional[float]]:
     Lambda's role). None when the key is absent (an older graph_query_api
     deploy that predates ENC-TSK-I91) or when graph_query_api itself had no
     recent rate to report -- both degrade silently, never raising.
+
+    flow_weight_entropy (ENC-FTR-108 AC-5 / ENC-TSK-J03) is likewise read from
+    the first adjacency page when graph_query_api provides it; None otherwise.
     """
     edges: List[Tuple[str, str]] = []
     node_count = 0
     spurious_attractor_rate: Optional[float] = None
+    flow_weight_entropy: Optional[float] = None
     offset = 0
     for page_idx in range(_MAX_PAGES):
         body = _graphsearch({
@@ -141,6 +145,8 @@ def _fetch_graph() -> Tuple[int, List[Tuple[str, str]], Optional[float]]:
             node_count = int(body.get("node_count", 0) or 0)
             raw_rate = body.get("spurious_attractor_rate")
             spurious_attractor_rate = float(raw_rate) if raw_rate is not None else None
+            raw_entropy = body.get("flow_weight_entropy")
+            flow_weight_entropy = float(raw_entropy) if raw_entropy is not None else None
         for e in body.get("edges", []):
             s, t = e.get("s"), e.get("t")
             if s and t and s != t:
@@ -152,10 +158,10 @@ def _fetch_graph() -> Tuple[int, List[Tuple[str, str]], Optional[float]]:
     else:
         logger.warning("[WARNING] adjacency pagination hit _MAX_PAGES=%d ceiling", _MAX_PAGES)
     logger.info(
-        "[INFO] Graph read: node_count=%d edge_count=%d spurious_attractor_rate=%s",
-        node_count, len(edges), spurious_attractor_rate,
+        "[INFO] Graph read: node_count=%d edge_count=%d spurious_attractor_rate=%s flow_weight_entropy=%s",
+        node_count, len(edges), spurious_attractor_rate, flow_weight_entropy,
     )
-    return node_count, edges, spurious_attractor_rate
+    return node_count, edges, spurious_attractor_rate, flow_weight_entropy
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +294,12 @@ def _write_ddb(row: Dict[str, Any]) -> None:
     logger.info("[SUCCESS] Wrote percolation telemetry row pk=%s to %s", row.get("pk"), PERCOLATION_TABLE)
 
 
-def _publish_cloudwatch(analytical_pc: float, empirical_pc: float, mean_degree: float) -> None:
+def _publish_cloudwatch(
+    analytical_pc: float,
+    empirical_pc: float,
+    mean_degree: float,
+    flow_weight_entropy: Optional[float] = None,
+) -> None:
     cw = boto3.client("cloudwatch", region_name=REGION)
     now = datetime.now(timezone.utc)
     dims = [{"Name": "ProjectId", "Value": PROJECT_ID}]
@@ -297,10 +308,18 @@ def _publish_cloudwatch(analytical_pc: float, empirical_pc: float, mean_degree: 
         {"MetricName": "empirical_pc", "Value": float(empirical_pc), "Unit": "None", "Timestamp": now, "Dimensions": dims},
         {"MetricName": "mean_degree", "Value": float(mean_degree), "Unit": "None", "Timestamp": now, "Dimensions": dims},
     ]
+    if flow_weight_entropy is not None:
+        metric_data.append({
+            "MetricName": "flow_weight_entropy",
+            "Value": float(flow_weight_entropy),
+            "Unit": "None",
+            "Timestamp": now,
+            "Dimensions": dims,
+        })
     cw.put_metric_data(Namespace=CLOUDWATCH_NAMESPACE, MetricData=metric_data)
     logger.info(
-        "[SUCCESS] Published Enceladus/Percolation metrics: analytical_pc=%.5f empirical_pc=%.5f mean_degree=%.4f",
-        analytical_pc, empirical_pc, mean_degree,
+        "[SUCCESS] Published Enceladus/Percolation metrics: analytical_pc=%.5f empirical_pc=%.5f mean_degree=%.4f flow_weight_entropy=%s",
+        analytical_pc, empirical_pc, mean_degree, flow_weight_entropy,
     )
 
 
@@ -313,7 +332,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     started = time.time()
 
     try:
-        node_count, edges, spurious_attractor_rate = _fetch_graph()
+        node_count, edges, spurious_attractor_rate, flow_weight_entropy = _fetch_graph()
         stats = _degree_stats(node_count, edges)
         analytical_pc = stats["analytical_pc"]
         mean_degree = stats["mean_degree"]
@@ -343,6 +362,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             # _fetch_graph). None on an older graph_query_api deploy or when
             # no recent drift-telemetry record carries a non-null rate.
             "spurious_attractor_rate": spurious_attractor_rate,
+            "flow_weight_entropy": flow_weight_entropy,
             "mc_trials": MC_TRIALS,
             "mc_num_p": MC_NUM_P,
             "sweep_p": [round(p, 6) for p in p_grid],
@@ -360,7 +380,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         row["analytical_pc_in_range"] = analytical_in_range
 
         _write_ddb(row)
-        _publish_cloudwatch(analytical_pc, empirical_pc, mean_degree)
+        _publish_cloudwatch(analytical_pc, empirical_pc, mean_degree, flow_weight_entropy)
 
         logger.info(
             "[END] node_count=%d edge_count=%d analytical_pc=%.5f empirical_pc=%.5f in %dms",

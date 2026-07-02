@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.05",
-  "updated_at": "2026-07-02T06:10:00Z",
-  "last_change_summary": "ENC-TSK-J72 (ENC-FTR-121 Ph5, DOC-5B888FCA43B8): SNS [ESCALATION] notifications to io. Publishes on requested (post-write) and terminal applied/failed; failure-isolated (never fails the escalation write); reuses devops-feed-alerts{suffix} via ESCALATION_ALERTS_TOPIC_ARN env + PublishEscalationAlerts role grant (02-compute.yaml, gamma lane; prod via Ph7a). Sub-dollar budget; email subscription confirmation is an io residual for Ph8.",
+  "version": "2026-07-02.06",
+  "updated_at": "2026-07-02T08:49:00Z",
+  "last_change_summary": "ENC-TSK-J03 (ENC-FTR-108 Ph3): graph_query_api.adjacency first-page enrichment adds nullable flow_weight_entropy + flow_weight_edge_count (Shannon entropy over live Neo4j flow_weight distribution for comp-percolation-monitor nightly CloudWatch publish). GDS_PPR_WEIGHT_PROPERTY env (default flow_weight) documents PPR read-path weight selection.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4888,6 +4888,14 @@
         "next_offset": {
           "type": "integer",
           "definition": "Response field: offset to pass on the next call when has_more is true; null otherwise."
+        },
+        "flow_weight_entropy": {
+          "type": "number",
+          "definition": "Response field (offset==0 only, ENC-TSK-J03 / ENC-FTR-108 AC-5): normalized Shannon entropy [0,1] over the live flow_weight distribution across all project relationships. Null when enrichment fails or graph_query_api predates J03."
+        },
+        "flow_weight_edge_count": {
+          "type": "integer",
+          "definition": "Response field (offset==0 only, ENC-TSK-J03): count of relationships sampled for flow_weight_entropy. Companion to flow_weight_entropy."
         }
       }
     },
