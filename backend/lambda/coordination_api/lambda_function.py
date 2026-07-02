@@ -2206,6 +2206,11 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         "task_complexity",
         "thinking",
         "stream",
+        "batch_eligible",
+        "batch_workload_type",
+        "deferred_tool_loading",
+        "mcp_server_name",
+        "eager_load_tools",
     }
     unknown = sorted(k for k in raw.keys() if k not in allowed)
     if unknown:
@@ -2393,6 +2398,39 @@ def _validate_provider_session(raw: Any) -> Dict[str, Any]:
         if not isinstance(stream, bool):
             raise ValueError("'provider_preferences.stream' must be a boolean")
         out["stream"] = stream
+
+    batch_eligible = raw.get("batch_eligible")
+    if batch_eligible is not None:
+        if not isinstance(batch_eligible, bool):
+            raise ValueError("'provider_preferences.batch_eligible' must be a boolean")
+        out["batch_eligible"] = batch_eligible
+
+    batch_workload_type = raw.get("batch_workload_type")
+    if batch_workload_type not in (None, ""):
+        if not isinstance(batch_workload_type, str):
+            raise ValueError("'provider_preferences.batch_workload_type' must be a string")
+        workload = batch_workload_type.strip()
+        if len(workload) > 128:
+            raise ValueError("'provider_preferences.batch_workload_type' exceeds max length (128)")
+        out["batch_workload_type"] = workload
+
+    deferred_tool_loading = raw.get("deferred_tool_loading")
+    if deferred_tool_loading is not None:
+        if not isinstance(deferred_tool_loading, bool):
+            raise ValueError("'provider_preferences.deferred_tool_loading' must be a boolean")
+        out["deferred_tool_loading"] = deferred_tool_loading
+
+    mcp_server_name = raw.get("mcp_server_name")
+    if mcp_server_name not in (None, ""):
+        if not isinstance(mcp_server_name, str):
+            raise ValueError("'provider_preferences.mcp_server_name' must be a string")
+        out["mcp_server_name"] = mcp_server_name.strip()
+
+    eager_load_tools = raw.get("eager_load_tools")
+    if eager_load_tools is not None:
+        if not isinstance(eager_load_tools, list):
+            raise ValueError("'provider_preferences.eager_load_tools' must be a list")
+        out["eager_load_tools"] = [str(t).strip() for t in eager_load_tools if str(t).strip()]
 
     return out
 
@@ -5612,6 +5650,355 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         "status": "succeeded",
         "provider_result": provider_result,
     }
+
+
+def _dispatch_claude_batch_api(
+    request: Dict[str, Any],
+    prompt: Optional[str],
+    dispatch_id: str,
+) -> Dict[str, Any]:
+    """Submit a Claude Messages request via Anthropic Batch API (ENC-TSK-G19)."""
+    from anthropic_batch import (
+        NON_INTERACTIVE_WORKLOADS,
+        submit_messages_batch,
+    )
+
+    provider_session = request.get("provider_session") or {}
+    model = _resolve_claude_model(provider_session)
+    task_complexity = str(provider_session.get("task_complexity") or "standard").strip().lower()
+    workload_type = str(
+        provider_session.get("batch_workload_type")
+        or (request.get("batch_context") or {}).get("workload_type")
+        or ""
+    ).strip()
+    if workload_type and workload_type not in NON_INTERACTIVE_WORKLOADS:
+        logger.warning("Unknown batch_workload_type=%s; proceeding anyway", workload_type)
+
+    resolved_prompt = str(prompt or "").strip() or _default_dispatch_prompt(request)
+    if not resolved_prompt:
+        raise RuntimeError("Missing prompt for claude_agent_sdk batch dispatch")
+    resolved_prompt, governance_context = _build_managed_session_prompt(
+        resolved_prompt,
+        str(request.get("project_id") or ""),
+    )
+
+    max_tokens = _coerce_claude_max_tokens((request.get("constraints") or {}).get("max_tokens"))
+    api_key = _fetch_provider_api_key("anthropic", ANTHROPIC_API_KEY_SECRET_ID)
+    batch_endpoint = f"{ANTHROPIC_API_BASE_URL.rstrip('/')}/v1/messages/batches"
+
+    system_prompt = provider_session.get("system_prompt")
+    system_blocks = None
+    if system_prompt:
+        system_blocks = [
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral", "ttl": CLAUDE_PROMPT_CACHE_TTL},
+            }
+        ]
+
+    message_params: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": resolved_prompt}],
+    }
+    if system_blocks:
+        message_params["system"] = system_blocks
+
+    thinking_param = _build_claude_thinking_param(provider_session, model)
+    if thinking_param:
+        message_params["thinking"] = thinking_param
+        budget = thinking_param.get("budget_tokens")
+        if budget is not None and max_tokens <= budget:
+            max_tokens = budget + max(budget, CLAUDE_API_MAX_TOKENS_DEFAULT)
+            message_params["max_tokens"] = max_tokens
+
+    preflight_token_count = _count_claude_tokens(
+        api_key=api_key,
+        model=model,
+        messages=message_params["messages"],
+        system=system_blocks,
+    )
+    context_limit = _CLAUDE_CONTEXT_LIMITS.get(model, _CLAUDE_DEFAULT_CONTEXT_LIMIT)
+    if preflight_token_count is not None and preflight_token_count > context_limit:
+        raise RuntimeError(
+            f"Estimated input tokens ({preflight_token_count}) exceed model context "
+            f"window ({context_limit}) for {model}"
+        )
+
+    anthropic_headers: Dict[str, str] = {}
+    toolset_cache_attached = _maybe_attach_deferred_tool_loading(
+        provider_session, message_params, anthropic_headers
+    )
+
+    started_at = _now_z()
+    started = time.perf_counter()
+    try:
+        batch_payload = submit_messages_batch(
+            api_key=api_key,
+            requests=[{"custom_id": dispatch_id, "params": message_params}],
+            cert_bundle=_CERT_BUNDLE,
+            extra_headers=anthropic_headers or None,
+        )
+    except Exception as exc:
+        _emit_structured_observability(
+            component="coordination_api",
+            event="dispatch_claude_batch_api",
+            request_id=str(request.get("request_id") or ""),
+            dispatch_id=dispatch_id,
+            tool_name="anthropic.messages.batches.create",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_code="batch_submit_failed",
+            extra={"execution_mode": "claude_agent_sdk", "model": model, "reason": str(exc)},
+        )
+        raise
+
+    batch_id = str(batch_payload.get("id") or "").strip()
+    processing_status = str(batch_payload.get("processing_status") or "in_progress").strip().lower()
+    if not batch_id:
+        raise RuntimeError("Anthropic batch API response missing batch id")
+
+    batch_context = dict(request.get("batch_context") or {})
+    batch_context.update(
+        {
+            "batch_eligible": True,
+            "batch_id": batch_id,
+            "batch_submitted_at": started_at,
+            "processing_status": processing_status,
+            "batch_max_timeout_hours": 24,
+            "cost_savings_estimate": "50%",
+            "poll_interval_seconds": 60,
+            "workload_type": workload_type or None,
+            "features_used": {
+                "prompt_caching": bool(system_blocks),
+                "cache_ttl": CLAUDE_PROMPT_CACHE_TTL if system_blocks else None,
+                "toolset_caching": toolset_cache_attached,
+                "toolset_cache_ttl": CLAUDE_PROMPT_CACHE_TTL if toolset_cache_attached else None,
+                "preflight_token_count": preflight_token_count,
+            },
+        }
+    )
+    request["batch_context"] = batch_context
+
+    _emit_structured_observability(
+        component="coordination_api",
+        event="dispatch_claude_batch_api",
+        request_id=str(request.get("request_id") or ""),
+        dispatch_id=dispatch_id,
+        tool_name="anthropic.messages.batches.create",
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        error_code="",
+        extra={
+            "execution_mode": "claude_agent_sdk",
+            "model": model,
+            "batch_id": batch_id,
+            "processing_status": processing_status,
+            "task_complexity": task_complexity,
+            "workload_type": workload_type,
+            "toolset_cache_attached": toolset_cache_attached,
+            "preflight_token_count": preflight_token_count,
+            "governance_loaded": bool(governance_context.get("loaded")),
+        },
+    )
+    return {
+        "dispatch_id": dispatch_id,
+        "execution_id": batch_id,
+        "execution_mode": "claude_agent_sdk",
+        "provider": "claude_agent_sdk",
+        "transport": "anthropic_messages_batches_api",
+        "api_endpoint": batch_endpoint,
+        "project_id": request.get("project_id"),
+        "coordination_request_id": request.get("request_id"),
+        "provider_secret_refs": [ANTHROPIC_API_KEY_SECRET_ID] if ANTHROPIC_API_KEY_SECRET_ID else [],
+        "sent_at": started_at,
+        "status": "running",
+        "batch_context": batch_context,
+    }
+
+
+def _find_pending_batch_requests(limit: int = 25) -> List[Dict[str, Any]]:
+    """Scan for running coordination requests awaiting Anthropic batch completion."""
+    ddb = _get_ddb()
+    pending: List[Dict[str, Any]] = []
+    last_evaluated_key = None
+    while len(pending) < limit:
+        kwargs: Dict[str, Any] = {
+            "TableName": COORDINATION_TABLE,
+            "FilterExpression": "#s = :running AND attribute_exists(batch_context.#bid)",
+            "ExpressionAttributeNames": {"#s": "state", "#bid": "batch_id"},
+            "ExpressionAttributeValues": {
+                ":running": _serialize(_STATE_RUNNING),
+            },
+            "Limit": min(50, limit - len(pending)),
+        }
+        if last_evaluated_key:
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
+        try:
+            resp = ddb.scan(**kwargs)
+        except (BotoCoreError, ClientError) as exc:
+            logger.warning("batch poller scan failed: %s", exc)
+            break
+        for raw in resp.get("Items", []):
+            item = _deserialize(raw)
+            batch_ctx = item.get("batch_context") or {}
+            if not isinstance(batch_ctx, dict):
+                continue
+            batch_id = str(batch_ctx.get("batch_id") or "").strip()
+            if not batch_id:
+                continue
+            if str(batch_ctx.get("processing_status") or "").lower() == "ended":
+                if batch_ctx.get("results_processed"):
+                    continue
+            pending.append(item)
+            if len(pending) >= limit:
+                break
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        if not last_evaluated_key:
+            break
+    return pending
+
+
+def _poll_single_anthropic_batch_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    """Poll one batch-backed request; finalize via batch-results callback when ended."""
+    from anthropic_batch import (
+        alert_batch_subrequest_failure,
+        batch_processing_ended,
+        download_batch_results,
+        get_messages_batch,
+    )
+
+    request_id = str(request.get("request_id") or "").strip()
+    batch_context = dict(request.get("batch_context") or {})
+    batch_id = str(batch_context.get("batch_id") or "").strip()
+    if not request_id or not batch_id:
+        return {"request_id": request_id, "skipped": True, "reason": "missing_batch_id"}
+
+    from anthropic_batch import BATCH_POLL_INTERVAL_SECONDS
+
+    last_polled_epoch = int(batch_context.get("last_polled_epoch") or 0)
+    now_epoch = _unix_now()
+    if last_polled_epoch and (now_epoch - last_polled_epoch) < BATCH_POLL_INTERVAL_SECONDS:
+        return {
+            "request_id": request_id,
+            "batch_id": batch_id,
+            "skipped": True,
+            "reason": "poll_interval_not_elapsed",
+            "seconds_until_next_poll": BATCH_POLL_INTERVAL_SECONDS - (now_epoch - last_polled_epoch),
+        }
+
+    api_key = _fetch_provider_api_key("anthropic", ANTHROPIC_API_KEY_SECRET_ID)
+    status_payload = get_messages_batch(
+        api_key=api_key,
+        batch_id=batch_id,
+        cert_bundle=_CERT_BUNDLE,
+    )
+    processing_status = str(status_payload.get("processing_status") or "").strip().lower()
+    batch_context["processing_status"] = processing_status
+    batch_context["last_polled_at"] = _now_z()
+    batch_context["last_polled_epoch"] = now_epoch
+    request["batch_context"] = batch_context
+    request["updated_at"] = _now_z()
+    request["updated_epoch"] = _unix_now()
+    _update_request(request)
+
+    if not batch_processing_ended(status_payload):
+        return {
+            "request_id": request_id,
+            "batch_id": batch_id,
+            "processing_status": processing_status,
+            "finalized": False,
+        }
+
+    results_url = str(status_payload.get("results_url") or "").strip()
+    if not results_url:
+        return {
+            "request_id": request_id,
+            "batch_id": batch_id,
+            "processing_status": processing_status,
+            "finalized": False,
+            "error": "missing_results_url",
+        }
+
+    results_jsonl = download_batch_results(
+        api_key=api_key,
+        results_url=results_url,
+        cert_bundle=_CERT_BUNDLE,
+    )
+    for line in results_jsonl.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            item = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        result_obj = item.get("result") if isinstance(item.get("result"), dict) else {}
+        result_type = str(result_obj.get("type") or "").strip().lower()
+        if result_type == "errored":
+            error_payload = result_obj.get("error") if isinstance(result_obj.get("error"), dict) else {}
+            alert_batch_subrequest_failure(
+                _emit_structured_observability,
+                request_id=request_id,
+                dispatch_id=str(item.get("custom_id") or ""),
+                batch_id=batch_id,
+                custom_id=str(item.get("custom_id") or ""),
+                error_type=str(error_payload.get("type") or "batch_error"),
+                error_message=str(error_payload.get("message") or "batch sub-request failed"),
+            )
+
+    callback_event = {
+        "headers": {"x-coordination-callback-token": str(request.get("callback_token") or "")},
+        "body": json.dumps(
+            {
+                "batch_id": batch_id,
+                "results_jsonl": results_jsonl,
+                "model": ((request.get("provider_session") or {}).get("model") or DEFAULT_CLAUDE_AGENT_MODEL),
+            }
+        ),
+    }
+    callback_resp = _handle_anthropic_batch_results_callback(callback_event, request_id)
+    latest = _get_request(request_id) or request
+    latest_batch = dict(latest.get("batch_context") or {})
+    latest_batch["results_processed"] = True
+    latest_batch["processing_status"] = "ended"
+    latest["batch_context"] = latest_batch
+    _update_request(latest)
+
+    return {
+        "request_id": request_id,
+        "batch_id": batch_id,
+        "processing_status": "ended",
+        "finalized": True,
+        "callback_status": int(callback_resp.get("statusCode") or 0),
+    }
+
+
+def _handle_coordination_batch_poll(_event: Dict[str, Any]) -> Dict[str, Any]:
+    """Scheduled poller: check Anthropic batch status every 60s (via rate(1 minute) rule)."""
+    pending = _find_pending_batch_requests()
+    outcomes: List[Dict[str, Any]] = []
+    for request in pending:
+        try:
+            outcomes.append(_poll_single_anthropic_batch_request(request))
+        except Exception as exc:
+            logger.exception("batch poll failed request_id=%s", request.get("request_id"))
+            outcomes.append(
+                {
+                    "request_id": request.get("request_id"),
+                    "error": str(exc),
+                    "finalized": False,
+                }
+            )
+    return _response(
+        200,
+        {
+            "success": True,
+            "polled_count": len(outcomes),
+            "outcomes": outcomes,
+        },
+    )
 
 
 def _build_mcp_connectivity_check_commands() -> List[str]:
@@ -12368,11 +12755,26 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
             )
 
         if execution_mode == "claude_agent_sdk":
-            dispatch_meta = _dispatch_claude_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
-            )
+            is_batch = bool((request.get("provider_session") or {}).get("batch_eligible"))
+            if is_batch:
+                request["batch_context"] = {
+                    **(request.get("batch_context") or {}),
+                    "batch_eligible": True,
+                    "batch_submitted_at": now,
+                    "batch_max_timeout_hours": 24,
+                    "cost_savings_estimate": "50%",
+                }
+                dispatch_meta = _dispatch_claude_batch_api(
+                    request=request,
+                    prompt=prompt,
+                    dispatch_id=dispatch_id,
+                )
+            else:
+                dispatch_meta = _dispatch_claude_api(
+                    request=request,
+                    prompt=prompt,
+                    dispatch_id=dispatch_id,
+                )
         elif execution_mode in {"codex_app_server", "codex_full_auto"}:
             dispatch_meta = _dispatch_openai_codex_api(
                 request=request,
@@ -12465,6 +12867,21 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
         if execution_mode in {"claude_agent_sdk", "codex_app_server", "codex_full_auto", "bedrock_agent"}:
             provider_result = dispatch_meta.get("provider_result") or {}
             terminal_state = str(dispatch_meta.get("status") or "succeeded").strip().lower()
+
+            if terminal_state == "running":
+                request["updated_at"] = now
+                request["updated_epoch"] = now_epoch
+                _update_request(request)
+                return _response(
+                    202,
+                    {
+                        "success": True,
+                        "request": _redact_request(request),
+                        "dispatch": dispatch_meta,
+                        "plan_status": _compute_plan_status(request),
+                    },
+                )
+
             if terminal_state not in _VALID_TERMINAL_STATES:
                 terminal_state = "succeeded"
 
@@ -15438,6 +15855,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if event.get("action") == "agent_session_idle_sweep":
         logger.info("[INFO] Scheduled agent-session idle-sweep invoked")
         return _handle_agent_session_idle_sweep(event)
+
+    # --- ENC-TSK-G19: Anthropic batch status poller (60s via rate(1 minute) rule) ---
+    if event.get("action") == "coordination_batch_poll":
+        logger.info("[INFO] Scheduled Anthropic batch poller invoked")
+        return _handle_coordination_batch_poll(event)
 
     # --- ENC-ISS-441 / ENC-TSK-J94: scheduled unclaim TTL sweep (ghost registrations) ---
     # The AgentSessionUnclaimSweepSchedule rule delivers its Input JSON verbatim as the event.

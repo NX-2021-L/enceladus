@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.14",
-  "updated_at": "2026-07-02T10:20:00Z",
-  "last_change_summary": "ENC-TSK-G17 (FTR-099 A3.5): context-management beta for long coordination loops — provider_session.context_management_enabled gates _maybe_attach_context_management in coordination_api dispatch_claude_api; emits clear_tool_uses_20250919 (100k trigger, keep 5, exclude memory), optional clear_thinking_20251015 on Opus+thinking, memory_20250818 tool registration, and context-management-2025-06-27 anthropic-beta header (appended, composes with deferred_tool_loading). New entity mcp_server.context_management. Rebased onto ENC-TSK-J94 (retirement sweeps, .13) -- both changes' entities preserved.",
+  "version": "2026-07-02.15",
+  "updated_at": "2026-07-02T10:05:00Z",
+  "last_change_summary": "ENC-TSK-G19 (FTR-099 A3.6): Anthropic Message Batches API routing — provider_preferences.batch_eligible routes claude_agent_sdk dispatches through _dispatch_claude_batch_api (POST /v1/messages/batches), EventBridge coordination_batch_poll (60s interval), batch_subrequest_failure alerts, ephemeral_1h cache on static prefix. New entity coordination_api.anthropic_batch. Merged with ENC-TSK-G17 context-management (.14) and ENC-TSK-J94 retirement sweeps (.13).",
   "owners": [
     "enceladus-platform"
   ],
@@ -2274,6 +2274,39 @@
           "type": "object",
           "definition": "Ephemeral 1h cache_control attached to the last tool in the Anthropic tools array (mcp_toolset block) when deferred_tool_loading is enabled.",
           "usage_guidance": "Requires catalog_tokens_est above Sonnet 2048 / Opus 4096 minimums (see toolset_cache_eligibility in capabilities). Per-turn cache_read_input_tokens and cache_creation_input_tokens logged via dispatch_claude_api observability."
+        }
+      }
+    },
+    "coordination_api.anthropic_batch": {
+      "description": "Anthropic Message Batches API routing for non-interactive workloads (ENC-TSK-G19 / FTR-099 Strategy #8). Submits via POST /v1/messages/batches when provider_preferences.batch_eligible=true; EventBridge poller (rate 1 minute, 60s min interval) finalizes via batch-results callback.",
+      "fields": {
+        "batch_eligible": {
+          "type": "boolean",
+          "definition": "Provider preference signaling deferred batch execution (50% Anthropic batch pricing). Incompatible with execution_mode=preflight.",
+          "usage_guidance": "Set in provider_preferences on coordination request intake or dispatch body. Routes claude_agent_sdk dispatches through _dispatch_claude_batch_api instead of synchronous Messages API."
+        },
+        "batch_workload_type": {
+          "type": "enum",
+          "enum": [
+            "nightly_changelog_generation",
+            "governance_audit_doc_patching",
+            "compliance_doc_creation",
+            "memory_consolidation_bulk"
+          ],
+          "definition": "Optional workload classifier for telemetry and cost attribution. See NON_INTERACTIVE_WORKLOADS in anthropic_batch.py."
+        },
+        "ephemeral_1h_cache": {
+          "type": "object",
+          "definition": "cache_control {type: ephemeral, ttl: 1h} on system prompt and mcp_toolset prefix blocks in batch params.",
+          "usage_guidance": "Stacks with batch 50% discount for ~95% effective cost on recurring static-prefix workloads (NIGHTLY_CHANGELOG_COST_COMPARISON in anthropic_batch.py)."
+        },
+        "poll_interval_seconds": {
+          "type": "integer",
+          "definition": "Minimum 60 seconds between Anthropic batch status polls per request (BATCH_POLL_INTERVAL_SECONDS)."
+        },
+        "batch_subrequest_failure_alert": {
+          "type": "observability",
+          "definition": "Structured CloudWatch event batch_subrequest_failure with alert=true emitted for each errored batch result line."
         }
       }
     },
