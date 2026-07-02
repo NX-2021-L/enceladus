@@ -23,13 +23,15 @@ jobs:
     # the CloudFormationDeployPolicy LambdaComputeOps statement never granted
     # Function URL config actions. Stack rolled back cleanly (UPDATE_ROLLBACK_COMPLETE,
     # no wedge). Immediately unblocked same-session via a manual aws iam
-    # put-role-policy patch broadening LambdaComputeOps (Resource: "*", matching
-    # its existing scope) with product-lead IAM. This workflow codifies an
-    # equivalent, tightly-scoped, git-tracked, re-runnable grant (scoped to the
-    # specific gamma function rather than "*") so the fix survives as CI-executed
-    # and reviewable rather than only living as an invisible manual CLI mutation —
-    # mirrors the iam-cfn-deploy-role-gamma-patch.yml / iam-cfn-deploy-role-eventbridge-listrules-patch.yml
-    # precedent for 04-github-roles.yaml drift of this role.
+    # put-role-policy patch broadening LambdaComputeOps (Resource: "*") with
+    # product-lead IAM. This workflow's first version tried to codify an
+    # equivalent grant as a NEW inline policy and hit LimitExceeded — the role's
+    # aggregate inline-policy quota (10,240 bytes) is already exhausted (same
+    # failure class as ENC-TSK-J85 / CodeDeployStackOpsPolicy). Corrected to
+    # create+attach a MANAGED policy instead (create-policy is idempotent-guarded:
+    # reuses an existing policy ARN and just attaches/updates rather than
+    # erroring on re-run), matching the LambdaFunctionUrlConfigPolicy CFN
+    # resource in 04-github-roles.yaml exactly (name, Sid, actions, resources).
     environment: v3-prod
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -43,7 +45,7 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Apply inline policy — Lambda Function URL config (mcp-code-gamma)
+      - name: Create or update managed policy — Lambda Function URL config (mcp-code-gamma)
         run: |
           set -euo pipefail
           cat > /tmp/lambda-fnurlconfig-policy.json <<'JSON'
@@ -68,15 +70,28 @@ jobs:
           }
           JSON
 
-          aws iam put-role-policy \
-            --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-lambda-fnurlconfig-v1" \
-            --policy-document "file:///tmp/lambda-fnurlconfig-policy.json"
+          POLICY_ARN="arn:aws:iam::356364570033:policy/enceladus-cfn-deploy-lambda-fnurlconfig-v1"
 
-      - name: Verify inline policy attached
-        run: |
-          aws iam get-role-policy \
+          if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
+            echo "Policy exists — creating a new default version"
+            aws iam create-policy-version \
+              --policy-arn "$POLICY_ARN" \
+              --policy-document "file:///tmp/lambda-fnurlconfig-policy.json" \
+              --set-as-default
+          else
+            echo "Policy does not exist — creating it"
+            aws iam create-policy \
+              --policy-name "enceladus-cfn-deploy-lambda-fnurlconfig-v1" \
+              --policy-document "file:///tmp/lambda-fnurlconfig-policy.json"
+          fi
+
+          aws iam attach-role-policy \
             --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-lambda-fnurlconfig-v1" \
-            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --policy-arn "$POLICY_ARN"
+
+      - name: Verify managed policy attached
+        run: |
+          aws iam list-attached-role-policies \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --query 'AttachedPolicies[?PolicyName==`enceladus-cfn-deploy-lambda-fnurlconfig-v1`]' \
             --output table
