@@ -1,21 +1,35 @@
 """
 Enceladus Graph Health Metrics Lambda — ENC-TSK-C10 / AC-13 (CloudWatch Proxy Path)
+Updated ENC-TSK-K43 (B66 Ph5): FiedlerAlgebraicConnectivity now carries the
+REAL Fiedler lambda2 (algebraic connectivity), not the GraphEdgeDensity proxy.
 
-Computes graph health proxy metrics and publishes to CloudWatch.
-GDS is unavailable on the current AuraDB tier, so this Lambda uses pure Cypher
-queries to compute proxy metrics instead of native Fiedler λ₂ computation.
+Computes graph health proxy metrics and publishes to CloudWatch. GDS is
+unavailable on the current AuraDB tier (ISS-465 additionally hard-forbids any
+standing GDS projection), so node/edge/orphan counts still use pure Cypher.
+FiedlerAlgebraicConnectivity, however, is now sourced from the real FTR-088
+graph_laplacian CSR/Fiedler path via a cross-Lambda invoke into
+devops-graph-query-api's action='publish_graph_health' entrypoint (see
+_fetch_real_fiedler_value) -- that entrypoint uses a BOUNDED induced subgraph
++ scipy.sparse.linalg.eigsh, which is the only tractable eigensolver at
+Enceladus's ~1,500-node scale (dense Jacobi over the unbounded full graph this
+Lambda already queries would be O(n^3) and infeasible in pure Python). Falls
+back to the original GraphEdgeDensity proxy only if that invoke fails.
 
 Metrics published:
   - GraphEdgeDensity (edges / nodes) in Enceladus/GraphHealth
   - OrphanNodeRatio (orphan nodes / total nodes) in Enceladus/GraphHealth
   - GraphNodeCount (total node count) in Enceladus/GraphHealth
+  - FiedlerAlgebraicConnectivity (real lambda2 via graph_query_api; proxy
+    GraphEdgeDensity value on invoke failure) in Enceladus/GraphHealth
 
 Triggered by EventBridge on a daily schedule.
 
 Environment variables:
-  NEO4J_SECRET_NAME    Secrets Manager secret ID (default: enceladus/neo4j/auradb-credentials)
-  CLOUDWATCH_NAMESPACE CloudWatch namespace (default: Enceladus/GraphHealth)
-  PROJECT_ID           Project dimension value (default: enceladus)
+  NEO4J_SECRET_NAME          Secrets Manager secret ID (default: enceladus/neo4j/auradb-credentials)
+  CLOUDWATCH_NAMESPACE       CloudWatch namespace (default: Enceladus/GraphHealth)
+  PROJECT_ID                 Project dimension value (default: enceladus)
+  GRAPH_QUERY_API_LAMBDA_NAME  Function name for the ENC-TSK-K43 cross-Lambda
+                                Fiedler lambda2 invoke (default: devops-graph-query-api)
 """
 
 import json
@@ -34,6 +48,19 @@ logger.setLevel(logging.INFO)
 NEO4J_SECRET_NAME = os.environ.get("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
 CLOUDWATCH_NAMESPACE = os.environ.get("CLOUDWATCH_NAMESPACE", "Enceladus/GraphHealth")
 PROJECT_ID = os.environ.get("PROJECT_ID", "enceladus")
+
+# ENC-TSK-K43 (B66 Ph5): real Fiedler lambda2 via a cross-Lambda invoke into
+# devops-graph-query-api's action='publish_graph_health' entrypoint (FTR-088
+# graph_laplacian CSR/Fiedler path -- scipy eigsh/dense eigh over a BOUNDED
+# induced subgraph, never Neo4j GDS/AGA per ISS-465). Dense Jacobi
+# eigendecomposition over the FULL graph (this Lambda's existing
+# MATCH (n) RETURN count(n) query has no upper bound; DOC-A3D0CDF91CE9 Q3.3
+# estimates ~1,500 nodes at Enceladus scale) is O(n^3) and infeasible in pure
+# Python inside a Lambda -- graph_query_api._query_laplacian's
+# LAPLACIAN_MAX_VERTICES=500 cap plus scipy.sparse.linalg.eigsh is the only
+# tractable path at this corpus size, so this Lambda delegates rather than
+# reimplementing a second (necessarily also-bounded) eigensolver here.
+GRAPH_QUERY_API_LAMBDA_NAME = os.environ.get("GRAPH_QUERY_API_LAMBDA_NAME", "devops-graph-query-api")
 
 # --- ENC-TSK-I10 (Dedup P6) convergence-probe configuration ----------------
 # Governed dedup-convergence signals (DOC-DF651F07D5C2 §10) are published to
@@ -63,6 +90,50 @@ def _dedup_int(name: str, default: int) -> int:
 
 _neo4j_driver = None
 _creds_cache = None
+_lambda_client = None
+
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda")
+    return _lambda_client
+
+
+def _fetch_real_fiedler_value() -> Dict[str, Any]:
+    """ENC-TSK-K43: cross-Lambda invoke into devops-graph-query-api's
+    action='publish_graph_health' entrypoint to obtain the REAL Fiedler
+    lambda2 (algebraic connectivity) via the bounded FTR-088 CSR/Fiedler path
+    (graph_health_metric.compute_fiedler_value -> lambda_function._query_laplacian).
+    That entrypoint already publishes its own Enceladus/GraphHealth datapoint
+    (metric FiedlerValue) as a side effect -- this call additionally folds the
+    lambda2 scalar into THIS Lambda's own metrics dict so the legacy
+    FiedlerAlgebraicConnectivity metric name (ENC-TSK-C10) carries the real
+    value too, preserving any existing alarms/dashboards keyed on it.
+
+    Returns {"ok": True, "lambda2": float} on success, or {"ok": False,
+    "error": str} on any invoke/parse failure -- never raises, so a
+    graph_query_api outage degrades this probe rather than breaking it (same
+    contract as the pre-existing dedup-convergence isolation in handler())."""
+    try:
+        response = _get_lambda_client().invoke(
+            FunctionName=GRAPH_QUERY_API_LAMBDA_NAME,
+            InvocationType="RequestResponse",
+            Payload=json.dumps({"action": "publish_graph_health", "project_id": PROJECT_ID}).encode("utf-8"),
+        )
+        payload_raw = response.get("Payload").read()
+        decoded = payload_raw.decode("utf-8") if isinstance(payload_raw, (bytes, bytearray)) else str(payload_raw)
+        body = json.loads(decoded or "{}")
+        if response.get("FunctionError"):
+            return {"ok": False, "error": f"FunctionError: {body}"}
+        results = body.get("results") or []
+        for result in results:
+            if result.get("ok") and result.get("project_id") == PROJECT_ID:
+                return {"ok": True, "lambda2": float(result["lambda2"])}
+        return {"ok": False, "error": f"no successful lambda2 result for project_id={PROJECT_ID}: {body}"}
+    except Exception as exc:  # pragma: no cover - defensive, mirrors dedup probe isolation
+        logger.warning("[WARNING] cross-Lambda publish_graph_health invoke failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
 
 
 def _get_neo4j_creds():
@@ -120,9 +191,21 @@ def _compute_metrics(driver) -> Dict[str, float]:
         else:
             metrics["OrphanNodeRatio"] = 0.0
 
-        # Also publish FiedlerLambda2 as the proxy value (edge density as placeholder)
-        # This satisfies the CloudWatch metric name requirement while GDS is unavailable
-        metrics["FiedlerAlgebraicConnectivity"] = metrics["GraphEdgeDensity"]
+        # ENC-TSK-K43 (B66 Ph5): real Fiedler lambda2 via the FTR-088 CSR/
+        # Fiedler path (cross-Lambda invoke into graph_query_api, see
+        # _fetch_real_fiedler_value). Falls back to the original GraphEdgeDensity
+        # proxy (the pre-K43 ENC-TSK-C10 placeholder, documented above) only if
+        # the invoke fails -- never blocks the rest of this Lambda's metrics.
+        fiedler = _fetch_real_fiedler_value()
+        if fiedler.get("ok"):
+            metrics["FiedlerAlgebraicConnectivity"] = fiedler["lambda2"]
+        else:
+            logger.warning(
+                "[WARNING] real Fiedler lambda2 unavailable (%s); falling back to "
+                "GraphEdgeDensity proxy for FiedlerAlgebraicConnectivity",
+                fiedler.get("error"),
+            )
+            metrics["FiedlerAlgebraicConnectivity"] = metrics["GraphEdgeDensity"]
 
     return metrics
 

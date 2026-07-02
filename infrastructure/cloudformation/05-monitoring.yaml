@@ -90,6 +90,41 @@ Resources:
       SourceArn: !GetAtt GraphHealthScheduleRule.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-K43 (B66 Ph5) — Fiedler lambda-2 GraphHealth metric schedule
+  # ---------------------------------------------------------------------------
+  # Gamma re-delivery of ENC-TSK-C10 (v3, closed). Triggers the existing
+  # devops-graph-query-api Lambda every 15 minutes (same cadence as
+  # HealthProbeScheduleRule above) with action='publish_graph_health', which
+  # computes the graph's Fiedler value (lambda2, algebraic connectivity) via
+  # the FTR-088 CSR/Fiedler _query_laplacian path (ISS-465-compliant: no GDS
+  # projection) and publishes it to the Enceladus/GraphHealth CloudWatch
+  # namespace. No new Lambda function — targets the existing graph_query_api
+  # function by ARN + Input, mirroring the ParityDriftDailyScheduleRule
+  # precedent immediately below of pointing a schedule's Input at an existing
+  # multi-action Lambda rather than minting a dedicated one.
+  GraphHealthScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "enceladus-graph-health-schedule${EnvironmentSuffix}"
+      Description: >
+        Triggers graph_query_api publish_graph_health (Fiedler lambda2 ->
+        Enceladus/GraphHealth) every 15 minutes (ENC-TSK-K43)
+      ScheduleExpression: "rate(15 minutes)"
+      State: ENABLED
+      Targets:
+        - Id: GraphHealthMetricTarget
+          Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+          Input: '{"action": "publish_graph_health"}'
+
+  GraphHealthScheduleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-graph-query-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GraphHealthScheduleRule.Arn
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-F64 / ENC-FTR-090 AC-20 — Daily parity + drift schedule
   # ---------------------------------------------------------------------------
   # Extends devops-deploy-parity-validator (ENC-TSK-F87) via EventBridge to run
