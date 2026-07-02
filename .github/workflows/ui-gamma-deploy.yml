@@ -16,7 +16,10 @@ permissions:
 env:
   AWS_REGION: us-west-2
   S3_BUCKET: jreese-net
-  S3_PREFIX: enceladus-gamma
+  # frontend/ui/vite.config.ts hardcodes base:'/enceladus/', so built assets
+  # reference /enceladus/... -- the S3 prefix must nest under enceladus/ to
+  # match, or the deployed app 404s on its own JS/CSS (blank page).
+  S3_PREFIX: enceladus-gamma/enceladus
   CLOUDFRONT_DISTRIBUTION_ID: E2CO2UXUONVQZH
 
 jobs:
