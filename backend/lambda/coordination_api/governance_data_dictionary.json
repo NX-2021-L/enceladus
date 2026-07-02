@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.08",
-  "updated_at": "2026-07-02T09:10:00Z",
-  "last_change_summary": "ENC-TSK-J90: graph_query_api gains action='close_wave' (backend/lambda/graph_query_api/lambda_function.py::_handle_close_wave), the missing wave-aggregation producer for compute_spurious_attractor_rate's retrieval_records[] -- see graph_query_api.drift_telemetry entity for detail.",
+  "version": "2026-07-02.09",
+  "updated_at": "2026-07-02T09:30:00Z",
+  "last_change_summary": "ENC-TSK-J91 (ENC-ISS-441 Ph1): I71 agent-session idle-sweep backported to v4/main - _handle_agent_session_idle_sweep + EventBridge dispatch in coordination_api, AgentSessionIdleSweepSchedule rule + permission + env vars in 02-compute.yaml (v4). New entity coordination.agent_session_idle_sweep documenting the v4 idle-reference precedence (last_activity_at > claimed_at > created_at). Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "owners": [
     "enceladus-platform"
   ],
@@ -6572,6 +6572,27 @@
       },
       "pwa_surface": "Escalations item in the PWA hamburger menu -> /escalations page: pending feed newest-first (target id/title, mutation type, requesting session, justification, fresh diff, prominent drift warning that still permits informed approve/deny), Approve / Deny / Deny-with-Guidance actions, terminal escalations in a collapsed History section. Ships via the comp-enceladus-pwa gamma pipeline.",
       "apigw_routes": "03-api.yaml (Condition: IsGamma, prod promotion io-gated per DOC-B716E8FB10B6): RouteEscalationsFeed, RouteEscalationsApprove, RouteEscalationsDeny -> CoordinationApiIntegration; RouteTrackerEscalationApply (POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply) -> TrackerMutationIntegration as the HTTP lane to the idempotent applier."
+    },
+    "coordination.agent_session_idle_sweep": {
+      "description": "ENC-TSK-I71 / ENC-FTR-117 AC#8, backported to v4/main by ENC-TSK-J91 (ENC-ISS-441 Ph1). Scheduled idle-sweep backstop that reaps abandoned agent sessions. The AgentSessionIdleSweepSchedule EventBridge rule (infrastructure/cloudformation/02-compute.yaml, rate(1 hour)) invokes the coordination_api Lambda with Input {\"action\":\"agent_session_idle_sweep\"}; lambda_handler dispatches to _handle_agent_session_idle_sweep, which calls agent_id_alloc.sweep_idle_sessions. Sessions left in a live status (allocated or claimed) whose idle reference (last_activity_at heartbeat when present per ENC-TSK-J71/J83, else claimed_at, else created_at) is older than AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS are flipped to 'retired' via the SAME append-only conditional UpdateItem used by agent.retire (#st = :allocated OR #st = :claimed -> retired). Third leg of FTR-117 AC#8 (append-only storage + explicit agent.retire + TTL idle-sweep backstop). Deliberately NOT DynamoDB native TTL: native TTL hard-deletes and would violate the append-only retire model from ENC-TSK-I38. Idempotent - already-retired sessions are excluded by the live-status scan filter, and a candidate concurrently retired between scan and update is skipped. Not an HTTP route (no auth/claims); invoked only by EventBridge. ENC-ISS-441 Ph4 (ENC-TSK-J94) tightens the default threshold to 7200s and adds SCI revocation + the 10-minute unclaim sweep.",
+      "fields": {
+        "AGENT_SESSIONS_IDLE_SWEEP_ENABLED": {
+          "type": "boolean",
+          "definition": "Env var (config.py + lambda_function.py), default true. Master enable flag; when false the handler short-circuits and reaps nothing."
+        },
+        "AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS": {
+          "type": "integer",
+          "definition": "Env var (config.py), default 86400 (24h) at J91 backport time. A live session whose idle reference is older than this is reaped. Operator-configurable per ENC-TSK-I71 AC#2; ENC-ISS-441 Ph4 (ENC-TSK-J94) tightens the default to 7200 (2h)."
+        },
+        "action": {
+          "type": "string",
+          "definition": "EventBridge Input discriminator. Fixed value 'agent_session_idle_sweep' routes lambda_handler to the sweep. Optional idle_threshold_seconds and dry_run keys in the Input override the configured defaults for an ad-hoc invoke."
+        },
+        "summary": {
+          "type": "object",
+          "definition": "Return value (CloudWatch only - no HTTP envelope): {enabled, dry_run, idle_threshold_seconds, cutoff, scanned_live, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped}."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -6665,6 +6686,11 @@
       "version": "2026-07-02.05",
       "task": "ENC-TSK-J72",
       "summary": "ENC-TSK-J72 (ENC-FTR-121 Ph5, DOC-5B888FCA43B8): SNS [ESCALATION] notifications to io. Publishes on requested (post-write) and terminal applied/failed; failure-isolated (never fails the escalation write); reuses devops-feed-alerts{suffix} via ESCALATION_ALERTS_TOPIC_ARN env + PublishEscalationAlerts role grant (02-compute.yaml, gamma lane; prod via Ph7a). Sub-dollar budget; email subscription confirmation is an io residual for Ph8."
+    },
+    {
+      "version": "2026-07-02.09",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-J91 (ENC-ISS-441 Ph1): I71 agent-session idle-sweep backported to v4/main - _handle_agent_session_idle_sweep + EventBridge dispatch in coordination_api, AgentSessionIdleSweepSchedule rule + permission + env vars in 02-compute.yaml (v4). New entity coordination.agent_session_idle_sweep documenting the v4 idle-reference precedence (last_activity_at > claimed_at > created_at). Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }

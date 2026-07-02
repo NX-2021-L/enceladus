@@ -215,6 +215,12 @@ Resources:
           AGENT_SESSIONS_TABLE: !Sub "agent-sessions${EnvironmentSuffix}"
           AGENT_TYPES_TABLE: !Sub "agent-types${EnvironmentSuffix}"
           AGENT_CREDENTIALS_TABLE: !Sub "agent-credentials${EnvironmentSuffix}"
+          # ENC-TSK-I71 (ENC-FTR-117 AC#8), backported to v4 by ENC-TSK-J91: idle-sweep
+          # backstop config. Enable flag read by lambda_function; threshold read by
+          # config.py / agent_id_alloc.sweep_idle_sessions. 86400 = 24h (I71 default;
+          # ENC-ISS-441 Ph4 tightens this to 7200).
+          AGENT_SESSIONS_IDLE_SWEEP_ENABLED: "true"
+          AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS: "86400"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -1894,6 +1900,34 @@ Resources:
       Targets:
         - Arn: !GetAtt CoordinationApiFunction.Arn
           Id: coordination-batch-poll
+
+  # ENC-TSK-I71 (ENC-FTR-117 AC#8), backported to v4 by ENC-TSK-J91 (ENC-ISS-441 Ph1). The
+  # rule invokes the coordination_api with a fixed Input action; the handler reaps sessions
+  # left allocated/claimed past AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS via an append-only flip
+  # to 'retired' (NOT native DynamoDB TTL — TTL hard-deletes and would break the append-only
+  # retire model from ENC-TSK-I38). Targets the unqualified function ARN, matching the
+  # CoordinationBatchPollerRule precedent above. Unlike that rule, this one ships with its
+  # required AWS::Lambda::Permission so EventBridge can actually invoke the function.
+  AgentSessionIdleSweepSchedule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-agent-session-idle-sweep${EnvironmentSuffix}"
+      Description: "ENC-TSK-I71: reap abandoned agent sessions (append-only retire backstop for ENC-FTR-117 AC#8)"
+      ScheduleExpression: rate(1 hour)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CoordinationApiFunction.Arn
+          Id: agent-session-idle-sweep
+          Input: '{"action": "agent_session_idle_sweep"}'
+
+  AgentSessionIdleSweepPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CoordinationApiFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AgentSessionIdleSweepSchedule.Arn
 
   DeployCodeBuildFinalizeRule:
     Type: AWS::Events::Rule
