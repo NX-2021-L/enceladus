@@ -9374,6 +9374,10 @@ async def _tracker_embeddings_for(args: dict) -> list[TextContent]:
         "project_id": project_id,
         "record_ids": ",".join(ids),
     }
+    resp = _graph_query_api_request(query=query_params)
+    return _result_text(resp)
+
+
 async def _tracker_sheaf_cohomology(args: dict) -> list[TextContent]:
     """Sheaf Laplacian H1 inconsistency detection (ENC-FTR-095 / ENC-TSK-I90).
 
@@ -9394,6 +9398,11 @@ async def _tracker_sheaf_cohomology(args: dict) -> list[TextContent]:
     vertex_set_query = args.get("vertex_set_query")
     if vertex_set_query:
         query_params["vertex_set_query"] = vertex_set_query
+
+    resp = _graph_query_api_request(query=query_params)
+    return _result_text(resp)
+
+
 async def _tracker_graph_laplacian(args: dict) -> list[TextContent]:
     """ENC-FTR-088 / ENC-TSK-I81: graph Laplacian read action.
 

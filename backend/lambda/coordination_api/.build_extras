@@ -11,3 +11,4 @@
 # (observed during ENC-TSK-I44 prod E2E). Declaring both here packages them together.
 tools/enceladus-mcp-server/dispatch_plan_generator.py
 tools/enceladus-mcp-server/handoff_mandate.py
+tools/enceladus-mcp-server/telemetry_rank.py
