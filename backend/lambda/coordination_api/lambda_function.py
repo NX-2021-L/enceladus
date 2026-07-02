@@ -204,6 +204,14 @@ COORDINATION_SESSION_ARCHIVE_BUFFER_DIR = os.environ.get(
     "COORDINATION_SESSION_ARCHIVE_BUFFER_DIR",
     "/tmp/coordination-session-archive-buffer",
 )
+COORDINATION_AGENT_MEMORY_PREFIX = os.environ.get(
+    "COORDINATION_AGENT_MEMORY_PREFIX",
+    "coordination-agent-memory",
+)
+CLAUDE_MEMORY_TOOL_LOOP_MAX_ITERATIONS = max(
+    1,
+    int(os.environ.get("CLAUDE_MEMORY_TOOL_LOOP_MAX_ITERATIONS", "8")),
+)
 AUTH_TOKEN_POLICY_PREFIX = "service_token#"
 OAUTH_CLIENT_POLICY_PREFIX = "oauth_client#"
 AUTH_ALLOWED_PERMISSIONS = {"read", "write", "put", "delete", "admin"}
@@ -5351,6 +5359,128 @@ def _maybe_attach_context_management(
         return False
 
 
+def _merge_claude_usage(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in (extra or {}).items():
+        if isinstance(value, (int, float)):
+            merged[key] = int(merged.get(key) or 0) + int(value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _post_claude_messages_request(
+    *,
+    api_key: str,
+    endpoint: str,
+    request_body: Dict[str, Any],
+    anthropic_headers: Dict[str, str],
+    timeout: int,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    request_json = json.dumps(request_body).encode("utf-8")
+    req = urllib.request.Request(
+        url=endpoint,
+        method="POST",
+        data=request_json,
+        headers=anthropic_headers,
+    )
+    context = ssl.create_default_context(cafile=_CERT_BUNDLE) if _CERT_BUNDLE else None
+    with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+        status = int(getattr(resp, "status", 0) or 0)
+        response_headers = dict(resp.headers.items())
+        raw_body = resp.read().decode("utf-8", errors="replace")
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"Claude API request returned http_{status}")
+    payload = json.loads(raw_body)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Claude API response payload is not an object")
+    if isinstance(payload.get("error"), dict):
+        error_type = str(payload["error"].get("type") or "unknown")
+        error_message = str(payload["error"].get("message") or "Unknown Claude API error")
+        raise RuntimeError(f"Claude API error ({error_type}): {error_message}")
+    return payload, response_headers
+
+
+def _run_claude_memory_tool_loop(
+    *,
+    api_key: str,
+    endpoint: str,
+    anthropic_headers: Dict[str, str],
+    request_body: Dict[str, Any],
+    initial_payload: Dict[str, Any],
+    project_id: str,
+    memory_scope_id: str,
+    governance_hash: str,
+    task_id: str,
+    timeout: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any], int]:
+    """Execute memory_20250818 tool_use blocks until Claude returns a terminal turn."""
+    from agent_session_memory import (
+        S3MemoryToolHandler,
+        build_memory_tool_results,
+        extract_memory_tool_uses,
+        memory_s3_root_key,
+        seed_enceladus_memory_file,
+    )
+
+    handler = S3MemoryToolHandler(
+        _get_s3(),
+        bucket=S3_BUCKET,
+        root_key=memory_s3_root_key(
+            COORDINATION_AGENT_MEMORY_PREFIX,
+            project_id,
+            memory_scope_id,
+        ),
+    )
+    seed_enceladus_memory_file(
+        handler,
+        governance_hash=governance_hash,
+        task_id=task_id,
+    )
+
+    payload = dict(initial_payload)
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    messages = list(request_body.get("messages") or [])
+    memory_iterations = 0
+
+    while memory_iterations < CLAUDE_MEMORY_TOOL_LOOP_MAX_ITERATIONS:
+        stop_reason = str(payload.get("stop_reason") or "").strip().lower()
+        if stop_reason != "tool_use":
+            break
+        content = payload.get("content")
+        tool_uses = extract_memory_tool_uses(content)
+        if not tool_uses:
+            break
+
+        messages.append({"role": "assistant", "content": content})
+        messages.append(
+            {
+                "role": "user",
+                "content": build_memory_tool_results(handler, tool_uses),
+            }
+        )
+        loop_body = dict(request_body)
+        loop_body["messages"] = messages
+        payload, _headers = _post_claude_messages_request(
+            api_key=api_key,
+            endpoint=endpoint,
+            request_body=loop_body,
+            anthropic_headers=anthropic_headers,
+            timeout=timeout,
+        )
+        usage = _merge_claude_usage(
+            usage,
+            payload.get("usage") if isinstance(payload.get("usage"), dict) else {},
+        )
+        memory_iterations += 1
+
+    if isinstance(payload.get("usage"), dict):
+        payload["usage"] = usage
+    else:
+        payload["usage"] = usage
+    return payload, usage, memory_iterations
+
+
 def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatch_id: str) -> Dict[str, Any]:
     """Dispatch a request to the Anthropic Messages API with full feature support.
 
@@ -5363,10 +5493,8 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
     - Enhanced observability with token breakdown and cost attribution
     - Context-management beta for long coordination loops (ENC-TSK-G17):
       clear_tool_uses_20250919 eviction + memory_20250818 tool, gated on
-      provider_session["context_management_enabled"]. NOTE: the memory tool is
-      registered and excluded from eviction, but a durable S3/local storage
-      backend for the Enceladus memory-file schema (_ENCELADUS_MEMORY_FILE_SCHEMA)
-      is a follow-up — this wires the API contract, not the backend.
+      provider_session["context_management_enabled"]. Memory tool requests are
+      executed against S3 via agent_session_memory.S3MemoryToolHandler.
     """
     provider_session = request.get("provider_session") or {}
 
@@ -5539,6 +5667,29 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         error_message = str(payload["error"].get("message") or "Unknown Claude API error")
         raise RuntimeError(f"Claude API error ({error_type}): {error_message}")
 
+    memory_iterations = 0
+    if context_management_attached and not use_streaming:
+        from agent_session_memory import memory_scope_id as _memory_scope_id
+
+        payload, merged_usage, memory_iterations = _run_claude_memory_tool_loop(
+            api_key=api_key,
+            endpoint=endpoint,
+            anthropic_headers=anthropic_headers,
+            request_body=request_body,
+            initial_payload=payload,
+            project_id=str(request.get("project_id") or "enceladus"),
+            memory_scope_id=_memory_scope_id(
+                request_id=str(request.get("request_id") or ""),
+                dispatch_id=dispatch_id,
+                session_id=str(provider_session.get("session_id") or ""),
+            ),
+            governance_hash=str(governance_context.get("governance_hash") or ""),
+            task_id=str((request.get("task_ids") or [""])[0] if isinstance(request.get("task_ids"), list) else ""),
+            timeout=timeout,
+        )
+        if merged_usage:
+            payload["usage"] = merged_usage
+
     summary = _extract_claude_text_response(payload)
     thinking_summary = _extract_claude_thinking_response(payload)
     completed_at = _now_z()
@@ -5593,6 +5744,14 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
             "preflight_token_count": preflight_token_count,
             "context_management": context_management_attached,
             "memory_tool": context_management_attached,
+            "memory_s3_backend": context_management_attached,
+            "memory_tool_iterations": memory_iterations,
+            "memory_s3_prefix": (
+                f"s3://{S3_BUCKET}/{COORDINATION_AGENT_MEMORY_PREFIX}/"
+                f"{str(request.get('project_id') or 'enceladus')}/"
+                if context_management_attached
+                else None
+            ),
         },
         "governance_context": {
             "loaded": bool(governance_context.get("loaded")),
