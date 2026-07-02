@@ -78,6 +78,9 @@ const DeploymentManagerPage = lazy(() =>
     default: module.DeploymentManagerPage,
   })),
 )
+const EscalationsPage = lazy(() =>
+  import('../pages/EscalationsPage').then((module) => ({ default: module.EscalationsPage })),
+)
 
 function withSuspense(element: ReactNode) {
   return <Suspense fallback={<LoadingState />}>{element}</Suspense>
@@ -123,6 +126,7 @@ export const router = createBrowserRouter(
         { path: '/terminal/manage', element: withSuspense(<TerminalManagePage />) },
         { path: '/components', element: withSuspense(<ComponentRegistryPage />) },
         { path: '/deployments', element: withSuspense(<DeploymentManagerPage />) },
+        { path: '/escalations', element: withSuspense(<EscalationsPage />) },
         { path: '/coordination', element: withSuspense(<CoordinationPage />) },
         { path: '/coordination/auth', element: withSuspense(<AuthTokensPage />) },
         {
