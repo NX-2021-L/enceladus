@@ -93,3 +93,4 @@ function_name_map:
   lifecycle_service: enceladus-lifecycle-service-gamma
   scoring_service: enceladus-scoring-service-gamma
   recompute_governance: devops-recompute-governance-gamma
+  corpus_entropy_engine: enceladus-corpus-entropy-engine-gamma
