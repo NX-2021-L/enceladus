@@ -372,6 +372,12 @@ CALLBACK_SQS_QUEUE_URL = os.environ.get("CALLBACK_SQS_QUEUE_URL", "")
 CALLBACK_EVENT_SOURCE = os.environ.get("CALLBACK_EVENT_SOURCE", "enceladus.coordination")
 CALLBACK_EVENT_DETAIL_TYPE = os.environ.get("CALLBACK_EVENT_DETAIL_TYPE", "coordination.callback")
 FEED_SUBSCRIPTIONS_TABLE = os.environ.get("FEED_SUBSCRIPTIONS_TABLE", "feed-subscriptions")
+# ENC-TSK-I71 (ENC-FTR-117 AC#8), backported to v4 by ENC-TSK-J91: master enable flag for
+# the scheduled agent-session idle-sweep. Threshold default lives in config.py and is the
+# default of agent_id_alloc.sweep_idle_sessions; only the enable flag is read here.
+AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
+)
 # ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier config.
 GRAPH_QUERY_API_URL = os.environ.get("GRAPH_QUERY_API_URL", "").strip()
 DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
@@ -15040,6 +15046,44 @@ def _handle_session_init_intent_drift(
     )
 
 
+def _handle_agent_session_idle_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Scheduled backstop reaper for abandoned agent sessions (ENC-TSK-I71 / ENC-FTR-117 AC#8).
+
+    Backported to v4 by ENC-TSK-J91 (ENC-ISS-441 Ph1). Invoked by the
+    AgentSessionIdleSweepSchedule EventBridge rule, NOT an HTTP route — there is no API
+    Gateway envelope, auth, or claims on this path. Flips sessions left in a live status
+    (allocated/claimed) past the configured idle threshold to 'retired' via the append-only
+    conditional update in agent_id_alloc.sweep_idle_sessions (NOT a delete; NOT native
+    DynamoDB TTL). On v4 the idle reference prefers last_activity_at (ENC-TSK-J71/J83
+    heartbeat) over claimed_at/created_at. Returns a plain summary dict for CloudWatch.
+    """
+    if not AGENT_SESSIONS_IDLE_SWEEP_ENABLED:
+        logger.info("[INFO] idle-sweep skipped — AGENT_SESSIONS_IDLE_SWEEP_ENABLED is false")
+        return {"enabled": False, "reason": "disabled", "retired_count": 0}
+    # The schedule delivers the rule's Input JSON verbatim; allow an optional per-invoke
+    # threshold/dry_run override, else fall back to the configured default.
+    raw_threshold = event.get("idle_threshold_seconds")
+    sweep_kwargs: Dict[str, Any] = {"dry_run": bool(event.get("dry_run", False))}
+    if raw_threshold is not None:
+        try:
+            sweep_kwargs["idle_threshold_seconds"] = int(raw_threshold)
+        except (TypeError, ValueError):
+            return {
+                "enabled": True,
+                "error": "idle_threshold_seconds must be an integer",
+                "retired_count": 0,
+            }
+    try:
+        summary = _agent_id_alloc.sweep_idle_sessions(**sweep_kwargs)
+    except ValueError as exc:
+        return {"enabled": True, "error": str(exc), "retired_count": 0}
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] idle-sweep DynamoDB failure: %s", exc)
+        return {"enabled": True, "error": "DynamoDB error during idle-sweep", "retired_count": 0}
+    logger.info("[SUCCESS] idle-sweep retired %d session(s)", summary.get("retired_count", 0))
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
@@ -15056,6 +15100,12 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     ):
         logger.info("[INFO] EventBridge callback event received")
         return _handle_eventbridge_callback(event)
+
+    # --- ENC-TSK-I71: scheduled agent-session idle-sweep (ENC-FTR-117 AC#8) ---
+    # The AgentSessionIdleSweepSchedule rule delivers its Input JSON verbatim as the event.
+    if event.get("action") == "agent_session_idle_sweep":
+        logger.info("[INFO] Scheduled agent-session idle-sweep invoked")
+        return _handle_agent_session_idle_sweep(event)
 
     # --- v0.3: SQS callback ingestion ---
     # SQS events have 'Records' with 'eventSource' = 'aws:sqs'.
