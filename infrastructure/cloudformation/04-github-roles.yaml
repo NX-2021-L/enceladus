@@ -377,6 +377,89 @@ Resources:
               - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentgroup:enceladus-lambda*"
               - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentconfig:*"
 
+  # ENC-TSK-K65 — the CFN deploy role deploys 07-ui-cdn.yaml (CloudFront OAC +
+  # distribution, TagResource, invalidations) and syncs the ui-v2 build to its
+  # S3 origin, but the base CloudFormationDeployPolicy grants zero cloudfront:*
+  # and no S3 object perms on the UI bucket — the apply AccessDenied'd at
+  # change-set execution and the _ui_deploy.yml s3 sync AccessDenied'd. This was
+  # unblocked out-of-band by manually attaching the managed policy
+  # `enceladus-ui-cdn-deploy` (arn:aws:iam::356364570033:policy/enceladus-ui-cdn-deploy)
+  # to enceladus-cloudformation-deploy-github-role.
+  #
+  # Codified here as an ATTACHED MANAGED policy (mirroring CodeDeployStackOpsPolicy
+  # above) because the role's aggregate inline-policy quota (10,240 bytes) is
+  # exhausted by the out-of-band patch policies (J85 / PR #733 pattern). A
+  # DISTINCT ManagedPolicyName is used deliberately: managing the identically
+  # named live `enceladus-ui-cdn-deploy` would AlreadyExists-collide with the
+  # manual attachment, so this attaches a second managed policy with the same
+  # effective grant (idempotent at the permission level). The manual policy can
+  # be detached later without a CFN conflict once this stack update lands.
+  UiCdnDeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-ui-cdn-stack-ops
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # CloudFront distribution + Origin Access Control lifecycle for
+          # 07-ui-cdn.yaml, plus tagging and the app-shell invalidation the
+          # _ui_deploy.yml pipeline issues after each sync. CloudFront is a
+          # global service — actions are not region-scoped and the distribution
+          # ARN carries no region segment, so Resource is "*".
+          - Sid: CloudFrontUiCdnOps
+            Effect: Allow
+            Action:
+              - cloudfront:CreateOriginAccessControl
+              - cloudfront:GetOriginAccessControl
+              - cloudfront:UpdateOriginAccessControl
+              - cloudfront:DeleteOriginAccessControl
+              - cloudfront:CreateDistribution
+              - cloudfront:GetDistribution
+              - cloudfront:GetDistributionConfig
+              - cloudfront:UpdateDistribution
+              - cloudfront:DeleteDistribution
+              - cloudfront:TagResource
+              - cloudfront:UntagResource
+              - cloudfront:CreateInvalidation
+            Resource: "*"
+          # S3 bucket lifecycle for the ui-v2 origin bucket (07-ui-cdn creates
+          # it) + object put/get/delete/list for the _ui_deploy.yml sync
+          # (--delete diffing needs GetObject + ListBucket). Scoped to the
+          # enceladus-ui-v2* bucket family (prod + -gamma suffix).
+          - Sid: S3UiBucketOps
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:PutBucketPolicy
+              - s3:GetBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:PutBucketTagging
+              - s3:GetBucketTagging
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetBucketPublicAccessBlock
+              - s3:PutBucketVersioning
+              - s3:GetBucketVersioning
+              - s3:PutLifecycleConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:PutBucketOwnershipControls
+              - s3:GetBucketOwnershipControls
+              - s3:ListBucket
+            Resource:
+              - "arn:aws:s3:::enceladus-ui-v2*"
+          - Sid: S3UiObjectOps
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:ListMultipartUploadParts
+              - s3:AbortMultipartUpload
+            Resource:
+              - "arn:aws:s3:::enceladus-ui-v2*/*"
+
   BackendDeployRole:
     Type: AWS::IAM::Role
     Properties:

@@ -255,6 +255,7 @@ STIGMERGIC_TRACE_TABLE = os.environ.get("STIGMERGIC_TRACE_TABLE", "").strip()
 
 _s3 = None
 _dynamodb = None
+_cloudwatch = None
 
 
 def _get_secretsmanager():
@@ -302,6 +303,21 @@ def _get_dynamodb():
             config=Config(retries={"max_attempts": 3, "mode": "standard"}),
         )
     return _dynamodb
+
+
+def _get_cloudwatch():
+    """Lazy CloudWatch client for the ENC-TSK-K43 GraphHealth lambda2 metric
+    publisher (mirrors _get_dynamodb / _get_s3 lazy-singleton convention)."""
+    global _cloudwatch
+    if _cloudwatch is None:
+        import boto3
+        from botocore.config import Config
+        _cloudwatch = boto3.client(
+            "cloudwatch",
+            region_name=SECRETS_REGION,
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _cloudwatch
 
 
 _SPURIOUS_ATTRACTOR_RECENT_LIMIT = 5
@@ -1683,6 +1699,31 @@ def _handle_refresh_flow_weight(event: Dict) -> Dict[str, Any]:
     if driver is None:
         return {"ok": False, "error": "neo4j driver unavailable after rebuild attempt"}
     return _fwr.run_refresh(driver, _get_s3(), event)
+
+
+def _handle_publish_graph_health(event: Dict) -> Dict[str, Any]:
+    """ENC-TSK-K43 (B66 Ph5, gamma re-delivery of ENC-TSK-C10) out-of-band
+    Fiedler lambda-2 GraphHealth metric publisher entrypoint. Mirrors
+    _handle_refresh_projection's/_handle_refresh_flow_weight's contract:
+    invoked by an EventBridge scheduled rule or a direct Lambda invoke
+    carrying action='publish_graph_health' (dispatched in lambda_handler
+    below); NOT exposed on the public API Gateway route. Delegates to
+    graph_health_metric, which computes lambda2 exclusively via the existing
+    FTR-088 _query_laplacian CSR/Fiedler path (ISS-465: no GDS projection —
+    see graph_health_metric.py module docstring) and publishes it to the
+    Enceladus/GraphHealth CloudWatch namespace.
+    """
+    try:
+        import graph_health_metric as _ghm
+    except Exception:
+        logger.exception("[ERROR] graph_health_metric module unavailable")
+        return {"ok": False, "error": "graph_health_metric module unavailable"}
+    return _ghm.handle_publish_graph_health(
+        event,
+        get_driver_fn=lambda: _ensure_live_driver(_get_neo4j_driver()),
+        get_cloudwatch_fn=_get_cloudwatch,
+        query_laplacian_fn=_query_laplacian,
+    )
 
 
 def _hybrid_keyword_ranks(
@@ -3501,6 +3542,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # never falls through to the FTR-101 projection-refresh handler.
     if isinstance(event, dict) and event.get("action") == "refresh_flow_weight":
         return _handle_refresh_flow_weight(event)
+
+    # ENC-TSK-K43 (B66 Ph5): out-of-band Fiedler lambda-2 GraphHealth metric
+    # publish. Checked before the generic aws.events/Scheduled-Event fallback
+    # below (same reasoning as refresh_flow_weight above) so an explicit
+    # action='publish_graph_health' invoke (or EventBridge rule Input) never
+    # falls through to the FTR-101 projection-refresh handler.
+    if isinstance(event, dict) and event.get("action") == "publish_graph_health":
+        return _handle_publish_graph_health(event)
 
     # ENC-FTR-101 (Option B): out-of-band standing-projection refresh. EventBridge
     # scheduled events / direct invokes carry action='refresh_projection' (and lack

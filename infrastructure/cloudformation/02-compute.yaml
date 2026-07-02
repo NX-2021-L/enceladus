@@ -173,6 +173,12 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt CoordinationApiRole.Arn
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing (MCP Server / governed-mutation API
+      # surface — CoordinationApiFunction is the gamma-deployable stand-in for "MCP Server"
+      # in the five-service trace; EnceladusMcpCodeGammaFunction is prod-stack-owned
+      # (Condition: IsProduction) and out of reach for a gamma-only compute deploy).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
         # ENC-TSK-F63 AC-1: AppConfig extension layer (arch-conditional)
@@ -264,6 +270,10 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt TrackerMutationRole.Arn
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing ("Record" service — TrackerMutationFunction
+      # writes/records the governed tracker mutation for every task/issue/feature/lesson).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
         - !If
@@ -377,6 +387,9 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt LifecycleServiceRole.Arn
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing (Lifecycle service).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
       Environment:
@@ -391,6 +404,75 @@ Resources:
           Value: enceladus
         - Key: Component
           Value: lifecycle
+
+  # ENC-TSK-K45 / B66 Ph5 AC-1: Checkout Service — adopted into CFN management via
+  # change-set-type=IMPORT (.github/workflows/cfn-resource-import.yml, gamma-only,
+  # no reviewer gate) to bring the last of the five v4 services under CFN so it can
+  # carry TracingConfig.Mode=Active. Live resource previously deployed entirely
+  # out-of-band via backend/lambda/checkout_service/deploy.sh (tombstone) + the
+  # _deploy.yml matrix build — see infrastructure/lambda_workflow_manifest.json
+  # (cfn_managed flipped false->true here). IAM role
+  # enceladus-checkout-service-role-gamma is intentionally NOT declared as a CFN
+  # resource in this stack — it remains out-of-band and is referenced by raw ARN,
+  # mirroring the EnceladusMcpCodeGammaFunction pattern below (this agent identity
+  # has an explicit IAM deny on iam:GetRole/ListRolePolicies, so the live role's
+  # exact policy document cannot be read to safely re-author it as a managed
+  # resource; importing only the Function avoids any risk of CFN silently
+  # clobbering live checkout-service permissions on a future stack update).
+  CheckoutServiceFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-checkout-service${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      # Out-of-band role (see comment above) — referenced by ARN, not CFN-managed.
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/enceladus-checkout-service-role${EnvironmentSuffix}"
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing (Checkout service).
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          CHECKOUT_TOKENS_REGION: !Ref AWS::Region
+          CHECKOUT_TOKENS_TABLE: !Sub "enceladus-checkout-tokens${EnvironmentSuffix}"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          ENCELADUS_COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          GITHUB_PRIVATE_KEY_SECRET: devops/github-app/enceladus-private-key
+          GITHUB_APP_ID: "2946766"
+          GITHUB_INSTALLATION_ID: "112392089"
+          GITHUB_TOKEN: !If [IsGamma, "disabled-for-gamma", !Ref "AWS::NoValue"]
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          CORS_ORIGIN: https://jreese.net
+          TRACKER_API_BASE: !Sub "https://hi0dzmvqrc.execute-api.${AWS::Region}.amazonaws.com/api/v1/tracker"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: checkout
+        - Key: ReconciledBy
+          # ENC-TSK-K45 follow-up (2026-07-02): forces CFN to recompute a real
+          # diff on this resource, mirroring the ENC-TSK-K44 fix for
+          # ProdHealthMonitorFunction. Post-IMPORT, `aws cloudformation
+          # deploy`'s change-set shortcut saw "template text unchanged" (the
+          # IMPORT already matched the live pre-import config, including
+          # TracingConfig.Mode=PassThrough) and skipped reconciling this
+          # function's TracingConfig against the template's declared
+          # Mode=Active -- this tag bump is a real property change so the
+          # next Apply actually pushes TracingConfig.Mode=Active live.
+          Value: "ENC-TSK-K45-reconcile-20260702"
 
   # ENC-TSK-H47 / B63 Phase 2B — Scoring Service. Standalone, SNS-triggered ASYNC consumer that owns
   # lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson
@@ -415,6 +497,9 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt ScoringServiceRole.Arn
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing (Scoring service).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
       Environment:
@@ -932,8 +1017,32 @@ Resources:
           TRACKER_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           PROJECTS_REGION: !Ref AWS::Region
-          FEED_BUCKET: !Ref S3Bucket
-          FEED_PREFIX: !Sub "${S3EnvPrefix}mobile/v1"
+          # ENC-TSK-K69: without this the code default is the PROD "documents"
+          # table (feed_utils.DEFAULT_DOCUMENTS_TABLE) — the gamma publisher
+          # was reading prod documents cross-env. Prod rendering: "documents"
+          # (identical to the code default; no-op).
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          # ENC-TSK-K69 gamma env isolation: publish snapshots into the ui-v2
+          # origin bucket (07-ui-cdn.yaml exports) so the PWA's same-origin
+          # VITE_FEED_BASE_URL=/mobile/v1 fetch resolves through the gamma
+          # distribution, and invalidate THAT distribution — not the prod
+          # E2BOQXCW1TA6Y4 code default (whose grant is IsProduction-gated
+          # anyway, so gamma invalidations were failing silently). Prod
+          # branches render byte-identical to the previous template
+          # (jreese-net + ${S3EnvPrefix}mobile/v1 + CF_DISTRIBUTION absent ->
+          # code default).
+          FEED_BUCKET: !If
+            - IsGamma
+            - !ImportValue "enceladus-ui-cdn-gamma-UiBucketName"
+            - !Ref S3Bucket
+          FEED_PREFIX: !If
+            - IsGamma
+            - "mobile/v1"
+            - !Sub "${S3EnvPrefix}mobile/v1"
+          CF_DISTRIBUTION: !If
+            - IsGamma
+            - !ImportValue "enceladus-ui-cdn-gamma-UiDistributionId"
+            - !Ref "AWS::NoValue"
           EVENT_BUS: default
           DEPLOY_TABLE: !Sub "devops-deployment-manager${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
@@ -1581,6 +1690,133 @@ Resources:
       SourceArn: !GetAtt StaleCheckoutMonitorSchedule.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-K44 / ENC-FTR-071 (B66 Ph5): Production Health Monitor Lambda.
+  # Moved from infrastructure/cloudformation/05-monitoring.yaml so the Lambda
+  # Workflow Coverage Guard recognizes it as a coverage-tracked function (the
+  # guard only parses AWS::Lambda::Function resources out of THIS template).
+  # 05-monitoring.yaml retains the IAM-independent bits that reference this
+  # function by name: the EventBridge 15-min schedule + permission, and the
+  # CloudWatch Alarms (CodeSizeMinimumAlarm plus the new K44 per-service
+  # alarms), mirroring the existing cross-stack pattern used there for
+  # devops-deploy-parity-validator / devops-env-drift-auditor (hardcoded
+  # !Sub ARN by function name, not !ImportValue — 05-monitoring.yaml does not
+  # take a compute-stack import today and this avoids a stack-dependency
+  # ordering change for a single Lambda move).
+  # Health checks (DynamoDB, Neo4j AuraDB, S3, SQS, Lambda cold-start
+  # baseline) publish DynamoDBThrottle / GraphSyncLag / MCPColdStart metrics
+  # feeding the B66 dashboard panels. Gamma only; not a v3-prod patch
+  # (ENC-PLN-019 lock) — deploys via the standard IsGamma/IsProduction !If
+  # arch/runtime conditions like every other Lambda in this template.
+  # ---------------------------------------------------------------------------
+
+  ProdHealthMonitorFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-prod-health-monitor${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 120
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt ProdHealthMonitorRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+      Environment:
+        Variables:
+          FUNCTION_NAMES: "[]"
+          DYNAMODB_TABLE_NAME: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
+          S3_HEALTH_BUCKET: !Ref S3Bucket
+          GRAPH_SYNC_QUEUE_URL: !ImportValue
+            Fn::Sub: ${DataStackName}-GraphSyncQueueUrl
+          SECRETS_REGION: !Ref "AWS::Region"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: health-monitor
+        - Key: ReconciledBy
+          # ENC-TSK-K44 follow-up (2026-07-02): forces CFN to recompute a real
+          # diff on this resource. Post-IMPORT, `aws cloudformation deploy`'s
+          # change-set shortcut saw "template text unchanged" and skipped
+          # reconciling this function's Layers/Environment against the live
+          # (pre-import) values -- this tag bump is a real property change so
+          # the next Apply picks up SharedLayerArn + the DynamoDB/Neo4j/S3/SQS
+          # env vars that were already correct in the template but never applied.
+          Value: "ENC-TSK-K44-reconcile-20260702"
+
+  ProdHealthMonitorRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-prod-health-monitor-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ProdHealthMonitorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+              - Sid: LambdaConfigRead
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListFunctions
+                Resource: "*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              - Sid: DynamoDBHealthCheck
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+              - Sid: SecretsManagerNeo4j
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+              - Sid: S3HealthCheck
+                Effect: Allow
+                Action:
+                  - s3:HeadBucket
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}"
+              - Sid: SqsHealthCheck
+                Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: health-monitor
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-C10: Graph Health Metrics Lambda (CloudWatch proxy path)
   # ---------------------------------------------------------------------------
 
@@ -1614,6 +1850,9 @@ Resources:
           CLOUDWATCH_NAMESPACE: Enceladus/GraphHealth
           PROJECT_ID: enceladus
           SECRETS_REGION: !Ref "AWS::Region"
+          # ENC-TSK-K43: cross-Lambda invoke target for the real Fiedler lambda2
+          # (FTR-088 CSR/Fiedler path, ISS-465-compliant).
+          GRAPH_QUERY_API_LAMBDA_NAME: !Sub "devops-graph-query-api${EnvironmentSuffix}"
           # ENC-TSK-I10 (Dedup P6): convergence-probe signal configuration
           # (DOC-DF651F07D5C2 §10). The walk-back model-health loop reads the
           # production auto-merge/walk-back audit counters back from CloudWatch.
@@ -1731,6 +1970,194 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt PercolationMonitorSchedule.Arn
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-K41 / B66 Ph5 (ENC-PLN-064): Corpus Entropy Engine (CEE) Lambda.
+  # Cognitive-hygiene subsystem detecting entropy accumulation across the
+  # governed corpus, per DOC-A3D0CDF91CE9. Five telemetry-only detectors
+  # (orphan, stagnation, relational, retention/FSRS-6, compliance/semantic);
+  # no corpus mutation -- GDMP Stage-1 auto-remediation is a separate task.
+  # OGTM: reads exclusively through the tracker/document/graph_query_api HTTP
+  # surface (no direct DynamoDB access, no new edge types). EventBridge
+  # per-invocation (no standing compute). Gamma-only (Condition: IsGamma):
+  # v3-prod is frozen (DOC-499FA089EC30). ISS-465 cost-preflight: weekly
+  # invocation count capped well under $1/mo (see CEEInvocationCostHeadroomAlarm
+  # below); CEE_HARD_DISABLED is the mandatory kill switch, checked first thing
+  # in the handler before any governed read is attempted.
+  # ---------------------------------------------------------------------------
+  CorpusEntropyEngineFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-corpus-entropy-engine${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt CorpusEntropyEngineRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          TRACKER_API_BASE: !Sub "https://enceladus-gamma.jreese.net/api/v1/tracker"
+          DOCUMENT_API_BASE: !Sub "https://enceladus-gamma.jreese.net/api/v1/documents"
+          GRAPH_QUERY_API_BASE: !Sub "https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
+          PROJECT_ID: enceladus
+          CLOUDWATCH_NAMESPACE: Enceladus/CEE
+          STAGNATION_THRESHOLD_DAYS: "14"
+          COMPLIANCE_SCORE_THRESHOLD: "70"
+          # ISS-465-style kill switch -- installed before the first scheduled
+          # run; io clears to "0" to enable. Mirrors TRAINING_HARD_DISABLED
+          # (K02) / UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
+          # Cleared 2026-07-02 per io: telemetry-only detector, no corpus
+          # mutation -- safe to run on its initial nightly schedule (ENC-TSK-K41).
+          CEE_HARD_DISABLED: "0"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: corpus-entropy-engine
+        - Key: Feature
+          Value: ENC-TSK-K41
+
+  # Nightly at 05:00 UTC -- after unlearning (04:00) and percolation (03:00),
+  # per-invocation only (no standing compute).
+  CorpusEntropyEngineSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-corpus-entropy-nightly${EnvironmentSuffix}"
+      Description: "Nightly Corpus Entropy Engine scan (ENC-TSK-K41 / B66 Ph5)"
+      ScheduleExpression: "cron(0 5 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CorpusEntropyEngineFunction.Arn
+          Id: corpus-entropy-nightly
+
+  CorpusEntropyEnginePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref CorpusEntropyEngineFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CorpusEntropyEngineSchedule.Arn
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-K42 / B66 Ph5: GDMP Stage-1 auto-remediation Lambda. Consumes K41's
+  # Compliance/Semantic detector output and deterministically resolves a
+  # whitelist of compliance_warnings classes via documents.patch, advancing
+  # raw documents to compliant maturity_state with no agent involvement.
+  # DATA-SAFETY: GDMP_DRY_RUN=1, GDMP_MUTATION_ENABLED=0, GDMP_IO_APPROVAL_RUNS=3
+  # (FTR-106 AC-4 io-approval-ramp pattern, same shape as UnlearningFunction).
+  # CEE_GDMP_HARD_DISABLED is the mandatory kill switch (ISS-465 cost-preflight
+  # precedent), checked first thing in the handler. Gamma-only (Condition:
+  # IsGamma): v3-prod is frozen (DOC-499FA089EC30).
+  # ---------------------------------------------------------------------------
+  CorpusEntropyGdmpRemediationFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-corpus-entropy-gdmp-remediation${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt CorpusEntropyGdmpRemediationRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          DOCUMENT_API_BASE: !Sub "https://enceladus-gamma.jreese.net/api/v1/documents"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
+          PROJECT_ID: enceladus
+          COMPLIANCE_SCORE_THRESHOLD: "70"
+          GDMP_STATE_BUCKET: !Ref S3Bucket
+          GDMP_STATE_PREFIX: !Sub "${S3EnvPrefix}gdmp-remediation-state"
+          GDMP_MAX_DOCS_PER_RUN: "200"
+          # DATA-SAFETY defaults -- io clears CEE_GDMP_HARD_DISABLED and later
+          # flips GDMP_MUTATION_ENABLED only after IO_APPROVAL_RUNS candidate
+          # reports have been reviewed. Mirrors UNLEARNING_* (K03) convention.
+          GDMP_DRY_RUN: "1"
+          GDMP_MUTATION_ENABLED: "0"
+          GDMP_IO_APPROVAL_RUNS: "3"
+          # ISS-465-style kill switch -- installed disabled by default; io
+          # clears to "0" to enable. Mirrors CEE_HARD_DISABLED (K41) /
+          # UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
+          # Cleared 2026-07-02 per io: lets the Lambda run on its initial
+          # nightly schedule. GDMP_DRY_RUN stays "1" / GDMP_MUTATION_ENABLED
+          # stays "0" -- this produces real candidate reports without
+          # mutating any documents yet (ENC-TSK-K42).
+          CEE_GDMP_HARD_DISABLED: "0"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: corpus-entropy-gdmp-remediation
+        - Key: Feature
+          Value: ENC-TSK-K42
+
+  # Nightly at 06:00 UTC -- after the CEE detection scan (05:00), so
+  # remediation always sees the freshest Compliance/Semantic findings.
+  CorpusEntropyGdmpRemediationSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-corpus-entropy-gdmp-nightly${EnvironmentSuffix}"
+      Description: "Nightly GDMP Stage-1 auto-remediation pass (ENC-TSK-K42 / B66 Ph5)"
+      ScheduleExpression: "cron(0 6 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CorpusEntropyGdmpRemediationFunction.Arn
+          Id: corpus-entropy-gdmp-nightly
+
+  CorpusEntropyGdmpRemediationPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref CorpusEntropyGdmpRemediationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CorpusEntropyGdmpRemediationSchedule.Arn
 
   # ---------------------------------------------------------------------------
   # ENC-TSK-H86 / ENC-FTR-111 Phase 1 (T5): Universal Arc-Walker telemetry +
@@ -2108,6 +2535,55 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
+  # ENC-TSK-K41 / B66 Ph5: CEE cost-preflight guard (ISS-465). Nightly cadence
+  # (1/day, EventBridge per-invocation, no standing compute) is far below the
+  # threshold; 512MB/300s ceiling per run keeps a full-corpus scan well under
+  # $1/mo even at max duration every night. 7-day invocation window mirrors
+  # the K02/K03 sibling alarms; breach indicates a runaway/duplicate schedule.
+  CorpusEntropyEngineCostHeadroomAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-corpus-entropy-invocations${EnvironmentSuffix}"
+      AlarmDescription: >-
+        ENC-TSK-K41 cost-preflight guard: 7-day invocation window; nightly cadence
+        should be <=7/week (threshold 10 allows buffer). Breach indicates runaway schedule.
+      Namespace: AWS/Events
+      MetricName: Invocations
+      Dimensions:
+        - Name: RuleName
+          Value: !Sub "enceladus-corpus-entropy-nightly${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 604800
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # ENC-TSK-K42 / B66 Ph5: GDMP Stage-1 remediation cost-preflight guard
+  # (ISS-465). Nightly cadence (1/day, EventBridge per-invocation, no standing
+  # compute) is far below the threshold. 7-day invocation window mirrors the
+  # K03/K41 sibling alarms; breach indicates a runaway/duplicate schedule.
+  CorpusEntropyGdmpRemediationCostHeadroomAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-corpus-entropy-gdmp-invocations${EnvironmentSuffix}"
+      AlarmDescription: >-
+        ENC-TSK-K42 cost-preflight guard: 7-day invocation window; nightly cadence
+        should be <=7/week (threshold 10 allows buffer). Breach indicates runaway schedule.
+      Namespace: AWS/Events
+      MetricName: Invocations
+      Dimensions:
+        - Name: RuleName
+          Value: !Sub "enceladus-corpus-entropy-gdmp-nightly${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 604800
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
   DeployCodeBuildFinalizeRule:
     Type: AWS::Events::Rule
     DeletionPolicy: Retain
@@ -2436,6 +2912,13 @@ Resources:
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-coordination-api${EnvironmentSuffix}*"
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/mcp/server*"
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/coordination/worker-runtime*"
+              # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access.
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
               - Sid: CoordinationTableAccess
                 Effect: Allow
                 Action:
@@ -2700,6 +3183,8 @@ Resources:
       # failed every request with 500 'Database read failed' (and had no log group).
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access ("Record" service).
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
       Policies:
         # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
         # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
@@ -2818,6 +3303,13 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-lifecycle-service${EnvironmentSuffix}*"
+              # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access.
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
               - Sid: DynamoDBTrackerRead
                 Effect: Allow
                 Action:
@@ -2867,6 +3359,13 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-scoring-service${EnvironmentSuffix}*"
+              # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access.
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
               - Sid: DynamoDBLessonScoringWriteback
                 Effect: Allow
                 Action:
@@ -3679,12 +4178,24 @@ Resources:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+                  # ENC-TSK-K73: the publisher's first step scans PROJECTS_TABLE
+                  # (_load_active_projects_from_ddb). This grant was missing, so
+                  # every gamma batch failed AccessDenied and the gamma snapshot
+                  # pipeline never completed a publish.
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
               - Sid: S3MobileFeedsWrite
                 Effect: Allow
                 Action:
                   - s3:PutObject
                   - s3:GetObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
+                # ENC-TSK-K69: gamma publishes into the ui-v2 origin bucket
+                # (same-origin /mobile/v1 serving through the gamma
+                # distribution); prod resource unchanged.
+                Resource: !If
+                  - IsGamma
+                  - !Sub "arn:aws:s3:::enceladus-ui-v2${EnvironmentSuffix}/mobile/v1/*"
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}mobile/v1/*"
               - Sid: EventBridgePut
                 Effect: Allow
                 Action: events:PutEvents
@@ -3702,6 +4213,20 @@ Resources:
                   Effect: Allow
                   Action: cloudfront:CreateInvalidation
                   Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/E2BOQXCW1TA6Y4"
+                - !Ref AWS::NoValue
+              # ENC-TSK-K69: gamma invalidates the ui-v2 gamma distribution
+              # after each snapshot publish (CF_DISTRIBUTION env). Previously
+              # gamma had NO invalidation grant and the code default pointed at
+              # the prod distribution — every gamma invalidation attempt failed.
+              - !If
+                - IsGamma
+                - Sid: CloudFrontInvalidationGamma
+                  Effect: Allow
+                  Action: cloudfront:CreateInvalidation
+                  Resource: !Join
+                    - ""
+                    - - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/"
+                      - !ImportValue "enceladus-ui-cdn-gamma-UiDistributionId"
                 - !Ref AWS::NoValue
               - !If
                 - IsProduction
@@ -4372,6 +4897,19 @@ Resources:
                   StringLike:
                     s3:prefix:
                       - !Sub "${S3EnvPrefix}pathway-telemetry/*"
+        # ENC-TSK-K43 (B66 Ph5): publish the Fiedler lambda2 GraphHealth metric.
+        # PutMetricData has no resource-level restriction in the CloudWatch API
+        # (metric namespaces are not ARN-addressable), matching the identical
+        # unscoped grant on ProdHealthMonitorPolicy (05-monitoring.yaml).
+        - PolicyName: GraphHealthMetricPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GraphHealthPutMetricData
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
       Tags:
         - Key: Project
           Value: enceladus
@@ -4604,6 +5142,14 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+              # ENC-TSK-K43 (B66 Ph5): cross-Lambda invoke into graph_query_api's
+              # publish_graph_health entrypoint for the real Fiedler lambda2
+              # (see _fetch_real_fiedler_value in lambda_function.py).
+              - Sid: InvokeGraphQueryApi
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -4659,6 +5205,110 @@ Resources:
                   - dynamodb:GetItem
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-percolation-telemetry${EnvironmentSuffix}"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ENC-TSK-K41 / B66 Ph5: Corpus Entropy Engine execution role (gamma-only).
+  # Reads the tracker/document/graph corpus exclusively over HTTPS via the
+  # governed tracker/document/graph_query_api endpoints (internal-key auth,
+  # no IAM grant needed for that path); writes ONLY CloudWatch metrics. No
+  # DynamoDB, S3, or Secrets Manager grants -- this Lambda is telemetry-only
+  # and never mutates the corpus (OGTM).
+  CorpusEntropyEngineRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-corpus-entropy-engine-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CorpusEntropyEnginePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ENC-TSK-K42 / B66 Ph5: GDMP Stage-1 remediation Lambda IAM Role
+  # (gamma-only). No direct DynamoDB/S3 document access -- all document
+  # reads/writes go through the governed document_api HTTP surface
+  # (internal API key auth). S3 access is scoped ONLY to this Lambda's own
+  # io-approval-ramp run-counter state prefix, mirroring UnlearningRole's
+  # narrow-prefix S3 scoping convention.
+  CorpusEntropyGdmpRemediationRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-corpus-entropy-gdmp-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CorpusEntropyGdmpRemediationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: GdmpRampStateS3
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}gdmp-remediation-state/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -4865,6 +5515,14 @@ Resources:
           ENCELADUS_COGNITO_DOMAIN: https://enceladus-status-356364570033.auth.us-east-1.amazoncognito.com
           MCP_AUDIT_CALLER_IDENTITY: devops-coordination-api-gamma
           MCP_SERVER_LOG_GROUP: /enceladus/mcp/server
+          # ENC-TSK-K77 / ENC-PLN-067: codify the OAuth issuer/callback host so a CFN compute
+          # deploy cannot strip the manually-set CUSTOM_DOMAIN (ENC-TSK-K75). Without it the MCP
+          # derives its OAuth issuer from the incoming Host header — which CloudFront sets to the
+          # origin Function-URL host (Managed-AllViewerExceptHostHeader) — so it advertised
+          # issuer=https://<raw-furl> and proxied /authorize to Cognito with an UNREGISTERED
+          # redirect_uri=https://<raw-furl>/callback, producing the Hosted-UI error (2026-07-02
+          # gamma auth outage). Mirrors prod enceladus-mcp-code's CUSTOM_DOMAIN=mcp.jreese.net.
+          CUSTOM_DOMAIN: mcp-gamma.jreese.net
           # ENC-ISS-410 / ENC-TSK-I14: gamma backend bases. The MCP front-end (server.py)
           # proxies the coordination, tracker, and graph planes to these hosts; if unset it
           # falls back to hardcoded prod defaults (https://jreese.net/... and the prod

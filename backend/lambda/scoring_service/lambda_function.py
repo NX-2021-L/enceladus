@@ -82,6 +82,90 @@ _VIBE_BOARD_ANCHORS = {
 
 _REQUIRED_PILLARS = {"efficiency", "human_protection", "intention", "alignment"}
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-K43 (B66 Ph5) — F_governance percentile normalization.
+# Math gate: DOC-A3D0CDF91CE9 Q3.1 ("Explicit F_governance Functional",
+# ENRICHING -> CORRECTED). F_structural, F_temporal, and F_evidential are not
+# directly summable (different units/scales); the corrected composite is a
+# percentile-rank sum, bounded [0, 3] where 0 == perfect health across all
+# three governance free-energy dimensions:
+#
+#   F_governance = percentile_rank(F_structural) + percentile_rank(F_temporal)
+#                  + percentile_rank(F_evidential)
+#
+# F_governance = 0 is NOT achievable in practice (Q3.1 sub-question — each
+# term is strictly >= 0 / > 0 for an active project), so this module treats
+# LOW F_governance (near the achievable minimum) as high compliance and HIGH
+# F_governance (near the theoretical max of 3.0) as low compliance, and folds
+# that into the Scoring Service's existing resonance anti-pattern-penalty
+# mechanism (_compute_resonance_score) as a governance compliance weighting
+# term — not a parallel scoring path, per the task's integration contract.
+# ---------------------------------------------------------------------------
+F_GOVERNANCE_MAX = 3.0  # theoretical ceiling: percentile_rank in [0,1] per term, 3 terms.
+
+# Multiplicative band the governance-compliance weight maps onto in
+# _compute_resonance_score, symmetric around 1.0x at weight==0.5 (neutral) so
+# a record with no historical distribution (percentile_rank's own neutral
+# midpoint) reproduces the exact pre-K43 score. Mirrors the scale of the
+# existing anti-pattern penalties immediately below (0.5x-0.8x) rather than a
+# wider swing, so F_governance nudges ranking without a single low-compliance
+# record ever dominating the vibe-board terms.
+_GOVERNANCE_MIN_MULTIPLIER = 0.8   # weight == 0.0 (worst observed governance health)
+_GOVERNANCE_MAX_MULTIPLIER = 1.2   # weight == 1.0 (perfect governance health, F_governance == 0)
+
+
+def percentile_rank(value: float, distribution) -> float:
+    """Fraction of ``distribution`` that is <= ``value``, in [0.0, 1.0].
+
+    Pure order-statistic percentile rank (no interpolation) against a
+    historical distribution — matches the Q3.1 gate's "percentile ranks
+    computed against historical distributions across all project-phases"
+    definition. An empty/falsy distribution degrades to the neutral midpoint
+    (0.5) rather than raising, since a governance signal with no history yet
+    (e.g. a brand-new project-phase) should neither help nor hurt ranking.
+    """
+    if not distribution:
+        return 0.5
+    values = sorted(float(v) for v in distribution)
+    n = len(values)
+    value = float(value)
+    count_le = sum(1 for v in values if v <= value)
+    return max(0.0, min(1.0, count_le / n))
+
+
+def compute_f_governance(
+    f_structural: float,
+    f_temporal: float,
+    f_evidential: float,
+    *,
+    structural_distribution=None,
+    temporal_distribution=None,
+    evidential_distribution=None,
+) -> float:
+    """DOC-A3D0CDF91CE9 Q3.1 corrected composite: sum of percentile ranks.
+
+    Each raw F_* value is converted to a percentile rank against its own
+    historical distribution (commensurability fix — the three free-energy
+    terms have different units and are not directly summable), then summed.
+    Bounded [0.0, 3.0]; 0.0 == perfect health on all three dimensions.
+    """
+    ps = percentile_rank(f_structural, structural_distribution)
+    pt = percentile_rank(f_temporal, temporal_distribution)
+    pe = percentile_rank(f_evidential, evidential_distribution)
+    return round(ps + pt + pe, 4)
+
+
+def governance_compliance_weight(f_governance: float) -> float:
+    """Map F_governance in [0, F_GOVERNANCE_MAX] to a compliance weight in
+    [0.0, 1.0], where 0.0 == worst-observed governance health and 1.0 ==
+    perfect health (F_governance == 0, per Q3.1). Linear inverse mapping —
+    simplest monotonic transform consistent with "lower F_governance is
+    better" and adequate for a first-order compliance weighting term (no
+    claim of a more elaborate curve; DOC-A3D0CDF91CE9 does not specify one).
+    """
+    clamped = max(0.0, min(F_GOVERNANCE_MAX, float(f_governance)))
+    return round(1.0 - (clamped / F_GOVERNANCE_MAX), 4)
+
 
 def _compute_lesson_pillar_composite(pillar_scores) -> float:
     """Weighted pillar composite: 0.25*eff + 0.30*hp + 0.20*int + 0.25*aln."""
@@ -91,8 +175,25 @@ def _compute_lesson_pillar_composite(pillar_scores) -> float:
     return round(composite, 4)
 
 
-def _compute_resonance_score(pillar_scores, anchor_alignments=None) -> float:
-    """Vibe board resonance with anti-pattern penalties. Returns [0.0, 1.0]."""
+def _compute_resonance_score(pillar_scores, anchor_alignments=None, f_governance: Optional[float] = None) -> float:
+    """Vibe board resonance with anti-pattern penalties. Returns [0.0, 1.0].
+
+    ``f_governance`` (ENC-TSK-K43 / B66 Ph5, additive keyword-only so the
+    verbatim-parity call sites in tracker_mutation / coordination_api that do
+    not pass it are unaffected) is the optional DOC-A3D0CDF91CE9 Q3.1
+    composite (percentile_rank(F_structural) + percentile_rank(F_temporal) +
+    percentile_rank(F_evidential), bounded [0, 3], 0 == perfect governance
+    health) for the record/project this score is being computed for. When
+    supplied, it is converted via governance_compliance_weight into a
+    multiplicative governance-compliance term applied the SAME way the
+    existing anti-pattern checks below apply their penalties — a bounded
+    multiplicative factor on ``raw`` — rather than a separate additive score
+    or a parallel ranking path. Below-median compliance (weight < 0.5, i.e.
+    F_governance above its own achievable-minimum band) dampens resonance;
+    above-median compliance (weight > 0.5) gives a mild boost, symmetric
+    around a neutral 1.0x at weight==0.5 (matches percentile_rank's own
+    neutral-midpoint convention for an unseeded distribution).
+    """
     if anchor_alignments:
         raw = sum(w * max(0.0, min(1.0, float(anchor_alignments.get(word, 0.0))))
                   for word, w in _VIBE_BOARD_ANCHORS.items())
@@ -120,6 +221,16 @@ def _compute_resonance_score(pillar_scores, anchor_alignments=None) -> float:
         raw *= 0.6
     if float(anchor_alignments.get("convergence", 0)) > 0.8 and float(anchor_alignments.get("play", 0)) < 0.2:
         raw *= 0.8
+
+    # ENC-TSK-K43: F_governance percentile-normalized compliance weighting.
+    # weight in [0,1], 0.5 neutral -> multiplier in [GOVERNANCE_MIN_MULTIPLIER, GOVERNANCE_MAX_MULTIPLIER].
+    if f_governance is not None:
+        weight = governance_compliance_weight(f_governance)
+        multiplier = (
+            _GOVERNANCE_MIN_MULTIPLIER
+            + (weight * (_GOVERNANCE_MAX_MULTIPLIER - _GOVERNANCE_MIN_MULTIPLIER))
+        )
+        raw *= multiplier
 
     return round(max(0.0, min(1.0, raw)), 4)
 
@@ -209,8 +320,23 @@ def score_lesson(message: dict) -> Tuple[str, dict]:
         logger.error("[H47] message for %s has missing/invalid pillar_scores; skipping", record_id)
         return "skipped", {"outcome": "skipped", "reason": "invalid_pillar_scores", "record_id": record_id}
 
+    # ENC-TSK-K43 (B66 Ph5): optional F_governance composite carried on the
+    # {lesson.scoring.requested} message (publisher-computed, e.g. by
+    # tracker_mutation from the record's own F_structural/F_temporal/
+    # F_evidential percentile ranks per DOC-A3D0CDF91CE9 Q3.1). Absent on
+    # messages from a publisher that hasn't wired governance signals in yet —
+    # _compute_resonance_score treats None as "no governance weighting term",
+    # so this degrades to the pre-K43 score rather than erroring.
+    f_governance = message.get("f_governance")
+    if f_governance is not None:
+        try:
+            f_governance = float(f_governance)
+        except (TypeError, ValueError):
+            logger.warning("[K43] message for %s has non-numeric f_governance=%r; ignoring", record_id, f_governance)
+            f_governance = None
+
     pillar_composite = _compute_lesson_pillar_composite(pillar_scores)
-    resonance_score = _compute_resonance_score(pillar_scores)
+    resonance_score = _compute_resonance_score(pillar_scores, f_governance=f_governance)
     outcome = _apply_scores(project_id, record_id, pillar_composite, resonance_score)
     detail = {
         "record_id": record_id,
@@ -218,6 +344,8 @@ def score_lesson(message: dict) -> Tuple[str, dict]:
         "resonance_score": resonance_score,
         "outcome": outcome,
     }
+    if f_governance is not None:
+        detail["f_governance"] = f_governance
     if outcome == "scored":
         logger.info(
             "[H47] scored %s pillar_composite=%s resonance_score=%s",

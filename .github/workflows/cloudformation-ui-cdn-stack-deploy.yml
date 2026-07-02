@@ -1,0 +1,337 @@
+name: CloudFormation UI CDN Stack Deploy
+
+# ENC-TSK-K52 / T1 — v4 UI Deploy Pipeline (DOC-3EE4F709EC98).
+# plan/apply split with a GitHub Environment gate, mirroring the sibling CFN
+# stack-deploy workflows (compute/api/monitoring). The plan job creates — but
+# does not execute — the 07-ui-cdn change-set and writes its resource summary
+# to the job summary. The apply job runs inside a GitHub Environment: v3-prod
+# (required reviewer: io) for main, v4-gamma (no reviewer) for v4/**. A merge
+# to main therefore PAUSES as a reviewable, rejectable request instead of
+# deploying prod directly (the ENC-FTR-120 / 1292/J08 class).
+#
+# Change-set creation uses `aws cloudformation deploy --no-execute-changeset`
+# so a merge to v4/main stands gamma up automatically, while prod is a gated
+# flip later. The gamma stack (enceladus-ui-cdn-gamma) validates on the
+# distribution's default *.cloudfront.net domain (no ACM/Cloudflare).
+#
+# Escalated prereq (07-ui-cdn.yaml Metadata.EscalatedPrereqs): the privileged
+# CFN deploy role needs cloudfront:* + S3 bucket-create/policy perms via an
+# io-gated attached-managed-policy IAM patch BEFORE the first gamma apply, or
+# the apply AccessDenies at change-set execution.
+
+on:
+  push:
+    branches:
+      - main
+      - 'v4/**'
+    paths:
+      - "infrastructure/cloudformation/07-ui-cdn.yaml"
+      - ".github/workflows/cloudformation-ui-cdn-stack-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: "CloudFormation stack name for 07-ui-cdn template"
+        type: string
+        required: false
+        default: "enceladus-ui-cdn"
+      api_origin_domain_name:
+        description: "API Gateway origin host for the /api/* behavior (host only; blank => template default)"
+        type: string
+        required: false
+        default: ""
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual UI CDN stack deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: cloudformation-ui-cdn-stack-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  TEMPLATE_FILE: infrastructure/cloudformation/07-ui-cdn.yaml
+  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  DEFAULT_STACK_NAME: enceladus-ui-cdn
+
+jobs:
+  plan:
+    name: Plan UI CDN stack change-set
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      stack_name: ${{ steps.params.outputs.stack_name }}
+      has_changes: ${{ steps.changeset.outputs.has_changes }}
+      changeset_arn: ${{ steps.changeset.outputs.changeset_arn }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify CF role secret is set
+        run: |
+          if [ -z "${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}" ]; then
+            echo "::error::AWS_CLOUDFORMATION_ROLE_TO_ASSUME secret is not set or empty. Set it to the ARN of a role with cloudformation:*, cloudfront:*, and S3 bucket-create/policy permissions."
+            exit 1
+          fi
+          echo "AWS_CLOUDFORMATION_ROLE_TO_ASSUME is set."
+
+      - name: Configure AWS credentials (OIDC privileged CloudFormation role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment parameters
+        id: params
+        env:
+          INPUT_STACK_NAME: ${{ github.event.inputs.stack_name }}
+        run: |
+          set -euo pipefail
+
+          stack_name="${INPUT_STACK_NAME:-${DEFAULT_STACK_NAME}}${ENVIRONMENT_SUFFIX}"
+          [ -n "${ENVIRONMENT_SUFFIX}" ] && environment="gamma" || environment="production"
+
+          {
+            echo "stack_name=${stack_name}"
+            echo "environment=${environment}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Recover a failed/rolled-back stack before the change-set (self-heal + diagnostics)
+        env:
+          STACK: ${{ steps.params.outputs.stack_name }}
+        run: |
+          set -euo pipefail
+
+          # A prior apply can leave the stack in a terminal-failed state that
+          # blocks a fresh CREATE (ROLLBACK_COMPLETE is not updatable). Surface
+          # the failure reason to the job log + summary, then delete so the
+          # subsequent change-set creates cleanly. Healthy/absent stacks are
+          # left untouched.
+          status=$(aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${STACK}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "Stack ${STACK} status: ${status}"
+
+          case "${status}" in
+            ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|UPDATE_ROLLBACK_FAILED|DELETE_FAILED)
+              echo "Stack ${STACK} is in ${status} — capturing failure events, then deleting for a clean re-create."
+              {
+                echo "## UI CDN stack recovery — ${STACK}"
+                echo ""
+                echo "Stack was in \`${status}\`; deleting before re-create. Recent failure events:"
+                echo ""
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              # Most-recent FAILED events first; limit to a readable slice.
+              aws cloudformation describe-stack-events \
+                --region "${AWS_REGION}" \
+                --stack-name "${STACK}" \
+                --query "reverse(StackEvents[?contains(ResourceStatus,'FAILED')].{t:Timestamp,id:LogicalResourceId,st:ResourceStatus,reason:ResourceStatusReason})" \
+                --output table 2>/dev/null | head -60 | tee -a "$GITHUB_STEP_SUMMARY" || echo "(describe-stack-events unavailable)" | tee -a "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+              aws cloudformation delete-stack \
+                --region "${AWS_REGION}" \
+                --stack-name "${STACK}"
+              aws cloudformation wait stack-delete-complete \
+                --region "${AWS_REGION}" \
+                --stack-name "${STACK}"
+              echo "Stack ${STACK} deleted; the change-set below will re-create it."
+              ;;
+            *)
+              echo "No recovery needed (status ${status} is absent or healthy)."
+              ;;
+          esac
+
+      - name: Create UI CDN stack change-set (no execute)
+        id: changeset
+        env:
+          INPUT_API_ORIGIN_DOMAIN_NAME: ${{ github.event.inputs.api_origin_domain_name }}
+        run: |
+          set -euo pipefail
+
+          # Only override ApiOriginDomainName when the dispatch supplied one;
+          # otherwise let the template Default (gamma execute-api host) stand,
+          # and `aws cloudformation deploy` reuse the stack's stored value on
+          # subsequent updates.
+          extra_overrides=()
+          if [ -n "${INPUT_API_ORIGIN_DOMAIN_NAME}" ]; then
+            extra_overrides+=("ApiOriginDomainName=${INPUT_API_ORIGIN_DOMAIN_NAME}")
+          fi
+
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --template-file "${TEMPLATE_FILE}" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --no-execute-changeset \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 07-ui-cdn/ \
+            --parameter-overrides \
+              Environment="${{ steps.params.outputs.environment }}" \
+              EnvironmentSuffix="${ENVIRONMENT_SUFFIX}" \
+              "${extra_overrides[@]}" 2>&1 | tee /tmp/plan-ui-cdn.log
+
+          if grep -q "No changes to deploy" /tmp/plan-ui-cdn.log; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "changeset_arn=" >> "${GITHUB_OUTPUT}"
+            {
+              echo "## UI CDN stack plan — ${{ steps.params.outputs.stack_name }}"
+              echo "No changes to deploy."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          changeset_arn=$(grep -oE 'arn:aws:cloudformation:[^ "]*changeSet/[^ "]*' /tmp/plan-ui-cdn.log | head -1)
+          if [ -z "${changeset_arn}" ]; then
+            echo "::error::Change-set creation output did not contain a change-set ARN."
+            exit 1
+          fi
+          echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          echo "changeset_arn=${changeset_arn}" >> "${GITHUB_OUTPUT}"
+
+      - name: Write change-set summary for the approval screen
+        if: steps.changeset.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## UI CDN stack plan — ${{ steps.params.outputs.stack_name }}"
+            echo ""
+            echo "Change-set: \`${{ steps.changeset.outputs.changeset_arn }}\`"
+            echo ""
+            echo '```'
+            aws cloudformation describe-change-set \
+              --region "${AWS_REGION}" \
+              --change-set-name "${{ steps.changeset.outputs.changeset_arn }}" \
+              --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}' \
+              --output table
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Apply UI CDN stack change-set
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    # CloudFront distribution create/update can take 40-60 min to propagate; 45
+    # min caused a mid-wait cancel that left the stack rolling back. 90 gives the
+    # distribution room to settle before the CFN wait is cancelled.
+    timeout-minutes: 90
+    # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma has
+    # none. A main-branch run therefore pauses here as a rejectable request.
+    environment: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+
+    steps:
+      - name: Configure AWS credentials (environment-scoped OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Execute reviewed change-set
+        id: deploy
+        env:
+          STACK: ${{ needs.plan.outputs.stack_name }}
+        run: |
+          set -euo pipefail
+          changeset_type=$(aws cloudformation describe-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}" \
+            --query 'ChangeSetType' --output text 2>/dev/null || echo "UPDATE")
+          aws cloudformation execute-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}"
+
+          # Terminal SUCCESS states depend on the change-set type; a fresh
+          # CREATE ends CREATE_COMPLETE, an UPDATE ends UPDATE_COMPLETE.
+          if [ "${changeset_type}" = "CREATE" ]; then
+            success_state="CREATE_COMPLETE"
+          else
+            success_state="UPDATE_COMPLETE"
+          fi
+          echo "Change-set type ${changeset_type}; waiting for ${success_state} on ${STACK}."
+
+          # Bounded fail-fast poll instead of `aws cloudformation wait`. The
+          # blocking waiter kept polling through a rollback until the OIDC token
+          # expired (~60 min ExpiredToken); this exits IMMEDIATELY the moment a
+          # rollback/terminal-failed status appears, and has an ~80 min wall
+          # clock guard so it can never outlive the 90-min job timeout.
+          deadline=$(( $(date +%s) + 80*60 ))
+          while true; do
+            st=$(aws cloudformation describe-stacks \
+              --region "${AWS_REGION}" \
+              --stack-name "${STACK}" \
+              --query 'Stacks[0].StackStatus' \
+              --output text 2>/dev/null || echo "DESCRIBE_FAILED")
+            echo "$(date -u +%H:%M:%S) ${STACK} status: ${st}"
+
+            case "${st}" in
+              "${success_state}")
+                echo "Stack ${STACK} reached ${st}."
+                exit 0
+                ;;
+              CREATE_COMPLETE|UPDATE_COMPLETE)
+                # Tolerate the sibling success state defensively.
+                echo "Stack ${STACK} reached ${st}."
+                exit 0
+                ;;
+              ROLLBACK_IN_PROGRESS|ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE|UPDATE_ROLLBACK_FAILED|DELETE_FAILED)
+                echo "::error::Stack ${STACK} entered terminal-failed status ${st} — failing fast (recent CREATE_FAILED events below)."
+                aws cloudformation describe-stack-events \
+                  --region "${AWS_REGION}" \
+                  --stack-name "${STACK}" \
+                  --query "reverse(StackEvents[?contains(ResourceStatus,'FAILED')].{t:Timestamp,id:LogicalResourceId,st:ResourceStatus,reason:ResourceStatusReason})" \
+                  --output table 2>/dev/null | head -60 || echo "(describe-stack-events unavailable)"
+                exit 1
+                ;;
+              *_IN_PROGRESS)
+                : # create/update still running — keep polling.
+                ;;
+              *)
+                echo "::warning::Unexpected stack status '${st}' for ${STACK} — continuing to poll."
+                ;;
+            esac
+
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Timed out after ~80 min waiting for ${STACK} to reach ${success_state} (last status ${st})."
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Report stack events on failure
+        if: failure() && steps.deploy.conclusion == 'failure'
+        run: |
+          echo "=== Stack events (last 20) ==="
+          aws cloudformation describe-stack-events \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'StackEvents[:20].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+            --output table || echo "(describe-stack-events unavailable)"
+
+      - name: Report deployed stack state + outputs
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
+            --output table
+          echo "=== Stack outputs (T2 UI deploy resolves UiBucketName + UiDistributionId from here) ==="
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'Stacks[0].Outputs' \
+            --output table

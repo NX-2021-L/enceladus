@@ -4,6 +4,9 @@ Description: >
   ENC-TSK-F63 AC-1: AppConfig application, environment, configuration profile,
   JSON Schema validator, and initial hosted configuration version replacing
   all ENABLE_* Lambda env vars with a governed, hot-reloadable config surface.
+  ENC-TSK-K33: schema relaxed from a closed key-enum to a typed-open schema
+  (additionalProperties typed, not false) so new boolean levers ship via an
+  AppConfig hosted-config push instead of a CFN deploy — see DOC-623CAFD9D1F6.
 
 Parameters:
   Environment:
@@ -74,9 +77,11 @@ Resources:
                 "enable_typed_relationships": { "type": "boolean" },
                 "enable_mcp_governance_prompt": { "type": "boolean" },
                 "enable_lifecycle_service_extraction": { "type": "boolean" },
-                "enable_scoring_service_extraction": { "type": "boolean" }
+                "enable_scoring_service_extraction": { "type": "boolean" },
+                "enable_dedup_auto_merge": { "type": "boolean" },
+                "dedup_auto_merge_kill_switch": { "type": "boolean" }
               },
-              "additionalProperties": false,
+              "additionalProperties": { "type": "boolean" },
               "required": [
                 "enable_claude_headless",
                 "enable_component_proposal",
@@ -104,7 +109,7 @@ Resources:
       ApplicationId: !Ref FeatureFlagsApplication
       ConfigurationProfileId: !Ref FeatureFlagsProfile
       ContentType: application/json
-      Description: "Initial version — all flags enabled (migrated from ENABLE_* env vars)"
+      Description: "Initial version - all flags enabled (migrated from ENABLE_* env vars)"
       Content: |
         {
           "enable_claude_headless": true,
@@ -124,7 +129,7 @@ Resources:
     Type: AWS::AppConfig::DeploymentStrategy
     Properties:
       Name: !Sub "enceladus-immediate${EnvironmentSuffix}"
-      Description: Immediate activation, no bake time — safe for boolean feature flags
+      Description: Immediate activation, no bake time - safe for boolean feature flags
       ReplicateTo: NONE
       DeploymentDurationInMinutes: 0
       FinalBakeTimeInMinutes: 0
@@ -143,7 +148,7 @@ Resources:
       ConfigurationProfileId: !Ref FeatureFlagsProfile
       ConfigurationVersion: !Ref FeatureFlagsInitialVersion
       DeploymentStrategyId: !Ref FeatureFlagsDeploymentStrategy
-      Description: "Initial activation — migrated from ENABLE_* env vars (ENC-TSK-F63)"
+      Description: "Initial activation - migrated from ENABLE_* env vars (ENC-TSK-F63)"
 
 Outputs:
   ApplicationId:

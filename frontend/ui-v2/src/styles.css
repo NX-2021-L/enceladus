@@ -1,0 +1,56 @@
+/* ENC-TSK-K21 · Global styles for PWA 2.0.
+ *
+ * Design contract (see frontend/design-system/README.md + SKILL.md "Five Laws"):
+ *   - Void canvas via var(--enc-void); content emerges like starlight.
+ *   - Teal-alpha borders; 8px card radii (var(--radius-lg)).
+ *   - cubic-bezier(0.4,0,0.2,1) "orbital" easing (var(--ease-orbit)).
+ *   - JetBrains Mono (var(--font-mono)) for record IDs.
+ *   - CSS variables ONLY — never hard-code a hex value in this app.
+ */
+
+/* Design-system tokens: the canonical --enc-* palette, type scale, radii,
+ * easing and the semantic element styles. Imported, never copied. */
+@import '../../design-system/colors_and_type.css';
+
+/* Tailwind v4 — utilities layered on top of the token system. */
+@import 'tailwindcss';
+
+/* Expose design-system tokens to Tailwind's theme so utilities like
+ * text-[var(--fg-muted)] and the raw var() references resolve consistently. */
+@theme {
+  --color-void: var(--enc-void);
+  --color-surface: var(--enc-surface);
+  --color-surface-alt: var(--enc-surface-alt);
+  --color-teal: var(--enc-teal);
+  --color-teal-light: var(--enc-teal-light);
+  --color-seafoam: var(--enc-seafoam);
+  --color-lavender: var(--enc-lavender);
+  --color-crimson: var(--enc-crimson);
+  --color-starlight: var(--enc-starlight);
+  --color-dust: var(--enc-dust);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+#root {
+  background-color: var(--enc-void);
+  color: var(--fg);
+}
+
+/* Law 4 — orbital motion, not spring physics. */
+button,
+a {
+  transition:
+    color var(--dur-base) var(--ease-orbit),
+    background-color var(--dur-base) var(--ease-orbit),
+    border-color var(--dur-base) var(--ease-orbit);
+}

@@ -1,0 +1,464 @@
+name: Deploy UI (ui-v2 PWA)
+
+# ENC-TSK-K53 / T2 — v4 UI Deploy Pipeline (DOC-3EE4F709EC98 L2).
+#
+# Ships the frontend/ui-v2 PWA 2.0 build to the S3 origin + CloudFront
+# distribution stood up by T1 (07-ui-cdn.yaml via
+# cloudformation-ui-cdn-stack-deploy.yml, stack enceladus-ui-cdn${suffix}).
+#
+# Branch-based env routing, mirroring cloudformation-ui-cdn-stack-deploy.yml
+# and _deploy.yml:
+#   push to v4/**  -> environment v4-gamma (ungated) — gamma auto-ships.
+#   push to main   -> environment v3-prod (io required-reviewer) — the deploy
+#                     PAUSES as a reviewable, rejectable request instead of
+#                     flipping prod directly (the ENC-FTR-120 invariant).
+#
+# The BUILD job is env-agnostic (no AWS, no environment) and produces dist/ as
+# an artifact. The DEPLOY job is the ONLY environment-scoped, AWS-mutating job:
+# it resolves the S3 bucket + CloudFront distribution id from the T1 stack's
+# CFN exports at runtime (never hardcoded), syncs dist/ with a cache-control
+# split (immutable hashed assets vs no-cache app shell), then invalidates the
+# app-shell paths. record_deploy writes a DPL telemetry record (ENC-ISS-451
+# mechanism) after a successful deploy, and never blocks it.
+#
+# Escalated prereq (deploy role): this workflow assumes AWS_UI_DEPLOY_ROLE_TO_ASSUME
+# when present, else falls back to AWS_CLOUDFORMATION_ROLE_TO_ASSUME. The
+# UI-deploy role needs, scoped to the UI bucket + distribution:
+#   s3:PutObject, s3:DeleteObject, s3:ListBucket  (on enceladus-ui-v2${suffix} + /*)
+#   s3:GetObject                                   (for --delete diffing)
+#   cloudfront:CreateInvalidation                  (on the ui-v2 distribution)
+#   cloudformation:DescribeStacks                  (to read the T1 stack exports)
+# These are io-gated to add as an ATTACHED managed policy (the CFN deploy role's
+# inline quota is exhausted — J85 / PR #733 pattern) BEFORE the first deploy if
+# the fallback CFN role is used, or the s3 sync AccessDenies.
+
+on:
+  push:
+    branches:
+      - main
+      - 'v4/**'
+    paths:
+      - "frontend/ui-v2/**"
+      - ".github/workflows/_ui_deploy.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this UI deploy is being triggered"
+        type: string
+        required: false
+        default: "manual ui-v2 deploy"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ui-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  # Env-conditional suffix — mirrors cloudformation-ui-cdn-stack-deploy.yml.
+  # v4/** -> "-gamma" (stack enceladus-ui-cdn-gamma), main -> "" (prod).
+  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  UI_CDN_STACK_BASE: enceladus-ui-cdn
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # BUILD — env-agnostic. No AWS, no environment gate. Produces dist/ artifact.
+  # VITE_API_BASE=/api/v1 is injected at build so the PWA's fetches are
+  # same-origin (the /api/* CloudFront behavior from 07-ui-cdn proxies them to
+  # API Gateway with auth cookies intact).
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ui-v2 PWA
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend/ui-v2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/ui-v2/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        env:
+          # Same-origin API base (07-ui-cdn /api/* behavior proxies to API GW).
+          VITE_API_BASE: /api/v1
+          # Same-origin feed snapshot base — the gamma feed publisher writes
+          # mobile/v1/tasks.json into the UI origin bucket (ENC-TSK-K72).
+          VITE_FEED_BASE_URL: /mobile/v1
+          # ENC-TSK-K70: AppSync Events realtime config. Sourced from GitHub
+          # repo VARIABLES (not CFN describe-stacks) because this build job is
+          # deliberately credential-less and ungated — granting it AWS access
+          # to resolve stack outputs would weaken the FTR-120 gating model.
+          # Set once after 06-appsync-events.yaml provisions (K56):
+          #   gh variable set VITE_APPSYNC_HTTP_HOST     --body <HttpEndpoint host>
+          #   gh variable set VITE_APPSYNC_REALTIME_HOST --body <RealtimeEndpoint host>
+          #   gh variable set VITE_APPSYNC_API_KEY       --body <ApiKey>
+          # Empty/unset => appsyncConfig.ts disables realtime and the feed pane
+          # degrades to S3-snapshot mode (skip-if-absent by construction). The
+          # API key is public-by-design (it ships in the JS bundle either way).
+          VITE_APPSYNC_HTTP_HOST: ${{ vars.VITE_APPSYNC_HTTP_HOST }}
+          VITE_APPSYNC_REALTIME_HOST: ${{ vars.VITE_APPSYNC_REALTIME_HOST }}
+          VITE_APPSYNC_API_KEY: ${{ vars.VITE_APPSYNC_API_KEY }}
+          VITE_APPSYNC_REGION: us-west-2
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-v2-dist-${{ github.sha }}
+          path: frontend/ui-v2/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY — environment-scoped, AWS-mutating. The ONLY gated job.
+  # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma none.
+  # A main-branch run therefore pauses here as a rejectable request.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy ui-v2 -> ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+    outputs:
+      bucket: ${{ steps.resolve.outputs.bucket }}
+      distribution_id: ${{ steps.resolve.outputs.distribution_id }}
+      stack_name: ${{ steps.resolve.outputs.stack_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-v2-dist-${{ github.sha }}
+          path: frontend/ui-v2/dist
+
+      - name: Select UI-deploy role
+        id: role
+        env:
+          # Prefer a dedicated least-privilege UI-deploy role; fall back to the
+          # privileged CFN role (which must carry the s3:*/cloudfront perms
+          # documented in the file header) when the dedicated one is unset.
+          UI_ROLE: ${{ secrets.AWS_UI_DEPLOY_ROLE_TO_ASSUME }}
+          CFN_ROLE: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+        run: |
+          set -euo pipefail
+          if [ -n "${UI_ROLE}" ]; then
+            echo "role_arn=${UI_ROLE}" >> "${GITHUB_OUTPUT}"
+            echo "Using dedicated AWS_UI_DEPLOY_ROLE_TO_ASSUME."
+          elif [ -n "${CFN_ROLE}" ]; then
+            echo "role_arn=${CFN_ROLE}" >> "${GITHUB_OUTPUT}"
+            echo "::warning::AWS_UI_DEPLOY_ROLE_TO_ASSUME unset — falling back to AWS_CLOUDFORMATION_ROLE_TO_ASSUME. It needs s3:PutObject/DeleteObject/ListBucket/GetObject on the UI bucket + cloudfront:CreateInvalidation + cloudformation:DescribeStacks."
+          else
+            echo "::error::Neither AWS_UI_DEPLOY_ROLE_TO_ASSUME nor AWS_CLOUDFORMATION_ROLE_TO_ASSUME is set. Cannot assume an AWS role for the UI deploy."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (environment-scoped OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ steps.role.outputs.role_arn }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve bucket + distribution from T1 stack exports
+        id: resolve
+        run: |
+          set -euo pipefail
+          STACK="${UI_CDN_STACK_BASE}${ENVIRONMENT_SUFFIX}"
+          echo "Resolving UI CDN outputs from stack: ${STACK} (region ${AWS_REGION})"
+
+          # describe-stacks errors (non-zero) if the stack does not exist yet.
+          if ! aws cloudformation describe-stacks \
+                --stack-name "${STACK}" \
+                --region "${AWS_REGION}" >/dev/null 2>&1; then
+            echo "::error::UI CDN stack not deployed yet: '${STACK}' does not exist in ${AWS_REGION}. Apply T1 (cloudformation-ui-cdn-stack-deploy.yml) before deploying the UI."
+            exit 1
+          fi
+
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK}" --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='UiBucketName'].OutputValue" \
+            --output text)
+          DIST=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK}" --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='UiDistributionId'].OutputValue" \
+            --output text)
+
+          # describe-stacks returns empty/None for a missing output key even when
+          # the stack exists (e.g. an older stack revision) — fail loud rather
+          # than sync into an empty bucket name.
+          if [ -z "${BUCKET}" ] || [ "${BUCKET}" = "None" ] || \
+             [ -z "${DIST}" ] || [ "${DIST}" = "None" ]; then
+            echo "::error::UI CDN stack '${STACK}' exists but is missing UiBucketName/UiDistributionId outputs (bucket='${BUCKET}' dist='${DIST}'). Is T1 fully applied?"
+            exit 1
+          fi
+
+          echo "stack_name=${STACK}"        >> "${GITHUB_OUTPUT}"
+          echo "bucket=${BUCKET}"           >> "${GITHUB_OUTPUT}"
+          echo "distribution_id=${DIST}"    >> "${GITHUB_OUTPUT}"
+          echo "Resolved bucket=${BUCKET}  distribution=${DIST}"
+
+      - name: Sync build to S3 (cache-control split)
+        env:
+          BUCKET: ${{ steps.resolve.outputs.bucket }}
+        run: |
+          set -euo pipefail
+          DIST_DIR=frontend/ui-v2/dist
+          [ -d "${DIST_DIR}" ] || { echo "::error::${DIST_DIR} missing — build artifact not downloaded."; exit 1; }
+
+          # 1. Full sync (mirrors the bucket, --delete removes stale objects).
+          #    Default cache-control here is conservative; the app-shell files
+          #    are re-put with no-cache below, and hashed assets/ are re-put
+          #    immutable below, so the ordering does not matter for those.
+          #    ENC-TSK-K69: mobile/* is EXCLUDED from the delete-mirror — the
+          #    gamma feed publisher (devops-feed-publisher-gamma) writes the
+          #    /mobile/v1 snapshot JSON into this bucket for same-origin
+          #    serving; a UI deploy must never wipe it.
+          aws s3 sync "${DIST_DIR}/" "s3://${BUCKET}/" --delete \
+            --exclude "mobile/*" \
+            --cache-control "public,max-age=0,must-revalidate"
+
+          # 2. Hashed, content-addressed build output under assets/ — safe to
+          #    cache forever (a new build gets new filenames).
+          if [ -d "${DIST_DIR}/assets" ]; then
+            aws s3 sync "${DIST_DIR}/assets/" "s3://${BUCKET}/assets/" \
+              --cache-control "public,max-age=31536000,immutable"
+          fi
+
+          # 3. App-shell entry points MUST NOT be cached (a stale index.html
+          #    would pin the browser to an old asset graph). Re-put each with
+          #    no-cache; skip any that a given build did not emit.
+          for f in index.html sw.js manifest.webmanifest; do
+            if [ -f "${DIST_DIR}/${f}" ]; then
+              aws s3 cp "${DIST_DIR}/${f}" "s3://${BUCKET}/${f}" \
+                --cache-control "no-cache" \
+                --metadata-directive REPLACE
+            else
+              echo "note: ${f} not present in build output — skipping no-cache re-put."
+            fi
+          done
+
+      - name: Invalidate CloudFront app-shell paths
+        env:
+          DIST: ${{ steps.resolve.outputs.distribution_id }}
+        run: |
+          set -euo pipefail
+          aws cloudfront create-invalidation \
+            --distribution-id "${DIST}" \
+            --paths /index.html /sw.js /manifest.webmanifest
+
+      # Post-deploy smoke test against the live distribution. Proves three
+      # things end-to-end: (1) the app shell serves 200 text/html from the S3
+      # origin, (2) /api/* routes to the API-Gateway origin (a 401 from the
+      # unauthenticated /api/v1/projects means the behavior reaches API GW and
+      # Cognito auth is enforced — a 200 would mean auth is OFF; a 404/000 means
+      # /api/* routing is broken). Health is a soft check (warning only). The
+      # resolved DOMAIN is echoed as LIVE_UI_URL= so it is greppable in the log.
+      - name: Validate live distribution (shell + /api routing)
+        env:
+          STACK: ${{ steps.resolve.outputs.stack_name }}
+        run: |
+          set -euo pipefail
+          DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK}" --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='UiDistributionDomainName'].OutputValue" \
+            --output text)
+          if [ -z "${DOMAIN}" ] || [ "${DOMAIN}" = "None" ]; then
+            echo "::error::UI CDN stack '${STACK}' is missing the UiDistributionDomainName output — cannot validate the live distribution."
+            exit 1
+          fi
+          echo "LIVE_UI_URL=https://${DOMAIN}/"
+
+          # Give the invalidation a moment to propagate before curling.
+          sleep 20
+
+          # Capture each result defensively so a curl failure surfaces as a
+          # 000 code under set -e rather than aborting the step early.
+          SHELL_RESULT=$(curl -sS -o /dev/null -w '%{http_code} %{content_type}' "https://${DOMAIN}/" || true)
+          SHELL_CODE=$(echo "${SHELL_RESULT}" | awk '{print $1}')
+          SHELL_CT=$(echo "${SHELL_RESULT}" | awk '{print $2}')
+          HEALTH=$(curl -sS -o /dev/null -w '%{http_code}' "https://${DOMAIN}/api/v1/health" || true)
+          PROJ=$(curl -sS -o /dev/null -w '%{http_code}' "https://${DOMAIN}/api/v1/projects" || true)
+
+          # Evaluate expectations.
+          shell_ok="FAIL"; [ "${SHELL_CODE}" = "200" ] && case "${SHELL_CT}" in text/html*) shell_ok="PASS";; esac
+          health_ok="WARN"; [ "${HEALTH}" = "200" ] && health_ok="PASS"
+          proj_ok="FAIL";  [ "${PROJ}" = "401" ] && proj_ok="PASS"
+
+          {
+            echo "## UI live-distribution validation — ${STACK}"
+            echo ""
+            echo "LIVE_UI_URL: https://${DOMAIN}/"
+            echo ""
+            echo "| Check | Endpoint | Result | Expected | Status |"
+            echo "| --- | --- | --- | --- | --- |"
+            echo "| Shell | \`/\` | \`${SHELL_CODE} ${SHELL_CT}\` | 200 + text/html | ${shell_ok} |"
+            echo "| Health | \`/api/v1/health\` | \`${HEALTH}\` | 200 | ${health_ok} |"
+            echo "| API routing/auth | \`/api/v1/projects\` | \`${PROJ}\` | 401 (auth enforced) | ${proj_ok} |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "Shell:  ${SHELL_CODE} ${SHELL_CT}  -> ${shell_ok}"
+          echo "Health: ${HEALTH}  -> ${health_ok}"
+          echo "API:    ${PROJ}  -> ${proj_ok}"
+
+          # FAIL conditions: shell not 200/text/html, OR /api/v1/projects not 401
+          # (200 = auth not enforced; 404/000 = /api/* routing broken). A
+          # non-200 health is only a warning and never fails the step.
+          fatal=0
+          if [ "${shell_ok}" != "PASS" ]; then
+            echo "::error::App shell did not return 200 text/html (got '${SHELL_CODE} ${SHELL_CT}') at https://${DOMAIN}/"
+            fatal=1
+          fi
+          if [ "${proj_ok}" != "PASS" ]; then
+            echo "::error::/api/v1/projects returned '${PROJ}', expected 401. A 200 means Cognito auth is not enforced; a 404/000 means the /api/* behavior is not routing to the API-Gateway origin."
+            fatal=1
+          fi
+          if [ "${health_ok}" != "PASS" ]; then
+            echo "::warning::/api/v1/health returned '${HEALTH}' (expected 200) — non-fatal warning."
+          fi
+          if [ "${fatal}" -ne 0 ]; then
+            echo "Live-distribution validation: FAIL"
+            exit 1
+          fi
+          echo "Live-distribution validation: PASS"
+
+  # ---------------------------------------------------------------------------
+  # RECORD_DEPLOY — write a DPL record so deploy.history stays current
+  # (ENC-ISS-451 mechanism, mirrored from _deploy.yml). Only runs after a
+  # successful deploy. continue-on-error: telemetry MUST NEVER block the deploy.
+  # ---------------------------------------------------------------------------
+  record_deploy:
+    name: Record deploy -> DPL (ENC-ISS-451)
+    needs: [build, deploy]
+    if: always() && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 5
+
+    steps:
+      - name: Fetch current governance hash
+        id: govhash
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          HASH=$(curl -sf \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Accept: application/json" \
+            "https://jreese.net/api/v1/health" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('governance_hash',''))" 2>/dev/null || true)
+          echo "governance_hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Governance hash: ${HASH:-(fetch failed)}"
+
+      - name: Extract PR number for merge commit
+        id: pr_info
+        env:
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          PR_NUMBER=$(gh api "/repos/$GITHUB_REPOSITORY/commits/${COMMIT_SHA}/pulls" \
+            --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -z "$PR_NUMBER" ]; then
+            MSG="${{ github.event.head_commit.message }}"
+            PR_NUMBER=$(echo "$MSG" | grep -oE '(^Merge pull request #|#)[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+          fi
+          echo "pr_number=${PR_NUMBER:-0}" >> "$GITHUB_OUTPUT"
+          echo "PR number: ${PR_NUMBER:-(not found, using 0)}"
+
+      - name: Submit DPL deploy record
+        id: submit
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+          GOVERNANCE_HASH: ${{ steps.govhash.outputs.governance_hash }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          COMMIT_SHA: ${{ github.sha }}
+          # v4/** -> v4-gamma, main -> v3-prod (same expression as the deploy job).
+          ENVIRONMENT: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+          MERGED_AT: ${{ github.event.head_commit.timestamp }}
+          DISTRIBUTION_ID: ${{ needs.deploy.outputs.distribution_id }}
+          BUCKET: ${{ needs.deploy.outputs.bucket }}
+          STACK_NAME: ${{ needs.deploy.outputs.stack_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          BODY=$(python3 - <<'PY'
+          import json, os
+          pr_raw = os.environ.get('PR_NUMBER', '0')
+          pr_id = int(pr_raw) if pr_raw.isdigit() else 0
+          sha = os.environ['COMMIT_SHA']
+          env = os.environ['ENVIRONMENT']
+          dist = os.environ.get('DISTRIBUTION_ID', '')
+          bucket = os.environ.get('BUCKET', '')
+          stack = os.environ.get('STACK_NAME', '')
+          ref = os.environ.get('REF_NAME', '')
+          acct = "356364570033"
+          print(json.dumps({
+              "project_id": "enceladus",
+              "change_type": "patch",
+              "deployment_type": "ui_update",
+              "summary": f"ui-v2 PWA deploy to {env} @ {sha[:7]} (PR #{pr_id})",
+              "changes": [
+                  f"commit_sha: {sha}",
+                  f"branch: {ref}",
+                  f"environment: {env}",
+                  f"bucket: {bucket}",
+                  f"distribution_id: {dist}",
+                  f"stack: {stack}",
+                  "workflow: _ui_deploy.yml / Deploy UI (ui-v2 PWA)",
+              ],
+              "pr_id": pr_id,
+              "merged_at": os.environ['MERGED_AT'],
+              "pr_owner": "NX-2021-L",
+              "pr_repo": "enceladus",
+              "submitted_by": "gha-ui-deploy-pipeline",
+              "non_ui_config": {
+                  "service_group": "ui",
+                  # The CloudFront distribution is the UI deploy target.
+                  "target_arn": f"arn:aws:cloudfront::{acct}:distribution/{dist}",
+              },
+              "governance_hash": os.environ['GOVERNANCE_HASH'],
+          }))
+          PY
+          )
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "X-Coordination-Internal-Key: ${COORDINATION_INTERNAL_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "$BODY" \
+            "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/deploy/submit")
+
+          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+          echo "Response (HTTP $HTTP_CODE): $HTTP_BODY"
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+            DEPLOY_ID=$(echo "$HTTP_BODY" | python3 -c \
+              "import sys,json; d=json.load(sys.stdin); print(d.get('deploy_id') or d.get('request_id') or d.get('spec_id') or 'unknown')" \
+              2>/dev/null || echo "unknown")
+            echo "deploy_id=${DEPLOY_ID}" >> "$GITHUB_OUTPUT"
+            echo "DPL record written: ${DEPLOY_ID}"
+          else
+            echo "deploy_id=failed-http-${HTTP_CODE}" >> "$GITHUB_OUTPUT"
+            echo "DPL record submit failed (HTTP ${HTTP_CODE}) — deploy succeeded, telemetry gap only"
+            exit 1
+          fi

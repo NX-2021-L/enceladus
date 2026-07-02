@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus governance-intent AppConfig surface — ENC-TSK-K33 (Phase 2 of the
+  ENC-ISS-477 retirement, per DOC-623CAFD9D1F6). Adds two configuration
+  profiles under the EXISTING AppConfig Application/Environment provisioned by
+  06-feature-flags.yaml: `budget-hierarchy` (numeric calibration, activates the
+  code already written in coordination_api/budget_hierarchy.py, previously
+  never CFN-codified) and `governance-doctrine` (typed-open string/number/
+  boolean doctrine levers, no consumer yet — infrastructure only). Neither
+  profile touches the DDB governance-dictionary surface or the `feature-flags`
+  profile; both are strictly additive per ENC-LSN-053 / PLN-047 discipline.
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+  AppConfigApplicationId:
+    Type: String
+    Description: >-
+      AppConfig Application ID from the 06-feature-flags stack Outputs
+      (ApplicationId). Pass via --parameter-overrides.
+  AppConfigEnvironmentId:
+    Type: String
+    Description: >-
+      AppConfig Environment ID from the 06-feature-flags stack Outputs
+      (EnvironmentId). Pass via --parameter-overrides.
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # budget-hierarchy — numeric calibration surface (ENC-FTR-083 / ENC-TSK-I86)
+  # Activates coordination_api/budget_hierarchy.py::_appconfig_budget_config(),
+  # which has read this profile by convention since I86 but had no CFN
+  # resource behind it — always fell through to hardcoded defaults in practice.
+  # ---------------------------------------------------------------------------
+
+  BudgetHierarchyProfile:
+    Type: AWS::AppConfig::ConfigurationProfile
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      Name: budget-hierarchy
+      LocationUri: hosted
+      Description: >-
+        Four-scale token budget vector (session/wave/project/corpus), live-
+        overridable per ENC-TSK-I86 AC-1 / ENC-TSK-K33.
+      Validators:
+        - Type: JSON_SCHEMA
+          Content: |
+            {
+              "$schema": "http://json-schema.org/draft-04/schema#",
+              "type": "object",
+              "properties": {
+                "budget_session_tokens": { "type": "number", "minimum": 0, "exclusiveMinimum": true },
+                "budget_wave_tokens":    { "type": "number", "minimum": 0, "exclusiveMinimum": true },
+                "budget_project_tokens": { "type": "number", "minimum": 0, "exclusiveMinimum": true },
+                "budget_corpus_tokens":  { "type": "number", "minimum": 0, "exclusiveMinimum": true }
+              },
+              "additionalProperties": { "type": "number" }
+            }
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: budget-hierarchy
+
+  BudgetHierarchyInitialVersion:
+    Type: AWS::AppConfig::HostedConfigurationVersion
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      ConfigurationProfileId: !Ref BudgetHierarchyProfile
+      ContentType: application/json
+      Description: >-
+        Initial version - mirrors DEFAULT_SCALE_BUDGETS_TOKENS in
+        budget_hierarchy.py exactly, so activation is a no-op until someone
+        deliberately pushes a change.
+      Content: |
+        {
+          "budget_session_tokens": 200000,
+          "budget_wave_tokens": 50000,
+          "budget_project_tokens": 500000,
+          "budget_corpus_tokens": 2000000
+        }
+
+  BudgetHierarchyDeploymentStrategy:
+    Type: AWS::AppConfig::DeploymentStrategy
+    Properties:
+      Name: !Sub "enceladus-governance-immediate${EnvironmentSuffix}"
+      Description: Immediate activation, no bake time - matches feature-flags precedent.
+      ReplicateTo: NONE
+      DeploymentDurationInMinutes: 0
+      FinalBakeTimeInMinutes: 0
+      GrowthFactor: 100
+      GrowthType: LINEAR
+
+  BudgetHierarchyInitialDeployment:
+    Type: AWS::AppConfig::Deployment
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      EnvironmentId: !Ref AppConfigEnvironmentId
+      ConfigurationProfileId: !Ref BudgetHierarchyProfile
+      ConfigurationVersion: !Ref BudgetHierarchyInitialVersion
+      DeploymentStrategyId: !Ref BudgetHierarchyDeploymentStrategy
+      Description: "Initial activation - ENC-TSK-K33, defaults match hardcoded fallback"
+
+  # ---------------------------------------------------------------------------
+  # governance-doctrine — string/number/boolean doctrine levers. No named
+  # consumer yet (ENC-TSK-K32 design: built for future levers, K33's
+  # verification is infrastructure-only — push/read round-trip via a
+  # synthetic canary key, not a behavioral test).
+  # ---------------------------------------------------------------------------
+
+  GovernanceDoctrineProfile:
+    Type: AWS::AppConfig::ConfigurationProfile
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      Name: governance-doctrine
+      LocationUri: hosted
+      Description: >-
+        Typed-open doctrine levers (string/number/boolean) that are neither a
+        boolean feature gate nor a budget number - e.g. a canary preference
+        name, an SLA minute count. Placeholder until a first real consumer
+        lands; see DOC-623CAFD9D1F6.
+      Validators:
+        - Type: JSON_SCHEMA
+          Content: |
+            {
+              "$schema": "https://json-schema.org/draft/2019-09/schema",
+              "type": "object",
+              "additionalProperties": { "type": ["string", "number", "boolean"] }
+            }
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: governance-doctrine
+
+  GovernanceDoctrineInitialVersion:
+    Type: AWS::AppConfig::HostedConfigurationVersion
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      ConfigurationProfileId: !Ref GovernanceDoctrineProfile
+      ContentType: application/json
+      Description: "Placeholder - synthetic canary key only, no real consumer yet (ENC-TSK-K33)"
+      Content: |
+        {
+          "_canary": "k33-verification-placeholder"
+        }
+
+  GovernanceDoctrineInitialDeployment:
+    Type: AWS::AppConfig::Deployment
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      EnvironmentId: !Ref AppConfigEnvironmentId
+      ConfigurationProfileId: !Ref GovernanceDoctrineProfile
+      ConfigurationVersion: !Ref GovernanceDoctrineInitialVersion
+      DeploymentStrategyId: !Ref BudgetHierarchyDeploymentStrategy
+      Description: "Initial activation - placeholder, ENC-TSK-K33"
+
+Outputs:
+  BudgetHierarchyProfileId:
+    Value: !Ref BudgetHierarchyProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-BudgetHierarchyProfileId"
+
+  GovernanceDoctrineProfileId:
+    Value: !Ref GovernanceDoctrineProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-GovernanceDoctrineProfileId"

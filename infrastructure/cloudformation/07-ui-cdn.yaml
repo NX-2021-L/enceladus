@@ -1,0 +1,292 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus UI CDN Layer — S3 origin + CloudFront distribution for the
+  frontend/ui-v2 PWA 2.0 (ENC-TSK-K52 / T1). Env-parameterized (gamma|prod)
+  mirroring 02-compute.yaml. Default cache behavior serves the SPA from a
+  private S3 bucket via an Origin Access Control (SigV4); an ordered /api/*
+  behavior proxies to the environment's API Gateway so the same-origin
+  fetches in frontend/ui-v2 (VITE_API_BASE=/api/v1) reach the backend with
+  their auth cookies intact. Custom-domain aliases + ACM are OPTIONAL and
+  gated behind the CustomDomain parameter, so gamma validates on the default
+  *.cloudfront.net domain with no ACM/Cloudflare dependency.
+  Part of the v4 UI Deploy Pipeline (DOC-3EE4F709EC98).
+
+Metadata:
+  EscalatedPrereqs:
+    # ENC-TSK-K52 / T1: a CloudFormation deploy role cannot self-grant the
+    # permissions it needs mid-deploy. These prerequisites are io-gated and
+    # MUST land BEFORE this stack's first gamma apply, or the apply
+    # AccessDenies at change-set execution.
+    DeployRoleIamPatch:
+      Role: AWS_CLOUDFORMATION_ROLE_TO_ASSUME (the privileged CFN OIDC role assumed by cloudformation-ui-cdn-stack-deploy.yml)
+      MissingPermissions:
+        - "cloudfront:* (CreateOriginAccessControl, CreateDistribution, UpdateDistribution, TagResource, GetDistribution, CreateInvalidation)"
+        - "cloudfront function ops for the SPA rewrite (ENC-TSK-K68): CreateFunction, PublishFunction, DescribeFunction, GetFunction, UpdateFunction, DeleteFunction"
+        - "s3:CreateBucket, s3:PutBucketPolicy, s3:PutBucketVersioning, s3:PutBucketPublicAccessBlock, s3:PutEncryptionConfiguration, s3:PutBucketTagging, s3:GetBucket*, s3:DeleteBucketPolicy"
+      Rationale: >
+        The CFN deploy role's inline policy quota is exhausted (see memory:
+        CFN deploy role inline quota exhausted). New grants must be an ATTACHED
+        managed policy (the J85 / PR #733 pattern), applied via an io-gated IAM
+        patch workflow, NOT an inline addition. Without it the gamma apply
+        fails AccessDenied on the S3 bucket create / bucket policy put / OAC
+        create / distribution create.
+    CustomDomainCutover:
+      Status: LATER STEP — deliberately NOT wired here.
+      Steps:
+        - "Provision an ACM certificate in us-east-1 (CloudFront requires us-east-1 certs) for the target hostname."
+        - "Set the CustomDomain + AcmCertificateArn parameters and redeploy so the distribution gains its Aliases + ViewerCertificate."
+        - "Add the Cloudflare CNAME (proxied) pointing the hostname at the distribution's *.cloudfront.net domain."
+      Rationale: >
+        Gamma is validated on the distribution's default *.cloudfront.net
+        domain (no cert required). The alias/ACM/Cloudflare wiring is a
+        separate, later cutover so gamma stand-up is not blocked on DNS/cert.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, gamma]
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+    Description: >
+      Appended to every resource name. Production uses "" (zero drift),
+      gamma uses "-gamma" for parallel deployment.
+  ApiOriginDomainName:
+    Type: String
+    Default: "hi0dzmvqrc.execute-api.us-west-2.amazonaws.com"
+    Description: >
+      Domain name of the API Gateway origin for the /api/* cache behavior
+      (host only — no scheme, no path). Default is the GAMMA HttpApi
+      (devops-tracker-api-gamma, id hi0dzmvqrc) regional execute-api endpoint
+      in us-west-2, sourced from 03-api.yaml's gamma tracker plane comment
+      (line ~368) and the HttpApi.ApiEndpoint output. This AWS-owned HTTPS
+      host needs no ACM/Cloudflare, so gamma validates without the
+      enceladus-gamma.jreese.net custom domain. For prod, override with the
+      prod HttpApi execute-api host (or the prod custom domain) via the deploy
+      workflow's --parameter-overrides at the io-gated cutover.
+  CustomDomain:
+    Type: String
+    Default: ""
+    Description: >
+      Optional FQDN alias for the distribution (e.g. ui-gamma.jreese.net).
+      Leave EMPTY (the gamma default) to serve on the distribution's own
+      *.cloudfront.net domain with no ACM cert. When set, AcmCertificateArn
+      MUST also be provided (a us-east-1 ACM cert covering this name).
+  AcmCertificateArn:
+    Type: String
+    Default: ""
+    Description: >
+      ARN of an ACM certificate in us-east-1 covering CustomDomain. Required
+      only when CustomDomain is set. Ignored when CustomDomain is empty.
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, "production"]
+  IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+  # Custom-domain aliases + ACM cert are attached ONLY when a CustomDomain is
+  # supplied. Empty (gamma default) => distribution serves on *.cloudfront.net
+  # with the default CloudFront certificate (no ACM required).
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomain, ""]]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # S3 origin bucket — private, versioned (rollback), SSE, CloudFront-only read
+  # ---------------------------------------------------------------------------
+  UiBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "enceladus-ui-v2${EnvironmentSuffix}"
+      # Private: no public ACLs/policies of any kind. Read is granted ONLY to
+      # the CloudFront Origin Access Control via the bucket policy below.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      # Versioning ENABLED so prior UI builds are retained for rollback.
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: ui-cdn
+
+  # Bucket policy: read ONLY to this distribution via the Origin Access Control
+  # (SigV4). Scoped to this distribution's ARN via SourceArn so no other
+  # distribution/principal can read the origin.
+  UiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UiBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontOACReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${UiBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${UiDistribution}"
+
+  # ---------------------------------------------------------------------------
+  # CloudFront Origin Access Control (OAC, SigV4) for the S3 origin
+  # ---------------------------------------------------------------------------
+  UiOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "enceladus-ui-v2-oac${EnvironmentSuffix}"
+        Description: SigV4 OAC granting the ui-v2 CloudFront distribution read access to the private S3 origin.
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ---------------------------------------------------------------------------
+  # SPA rewrite function (viewer-request, DEFAULT behavior only) — ENC-TSK-K68
+  # ---------------------------------------------------------------------------
+  # Replaces the former distribution-wide CustomErrorResponses (403/404 ->
+  # 200 /index.html), which applied to ALL origins and therefore masked real
+  # API Gateway 404/403 JSON responses as 200 text/html — breaking the ui-v2
+  # client's NotFoundError/auth semantics. This function rewrites only
+  # extensionless, non-/api/* viewer URIs to /index.html BEFORE the cache/
+  # origin lookup, so:
+  #   - SPA deep links (/task/ENC-TSK-XXX) serve the app shell with a 200;
+  #   - /api/* passes through untouched (it has its own behavior anyway);
+  #   - real file misses (hashed assets, /mobile/v1/*.json) surface their true
+  #     origin status instead of a rewritten app shell.
+  UiSpaRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "enceladus-ui-v2-spa-rewrite${EnvironmentSuffix}"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Rewrite extensionless non-API viewer URIs to /index.html for SPA client-side routing (S3 origin only).
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+          if (!uri.startsWith('/api/')) {
+            var lastSegment = uri.split('/').pop();
+            if (!lastSegment.includes('.')) {
+              request.uri = '/index.html';
+            }
+          }
+          return request;
+        }
+
+  # ---------------------------------------------------------------------------
+  # CloudFront Distribution — S3 (default) + API Gateway (/api/*)
+  # ---------------------------------------------------------------------------
+  UiDistribution:
+    Type: AWS::CloudFront::Distribution
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "Enceladus ui-v2 PWA CDN (${Environment})"
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        # Aliases attached ONLY when a CustomDomain is supplied (gamma: none).
+        Aliases: !If
+          - HasCustomDomain
+          - [!Ref CustomDomain]
+          - !Ref "AWS::NoValue"
+        # ViewerCertificate: default *.cloudfront.net cert unless a CustomDomain
+        # + us-east-1 ACM cert is supplied.
+        ViewerCertificate: !If
+          - HasCustomDomain
+          - AcmCertificateArn: !Ref AcmCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        Origins:
+          # S3 origin (SPA static assets) — reached only via the OAC.
+          - Id: s3-ui-origin
+            DomainName: !GetAtt UiBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt UiOriginAccessControl.Id
+            S3OriginConfig:
+              # Empty OriginAccessIdentity => OAC (not legacy OAI) is in effect.
+              OriginAccessIdentity: ""
+          # API Gateway origin (custom origin) for the /api/* behavior.
+          - Id: api-gw-origin
+            DomainName: !Ref ApiOriginDomainName
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              HTTPSPort: 443
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          TargetOriginId: s3-ui-origin
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          # AWS managed cache policy: CachingOptimized.
+          CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6"
+          # SPA client-side routing handled here (default/S3 behavior ONLY) so
+          # the /api/* behavior keeps true API status codes (ENC-TSK-K68).
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt UiSpaRewriteFunction.FunctionARN
+        CacheBehaviors:
+          # /api/* -> API Gateway custom origin. Forward ALL viewer
+          # headers/cookies/querystring so auth cookies reach the API, and
+          # DISABLE caching (dynamic API responses).
+          - PathPattern: "/api/*"
+            TargetOriginId: api-gw-origin
+            ViewerProtocolPolicy: redirect-to-https
+            Compress: false
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD]
+            # AWS managed cache policy: CachingDisabled.
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            # AWS managed origin-request policy: AllViewerExceptHostHeader
+            # (forwards all viewer cookies/headers/querystring EXCEPT Host, so
+            # API GW receives its own execute-api host and routes correctly).
+            OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+        # NOTE (ENC-TSK-K68): the former CustomErrorResponses 403/404 ->
+        # 200 /index.html were REMOVED — they were distribution-wide and
+        # rewrote genuine API-origin errors into the app shell. SPA deep-link
+        # routing is now handled by UiSpaRewriteFunction on the default (S3)
+        # behavior only.
+        PriceClass: PriceClass_100
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: ui-cdn
+
+Outputs:
+  UiBucketName:
+    Description: Name of the private S3 origin bucket holding the ui-v2 build.
+    Value: !Ref UiBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-UiBucketName"
+  UiDistributionId:
+    Description: CloudFront distribution id (used by the T2 UI deploy workflow for invalidation).
+    Value: !Ref UiDistribution
+    Export:
+      Name: !Sub "${AWS::StackName}-UiDistributionId"
+  UiDistributionDomainName:
+    Description: The distribution's default *.cloudfront.net domain (gamma serves here, no ACM).
+    Value: !GetAtt UiDistribution.DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-UiDistributionDomainName"
