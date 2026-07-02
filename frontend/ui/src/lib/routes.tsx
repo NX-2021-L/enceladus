@@ -81,6 +81,11 @@ const DeploymentManagerPage = lazy(() =>
 const EscalationsPage = lazy(() =>
   import('../pages/EscalationsPage').then((module) => ({ default: module.EscalationsPage })),
 )
+const LessonCandidatesPage = lazy(() =>
+  import('../pages/LessonCandidatesPage').then((module) => ({
+    default: module.LessonCandidatesPage,
+  })),
+)
 
 function withSuspense(element: ReactNode) {
   return <Suspense fallback={<LoadingState />}>{element}</Suspense>
@@ -127,6 +132,7 @@ export const router = createBrowserRouter(
         { path: '/components', element: withSuspense(<ComponentRegistryPage />) },
         { path: '/deployments', element: withSuspense(<DeploymentManagerPage />) },
         { path: '/escalations', element: withSuspense(<EscalationsPage />) },
+        { path: '/lesson-candidates', element: withSuspense(<LessonCandidatesPage />) },
         { path: '/coordination', element: withSuspense(<CoordinationPage />) },
         { path: '/coordination/auth', element: withSuspense(<AuthTokensPage />) },
         {

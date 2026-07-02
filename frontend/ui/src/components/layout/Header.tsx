@@ -18,6 +18,7 @@ const TITLES: Record<string, string> = {
   '/components': 'Component Registry',
   '/deployments': 'Deployment Manager',
   '/escalations': 'Escalations',
+  '/lesson-candidates': 'Lesson Candidates',
 }
 
 function resolveTitle(pathname: string): string {
@@ -173,6 +174,15 @@ export function Header() {
                 className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 active:bg-slate-600 transition-colors"
               >
                 Escalations
+              </button>
+              <button
+                onClick={() => {
+                  setMenuOpen(false)
+                  navigate('/lesson-candidates')
+                }}
+                className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 active:bg-slate-600 transition-colors"
+              >
+                Lesson Candidates
               </button>
               <button
                 onClick={() => {
