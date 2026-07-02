@@ -17,15 +17,15 @@ export function TaskPrimitive({ record }: { record: Task }) {
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
           <ListChecks size={14} strokeWidth={1.5} color="var(--accent)" />
           <Metric>
-            {record.checklist_done}/{record.checklist_total}
+            {record.checklist_done ?? 0}/{record.checklist_total ?? 0}
           </Metric>
         </span>
       </MetaRow>
       <MetaRow label="Related">
         <Metric>
-          {record.related_task_ids.length +
-            record.related_issue_ids.length +
-            record.related_feature_ids.length}
+          {(record.related_task_ids?.length ?? 0) +
+            (record.related_issue_ids?.length ?? 0) +
+            (record.related_feature_ids?.length ?? 0)}
         </Metric>{' '}
         edges
       </MetaRow>
