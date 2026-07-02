@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.36",
-  "updated_at": "2026-07-02T20:55:00Z",
-  "last_change_summary": "ENC-TSK-K34 (ENC-ISS-477 cutover, DOC-F234A4E11DFD Option E): the DynamoDB governance-policies mirror of this dictionary is retired from the read path. coordination_api._load_governance_dictionary now serves this bundled file exclusively -- no DDB scan, no fallback branch. ENC-TSK-K31 found the DDB mirror had never once served as a live, independently-authored hot-patch target (every write only ever caught DynamoDB up to a prior git/S3 change), and it had been unwritable since 2026-06-29 (509KB item vs DynamoDB's 400KB cap). document_api's dictionary-specific DDB propagation is removed alongside it. This file (repo -> Lambda bundle -> deploy) is now the sole and always-authoritative source; check_governance_dictionary_sync.py remains the enforcement that this file stays current with schema-affecting code changes. No entity schema changed.",
+  "version": "2026-07-02.37",
+  "updated_at": "2026-07-02T21:01:00Z",
+  "last_change_summary": "ENC-PLN-068: monitoring.rhythm_cycle entity for enceladus-rhythm-cycle Lambda, EventBridge Scheduler tier groups, Enceladus/Rhythm CloudWatch namespace, S3 cycle-artifact convention, and Lyapunov backlog_open_leaves pathology alarm.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6201,6 +6201,28 @@
       "description": "See source task.",
       "source": "ENC-TSK",
       "telemetry_eligible": false
+    },
+    "monitoring.rhythm_cycle": {
+      "description": "ENC-PLN-068 / DOC-BDDE755DB874: cost-weighted harmonic scheduling substrate. The enceladus-rhythm-cycle Lambda (backend/lambda/rhythm_cycle/, gamma-only, Condition IsGamma) is invoked by five EventBridge Scheduler groups (rhythm-sense/decide/light/heavy/coherence) with independent pause via RhythmCycleEnabled. Each beat reads its predecessor's S3 artifact, performs tier-scoped work, writes its own artifact under {S3EnvPrefix}rhythm-cycle/{tier}/latest.json, and emits Enceladus/Rhythm metrics (beat_duration_ms, beat_cost_estimate, artifact_bytes, backlog_delta). Decide beat publishes backlog_open_leaves Lyapunov metric; RhythmPathologyAlarm fires on 3 consecutive non-decreasing deltas. Legacy gamma schedules (memory consolidation, graph health, recompute backstop) DISABLE when RhythmActive.",
+      "owner": "enceladus-platform",
+      "source": "ENC-PLN-068 / ENC-TSK-K79..K94",
+      "telemetry_eligible": true,
+      "fields": {
+        "CLOUDWATCH_NAMESPACE": {
+          "type": "string",
+          "default": "Enceladus/Rhythm",
+          "definition": "CloudWatch namespace for per-beat telemetry."
+        },
+        "RhythmCycleEnabled": {
+          "type": "feature_flag",
+          "default": "true",
+          "definition": "CFN parameter; when true on gamma, rhythm schedules ENABLED and legacy superseded EventBridge rules DISABLED."
+        },
+        "backlog_open_leaves": {
+          "type": "metric",
+          "definition": "Open orphan leaf-task count sampled at each Decide beat; Lyapunov function per DOC-BDDE755DB874 section 6."
+        }
+      }
     },
     "unlearning.lambda": {
       "description": "ENC-FTR-106 / ENC-TSK-K03: nightly Crick-Mitchison unlearning Lambda (enceladus-unlearning). EventBridge UnlearningSchedule (gamma, cron 04:00 UTC) invokes lambda_handler per project. Identifies prune candidates from stigmergic-trace miss clusters (UNLEARNING_MIN_MISS_COUNT default 3) cross-referenced with drift-telemetry spurious_attractor_rate waves (UNLEARNING_SPURIOUS_ATTRACTOR_THRESHOLD default 0.5). DATA-SAFETY rails: UNLEARNING_DRY_RUN=1 (default) blocks all mutations; UNLEARNING_MUTATION_ENABLED=0 (default) report-only; IO_APPROVAL_RUNS=3 first live runs emit unlearning-candidate draft docs (subtypepattern=unlearning-candidate) only — io must approve before mutation. Mutation path (when enabled): writes reversible S3 tombstones under UNLEARNING_PREFIX (default gamma/unlearning-tombstones) with TOMBSTONE_RECOVERY_DAYS=30 recovery window, archives eligible reference tracker records (status=archived) so graph_sync removes Neo4j projection — no new edge types (OGTM). Run counter persisted at UNLEARNING_STATE_PREFIX/run_counter.json. Cost-preflight ~$0.25/mo; UnlearningCostHeadroomAlarm guards EventBridge invocations.",

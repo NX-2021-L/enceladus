@@ -5975,12 +5975,12 @@ Resources:
       FunctionName: !Sub "enceladus-rhythm-cycle${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 300
       Architectures:
-        - arm64
+        - !If [IsGamma, arm64, x86_64]
       Role: !GetAtt RhythmCycleRole.Arn
       Layers:
         - !Ref SharedLayerArn
