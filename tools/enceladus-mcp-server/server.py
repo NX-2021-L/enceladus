@@ -6146,6 +6146,28 @@ async def _escalation_list(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+async def _escalation_watch(args: dict) -> list[TextContent]:
+    """ENC-TSK-J71 (Ph4): cursor-based escalation event polling.
+
+    Streams §11.2 lifecycle events for every escalation the calling session
+    originated and refreshes the session's last_activity_at heartbeat so a
+    listening agent survives the idle sweep (§5.9). Pass the returned
+    next_cursor back as `since`. Recommended cadence: 15-30s, exponential
+    backoff after two idle hours (§5.8).
+    """
+    session_id = str(args.get("session_id") or "").strip()
+    if not session_id:
+        return _result_text({"error": "Field 'session_id' is required (ENC-SES-*)."})
+    query = {
+        "session_id": session_id,
+        "since": args.get("since"),
+        "project_id": args.get("project_id"),
+    }
+    resp = _coordination_api_request(
+        "GET", "/api/v1/coordination/escalations/watch", query=query)
+    return _result_text(resp)
+
+
 # --- Acceptance Criteria Evidence Handshake (§7.1.1) ---
 
 
@@ -7732,6 +7754,11 @@ if ENABLE_ESCALATION_PRIMITIVE:
     }
     _SEARCH_ACTIONS["escalation.list"] = {
         "tool": "escalation_list",
+    }
+    # ENC-TSK-J71 (Ph4): session-scoped cursor polling — the listening agent's
+    # side of the loop (§5.4 coordination surface, §5.9 activity rule).
+    _COORDINATION_ACTIONS["escalation.watch"] = {
+        "tool": "escalation_watch",
     }
 
 # ENC-FTR-052: Conditionally register lesson actions behind feature flag
@@ -10646,6 +10673,8 @@ _TOOL_HANDLERS = {
     "escalation_request": _escalation_request,
     "escalation_get": _escalation_get,
     "escalation_list": _escalation_list,
+    # ENC-FTR-121 / ENC-TSK-J71: session-scoped event polling
+    "escalation_watch": _escalation_watch,
     # ENC-FTR-047: Graph search
     "tracker_graphsearch": _tracker_graphsearch,
     # ENC-FTR-089 / ENC-TSK-I89: admin-scoped raw-embedding egress

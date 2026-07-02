@@ -2374,6 +2374,15 @@ Resources:
       RouteKey: "GET /api/v1/coordination/escalations"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-J71 / ENC-FTR-121 Ph4: session-scoped escalation event polling.
+  RouteEscalationsWatch:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/escalations/watch"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   RouteEscalationsApprove:
     Type: AWS::ApiGatewayV2::Route
     Condition: IsGamma
