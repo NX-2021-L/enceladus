@@ -171,6 +171,13 @@ GOVERNANCE_PROJECT_ID = os.environ.get("GOVERNANCE_PROJECT_ID", "devops")
 GOVERNANCE_KEYWORD = os.environ.get("GOVERNANCE_KEYWORD", "governance-file")
 # ENC-TSK-729: push-on-write sync — Lambda name for async document store refresh
 DOCUMENT_API_LAMBDA_NAME = os.environ.get("DOCUMENT_API_LAMBDA_NAME", "devops-document-api")
+# ENC-FTR-121 Ph3 (ENC-TSK-J70): tracker_mutation Lambda hosting applyEscalatedMutation.
+# Default derives the environment suffix so a code deploy that races the CFN env
+# addition still targets the same environment's tracker mutation function.
+TRACKER_MUTATION_LAMBDA_NAME = os.environ.get(
+    "TRACKER_MUTATION_LAMBDA_NAME",
+    f"devops-tracker-mutation-api{os.environ.get('ENVIRONMENT_SUFFIX', '')}",
+)
 # ADE Component C: shared secret used to verify Cursor Cloud Agents completion
 # webhook signatures (HMAC-SHA256 over the raw body). Sourced via SSM/Secrets
 # param in CFN (see infrastructure/cloudformation/02-compute.yaml). Empty default
@@ -8978,6 +8985,378 @@ def _finalize_lesson_candidate_decision(
     )
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-121 Ph3 / ENC-TSK-J70 — Escalations approval surface (DOC-5B888FCA43B8
+# §5.7 + §6). Approval is non-delegable by construction: every route here
+# verifies a genuine Cognito human session server-side; internal-key, SCI, and
+# managed-token credentials are structurally rejected (403). No MCP action maps
+# to approve/deny. Approve is the ONLY reachable entry to applyEscalatedMutation
+# (tracker_mutation) because status=approved is written nowhere else.
+# ---------------------------------------------------------------------------
+
+_ESCALATION_TARGET_SEGMENTS = {"TSK": "task", "ISS": "issue", "FTR": "feature"}
+
+
+def _invoke_tracker_mutation_api(
+    method: str, path: str, body: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Invoke the tracker_mutation Lambda via the same internal Lambda-invoke
+    mechanism as _invoke_document_api. Used by the escalation approval flow to
+    drive applyEscalatedMutation (ENC-TSK-J69) after io approval.
+    """
+    fn_name = TRACKER_MUTATION_LAMBDA_NAME
+    if not fn_name:
+        raise RuntimeError("TRACKER_MUTATION_LAMBDA_NAME not configured")
+
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    internal_key = (COORDINATION_INTERNAL_API_KEY or "").strip()
+    if internal_key:
+        headers["X-Coordination-Internal-Key"] = internal_key
+
+    invoke_event = {
+        "version": "2.0",
+        "routeKey": f"{method.upper()} {path}",
+        "rawPath": path,
+        "requestContext": {"http": {"method": method.upper(), "path": path}},
+        "httpMethod": method.upper(),
+        "headers": headers,
+        "isBase64Encoded": False,
+        "body": json.dumps(body) if body is not None else None,
+    }
+
+    resp = _get_lambda_client().invoke(
+        FunctionName=fn_name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(invoke_event).encode("utf-8"),
+    )
+    raw = resp.get("Payload")
+    payload_text = raw.read().decode("utf-8") if raw is not None else ""
+    envelope = json.loads(payload_text) if payload_text else {}
+    if resp.get("FunctionError"):
+        raise RuntimeError(f"tracker mutation invoke error: {envelope}")
+
+    status_code = int(envelope.get("statusCode") or 0)
+    inner_raw = envelope.get("body")
+    inner: Dict[str, Any] = {}
+    if isinstance(inner_raw, str) and inner_raw:
+        try:
+            inner = json.loads(inner_raw)
+        except json.JSONDecodeError:
+            inner = {}
+    elif isinstance(inner_raw, dict):
+        inner = inner_raw
+    inner["_status_code"] = status_code
+    return inner
+
+
+def _escalation_payload_dict(escalation: Dict[str, Any]) -> Dict[str, Any]:
+    """The escalation payload is stored as a JSON string on the item."""
+    raw = escalation.get("payload")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    return {}
+
+
+def _read_escalation_item(project_id: str, escalation_id: str) -> Optional[Dict[str, Any]]:
+    resp = _get_ddb().get_item(
+        TableName=TRACKER_TABLE,
+        Key={
+            "project_id": _serialize(project_id),
+            "record_id": _serialize(f"escalation#{escalation_id}"),
+        },
+        ConsistentRead=True,
+    )
+    raw = resp.get("Item")
+    return _deserialize(raw) if raw else None
+
+
+def _read_escalation_target(project_id: str, target_record_id: str) -> Optional[Dict[str, Any]]:
+    parts = str(target_record_id or "").split("-")
+    record_type = _ESCALATION_TARGET_SEGMENTS.get(parts[1].upper()) if len(parts) >= 3 else None
+    if not record_type:
+        return None
+    resp = _get_ddb().get_item(
+        TableName=TRACKER_TABLE,
+        Key={
+            "project_id": _serialize(project_id),
+            "record_id": _serialize(f"{record_type}#{target_record_id}"),
+        },
+        ConsistentRead=True,
+    )
+    raw = resp.get("Item")
+    return _deserialize(raw) if raw else None
+
+
+def _render_escalation_diff(
+    escalation: Dict[str, Any], target: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """§5.7 render_diff: fresh current-versus-requested delta computed at render
+    time from the LIVE target record — never from the cached request — with an
+    explicit drift flag when expected_version mismatches.
+    """
+    payload = _escalation_payload_dict(escalation)
+    mutation_type = str(escalation.get("mutation_type") or "")
+    diff: Dict[str, Any] = {
+        "mutation_type": mutation_type,
+        "target_record_id": escalation.get("target_record_id"),
+    }
+    if target is None:
+        diff["target_missing"] = True
+        return diff
+
+    if mutation_type == "deploy_arc_change":
+        diff["field"] = "transition_type"
+        diff["current"] = target.get("transition_type")
+        diff["requested"] = payload.get("new_deploy_arc_type")
+    elif mutation_type == "direct_state_override":
+        diff["field"] = "status"
+        diff["current"] = target.get("status")
+        diff["requested"] = payload.get("target_status")
+        field_values = payload.get("field_values")
+        if isinstance(field_values, dict) and field_values:
+            diff["field_values"] = {
+                field: {"current": target.get(field), "requested": requested}
+                for field, requested in field_values.items()
+            }
+
+    diff["target_snapshot"] = {
+        "title": target.get("title"),
+        "status": target.get("status"),
+        "transition_type": target.get("transition_type"),
+        "checkout_state": target.get("checkout_state"),
+        "sync_version": target.get("sync_version"),
+        "updated_at": target.get("updated_at"),
+    }
+    expected_version = str(escalation.get("expected_version") or "").strip()
+    if expected_version:
+        current_markers = {
+            str(target.get("sync_version") or ""),
+            str(target.get("updated_at") or ""),
+            f"sync_version:{target.get('sync_version')}",
+        }
+        diff["drift"] = {
+            "expected_version": expected_version,
+            "current_sync_version": str(target.get("sync_version") or ""),
+            "current_updated_at": str(target.get("updated_at") or ""),
+            "detected": expected_version not in current_markers,
+        }
+    return diff
+
+
+def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/escalations — io's approval queue (§5.7).
+
+    Pending escalations carry a fresh diff + drift flag; terminal escalations
+    remain browsable for audit. Cognito-only: this is the human queue view.
+    """
+    if not _is_cognito_session(claims):
+        return _error(403, "The escalations queue requires a Cognito session (PWA, human-only).")
+
+    params = event.get("queryStringParameters") or {}
+    project_id = str(params.get("project_id") or "enceladus").strip()
+    status_filter = str(params.get("status") or "").strip()
+
+    ddb = _get_ddb()
+    query_kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
+        "ExpressionAttributeValues": {
+            ":pid": _serialize(project_id),
+            ":prefix": _serialize("escalation#"),
+        },
+    }
+    if status_filter:
+        query_kwargs["FilterExpression"] = "#st = :status_filter"
+        query_kwargs["ExpressionAttributeNames"] = {"#st": "status"}
+        query_kwargs["ExpressionAttributeValues"][":status_filter"] = _serialize(status_filter)
+
+    escalations = []
+    try:
+        while True:
+            page = ddb.query(**query_kwargs)
+            escalations.extend(_deserialize(raw) for raw in page.get("Items", []))
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key or len(escalations) >= 200:
+                break
+            query_kwargs["ExclusiveStartKey"] = last_key
+    except Exception as exc:
+        logger.error("escalations feed query failed: %s", exc)
+        return _error(500, "Failed to read escalations.")
+
+    for escalation in escalations:
+        escalation["payload"] = _escalation_payload_dict(escalation)
+        if escalation.get("status") == "requested":
+            target = _read_escalation_target(
+                project_id, str(escalation.get("target_record_id") or ""))
+            escalation["diff"] = _render_escalation_diff(escalation, target)
+
+    escalations.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    pending = [e for e in escalations if e.get("status") == "requested"]
+    terminal = [e for e in escalations if e.get("status") != "requested"]
+    return _response(200, {
+        "success": True,
+        "project_id": project_id,
+        "pending": pending,
+        "terminal": terminal,
+        "count": len(escalations),
+    })
+
+
+def _record_escalation_decision(
+    project_id: str, escalation_id: str, new_status: str, actor: str,
+    approved_by: Optional[Dict[str, str]] = None, guidance_note: str = "",
+) -> bool:
+    """Conditionally walk requested→{approved|denied|denied_with_guidance},
+    appending the §11.2 event. Returns False when the race guard loses.
+    """
+    now = _now_z()
+    event_entry: Dict[str, Any] = {"event_type": new_status, "at": now, "actor": actor}
+    if guidance_note:
+        event_entry["guidance_note"] = guidance_note
+    update_parts = [
+        "#st = :new_status",
+        "updated_at = :now",
+        "#ev = list_append(if_not_exists(#ev, :empty), :event)",
+    ]
+    names = {"#st": "status", "#ev": "events"}
+    values: Dict[str, Any] = {
+        ":new_status": _serialize(new_status),
+        ":requested": _serialize("requested"),
+        ":now": _serialize(now),
+        ":empty": _serialize([]),
+        ":event": _serialize([event_entry]),
+    }
+    if approved_by is not None:
+        update_parts.append("approved_by = :approved_by")
+        values[":approved_by"] = _serialize(approved_by)
+    if guidance_note:
+        update_parts.append("guidance_note = :guidance_note")
+        values[":guidance_note"] = _serialize(guidance_note)
+    try:
+        _get_ddb().update_item(
+            TableName=TRACKER_TABLE,
+            Key={
+                "project_id": _serialize(project_id),
+                "record_id": _serialize(f"escalation#{escalation_id}"),
+            },
+            UpdateExpression="SET " + ", ".join(update_parts),
+            ConditionExpression="attribute_exists(record_id) AND #st = :requested",
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+        return True
+    except Exception as exc:
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        if code == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def _handle_escalation_decision(
+    project_id: str, escalation_id: str, decision: str,
+    event: Dict[str, Any], claims: Dict[str, Any],
+) -> Dict[str, Any]:
+    """POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve|deny.
+
+    Non-delegable (§6): Cognito human session only. Approve stamps approved_by
+    and drives applyEscalatedMutation; if the applier invoke fails, the
+    approval remains durable (status=approved) and the idempotent apply route
+    can be re-driven — the agent never resubmits the mutation.
+    """
+    if not _is_cognito_session(claims):
+        return _error(403, (
+            "Escalation approval/denial requires a Cognito session (human-only). "
+            "Agent, SCI, and internal-key credentials are structurally rejected."
+        ))
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except (ValueError, TypeError):
+        body = {}
+
+    escalation = _read_escalation_item(project_id, escalation_id)
+    if escalation is None:
+        return _error(404, f"Escalation not found: {escalation_id}")
+    current_status = str(escalation.get("status") or "")
+    if current_status != "requested":
+        return _error(409, (
+            f"Escalation {escalation_id} is '{current_status}'; only 'requested' "
+            "escalations can be decided."
+        ))
+
+    decider = _resolve_decider_identity(claims)
+    actor = str(claims.get("sub") or decider)
+
+    if decision == "approve":
+        approved_by = {
+            "sub": str(claims.get("sub") or ""),
+            "email": str(claims.get("email") or ""),
+        }
+        if not _record_escalation_decision(
+            project_id, escalation_id, "approved", actor, approved_by=approved_by,
+        ):
+            return _error(409, "Escalation was decided concurrently; refresh the queue.")
+
+        apply_result: Dict[str, Any] = {}
+        apply_error = ""
+        try:
+            apply_result = _invoke_tracker_mutation_api(
+                "POST",
+                f"/api/v1/tracker/{project_id}/escalation/{escalation_id}/apply",
+                body={"write_source": {"provider": f"io:{decider}", "channel": "coordination_api"}},
+            )
+            status_code = int(apply_result.get("_status_code") or 0)
+            if status_code >= 400:
+                apply_error = str(apply_result.get("error") or f"apply returned HTTP {status_code}")
+        except Exception as exc:
+            logger.error("escalation apply invoke failed: %s", exc)
+            apply_error = str(exc)
+
+        if apply_error:
+            return _response(200, {
+                "success": True,
+                "escalation_id": escalation_id,
+                "status": "approved",
+                "applied": False,
+                "approved_by": decider,
+                "apply_error": apply_error,
+                "retry": (
+                    f"POST /api/v1/tracker/{project_id}/escalation/{escalation_id}/apply "
+                    "(idempotent; applies only while status=approved and applied_at unset)"
+                ),
+            })
+        return _response(200, {
+            "success": True,
+            "escalation_id": escalation_id,
+            "status": str(apply_result.get("status") or "applied"),
+            "applied": str(apply_result.get("status") or "applied") == "applied",
+            "approved_by": decider,
+            "apply_result": apply_result.get("result"),
+        })
+
+    guidance_note = str(body.get("guidance_note") or "").strip()
+    new_status = "denied_with_guidance" if guidance_note else "denied"
+    if not _record_escalation_decision(
+        project_id, escalation_id, new_status, actor, guidance_note=guidance_note,
+    ):
+        return _error(409, "Escalation was decided concurrently; refresh the queue.")
+    return _response(200, {
+        "success": True,
+        "escalation_id": escalation_id,
+        "status": new_status,
+        "denied_by": decider,
+        "guidance_note": guidance_note,
+    })
+
+
 def _handle_lesson_candidate_approve(
     document_id: str, event: Dict[str, Any], claims: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -14672,6 +15051,22 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         if decision == "approve":
             return _handle_lesson_candidate_approve(candidate_doc_id, event, claims or {})
         return _handle_lesson_candidate_reject(candidate_doc_id, event, claims or {})
+
+    # ENC-FTR-121 Ph3 (ENC-TSK-J70): Escalations — io approval queue + decisions
+    # (DOC-5B888FCA43B8 §5.7). Cognito-gated inside the handlers; no agent path.
+    if method == "GET" and path == "/api/v1/coordination/escalations":
+        return _handle_escalations_feed(event, claims or {})
+    match_escalation_decision = re.fullmatch(
+        r"/api/v1/coordination/escalations/([a-z0-9_\-]+)/([A-Za-z0-9\-]+)/(approve|deny)", path
+    )
+    if method == "POST" and match_escalation_decision:
+        return _handle_escalation_decision(
+            match_escalation_decision.group(1),
+            match_escalation_decision.group(2),
+            match_escalation_decision.group(3),
+            event,
+            claims or {},
+        )
 
     # POST /api/v1/coordination/components/{componentId}/{action} where action is
     # one of the ENC-FTR-076 v2 / ENC-TSK-F40 state-machine actions.

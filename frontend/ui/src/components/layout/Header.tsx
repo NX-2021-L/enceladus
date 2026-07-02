@@ -17,6 +17,7 @@ const TITLES: Record<string, string> = {
   '/coordination/auth': 'Access Tokens',
   '/components': 'Component Registry',
   '/deployments': 'Deployment Manager',
+  '/escalations': 'Escalations',
 }
 
 function resolveTitle(pathname: string): string {
@@ -163,6 +164,15 @@ export function Header() {
                 className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 active:bg-slate-600 transition-colors"
               >
                 Coordination Monitor
+              </button>
+              <button
+                onClick={() => {
+                  setMenuOpen(false)
+                  navigate('/escalations')
+                }}
+                className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700 active:bg-slate-600 transition-colors"
+              >
+                Escalations
               </button>
               <button
                 onClick={() => {

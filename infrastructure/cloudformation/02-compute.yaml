@@ -201,6 +201,9 @@ Resources:
           CORS_ORIGIN: !Ref CorsOrigin
           ENCELADUS_MCP_INTERFACE_MODE: code
           DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
+          # ENC-TSK-J70 / ENC-FTR-121 Ph3: applyEscalatedMutation lives in
+          # tracker_mutation; the Cognito approval flow invokes it directly.
+          TRACKER_MUTATION_LAMBDA_NAME: !Sub "devops-tracker-mutation-api${EnvironmentSuffix}"
           # ADE Component C: Cursor webhook HMAC verification secret (POST /api/v1/cursor/webhook)
           CURSOR_WEBHOOK_SECRET: !Ref CursorWebhookSecret
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
@@ -2278,6 +2281,17 @@ Resources:
                   - dynamodb:UpdateItem
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+              # ENC-TSK-J70 / ENC-FTR-121 Ph3: the Cognito-gated escalation
+              # approval flow drives applyEscalatedMutation (ENC-TSK-J69) in
+              # tracker_mutation via direct Lambda invoke -- the only reachable
+              # entry to the single privileged apply path (DOC-5B888FCA43B8 §6).
+              - Sid: InvokeTrackerMutationEscalationApply
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-tracker-mutation-api${EnvironmentSuffix}:*"
               - Sid: ComponentRegistryTableAccess
                 Effect: Allow
                 Action:
