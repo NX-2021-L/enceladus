@@ -55,6 +55,11 @@ artifact_version_ids: {}
 # Functions absent from this map are silently skipped by the deploy step.
 # deploy_capability_auditor intentionally excluded — not provisioned in v4-gamma.
 function_name_map:
+  # ENC-TSK-K56: the AppSync FeedPublisher (K20) was missing from this map, so
+  # Gen2 silently skipped it and the fn kept its CFN placeholder code (loaded
+  # surgically as a stopgap during gamma provisioning). New-gamma-Lambda
+  # checklist step 3 — keep this map in lockstep with lambda_workflow_manifest.
+  appsync_feed_publisher: devops-appsync-feed-publisher-gamma
   auth_refresh: auth-refresh-gamma
   bedrock_agent_actions: enceladus-bedrock-agent-actions-gamma
   changelog_api: devops-changelog-api-gamma
