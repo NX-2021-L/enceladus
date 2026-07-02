@@ -7,9 +7,8 @@ import { fetchWithAuth } from './client'
 const DOCUMENTS_BASE = '/api/v1/documents'
 const COORDINATION_BASE = '/api/v1/coordination'
 
-export interface LessonCandidate extends Document {
-  handoff_status?: string
-  description?: string
+export type LessonCandidate = Document & {
+  cluster_member_ids?: string[]
 }
 
 export interface LessonCandidateApproveBody {
