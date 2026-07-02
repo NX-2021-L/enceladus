@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.09",
-  "updated_at": "2026-07-02T09:30:00Z",
-  "last_change_summary": "ENC-TSK-J91 (ENC-ISS-441 Ph1): I71 agent-session idle-sweep backported to v4/main - _handle_agent_session_idle_sweep + EventBridge dispatch in coordination_api, AgentSessionIdleSweepSchedule rule + permission + env vars in 02-compute.yaml (v4). New entity coordination.agent_session_idle_sweep documenting the v4 idle-reference precedence (last_activity_at > claimed_at > created_at). Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "version": "2026-07-02.10",
+  "updated_at": "2026-07-02T09:40:00Z",
+  "last_change_summary": "ENC-TSK-G15: deferred tool loading policy (tool_defer_loading.py), BM25 tool search, mcp_toolset defer-by-default, coordination_capabilities.features.deferred_tool_loading, provider_session.deferred_tool_loading opt-in for Claude dispatch. (Rebased atop ENC-TSK-J91 idle-sweep dictionary bump.)",
   "owners": [
     "enceladus-platform"
   ],
@@ -1607,6 +1607,11 @@
           "definition": "Optional raw MCP tool allowlist used internally by code-mode action resolution.",
           "usage_guidance": "Code-mode sessions pass this boundary to the MCP server via COORDINATION_ALLOWED_RAW_TOOLS[_JSON]. Meta-tools may resolve only to raw tools listed here."
         },
+        "provider_session.deferred_tool_loading": {
+          "type": "boolean",
+          "definition": "When true on claude_agent_sdk dispatch, coordination attaches Anthropic deferred tool-loading tools array (mcp_toolset + BM25 tool search) and advanced-tool-use beta headers to the Messages API request.",
+          "usage_guidance": "Opt-in per coordination request. Eager-load tools default to search, get_compact_context, execute, coordination; all other MCP tools defer until BM25 retrieval. See mcp_server.deferred_tool_loading entity."
+        },
         "dispatch_target_task_ids": {
           "type": "array",
           "item_type": "string",
@@ -2229,6 +2234,36 @@
           "type": "array",
           "item_type": "string",
           "definition": "Raw MCP tools that code-mode meta-tools may resolve onto within the current session boundary."
+        }
+      }
+    },
+    "mcp_server.deferred_tool_loading": {
+      "description": "Anthropic deferred tool-loading policy for Enceladus MCP (ENC-TSK-G15 / FTR-099 A3.2). Reduces per-turn tool-definition token footprint by deferring non-essential tools and registering BM25 on-demand retrieval.",
+      "fields": {
+        "eager_load_tools": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Code-mode meta-tools always loaded (not deferred): search, get_compact_context, execute, coordination.",
+          "usage_guidance": "Configured in tools/enceladus-mcp-server/tool_defer_loading.py EAGER_LOAD_TOOLS; surfaced via coordination_capabilities.features.deferred_tool_loading."
+        },
+        "mcp_toolset": {
+          "type": "object",
+          "definition": "Anthropic mcp_toolset block with default_config.defer_loading=true and per-tool eager overrides.",
+          "usage_guidance": "Built by build_mcp_toolset() in tool_defer_loading.py; attached to Claude dispatch when provider_session.deferred_tool_loading=true."
+        },
+        "tool_search_tool_bm25_20251119": {
+          "type": "tool",
+          "definition": "BM25 tool search registered in the Anthropic tools array for deferred tool discovery.",
+          "usage_guidance": "Keyword-rich ENCELADUS_MCP_SERVER_INSTRUCTIONS and MCP initialize serverInfo.instructions improve BM25 routing for tracker, docstore, checkout, deploy, and governance queries."
+        },
+        "anthropic_beta_headers": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Required beta headers: advanced-tool-use-2025-11-20 and mcp-client-2025-11-20 when using defer_loading with MCP connector."
+        },
+        "token_footprint_reduction": {
+          "type": "behavior",
+          "definition": "Estimated >70% reduction in tool-definition tokens per turn when 4 eager + 36 deferred tools (validated in test_tool_defer_loading.py)."
         }
       }
     },

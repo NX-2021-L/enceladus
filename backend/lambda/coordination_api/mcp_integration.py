@@ -42,10 +42,14 @@ from project_utils import _ENCELADUS_MCP_SERVER_MODULE
 
 __all__ = [
     "_compute_governance_hash_local",
+    "_get_defer_loading_policy_summary",
     "_load_mcp_server_module",
+    "_load_tool_defer_loading_module",
     "_parse_mcp_result",
     "_resolve_mcp_server_path",
 ]
+
+_TOOL_DEFER_LOADING_MODULE: Any = None
 
 # ---------------------------------------------------------------------------
 # Tracker record helpers
@@ -85,6 +89,35 @@ def _load_mcp_server_module():
     spec.loader.exec_module(module)
     _ENCELADUS_MCP_SERVER_MODULE = module
     return _ENCELADUS_MCP_SERVER_MODULE
+
+
+def _load_tool_defer_loading_module():
+    """Load ENC-TSK-G15 policy module sibling to server.py."""
+    global _TOOL_DEFER_LOADING_MODULE
+    if _TOOL_DEFER_LOADING_MODULE is not None:
+        return _TOOL_DEFER_LOADING_MODULE
+
+    server_module = _load_mcp_server_module()
+    policy_path = pathlib.Path(getattr(server_module, "__file__", "")).with_name("tool_defer_loading.py")
+    if not policy_path.is_file():
+        raise RuntimeError(f"tool_defer_loading.py not found beside MCP server at {policy_path}")
+
+    spec = importlib.util.spec_from_file_location("enceladus_tool_defer_loading", policy_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load defer-loading policy from {policy_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _TOOL_DEFER_LOADING_MODULE = module
+    return _TOOL_DEFER_LOADING_MODULE
+
+
+def _get_defer_loading_policy_summary(*, deferred_tool_count: int = 0) -> Dict[str, Any]:
+    policy = _load_tool_defer_loading_module()
+    summary_fn = getattr(policy, "defer_loading_policy_summary", None)
+    if not callable(summary_fn):
+        raise RuntimeError("tool_defer_loading.defer_loading_policy_summary is missing")
+    return summary_fn(deferred_tool_count=deferred_tool_count)
 
 
 def _parse_mcp_result(result: Any) -> Dict[str, Any]:
