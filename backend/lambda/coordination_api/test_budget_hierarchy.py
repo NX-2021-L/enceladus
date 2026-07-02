@@ -45,6 +45,23 @@ class TestScaleBudgetConfig(unittest.TestCase):
         finally:
             del os.environ["BUDGET_CORPUS_TOKENS"]
 
+    def test_appconfig_value_takes_precedence_over_env_and_default(self):
+        """ENC-TSK-K33: the `budget-hierarchy` AppConfig profile ships
+        `budget_<scale>_tokens` keys (see 09-appconfig-governance.yaml). Pins
+        that exact key format against the reader so a schema/key mismatch
+        between the CFN content and this resolver — the same silent-failure
+        class ENC-TSK-K32 found for the dedup flags — would fail loudly here
+        instead of being discovered live."""
+        original = bhc._appconfig_budget_config
+        bhc._appconfig_budget_config = lambda: {"budget_wave_tokens": 999}
+        os.environ["BUDGET_WAVE_TOKENS"] = "111"  # lower precedence than AppConfig
+        try:
+            budgets = bhc.load_scale_budgets()
+            self.assertEqual(budgets["wave"], 999)
+        finally:
+            bhc._appconfig_budget_config = original
+            del os.environ["BUDGET_WAVE_TOKENS"]
+
 
 class TestBanachSolver(unittest.TestCase):
     """AC-2: solver converges in <= 1 iteration on the interior 4-scale vector."""
