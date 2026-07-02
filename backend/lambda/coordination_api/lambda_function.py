@@ -37,6 +37,7 @@ import ssl
 import time
 import uuid
 import urllib.error
+import base64
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -9357,6 +9358,121 @@ def _handle_escalation_decision(
     })
 
 
+# ---------------------------------------------------------------------------
+# ENC-FTR-121 Ph4 / ENC-TSK-J71 — escalation.watch cursor polling (§5.4, §5.9)
+# ---------------------------------------------------------------------------
+
+
+def _decode_watch_cursor(raw: str) -> Dict[str, int]:
+    """Decode the opaque watch cursor: base64url(JSON {escalation_id: events_consumed}).
+
+    Event timestamps are second-granular and FSM edges (applying→applied) land
+    inside one second, so a timestamp cursor would drop same-second events.
+    The cursor instead counts consumed events per escalation against the
+    append-only events array — lossless and stable on empty polls. Garbage or
+    absent cursors decode to {} (full replay; events are facts, replay is safe).
+    """
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8"))
+        if not isinstance(decoded, dict):
+            return {}
+        return {str(k): int(v) for k, v in decoded.items() if int(v) >= 0}
+    except Exception:  # noqa: BLE001 — any malformed cursor means full replay
+        return {}
+
+
+def _encode_watch_cursor(counts: Dict[str, int]) -> str:
+    return base64.urlsafe_b64encode(
+        json.dumps(counts, sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+
+
+def _handle_escalation_watch(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/escalations/watch — session-scoped event polling.
+
+    Returns escalation lifecycle events newer than the supplied cursor across
+    every escalation the calling session originated, and refreshes the
+    session's last_activity_at heartbeat (§5.9) so a listening agent survives
+    the idle sweep while waiting on io. Read-scoped: agent credentials are the
+    intended callers (this is the agent side of the loop; approval stays
+    Cognito-only). Recommended polling: 15-30s with exponential backoff after
+    two idle hours (§5.8).
+    """
+    params = event.get("queryStringParameters") or {}
+    session_id = str(params.get("session_id") or "").strip()
+    if not session_id:
+        return _error(400, "Query parameter 'session_id' is required (ENC-SES-*).")
+    project_id = str(params.get("project_id") or "enceladus").strip()
+    cursor_counts = _decode_watch_cursor(str(params.get("since") or "").strip())
+
+    ddb = _get_ddb()
+    query_kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
+        "FilterExpression": "requested_by.session_id = :sid",
+        "ExpressionAttributeValues": {
+            ":pid": _serialize(project_id),
+            ":prefix": _serialize("escalation#"),
+            ":sid": _serialize(session_id),
+        },
+    }
+    escalations = []
+    try:
+        while True:
+            page = ddb.query(**query_kwargs)
+            escalations.extend(_deserialize(raw) for raw in page.get("Items", []))
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query_kwargs["ExclusiveStartKey"] = last_key
+    except Exception as exc:
+        logger.error("escalation watch query failed: %s", exc)
+        return _error(500, "Failed to read escalations for watch.")
+
+    new_events = []
+    next_counts = dict(cursor_counts)
+    for escalation in escalations:
+        escalation_id = str(escalation.get("item_id") or "")
+        events = escalation.get("events") or []
+        consumed = cursor_counts.get(escalation_id, 0)
+        for entry in events[consumed:]:
+            if not isinstance(entry, dict):
+                continue
+            emitted = {
+                "escalation_id": escalation_id,
+                "escalation_status": escalation.get("status"),
+                "target_record_id": escalation.get("target_record_id"),
+                "event_type": entry.get("event_type"),
+                "at": entry.get("at"),
+                "actor": entry.get("actor"),
+            }
+            if entry.get("detail") is not None:
+                emitted["detail"] = entry.get("detail")
+            if entry.get("guidance_note"):
+                emitted["guidance_note"] = entry.get("guidance_note")
+            new_events.append(emitted)
+        next_counts[escalation_id] = len(events)
+
+    new_events.sort(key=lambda item: (str(item.get("at") or ""), str(item["escalation_id"])))
+    session_touched = False
+    try:
+        session_touched = _agent_id_alloc.touch_session_activity(session_id)
+    except Exception as exc:  # noqa: BLE001 — heartbeat failure must not fail the poll
+        logger.error("watch heartbeat touch failed for %s: %s", session_id, exc)
+
+    return _response(200, {
+        "success": True,
+        "session_id": session_id,
+        "project_id": project_id,
+        "events": new_events,
+        "count": len(new_events),
+        "next_cursor": _encode_watch_cursor(next_counts),
+        "session_touched": session_touched,
+    })
+
+
 def _handle_lesson_candidate_approve(
     document_id: str, event: Dict[str, Any], claims: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -15051,6 +15167,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         if decision == "approve":
             return _handle_lesson_candidate_approve(candidate_doc_id, event, claims or {})
         return _handle_lesson_candidate_reject(candidate_doc_id, event, claims or {})
+
+    # ENC-FTR-121 Ph4 (ENC-TSK-J71): session-scoped escalation event polling —
+    # the AGENT side of the loop (approval stays Cognito-only).
+    if method == "GET" and path == "/api/v1/coordination/escalations/watch":
+        return _handle_escalation_watch(event, claims or {})
 
     # ENC-FTR-121 Ph3 (ENC-TSK-J70): Escalations — io approval queue + decisions
     # (DOC-5B888FCA43B8 §5.7). Cognito-gated inside the handlers; no agent path.

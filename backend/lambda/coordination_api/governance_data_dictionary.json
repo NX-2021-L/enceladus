@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.03",
-  "updated_at": "2026-07-02T04:50:00Z",
-  "last_change_summary": "ENC-TSK-J70 (ENC-FTR-121 Ph3, DOC-5B888FCA43B8): Cognito approval API + PWA Escalations page. coordination.escalations entity: Cognito-human-only feed/approve/deny routes (403 for internal-key/SCI/managed-token; no MCP action), requested->approved|denied|denied_with_guidance decision writes with race guards, approve drives applyEscalatedMutation via Lambda invoke with a fail-soft approved-but-unapplied path, section-5.7 render_diff with drift flag computed from the live target at render time. PWA: hamburger menu item + /escalations page (pending cards with diff + drift warning, approve/deny/deny-with-guidance, collapsed History audit section). APIGW routes gamma-only in 03-api.yaml; TRACKER_MUTATION_LAMBDA_NAME env + InvokeTrackerMutationEscalationApply role grant in 02-compute.yaml.",
+  "version": "2026-07-02.04",
+  "updated_at": "2026-07-02T06:00:00Z",
+  "last_change_summary": "ENC-TSK-J71 (ENC-FTR-121 Ph4, DOC-5B888FCA43B8): escalation.watch session-scoped cursor polling. Count-based opaque cursor (base64url JSON {escalation_id: events_consumed}) against the append-only events array - lossless under second-granular event timestamps where a timestamp cursor would drop same-second FSM edges; stable on empty polls; malformed cursors replay safely. Every poll refreshes the session's new last_activity_at heartbeat and the idle sweep's _idle_reference prefers it (listening agents survive the sweep; section 5.9 preferred formulation). MCP coordination action escalation.watch behind ENABLE_ESCALATION_PRIMITIVE; gamma APIGW route RouteEscalationsWatch. Polling guidance: 15-30s, backoff after two idle hours; polling only.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6186,6 +6186,16 @@
         "credential_id": {
           "type": "string",
           "definition": "ENC-TSK-J43 / ENC-FTR-074 Ph3. Optional foreign key to coordination.agent_credential. Written ONLY when the session is minted with a credential_id (validated active at mint time); omitted entirely -- not written as an empty string -- when no credential is bound, to preserve the frozen v4 SESSION_NODE_PROPERTIES shape (DOC-05C45B438FC1). Drives the graph AUTHENTICATED_AS edge target resolution alongside agent_type_id, and is the scan-filter key revoke_credential's cascade uses to find and retire bound sessions."
+        },
+        "last_activity_at": {
+          "type": "string",
+          "constraints": {
+            "format": "iso8601"
+          },
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-TSK-J71 (DOC-5B888FCA43B8 section 5.9 / ENC-ISS-441): heartbeat refreshed by every escalation.watch poll (agent_id_alloc.touch_session_activity - conditional on the session being live; retired/missing sessions return session_touched=false rather than failing the poll). The idle sweep's _idle_reference now prefers last_activity_at over claimed_at/created_at, so a listening agent waiting on io's approval is not idle-retired. The 10-minute unclaim TTL is unaffected."
         }
       }
     },
@@ -6522,6 +6532,10 @@
         "escalation.list": {
           "type": "search_action",
           "definition": "List escalations filterable by status, target_record_id, session_id; page_size 1-200 (default 50), newest first. ENC-TSK-J69: the MCP server calls GET /{project}/escalation/list (pseudo-id alias riding the registered {recordType}/{recordId} API Gateway route) because explicit gamma-style route tables register no bare {recordType} collection path; 'list' can never collide with a server-minted ENC-ESC-* id."
+        },
+        "escalation.watch": {
+          "type": "coordination_action",
+          "definition": "ENC-TSK-J71: coordination(action=escalation.watch, arguments={session_id, since?, project_id?}) -> GET /api/v1/coordination/escalations/watch. Pass the returned next_cursor back as since. Registered behind ENABLE_ESCALATION_PRIMITIVE."
         }
       }
     },
@@ -6539,6 +6553,10 @@
         "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny": {
           "type": "route",
           "definition": "Non-delegable deny: requested->denied (or denied_with_guidance when body.guidance_note is non-empty). Denied escalations are never applied."
+        },
+        "GET /api/v1/coordination/escalations/watch": {
+          "type": "route",
+          "definition": "ENC-TSK-J71 (Ph4, section 5.4 + 5.9): session-scoped cursor polling - the listening AGENT's side of the loop (read scope; agent credentials are the intended callers; approval stays Cognito-only). Query params: session_id (required, ENC-SES-*), since (opaque cursor), project_id (default enceladus). Returns every section-11.2 lifecycle event newer than the cursor across all escalations the session originated (guidance_note rides denied_with_guidance events), plus next_cursor and session_touched. CURSOR SEMANTICS: base64url(JSON {escalation_id: events_consumed}) counting against the append-only events array - event timestamps are second-granular and FSM edges (applying->applied) land inside one second, so a timestamp cursor would drop same-second events; the count cursor is lossless, exactly-once, and stable on empty polls. Malformed/absent cursors replay from the start (events are facts; replay is safe). Every poll refreshes the session's last_activity_at heartbeat. POLLING GUIDANCE (section 5.8): 15-30s interval, exponential backoff after two idle hours; transport is polling ONLY (no WebSocket/SSE by design)."
         }
       },
       "pwa_surface": "Escalations item in the PWA hamburger menu -> /escalations page: pending feed newest-first (target id/title, mutation type, requesting session, justification, fresh diff, prominent drift warning that still permits informed approve/deny), Approve / Deny / Deny-with-Guidance actions, terminal escalations in a collapsed History section. Ships via the comp-enceladus-pwa gamma pipeline.",
@@ -6626,6 +6644,11 @@
       "version": "2026-07-02.03",
       "task": "ENC-TSK-J70",
       "summary": "ENC-TSK-J70 (ENC-FTR-121 Ph3, DOC-5B888FCA43B8): Cognito approval API + PWA Escalations page. coordination.escalations entity: Cognito-human-only feed/approve/deny routes (403 for internal-key/SCI/managed-token; no MCP action), requested->approved|denied|denied_with_guidance decision writes with race guards, approve drives applyEscalatedMutation via Lambda invoke with a fail-soft approved-but-unapplied path, section-5.7 render_diff with drift flag computed from the live target at render time. PWA: hamburger menu item + /escalations page (pending cards with diff + drift warning, approve/deny/deny-with-guidance, collapsed History audit section). APIGW routes gamma-only in 03-api.yaml; TRACKER_MUTATION_LAMBDA_NAME env + InvokeTrackerMutationEscalationApply role grant in 02-compute.yaml."
+    },
+    {
+      "version": "2026-07-02.04",
+      "task": "ENC-TSK-J71",
+      "summary": "ENC-TSK-J71 (ENC-FTR-121 Ph4, DOC-5B888FCA43B8): escalation.watch session-scoped cursor polling. Count-based opaque cursor (base64url JSON {escalation_id: events_consumed}) against the append-only events array - lossless under second-granular event timestamps where a timestamp cursor would drop same-second FSM edges; stable on empty polls; malformed cursors replay safely. Every poll refreshes the session's new last_activity_at heartbeat and the idle sweep's _idle_reference prefers it (listening agents survive the sweep; section 5.9 preferred formulation). MCP coordination action escalation.watch behind ENABLE_ESCALATION_PRIMITIVE; gamma APIGW route RouteEscalationsWatch. Polling guidance: 15-30s, backoff after two idle hours; polling only."
     }
   ]
 }
