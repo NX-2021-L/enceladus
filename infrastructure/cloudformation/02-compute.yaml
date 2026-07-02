@@ -462,6 +462,17 @@ Resources:
           Value: enceladus
         - Key: Component
           Value: checkout
+        - Key: ReconciledBy
+          # ENC-TSK-K45 follow-up (2026-07-02): forces CFN to recompute a real
+          # diff on this resource, mirroring the ENC-TSK-K44 fix for
+          # ProdHealthMonitorFunction. Post-IMPORT, `aws cloudformation
+          # deploy`'s change-set shortcut saw "template text unchanged" (the
+          # IMPORT already matched the live pre-import config, including
+          # TracingConfig.Mode=PassThrough) and skipped reconciling this
+          # function's TracingConfig against the template's declared
+          # Mode=Active -- this tag bump is a real property change so the
+          # next Apply actually pushes TracingConfig.Mode=Active live.
+          Value: "ENC-TSK-K45-reconcile-20260702"
 
   # ENC-TSK-H47 / B63 Phase 2B — Scoring Service. Standalone, SNS-triggered ASYNC consumer that owns
   # lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson
