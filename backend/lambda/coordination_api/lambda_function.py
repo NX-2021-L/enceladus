@@ -5114,10 +5114,13 @@ def _maybe_attach_deferred_tool_loading(
     provider_session: Dict[str, Any],
     request_body: Dict[str, Any],
     request_headers: Dict[str, str],
-) -> None:
-    """Attach BM25 tool search + mcp_toolset when provider_session requests defer_loading."""
+) -> bool:
+    """Attach BM25 tool search + mcp_toolset when provider_session requests defer_loading.
+
+    Returns True when toolset cache_control was attached.
+    """
     if not provider_session.get("deferred_tool_loading"):
-        return
+        return False
     try:
         from mcp_integration import _load_tool_defer_loading_module
 
@@ -5132,8 +5135,12 @@ def _maybe_attach_deferred_tool_loading(
         )
         request_body["tools"] = tools
         request_headers["anthropic-beta"] = policy.anthropic_beta_headers()
+        return bool(
+            tools and isinstance(tools[-1], dict) and tools[-1].get("cache_control")
+        )
     except Exception as exc:
         logger.warning("deferred_tool_loading attach failed: %s", exc)
+        return False
 
 
 def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatch_id: str) -> Dict[str, Any]:
@@ -5250,7 +5257,9 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         "anthropic-version": ANTHROPIC_API_VERSION,
         "content-type": "application/json",
     }
-    _maybe_attach_deferred_tool_loading(provider_session, request_body, anthropic_headers)
+    toolset_cache_attached = _maybe_attach_deferred_tool_loading(
+        provider_session, request_body, anthropic_headers
+    )
     if "tools" in request_body:
         request_json = json.dumps(request_body).encode("utf-8")
     req = urllib.request.Request(
@@ -5357,6 +5366,8 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
             "system_prompt": bool(system_blocks),
             "prompt_caching": bool(system_blocks),
             "cache_ttl": CLAUDE_PROMPT_CACHE_TTL if system_blocks else None,
+            "toolset_caching": toolset_cache_attached,
+            "toolset_cache_ttl": CLAUDE_PROMPT_CACHE_TTL if toolset_cache_attached else None,
             "extended_thinking": bool(thinking_param),
             "streaming": use_streaming,
             "preflight_token_count": preflight_token_count,
@@ -5393,6 +5404,7 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
             "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
             "total_cost_usd": cost_attribution.get("total_cost_usd"),
             "cache_hit_ratio": cost_attribution.get("cache_hit_ratio"),
+            "toolset_cache_attached": toolset_cache_attached,
             "streaming": use_streaming,
             "thinking_enabled": bool(thinking_param),
             "preflight_token_count": preflight_token_count,
