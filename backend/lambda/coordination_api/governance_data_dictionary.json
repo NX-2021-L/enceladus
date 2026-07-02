@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.17",
-  "updated_at": "2026-07-02T10:30:00Z",
-  "last_change_summary": "ENC-TSK-J96 (ENC-ISS-441 Ph6, ENC-FTR-122): retirement_prompt injected verbatim into terminal-state success envelopes - checkout_service task->closed + plan->complete advances, tracker_mutation status writes to task/issue closed, feature production/deprecated, plan complete. Additive-only; non-terminal envelopes byte-identical. New entity tracker.retirement_prompt. Repo-file edit only - governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "version": "2026-07-02.18",
+  "updated_at": "2026-07-02T10:40:00Z",
+  "last_change_summary": "ENC-TSK-K05 (ENC-FTR-109): stigmergic exploration trace emission — graph_query_api.stigmergic_trace entity documents DynamoDB sink enceladus-stigmergic-trace${EnvironmentSuffix}, STIGMERGIC_TRACE_TABLE env var, 90-day TTL, telemetry-only retrieval/traversal events.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4910,6 +4910,27 @@
         "telemetry_schema": {
           "type": "string",
           "definition": "enceladus.drift.telemetry.v1"
+        }
+      }
+    },
+    "graph_query_api.stigmergic_trace": {
+      "description": "ENC-FTR-109 / ENC-TSK-K05: Stigmergic exploration trace emission (telemetry-only). On every hybrid retrieval (_query_hybrid) and non-hybrid graphsearch traversal (_handle_search), graph_query_api writes one per-event trace to enceladus-stigmergic-trace${EnvironmentSuffix} (PAY_PER_REQUEST; base key trace_id [HASH]; project-timestamp-index GSI on project_id [HASH] + timestamp [RANGE]; TTL expires_at 90 days). Record schema enceladus.stigmergic.trace.v1 carries session_id, pipe-delimited record_id_path, ISO timestamp, JSON outcome_signal, and event_type retrieval|traversal. No retrieval-behavior mutation — exploration-weighting is deferred per io approval (FTR-106 AC-4 gate). OGTM: DynamoDB-only sink, no new Neo4j edge type.",
+      "fields": {
+        "table": {
+          "type": "string",
+          "definition": "enceladus-stigmergic-trace${EnvironmentSuffix} (01-data.yaml StigmergicTraceTable). PAY_PER_REQUEST. TTL on expires_at (90 days)."
+        },
+        "env_vars": {
+          "type": "object",
+          "definition": "STIGMERGIC_TRACE_TABLE on devops-graph-query-api (02-compute.yaml). GraphQueryApiRole StigmergicTraceTableAccess grants dynamodb:PutItem."
+        },
+        "record_fields": {
+          "type": "object",
+          "definition": "{schema:'enceladus.stigmergic.trace.v1', trace_id, project_id, session_id, event_type:'retrieval'|'traversal', record_id_path (pipe-delimited), timestamp (ISO-8601 UTC), outcome_signal (JSON string), expires_at (epoch seconds, TTL)}."
+        },
+        "telemetry_schema": {
+          "type": "string",
+          "definition": "enceladus.stigmergic.trace.v1"
         }
       }
     },

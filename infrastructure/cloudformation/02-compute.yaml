@@ -1208,6 +1208,8 @@ Resources:
           # ENC-FTR-087 Phase 1 (ENC-TSK-I85): wave-close drift telemetry sink.
           # Codified here so a compute deploy never strips it (ENC-LSN-053 class).
           DRIFT_TELEMETRY_TABLE: !Sub "enceladus-drift-telemetry${EnvironmentSuffix}"
+          # ENC-FTR-109 / ENC-TSK-K05: stigmergic exploration trace sink.
+          STIGMERGIC_TRACE_TABLE: !Sub "enceladus-stigmergic-trace${EnvironmentSuffix}"
           # ENC-FTR-082 AC-1 (ENC-TSK-H44): raw pathway-telemetry S3 sink. Setting
           # the bucket activates the durable .jsonl append-log (the code degrades
           # to CloudWatch when unset — ENC-TSK-H38); prefix is env-partitioned via
@@ -4170,6 +4172,17 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-drift-telemetry${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-drift-telemetry${EnvironmentSuffix}/index/*"
+        # ENC-FTR-109 / ENC-TSK-K05: stigmergic exploration trace writes.
+        - PolicyName: StigmergicTraceTableAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: StigmergicTraceWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-stigmergic-trace${EnvironmentSuffix}"
         # ENC-FTR-082 AC-1 (ENC-TSK-H44): raw pathway-telemetry S3 append-log sink.
         # The Lambda already emits envelopes and degrades to CloudWatch when
         # PATHWAY_TELEMETRY_BUCKET is unset (ENC-TSK-H38); this grant + the env
