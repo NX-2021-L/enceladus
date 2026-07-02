@@ -1,6 +1,6 @@
 {
-  "version": "2026-07-02.34",
-  "updated_at": "2026-07-02T15:45:00Z",
+  "version": "2026-07-02.35",
+  "updated_at": "2026-07-02T19:20:00Z",
   "last_change_summary": "ENC-TSK-K34 (ENC-ISS-477 cutover, DOC-F234A4E11DFD Option E): the DynamoDB governance-policies mirror of this dictionary is retired from the read path. coordination_api._load_governance_dictionary now serves this bundled file exclusively -- no DDB scan, no fallback branch. ENC-TSK-K31 found the DDB mirror had never once served as a live, independently-authored hot-patch target (every write only ever caught DynamoDB up to a prior git/S3 change), and it had been unwritable since 2026-06-29 (509KB item vs DynamoDB's 400KB cap). document_api's dictionary-specific DDB propagation is removed alongside it. This file (repo -> Lambda bundle -> deploy) is now the sole and always-authoritative source; check_governance_dictionary_sync.py remains the enforcement that this file stays current with schema-affecting code changes. No entity schema changed.",
   "owners": [
     "enceladus-platform"
