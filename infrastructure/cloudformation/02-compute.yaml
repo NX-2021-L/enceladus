@@ -4187,9 +4187,9 @@ Resources:
         # The Lambda already emits envelopes and degrades to CloudWatch when
         # PATHWAY_TELEMETRY_BUCKET is unset (ENC-TSK-H38); this grant + the env
         # vars on GraphQueryApiFunction turn the durable sink on.
-        # ENC-TSK-J90: close_wave aggregates telemetry back via ListBucket+GetObject,
-        # scoped to the same prefix as the existing PutObject grant (still no access
-        # outside gamma/pathway-telemetry/).
+        # ENC-TSK-K14: close_wave (PR #741) aggregates telemetry back via
+        # ListBucket+GetObject, scoped to the same prefix as the existing
+        # PutObject grant (still no access outside gamma/pathway-telemetry/).
         - PolicyName: PathwayTelemetrySinkWrite
           PolicyDocument:
             Version: '2012-10-17'
