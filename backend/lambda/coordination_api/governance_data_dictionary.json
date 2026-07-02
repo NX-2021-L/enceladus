@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.10",
-  "updated_at": "2026-07-02T09:40:00Z",
-  "last_change_summary": "ENC-TSK-G15: deferred tool loading policy (tool_defer_loading.py), BM25 tool search, mcp_toolset defer-by-default, coordination_capabilities.features.deferred_tool_loading, provider_session.deferred_tool_loading opt-in for Claude dispatch. (Rebased atop ENC-TSK-J91 idle-sweep dictionary bump.)",
+  "version": "2026-07-02.11",
+  "updated_at": "2026-07-02T09:42:00Z",
+  "last_change_summary": "ENC-TSK-G16: ephemeral 1h cache_control on deferred MCP toolset (last tools-array block); toolset_cache_eligibility metrics in coordination_capabilities.features.deferred_tool_loading.",
   "owners": [
     "enceladus-platform"
   ],
@@ -2264,6 +2264,11 @@
         "token_footprint_reduction": {
           "type": "behavior",
           "definition": "Estimated >70% reduction in tool-definition tokens per turn when 4 eager + 36 deferred tools (validated in test_tool_defer_loading.py)."
+        },
+        "toolset_cache_control": {
+          "type": "object",
+          "definition": "Ephemeral 1h cache_control attached to the last tool in the Anthropic tools array (mcp_toolset block) when deferred_tool_loading is enabled.",
+          "usage_guidance": "Requires catalog_tokens_est above Sonnet 2048 / Opus 4096 minimums (see toolset_cache_eligibility in capabilities). Per-turn cache_read_input_tokens and cache_creation_input_tokens logged via dispatch_claude_api observability."
         }
       }
     },
