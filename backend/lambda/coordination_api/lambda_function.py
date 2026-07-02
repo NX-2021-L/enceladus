@@ -378,6 +378,12 @@ FEED_SUBSCRIPTIONS_TABLE = os.environ.get("FEED_SUBSCRIPTIONS_TABLE", "feed-subs
 AGENT_SESSIONS_IDLE_SWEEP_ENABLED = (
     os.environ.get("AGENT_SESSIONS_IDLE_SWEEP_ENABLED", "true").lower() == "true"
 )
+# ENC-ISS-441 / ENC-TSK-J94: master enable flag for the 10-minute unclaim TTL sweep
+# (ghost-registration reaper). TTL default lives in config.py and is the default of
+# agent_id_alloc.sweep_unclaimed_sessions; only the enable flag is read here.
+AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED = (
+    os.environ.get("AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED", "true").lower() == "true"
+)
 # ENC-FTR-084 Phase 1 / ENC-TSK-I93: session-init intent classifier config.
 GRAPH_QUERY_API_URL = os.environ.get("GRAPH_QUERY_API_URL", "").strip()
 DRIFT_TELEMETRY_TABLE = os.environ.get("DRIFT_TELEMETRY_TABLE", "").strip()
@@ -454,6 +460,65 @@ _CLAUDE_CONTEXT_LIMITS = {
     "claude-opus-4-6": 200_000,
 }
 _CLAUDE_DEFAULT_CONTEXT_LIMIT = 200_000
+
+# --- Context-management beta (ENC-TSK-G17 / G60/G61/G62) -------------------
+# Anthropic's context-management beta evicts stale tool_use/tool_result blocks
+# once an input-token threshold is crossed, so long coordination loops stop
+# carrying thousands of tokens of dead context after 20+ tool calls.
+CLAUDE_CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
+_CLAUDE_CLEAR_TOOL_USES_EDIT_TYPE = "clear_tool_uses_20250919"
+_CLAUDE_CLEAR_THINKING_EDIT_TYPE = "clear_thinking_20251015"
+# clear_tool_uses config: trigger at 100k input tokens, keep the last 5 tool-use
+# records so the agent retains recent working context.
+_CLAUDE_CONTEXT_MANAGEMENT_TRIGGER_INPUT_TOKENS = 100_000
+_CLAUDE_CONTEXT_MANAGEMENT_KEEP_TOOL_USES = 5
+# Client-side memory tool (Anthropic-defined, schema-less) used to persist what
+# matters before eviction. The tool itself is excluded from clear_tool_uses so
+# the agent never loses its own memory writes/reads.
+_CLAUDE_MEMORY_TOOL_TYPE = "memory_20250818"
+_CLAUDE_MEMORY_TOOL_NAME = "memory"
+# Enceladus memory-file schema: what a coordination agent should preserve across
+# eviction. This documents the intended memory-file content shape; the actual
+# storage backend is a follow-up (see _dispatch_claude_api docstring / report).
+_ENCELADUS_MEMORY_FILE_SCHEMA = {
+    "type": "object",
+    "description": "Enceladus coordination-loop memory record preserved across "
+    "context-management tool-result eviction.",
+    "properties": {
+        "plan_anchors": {
+            "type": "array",
+            "description": "Stable ENC-PLN/ENC-TSK/DOC anchors and their intent.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "note": {"type": "string"},
+                },
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+        },
+        "active_governance_hash": {
+            "type": "string",
+            "description": "The governance_hash captured at session init.",
+        },
+        "active_task_state": {
+            "type": "object",
+            "description": "Checkout/lifecycle state for the task in flight.",
+            "properties": {
+                "task_id": {"type": "string"},
+                "status": {"type": "string"},
+                "transition_type": {"type": "string"},
+                "components": {"type": "array", "items": {"type": "string"}},
+                "cai": {"type": "string"},
+                "cci": {"type": "string"},
+                "commit_sha": {"type": "string"},
+            },
+            "additionalProperties": True,
+        },
+    },
+    "additionalProperties": True,
+}
 _VALID_TERMINAL_STATES = {"succeeded", "failed", "cancelled", "dead_letter"}
 _VALID_PROVIDERS = {"claude_agent_sdk", "openai_codex", "aws_native", "aws_bedrock_agent"}
 _CLAUDE_PERMISSION_MODES = {"plan", "acceptEdits", "default"}
@@ -5181,6 +5246,111 @@ def _maybe_attach_deferred_tool_loading(
         return False
 
 
+def _append_anthropic_beta(request_headers: Dict[str, str], *beta_values: str) -> None:
+    """Append beta flag(s) to the comma-separated ``anthropic-beta`` header.
+
+    Anthropic's beta header is a comma-joined list. This MUST NOT overwrite any
+    value another feature (e.g. _maybe_attach_deferred_tool_loading) already set
+    — it appends new flags, de-duplicated, preserving prior order. Composable
+    regardless of the order in which the two attach helpers run.
+    """
+    existing = str(request_headers.get("anthropic-beta", "") or "")
+    ordered: List[str] = []
+    seen = set()
+    for value in list(part.strip() for part in existing.split(",")) + list(beta_values):
+        if value and value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    if ordered:
+        request_headers["anthropic-beta"] = ",".join(ordered)
+
+
+def _build_claude_context_management_config() -> Dict[str, Any]:
+    """Build the ``context_management`` request-body block for coordination loops.
+
+    Wires a ``clear_tool_uses_20250919`` edit: trigger eviction at 100k input
+    tokens, keep the last 5 tool-use records, and exclude the memory tool so the
+    agent never loses its own memory writes/reads.
+
+    NOTE (verify against current Anthropic context-management docs before ship):
+    the field used to exempt a tool from clearing is assumed to be
+    ``exclude_tools`` (a list of tool_name strings). If Anthropic's current API
+    uses a different field name, only this key needs to change. Flagged in the
+    ENC-TSK-G17 report.
+    """
+    return {
+        "edits": [
+            {
+                "type": _CLAUDE_CLEAR_TOOL_USES_EDIT_TYPE,
+                "trigger": {
+                    "type": "input_tokens",
+                    "value": _CLAUDE_CONTEXT_MANAGEMENT_TRIGGER_INPUT_TOKENS,
+                },
+                "keep": {
+                    "type": "tool_uses",
+                    "value": _CLAUDE_CONTEXT_MANAGEMENT_KEEP_TOOL_USES,
+                },
+                # Exempt the memory tool from eviction (G61).
+                "exclude_tools": [_CLAUDE_MEMORY_TOOL_NAME],
+            }
+        ]
+    }
+
+
+def _maybe_attach_context_management(
+    provider_session: Dict[str, Any],
+    request_body: Dict[str, Any],
+    request_headers: Dict[str, str],
+    model: str,
+    thinking_param: Optional[Dict[str, Any]],
+) -> bool:
+    """Attach context-management beta (clear_tool_uses + memory tool) when enabled.
+
+    Gated behind ``provider_session["context_management_enabled"]`` — the caller
+    sets this for sessions expected to exceed ~20 tool calls (ENC-TSK-G17 AC).
+    Composes with _maybe_attach_deferred_tool_loading: appends the beta header
+    (never overwrites) and appends the memory tool (never clobbers an existing
+    tools array). Returns True when the context_management block was attached.
+    """
+    if not provider_session.get("context_management_enabled"):
+        return False
+    try:
+        context_management = _build_claude_context_management_config()
+
+        # G62 companion: clear_thinking is only valid/useful when the resolved
+        # model is an Opus model AND extended/adaptive thinking is active for
+        # this call. Reuse the existing thinking detection (thinking_param) —
+        # it is non-None exactly when thinking was constructed for this request.
+        if thinking_param and "opus" in str(model).lower():
+            context_management["edits"].append(
+                {"type": _CLAUDE_CLEAR_THINKING_EDIT_TYPE}
+            )
+
+        request_body["context_management"] = context_management
+
+        # Add the memory tool (G61) to the tools array, appending so we compose
+        # with the deferred-tool-loading toolset rather than overwriting it.
+        memory_tool = {
+            "type": _CLAUDE_MEMORY_TOOL_TYPE,
+            "name": _CLAUDE_MEMORY_TOOL_NAME,
+        }
+        tools = request_body.get("tools")
+        if not isinstance(tools, list):
+            tools = []
+        if not any(
+            isinstance(t, dict) and t.get("type") == _CLAUDE_MEMORY_TOOL_TYPE
+            for t in tools
+        ):
+            tools.append(memory_tool)
+        request_body["tools"] = tools
+
+        _append_anthropic_beta(request_headers, CLAUDE_CONTEXT_MANAGEMENT_BETA)
+        return True
+    except Exception as exc:
+        logger.warning("context_management attach failed: %s", exc)
+        return False
+
+
 def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatch_id: str) -> Dict[str, Any]:
     """Dispatch a request to the Anthropic Messages API with full feature support.
 
@@ -5191,6 +5361,12 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
     - Streaming SSE support
     - Pre-flight token counting
     - Enhanced observability with token breakdown and cost attribution
+    - Context-management beta for long coordination loops (ENC-TSK-G17):
+      clear_tool_uses_20250919 eviction + memory_20250818 tool, gated on
+      provider_session["context_management_enabled"]. NOTE: the memory tool is
+      registered and excluded from eviction, but a durable S3/local storage
+      backend for the Enceladus memory-file schema (_ENCELADUS_MEMORY_FILE_SCHEMA)
+      is a follow-up — this wires the API contract, not the backend.
     """
     provider_session = request.get("provider_session") or {}
 
@@ -5298,7 +5474,13 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
     toolset_cache_attached = _maybe_attach_deferred_tool_loading(
         provider_session, request_body, anthropic_headers
     )
-    if "tools" in request_body:
+    # Context-management beta runs AFTER deferred tool loading so its beta-header
+    # append composes with (never overwrites) the deferred beta values, and the
+    # memory tool appends to any deferred toolset (ENC-TSK-G17 / G60/G61).
+    context_management_attached = _maybe_attach_context_management(
+        provider_session, request_body, anthropic_headers, model, thinking_param
+    )
+    if "tools" in request_body or "context_management" in request_body:
         request_json = json.dumps(request_body).encode("utf-8")
     req = urllib.request.Request(
         url=endpoint,
@@ -5409,6 +5591,8 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
             "extended_thinking": bool(thinking_param),
             "streaming": use_streaming,
             "preflight_token_count": preflight_token_count,
+            "context_management": context_management_attached,
+            "memory_tool": context_management_attached,
         },
         "governance_context": {
             "loaded": bool(governance_context.get("loaded")),
@@ -5443,6 +5627,7 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
             "total_cost_usd": cost_attribution.get("total_cost_usd"),
             "cache_hit_ratio": cost_attribution.get("cache_hit_ratio"),
             "toolset_cache_attached": toolset_cache_attached,
+            "context_management_attached": context_management_attached,
             "streaming": use_streaming,
             "thinking_enabled": bool(thinking_param),
             "preflight_token_count": preflight_token_count,
@@ -15607,6 +15792,47 @@ def _handle_agent_session_idle_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
+def _handle_agent_session_unclaim_sweep(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Scheduled ghost-registration reaper (ENC-ISS-441 / ENC-TSK-J94).
+
+    Invoked by the AgentSessionUnclaimSweepSchedule EventBridge rule (rate(10 minutes)),
+    NOT an HTTP route — no API Gateway envelope, auth, or claims on this path. Flips
+    'allocated' sessions never claimed within AGENT_SESSIONS_UNCLAIM_TTL_MINUTES of
+    created_at to 'retired' via the append-only conditional update in
+    agent_id_alloc.sweep_unclaimed_sessions, revoking any bound SCI. Returns a plain
+    summary dict for CloudWatch.
+    """
+    if not AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED:
+        logger.info(
+            "[INFO] unclaim-sweep skipped — AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED is false"
+        )
+        return {"enabled": False, "reason": "disabled", "retired_count": 0}
+    raw_ttl = event.get("unclaim_ttl_minutes")
+    sweep_kwargs: Dict[str, Any] = {"dry_run": bool(event.get("dry_run", False))}
+    if raw_ttl is not None:
+        try:
+            sweep_kwargs["unclaim_ttl_minutes"] = int(raw_ttl)
+        except (TypeError, ValueError):
+            return {
+                "enabled": True,
+                "error": "unclaim_ttl_minutes must be an integer",
+                "retired_count": 0,
+            }
+    try:
+        summary = _agent_id_alloc.sweep_unclaimed_sessions(**sweep_kwargs)
+    except ValueError as exc:
+        return {"enabled": True, "error": str(exc), "retired_count": 0}
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] unclaim-sweep DynamoDB failure: %s", exc)
+        return {"enabled": True, "error": "DynamoDB error during unclaim-sweep", "retired_count": 0}
+    logger.info(
+        "[SUCCESS] unclaim-sweep retired %d session(s), revoked %d SCI(s)",
+        summary.get("retired_count", 0),
+        summary.get("revoked_sci_count", 0),
+    )
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Main Lambda handler
 # ---------------------------------------------------------------------------
@@ -15634,6 +15860,12 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if event.get("action") == "coordination_batch_poll":
         logger.info("[INFO] Scheduled Anthropic batch poller invoked")
         return _handle_coordination_batch_poll(event)
+
+    # --- ENC-ISS-441 / ENC-TSK-J94: scheduled unclaim TTL sweep (ghost registrations) ---
+    # The AgentSessionUnclaimSweepSchedule rule delivers its Input JSON verbatim as the event.
+    if event.get("action") == "agent_session_unclaim_sweep":
+        logger.info("[INFO] Scheduled agent-session unclaim-sweep invoked")
+        return _handle_agent_session_unclaim_sweep(event)
 
     # --- v0.3: SQS callback ingestion ---
     # SQS events have 'Records' with 'eventSource' = 'aws:sqs'.

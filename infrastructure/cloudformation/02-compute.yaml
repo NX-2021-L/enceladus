@@ -217,10 +217,15 @@ Resources:
           AGENT_CREDENTIALS_TABLE: !Sub "agent-credentials${EnvironmentSuffix}"
           # ENC-TSK-I71 (ENC-FTR-117 AC#8), backported to v4 by ENC-TSK-J91: idle-sweep
           # backstop config. Enable flag read by lambda_function; threshold read by
-          # config.py / agent_id_alloc.sweep_idle_sessions. 86400 = 24h (I71 default;
-          # ENC-ISS-441 Ph4 tightens this to 7200).
+          # config.py / agent_id_alloc.sweep_idle_sessions. ENC-ISS-441 / ENC-TSK-J94:
+          # threshold tightened from I71's 86400 (24h) to 7200 (2h); the idle reference
+          # prefers last_activity_at (J71/J83), so polling listeners stay exempt.
           AGENT_SESSIONS_IDLE_SWEEP_ENABLED: "true"
-          AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS: "86400"
+          AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS: "7200"
+          # ENC-ISS-441 / ENC-TSK-J94: unclaim TTL sweep — allocated sessions never
+          # claimed within the TTL are ghost registrations and get reaped + SCI-revoked.
+          AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED: "true"
+          AGENT_SESSIONS_UNCLAIM_TTL_MINUTES: "10"
           # ENC-ISS-441 / ENC-TSK-J92: SCI tokens share the checkout service's token table
           # (pk = token id, token_type=SCI). Env-suffixed so gamma writes the -gamma twin.
           CHECKOUT_TOKENS_TABLE: !Sub "enceladus-checkout-tokens${EnvironmentSuffix}"
@@ -1941,6 +1946,32 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt AgentSessionIdleSweepSchedule.Arn
+
+  # ENC-ISS-441 / ENC-TSK-J94 (ENC-FTR-122): 10-minute unclaim TTL sweep. Reaps ghost
+  # registrations — sessions that called agent.register but never agent.claim within
+  # AGENT_SESSIONS_UNCLAIM_TTL_MINUTES of created_at (10 of 24 prod sessions showed this
+  # pattern, the ENC-ISS-441 evidence). Same append-only retire flip + Lambda::Permission
+  # discipline as the I71 idle-sweep rule above; both sweeps also revoke the session's SCI.
+  AgentSessionUnclaimSweepSchedule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-agent-session-unclaim-sweep${EnvironmentSuffix}"
+      Description: "ENC-ISS-441/ENC-TSK-J94: reap never-claimed (ghost) agent sessions after the 10-min unclaim TTL and revoke their SCIs"
+      ScheduleExpression: rate(10 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CoordinationApiFunction.Arn
+          Id: agent-session-unclaim-sweep
+          Input: '{"action": "agent_session_unclaim_sweep"}'
+
+  AgentSessionUnclaimSweepPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CoordinationApiFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AgentSessionUnclaimSweepSchedule.Arn
 
   DeployCodeBuildFinalizeRule:
     Type: AWS::Events::Rule
