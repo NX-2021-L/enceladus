@@ -1867,6 +1867,96 @@ Resources:
       SourceArn: !GetAtt PercolationMonitorSchedule.Arn
 
   # ---------------------------------------------------------------------------
+  # ENC-TSK-K41 / B66 Ph5 (ENC-PLN-064): Corpus Entropy Engine (CEE) Lambda.
+  # Cognitive-hygiene subsystem detecting entropy accumulation across the
+  # governed corpus, per DOC-A3D0CDF91CE9. Five telemetry-only detectors
+  # (orphan, stagnation, relational, retention/FSRS-6, compliance/semantic);
+  # no corpus mutation -- GDMP Stage-1 auto-remediation is a separate task.
+  # OGTM: reads exclusively through the tracker/document/graph_query_api HTTP
+  # surface (no direct DynamoDB access, no new edge types). EventBridge
+  # per-invocation (no standing compute). Gamma-only (Condition: IsGamma):
+  # v3-prod is frozen (DOC-499FA089EC30). ISS-465 cost-preflight: weekly
+  # invocation count capped well under $1/mo (see CEEInvocationCostHeadroomAlarm
+  # below); CEE_HARD_DISABLED is the mandatory kill switch, checked first thing
+  # in the handler before any governed read is attempted.
+  # ---------------------------------------------------------------------------
+  CorpusEntropyEngineFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-corpus-entropy-engine${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      SnapStart: !If
+        - SnapStartEnabled
+        - ApplyOn: PublishedVersions
+        - !Ref AWS::NoValue
+      Role: !GetAtt CorpusEntropyEngineRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          TRACKER_API_BASE: !Sub "https://enceladus-gamma.jreese.net/api/v1/tracker"
+          DOCUMENT_API_BASE: !Sub "https://enceladus-gamma.jreese.net/api/v1/documents"
+          GRAPH_QUERY_API_BASE: !Sub "https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch"
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
+          PROJECT_ID: enceladus
+          CLOUDWATCH_NAMESPACE: Enceladus/CEE
+          STAGNATION_THRESHOLD_DAYS: "14"
+          COMPLIANCE_SCORE_THRESHOLD: "70"
+          # ISS-465-style kill switch -- installed before the first scheduled
+          # run; io clears to "0" to enable. Mirrors TRAINING_HARD_DISABLED
+          # (K02) / UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
+          CEE_HARD_DISABLED: "1"
+          AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          APPCONFIG_CONFIGURATION: feature-flags
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: corpus-entropy-engine
+        - Key: Feature
+          Value: ENC-TSK-K41
+
+  # Nightly at 05:00 UTC -- after unlearning (04:00) and percolation (03:00),
+  # per-invocation only (no standing compute).
+  CorpusEntropyEngineSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-corpus-entropy-nightly${EnvironmentSuffix}"
+      Description: "Nightly Corpus Entropy Engine scan (ENC-TSK-K41 / B66 Ph5)"
+      ScheduleExpression: "cron(0 5 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CorpusEntropyEngineFunction.Arn
+          Id: corpus-entropy-nightly
+
+  CorpusEntropyEnginePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Ref CorpusEntropyEngineFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CorpusEntropyEngineSchedule.Arn
+
+  # ---------------------------------------------------------------------------
   # ENC-TSK-H86 / ENC-FTR-111 Phase 1 (T5): Universal Arc-Walker telemetry +
   # convergence-probe Lambda. Read-only — scans the tracker table and publishes
   # CloudWatch metrics (Enceladus/ArcWalk).
@@ -2235,6 +2325,31 @@ Resources:
       Dimensions:
         - Name: RuleName
           Value: !Sub "devops-unlearning-nightly${EnvironmentSuffix}"
+      Statistic: Sum
+      Period: 604800
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # ENC-TSK-K41 / B66 Ph5: CEE cost-preflight guard (ISS-465). Nightly cadence
+  # (1/day, EventBridge per-invocation, no standing compute) is far below the
+  # threshold; 512MB/300s ceiling per run keeps a full-corpus scan well under
+  # $1/mo even at max duration every night. 7-day invocation window mirrors
+  # the K02/K03 sibling alarms; breach indicates a runaway/duplicate schedule.
+  CorpusEntropyEngineCostHeadroomAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsGamma
+    Properties:
+      AlarmName: !Sub "enceladus-corpus-entropy-invocations${EnvironmentSuffix}"
+      AlarmDescription: >-
+        ENC-TSK-K41 cost-preflight guard: 7-day invocation window; nightly cadence
+        should be <=7/week (threshold 10 allows buffer). Breach indicates runaway schedule.
+      Namespace: AWS/Events
+      MetricName: Invocations
+      Dimensions:
+        - Name: RuleName
+          Value: !Sub "enceladus-corpus-entropy-nightly${EnvironmentSuffix}"
       Statistic: Sum
       Period: 604800
       EvaluationPeriods: 1
@@ -4829,6 +4944,57 @@ Resources:
                   - dynamodb:GetItem
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-percolation-telemetry${EnvironmentSuffix}"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  # ENC-TSK-K41 / B66 Ph5: Corpus Entropy Engine execution role (gamma-only).
+  # Reads the tracker/document/graph corpus exclusively over HTTPS via the
+  # governed tracker/document/graph_query_api endpoints (internal-key auth,
+  # no IAM grant needed for that path); writes ONLY CloudWatch metrics. No
+  # DynamoDB, S3, or Secrets Manager grants -- this Lambda is telemetry-only
+  # and never mutates the corpus (OGTM).
+  CorpusEntropyEngineRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-corpus-entropy-engine-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CorpusEntropyEnginePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
