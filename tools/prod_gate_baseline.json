@@ -17,6 +17,13 @@
       ],
       "notes": "environment: parametrized per target (v3-prod reviewer-gated, v4-gamma ungated); dedicated per-env OIDC roles (PR #407)"
     },
+    "_ui_deploy.yml": {
+      "class": "already-gated",
+      "gated_jobs": [
+        "deploy"
+      ],
+      "notes": "ENC-TSK-K53 / T2 (v4 UI Deploy Pipeline, DOC-3EE4F709EC98 L2). Ships frontend/ui-v2 to the T1 07-ui-cdn S3+CloudFront stack. The deploy job (the sole AWS-mutating job) carries environment by ref: startsWith(github.ref,'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' (v4/** ungated gamma, main io-reviewer-gated). Bucket + distribution id resolved at runtime from the enceladus-ui-cdn${suffix} CFN exports; role AWS_UI_DEPLOY_ROLE_TO_ASSUME with AWS_CLOUDFORMATION_ROLE_TO_ASSUME fallback"
+    },
     "build-lambda-artifacts.yml": {
       "class": "inert",
       "notes": "S3 artifact staging bucket writes only; no live function/stack mutation"
@@ -71,6 +78,13 @@
       ],
       "notes": "ENC-TSK-J63 plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod); ROLLBACK_COMPLETE cleanup is gamma-self-heal / prod-fail-closed"
     },
+    "cloudformation-ui-cdn-stack-deploy.yml": {
+      "class": "conditional",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-K52 / T1 (v4 UI Deploy Pipeline, DOC-3EE4F709EC98) plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod). Deploys the 07-ui-cdn S3+CloudFront stack for frontend/ui-v2; gamma stands up on merge to v4/main, prod is a gated flip later"
+    },
     "component-registry-guard.yml": {
       "class": "inert",
       "notes": "guard"
@@ -93,6 +107,13 @@
       ],
       "notes": "ENC-TSK-J64: environment: v3-prod (shared/global IAM role objects)"
     },
+    "iam-cfn-deploy-role-scheduler-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-PLN-068: environment: v3-prod — grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
+    },
     "iam-cfn-deploy-role-gamma-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
@@ -105,7 +126,14 @@
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-TSK-K59: environment: v3-prod \u2014 despite the gamma-scoped grant, it patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-gamma-patch.yml)"
+      "notes": "ENC-TSK-K59: environment: v3-prod — despite the gamma-scoped grant, it patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-gamma-patch.yml)"
+    },
+    "iam-cfn-deploy-role-fnurlconfig-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-K09: environment: v3-prod — patches the SHARED CFN deploy role object with lambda:*FunctionUrlConfig on enceladus-mcp-code-gamma (ENC-TSK-K07 unblock)."
     },
     "iam-cloudformation-unblock.yml": {
       "class": "prod-mutating",
@@ -191,13 +219,6 @@
         "wire-notification"
       ],
       "notes": "ENC-TSK-J65: environment chosen from environment_suffix input (-gamma -> v4-gamma, '' -> v3-prod). Caught by the guard's own first fail-closed run."
-    },
-    "iam-cfn-deploy-role-fnurlconfig-patch.yml": {
-      "class": "prod-mutating",
-      "gated_jobs": [
-        "patch-role"
-      ],
-      "notes": "ENC-TSK-K09: environment: v3-prod \u2014 patches the SHARED CFN deploy role object with lambda:*FunctionUrlConfig on enceladus-mcp-code-gamma (ENC-TSK-K07 unblock)."
     }
   }
 }
