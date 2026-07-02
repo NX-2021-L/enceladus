@@ -731,6 +731,17 @@ Resources:
       RouteKey: POST /api/v1/auth/refresh
       Target: !Sub integrations/${AuthRefreshIntegration}
 
+  # ENC-TSK-K95: Cognito Hosted-UI OAuth2 authorization-code callback for the
+  # v4 cockpit (frontend/ui-v2). Same-origin login exchange handled by
+  # auth_refresh — no Lambda@Edge. Public (no authorizer): it receives an
+  # opaque one-time code and sets the session cookie itself.
+  RouteAuthCallback:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/auth/callback
+      Target: !Sub integrations/${AuthRefreshIntegration}
+
   RouteAuthGitHubToken:
     Type: AWS::ApiGatewayV2::Route
     Properties:
