@@ -1183,6 +1183,13 @@ Resources:
           # ENC-FTR-087 Phase 1 (ENC-TSK-I85): wave-close drift telemetry sink.
           # Codified here so a compute deploy never strips it (ENC-LSN-053 class).
           DRIFT_TELEMETRY_TABLE: !Sub "enceladus-drift-telemetry${EnvironmentSuffix}"
+          # ENC-FTR-082 AC-1 (ENC-TSK-H44): raw pathway-telemetry S3 sink. Setting
+          # the bucket activates the durable .jsonl append-log (the code degrades
+          # to CloudWatch when unset — ENC-TSK-H38); prefix is env-partitioned via
+          # S3EnvPrefix (prod "" / gamma "gamma/"). Registered deploy-critical in
+          # env_drift_registry.json so the env-parity gate protects them.
+          PATHWAY_TELEMETRY_BUCKET: !Ref S3Bucket
+          PATHWAY_TELEMETRY_PREFIX: !Sub "${S3EnvPrefix}pathway-telemetry"
       Tags:
         - Key: Project
           Value: enceladus
@@ -4044,6 +4051,20 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-drift-telemetry${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-drift-telemetry${EnvironmentSuffix}/index/*"
+        # ENC-FTR-082 AC-1 (ENC-TSK-H44): raw pathway-telemetry S3 append-log sink.
+        # The Lambda already emits envelopes and degrades to CloudWatch when
+        # PATHWAY_TELEMETRY_BUCKET is unset (ENC-TSK-H38); this grant + the env
+        # vars on GraphQueryApiFunction turn the durable sink on. Write-only,
+        # prefix-scoped.
+        - PolicyName: PathwayTelemetrySinkWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PathwayTelemetryPutObject
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}pathway-telemetry/*"
       Tags:
         - Key: Project
           Value: enceladus
