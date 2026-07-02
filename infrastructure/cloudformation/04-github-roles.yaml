@@ -214,30 +214,6 @@ Resources:
               # unblocked by an out-of-band inline patch (enceladus-cfn-deploy-gamma-
               # ddb-sns-v1, gamma-only); codified here as the durable capability
               # contract, scoped to enceladus-*/devops-* (both prod and gamma).
-              # ENC-TSK-J85 / ENC-ISS-298 — the role deploys 07-codedeploy.yaml
-              # (CodeDeploy application + per-function DeploymentGroups) but held
-              # zero codedeploy actions, so the 2026-04-28 stack update AND its
-              # rollback both failed AccessDenied, wedging enceladus-codedeploy in
-              # UPDATE_ROLLBACK_FAILED. Scoped to the enceladus-lambda application
-              # namespace and its deployment groups/configs.
-              - Sid: CodeDeployStackOps
-                Effect: Allow
-                Action:
-                  - codedeploy:CreateApplication
-                  - codedeploy:DeleteApplication
-                  - codedeploy:GetApplication
-                  - codedeploy:CreateDeploymentGroup
-                  - codedeploy:DeleteDeploymentGroup
-                  - codedeploy:GetDeploymentGroup
-                  - codedeploy:UpdateDeploymentGroup
-                  - codedeploy:ListTagsForResource
-                  - codedeploy:TagResource
-                  - codedeploy:UntagResource
-                Resource:
-                  - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:application:enceladus-lambda*"
-                  - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentgroup:enceladus-lambda*"
-                  - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentconfig:*"
-
               - Sid: SqsQueueOps
                 Effect: Allow
                 Action:
@@ -368,6 +344,39 @@ Resources:
   #     --capabilities CAPABILITY_NAMED_IAM
   # Then execute the change set, and subsequent stack updates will manage it.
   # ---------------------------------------------------------------------------
+  # ENC-TSK-J85 / ENC-ISS-298 — the CFN deploy role deploys 07-codedeploy.yaml
+  # but held zero codedeploy actions; the 2026-04-28 stack update AND its
+  # rollback both failed AccessDenied, wedging enceladus-codedeploy in
+  # UPDATE_ROLLBACK_FAILED. Shipped as an attached MANAGED policy because the
+  # role's aggregate inline-policy quota (10,240 bytes) is exhausted by the
+  # out-of-band patch policies (first attempt failed on exactly that limit).
+  CodeDeployStackOpsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-codedeploy-stack-ops
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CodeDeployStackOps
+            Effect: Allow
+            Action:
+              - codedeploy:CreateApplication
+              - codedeploy:DeleteApplication
+              - codedeploy:GetApplication
+              - codedeploy:CreateDeploymentGroup
+              - codedeploy:DeleteDeploymentGroup
+              - codedeploy:GetDeploymentGroup
+              - codedeploy:UpdateDeploymentGroup
+              - codedeploy:ListTagsForResource
+              - codedeploy:TagResource
+              - codedeploy:UntagResource
+            Resource:
+              - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:application:enceladus-lambda*"
+              - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentgroup:enceladus-lambda*"
+              - !Sub "arn:aws:codedeploy:us-west-2:${AWS::AccountId}:deploymentconfig:*"
+
   BackendDeployRole:
     Type: AWS::IAM::Role
     Properties:
