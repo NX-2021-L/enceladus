@@ -173,6 +173,12 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt CoordinationApiRole.Arn
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing (MCP Server / governed-mutation API
+      # surface — CoordinationApiFunction is the gamma-deployable stand-in for "MCP Server"
+      # in the five-service trace; EnceladusMcpCodeGammaFunction is prod-stack-owned
+      # (Condition: IsProduction) and out of reach for a gamma-only compute deploy).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
         # ENC-TSK-F63 AC-1: AppConfig extension layer (arch-conditional)
@@ -264,6 +270,10 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt TrackerMutationRole.Arn
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing ("Record" service — TrackerMutationFunction
+      # writes/records the governed tracker mutation for every task/issue/feature/lesson).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
         - !If
@@ -377,6 +387,9 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt LifecycleServiceRole.Arn
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing (Lifecycle service).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
       Environment:
@@ -415,6 +428,9 @@ Resources:
         - ApplyOn: PublishedVersions
         - !Ref AWS::NoValue
       Role: !GetAtt ScoringServiceRole.Arn
+      # ENC-TSK-K45 / B66 AC-1: active X-Ray tracing (Scoring service).
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
       Environment:
@@ -2436,6 +2452,13 @@ Resources:
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-coordination-api${EnvironmentSuffix}*"
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/mcp/server*"
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/enceladus/coordination/worker-runtime*"
+              # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access.
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
               - Sid: CoordinationTableAccess
                 Effect: Allow
                 Action:
@@ -2700,6 +2723,8 @@ Resources:
       # failed every request with 500 'Database read failed' (and had no log group).
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access ("Record" service).
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
       Policies:
         # ENC-ISS-313 / ENC-TSK-G95: grants applied out-of-band by the tombstoned
         # per-Lambda deploy.sh ensure_role() (dropped by matrix-build migration
@@ -2818,6 +2843,13 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-lifecycle-service${EnvironmentSuffix}*"
+              # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access.
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
               - Sid: DynamoDBTrackerRead
                 Effect: Allow
                 Action:
@@ -2867,6 +2899,13 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-scoring-service${EnvironmentSuffix}*"
+              # ENC-TSK-K45 / B66 AC-1: X-Ray active tracing write access.
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
               - Sid: DynamoDBLessonScoringWriteback
                 Effect: Allow
                 Action:
