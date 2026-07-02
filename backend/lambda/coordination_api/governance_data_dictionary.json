@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-02.23",
+  "version": "2026-07-02.24",
   "updated_at": "2026-07-02T11:25:00Z",
-  "last_change_summary": "ENC-TSK-K12: Gen2 build packages tools/enceladus-mcp-server runtime modules into coordination_api and mcp_code artifacts so gamma MCP gateway can load server.py (ISS-473/474 live smoke).",
+  "last_change_summary": "ENC-TSK-K02 (FTR-084 Ph2): intent-classifier training loop — weekly EventBridge job, versioned S3 record_boosts, TRAINING_HARD_DISABLED kill switch (default ON), holdout degradation guard, one-call rollback, cost-preflight ~$0.04/mo.",
   "owners": [
     "enceladus-platform"
   ],
@@ -6094,6 +6094,23 @@
         }
       }
     },
+    "coordination_api.intent_training": {
+      "description": "ENC-FTR-084 Ph2 / ENC-TSK-K02: scheduled intent-classifier training loop in coordination_api. EventBridge IntentClassifierTrainingSchedule (gamma, cron Sunday 04:00 UTC) invokes lambda_handler with {\"action\":\"intent_classifier_training\"}; rollback via {\"action\":\"intent_classifier_training_rollback\",\"version_id\"?}. Per-invocation only (no always-on compute). Mutates versioned per-record score boosts stored on S3 under INTENT_TRAINING_PREFIX (default gamma/intent-training): labels at labels/session_outcomes.jsonl (NDJSON of {first_turn_text, label_node_ids, embedding?}), active pointer at weights/active.json, immutable snapshots at weights/versions/{version_id}.json with previous_version_id chain for one-call rollback. Inference reads boosts via intent_training.load_inference_record_boosts() inside classify_session_intent (intent_classifier applies multiplicative boosts to neighbor scores). TRAINING_HARD_DISABLED=1 (default, ISS-465 pattern) hard-stops training AND suppresses boost reads at inference; io clears to 0 to enable. Holdout validation (20% split): >10% accuracy degradation vs baseline auto-sets training_disabled on the active snapshot. COST-PREFLIGHT: projected ~$0.04/month; IntentTrainingCostHeadroomAlarm fires if EventBridge invocations exceed 6/30d.",
+      "fields": {
+        "eventbridge_actions": {
+          "type": "object",
+          "definition": "intent_classifier_training (weekly train), intent_classifier_training_rollback (repoint active.json to previous or explicit version_id)."
+        },
+        "env_vars": {
+          "type": "object",
+          "definition": "TRAINING_HARD_DISABLED (default 1), INTENT_TRAINING_BUCKET, INTENT_TRAINING_PREFIX, TRAINING_LEARNING_RATE (0.05), TRAINING_BOOST_MIN (0.5), TRAINING_BOOST_MAX (2.0), TRAINING_DEGRADATION_THRESHOLD (0.10)."
+        },
+        "rollback": {
+          "type": "object",
+          "definition": "Invoke coordination_api with {\"action\":\"intent_classifier_training_rollback\"} to roll back to previous_version_id, or pass version_id to pin a specific snapshot."
+        }
+      }
+    },
     "mcp_server.governance_hash_resolution": {
       "description": "Hash resolution chain in enceladus-mcp-server._get_governance_hash_via_api() after the ENC-TSK-I29 cutover. Four-tier resolution with 60s TTL cache.",
       "fields": {
@@ -7004,6 +7021,11 @@
       "version": "2026-07-02.20",
       "date": "2026-07-02",
       "summary": "ENC-TSK-K12 (ENC-ISS-473, ENC-ISS-474): MCP server restores truncated tracker_embeddings_for and tracker_sheaf_cohomology handlers (search actions tracker.embeddings_for / tracker.sheaf_cohomology forwarding to graph_query_api embeddings_for and sheaf_cohomology search_types); coordination_api .build_extras now packages tools/enceladus-mcp-server/telemetry_rank.py so dispatch_plan / coordination paths can import telemetry.rank helpers. New entities mcp_server.tracker_embeddings_for and mcp_server.tracker_sheaf_cohomology. Repo-file edit only \u2014 governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
+    {
+      "version": "2026-07-02.22",
+      "date": "2026-07-02",
+      "summary": "ENC-TSK-K02 (FTR-084 Ph2): intent-classifier training loop — intent_training.py + weekly EventBridge schedule on coordination_api (gamma), versioned S3 record_boosts with rollback action, TRAINING_HARD_DISABLED kill switch default ON, holdout degradation auto-disable, cost-preflight alarm. Inference path applies trained boosts in classify_session_intent; applied_entelechy_override still wins. New entity coordination_api.intent_training. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
     }
   ]
 }

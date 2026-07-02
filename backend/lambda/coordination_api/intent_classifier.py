@@ -13,11 +13,11 @@ Given the first-turn request text and session metadata, this module:
      classifier prediction is still computed and logged, but the applied value is
      the io-supplied override (override wins — AC-2).
 
-SCOPE GUARD (AC-5): This module is INFERENCE-ONLY. It performs NO model training,
-NO weight/parameter persistence, and NO governed graph mutation. There is no
-training loop here; the persistent-model-mutation arc (FTR-084 AC-3) is a
-deferred follow-on task pending io review. `INFERENCE_ONLY`/`TRAINING_ENABLED`
-below are asserted by the unit-test suite.
+SCOPE GUARD (AC-5): The classify path is INFERENCE-ONLY for training writes.
+Trained record boosts are read from versioned S3 snapshots (FTR-084 Ph2 /
+ENC-TSK-K02); mutation runs only in intent_training.py on the scheduled
+EventBridge path. `INFERENCE_ONLY`/`TRAINING_ENABLED` below are asserted by
+the unit-test suite.
 
 OGTM note (AC-4): Phase 1 returns predictions inline and introduces NO new edge
 type, record type, or relational field. The Ontological Graph Traversability
@@ -336,6 +336,8 @@ def classify_session_intent(
     neighbor_provider: Optional[
         Callable[[str, Optional[Sequence[float]], int, str], List[Dict[str, Any]]]
     ] = None,
+    record_boosts: Optional[Dict[str, float]] = None,
+    load_trained_boosts: bool = True,
 ) -> Dict[str, Any]:
     """Predict session-init intent (𝔈) and resolve the applied entelechy.
 
@@ -375,6 +377,22 @@ def classify_session_intent(
         except Exception:  # noqa: BLE001
             logger.exception("[ERROR] intent_classifier: neighbor_provider raised")
             neighbors = []
+
+    boosts = record_boosts
+    if boosts is None and load_trained_boosts:
+        try:
+            import intent_training as _intent_training
+
+            boosts = _intent_training.load_inference_record_boosts()
+        except Exception:  # noqa: BLE001
+            boosts = {}
+    if boosts:
+        try:
+            import intent_training as _intent_training
+
+            neighbors = _intent_training.apply_record_boosts_to_neighbors(neighbors, boosts)
+        except Exception:  # noqa: BLE001
+            pass
 
     node_ids: List[str] = []
     for n in neighbors:
