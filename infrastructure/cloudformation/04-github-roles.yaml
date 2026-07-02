@@ -367,6 +367,11 @@ Resources:
                 token.actions.githubusercontent.com:sub:
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/v4/*"
+                  # ENC-TSK-J64 / ENC-FTR-120: environment-scoped jobs (gated UI
+                  # prod lane + iam-* patch workflows assuming this role) emit
+                  # environment-form subs. Additive; ref subs retained.
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:v3-prod"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:v4-gamma"
       Policies:
         # Split into original named policies to stay under IAM 10KB
         # per-policy limit (ENC-TSK-E32). Source: iam:GetRolePolicy dump

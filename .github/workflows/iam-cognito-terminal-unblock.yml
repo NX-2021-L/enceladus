@@ -21,6 +21,8 @@ permissions:
 jobs:
   patch-role:
     name: Patch deploy role for Cognito terminal provisioning
+    # ENC-TSK-J64 / ENC-FTR-120: live IAM mutation (shared/global role objects) — pauses on the v3-prod required-reviewer rule.
+    environment: v3-prod
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

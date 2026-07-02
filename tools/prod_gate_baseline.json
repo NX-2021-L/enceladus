@@ -1,0 +1,189 @@
+{
+  "_doc": "ENC-TSK-J64 / ENC-FTR-120 prod-gate classification baseline. Every workflow under .github/workflows/ is classified for the FTR-120 invariant: no agent-reachable git operation mutates v3-prod without pausing on the v3-prod GitHub Environment required-reviewer gate. Consumed by the ENC-TSK-J65 prod-gate-coverage-guard, which FAILS CLOSED on any workflow absent from this file or classified prod-mutating without its mutating job carrying environment: v3-prod. Classes: prod-mutating (job can mutate v3-prod runtime/control-plane -> its mutating job MUST be v3-prod environment-scoped), gamma-only (mutates only -gamma resources / v4 lanes), conditional (environment chosen by expression from ref or inputs -> guard asserts the expression includes v3-prod for the prod path), already-gated (carries the environment natively), inert (no AWS mutation: guards, CI, git-only, read-only audits, docstore-only writes).",
+  "_schema": {
+    "version": "2026-07-02-j64",
+    "format": "workflows.<file> = {class, gated_jobs?, notes}",
+    "gated_jobs": "job ids whose environment key satisfies the invariant (v3-prod, v4-gamma, or a conditional expression covering both)"
+  },
+  "workflows": {
+    "_build.yml": {
+      "class": "inert",
+      "notes": "reusable build; artifact staging only, no runtime mutation"
+    },
+    "_deploy.yml": {
+      "class": "already-gated",
+      "gated_jobs": [
+        "deploy"
+      ],
+      "notes": "environment: parametrized per target (v3-prod reviewer-gated, v4-gamma ungated); dedicated per-env OIDC roles (PR #407)"
+    },
+    "build-lambda-artifacts.yml": {
+      "class": "inert",
+      "notes": "S3 artifact staging bucket writes only; no live function/stack mutation"
+    },
+    "cfn-drift-audit.yml": {
+      "class": "inert",
+      "notes": "read-only drift audit"
+    },
+    "cfn-resource-import.yml": {
+      "class": "conditional",
+      "gated_jobs": [
+        "import"
+      ],
+      "notes": "ENC-TSK-J64: environment chosen from inputs.stack_name (-gamma -> v4-gamma, else v3-prod)"
+    },
+    "ci.yml": {
+      "class": "inert",
+      "notes": "lint/tests/guards"
+    },
+    "cloudformation-agent-auth-stack-deploy.yml": {
+      "class": "already-gated",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "v4/main-only file; gamma-only by construction (guard-gamma-only job refuses non-gamma, v3-prod FROZEN per DOC-499FA089EC30); ENC-TSK-J63 plan/apply split with apply environment: v4-gamma"
+    },
+    "cloudformation-api-stack-deploy.yml": {
+      "class": "conditional",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-J62 plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod)"
+    },
+    "cloudformation-codedeploy-stack-deploy.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-J63 plan/apply split; prod-only stack so apply is always environment: v3-prod; plan fails closed on stuck stack states"
+    },
+    "cloudformation-compute-stack-deploy.yml": {
+      "class": "conditional",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-J62 plan/apply split; apply environment by ref"
+    },
+    "cloudformation-monitoring-stack-deploy.yml": {
+      "class": "conditional",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-J63 plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod); ROLLBACK_COMPLETE cleanup is gamma-self-heal / prod-fail-closed"
+    },
+    "component-registry-guard.yml": {
+      "class": "inert",
+      "notes": "guard"
+    },
+    "governance-dictionary-guard.yml": {
+      "class": "inert",
+      "notes": "guard"
+    },
+    "governance-prod-backstop-grant.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "v4/main-only file; dispatch-only IAM grant with doc-id consent input; apply job gated environment: v3-prod by ENC-TSK-J64's v4 port (baseline entry corrected by the J65 guard's own first v4 run)."
+    },
+    "iam-cfn-deploy-role-eventbridge-listrules-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-J64: environment: v3-prod (shared/global IAM role objects)"
+    },
+    "iam-cfn-deploy-role-gamma-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-J64: environment: v3-prod \u2014 despite the name it patches the SHARED CFN deploy role object"
+    },
+    "iam-cloudformation-unblock.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-J64: environment: v3-prod"
+    },
+    "iam-cognito-terminal-unblock.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-J64: environment: v3-prod"
+    },
+    "iam-coordination-api-gamma-govversion-grant.yml": {
+      "class": "gamma-only",
+      "notes": "v4/main-only file; mutates devops-coordination-api-lambda-role-GAMMA policy only"
+    },
+    "lambda-workflow-coverage-guard.yml": {
+      "class": "inert",
+      "notes": "guard"
+    },
+    "mcp-api-boundary-guard.yml": {
+      "class": "inert",
+      "notes": "guard"
+    },
+    "nightly-parity-audit.yml": {
+      "class": "inert",
+      "notes": "read-only audit"
+    },
+    "oidc-trust-probe.yml": {
+      "class": "already-gated",
+      "gated_jobs": [
+        "probe"
+      ],
+      "notes": "read-only probe; environment: from input (v3-prod dispatches pause like any other)"
+    },
+    "pr-commit-gate.yml": {
+      "class": "inert",
+      "notes": "gate validation, read-only"
+    },
+    "promote-gamma-to-prod-request.yml": {
+      "class": "inert",
+      "notes": "relay: dispatches _deploy.yml whose v3-prod lane is environment-gated; performs no mutation itself"
+    },
+    "secrets-guardrail.yml": {
+      "class": "inert",
+      "notes": "guard"
+    },
+    "sync-architecture-doc.yml": {
+      "class": "inert",
+      "notes": "docstore document write via internal key; no runtime-infrastructure mutation \u2014 flagged for awareness, out of the v3-prod runtime invariant's scope"
+    },
+    "sync-main-to-v4main.yml": {
+      "class": "inert",
+      "notes": "git-only forward-sync (currently disabled/fork-mode)"
+    },
+    "ui-backend-deploy.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "deploy"
+      ],
+      "notes": "ENC-TSK-J64: environment: v3-prod \u2014 the DPL submit is the irrevocable prod trigger (orchestrator deploys the queued request with no further gate)"
+    },
+    "ui-gamma-deploy.yml": {
+      "class": "already-gated",
+      "gated_jobs": [
+        "deploy"
+      ],
+      "notes": "v4/main-only; environment: v4-gamma with dedicated GitHubActions-V4Gamma-DeployRole since inception"
+    },
+    "ddb-add-deployment-manager-gsis.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "add-gsis"
+      ],
+      "notes": "ENC-TSK-J65: dispatch-only GSI addition on the prod deployment-manager table; environment: v3-prod. Caught by the guard's own first fail-closed run."
+    },
+    "s3-governance-notification-wire.yml": {
+      "class": "conditional",
+      "gated_jobs": [
+        "wire-notification"
+      ],
+      "notes": "ENC-TSK-J65: environment chosen from environment_suffix input (-gamma -> v4-gamma, '' -> v3-prod). Caught by the guard's own first fail-closed run."
+    }
+  }
+}

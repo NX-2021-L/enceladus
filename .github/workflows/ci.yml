@@ -66,6 +66,15 @@ jobs:
           python3 -m pip install --quiet pyyaml
           python3 tools/test_synthetic_strip_proof.py
 
+      # ENC-TSK-J65 / ENC-FTR-120: no agent-reachable git operation may mutate
+      # v3-prod without the environment reviewer gate. Fail-closed: unclassified
+      # workflows and ungated prod-mutating jobs fail CI here.
+      - name: Prod-gate coverage guard (ENC-TSK-J65)
+        run: |
+          set -euo pipefail
+          python3 tools/prod_gate_coverage_guard.py
+          python3 -m unittest tools.test_prod_gate_coverage_guard
+
   frontend-ui-tests:
     name: Frontend UI Tests
     runs-on: ubuntu-latest
