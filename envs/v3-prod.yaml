@@ -66,7 +66,7 @@ function_name_map:
   auth_refresh: auth-refresh
   bedrock_agent_actions: enceladus-bedrock-agent-actions
   changelog_api: devops-changelog-api
-  checkout_service: enceladus-checkout-service-auto
+  checkout_service: enceladus-checkout-service,enceladus-checkout-service-auto
   coordination_api: devops-coordination-api
   coordination_monitor_api: devops-coordination-monitor-api
   deploy_decide: devops-deploy-decide
