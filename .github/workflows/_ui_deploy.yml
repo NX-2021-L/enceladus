@@ -96,9 +96,11 @@ jobs:
         env:
           # Same-origin API base (07-ui-cdn /api/* behavior proxies to API GW).
           VITE_API_BASE: /api/v1
-          # Same-origin feed snapshot base — the gamma feed publisher writes
-          # mobile/v1/tasks.json into the UI origin bucket (ENC-TSK-K72).
-          VITE_FEED_BASE_URL: /mobile/v1
+          # ENC-TSK-K98: cold-start snapshot now comes from the AUTHENTICATED
+          # feed_query API (GET /api/v1/feed/tasks.json), not the public
+          # /mobile/v1/ S3 objects (which are being retired). Same-origin;
+          # the 07-ui-cdn /api/* behavior proxies to API GW.
+          VITE_FEED_BASE_URL: /api/v1/feed
           # ENC-TSK-K70: AppSync Events realtime config. Sourced from GitHub
           # repo VARIABLES (not CFN describe-stacks) because this build job is
           # deliberately credential-less and ungated — granting it AWS access

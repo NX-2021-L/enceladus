@@ -1472,6 +1472,62 @@ def _handle_feed_refresh() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _handle_snapshot() -> Dict[str, Any]:
+    """
+    ENC-TSK-K98 — authenticated cold-start snapshot (GET /api/v1/feed/tasks.json).
+
+    Replaces the previously PUBLIC S3 object at /mobile/v1/tasks.json. The whole
+    handler is JWT-gated (see lambda_handler: token is extracted + verified
+    before any dispatch), so an unauthenticated request 401s here instead of
+    reading a public file. Returns only the minimal fields the ui-v2 cockpit
+    needs to seed its feed before the realtime WSS connects
+    ({item_id, title, status, record_type, updated_at}) across all record types.
+    The minimal projection also shrinks the payload from ~7.7MB of full records
+    to a few KB and stops leaking descriptions / session / worklog data.
+    """
+    try:
+        tasks, issues, features, lessons, plans = _query_all_records()
+    except Exception as exc:  # noqa: BLE001 — surface a structured 500, not opaque
+        logger.error("snapshot query failed: %s", exc)
+        return _error(500, "Failed to query snapshot. Please try again.")
+
+    def _rows(records: List[Dict[str, Any]], id_key: str, record_type: str) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for r in records:
+            rid = r.get(id_key) or r.get("item_id")
+            if not rid:
+                continue
+            out.append(
+                {
+                    "item_id": rid,
+                    "title": r.get("title") or rid,
+                    "status": r.get("status") or "open",
+                    "record_type": record_type,
+                    "updated_at": r.get("updated_at") or None,
+                }
+            )
+        return out
+
+    rows = (
+        _rows(tasks, "task_id", "task")
+        + _rows(issues, "issue_id", "issue")
+        + _rows(features, "feature_id", "feature")
+        + _rows(lessons, "lesson_id", "lesson")
+        + _rows(plans, "plan_id", "plan")
+    )
+
+    body = {"generated_at": _now_z(), "tasks": rows}
+    return {
+        "statusCode": 200,
+        "headers": {
+            **_cors_headers(),
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+        "body": json.dumps(body),
+    }
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
@@ -1535,6 +1591,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return _error(404, f"Subscription '{subscription_id}' not found")
 
         return _response(200, {"success": True, "subscription": _subscription_public(sub)})
+
+    # ENC-TSK-K98 — authenticated cold-start snapshot; replaces the public
+    # /mobile/v1/tasks.json S3 object. JWT already enforced above.
+    if method == "GET" and re.search(r"/api/v1/feed/tasks\.json/?$", path):
+        return _handle_snapshot()
 
     if method != "GET" or not re.search(r"/api/v1/feed/?$", path):
         return _error(404, f"Unsupported route: {method} {path}")

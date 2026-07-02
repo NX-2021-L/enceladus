@@ -96,6 +96,14 @@ DOCUMENTS_REGION = os.environ.get("DOCUMENTS_REGION", "us-west-2")
 FEED_BUCKET = os.environ.get("FEED_BUCKET", DEFAULT_MOBILE_S3_BUCKET)
 FEED_PREFIX = os.environ.get("FEED_PREFIX", DEFAULT_MOBILE_S3_PREFIX)
 CF_DISTRIBUTION = os.environ.get("CF_DISTRIBUTION", DEFAULT_MOBILE_CF_DISTRIBUTION)
+# ENC-TSK-K98: gate the PUBLIC /mobile feed publish (+ its CF invalidation).
+# Prod keeps publishing (default "true"). Gamma sets this "false" because the
+# gamma /mobile/v1 objects are served PUBLICLY by the shared UI-origin cockpit
+# CDN (a full-record data leak), and the ui-v2 cockpit now reads its cold-start
+# snapshot from the AUTHENTICATED feed_query API (GET /api/v1/feed/tasks.json).
+FEED_S3_PUBLISH_ENABLED = (
+    os.environ.get("FEED_S3_PUBLISH_ENABLED", "true").strip().lower() != "false"
+)
 SNS_TOPIC = os.environ.get("SNS_TOPIC", DEFAULT_SNS_TOPIC)
 EVENT_BUS = os.environ.get("EVENT_BUS", DEFAULT_EVENT_BUS)
 ANALYTICS_BUCKET = os.environ.get("ANALYTICS_BUCKET", ANALYTICS_S3_BUCKET)
@@ -435,13 +443,25 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             # Non-fatal: continue without reference docs
 
         # 5. Publish feed files to S3
-        uploaded_keys = publish_mobile_feeds_to_s3(
-            feed_dir=feed_dir,
-            bucket=FEED_BUCKET,
-            s3_prefix=FEED_PREFIX,
-            dry_run=DRY_RUN,
-        )
-        logger.info("feed_publisher: published %d files to S3", len(uploaded_keys))
+        #
+        # ENC-TSK-K98: skip on gamma (FEED_S3_PUBLISH_ENABLED=false) — the
+        # /mobile/v1 objects are served PUBLICLY by the shared UI-origin cockpit
+        # CDN, and the ui-v2 cockpit now reads its snapshot from the
+        # authenticated feed_query API. Prod keeps publishing.
+        if FEED_S3_PUBLISH_ENABLED:
+            uploaded_keys = publish_mobile_feeds_to_s3(
+                feed_dir=feed_dir,
+                bucket=FEED_BUCKET,
+                s3_prefix=FEED_PREFIX,
+                dry_run=DRY_RUN,
+            )
+            logger.info("feed_publisher: published %d files to S3", len(uploaded_keys))
+        else:
+            uploaded_keys = []
+            logger.info(
+                "feed_publisher: PUBLIC /mobile S3 publish disabled "
+                "(FEED_S3_PUBLISH_ENABLED=false); skipping write + CF invalidation"
+            )
 
         # 5b. Write analytics sync-stage JSON for Trino/Superset pipeline
         analytics_stage_prefixes = {}  # project_name -> {artifact -> s3_prefix_uri}
@@ -465,16 +485,17 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             logger.error("feed_publisher: analytics sync-stage write failed: %s", exc)
             # Non-fatal: mobile feeds are already published
 
-        # 6. CloudFront invalidation
-        try:
-            inv_id = invalidate_mobile_cf(
-                distribution_id=CF_DISTRIBUTION,
-                dry_run=DRY_RUN,
-            )
-            logger.info("feed_publisher: CF invalidation id=%s", inv_id)
-        except Exception as exc:
-            logger.error("feed_publisher: CloudFront invalidation failed: %s", exc)
-            # Non-fatal: feeds are published even if invalidation fails
+        # 6. CloudFront invalidation (only when we actually published — K98)
+        if FEED_S3_PUBLISH_ENABLED:
+            try:
+                inv_id = invalidate_mobile_cf(
+                    distribution_id=CF_DISTRIBUTION,
+                    dry_run=DRY_RUN,
+                )
+                logger.info("feed_publisher: CF invalidation id=%s", inv_id)
+            except Exception as exc:
+                logger.error("feed_publisher: CloudFront invalidation failed: %s", exc)
+                # Non-fatal: feeds are published even if invalidation fails
 
         # 7. SNS signal for Trino/Superset pipeline
         try:
