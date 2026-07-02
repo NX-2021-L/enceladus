@@ -4178,6 +4178,12 @@ Resources:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
+                  # ENC-TSK-K73: the publisher's first step scans PROJECTS_TABLE
+                  # (_load_active_projects_from_ddb). This grant was missing, so
+                  # every gamma batch failed AccessDenied and the gamma snapshot
+                  # pipeline never completed a publish.
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
               - Sid: S3MobileFeedsWrite
                 Effect: Allow
                 Action:
