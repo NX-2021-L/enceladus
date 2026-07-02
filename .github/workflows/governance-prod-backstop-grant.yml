@@ -44,6 +44,9 @@ env:
 jobs:
   apply:
     name: Apply prod governance-hash backstop (io-exception)
+    # ENC-TSK-J64 / ENC-FTR-120: prod IAM grant -- pauses on the v3-prod
+    # required-reviewer rule (layered under the doc-id consent input).
+    environment: v3-prod
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
