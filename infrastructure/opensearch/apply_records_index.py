@@ -43,9 +43,18 @@ def _request(host, method, path, admin_password, body=None):
     ctx.verify_mode = ssl.CERT_NONE
     try:
         with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-            return resp.status, json.loads(resp.read())
+            raw = resp.read()
+            if raw:
+                return resp.status, json.loads(raw)
+            return resp.status, {}
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
+        raw = exc.read()
+        if raw:
+            try:
+                return exc.code, json.loads(raw)
+            except json.JSONDecodeError:
+                return exc.code, {"error": raw.decode("utf-8", errors="replace")}
+        return exc.code, {}
 
 
 def main():
