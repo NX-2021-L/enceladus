@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.15",
+  "version": "2026-07-05.16",
   "updated_at": "2026-07-05T11:25:00Z",
-  "last_change_summary": "ENC-TSK-K26: shared record_extensions module attaches typed_relationships + computed context_node (absolute structural_importance per DOC-310B93107B60) on feed_query and tracker_mutation GET; ui-v2 governance surfaces consume the extensions.",
+  "last_change_summary": "ENC-TSK-J40: added component_registry.component.deploy_targets (stack names + function-name globs a component owns) to the ENC-TSK-E68 capability-declaration field set, consumed by tools/assert_deploy_target_coverage.py to fail closed when a component's declared targets are narrower than a merge's diff-inferred affected set.",
   "owners": [
     "enceladus-platform"
   ],
@@ -2909,7 +2909,7 @@
       }
     },
     "component_registry.component": {
-      "description": "A registered product component in the Enceladus component registry (ENC-FTR-041). Associates a system component with its required transition_type, enforced by the checkout service when tasks declare that component in task.components. ENC-TSK-E68 (ENC-PLN-031): extended with 5 capability-declaration fields (required_iam_actions, required_env_secrets, required_apigw_routes, required_cfn_resources, required_lambda_env_vars) that the continuous deploy capability auditor (ENC-TSK-E69) and pre-merge guard (ENC-TSK-E70) consume as source-of-truth to detect drift between declared and deployed state. ENC-TSK-F50 / ENC-ISS-270 (DOC-240A67973B13): introduced `required_transition_type` as the first-class invariant field that checkout_service reads for strictness enforcement \u2014 the legacy `transition_type` field is retained for back-compat documentation but is NOT read by the strictness path post-F50. Coordination API enforces `required_transition_type` presence at create time (Option A strict \u2014 see checkout_service.required_transition_type_enforcement entity for the 5-surface defense-in-depth contract).",
+      "description": "A registered product component in the Enceladus component registry (ENC-FTR-041). Associates a system component with its required transition_type, enforced by the checkout service when tasks declare that component in task.components. ENC-TSK-E68 (ENC-PLN-031): extended with 5 capability-declaration fields (required_iam_actions, required_env_secrets, required_apigw_routes, required_cfn_resources, required_lambda_env_vars) that the continuous deploy capability auditor (ENC-TSK-E69) and pre-merge guard (ENC-TSK-E70) consume as source-of-truth to detect drift between declared and deployed state. ENC-TSK-J40 (PLN-060 Pile B): added a 6th field, deploy_targets, to the same capability-declaration set -- consumed by tools/assert_deploy_target_coverage.py to fail closed on blast-radius-scoped deploys when a component's declared targets are narrower than a merge's actual diff. ENC-TSK-F50 / ENC-ISS-270 (DOC-240A67973B13): introduced `required_transition_type` as the first-class invariant field that checkout_service reads for strictness enforcement \u2014 the legacy `transition_type` field is retained for back-compat documentation but is NOT read by the strictness path post-F50. Coordination API enforces `required_transition_type` presence at create time (Option A strict \u2014 see checkout_service.required_transition_type_enforcement entity for the 5-surface defense-in-depth contract).",
       "fields": {
         "component_id": {
           "type": "string",
@@ -3125,6 +3125,15 @@
           "example": [
             "COORDINATION_INTERNAL_API_KEY",
             "DYNAMODB_REGION"
+          ]
+        },
+        "deploy_targets": {
+          "type": "array",
+          "item_type": "string",
+          "definition": "Stack names and/or backend/lambda function-name globs this component owns for deploy purposes. ENC-TSK-J40 (PLN-060 Pile B). Consumed by tools/assert_deploy_target_coverage.py as part of the blast-radius-scoped Gen2 deploy: when tools/compute_affected_targets.py diffs a merge against the last-deployed SHA and finds a changed backend/lambda/<dir> whose owning component (matched via source_paths.directory) HAS declared deploy_targets, that declaration must cover the changed dir or the deploy CI run fails closed. Components that have not declared deploy_targets are not gated. Optional (empty-array default).",
+          "usage_guidance": "Populate with the exact backend/lambda directory name(s) (fnmatch glob supported) this component is responsible for redeploying. Getting this wrong narrow fails the deploy CI run; getting it wrong wide is safe.",
+          "example": [
+            "tracker_mutation"
           ]
         },
         "source_paths": {

@@ -52,6 +52,11 @@ jobs:
           set -euo pipefail
           python3 -m unittest tools.test_verify_lambda_package_arch -v
 
+      - name: Test blast-radius affected-target computation (ENC-TSK-J40)
+        run: |
+          set -euo pipefail
+          python3 -m unittest tools.test_compute_affected_targets -v
+
       # ENC-TSK-H22 (ENC-PLN-048 Obj 4.1): prove the env-parity gate catches a
       # template strip. Needs PyYAML (the gate's resolver parses CFN); no current
       # CI step imports yaml, so provision Python+PyYAML scoped to this step only.
