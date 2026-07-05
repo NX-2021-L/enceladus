@@ -1408,12 +1408,12 @@ Resources:
       FunctionName: !Sub "devops-opensearch-indexer${EnvironmentSuffix}"
       Code:
         ZipFile: "# managed outside CloudFormation"
-      Runtime: python3.12
+      Runtime: !If [IsGamma, python3.12, python3.11]
       Handler: lambda_function.handler
       MemorySize: 256
       Timeout: 60
       Architectures:
-        - arm64
+        - !If [IsGamma, arm64, x86_64]
       Role: !GetAtt OpenSearchIndexerRole.Arn
       VpcConfig:
         SecurityGroupIds:

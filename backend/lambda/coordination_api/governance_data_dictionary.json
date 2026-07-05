@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.16",
-  "updated_at": "2026-07-05T11:25:00Z",
-  "last_change_summary": "ENC-TSK-J40: added component_registry.component.deploy_targets (stack names + function-name globs a component owns) to the ENC-TSK-E68 capability-declaration field set, consumed by tools/assert_deploy_target_coverage.py to fail closed when a component's declared targets are narrower than a merge's diff-inferred affected set.",
+  "version": "2026-07-05.17",
+  "updated_at": "2026-07-05T11:50:00Z",
+  "last_change_summary": "ENC-TSK-L41 (B67 Search2.0 WaveB): new opensearch_indexer.lambda entity — devops-opensearch-indexer CDC Lambda fed by dedicated SearchIndexQueue FIFO (Tracker/Documents EventBridge Pipes), bulk-upserting tracker/document mutations to OpenSearch records_write with external-version idempotency.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7464,10 +7464,46 @@
           "usage_guidance": "Client subscribes to /records/{recordId} (ENC-TSK-L29 AppSyncRealtimeClient.watchRecord) only while that record's detail page is open, and upserts event.record directly into the Tier-2 cache + the live query cache -- never re-fetches on receipt of this event."
         }
       }
+    },
+    "opensearch_indexer.lambda": {
+      "description": "ENC-TSK-L41 (B67 Search2.0 WaveB / DOC-77D6C714867E \u00a715): OpenSearch CDC indexer Lambda (devops-opensearch-indexer; gamma twin devops-opensearch-indexer-gamma, arm64/python3.12). DISTINCT from graph_sync \u2014 consumes a DEDICATED devops-search-index-queue.fifo fed by TrackerToSearchIndexPipe + DocumentsToSearchIndexPipe (second DynamoDB-stream reader group on tracker + documents tables). Bulk-upserts INSERT/MODIFY tracker/document stream records into OpenSearch via the records_write alias; REMOVE deletes by stable natural key _id={project_id}#{record_type}#{bare_record_id}. Interim external-version contract: version = updated_at epoch-ms (version_seq field) until ENC-TSK-L27 version_seq cutover. SQS trigger uses ReportBatchItemFailures + DLQ redrive. Runs in VPC to reach the gamma single-node OpenSearch cluster (TLS basic auth via OPENSEARCH_ADMIN_PASSWORD env or Secrets Manager enceladus/opensearch/gamma-admin). Skips reference and relationship record_types. Provisioned by infrastructure/cloudformation/01-data.yaml (SearchIndexQueue) + 02-compute.yaml (pipes, function, role, event source mapping).",
+      "fields": {
+        "OPENSEARCH_ENDPOINT": {
+          "definition": "HTTPS URL of the gamma OpenSearch node (VPC-private IP, e.g. https://172.31.28.54:9200).",
+          "type": "string"
+        },
+        "OPENSEARCH_WRITE_ALIAS": {
+          "definition": "OpenSearch write alias; locked to records_write per ENC-TSK-L40 naming contract.",
+          "default": "records_write",
+          "type": "string"
+        },
+        "OPENSEARCH_ADMIN_PASSWORD": {
+          "definition": "Admin basic-auth password when set; takes precedence over Secrets Manager lookup.",
+          "type": "string"
+        },
+        "OPENSEARCH_SECRET_NAME": {
+          "definition": "Secrets Manager secret id holding {\"password\":\"...\"} when OPENSEARCH_ADMIN_PASSWORD is empty.",
+          "default": "enceladus/opensearch/gamma-admin",
+          "type": "string"
+        },
+        "SECRETS_REGION": {
+          "definition": "Region for Secrets Manager client.",
+          "default": "us-west-2",
+          "type": "string"
+        }
+      },
+      "owner": "search",
+      "source": "ENC-TSK-L41 / B67 Search2.0",
+      "telemetry_eligible": true
     }
   },
-  "change_summary": "ENC-TSK-K26 (B67 PWA2.0 Ph7 governance surfaces): enceladus_shared.record_extensions centralizes typed_relationships query + context_node score computation (absolute structural_importance per DOC-310B93107B60); feed_query attaches extensions on task/issue/feature/lesson/plan payloads; tracker_mutation GET enriches single-record reads with the same fields for ui-v2 TypedRelationshipSection + ContextNodeBadges.",
+  "change_summary": "ENC-TSK-L41 (B67 Search2.0 WaveB): opensearch_indexer.lambda — CDC indexer on dedicated SearchIndexQueue FIFO projecting tracker/document mutations to OpenSearch records_write with external-version idempotency; graph_sync queue untouched.",
   "change_log": [
+    {
+      "version": "2026-07-05.17",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L41 (B67 Search2.0 WaveB): new opensearch_indexer.lambda entity for devops-opensearch-indexer CDC Lambda (dedicated SearchIndexQueue FIFO, records_write bulk upsert/delete, external-version idempotency). Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
     {
       "version": "2026-07-05.15",
       "date": "2026-07-05",
