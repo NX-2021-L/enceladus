@@ -3916,6 +3916,69 @@ def _normalize_evidence_value(raw_value: Any) -> Tuple[Optional[List[Any]], Opti
     return parsed_list, None
 
 
+def _apply_reverse_relation_edges(
+    project_id: str,
+    record_type: str,
+    record_id: str,
+    field: str,
+    old_ids: Optional[List[str]],
+    new_ids: Optional[List[str]],
+) -> None:
+    """ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): mirror newly-added related_*_ids
+    onto each target's reverse field so cross-references are bidirectional.
+
+    Reverse field on the target is always related_{source_record_type}_ids —
+    symmetric to how the source stores related_{target_record_type}_ids.
+    Each target write is an independently atomic conditional append
+    (contains-check as the DynamoDB ConditionExpression); a target that
+    already carries the back-reference is a silent no-op (idempotent), and a
+    missing/unknown target is skipped without failing the primary write,
+    which has already committed by the time this runs.
+    """
+    old_set = set(old_ids or [])
+    added = [rid.strip().upper() for rid in (new_ids or []) if rid and rid.strip().upper() not in old_set]
+    if not added:
+        return
+    reverse_field = f"related_{record_type}_ids"
+    if reverse_field not in _RELATION_ID_FIELDS:
+        return
+    ddb = _get_ddb()
+    now = _now_z()
+    for target_id in added:
+        target_type = _record_type_from_id(target_id)
+        if target_type not in _TYPE_SEG_TO_SK_PREFIX:
+            continue
+        try:
+            target_key = _build_key(project_id, target_type, target_id)
+            ddb.update_item(
+                TableName=DYNAMODB_TABLE,
+                Key=target_key,
+                UpdateExpression=(
+                    "SET #rf = list_append(if_not_exists(#rf, :empty), :new), updated_at = :now"
+                ),
+                ConditionExpression="attribute_not_exists(#rf) OR NOT contains(#rf, :rid)",
+                ExpressionAttributeNames={"#rf": reverse_field},
+                ExpressionAttributeValues={
+                    ":empty": {"L": []},
+                    ":new": {"L": [_ser_s(record_id.strip().upper())]},
+                    ":rid": _ser_s(record_id.strip().upper()),
+                    ":now": _ser_s(now),
+                },
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                continue  # target already carries the back-reference — idempotent no-op
+            logger.warning(
+                "[ENC-TSK-L07] reverse edge write failed %s.%s -> %s: %s",
+                record_id, reverse_field, target_id, exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ENC-TSK-L07] reverse edge write failed %s.%s -> %s: %s",
+                record_id, reverse_field, target_id, exc,
+            )
+
+
 def _normalize_related_ids_value(raw_value: Any) -> Tuple[Optional[List[str]], Optional[str]]:
     """Normalize PATCH related_*_ids payloads, including JSON-stringified arrays.
 
@@ -5130,6 +5193,17 @@ def _handle_update_field(
     except Exception as exc:
         logger.error("update_item failed: %s", exc)
         return _error(500, "Database write failed.")
+
+    # ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): mirror newly-added related_*_ids onto
+    # each target's reverse field so the primary write's relation is bidirectional.
+    if field in _RELATION_ID_FIELDS:
+        try:
+            _apply_reverse_relation_edges(
+                project_id, record_type, record_id, field,
+                item_data.get(field) or [], value,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ENC-TSK-L07] reverse edge propagation failed (non-fatal): %s", exc)
 
     # ENC-FTR-111 / ENC-TSK-H83: emit the Artifact-Genesis telemetry event after the latch commits.
     if _optout_latch is not None:

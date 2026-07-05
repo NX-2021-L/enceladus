@@ -1052,6 +1052,66 @@ def _merge_keywords(existing: Any, required: List[str]) -> List[str]:
     return sorted(merged)
 
 
+# ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): minimal ID-prefix -> tracker record_type
+# map, just enough to route a related_items reverse-edge write to the right SK.
+_L07_ID_SEGMENT_TO_TYPE = {"TSK": "task", "ISS": "issue", "FTR": "feature", "LSN": "lesson", "PLN": "plan"}
+
+
+def _mirror_related_items_to_tracker(
+    project_id: str, document_id: str, old_items: Optional[List[str]], new_items: Optional[List[str]]
+) -> None:
+    """Mirror newly-added document related_items onto each target tracker
+    record's related_document_ids (B65 AC-5/AC-7). Best-effort and non-blocking:
+    the document write is already the source of truth by the time this runs;
+    a missing/unknown target or a target on another project is skipped, and an
+    already-present back-reference is a silent, atomic no-op (contains-check
+    ConditionExpression — same pattern as tracker_mutation's reverse-edge write)."""
+    old_set = set(old_items or [])
+    added = [str(i).strip().upper() for i in (new_items or []) if str(i).strip() and str(i).strip().upper() not in old_set]
+    if not added:
+        return
+    ddb = _get_ddb()
+    now = _now_z()
+    for target_id in added:
+        parts = target_id.split("-")
+        if len(parts) < 2:
+            continue
+        target_type = _L07_ID_SEGMENT_TO_TYPE.get(parts[1])
+        if not target_type:
+            continue
+        target_sk = f"{target_type}#{target_id}"
+        try:
+            ddb.update_item(
+                TableName=TRACKER_TABLE,
+                Key={"project_id": {"S": project_id}, "record_id": {"S": target_sk}},
+                UpdateExpression=(
+                    "SET related_document_ids = list_append(if_not_exists(related_document_ids, :empty), :new), "
+                    "updated_at = :now"
+                ),
+                ConditionExpression=(
+                    "attribute_not_exists(related_document_ids) OR NOT contains(related_document_ids, :did)"
+                ),
+                ExpressionAttributeValues={
+                    ":empty": {"L": []},
+                    ":new": {"L": [{"S": document_id}]},
+                    ":did": {"S": document_id},
+                    ":now": {"S": now},
+                },
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                continue  # target already carries the back-reference — idempotent no-op
+            logger.warning(
+                "[ENC-TSK-L07] related_document_ids mirror failed %s -> %s: %s",
+                document_id, target_id, exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ENC-TSK-L07] related_document_ids mirror failed %s -> %s: %s",
+                document_id, target_id, exc,
+            )
+
+
 def _query_project_documents(project_id: str) -> List[Dict[str, Any]]:
     ddb = _get_ddb()
     params: Dict[str, Any] = {
@@ -1974,6 +2034,12 @@ def _handle_put(event: Dict, claims: Dict) -> Dict:
             pass
         return _error(500, "Failed to save document metadata.")
 
+    # ENC-TSK-L07 (B65 AC-5/AC-7): mirror related_items onto each target's related_document_ids.
+    try:
+        _mirror_related_items_to_tracker(project_id, document_id, [], related_items)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ENC-TSK-L07] related_items mirror on create failed (non-fatal): %s", exc)
+
     logger.info("document created: %s project=%s size=%d", document_id, project_id, size_bytes)
     return _response(201, {
         "success": True,
@@ -2255,6 +2321,9 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             )
         expr_parts.append("related_items = :ri")
         attr_values[":ri"] = _serialize_list(items)
+        # ENC-TSK-L07: captured under its own name — `items` is reused generically
+        # elsewhere in this handler and must not be relied on after this block.
+        _l07_new_related_items = items
 
     if "keywords" in body:
         kws = body["keywords"]
@@ -2724,6 +2793,19 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     except Exception as exc:
         logger.error("update_item failed: %s", exc)
         return _error(500, "Database write failed.")
+
+    # ENC-TSK-L07 (B65 AC-5/AC-7): mirror any newly-added related_items onto each
+    # target's related_document_ids.
+    if "related_items" in body:
+        try:
+            old_related_items = [
+                s.get("S", "") for s in existing.get("related_items", {}).get("L", [])
+            ]
+            _mirror_related_items_to_tracker(
+                project_id, document_id, old_related_items, _l07_new_related_items,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ENC-TSK-L07] related_items mirror on patch failed (non-fatal): %s", exc)
 
     logger.info("document updated: %s", document_id)
     payload: Dict[str, Any] = {
