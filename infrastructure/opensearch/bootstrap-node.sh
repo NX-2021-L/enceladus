@@ -23,7 +23,9 @@ if [[ -f "${MARKER}" ]]; then
 fi
 
 log "Installing prerequisites"
-dnf install -y java-17-amazon-corretto-headless tar gzip curl jq amazon-cloudwatch-agent
+# --allowerasing: AL2023 preinstalls curl-minimal, which conflicts with the full
+# curl package on package name; let dnf swap it in (ENC-TSK-L39 bootstrap bug).
+dnf install -y --allowerasing java-17-amazon-corretto-headless tar gzip curl jq amazon-cloudwatch-agent
 
 if ! id "${OPENSEARCH_USER}" &>/dev/null; then
   useradd --system --home-dir "${OPENSEARCH_HOME}" --shell /sbin/nologin "${OPENSEARCH_USER}"
