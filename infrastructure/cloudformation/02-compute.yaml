@@ -2517,6 +2517,14 @@ Resources:
         Fn::Sub: ${DataStackName}-GraphSyncQueueArn
       FunctionName: !Ref GraphSyncFunction
       BatchSize: 10
+      # ENC-TSK-L74: without partial-batch-failure reporting, a batch with even
+      # one successful record returns HTTP 200 for the WHOLE batch and SQS
+      # deletes every message in it -- including ones whose _process_record
+      # raised -- permanently losing their MENTIONS edge writes with no retry.
+      # Matches the existing pattern on DeployOrchestratorSqsTrigger/
+      # FeedPublisherSqsTrigger above.
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
       Enabled: true
 
   SearchIndexSqsTrigger:
