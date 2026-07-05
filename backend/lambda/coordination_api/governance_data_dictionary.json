@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.5",
-  "updated_at": "2026-07-05T07:24:00Z",
-  "last_change_summary": "ENC-TSK-L25 (B67 Search2.0 WaveB / FTR-127 AC-10/16/17): new user_preferences_api Lambda + user-preferences DynamoDB table (PK=sub) + GET/PUT /api/v1/user/preferences routes, gamma-only. New entity user_preferences_api.lambda.",
+  "version": "2026-07-05.6",
+  "updated_at": "2026-07-05T07:45:00Z",
+  "last_change_summary": "ENC-TSK-L47 (B67 backend / FTR-127 AC-19, K25 AC-3): If-Match / HTTP 409 per-record revision-conflict contract added to tracker_mutation's generic field-update path (sync_version) and document_api's PATCH path (version). Absent header preserves prior unconditional-write behavior. New entity api.if_match_revision_contract; new error_envelope.code value REVISION_CONFLICT.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7334,6 +7334,25 @@
           "type": "object"
         }
       }
+    },
+    "api.if_match_revision_contract": {
+      "description": "ENC-TSK-L47 (B67 AC-19 / K25 AC-3): optional client-driven optimistic-concurrency contract on tracker_mutation's generic field-update path (PATCH /{project}/{type}/{id}, keyed on the existing sync_version counter) and document_api's PATCH path (PATCH /documents/{id}, keyed on the existing version counter). Deliberately decoupled from ENC-TSK-L27's version_seq GSI work so it ships without escalated IAM. Absence of the header preserves pre-L47 unconditional-write behavior for every existing agent/PWA caller -- this is strictly additive.",
+      "fields": {
+        "If-Match": {
+          "type": "http_header",
+          "definition": "Optional request header carrying the revision the caller last read (sync_version for tracker records, version for documents). Quoted ETag-style values are accepted (quotes are stripped). When present, the server compares it against the current server-side revision before writing.",
+          "usage_guidance": "Read the revision from a prior GET/tracker.get response and echo it back as If-Match on the next mutation to get a 409 instead of a silent lost-update when another writer has landed a change in between. Omit entirely for today's unconditional-write behavior (no functional change)."
+        },
+        "REVISION_CONFLICT": {
+          "type": "error_envelope.code",
+          "definition": "New error_envelope.code value (HTTP 409). Returned when a supplied If-Match does not match the current server-side revision -- either at the pre-write check or (rarer) at the DynamoDB ConditionExpression guarding the commit itself if a write lands in the interim. The response body includes expected_revision, current_revision, and current (the full current server-side field values, deserialized) so callers -- notably ENC-TSK-K25's merge-conflict UI -- can resolve without a follow-up read.",
+          "usage_guidance": "On REVISION_CONFLICT, re-render the conflict from error_envelope.details.current and let the caller choose retry-with-fresh-revision or merge. Do not blind-retry with the same If-Match value."
+        },
+        "write_response_revision_echo": {
+          "type": "behavior",
+          "definition": "Every successful write on either path now echoes the post-write revision in the response body (sync_version on tracker_mutation, version on document_api) so the caller can update its local cache without an extra read."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda -- nightly EventBridge (gamma, cron 06:00 UTC, after K41's 05:00 CEE scan) consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (fence_missing_language, metadata_field_missing) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent session involvement. DATA-SAFETY: only the deterministic whitelist is auto-remediated; ambiguous/content-changing warnings are left for agent review; every auto-patch is logged with before/after compliance_score. Dry-run default-on (GDMP_DRY_RUN=1) plus a 3-run io-approval ramp (GDMP_IO_APPROVAL_RUNS=3, GDMP_MUTATION_ENABLED=0) reuse the FTR-106 / ENC-TSK-K03 unlearning Lambda's S3 run-counter pattern verbatim. CEE_GDMP_HARD_DISABLED=1 kill switch ships ON by default. Idempotent: is_already_compliant guards against re-patching already-compliant documents. New entity corpus_entropy_gdmp_remediation.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
@@ -7527,6 +7546,11 @@
       "version": "2026-07-02.34",
       "date": "2026-07-02",
       "summary": "ENC-TSK-K34 (ENC-ISS-477 cutover, DOC-F234A4E11DFD Option E): the DynamoDB governance-policies mirror of this dictionary is retired from the read path. coordination_api._load_governance_dictionary now serves this bundled file exclusively -- no DDB scan, no fallback branch. ENC-TSK-K31 found the DDB mirror had never once served as a live, independently-authored hot-patch target (every write only ever caught DynamoDB up to a prior git/S3 change), and it had been unwritable since 2026-06-29 (509KB item vs DynamoDB's 400KB cap). document_api's dictionary-specific DDB propagation is removed alongside it. This file (repo -> Lambda bundle -> deploy) is now the sole and always-authoritative source; check_governance_dictionary_sync.py remains the enforcement that this file stays current with schema-affecting code changes. No entity schema changed."
+    },
+    {
+      "version": "2026-07-05.6",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L47 (B67 backend / FTR-127 AC-19, K25 AC-3): If-Match / HTTP 409 per-record revision-conflict contract added to tracker_mutation's generic field-update path (sync_version) and document_api's PATCH path (version). Absent header preserves prior unconditional-write behavior. New entity api.if_match_revision_contract; new error_envelope.code value REVISION_CONFLICT."
     }
   ]
 }
