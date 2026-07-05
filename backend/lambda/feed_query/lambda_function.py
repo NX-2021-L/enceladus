@@ -1762,13 +1762,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return {"statusCode": 204, "headers": _cors_headers(), "body": ""}
 
     token = _extract_token(event)
-    if not token:
+    headers = event.get("headers") or {}
+    internal_key = headers.get("x-coordination-internal-key") or headers.get("X-Coordination-Internal-Key")
+    internal_ok = False
+    if internal_key:
+        expected = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
+        previous = os.environ.get("COORDINATION_INTERNAL_API_KEY_PREVIOUS", "")
+        valid = {k for k in (expected, previous) if k}
+        internal_ok = internal_key in valid
+
+    if not token and not internal_ok:
         return _error(401, "Authentication required. Please sign in.")
 
-    try:
-        claims = _verify_token(token)
-    except ValueError as exc:
-        return _error(401, str(exc))
+    claims: Dict[str, Any] = {"internal_service": True} if internal_ok and not token else {}
+    if token:
+        try:
+            claims = _verify_token(token)
+        except ValueError as exc:
+            return _error(401, str(exc))
 
     if method == "POST" and re.search(r"/api/v1/feed/refresh/?$", path):
         return _handle_feed_refresh()

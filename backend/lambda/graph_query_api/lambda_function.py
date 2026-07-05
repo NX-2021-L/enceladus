@@ -22,6 +22,11 @@ Environment variables:
   COGNITO_CLIENT_ID           Cognito client ID
   CORS_ORIGIN                 CORS allowed origin (default: https://jreese.net)
   COORDINATION_INTERNAL_API_KEY  Internal API key for service-to-service auth
+  OPENSEARCH_ENDPOINT            Gamma OpenSearch HTTPS URL (ENC-TSK-L43)
+  OPENSEARCH_READ_ALIAS          Read alias (records_read)
+  OPENSEARCH_SECRET_NAME         Secrets Manager secret for query user
+  OPENSEARCH_USERNAME            OpenSearch security-plugin username (query)
+  FEED_API_BASE                  Base URL for feed/corpus facet fallback
   BEDROCK_REGION              AWS region for Bedrock (default: us-west-2)
 """
 
@@ -40,6 +45,7 @@ from urllib.parse import parse_qs
 import corroboration
 import dedup_convergence
 import energy_function
+import opensearch_keyword
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -2331,18 +2337,49 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         finally:
             _gex.shutdown(wait=False)
 
-    # ---- Keyword signal ----------------------------------------------------
+    # ---- Keyword signal (ENC-TSK-L43: OpenSearch primary, Neo4j fallback) --
     keyword_ranks: List[Dict[str, Any]] = []
     keyword_available = False
+    keyword_source = "unavailable"
+    facets: Dict[str, Dict[str, int]] = {}
+    facets_source: Optional[str] = None
     if query_text:
-        keyword_ranks = _hybrid_keyword_ranks(
-            driver,
+        os_ranks, os_facets, os_err = opensearch_keyword.hybrid_keyword_ranks(
             project_id,
             query_text,
             top_n=HYBRID_SIGNAL_TOP_N,
             record_type_filter=record_type_filter,
         )
-        keyword_available = bool(keyword_ranks)
+        if os_err is None:
+            keyword_ranks = os_ranks
+            keyword_available = bool(keyword_ranks)
+            keyword_source = "opensearch"
+            facets = os_facets
+            facets_source = "opensearch"
+        else:
+            logger.warning(
+                "[WARNING] OpenSearch keyword arm unavailable (%s) — Neo4j fallback",
+                os_err,
+            )
+            keyword_ranks = _hybrid_keyword_ranks(
+                driver,
+                project_id,
+                query_text,
+                top_n=HYBRID_SIGNAL_TOP_N,
+                record_type_filter=record_type_filter,
+            )
+            keyword_available = bool(keyword_ranks)
+            keyword_source = "neo4j_fallback"
+            fallback_facets, fb_err = opensearch_keyword.fetch_feed_corpus_facets(
+                project_id=project_id,
+                query_text=query_text,
+                record_type_filter=record_type_filter,
+            )
+            if fallback_facets:
+                facets = fallback_facets
+                facets_source = "feed_corpus"
+            elif fb_err:
+                logger.warning("[WARNING] feed/corpus facet fallback failed: %s", fb_err)
 
     # ---- RRF fusion --------------------------------------------------------
     signals: Dict[str, List[Dict[str, Any]]] = {}
@@ -2406,6 +2443,9 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
             # this call, surfaced even with zero candidates for observability
             # parity with energy_lambda_weights above.
             "corroboration_weber_k": corroboration_weber_k,
+            "facets": facets,
+            "facets_source": facets_source,
+            "keyword_source": keyword_source,
         }
 
     fused = _rrf_fuse(signals, k=RRF_K)
@@ -2641,10 +2681,10 @@ def _query_hybrid(driver, project_id: str, params: Dict) -> Dict:
         # call's corroboration bonus (see per_node_fusion[*].b_corr/k_corr and
         # nodes[*]._b_corr/_corroboration_count/_final_score/_final_rank).
         "corroboration_weber_k": corroboration_weber_k,
+        "facets": facets,
+        "facets_source": facets_source,
+        "keyword_source": keyword_source,
     }
-
-
-# Embedding property name must mirror graph_sync/embedding.py EMBEDDING_PROPERTY
 # without forcing an import at module load time (deploy packages the helper at
 # the top level, so the import is deferred to _compute_query_embedding).
 _EMBEDDING_PROPERTY = "embedding"
@@ -3029,6 +3069,9 @@ def _handle_search(event: Dict) -> Dict:
         "include_below_threshold",
         "edge_participation",
         "pathway",
+        "facets",
+        "facets_source",
+        "keyword_source",
         # ENC-TSK-I88: adjacency export pagination + corpus-size fields.
         "node_count",
         "edge_count",
