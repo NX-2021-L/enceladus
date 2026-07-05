@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ENC-TSK-L39 — gamma-only self-hosted OpenSearch single-node infrastructure (DOC-77D6C714867E §14).
+  Stands up one graviton EC2 (t4g.small, arm64) with gp3 data volume (<=16GB), instance IAM role
+  (SSM Session Manager + CloudWatch Agent; optional manual snapshot bucket access), placed in a
+  public subnet with NO NAT gateway and single-AZ placement.
+
+  Cost posture (AC-3, locked): on-demand <= ~$13/mo (t4g.small + 16GB gp3 + modest egress);
+  1-year Compute Savings Plan / Reserved Instance recommended (~$8/mo). Explicitly excludes NAT
+  gateway, multi-AZ, replica nodes, and OpenSearch Serverless (~$350+/mo floor — rejected ISS-465 class).
+
+  DEPLOY TARGET: gamma (v4) ONLY via cloudformation-opensearch-node-stack-deploy.yml.
+  EscalatedPrereq: CFN deploy role must hold ec2:RunInstances + iam:PassRole for the instance
+  profile (DOC-359655466119) — do not hand-edit live IAM.
+
+Metadata:
+  Enceladus:
+    TaskId: ENC-TSK-L39
+    EscalatedPrereqs:
+      - CFN deploy role needs ec2:RunInstances, ec2:CreateTags, ec2:Describe*, iam:PassRole on OpenSearchNodeInstanceProfile
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: "-gamma"
+    AllowedValues: ["", "-gamma"]
+    Description: Resource suffix; gamma-only stack in Phase 1.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-8ad4a8f2
+    Description: VPC for the OpenSearch node (default VPC on gamma account).
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0a27ee72
+    Description: Public subnet (MapPublicIpOnLaunch=true) — single-AZ, no NAT.
+
+  VpcCidr:
+    Type: String
+    Default: 172.31.0.0/16
+    Description: VPC CIDR allowed to reach OpenSearch :9200 (TLS).
+
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues: [t4g.small, t4g.medium]
+    Description: Graviton instance class (AC-1 locks t4g.small).
+
+  VolumeSizeGiB:
+    Type: Number
+    Default: 16
+    MinValue: 8
+    MaxValue: 16
+    Description: gp3 root/data volume size (AC-1 <= 16GB).
+
+  OpenSearchVersion:
+    Type: String
+    Default: "2.19.1"
+    Description: OpenSearch tarball version installed by bootstrap-node.sh.
+
+  SnapshotBucketName:
+    Type: String
+    Default: ""
+    Description: Optional S3 bucket name for manual snapshot exports (empty disables snapshot IAM).
+
+Conditions:
+  HasSnapshotBucket: !Not [!Equals [!Ref SnapshotBucketName, ""]]
+
+Resources:
+  OpenSearchNodeRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-opensearch-node-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - !If
+          - HasSnapshotBucket
+          - PolicyName: opensearch-manual-snapshot-s3
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Sid: SnapshotObjectRW
+                  Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:GetObject
+                    - s3:DeleteObject
+                    - s3:ListBucket
+                  Resource:
+                    - !Sub "arn:aws:s3:::${SnapshotBucketName}"
+                    - !Sub "arn:aws:s3:::${SnapshotBucketName}/*"
+          - !Ref AWS::NoValue
+
+  OpenSearchNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "enceladus-opensearch-node${EnvironmentSuffix}"
+      Roles:
+        - !Ref OpenSearchNodeRole
+
+  OpenSearchNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "OpenSearch node (TLS :9200) ${EnvironmentSuffix}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9200
+          ToPort: 9200
+          CidrIp: !Ref VpcCidr
+          Description: OpenSearch REST (TLS) from VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Package downloads + artifact fetch
+
+  OpenSearchNodeInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref OpenSearchNodeInstanceProfile
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64}}'
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref OpenSearchNodeSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref VolumeSizeGiB
+            Encrypted: true
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      Tags:
+        - Key: Name
+          Value: !Sub "enceladus-opensearch-node${EnvironmentSuffix}"
+        - Key: enceladus:component
+          Value: opensearch-node
+        - Key: enceladus:task
+          Value: ENC-TSK-L39
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euo pipefail
+            exec > /var/log/opensearch-userdata.log 2>&1
+            export OPENSEARCH_VERSION="${OpenSearchVersion}"
+            export OPENSEARCH_CLUSTER_NAME="enceladus-search${EnvironmentSuffix}"
+            echo "${BootstrapScriptB64}" | base64 -d > /tmp/bootstrap-node.sh
+            chmod +x /tmp/bootstrap-node.sh
+            /tmp/bootstrap-node.sh
+          - OpenSearchVersion: !Ref OpenSearchVersion
+            EnvironmentSuffix: !Ref EnvironmentSuffix
+            BootstrapScriptB64: "IyEvdXNyL2Jpbi9lbnYgYmFzaAojIEVOQy1UU0stTDM5IOKAlCBzaW5nbGUtbm9kZSBPcGVuU2VhcmNoIGJvb3RzdHJhcCBmb3IgZ2FtbWEgKHQ0Zy5zbWFsbCAvIGFybTY0KS4KIyBJbnN0YWxsZWQgYnkgMTAtb3BlbnNlYXJjaC1ub2RlLnlhbWwgVXNlckRhdGEuIElkZW1wb3RlbnQgb24gcmUtcnVuIGV4Y2VwdCBmaXJzdAojIGNsdXN0ZXIgZm9ybWF0aW9uIChndWFyZGVkIGJ5IG1hcmtlciBmaWxlKS4Kc2V0IC1ldW8gcGlwZWZhaWwKCmV4ZWMgPiAvdmFyL2xvZy9vcGVuc2VhcmNoLWJvb3RzdHJhcC5sb2cgMj4mMQoKT1BFTlNFQVJDSF9WRVJTSU9OPSIke09QRU5TRUFSQ0hfVkVSU0lPTjotMi4xOS4xfSIKT1BFTlNFQVJDSF9IT01FPSIke09QRU5TRUFSQ0hfSE9NRTotL3Vzci9zaGFyZS9vcGVuc2VhcmNofSIKT1BFTlNFQVJDSF9VU0VSPSIke09QRU5TRUFSQ0hfVVNFUjotb3BlbnNlYXJjaH0iCkNMVVNURVJfTkFNRT0iJHtPUEVOU0VBUkNIX0NMVVNURVJfTkFNRTotZW5jZWxhZHVzLXNlYXJjaC1nYW1tYX0iCk5PREVfTkFNRT0iJHtPUEVOU0VBUkNIX05PREVfTkFNRTotc2VhcmNoLW5vZGUtMX0iCkFETUlOX1BBU1NXT1JEX0ZJTEU9IiR7T1BFTlNFQVJDSF9BRE1JTl9QQVNTV09SRF9GSUxFOi0vcm9vdC8ub3BlbnNlYXJjaC1hZG1pbi1wYXNzd29yZH0iCk1BUktFUj0iL3Zhci9saWIvb3BlbnNlYXJjaC8uYm9vdHN0cmFwLWNvbXBsZXRlIgpKVk1fSEVBUD0iJHtPUEVOU0VBUkNIX0pWTV9IRUFQOi0xZ30iCgpsb2coKSB7IGVjaG8gIlskKGRhdGUgLXUgKyVZLSVtLSVkVCVIOiVNOiVTWildICQqIjsgfQoKaWYgW1sgLWYgIiR7TUFSS0VSfSIgXV07IHRoZW4KICBsb2cgIkJvb3RzdHJhcCBhbHJlYWR5IGNvbXBsZXRlOyBleGl0aW5nLiIKICBleGl0IDAKZmkKCmxvZyAiSW5zdGFsbGluZyBwcmVyZXF1aXNpdGVzIgpkbmYgaW5zdGFsbCAteSBqYXZhLTE3LWFtYXpvbi1jb3JyZXR0by1oZWFkbGVzcyB0YXIgZ3ppcCBjdXJsIGpxIGFtYXpvbi1jbG91ZHdhdGNoLWFnZW50CgppZiAhIGlkICIke09QRU5TRUFSQ0hfVVNFUn0iICY+L2Rldi9udWxsOyB0aGVuCiAgdXNlcmFkZCAtLXN5c3RlbSAtLWhvbWUtZGlyICIke09QRU5TRUFSQ0hfSE9NRX0iIC0tc2hlbGwgL3NiaW4vbm9sb2dpbiAiJHtPUEVOU0VBUkNIX1VTRVJ9IgpmaQoKaW5zdGFsbCAtZCAtbSAwNzU1ICIke09QRU5TRUFSQ0hfSE9NRX0iCmluc3RhbGwgLWQgLW0gMDc1MCAtbyAiJHtPUEVOU0VBUkNIX1VTRVJ9IiAtZyAiJHtPUEVOU0VBUkNIX1VTRVJ9IiAvdmFyL2xpYi9vcGVuc2VhcmNoCmluc3RhbGwgLWQgLW0gMDc1MCAtbyAiJHtPUEVOU0VBUkNIX1VTRVJ9IiAtZyAiJHtPUEVOU0VBUkNIX1VTRVJ9IiAvdmFyL2xvZy9vcGVuc2VhcmNoCgpUQVJCQUxMPSJvcGVuc2VhcmNoLSR7T1BFTlNFQVJDSF9WRVJTSU9OfS1saW51eC1hcm02NC50YXIuZ3oiClVSTD0iaHR0cHM6Ly9hcnRpZmFjdHMub3BlbnNlYXJjaC5vcmcvcmVsZWFzZXMvYnVuZGxlL29wZW5zZWFyY2gvJHtPUEVOU0VBUkNIX1ZFUlNJT059LyR7VEFSQkFMTH0iClRNUD0iL3RtcC8ke1RBUkJBTEx9IgoKaWYgW1sgISAteCAiJHtPUEVOU0VBUkNIX0hPTUV9L2Jpbi9vcGVuc2VhcmNoIiBdXTsgdGhlbgogIGxvZyAiRG93bmxvYWRpbmcgT3BlblNlYXJjaCAke09QRU5TRUFSQ0hfVkVSU0lPTn0gKCR7VVJMfSkiCiAgY3VybCAtZnNTTCAiJHtVUkx9IiAtbyAiJHtUTVB9IgogIHRhciAteHpmICIke1RNUH0iIC1DIC90bXAKICBybSAtcmYgIiR7T1BFTlNFQVJDSF9IT01FOj99Ii8qCiAgY3AgLWEgIi90bXAvb3BlbnNlYXJjaC0ke09QRU5TRUFSQ0hfVkVSU0lPTn0iLyogIiR7T1BFTlNFQVJDSF9IT01FfS8iCiAgcm0gLWYgIiR7VE1QfSIKZmkKCmNob3duIC1SICIke09QRU5TRUFSQ0hfVVNFUn06JHtPUEVOU0VBUkNIX1VTRVJ9IiAiJHtPUEVOU0VBUkNIX0hPTUV9IiAvdmFyL2xpYi9vcGVuc2VhcmNoIC92YXIvbG9nL29wZW5zZWFyY2gKCmlmIFtbICEgLWYgIiR7QURNSU5fUEFTU1dPUkRfRklMRX0iIF1dOyB0aGVuCiAgb3BlbnNzbCByYW5kIC1iYXNlNjQgMjQgPiAiJHtBRE1JTl9QQVNTV09SRF9GSUxFfSIKICBjaG1vZCAwNjAwICIke0FETUlOX1BBU1NXT1JEX0ZJTEV9IgpmaQpBRE1JTl9QQVNTV09SRD0iJCh0ciAtZCAnXG4nIDwgIiR7QURNSU5fUEFTU1dPUkRfRklMRX0iKSIKZXhwb3J0IE9QRU5TRUFSQ0hfSU5JVElBTF9BRE1JTl9QQVNTV09SRD0iJHtBRE1JTl9QQVNTV09SRH0iCgpsb2cgIldyaXRpbmcgb3BlbnNlYXJjaC55bWwiCkNGRz0iJHtPUEVOU0VBUkNIX0hPTUV9L2NvbmZpZy9vcGVuc2VhcmNoLnltbCIKY2F0ID4+ICIke0NGR30iIDw8RU9GCgojIyMjIyMjIyMjIEVOQy1UU0stTDM5IGdlbmVyYXRlZCAjIyMjIyMjIyMjCmNsdXN0ZXIubmFtZTogJHtDTFVTVEVSX05BTUV9Cm5vZGUubmFtZTogJHtOT0RFX05BTUV9CmRpc2NvdmVyeS50eXBlOiBzaW5nbGUtbm9kZQpuZXR3b3JrLmhvc3Q6IDAuMC4wLjAKcGF0aC5kYXRhOiAvdmFyL2xpYi9vcGVuc2VhcmNoCnBhdGgubG9nczogL3Zhci9sb2cvb3BlbnNlYXJjaApwbHVnaW5zLnNlY3VyaXR5LmRpc2FibGVkOiBmYWxzZQphY3Rpb24uYXV0b19jcmVhdGVfaW5kZXg6IHRydWUKIyMjIyMjIyMjIyBFTkQgRU5DLVRTSy1MMzkgZ2VuZXJhdGVkICMjIyMjIyMjIyMKRU9GCgppbnN0YWxsIC1kIC1tIDA3NTUgIiR7T1BFTlNFQVJDSF9IT01FfS9jb25maWcvanZtLm9wdGlvbnMuZCIKY2F0ID4gIiR7T1BFTlNFQVJDSF9IT01FfS9jb25maWcvanZtLm9wdGlvbnMuZC9oZWFwLm9wdGlvbnMiIDw8RU9GCi1YbXMke0pWTV9IRUFQfQotWG14JHtKVk1fSEVBUH0KRU9GCgpsb2cgIlJ1bm5pbmcgb3BlbnNlYXJjaC10YXItaW5zdGFsbC5zaCAoVExTICsgc2VjdXJpdHkgcGx1Z2luIGRlbW8gY2VydHMpIgpjZCAiJHtPUEVOU0VBUkNIX0hPTUV9IgpjaG1vZCAreCAuL29wZW5zZWFyY2gtdGFyLWluc3RhbGwuc2gKLi9vcGVuc2VhcmNoLXRhci1pbnN0YWxsLnNoCiMgRGVtbyBpbnN0YWxsZXIgbWF5IGxlYXZlIGEgZm9yZWdyb3VuZCBwcm9jZXNzOyBlbnN1cmUgY2xlYW4gaGFuZG9mZiB0byBzeXN0ZW1kLgpwa2lsbCAtdSAiJHtPUEVOU0VBUkNIX1VTRVJ9IiB8fCB0cnVlCnNsZWVwIDIKCmxvZyAiSW5zdGFsbGluZyBzeXN0ZW1kIHVuaXQiCmNhdCA+IC9ldGMvc3lzdGVtZC9zeXN0ZW0vb3BlbnNlYXJjaC5zZXJ2aWNlIDw8RU9GCltVbml0XQpEZXNjcmlwdGlvbj1PcGVuU2VhcmNoIChFTkMtVFNLLUwzOSBzaW5nbGUgbm9kZSkKQWZ0ZXI9bmV0d29yay1vbmxpbmUudGFyZ2V0CldhbnRzPW5ldHdvcmstb25saW5lLnRhcmdldAoKW1NlcnZpY2VdClR5cGU9c2ltcGxlClVzZXI9JHtPUEVOU0VBUkNIX1VTRVJ9Ckdyb3VwPSR7T1BFTlNFQVJDSF9VU0VSfQpFbnZpcm9ubWVudD1PUEVOU0VBUkNIX0hPTUU9JHtPUEVOU0VBUkNIX0hPTUV9CkVudmlyb25tZW50PU9QRU5TRUFSQ0hfUEFUSF9DT05GPSR7T1BFTlNFQVJDSF9IT01FfS9jb25maWcKRW52aXJvbm1lbnQ9T1BFTlNFQVJDSF9KQVZBX0hPTUU9JHtPUEVOU0VBUkNIX0hPTUV9L2pkawpXb3JraW5nRGlyZWN0b3J5PSR7T1BFTlNFQVJDSF9IT01FfQpFeGVjU3RhcnQ9JHtPUEVOU0VBUkNIX0hPTUV9L2Jpbi9vcGVuc2VhcmNoClJlc3RhcnQ9b24tZmFpbHVyZQpMaW1pdE5PRklMRT02NTUzNgpMaW1pdE1FTUxPQ0s9aW5maW5pdHkKCltJbnN0YWxsXQpXYW50ZWRCeT1tdWx0aS11c2VyLnRhcmdldApFT0YKCnN5c3RlbWN0bCBkYWVtb24tcmVsb2FkCnN5c3RlbWN0bCBlbmFibGUgb3BlbnNlYXJjaApzeXN0ZW1jdGwgcmVzdGFydCBvcGVuc2VhcmNoCgpsb2cgIldhaXRpbmcgZm9yIGNsdXN0ZXIgaGVhbHRoIEdSRUVOIgpmb3IgaSBpbiAkKHNlcSAxIDYwKTsgZG8KICBpZiBjdXJsIC1rcyAtdSAiYWRtaW46JHtBRE1JTl9QQVNTV09SRH0iICJodHRwczovLzEyNy4wLjAuMTo5MjAwL19jbHVzdGVyL2hlYWx0aCIgXAogICAgfCBqcSAtZSAnLnN0YXR1cyA9PSAiZ3JlZW4iIG9yIC5zdGF0dXMgPT0gInllbGxvdyInID4vZGV2L251bGwgMj4mMTsgdGhlbgogICAgYnJlYWsKICBmaQogIHNsZWVwIDUKZG9uZQoKY3VybCAta3MgLXUgImFkbWluOiR7QURNSU5fUEFTU1dPUkR9IiAiaHR0cHM6Ly8xMjcuMC4wLjE6OTIwMC9fY2x1c3Rlci9oZWFsdGg/d2FpdF9mb3Jfc3RhdHVzPWdyZWVuJnRpbWVvdXQ9MTIwcyIgfCB0ZWUgL3Zhci9sb2cvb3BlbnNlYXJjaC1jbHVzdGVyLWhlYWx0aC5qc29uCgpsb2cgIkFwcGx5aW5nIGRlZmF1bHQgaW5kZXggdGVtcGxhdGUgKG51bWJlcl9vZl9yZXBsaWNhczogMCkiCmN1cmwgLWtzIC11ICJhZG1pbjoke0FETUlOX1BBU1NXT1JEfSIgLVggUFVUICJodHRwczovLzEyNy4wLjAuMTo5MjAwL19pbmRleF90ZW1wbGF0ZS9lbmNlbGFkdXMtZGVmYXVsdC1yZXBsaWNhcy16ZXJvIiBcCiAgLUggJ0NvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vanNvbicgXAogIC1kICd7ImluZGV4X3BhdHRlcm5zIjpbImVuY2VsYWR1cy0qIl0sInRlbXBsYXRlIjp7InNldHRpbmdzIjp7Im51bWJlcl9vZl9zaGFyZHMiOjEsIm51bWJlcl9vZl9yZXBsaWNhcyI6MH19fScKCnRvdWNoICIke01BUktFUn0iCmxvZyAiQm9vdHN0cmFwIGNvbXBsZXRlIgo="
+
+
+Outputs:
+  OpenSearchInstanceId:
+    Description: EC2 instance id for the gamma OpenSearch node
+    Value: !Ref OpenSearchNodeInstance
+    Export:
+      Name: !Sub "enceladus-opensearch-node-instance-id${EnvironmentSuffix}"
+
+  OpenSearchPrivateIp:
+    Description: Private IPv4 for in-VPC clients (https://<ip>:9200)
+    Value: !GetAtt OpenSearchNodeInstance.PrivateIp
+    Export:
+      Name: !Sub "enceladus-opensearch-node-private-ip${EnvironmentSuffix}"
+
+  OpenSearchHttpsEndpoint:
+    Description: TLS REST endpoint inside the VPC (demo/self-signed certs from bootstrap)
+    Value: !Sub
+      - "https://${Ip}:9200"
+      - Ip: !GetAtt OpenSearchNodeInstance.PrivateIp
+    Export:
+      Name: !Sub "enceladus-opensearch-node-endpoint${EnvironmentSuffix}"
+
+  OpenSearchNodeRoleArn:
+    Description: Instance role ARN (SSM + CloudWatch; optional snapshot bucket)
+    Value: !GetAtt OpenSearchNodeRole.Arn
