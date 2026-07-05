@@ -64,7 +64,12 @@ try:
 
     _VERSION_SEQ_AVAILABLE = True
 except ImportError:
-    _VERSION_SEQ_AVAILABLE = False
+    try:
+        from version_seq_util import allocate_version_seq, version_seq_attr, version_seq_update_clause
+
+        _VERSION_SEQ_AVAILABLE = True
+    except ImportError:
+        _VERSION_SEQ_AVAILABLE = False
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
