@@ -50,6 +50,13 @@
       ],
       "notes": "v4/main-only file; gamma-only by construction (guard-gamma-only job refuses non-gamma, v3-prod FROZEN per DOC-499FA089EC30); ENC-TSK-J63 plan/apply split with apply environment: v4-gamma"
     },
+    "cloudformation-opensearch-node-stack-deploy.yml": {
+      "class": "already-gated",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-L39 gamma-only OpenSearch node stack; guard-gamma-only + apply environment: v4-gamma (v3-prod FROZEN)"
+    },
     "cloudformation-api-stack-deploy.yml": {
       "class": "conditional",
       "gated_jobs": [
