@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.22",
-  "updated_at": "2026-07-05T13:57:00Z",
-  "last_change_summary": "ENC-TSK-L44: devops-opensearch-indexer now authenticates to the OpenSearch node as the scoped 'indexer' security-plugin user (OPENSEARCH_USERNAME env var, default 'admin' for backward compat) instead of the admin superuser; OPENSEARCH_SECRET_NAME now points at enceladus/opensearch/gamma-indexer by default.",
+  "version": "2026-07-05.23",
+  "updated_at": "2026-07-05T14:06:00Z",
+  "last_change_summary": "ENC-TSK-L43: graph_query_api hybrid keyword arm reads OpenSearch records_read (multi_match fuzziness AUTO + bool_prefix) with within-search facet aggs; circuit-breaker falls back to Neo4j keyword + feed/corpus facets. feed/corpus accepts X-Coordination-Internal-Key for service facet fallback.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3467,11 +3467,11 @@
       }
     },
     "feed_query.corpus": {
-      "description": "ENC-TSK-L23 / FTR-127 AC-1..4/13: GET /api/v1/feed/corpus returns the full multi-project feed corpus from BOTH the tracker table and the documents table as a cursor-paginated stream. Minimal identity projection plus compact attrs map (status, priority, tags/keywords, document_subtype). Filter and sort pushdown via query params; facet counts are the browse/filter authority until ENC-TSK-L43 OpenSearch ships.",
+      "description": "ENC-TSK-L23 / FTR-127 AC-1..4/13: GET /api/v1/feed/corpus returns the full multi-project feed corpus from BOTH the tracker table and the documents table as a cursor-paginated stream. Minimal identity projection plus compact attrs map (status, priority, tags/keywords, document_subtype). Filter and sort pushdown via query params; facet counts are the browse-with-no-query facet authority and the graphsearch hybrid circuit-breaker fallback (ENC-TSK-L43). ENC-TSK-L43: also accepts X-Coordination-Internal-Key for service-to-service facet fallback from graph_query_api.",
       "fields": {
         "endpoint": {
           "type": "string",
-          "definition": "GET /api/v1/feed/corpus \u2014 JWT-gated (401 unauthenticated). Query params: limit, cursor, sort, q, record_type, status, project_id, priority."
+          "definition": "GET /api/v1/feed/corpus \u2014 JWT-gated (401 unauthenticated) OR X-Coordination-Internal-Key for service callers. Query params: limit, cursor, sort, q, record_type, status, project_id, priority."
         },
         "cursor": {
           "type": "string",
@@ -5807,7 +5807,7 @@
       }
     },
     "retrieval.hybrid_pipeline": {
-      "description": "Three-signal hybrid retrieval pipeline for the governed corpus (ENC-TSK-B92, headline ENC-TSK-B62 Phase 1 deliverable). Combines vector cosine similarity (HNSW per-label indexes from ENC-TSK-B90), graph topology (Personalized PageRank via Neo4j GDS with native-Cypher edge-walk fallback), and keyword title/intent/description match \u2014 fused via Reciprocal Rank Fusion (k=60). Implemented as a new `hybrid` search_type in backend/lambda/graph_query_api/lambda_function.py and surfaced through the MCP server's get_compact_context tool. Backward-compatible: when target nodes lack embeddings the vector signal is empty and RRF degrades to graph + keyword only; when GDS is not installed on AuraDB the graph signal degrades to a per-relationship-type weighted edge-walk in native Cypher.",
+      "description": "Three-signal hybrid retrieval pipeline for the governed corpus (ENC-TSK-B92, headline ENC-TSK-B62 Phase 1 deliverable). Combines vector cosine similarity (HNSW per-label indexes from ENC-TSK-B90), graph topology (Personalized PageRank via Neo4j GDS with native-Cypher edge-walk fallback), and keyword match \u2014 fused via Reciprocal Rank Fusion (k=60). ENC-TSK-L43: keyword arm reads OpenSearch records_read when configured (multi_match fuzziness AUTO + bool_prefix) with Neo4j CONTAINS fallback; within-search facets come from OpenSearch aggs with feed/corpus fallback. Implemented as search_type=hybrid in graph_query_api and surfaced through MCP get_compact_context.",
       "fields": {
         "rrf_k": {
           "type": "integer",
@@ -7518,6 +7518,51 @@
       },
       "owner": "search",
       "source": "ENC-TSK-L41 / B67 Search2.0; credentials hardened by ENC-TSK-L44",
+      "telemetry_eligible": true
+    },
+    "graph_query_api.opensearch_keyword": {
+      "description": "ENC-TSK-L43 (B67 Search2.0 WaveB / DOC-77D6C714867E \u00a715d): OpenSearch-backed keyword signal + within-search facet authority for hybrid graphsearch. Module backend/lambda/graph_query_api/opensearch_keyword.py queries records_read via multi_match (fuzziness AUTO over title/description/body) plus bool_prefix autocomplete; ranks feed the existing RRF k=60 fusion unchanged. Facet aggs over project_id, record_type, status, priority are scoped to the active search filter set. Circuit-breaker: on OpenSearch failure degrades keyword ranks to Neo4j _hybrid_keyword_ranks and facets to GET /feed/corpus via X-Coordination-Internal-Key. Gamma-only wiring: devops-graph-query-api-gamma runs in the OpenSearch VPC subnet with OPENSEARCH_* env vars and authenticates as the scoped query security-plugin user (enceladus/opensearch/gamma-query).",
+      "fields": {
+        "OPENSEARCH_ENDPOINT": {
+          "type": "string",
+          "definition": "HTTPS URL of the gamma OpenSearch node (VPC-private IP)."
+        },
+        "OPENSEARCH_READ_ALIAS": {
+          "type": "string",
+          "definition": "Read alias locked to records_read per ENC-TSK-L40 naming contract.",
+          "default": "records_read"
+        },
+        "OPENSEARCH_SECRET_NAME": {
+          "type": "string",
+          "definition": "Secrets Manager secret holding {\"username\":\"query\",\"password\":\"...\"}.",
+          "default": "enceladus/opensearch/gamma-query"
+        },
+        "OPENSEARCH_USERNAME": {
+          "type": "string",
+          "definition": "Security-plugin username; defaults to query (read-only query_role).",
+          "default": "query"
+        },
+        "FEED_API_BASE": {
+          "type": "string",
+          "definition": "Base URL for feed/corpus facet fallback (service auth via COORDINATION_INTERNAL_API_KEY)."
+        },
+        "facets": {
+          "type": "object",
+          "definition": "Hybrid response field: facet counts {project_id, record_type, status, priority} over the active search."
+        },
+        "facets_source": {
+          "type": "enum",
+          "enum": ["opensearch", "feed_corpus"],
+          "definition": "Provenance of facets on hybrid responses."
+        },
+        "keyword_source": {
+          "type": "enum",
+          "enum": ["opensearch", "neo4j_fallback", "unavailable"],
+          "definition": "Provenance of the keyword RRF arm on hybrid responses."
+        }
+      },
+      "owner": "search",
+      "source": "ENC-TSK-L43",
       "telemetry_eligible": true
     },
     "opensearch_backfill.lambda": {
