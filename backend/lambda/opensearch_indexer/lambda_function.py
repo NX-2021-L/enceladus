@@ -31,6 +31,10 @@ logger.setLevel(logging.INFO)
 WRITE_ALIAS = os.environ.get("OPENSEARCH_WRITE_ALIAS", "records_write")
 OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT", "").rstrip("/")
 OPENSEARCH_SECRET_NAME = os.environ.get("OPENSEARCH_SECRET_NAME", "")
+# ENC-TSK-L44: write path uses the scoped "indexer" security-plugin user (write-only
+# index_permissions), not the admin superuser. Default preserved for pre-L44 secrets
+# that only contain {"password": "..."} with no username field.
+OPENSEARCH_USERNAME = os.environ.get("OPENSEARCH_USERNAME", "admin")
 SECRETS_REGION = os.environ.get("SECRETS_REGION", os.environ.get("AWS_REGION", "us-west-2"))
 
 SKIP_RECORD_TYPES = frozenset({"reference", "relationship"})
@@ -39,6 +43,7 @@ SSL_CONTEXT.check_hostname = False
 SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 
 _admin_password: Optional[str] = None
+_auth_username: Optional[str] = None
 _secrets_client = None
 
 
@@ -50,12 +55,16 @@ def _get_secrets_client():
 
 
 def _get_admin_password() -> str:
-    global _admin_password
+    """Returns the bind password for OPENSEARCH_USERNAME (ENC-TSK-L44: normally the
+    scoped 'indexer' user, not the admin superuser). Name kept for compatibility with
+    existing callers/tests; also resolves _auth_username as a side effect."""
+    global _admin_password, _auth_username
     if _admin_password is not None:
         return _admin_password
     override = os.environ.get("OPENSEARCH_ADMIN_PASSWORD")
     if override:
         _admin_password = override
+        _auth_username = OPENSEARCH_USERNAME
         return _admin_password
     if not OPENSEARCH_SECRET_NAME:
         raise RuntimeError("OPENSEARCH_SECRET_NAME is not configured")
@@ -65,7 +74,16 @@ def _get_admin_password() -> str:
     if not password:
         raise RuntimeError(f"Secret {OPENSEARCH_SECRET_NAME} missing password key")
     _admin_password = str(password)
+    # ENC-TSK-L44 secrets carry {"username": "...", "password": "..."}; older
+    # admin-only secrets have no username field, so fall back to the env default.
+    _auth_username = str(payload.get("username") or OPENSEARCH_USERNAME)
     return _admin_password
+
+
+def _get_auth_username() -> str:
+    if _auth_username is None:
+        _get_admin_password()
+    return _auth_username or OPENSEARCH_USERNAME
 
 
 def _deser_value(ddb_val: Dict[str, Any]) -> Any:
@@ -204,7 +222,7 @@ def _opensearch_request(method: str, path: str, body: Optional[Any] = None) -> T
         data = json.dumps(body).encode("utf-8") if not isinstance(body, (bytes, bytearray)) else body
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
-    auth = base64.b64encode(f"admin:{_get_admin_password()}".encode()).decode()
+    auth = base64.b64encode(f"{_get_auth_username()}:{_get_admin_password()}".encode()).decode()
     req.add_header("Authorization", f"Basic {auth}")
     try:
         with urllib.request.urlopen(req, context=SSL_CONTEXT, timeout=30) as resp:
