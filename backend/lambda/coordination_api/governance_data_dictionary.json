@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.8",
-  "updated_at": "2026-07-05T08:19:00Z",
-  "last_change_summary": "ENC-TSK-L29 (B67 Search2.0 WaveC / DOC-77D6C714867E §15m): appsync_feed_publisher now attaches a full record body (deserialized NewImage) to the /records/{recordId} channel's event only -- /feed/updates and /projects/{id} stay at the fixed AC-23 lightweight payload. New entity appsync_feed_publisher.full_record_body_l29.",
+  "version": "2026-07-05.9",
+  "updated_at": "2026-07-05T08:26:00Z",
+  "last_change_summary": "ENC-TSK-L10 (B64 Ph3): new mcp_streaming_gateway Lambda (Lambda Web Adapter + Starlette/uvicorn, reusing server.py's MCP tool surface) + dedicated REST API Gateway v1 (McpStreamingRestApi) with responseTransferMode=STREAM, gamma-only. New entity mcp_streaming_gateway.lambda.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7354,6 +7354,20 @@
         }
       }
     },
+    "mcp_streaming_gateway.lambda": {
+      "description": "ENC-TSK-L10 (B64 Ph3): true Lambda response-streaming MCP endpoint. Distinct from enceladus-mcp-streamable (ENC-FTR-025) -- that Lambda is invoked event-per-request via a Function URL in BUFFERED InvokeMode; this one runs as a persistent Starlette/uvicorn server (asgi_app.py) behind the AWS Lambda Web Adapter (AWS_LAMBDA_EXEC_WRAPPER=/opt/bootstrap, AWS_LWA_INVOKE_MODE=response_stream), fronted by a dedicated REST API Gateway v1 (McpStreamingRestApi, 03-api.yaml) using responseTransferMode=STREAM -- HTTP API v2 (AWS::ApiGatewayV2) does not support Lambda response streaming, only REST API v1 does (InvokeWithResponseStream). Reuses server.py's tool surface (StreamableHTTPSessionManager, json_response=False so it actually emits SSE instead of buffering). Gamma-only (Condition: IsGamma), 15-min Lambda timeout; API Gateway integration TimeoutInMillis capped at 29000 (REST API's documented ceiling, not lifted for streaming per available docs).",
+      "fields": {
+        "AWS_LWA_PORT": {
+          "definition": "Port the Starlette/uvicorn server listens on; the Lambda Web Adapter proxies invocations to it.",
+          "default": "8080",
+          "type": "string"
+        },
+        "AWS_LWA_INVOKE_MODE": {
+          "definition": "response_stream -- tells the adapter to use Lambda's RESPONSE_STREAM invoke path so API Gateway's responseTransferMode=STREAM integration gets real streamed output.",
+          "type": "string"
+        }
+      }
+    },
     "appsync_feed_publisher.full_record_body_l29": {
       "description": "ENC-TSK-L29 (B67 Search2.0 WaveC): the appsync_feed_publisher Lambda (backend/lambda/appsync_feed_publisher, DISTINCT from the legacy backend/lambda/feed_publisher v1 S3 mobile-feed publisher) attaches the full current record body to the event delivered on a record's /records/{recordId} AppSync Events channel only. The /feed/updates (global firehose) and /projects/{projectId} channels are never given a body -- their payload stays exactly the pre-existing B67 AC-10 lightweight envelope (fixed ~500-byte AC-23 budget). Purpose: an open record-detail page's client-side Tier-1/Tier-2 mirror (ENC-TSK-L24) can upsert directly from a /records/{recordId} event with no follow-up GET.",
       "fields": {
@@ -7367,6 +7381,11 @@
   },
   "change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda -- nightly EventBridge (gamma, cron 06:00 UTC, after K41's 05:00 CEE scan) consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (fence_missing_language, metadata_field_missing) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent session involvement. DATA-SAFETY: only the deterministic whitelist is auto-remediated; ambiguous/content-changing warnings are left for agent review; every auto-patch is logged with before/after compliance_score. Dry-run default-on (GDMP_DRY_RUN=1) plus a 3-run io-approval ramp (GDMP_IO_APPROVAL_RUNS=3, GDMP_MUTATION_ENABLED=0) reuse the FTR-106 / ENC-TSK-K03 unlearning Lambda's S3 run-counter pattern verbatim. CEE_GDMP_HARD_DISABLED=1 kill switch ships ON by default. Idempotent: is_already_compliant guards against re-patching already-compliant documents. New entity corpus_entropy_gdmp_remediation.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "change_log": [
+    {
+      "version": "2026-07-05.9",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L10 (B64 Ph3): new mcp_streaming_gateway Lambda (Lambda Web Adapter + Starlette/uvicorn, reusing server.py's MCP tool surface) + dedicated REST API Gateway v1 (McpStreamingRestApi) with responseTransferMode=STREAM, gamma-only. New entity mcp_streaming_gateway.lambda."
+    },
     {
       "version": "2026-07-05.5",
       "date": "2026-07-05",

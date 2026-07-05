@@ -102,3 +102,4 @@ function_name_map:
   corpus_entropy_engine: enceladus-corpus-entropy-engine-gamma
   corpus_entropy_gdmp_remediation: enceladus-corpus-entropy-gdmp-remediation-gamma
   user_preferences_api: enceladus-user-preferences-api-gamma
+  mcp_streaming_gateway: enceladus-mcp-streaming-gateway-gamma
