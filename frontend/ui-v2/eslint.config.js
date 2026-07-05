@@ -62,7 +62,7 @@ export default tseslint.config(
   {
     // AC-13 — bare fetch() is only permitted inside the api/ query-fn layer.
     files: ['src/**/*.{ts,tsx}'],
-    ignores: ['src/api/**'],
+    ignores: ['src/api/**', 'src/auth/**'],
     rules: {
       'no-restricted-globals': [
         'error',

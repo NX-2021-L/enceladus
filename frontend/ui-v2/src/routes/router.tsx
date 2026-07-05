@@ -6,6 +6,7 @@ import {
 } from '@tanstack/react-router'
 import { AppShell } from '../shell/AppShell'
 import { HomeRoute } from './HomeRoute'
+import { PlaceholderRoute } from './PlaceholderRoute'
 import { createDocumentRecordRoute, createRecordRoute } from './recordRoute'
 import {
   documentQueryOptions,
@@ -68,8 +69,28 @@ const documentRoute = createDocumentRecordRoute({
   queryOptionsFor: documentQueryOptions,
 })
 
+const shellNavRoutes = [
+  { path: '/projects', title: 'Projects' },
+  { path: '/feed', title: 'Feed' },
+  { path: '/docs', title: 'Docs' },
+  { path: '/coordination', title: 'Coordination' },
+  { path: '/component-registry', title: 'Component registry' },
+  { path: '/deployments', title: 'Deployment manager' },
+  { path: '/access-tokens', title: 'Access tokens' },
+  { path: '/terminal-sessions', title: 'Terminal sessions' },
+] as const
+
+const placeholderRoutes = shellNavRoutes.map(({ path, title }) =>
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path,
+    component: () => <PlaceholderRoute title={title} />,
+  }),
+)
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  ...placeholderRoutes,
   taskRoute,
   issueRoute,
   featureRoute,

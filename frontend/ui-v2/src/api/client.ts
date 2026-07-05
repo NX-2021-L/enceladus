@@ -12,6 +12,8 @@
  *   - 401 -> SessionExpiredError, 404 -> NotFoundError.
  */
 
+import type { HybridGraphsearchResponse, HybridSearchParams } from '../types/search'
+
 /**
  * Read API base URL. Defaults to `/api/v1`, matching the existing app's
  * `normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL)` default in
@@ -39,6 +41,17 @@ export class NotFoundError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'NotFoundError'
+  }
+}
+
+/** Graph index unavailable (503 GRAPH_UNAVAILABLE) — fall back to local/tracker reads. */
+export class GraphUnavailableError extends Error {
+  readonly status = 503
+  readonly fallbackHint?: string
+  constructor(message: string, fallbackHint?: string) {
+    super(message)
+    this.name = 'GraphUnavailableError'
+    this.fallbackHint = fallbackHint
   }
 }
 
@@ -108,4 +121,42 @@ export async function fetchDocumentRecord<T>(
   const url = `${API_BASE}/documents/${encodeURIComponent(documentId)}`
   const body = await requestJson<{ document?: T } & Record<string, unknown>>(url, init)
   return (body.document ?? (body as unknown)) as T
+}
+
+/**
+ * Hybrid graphsearch (FTR-127 / ENC-TSK-L22). Live gamma endpoint:
+ * GET /api/v1/tracker/graphsearch?search_type=hybrid&project_id=...
+ */
+export async function fetchHybridGraphsearch(
+  params: HybridSearchParams,
+  init?: FetchInit,
+): Promise<HybridGraphsearchResponse> {
+  const qs = new URLSearchParams({
+    search_type: 'hybrid',
+    project_id: params.projectId,
+  })
+  if (params.query?.trim()) qs.set('query', params.query.trim())
+  if (params.anchorRecordId?.trim()) qs.set('anchor_record_id', params.anchorRecordId.trim())
+  if (params.recordType) qs.set('record_type', params.recordType)
+  if (params.topN != null) qs.set('top_n', String(params.topN))
+  if (params.includeBelowThreshold) qs.set('include_below_threshold', 'true')
+
+  const url = `${API_BASE}/tracker/graphsearch?${qs.toString()}`
+  const res = await fetch(url, {
+    signal: init?.signal,
+    headers: withDefaultHeaders(init?.headers),
+    credentials: 'include',
+    cache: 'no-store',
+  })
+  if (res.status === 401) throw new SessionExpiredError()
+  if (res.status === 404) throw new NotFoundError(`Not found: ${url}`)
+  if (res.status === 503) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string; fallback_hint?: string }
+    throw new GraphUnavailableError(
+      body.message ?? 'Graph index temporarily unavailable',
+      body.fallback_hint,
+    )
+  }
+  if (!res.ok) throw new Error(`Request failed (${res.status}): ${url}`)
+  return (await res.json()) as HybridGraphsearchResponse
 }

@@ -224,6 +224,11 @@ Resources:
           # ADE Component C: Cursor webhook HMAC verification secret (POST /api/v1/cursor/webhook)
           CURSOR_WEBHOOK_SECRET: !Ref CursorWebhookSecret
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
+          # ENC-TSK-L08 / ISS-070: Auth dashboard oauth-clients list scans
+          # governance-policies; without this env var the code default
+          # ("governance-policies") misses the gamma suffix and IAM denies Scan.
+          GOVERNANCE_POLICIES_TABLE: !Sub "governance-policies${EnvironmentSuffix}"
+          AUTH_TOKENS_TABLE: !Sub "governance-policies${EnvironmentSuffix}"
           # ENC-FTR-116 / ENC-TSK-I29: canonical governance-version DDB record.
           GOVERNANCE_VERSION_TABLE: !Sub "governance-version${EnvironmentSuffix}"
           # ENC-TSK-I37 / ENC-TSK-J04 (ENC-FTR-117 / ENC-FTR-074): agent identity stores.
