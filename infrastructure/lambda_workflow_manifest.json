@@ -135,6 +135,12 @@
       "deploy_script": "backend/lambda/opensearch_indexer/deploy.sh"
     },
     {
+      "function_name": "devops-opensearch-backfill",
+      "lambda_dir": "backend/lambda/opensearch_backfill",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/opensearch_backfill/deploy.sh"
+    },
+    {
       "function_name": "devops-project-service",
       "lambda_dir": "backend/lambda/project_service",
       "workflow_file": ".github/workflows/_deploy.yml",

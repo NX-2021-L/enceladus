@@ -1470,6 +1470,42 @@ Resources:
         - Key: Component
           Value: search
 
+  # ENC-TSK-L42 / B67 Search2.0: full-corpus backfill + reindex job (gamma-only).
+  OpenSearchBackfillFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-opensearch-backfill${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 512
+      Timeout: 900
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt OpenSearchBackfillRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref OpenSearchIndexerSecurityGroup
+        SubnetIds: !Ref OpenSearchIndexerSubnetIds
+      Environment:
+        Variables:
+          TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
+          OPENSEARCH_ENDPOINT: !Ref OpenSearchHttpsEndpoint
+          OPENSEARCH_WRITE_ALIAS: records_write
+          OPENSEARCH_ADMIN_PASSWORD: !Ref OpenSearchAdminPassword
+          OPENSEARCH_SECRET_NAME: !Ref OpenSearchAdminSecretName
+          OPENSEARCH_USERNAME: !Ref OpenSearchIndexerUsername
+          SECRETS_REGION: !Ref AWS::Region
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
+
   GraphQueryApiFunction:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
@@ -6046,6 +6082,68 @@ Resources:
                   - sqs:GetQueueAttributes
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-SearchIndexQueueArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: SecretsManagerOpenSearch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerOpenSearch
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/opensearch/*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
+
+  OpenSearchBackfillRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-opensearch-backfill-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: DynamoDBCorpusScan
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TrackerTableScan
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: DocumentsTableScan
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
         - PolicyName: CloudWatchLogs
           PolicyDocument:
             Version: '2012-10-17'
