@@ -6384,7 +6384,7 @@ Resources:
     Condition: RhythmActive
     Properties:
       Name: !Sub "rhythm-sense-hourly${EnvironmentSuffix}"
-      GroupName: !GetAtt RhythmSenseGroup.Name
+      GroupName: !Ref RhythmSenseGroup
       ScheduleExpression: cron(0 * * * ? *)
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
@@ -6400,7 +6400,7 @@ Resources:
     Condition: RhythmActive
     Properties:
       Name: !Sub "rhythm-light-integrate${EnvironmentSuffix}"
-      GroupName: !GetAtt RhythmLightGroup.Name
+      GroupName: !Ref RhythmLightGroup
       ScheduleExpression: cron(15 0,6,12,18 * * ? *)
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
@@ -6416,7 +6416,7 @@ Resources:
     Condition: RhythmActive
     Properties:
       Name: !Sub "rhythm-decide-act${EnvironmentSuffix}"
-      GroupName: !GetAtt RhythmDecideGroup.Name
+      GroupName: !Ref RhythmDecideGroup
       ScheduleExpression: cron(30 0,3,6,9,12,15,18,21 * * ? *)
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
@@ -6432,7 +6432,7 @@ Resources:
     Condition: RhythmActive
     Properties:
       Name: !Sub "rhythm-heavy-integrate${EnvironmentSuffix}"
-      GroupName: !GetAtt RhythmHeavyGroup.Name
+      GroupName: !Ref RhythmHeavyGroup
       ScheduleExpression: cron(45 0,12 * * ? *)
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
@@ -6448,7 +6448,7 @@ Resources:
     Condition: RhythmActive
     Properties:
       Name: !Sub "rhythm-coherence-point${EnvironmentSuffix}"
-      GroupName: !GetAtt RhythmCoherenceGroup.Name
+      GroupName: !Ref RhythmCoherenceGroup
       ScheduleExpression: cron(0 0,12 * * ? *)
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
