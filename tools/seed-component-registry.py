@@ -107,6 +107,7 @@ KNOWN_COMPONENTS = [
             "related": ["backend/lambda/shared_layer/"],
             "architecture_sections": ["4.17"],
         },
+        "deploy_targets": ["checkout_service"],
     },
     {
         "component_id": "comp-lifecycle-service",
@@ -129,6 +130,7 @@ KNOWN_COMPONENTS = [
             ],
             "architecture_sections": ["4.17"],
         },
+        "deploy_targets": ["lifecycle_service"],
     },
     {
         "component_id": "comp-scoring-service",
@@ -151,6 +153,7 @@ KNOWN_COMPONENTS = [
             ],
             "architecture_sections": ["4.17"],
         },
+        "deploy_targets": ["scoring_service"],
     },
     {
         "component_id": "comp-coordination-api",
@@ -173,6 +176,7 @@ KNOWN_COMPONENTS = [
             ],
             "architecture_sections": ["4.2", "5.1"],
         },
+        "deploy_targets": ["coordination_api"],
     },
     {
         "component_id": "comp-tracker-mutation",
@@ -192,6 +196,7 @@ KNOWN_COMPONENTS = [
             "related": ["backend/lambda/shared_layer/"],
             "architecture_sections": ["4.1", "5.1"],
         },
+        "deploy_targets": ["tracker_mutation"],
     },
     {
         "component_id": "comp-enceladus-mcp-server",

@@ -8744,12 +8744,17 @@ _COMPONENT_STATUSES = frozenset({"active", "deprecated", "archived"})
 # components_create / components_update / components_propose. All optional
 # List[str], empty-array default. Source-of-truth for the continuous deploy
 # capability auditor (ENC-TSK-E69) and pre-merge guard (ENC-TSK-E70).
+# ENC-TSK-J40: deploy_targets added to the same extension point -- stack names
+# and function-name globs this component owns, consumed by
+# tools/assert_deploy_target_coverage.py to fail closed when a component's
+# declared targets are narrower than what a merge's diff actually touched.
 _COMPONENT_CAPABILITY_FIELDS = (
     "required_iam_actions",
     "required_env_secrets",
     "required_apigw_routes",
     "required_cfn_resources",
     "required_lambda_env_vars",
+    "deploy_targets",
 )
 _COMPONENT_STRICTNESS_RANK = {
     "github_pr_deploy": 0,
