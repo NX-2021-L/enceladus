@@ -9287,31 +9287,19 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
 
     ddb = _get_ddb()
     try:
-        ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Put": {
-                        "TableName": COMPONENTS_TABLE,
-                        "Item": _py_to_ddb(component_item),
-                        "ConditionExpression": "attribute_not_exists(component_id)",
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": TRACKER_TABLE,
-                        "Item": forward_rel,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": TRACKER_TABLE,
-                        "Item": inverse_rel,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-            ]
-        )
+        from enceladus_shared.relationship_store import build_create_transact_puts
+
+        transact_items = [
+            {
+                "Put": {
+                    "TableName": COMPONENTS_TABLE,
+                    "Item": _py_to_ddb(component_item),
+                    "ConditionExpression": "attribute_not_exists(component_id)",
+                }
+            },
+            *build_create_transact_puts(TRACKER_TABLE, forward_rel, inverse_rel),
+        ]
+        ddb.transact_write_items(TransactItems=transact_items)
     except ddb.exceptions.TransactionCanceledException as exc:
         reasons = getattr(exc, "response", {}).get("CancellationReasons") or []
         if any((r or {}).get("Code") == "ConditionalCheckFailed" for r in reasons):
@@ -11076,23 +11064,10 @@ def _handle_components_add_edge(
 
     ddb = _get_ddb()
     try:
+        from enceladus_shared.relationship_store import build_create_transact_puts
+
         ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Put": {
-                        "TableName": TRACKER_TABLE,
-                        "Item": forward,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": TRACKER_TABLE,
-                        "Item": inverse,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-            ]
+            TransactItems=build_create_transact_puts(TRACKER_TABLE, forward, inverse)
         )
     except ddb.exceptions.TransactionCanceledException as exc:
         reasons = getattr(exc, "response", {}).get("CancellationReasons") or []
@@ -11200,29 +11175,15 @@ def _handle_components_remove_edge(
 
     ddb = _get_ddb()
     try:
+        from enceladus_shared.relationship_store import build_delete_transact_deletes
+
         ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Delete": {
-                        "TableName": TRACKER_TABLE,
-                        "Key": {
-                            "project_id": {"S": project_id},
-                            "record_id": {"S": forward_sk},
-                        },
-                        "ConditionExpression": "attribute_exists(record_id)",
-                    }
-                },
-                {
-                    "Delete": {
-                        "TableName": TRACKER_TABLE,
-                        "Key": {
-                            "project_id": {"S": project_id},
-                            "record_id": {"S": inverse_sk},
-                        },
-                        "ConditionExpression": "attribute_exists(record_id)",
-                    }
-                },
-            ]
+            TransactItems=build_delete_transact_deletes(
+                TRACKER_TABLE,
+                project_id_attr={"S": project_id},
+                forward_sk=forward_sk,
+                inverse_sk=inverse_sk,
+            )
         )
     except ddb.exceptions.TransactionCanceledException as exc:
         reasons = getattr(exc, "response", {}).get("CancellationReasons") or []

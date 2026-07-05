@@ -6368,23 +6368,12 @@ def _handle_create_relationship(project_id: str, body: Dict) -> Dict:
 
     ddb = _get_ddb()
     try:
+        from enceladus_shared.relationship_store import build_create_transact_puts
+
         ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Put": {
-                        "TableName": DYNAMODB_TABLE,
-                        "Item": forward_item,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": DYNAMODB_TABLE,
-                        "Item": inverse_item,
-                        "ConditionExpression": "attribute_not_exists(record_id)",
-                    }
-                },
-            ]
+            TransactItems=build_create_transact_puts(
+                DYNAMODB_TABLE, forward_item, inverse_item
+            )
         )
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "TransactionCanceledException":
@@ -6442,35 +6431,16 @@ def _handle_archive_relationship(project_id: str, params: Dict) -> Dict:
 
     ddb = _get_ddb()
     try:
+        from enceladus_shared.relationship_store import build_archive_transact_updates
+
         ddb.transact_write_items(
-            TransactItems=[
-                {
-                    "Update": {
-                        "TableName": DYNAMODB_TABLE,
-                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(forward_sk)},
-                        "UpdateExpression": "SET #st = :archived, archived_at = :now",
-                        "ExpressionAttributeNames": {"#st": "status"},
-                        "ExpressionAttributeValues": {
-                            ":archived": _ser_s("archived"),
-                            ":now": _ser_s(now),
-                        },
-                        "ConditionExpression": "attribute_exists(record_id)",
-                    }
-                },
-                {
-                    "Update": {
-                        "TableName": DYNAMODB_TABLE,
-                        "Key": {"project_id": _ser_s(project_id), "record_id": _ser_s(inverse_sk)},
-                        "UpdateExpression": "SET #st = :archived, archived_at = :now",
-                        "ExpressionAttributeNames": {"#st": "status"},
-                        "ExpressionAttributeValues": {
-                            ":archived": _ser_s("archived"),
-                            ":now": _ser_s(now),
-                        },
-                        "ConditionExpression": "attribute_exists(record_id)",
-                    }
-                },
-            ]
+            TransactItems=build_archive_transact_updates(
+                DYNAMODB_TABLE,
+                project_id_attr=_ser_s(project_id),
+                forward_sk=forward_sk,
+                inverse_sk=inverse_sk,
+                archived_at_attr=_ser_s(now),
+            )
         )
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "TransactionCanceledException":
@@ -6521,26 +6491,29 @@ def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
         sk_prefix = "rel#"
 
     kwargs: Dict[str, Any] = {
-        "TableName": DYNAMODB_TABLE,
-        "KeyConditionExpression": "project_id = :pid AND begins_with(record_id, :prefix)",
-        "ExpressionAttributeValues": {
-            ":pid": _ser_s(project_id),
-            ":prefix": _ser_s(sk_prefix),
-        },
         "Limit": page_size,
     }
 
     cursor = query_params.get("cursor", "")
+    exclusive_start_key = None
     if cursor:
         try:
             import base64
-            decoded = json.loads(base64.b64decode(cursor))
-            kwargs["ExclusiveStartKey"] = decoded
+            exclusive_start_key = json.loads(base64.b64decode(cursor))
         except Exception:
             pass
 
-    resp = ddb.query(**kwargs)
-    items = resp.get("Items", [])
+    from enceladus_shared.relationship_store import query_relationship_raw_items
+
+    items, last_key = query_relationship_raw_items(
+        ddb,
+        DYNAMODB_TABLE,
+        project_id,
+        sk_prefix,
+        ser_s=_ser_s,
+        limit=page_size,
+        exclusive_start_key=exclusive_start_key,
+    )
 
     results = []
     for item in items:
@@ -6579,7 +6552,6 @@ def _handle_list_relationships(project_id: str, query_params: Dict) -> Dict:
         "count": len(results),
     }
 
-    last_key = resp.get("LastEvaluatedKey")
     if last_key:
         import base64
         response_body["next_cursor"] = base64.b64encode(

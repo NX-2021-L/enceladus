@@ -147,6 +147,33 @@ Resources:
         - Key: Component
           Value: tracker
 
+  # ENC-TSK-L13 / B65 Ph4: dedicated typed-relationship edge store (rel# rows).
+  # Dual-write migration from devops-project-tracker; graph_sync continues to
+  # consume tracker-table streams until rel# cleanup (AC5).
+  RelationshipsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "enceladus-relationships${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        - AttributeName: project_id
+          AttributeType: S
+        - AttributeName: record_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: project_id
+          KeyType: HASH
+        - AttributeName: record_id
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: relationships
+
   ProjectsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -887,6 +914,18 @@ Outputs:
     Value: !GetAtt TrackerTable.StreamArn
     Export:
       Name: !Sub ${AWS::StackName}-TrackerStreamArn
+  RelationshipsTableName:
+    Value: !Ref RelationshipsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-RelationshipsTable
+  RelationshipsTableArn:
+    Value: !GetAtt RelationshipsTable.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-RelationshipsTableArn
+  RelationshipsStreamArn:
+    Value: !GetAtt RelationshipsTable.StreamArn
+    Export:
+      Name: !Sub ${AWS::StackName}-RelationshipsStreamArn
   ProjectsTableName:
     Value: !Ref ProjectsTable
     Export:

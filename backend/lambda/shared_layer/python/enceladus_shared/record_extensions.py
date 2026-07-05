@@ -137,38 +137,33 @@ def query_typed_relationships_for_projects(
     ddb_float: Callable[[Dict[str, Any], str], float],
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Query all outgoing typed edges for the given projects."""
+    from enceladus_shared.relationship_store import iter_project_relationship_items
+
     edges_by_source: Dict[str, List[Dict[str, Any]]] = {}
-    for pid in project_ids:
-        if not pid:
+    for raw in iter_project_relationship_items(
+        ddb,
+        table_name,
+        project_ids,
+        ser_s=lambda value: {"S": value},
+    ):
+        sk = ddb_str(raw, "record_id")
+        if not sk or not sk.startswith("rel#"):
             continue
-        paginator = ddb.get_paginator("query")
-        for page in paginator.paginate(
-            TableName=table_name,
-            KeyConditionExpression="project_id = :pid AND begins_with(record_id, :rel_prefix)",
-            ExpressionAttributeValues={
-                ":pid": {"S": pid},
-                ":rel_prefix": {"S": "rel#"},
-            },
-        ):
-            for raw in page.get("Items", []):
-                sk = ddb_str(raw, "record_id")
-                if not sk or not sk.startswith("rel#"):
-                    continue
-                parts = sk.split("#", 4)
-                if len(parts) < 4:
-                    continue
-                _, source_id, rel_type, target_id = parts[0], parts[1], parts[2], parts[3]
-                if ddb_str(raw, "status") == "archived":
-                    continue
-                edge = {
-                    "relationship_type": rel_type,
-                    "target_id": target_id,
-                    "weight": ddb_float(raw, "weight"),
-                    "confidence": ddb_float(raw, "confidence"),
-                    "reason": ddb_str(raw, "reason") or None,
-                    "created_at": ddb_str(raw, "created_at") or None,
-                }
-                edges_by_source.setdefault(source_id, []).append(edge)
+        parts = sk.split("#", 4)
+        if len(parts) < 4:
+            continue
+        _, source_id, rel_type, target_id = parts[0], parts[1], parts[2], parts[3]
+        if ddb_str(raw, "status") == "archived":
+            continue
+        edge = {
+            "relationship_type": rel_type,
+            "target_id": target_id,
+            "weight": ddb_float(raw, "weight"),
+            "confidence": ddb_float(raw, "confidence"),
+            "reason": ddb_str(raw, "reason") or None,
+            "created_at": ddb_str(raw, "created_at") or None,
+        }
+        edges_by_source.setdefault(source_id, []).append(edge)
     return edges_by_source
 
 
@@ -182,35 +177,35 @@ def query_edges_for_record(
     ddb_float: Callable[[Dict[str, Any], str], float],
 ) -> List[Dict[str, Any]]:
     """Query outgoing typed edges for a single source record."""
-    edges: List[Dict[str, Any]] = []
+    from enceladus_shared.relationship_store import query_relationship_raw_items
+
     prefix = f"rel#{source_id}#"
-    paginator = ddb.get_paginator("query")
-    for page in paginator.paginate(
-        TableName=table_name,
-        KeyConditionExpression="project_id = :pid AND begins_with(record_id, :prefix)",
-        ExpressionAttributeValues={
-            ":pid": {"S": project_id},
-            ":prefix": {"S": prefix},
-        },
-    ):
-        for raw in page.get("Items", []):
-            sk = ddb_str(raw, "record_id")
-            if not sk or not sk.startswith("rel#"):
-                continue
-            parts = sk.split("#", 4)
-            if len(parts) < 4:
-                continue
-            _, _src, rel_type, target_id = parts
-            if ddb_str(raw, "status") == "archived":
-                continue
-            edges.append(
-                {
-                    "relationship_type": rel_type,
-                    "target_id": target_id,
-                    "weight": ddb_float(raw, "weight"),
-                    "confidence": ddb_float(raw, "confidence"),
-                    "reason": ddb_str(raw, "reason") or None,
-                    "created_at": ddb_str(raw, "created_at") or None,
-                }
-            )
+    raw_items, _ = query_relationship_raw_items(
+        ddb,
+        table_name,
+        project_id,
+        prefix,
+        ser_s=lambda value: {"S": value},
+    )
+    edges: List[Dict[str, Any]] = []
+    for raw in raw_items:
+        sk = ddb_str(raw, "record_id")
+        if not sk or not sk.startswith("rel#"):
+            continue
+        parts = sk.split("#", 4)
+        if len(parts) < 4:
+            continue
+        _, _src, rel_type, target_id = parts
+        if ddb_str(raw, "status") == "archived":
+            continue
+        edges.append(
+            {
+                "relationship_type": rel_type,
+                "target_id": target_id,
+                "weight": ddb_float(raw, "weight"),
+                "confidence": ddb_float(raw, "confidence"),
+                "reason": ddb_str(raw, "reason") or None,
+                "created_at": ddb_str(raw, "created_at") or None,
+            }
+        )
     return edges

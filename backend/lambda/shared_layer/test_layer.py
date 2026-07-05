@@ -7,6 +7,7 @@ Run from shared_layer directory:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from decimal import Decimal
@@ -28,6 +29,10 @@ from enceladus_shared.record_extensions import (
     compute_freshness,
     compute_max_degree,
     compute_structural_importance,
+)
+from enceladus_shared.relationship_store import (
+    build_create_transact_puts,
+    write_target_tables,
 )
 
 
@@ -228,6 +233,36 @@ class RecordExtensionsTests(unittest.TestCase):
 
     def test_compute_freshness_missing_timestamp_defaults(self):
         self.assertEqual(compute_freshness(None, "task"), 0.5)
+
+
+class RelationshipStoreTests(unittest.TestCase):
+    def test_write_target_tables_dual_write(self):
+        with patch.dict(
+            os.environ,
+            {"RELATIONSHIPS_TABLE": "enceladus-relationships-gamma"},
+            clear=False,
+        ):
+            targets = write_target_tables("devops-project-tracker-gamma")
+        self.assertEqual(
+            targets,
+            ["enceladus-relationships-gamma", "devops-project-tracker-gamma"],
+        )
+
+    def test_build_create_transact_puts_dual_write(self):
+        forward = {"project_id": {"S": "enceladus"}, "record_id": {"S": "rel#A#relates-to#B"}}
+        inverse = {"project_id": {"S": "enceladus"}, "record_id": {"S": "rel#B#related-to#A"}}
+        with patch.dict(
+            os.environ,
+            {"RELATIONSHIPS_TABLE": "enceladus-relationships-gamma"},
+            clear=False,
+        ):
+            items = build_create_transact_puts("devops-project-tracker-gamma", forward, inverse)
+        self.assertEqual(len(items), 4)
+        tables = {item["Put"]["TableName"] for item in items}
+        self.assertEqual(
+            tables,
+            {"enceladus-relationships-gamma", "devops-project-tracker-gamma"},
+        )
 
 
 if __name__ == "__main__":

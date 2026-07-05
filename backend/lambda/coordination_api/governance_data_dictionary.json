@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.20",
-  "updated_at": "2026-07-05T12:20:00Z",
-  "last_change_summary": "ENC-TSK-L74: graph_sync SQS handler() now reports batchItemFailures (partial-batch-failure contract) instead of silently deleting the whole batch on any successful record, which was permanently losing MENTIONS graph edges for records that failed processing (root cause of ENC-ISS-486/488/493). No schema field changes -- dictionary bump is for the governance-guard gate on lambda_function.py edits.",
+  "version": "2026-07-05.21",
+  "updated_at": "2026-07-05T12:53:00Z",
+  "last_change_summary": "ENC-TSK-L13: enceladus-relationships dedicated table + enceladus_shared.relationship_store dual-write/read-merge migration off devops-project-tracker rel# rows.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3814,7 +3814,7 @@
       "field_count": 2
     },
     "tracker.relationship": {
-      "description": "First-class governed typed relationship edge between tracker records (ENC-FTR-049). Stored in devops-project-tracker with rel# SK prefix. Each relationship creates an atomic forward+inverse pair. DynamoDB is system of record; Neo4j receives MERGE projections via DynamoDB Streams.",
+      "description": "First-class governed typed relationship edge between tracker records (ENC-FTR-049). Primary store is enceladus-relationships (ENC-TSK-L13 / B65 Ph4); devops-project-tracker rel# rows remain during dual-write migration. Each relationship creates an atomic forward+inverse pair. DynamoDB is system of record; Neo4j receives MERGE projections via devops-project-tracker DynamoDB Streams until rel# cleanup (AC5).",
       "fields": {
         "relationship_type": {
           "type": "enum",
@@ -4059,7 +4059,9 @@
         "pk": "project_id",
         "sk_pattern": "rel#{source_id}#{relationship_type}#{target_id}",
         "inverse_sk_pattern": "rel#{target_id}#{inverse_type}#{source_id}",
-        "table": "devops-project-tracker",
+        "table": "enceladus-relationships",
+        "legacy_table": "devops-project-tracker",
+        "dual_write_env": "RELATIONSHIPS_TABLE",
         "delete_method": "soft-delete via UpdateItem (status=archived). No DeleteItem permission needed. Data preserved for audit."
       },
       "covered_lambdas": [
@@ -4627,6 +4629,23 @@
         "attach_record_extensions": {
           "type": "function",
           "definition": "Mutates each record dict in-place: sets typed_relationships when edges exist and always sets context_node with the four score fields."
+        }
+      }
+    },
+    "enceladus_shared.relationship_store": {
+      "description": "Shared Python module (backend/lambda/shared_layer/python/enceladus_shared/relationship_store.py) for B65 Ph4 typed-relationship table extraction (ENC-TSK-L13). When RELATIONSHIPS_TABLE is set, writes dual-put forward+inverse pairs to enceladus-relationships and devops-project-tracker; reads merge the relationships table first with legacy tracker fallback on SK conflicts.",
+      "fields": {
+        "write_target_tables": {
+          "type": "function",
+          "definition": "Returns [relationships_table, tracker_table] when RELATIONSHIPS_TABLE is configured, else [tracker_table] only."
+        },
+        "query_relationship_raw_items": {
+          "type": "function",
+          "definition": "Prefix query with relationships-table-first merge; pagination cursor follows the primary (relationships) table."
+        },
+        "iter_project_relationship_items": {
+          "type": "function",
+          "definition": "Full-project rel# scan for feed/extensions; relationships table keys win over tracker duplicates."
         }
       }
     },
