@@ -37,6 +37,7 @@ export interface Task {
   history: HistoryEntry[]
   updated_at: string | null
   created_at: string | null
+  sync_version?: number
 }
 
 export interface Issue {

@@ -6,6 +6,7 @@ import { performLogout } from '../auth/logout'
 import { useUiStore } from '../store/uiStore'
 import { CommandPalette } from './CommandPalette'
 import { FeedPane } from './FeedPane'
+import { ConflictMergeModal, OfflinePendingFlashbar } from '../components/OfflineLayer'
 import './shell.css'
 
 const LOGOUT_HREF = '__logout__'
@@ -152,6 +153,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         toolsOpen={toolsOpen}
       />
       <CommandPalette />
+      <OfflinePendingFlashbar />
+      <ConflictMergeModal />
     </div>
   )
 }

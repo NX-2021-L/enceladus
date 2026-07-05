@@ -25,3 +25,5 @@ export { Select } from '../../../design-system-2/v2/components/Select/Select.jsx
 export { Table } from '../../../design-system-2/v2/components/Table/Table.jsx'
 export { Tabs } from '../../../design-system-2/v2/components/Tabs/Tabs.jsx'
 export { StatusIndicator } from '../../../design-system-2/v2/components/StatusIndicator/StatusIndicator.jsx'
+export { Flashbar } from '../../../design-system-2/v2/components/Flashbar/Flashbar.jsx'
+export { Alert } from '../../../design-system-2/v2/components/Alert/Alert.jsx'
