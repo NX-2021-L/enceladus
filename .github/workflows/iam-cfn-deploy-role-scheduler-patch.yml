@@ -4,6 +4,8 @@ name: IAM CFN Deploy Role — EventBridge Scheduler Patch
 # Scheduler API actions), blocking Rhythm Cycle ScheduleGroup creation on gamma compute
 # deploy (UPDATE_ROLLBACK_COMPLETE 2026-07-02). Durable fix in 04-github-roles.yaml;
 # this one-off dispatch applies the grant live ahead of the next github-roles stack deploy.
+# Uses an attached customer-managed policy (not inline): the role's inline quota is
+# exhausted (~10 KiB), so put-role-policy fails with LimitExceeded (2026-07-05).
 
 on:
   workflow_dispatch:
@@ -34,10 +36,13 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Apply inline policy — EventBridge Scheduler
+      - name: Apply managed policy — EventBridge Scheduler
         run: |
           set -euo pipefail
+          ROLE_NAME="enceladus-cloudformation-deploy-github-role"
+          POLICY_NAME="enceladus-cfn-deploy-scheduler-v1"
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${POLICY_NAME}"
           cat > /tmp/cfn-deploy-role-scheduler.json <<JSON
           {
             "Version": "2012-10-17",
@@ -69,15 +74,27 @@ jobs:
           }
           JSON
 
-          aws iam put-role-policy \
-            --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-scheduler-v1" \
-            --policy-document "file:///tmp/cfn-deploy-role-scheduler.json"
+          if aws iam get-policy --policy-arn "${POLICY_ARN}" >/dev/null 2>&1; then
+            aws iam create-policy-version \
+              --policy-arn "${POLICY_ARN}" \
+              --policy-document "file:///tmp/cfn-deploy-role-scheduler.json" \
+              --set-as-default
+          else
+            aws iam create-policy \
+              --policy-name "${POLICY_NAME}" \
+              --policy-document "file:///tmp/cfn-deploy-role-scheduler.json"
+          fi
 
-      - name: Verify inline policy attached
+          aws iam attach-role-policy \
+            --role-name "${ROLE_NAME}" \
+            --policy-arn "${POLICY_ARN}"
+
+      - name: Verify managed policy attached
         run: |
-          aws iam get-role-policy \
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/enceladus-cfn-deploy-scheduler-v1"
+          aws iam list-attached-role-policies \
             --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-scheduler-v1" \
-            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --query "AttachedPolicies[?PolicyArn=='${POLICY_ARN}'].{PolicyName:PolicyName,PolicyArn:PolicyArn}" \
             --output table
