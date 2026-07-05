@@ -222,11 +222,12 @@ jobs:
             fi
           done
 
-          # --- DynamoDB tables (new tables added by ENC-TSK-I27/I28 that can be orphaned) ---
+          # --- DynamoDB tables (new tables added by ENC-TSK-I27/I28/L13 that can be orphaned) ---
           candidate_tables=(
             "governance-version${suffix}"
             "agent-sessions${suffix}"
             "agent-types${suffix}"
+            "enceladus-relationships${suffix}"
           )
           tracked_tables=$(aws cloudformation list-stack-resources \
             --stack-name "${stack_name}" --region "${region}" \
