@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.19",
+  "version": "2026-07-05.20",
   "updated_at": "2026-07-05T12:20:00Z",
-  "last_change_summary": "ENC-TSK-K26 hotfix: tracker GET promotes item_id to {type}_id before record_extensions attach so context_node and typed_relationships appear on detail pages.",
+  "last_change_summary": "ENC-TSK-L74: graph_sync SQS handler() now reports batchItemFailures (partial-batch-failure contract) instead of silently deleting the whole batch on any successful record, which was permanently losing MENTIONS graph edges for records that failed processing (root cause of ENC-ISS-486/488/493). No schema field changes -- dictionary bump is for the governance-guard gate on lambda_function.py edits.",
   "owners": [
     "enceladus-platform"
   ],
