@@ -491,6 +491,25 @@ def _verify_token(token: str) -> Dict[str, Any]:
     return claims
 
 
+def _extract_if_match(event: Optional[Dict]) -> Optional[str]:
+    """Extract the If-Match header value (ENC-TSK-L47 revision-conflict contract).
+
+    Returns the raw revision token as a string (quotes stripped per ETag convention),
+    or None if the header is absent. Absence preserves today's unconditional-PATCH
+    behavior for backward compatibility.
+    """
+    if not event:
+        return None
+    headers = event.get("headers") or {}
+    raw = headers.get("if-match") or headers.get("If-Match")
+    if raw is None:
+        return None
+    raw = str(raw).strip()
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        raw = raw[1:-1]
+    return raw or None
+
+
 def _extract_token(event: Dict) -> Optional[str]:
     headers = event.get("headers") or {}
     cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
@@ -2203,6 +2222,22 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
     project_id = existing.get("project_id", {}).get("S", "")
     now = _now_z()
 
+    # ENC-TSK-L47: If-Match / HTTP 409 per-record revision contract. Own lightweight
+    # counter (version), decoupled from ENC-TSK-L27's version_seq. Absent header
+    # preserves today's unconditional-PATCH behavior (backward compatible).
+    if_match = _extract_if_match(event)
+    if if_match is not None and if_match != str(current_version):
+        return _error(
+            409,
+            f"If-Match revision mismatch: client expected revision '{if_match}', "
+            f"server is at revision {current_version}.",
+            code="REVISION_CONFLICT",
+            document_id=document_id,
+            expected_revision=if_match,
+            current_revision=current_version,
+            current=_deserialize_item(existing),
+        )
+
     # ENC-FTR-078 AC-3 / AC-19: determine final_subtype for subsequent validations.
     # existing_subtype is the pre-patch value (may be a legacy read-only value for
     # grandfathered records). final_subtype is the post-patch target — either the
@@ -2789,7 +2824,24 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
             ExpressionAttributeValues=attr_values,
         )
     except ddb.exceptions.ConditionalCheckFailedException:
-        return _error(409, "Document was modified concurrently. Please refresh and try again.")
+        try:
+            _refreshed_resp = ddb.get_item(
+                TableName=DOCUMENTS_TABLE,
+                Key={"document_id": {"S": document_id}},
+                ConsistentRead=True,
+            )
+            _refreshed = _deserialize_item(_refreshed_resp.get("Item") or existing)
+        except Exception:  # noqa: BLE001
+            _refreshed = _deserialize_item(existing)
+        return _error(
+            409,
+            "Document was modified concurrently. Please refresh and try again.",
+            code="REVISION_CONFLICT",
+            document_id=document_id,
+            expected_revision=str(current_version),
+            current_revision=_refreshed.get("version"),
+            current=_refreshed,
+        )
     except Exception as exc:
         logger.error("update_item failed: %s", exc)
         return _error(500, "Database write failed.")
