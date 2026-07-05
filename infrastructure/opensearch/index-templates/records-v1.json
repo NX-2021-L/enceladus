@@ -1,0 +1,45 @@
+{
+  "index_patterns": ["records_v*"],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "analysis": {
+        "analyzer": {
+          "enceladus_text_analyzer": {
+            "type": "custom",
+            "tokenizer": "standard",
+            "filter": ["lowercase", "asciifolding"]
+          }
+        }
+      }
+    },
+    "mappings": {
+      "properties": {
+        "project_id": { "type": "keyword" },
+        "record_type": { "type": "keyword" },
+        "status": { "type": "keyword" },
+        "priority": { "type": "keyword" },
+        "tags": { "type": "keyword" },
+        "title": {
+          "type": "search_as_you_type",
+          "analyzer": "enceladus_text_analyzer"
+        },
+        "description": {
+          "type": "search_as_you_type",
+          "analyzer": "enceladus_text_analyzer"
+        },
+        "body": {
+          "type": "search_as_you_type",
+          "analyzer": "enceladus_text_analyzer"
+        },
+        "created_at": { "type": "date" },
+        "updated_at": { "type": "date" },
+        "version_seq": {
+          "type": "long"
+        }
+      }
+    }
+  }
+}
