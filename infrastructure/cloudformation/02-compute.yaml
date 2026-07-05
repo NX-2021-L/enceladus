@@ -189,6 +189,12 @@ Parameters:
     Type: CommaDelimitedList
     Default: subnet-0a27ee72
     Description: Subnet(s) for the indexer Lambda ENI (must route to OpenSearch :9200).
+  OpenSearchIndexerRouteTableIds:
+    Type: CommaDelimitedList
+    Default: rtb-b282dbc9
+    Description: >
+      ENC-TSK-L42: route table(s) for the DynamoDB gateway VPC endpoint so
+      VPC-attached search Lambdas (indexer/backfill) can Scan tracker/documents.
 
   # ENC-TSK-C08 / ENC-FTR-064: configurable HCE cadence. The engine's adaptive
   # trigger makes this an upper bound — a scheduled invoke runs a full
@@ -6053,6 +6059,18 @@ Resources:
           Value: enceladus
         - Key: Component
           Value: search
+
+  # ENC-TSK-L42: backfill Lambda runs in VPC (OpenSearch :9200) and must Scan
+  # tracker/documents — gateway endpoint avoids NAT for DynamoDB API calls.
+  OpenSearchDynamoDbVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      VpcId: !Ref OpenSearchIndexerVpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      VpcEndpointType: Gateway
+      RouteTableIds: !Ref OpenSearchIndexerRouteTableIds
 
   OpenSearchIndexerRole:
     Type: AWS::IAM::Role
