@@ -367,8 +367,13 @@ jobs:
           # prod feature flags. Prod: 5t3sqte/bnwj3lj; gamma: fhhcl7m/zecfu42.
           if [ "${ENVIRONMENT_SUFFIX}" = "-gamma" ]; then
             APPCFG_APP="fhhcl7m"; APPCFG_ENV="zecfu42"
+            # ENC-PLN-068 / L14-L48 deploy unblock: Rhythm ScheduleGroups fail CREATE until
+            # CloudFormationDeployRole has scheduler:* (see iam-cfn-deploy-role-scheduler-patch.yml).
+            # Keep legacy gamma schedules active until IAM patch lands.
+            RHYTHM_CYCLE_ENABLED="false"
           else
             APPCFG_APP="5t3sqte"; APPCFG_ENV="bnwj3lj"
+            RHYTHM_CYCLE_ENABLED="true"
           fi
 
           aws cloudformation deploy \
@@ -387,6 +392,7 @@ jobs:
               AppConfigEnvironmentId="${APPCFG_ENV}" \
               EnceladusCognitoClientSecret="${{ secrets.ENCELADUS_COGNITO_CLIENT_SECRET }}" \
               SharedLayerArn="arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10" \
+              RhythmCycleEnabled="${RHYTHM_CYCLE_ENABLED}" \
               CursorWebhookSecret="${{ secrets.CURSOR_WEBHOOK_SECRET }}" 2>&1 | tee /tmp/plan-compute.log
               # ADE Component C (ENC-FTR-118): pass the Cursor webhook HMAC secret as a NoEcho
               # param so `aws cloudformation deploy` does not reuse/zero it (same value-strip class
