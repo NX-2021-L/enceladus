@@ -82,9 +82,7 @@ jobs:
             --template-file "${TEMPLATE_FILE}" \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
-            --no-execute-changeset \
-            --s3-bucket enceladus-cfn-staging-us-west-2 \
-            --s3-prefix 04-github-roles/ 2>&1 | tee /tmp/plan.log
+            --no-execute-changeset 2>&1 | tee /tmp/plan.log
 
           if grep -q "No changes to deploy" /tmp/plan.log; then
             echo "has_changes=false" >> "${GITHUB_OUTPUT}"
