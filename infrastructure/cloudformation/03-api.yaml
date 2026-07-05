@@ -948,6 +948,19 @@ Resources:
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
+  # ENC-TSK-L65: neither prod nor gamma ever had an AWS::Lambda::Permission for
+  # this integration -- discovered when GET /api/v1/changelog/history returned
+  # a generic API-Gateway 500 with zero Lambda invocations (no resource policy
+  # existed at all). Applies unconditionally (both envs), matching the
+  # unconditional ChangelogApiIntegration above.
+  ChangelogApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "devops-changelog-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/api/v1/changelog/*"
+
   # ---------------------------------------------------------------------------
   # ENC-TSK-L10 (B64 Ph3): REST API Gateway (v1) for Lambda response streaming.
   # A SEPARATE API from HttpApi above -- HTTP API v2 (AWS::ApiGatewayV2) does not
