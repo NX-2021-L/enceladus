@@ -88,6 +88,34 @@ class TestFanout(unittest.TestCase):
         # Every message carries an explicit FIFO dedup id.
         self.assertTrue(all(m.get("MessageDeduplicationId") for m in sent))
 
+    def test_pipe_direct_stream_record_fanout(self):
+        sent = []
+
+        class FakeSqs:
+            def send_message(self, **kw):
+                sent.append(kw)
+
+        orig_sqs, orig_url = lf._sqs, lf.QUEUE_URL
+        lf._sqs = FakeSqs()
+        lf.QUEUE_URL = "https://sqs.example/q.fifo"
+        try:
+            out = lf.handler(
+                _stream_record(
+                    {
+                        "project_id": {"S": "enceladus"},
+                        "record_type": {"S": "task"},
+                        "record_id": {"S": "ENC-TSK-L14"},
+                        "updated_at": {"S": "2026-07-05T06:00:00Z"},
+                        "category": {"S": "Implementation"},
+                    }
+                )
+            )
+        finally:
+            lf._sqs, lf.QUEUE_URL = orig_sqs, orig_url
+
+        self.assertEqual(out["fanned_out"], 1)
+        self.assertEqual(len(sent), 1)
+
 
 class TestIncrementDispatch(unittest.TestCase):
     def test_handle_increment_idempotent_across_batch(self):

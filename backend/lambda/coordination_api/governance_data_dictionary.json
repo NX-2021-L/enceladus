@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.1",
-  "updated_at": "2026-07-05T06:16:00Z",
-  "last_change_summary": "ENC-TSK-L11: provider_adapters package + dispatch registry wiring in coordination_api (Claude/Codex/Bedrock/A2A seam). No governed record schema or enum change; dictionary bump satisfies CI guard for handlers.py/lambda_function.py touch.",
+  "version": "2026-07-05.2",
+  "updated_at": "2026-07-05T06:35:00Z",
+  "last_change_summary": "ENC-TSK-L14: migrate governance-audit + convergence-telemetry tracker stream triggers to EventBridge Pipes (Pipe->Lambda). Handler touch only; no governed record schema change — dictionary bump satisfies CI guard.",
   "owners": [
     "enceladus-platform"
   ],

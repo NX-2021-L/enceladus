@@ -1,6 +1,6 @@
 /* ENC-TSK-K21 · Global styles for PWA 2.0.
  *
- * Design contract (see frontend/design-system/README.md + SKILL.md "Five Laws"):
+ * Design contract (see frontend/design-system-2/README.md + SKILL.md "Five Laws"):
  *   - Void canvas via var(--enc-void); content emerges like starlight.
  *   - Teal-alpha borders; 8px card radii (var(--radius-lg)).
  *   - cubic-bezier(0.4,0,0.2,1) "orbital" easing (var(--ease-orbit)).
@@ -10,7 +10,7 @@
 
 /* Design-system tokens: the canonical --enc-* palette, type scale, radii,
  * easing and the semantic element styles. Imported, never copied. */
-@import '../../design-system/colors_and_type.css';
+@import '../../design-system-2/colors_and_type.css';
 
 /* Tailwind v4 — utilities layered on top of the token system. */
 @import 'tailwindcss';

@@ -1,4 +1,5 @@
 import { Link } from '@tanstack/react-router'
+import { useQuery } from '@tanstack/react-query'
 import {
   CircleDot,
   FileText,
@@ -8,8 +9,9 @@ import {
   Sparkles,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
 import { useUiStore } from '../store/uiStore'
-import { RECORD_ROUTE_PATH } from '../routes/recordLink'
+import { DOCUMENT_ROUTE_PATH, trackerRoutePath } from '../routes/recordLink'
 import type { RecordType } from '../types/records'
 
 // A representative record id per type so the scaffold's nav deep-links resolve.
@@ -22,10 +24,26 @@ const NAV: Array<{ type: RecordType; label: string; icon: LucideIcon; sampleId: 
   { type: 'document', label: 'Documents', icon: FileText, sampleId: 'DOC-E470AC8CE9A8' },
 ]
 
+function navLinkProps(
+  type: RecordType,
+  sampleId: string,
+  projects: Array<{ project_id: string; prefix: string }>,
+) {
+  if (type === 'document') {
+    return { to: DOCUMENT_ROUTE_PATH as '/document/$id', params: { id: sampleId } }
+  }
+  const project = resolveProjectFromRecordId(sampleId, projects) ?? 'enceladus'
+  return {
+    to: trackerRoutePath(type) as '/$project/task/$id',
+    params: { project, id: sampleId },
+  }
+}
+
 export function Sidebar() {
   const open = useUiStore((s) => s.sidebarOpen)
   const selectedRecordId = useUiStore((s) => s.selectedRecordId)
   const selectRecord = useUiStore((s) => s.selectRecord)
+  const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
 
   return (
     <nav
@@ -61,8 +79,7 @@ export function Sidebar() {
             return (
               <li key={type}>
                 <Link
-                  to={RECORD_ROUTE_PATH[type]}
-                  params={{ id: sampleId }}
+                  {...navLinkProps(type, sampleId, projects)}
                   onClick={() => selectRecord(sampleId)}
                   style={{
                     display: 'flex',

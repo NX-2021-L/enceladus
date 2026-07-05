@@ -1,9 +1,9 @@
 """enceladus-convergence-telemetry Lambda (ENC-FTR-086 Ph1 / ENC-TSK-I82).
 
 The Convergence Surface fan-out + increment Lambda. A single deployed function
-serves two event sources, dispatched on ``eventSource``:
+serves two event sources, dispatched on the normalized record shape:
 
-1. DynamoDB Stream (tracker table) -> FAN-OUT (AC-2)
+1. DynamoDB Stream (tracker table) via EventBridge Pipe -> FAN-OUT (AC-2)
    For each INSERT/MODIFY tracker record, canonicalize the open-taxonomy field
    values (category, priority, tags) and emit one SQS FIFO message per
    (attribute, canonical_value), partitioned by attribute_name (MessageGroupId)
@@ -222,15 +222,33 @@ def _handle_increment(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _collect_records(event: Any) -> List[Dict[str, Any]]:
+    """Normalize records from SQS, direct stream, or EventBridge Pipe invokes."""
+    if isinstance(event, list):
+        return [item for item in event if isinstance(item, dict)]
+
+    if not isinstance(event, dict):
+        return []
+
+    records = event.get("Records", [])
+    if records:
+        return records
+
+    if "dynamodb" in event:
+        return [event]
+
+    return []
+
+
 def handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
-    records = event.get("Records", []) if isinstance(event, dict) else []
+    records = _collect_records(event)
     if not records:
         return {"status": "noop", "reason": "no records"}
 
     source = records[0].get("eventSource") or records[0].get("EventSource") or ""
     if source == "aws:sqs":
         return _handle_increment(records)
-    if source == "aws:dynamodb":
+    if source == "aws:dynamodb" or "dynamodb" in records[0]:
         return _handle_fanout(records)
 
     logger.warning("convergence: unrecognized event source %r", source)

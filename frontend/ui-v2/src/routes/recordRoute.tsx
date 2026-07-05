@@ -6,8 +6,10 @@ import { SkeletonCard } from '../components/SkeletonCard'
 import { getPrimitive } from '../primitives/registry'
 import type { RecordShapeMap, RecordType } from '../types/records'
 
+type TrackerRecordType = Exclude<RecordType, 'document'>
+
 /**
- * Builds one record-detail route for a given record type (AC-14). Each route:
+ * Builds one tracker record-detail route for a given record type (AC-14). Each route:
  *
  *   1. `loader` calls queryClient.ensureQueryData(queryOptions) so the data is
  *      primed before render (no client-side loading waterfall).
@@ -16,22 +18,21 @@ import type { RecordShapeMap, RecordType } from '../types/records'
  *      branches and ZERO `data?.` optional chaining here.
  *   3. A route-level <Suspense fallback={<SkeletonCard />}> boundary wraps the
  *      component, so first paint shows the skeleton, not a spinner-in-content.
- *
- * The concrete queryOptions factory is injected per type, keeping the six route
- * modules thin while the loader/suspense contract lives in exactly one place.
  */
-export function createRecordRoute<K extends RecordType>(config: {
+export function createRecordRoute<K extends TrackerRecordType>(config: {
   getParentRoute: () => AnyRoute
   path: string
   type: K
-  queryOptionsFor: (id: string) => UseSuspenseQueryOptions<RecordShapeMap[K]>
+  queryOptionsFor: (
+    projectId: string,
+    id: string,
+  ) => UseSuspenseQueryOptions<RecordShapeMap[K]>
 }) {
   const { getParentRoute, path, type, queryOptionsFor } = config
 
   function RecordComponent() {
-    const { id } = route.useParams()
-    // useSuspenseQuery -> data is RecordShapeMap[K], fully typed, never undefined.
-    const { data } = useSuspenseQuery(queryOptionsFor(id))
+    const { project, id } = route.useParams() as { project: string; id: string }
+    const { data } = useSuspenseQuery(queryOptionsFor(project, id))
     const Primitive = getPrimitive(type)
     return <Primitive record={data} />
   }
@@ -39,6 +40,42 @@ export function createRecordRoute<K extends RecordType>(config: {
   function RouteComponent() {
     return (
       <Suspense fallback={<SkeletonCard label={`Loading ${type}`} />}>
+        <RecordComponent />
+      </Suspense>
+    )
+  }
+
+  const route: AnyRoute = createRoute({
+    getParentRoute,
+    path,
+    loader: ({ params }) => {
+      const { project, id } = params as { project: string; id: string }
+      return queryClient.ensureQueryData(queryOptionsFor(project, id))
+    },
+    component: RouteComponent,
+  })
+
+  return route
+}
+
+/** Document routes omit project slug — docstore ids are globally unique. */
+export function createDocumentRecordRoute(config: {
+  getParentRoute: () => AnyRoute
+  path: string
+  queryOptionsFor: (id: string) => UseSuspenseQueryOptions<RecordShapeMap['document']>
+}) {
+  const { getParentRoute, path, queryOptionsFor } = config
+
+  function RecordComponent() {
+    const { id } = route.useParams() as { id: string }
+    const { data } = useSuspenseQuery(queryOptionsFor(id))
+    const Primitive = getPrimitive('document')
+    return <Primitive record={data} />
+  }
+
+  function RouteComponent() {
+    return (
+      <Suspense fallback={<SkeletonCard label="Loading document" />}>
         <RecordComponent />
       </Suspense>
     )
