@@ -131,6 +131,7 @@ from dispatch_ssm import (
     _refresh_request_from_ssm,
     _send_dispatch,
 )
+from provider_adapters import dispatch_via_provider_adapter, wire_default_provider_adapters
 from lifecycle import (
     _compute_plan_status,
     _emit_callback_event,
@@ -163,6 +164,24 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
+
+_PROVIDER_ADAPTERS_WIRED = False
+
+
+def _ensure_provider_adapters_wired() -> None:
+    global _PROVIDER_ADAPTERS_WIRED
+    if _PROVIDER_ADAPTERS_WIRED:
+        return
+
+    def _bedrock_unavailable(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+        raise RuntimeError("bedrock_agent direct dispatch is not wired in handlers path")
+
+    wire_default_provider_adapters(
+        claude_dispatch=_dispatch_claude_api,
+        codex_dispatch=_dispatch_openai_codex_api,
+        bedrock_dispatch=_bedrock_unavailable,
+    )
+    _PROVIDER_ADAPTERS_WIRED = True
 
 
 def _mcp_jsonrpc_response(request_id: Any, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1097,6 +1116,7 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
         # Check if batch mode is requested via provider_preferences
         is_batch = bool((request.get("provider_session") or {}).get("batch_eligible"))
 
+        dispatch_meta: Optional[Dict[str, Any]] = None
         if is_batch and execution_mode == "claude_agent_sdk":
             # Batch mode: set batch_context metadata, dispatch async
             request["batch_context"] = {
@@ -1111,20 +1131,15 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                 prompt=prompt,
                 dispatch_id=dispatch_id,
             )
-        elif execution_mode == "claude_agent_sdk":
-            dispatch_meta = _dispatch_claude_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
+        if dispatch_meta is None:
+            _ensure_provider_adapters_wired()
+            dispatch_meta = dispatch_via_provider_adapter(
+                execution_mode,
+                request,
+                prompt,
+                dispatch_id,
             )
-        elif execution_mode in {"codex_app_server", "codex_full_auto"}:
-            dispatch_meta = _dispatch_openai_codex_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
-                execution_mode=execution_mode,
-            )
-        else:
+        if dispatch_meta is None:
             dispatch_meta = _send_dispatch(
                 request,
                 execution_mode=execution_mode,
