@@ -63,6 +63,11 @@ ADMIN_PASSWORD="$(tr -d '\n' < "${ADMIN_PASSWORD_FILE}")"
 export OPENSEARCH_INITIAL_ADMIN_PASSWORD="${ADMIN_PASSWORD}"
 
 log "Writing opensearch.yml"
+# Do NOT add any plugins.security.* key here: the demo installer below
+# (org.opensearch.security.tools.democonfig.Installer) treats presence of
+# any such key as "already configured" and silently quits without
+# generating TLS certs (ENC-TSK-L70) -- security is enabled by default,
+# so no explicit setting is needed anyway.
 CFG="${OPENSEARCH_HOME}/config/opensearch.yml"
 cat >> "${CFG}" <<EOF
 
@@ -73,7 +78,6 @@ discovery.type: single-node
 network.host: 0.0.0.0
 path.data: /var/lib/opensearch
 path.logs: /var/log/opensearch
-plugins.security.disabled: false
 action.auto_create_index: true
 ########## END ENC-TSK-L39 generated ##########
 EOF
