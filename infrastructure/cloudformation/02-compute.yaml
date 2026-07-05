@@ -6048,6 +6048,13 @@ Resources:
           ToPort: 443
           CidrIp: 0.0.0.0/0
           Description: Secrets Manager / AWS API egress when subnet routes public
+        # ENC-TSK-L43 follow-up: graph_query_api shares this SG in-VPC for
+        # OpenSearch :9200; hybrid search still needs Neo4j Aura Bolt (:7687).
+        - IpProtocol: tcp
+          FromPort: 7687
+          ToPort: 7687
+          CidrIp: 0.0.0.0/0
+          Description: Neo4j Aura Bolt TLS for graph_query_api hybrid path
       Tags:
         - Key: Project
           Value: enceladus
