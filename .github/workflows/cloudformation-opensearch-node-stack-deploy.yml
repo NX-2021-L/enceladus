@@ -183,10 +183,14 @@ jobs:
             --region "${AWS_REGION}" \
             --change-set-name "${{ needs.plan.outputs.changeset_arn }}" \
             --query 'ChangeSetType' --output text 2>/dev/null || echo "UPDATE")
+          stack_status=$(aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NONE")
           aws cloudformation execute-change-set \
             --region "${AWS_REGION}" \
             --change-set-name "${{ needs.plan.outputs.changeset_arn }}"
-          if [ "${changeset_type}" = "CREATE" ]; then
+          if [ "${changeset_type}" = "CREATE" ] || [ "${stack_status}" = "REVIEW_IN_PROGRESS" ] || [ "${stack_status}" = "NONE" ]; then
             aws cloudformation wait stack-create-complete \
               --region "${AWS_REGION}" \
               --stack-name "${{ needs.plan.outputs.stack_name }}"
