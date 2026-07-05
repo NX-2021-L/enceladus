@@ -367,10 +367,8 @@ jobs:
           # prod feature flags. Prod: 5t3sqte/bnwj3lj; gamma: fhhcl7m/zecfu42.
           if [ "${ENVIRONMENT_SUFFIX}" = "-gamma" ]; then
             APPCFG_APP="fhhcl7m"; APPCFG_ENV="zecfu42"
-            # ENC-PLN-068 / L14-L48 deploy unblock: Rhythm ScheduleGroups fail CREATE until
-            # CloudFormationDeployRole has scheduler:* (see iam-cfn-deploy-role-scheduler-patch.yml).
-            # Keep legacy gamma schedules active until IAM patch lands.
-            RHYTHM_CYCLE_ENABLED="false"
+            # ENC-TSK-L54: scheduler IAM landed (enceladus-cfn-deploy-scheduler-v1 on CFN deploy role).
+            RHYTHM_CYCLE_ENABLED="true"
           else
             APPCFG_APP="5t3sqte"; APPCFG_ENV="bnwj3lj"
             RHYTHM_CYCLE_ENABLED="true"
