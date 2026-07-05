@@ -82,6 +82,7 @@ function_name_map:
   arc_walk_metrics: enceladus-arc-walk-metrics-gamma
   graph_query_api: devops-graph-query-api-gamma
   graph_sync: devops-graph-sync-gamma
+  opensearch_indexer: devops-opensearch-indexer-gamma
   memory_consolidation: enceladus-memory-consolidation-gamma
   neo4j_backup: enceladus-neo4j-backup-gamma
   percolation_monitor: enceladus-percolation-monitor-gamma

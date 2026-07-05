@@ -507,6 +507,44 @@ Resources:
         - Key: Component
           Value: graph
 
+  # ENC-TSK-L41 / B67 Search2.0: dedicated FIFO for the OpenSearch CDC indexer.
+  # Fed by TrackerToSearchIndexPipe + DocumentsToSearchIndexPipe (02-compute.yaml)
+  # — NOT graph_sync's GraphSyncQueue (SQS would split messages across consumers).
+  SearchIndexQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "devops-search-index-queue${EnvironmentSuffix}.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 86400
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SearchIndexDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
+
+  SearchIndexDLQ:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "devops-search-index-dlq${EnvironmentSuffix}.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
+
   # ENC-FTR-086 Ph1 / ENC-TSK-I82: write buffer between the convergence fan-out
   # (DynamoDB-stream-triggered) and the idempotent counter increment. FIFO with
   # per-attribute MessageGroupId so increments to one attribute are ordered while
@@ -901,6 +939,18 @@ Outputs:
     Value: !GetAtt GraphSyncDLQ.Arn
     Export:
       Name: !Sub ${AWS::StackName}-GraphSyncDLQArn
+  SearchIndexQueueUrl:
+    Value: !Ref SearchIndexQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-SearchIndexQueueUrl
+  SearchIndexQueueArn:
+    Value: !GetAtt SearchIndexQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-SearchIndexQueueArn
+  SearchIndexDLQArn:
+    Value: !GetAtt SearchIndexDLQ.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-SearchIndexDLQArn
   ComponentRegistryEventsTopicArn:
     Value: !Ref ComponentRegistryEventsTopic
     Export:
