@@ -16,16 +16,17 @@
       "deploy_script": "backend/lambda/auth_refresh/deploy.sh"
     },
     {
-      "function_name": "enceladus-lifecycle-service",
-      "lambda_dir": "backend/lambda/lifecycle_service",
+      "function_name": "devops-appsync-feed-publisher",
+      "lambda_dir": "backend/lambda/appsync_feed_publisher",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/lifecycle_service/deploy.sh"
+      "deploy_script": "backend/lambda/appsync_feed_publisher/deploy.sh",
+      "cfn_managed": false
     },
     {
-      "function_name": "enceladus-scoring-service",
-      "lambda_dir": "backend/lambda/scoring_service",
+      "function_name": "devops-changelog-api",
+      "lambda_dir": "backend/lambda/changelog_api",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/scoring_service/deploy.sh"
+      "deploy_script": "backend/lambda/changelog_api/deploy.sh"
     },
     {
       "function_name": "devops-coordination-api",
@@ -38,12 +39,6 @@
       "lambda_dir": "backend/lambda/coordination_monitor_api",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/coordination_monitor_api/deploy.sh"
-    },
-    {
-      "function_name": "devops-changelog-api",
-      "lambda_dir": "backend/lambda/changelog_api",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/changelog_api/deploy.sh"
     },
     {
       "function_name": "devops-deploy-decide",
@@ -70,6 +65,12 @@
       "deploy_script": "backend/lambda/deploy_orchestrator/deploy.sh"
     },
     {
+      "function_name": "devops-deploy-parity-validator",
+      "lambda_dir": "backend/lambda/deploy_parity_validator",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/deploy_parity_validator/deploy.sh"
+    },
+    {
       "function_name": "devops-doc-prep",
       "lambda_dir": "backend/lambda/doc_prep",
       "workflow_file": ".github/workflows/_deploy.yml",
@@ -82,6 +83,12 @@
       "deploy_script": "backend/lambda/document_api/deploy.sh"
     },
     {
+      "function_name": "devops-env-drift-auditor",
+      "lambda_dir": "backend/lambda/env_drift_auditor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/env_drift_auditor/deploy.sh"
+    },
+    {
       "function_name": "devops-feed-publisher",
       "lambda_dir": "backend/lambda/feed_publisher",
       "workflow_file": ".github/workflows/_deploy.yml",
@@ -91,95 +98,10 @@
       ]
     },
     {
-      "function_name": "devops-appsync-feed-publisher",
-      "lambda_dir": "backend/lambda/appsync_feed_publisher",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/appsync_feed_publisher/deploy.sh",
-      "cfn_managed": false
-    },
-    {
       "function_name": "devops-feed-query-api",
       "lambda_dir": "backend/lambda/feed_query",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/feed_query/deploy.sh"
-    },
-    {
-      "function_name": "devops-project-service",
-      "lambda_dir": "backend/lambda/project_service",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/project_service/deploy.sh"
-    },
-    {
-      "function_name": "devops-reference-search",
-      "lambda_dir": "backend/lambda/reference_search",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/reference_search/deploy.sh"
-    },
-    {
-      "function_name": "devops-tracker-mutation-api",
-      "lambda_dir": "backend/lambda/tracker_mutation",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/tracker_mutation/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-bedrock-agent-actions",
-      "lambda_dir": "backend/lambda/bedrock_agent_actions",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/bedrock_agent_actions/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-governance-audit",
-      "lambda_dir": "backend/lambda/governance_audit",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/governance_audit/deploy.sh"
-    },
-    {
-      "function_name": "devops-graph-sync",
-      "lambda_dir": "backend/lambda/graph_sync",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/graph_sync/deploy.sh"
-    },
-    {
-      "function_name": "devops-graph-query-api",
-      "lambda_dir": "backend/lambda/graph_query_api",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/graph_query_api/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-neo4j-backup",
-      "lambda_dir": "backend/lambda/neo4j_backup",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/neo4j_backup/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-memory-consolidation",
-      "lambda_dir": "backend/lambda/memory_consolidation",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/memory_consolidation/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-rhythm-cycle",
-      "lambda_dir": "backend/lambda/rhythm_cycle",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/rhythm_cycle/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-graph-health-metrics",
-      "lambda_dir": "backend/lambda/graph_health_metrics",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/graph_health_metrics/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-percolation-monitor",
-      "lambda_dir": "backend/lambda/percolation_monitor",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/percolation_monitor/deploy.sh"
-    },
-    {
-      "function_name": "enceladus-unlearning",
-      "lambda_dir": "backend/lambda/unlearning",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/unlearning/deploy.sh"
     },
     {
       "function_name": "devops-github-integration",
@@ -189,32 +111,40 @@
       "cfn_managed": false
     },
     {
-      "function_name": "enceladus-checkout-service",
-      "lambda_dir": "backend/lambda/checkout_service",
+      "function_name": "devops-governance-drift-check",
+      "lambda_dir": "backend/lambda/governance_drift_check",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/checkout_service/deploy.sh",
-      "cfn_managed": true
+      "deploy_script": "backend/lambda/governance_drift_check/deploy.sh"
     },
     {
-      "function_name": "enceladus-stale-checkout-monitor",
-      "lambda_dir": "backend/lambda/stale_checkout_monitor",
+      "function_name": "devops-graph-query-api",
+      "lambda_dir": "backend/lambda/graph_query_api",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/stale_checkout_monitor/deploy.sh",
-      "cfn_managed": true
+      "deploy_script": "backend/lambda/graph_query_api/deploy.sh"
     },
     {
-      "function_name": "enceladus-mcp-code",
-      "lambda_dir": "backend/lambda/mcp_code",
+      "function_name": "devops-graph-sync",
+      "lambda_dir": "backend/lambda/graph_sync",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/mcp_code/deploy.sh",
-      "cfn_managed": false
+      "deploy_script": "backend/lambda/graph_sync/deploy.sh"
     },
     {
-      "function_name": "enceladus-mcp-streamable",
-      "lambda_dir": "backend/lambda/mcp_streamable",
+      "function_name": "devops-project-service",
+      "lambda_dir": "backend/lambda/project_service",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/mcp_streamable/deploy.sh",
-      "cfn_managed": false
+      "deploy_script": "backend/lambda/project_service/deploy.sh"
+    },
+    {
+      "function_name": "devops-recompute-governance",
+      "lambda_dir": "backend/lambda/recompute_governance",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/recompute_governance/deploy.sh"
+    },
+    {
+      "function_name": "devops-reference-search",
+      "lambda_dir": "backend/lambda/reference_search",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/reference_search/deploy.sh"
     },
     {
       "function_name": "devops-titan-embedding-backfill",
@@ -224,48 +154,29 @@
       "cfn_managed": false
     },
     {
-      "function_name": "enceladus-prod-health-monitor",
-      "lambda_dir": "backend/lambda/prod_health_monitor",
+      "function_name": "devops-tracker-mutation-api",
+      "lambda_dir": "backend/lambda/tracker_mutation",
       "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/prod_health_monitor/deploy.sh",
-      "cfn_managed": true
-    },
-    {
-      "function_name": "enceladus-deploy-capability-auditor",
-      "lambda_dir": "backend/lambda/deploy_capability_auditor",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/deploy_capability_auditor/deploy.sh",
-      "cfn_managed": false
-    },
-    {
-      "function_name": "devops-env-drift-auditor",
-      "lambda_dir": "backend/lambda/env_drift_auditor",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/env_drift_auditor/deploy.sh"
-    },
-    {
-      "function_name": "devops-deploy-parity-validator",
-      "lambda_dir": "backend/lambda/deploy_parity_validator",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/deploy_parity_validator/deploy.sh"
-    },
-    {
-      "function_name": "devops-recompute-governance",
-      "lambda_dir": "backend/lambda/recompute_governance",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/recompute_governance/deploy.sh"
-    },
-    {
-      "function_name": "devops-governance-drift-check",
-      "lambda_dir": "backend/lambda/governance_drift_check",
-      "workflow_file": ".github/workflows/_deploy.yml",
-      "deploy_script": "backend/lambda/governance_drift_check/deploy.sh"
+      "deploy_script": "backend/lambda/tracker_mutation/deploy.sh"
     },
     {
       "function_name": "enceladus-arc-walk-metrics",
       "lambda_dir": "backend/lambda/arc_walk_metrics",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/arc_walk_metrics/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-bedrock-agent-actions",
+      "lambda_dir": "backend/lambda/bedrock_agent_actions",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/bedrock_agent_actions/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-checkout-service",
+      "lambda_dir": "backend/lambda/checkout_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/checkout_service/deploy.sh",
+      "cfn_managed": true
     },
     {
       "function_name": "enceladus-convergence-telemetry",
@@ -288,6 +199,101 @@
       "lambda_dir": "backend/lambda/corpus_entropy_gdmp_remediation",
       "workflow_file": ".github/workflows/_deploy.yml",
       "deploy_script": "backend/lambda/corpus_entropy_gdmp_remediation/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-deploy-capability-auditor",
+      "lambda_dir": "backend/lambda/deploy_capability_auditor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/deploy_capability_auditor/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "enceladus-governance-audit",
+      "lambda_dir": "backend/lambda/governance_audit",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/governance_audit/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-graph-health-metrics",
+      "lambda_dir": "backend/lambda/graph_health_metrics",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/graph_health_metrics/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-lifecycle-service",
+      "lambda_dir": "backend/lambda/lifecycle_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/lifecycle_service/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-mcp-code",
+      "lambda_dir": "backend/lambda/mcp_code",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/mcp_code/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "enceladus-mcp-streamable",
+      "lambda_dir": "backend/lambda/mcp_streamable",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/mcp_streamable/deploy.sh",
+      "cfn_managed": false
+    },
+    {
+      "function_name": "enceladus-memory-consolidation",
+      "lambda_dir": "backend/lambda/memory_consolidation",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/memory_consolidation/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-neo4j-backup",
+      "lambda_dir": "backend/lambda/neo4j_backup",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/neo4j_backup/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-percolation-monitor",
+      "lambda_dir": "backend/lambda/percolation_monitor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/percolation_monitor/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-prod-health-monitor",
+      "lambda_dir": "backend/lambda/prod_health_monitor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/prod_health_monitor/deploy.sh",
+      "cfn_managed": true
+    },
+    {
+      "function_name": "enceladus-rhythm-cycle",
+      "lambda_dir": "backend/lambda/rhythm_cycle",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/rhythm_cycle/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-scoring-service",
+      "lambda_dir": "backend/lambda/scoring_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/scoring_service/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-stale-checkout-monitor",
+      "lambda_dir": "backend/lambda/stale_checkout_monitor",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/stale_checkout_monitor/deploy.sh",
+      "cfn_managed": true
+    },
+    {
+      "function_name": "enceladus-unlearning",
+      "lambda_dir": "backend/lambda/unlearning",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/unlearning/deploy.sh"
+    },
+    {
+      "function_name": "enceladus-user-preferences-api",
+      "lambda_dir": "backend/lambda/user_preferences_api",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/user_preferences_api/deploy.sh"
     }
   ]
 }

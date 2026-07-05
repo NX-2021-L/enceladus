@@ -912,6 +912,50 @@ Resources:
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
+  # ENC-TSK-L25 / ENC-FTR-127 AC-10/16/17: per-user preferences service.
+  # Gamma-only (Condition: IsGamma) — function only exists on gamma.
+  UserPreferencesApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-user-preferences-api${EnvironmentSuffix}"
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  # NOTE: 02-compute.yaml (UserPreferencesApiFunction) and 03-api.yaml are
+  # separate stacks — cross-stack Lambda references here use the literal
+  # function name (same convention as ChangelogApiIntegration's IntegrationUri
+  # above), not !Ref.
+  UserPreferencesApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Sub "enceladus-user-preferences-api${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/api/v1/user/preferences"
+
+  RouteGetUserPreferences:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/user/preferences
+      Target: !Sub integrations/${UserPreferencesApiIntegration}
+
+  RoutePutUserPreferences:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /api/v1/user/preferences
+      Target: !Sub integrations/${UserPreferencesApiIntegration}
+
   RouteDeleteCheckoutByProjectTaskByTaskIdCheckout:
     Type: AWS::ApiGatewayV2::Route
     DeletionPolicy: Retain
