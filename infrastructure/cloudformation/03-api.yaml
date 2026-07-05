@@ -265,6 +265,28 @@ Resources:
       RouteKey: POST /api/v1/coordination/components
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-L34 (B67 PWA2.0 Coordination monitor page): these two GET routes were
+  # implemented server-side by ENC-TSK-I38/J43 (_handle_agent_session_list /
+  # _handle_agent_type_list in coordination_api/lambda_function.py, backed by
+  # agent_id_alloc.list_sessions / list_agent_types over the agent-sessions /
+  # agent-types tables) but were never wired to API Gateway. Wiring them here is
+  # the "NEW coordination-api list route" this task's AC calls for -- no new
+  # Lambda handler code was needed, only this CFN gap-fill. ENC-TSK-L36 (Agent
+  # detail page) depends on RouteAgentSessionsList with ?agent_type_id=<id>&status=claimed.
+  RouteAgentSessionsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/agents/sessions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentTypesList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/agents/types
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   RouteComponentsGet:
     Type: AWS::ApiGatewayV2::Route
     Properties:
