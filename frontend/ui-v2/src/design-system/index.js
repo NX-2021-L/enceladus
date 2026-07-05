@@ -13,3 +13,4 @@ export { Container } from '../../../design-system-2/v2/components/Container/Cont
 export { Header } from '../../../design-system-2/v2/components/Header/Header.jsx'
 export { Pagination } from '../../../design-system-2/v2/components/Pagination/Pagination.jsx'
 export { Box } from '../../../design-system-2/v2/components/Box/Box.jsx'
+export { BreadcrumbGroup } from '../../../design-system-2/v2/components/BreadcrumbGroup/BreadcrumbGroup.jsx'
