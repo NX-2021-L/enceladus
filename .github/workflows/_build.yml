@@ -139,7 +139,15 @@ jobs:
                 esac
                 cp "$py" "$workdir/$base"
               done
-              echo "  [$fn] packaged tools/enceladus-mcp-server runtime modules"
+              # ENC-TSK-L63 / ENC-ISS-492: server.py imports the decomposed mcp_server
+              # package (ENC-TSK-L09). Root-level *.py copy alone is insufficient.
+              if [ ! -d tools/enceladus-mcp-server/mcp_server ]; then
+                echo "ERROR: $fn requires tools/enceladus-mcp-server/mcp_server package" >&2
+                exit 1
+              fi
+              rsync -a --exclude='__pycache__' --exclude='*.pyc' \
+                tools/enceladus-mcp-server/mcp_server/ "$workdir/mcp_server/"
+              echo "  [$fn] packaged tools/enceladus-mcp-server runtime modules + mcp_server/"
             fi
 
             # ENC-TSK-G43: cross-Lambda module sharing via .build_extras manifest.
