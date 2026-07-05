@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.14",
-  "updated_at": "2026-07-05T09:35:00Z",
-  "last_change_summary": "ENC-TSK-L35: added coordination.agent_session.updated_at (unconditional session-activity bump) + .history (mirrored worklog entries) for the B67 PWA2.0 session detail page.",
+  "version": "2026-07-05.15",
+  "updated_at": "2026-07-05T11:25:00Z",
+  "last_change_summary": "ENC-TSK-K26: shared record_extensions module attaches typed_relationships + computed context_node (absolute structural_importance per DOC-310B93107B60) on feed_query and tracker_mutation GET; ui-v2 governance surfaces consume the extensions.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4575,7 +4575,7 @@
       }
     },
     "feed_query.record_extensions": {
-      "description": "Feed query record extension fields added to task/issue/feature/lesson payloads in the /api/v1/feed response (ENC-TSK-A57). typed_relationships: typed relationship edges from rel# DynamoDB items. subtask_ids: plan tree hierarchy. context_node: context node scores (when ENABLE_CONTEXT_NODES active).",
+      "description": "Feed query record extension fields added to task/issue/feature/lesson/plan payloads in the /api/v1/feed response (ENC-TSK-A57, extended ENC-TSK-K26). Implemented in enceladus_shared.record_extensions and invoked from feed_query. typed_relationships: typed relationship edges from rel# DynamoDB items. context_node: computed scores (freshness, absolute-degree structural_importance, information_density, access_frequency).",
       "fields": {
         "typed_relationships": {
           "type": "array",
@@ -4590,8 +4590,34 @@
         },
         "context_node": {
           "type": "object",
-          "definition": "Context node metadata scores (freshness_score, structural_importance, information_density, access_frequency) joined from context node DynamoDB items when ENABLE_CONTEXT_NODES feature flag is active.",
-          "usage_guidance": "Used by ContextNodeBadges PWA component. Returns null/absent when feature flag is off or no context node exists."
+          "definition": "Context node metadata scores computed at read time by enceladus_shared.record_extensions.build_context_node_meta: freshness_score (half-life decay from updated_at), structural_importance (absolute degree normalized by project max per DOC-310B93107B60), information_density (text length / 2000), access_frequency (context_access_count). Always attached on feed records; not gated by ENABLE_CONTEXT_NODES.",
+          "usage_guidance": "Used by ui-v2 ContextNodeBadges on task/issue/feature/plan detail pages."
+        }
+      }
+    },
+    "tracker_mutation.get_record_extensions": {
+      "description": "ENC-TSK-K26: tracker_mutation GET /{project}/{type}/{id} enriches the deserialized record with the same typed_relationships + context_node extensions as feed_query via enceladus_shared.record_extensions.attach_record_extensions (query_typed_relationships_for_projects scoped to the record's project). Failures are logged and the bare record is still returned.",
+      "fields": {
+        "typed_relationships": {
+          "type": "array",
+          "definition": "Outgoing typed edges for the requested source record, same shape as feed_query.record_extensions.typed_relationships."
+        },
+        "context_node": {
+          "type": "object",
+          "definition": "Computed context node metadata for the requested record, same shape as feed_query.record_extensions.context_node."
+        }
+      }
+    },
+    "enceladus_shared.record_extensions": {
+      "description": "Shared Python module (backend/lambda/shared_layer/python/enceladus_shared/record_extensions.py) centralizing typed-edge query + context-node score computation for feed_query and tracker_mutation GET handlers (ENC-TSK-K26 / ENC-TSK-A57).",
+      "fields": {
+        "compute_structural_importance": {
+          "type": "function",
+          "definition": "Absolute graph degree (in+out typed edges) for a record_id normalized by the project max degree; capped at 1.0. Implements DOC-310B93107B60 absolute metric (not stub/global PageRank)."
+        },
+        "attach_record_extensions": {
+          "type": "function",
+          "definition": "Mutates each record dict in-place: sets typed_relationships when edges exist and always sets context_node with the four score fields."
         }
       }
     },
@@ -7431,8 +7457,13 @@
       }
     }
   },
-  "change_summary": "ENC-TSK-L35 (B67 PWA2.0 session detail + worklog mirroring): coordination.agent_session gains updated_at (unconditional bump on every session-requiring call passing the SCI gate, including previously-untouched grandfathered/checkout-forwarded sessions) and history (best-effort mirror of every worklog entry the session appends to any governed record, via tracker_mutation._mirror_worklog_to_session). New GET /api/v1/coordination/agents/sessions/{id} single-session read route (coordination_api._handle_agent_session_get). Also wires the pre-existing agent-session-list/agent-type-list handlers (ENC-TSK-L34) to new API Gateway routes in 03-api.yaml. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
+  "change_summary": "ENC-TSK-K26 (B67 PWA2.0 Ph7 governance surfaces): enceladus_shared.record_extensions centralizes typed_relationships query + context_node score computation (absolute structural_importance per DOC-310B93107B60); feed_query attaches extensions on task/issue/feature/lesson/plan payloads; tracker_mutation GET enriches single-record reads with the same fields for ui-v2 TypedRelationshipSection + ContextNodeBadges.",
   "change_log": [
+    {
+      "version": "2026-07-05.15",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-K26 (B67 PWA2.0 Ph7): shared record_extensions module + feed_query/tracker_mutation GET enrichment for typed_relationships and computed context_node scores; ui-v2 governance route, Cytoscape plan graph, typed-edge + badge primitives. Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
     {
       "version": "2026-07-05.13",
       "date": "2026-07-05",
