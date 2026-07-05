@@ -2686,7 +2686,7 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
 
     id_key = f"{record_type}_id"
     try:
-        from enceladus_shared.record_extensions import (
+        from record_extensions import (
             attach_record_extensions,
             query_typed_relationships_for_projects,
         )

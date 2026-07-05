@@ -1887,7 +1887,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         try:
             project_ids = list({r.get("project_id", "") for r in tasks + issues + features + lessons + plans if r.get("project_id")})
             if project_ids:
-                from enceladus_shared.record_extensions import (
+                from record_extensions import (
                     attach_record_extensions,
                     query_typed_relationships_for_projects,
                 )

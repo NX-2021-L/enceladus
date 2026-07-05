@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.17",
-  "updated_at": "2026-07-05T11:50:00Z",
-  "last_change_summary": "ENC-TSK-L41 (B67 Search2.0 WaveB): new opensearch_indexer.lambda entity — devops-opensearch-indexer CDC Lambda fed by dedicated SearchIndexQueue FIFO (Tracker/Documents EventBridge Pipes), bulk-upserting tracker/document mutations to OpenSearch records_write with external-version idempotency.",
+  "version": "2026-07-05.18",
+  "updated_at": "2026-07-05T11:56:00Z",
+  "last_change_summary": "ENC-TSK-K26 hotfix: vendor record_extensions.py into feed_query/tracker_mutation function zips via .build_extras until enceladus-shared layer :11 ships.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4618,7 +4618,7 @@
       }
     },
     "enceladus_shared.record_extensions": {
-      "description": "Shared Python module (backend/lambda/shared_layer/python/enceladus_shared/record_extensions.py) centralizing typed-edge query + context-node score computation for feed_query and tracker_mutation GET handlers (ENC-TSK-K26 / ENC-TSK-A57).",
+      "description": "Shared Python module (backend/lambda/shared_layer/python/enceladus_shared/record_extensions.py) centralizing typed-edge query + context-node score computation for feed_query and tracker_mutation GET handlers (ENC-TSK-K26 / ENC-TSK-A57). Until enceladus-shared layer :11 publishes this module, feed_query and tracker_mutation vendor it into their function zips via .build_extras and import as top-level record_extensions.",
       "fields": {
         "compute_structural_importance": {
           "type": "function",
@@ -7497,8 +7497,13 @@
       "telemetry_eligible": true
     }
   },
-  "change_summary": "ENC-TSK-L41 (B67 Search2.0 WaveB): opensearch_indexer.lambda — CDC indexer on dedicated SearchIndexQueue FIFO projecting tracker/document mutations to OpenSearch records_write with external-version idempotency; graph_sync queue untouched.",
+  "change_summary": "ENC-TSK-K26 hotfix: feed_query + tracker_mutation vendor record_extensions.py via .build_extras (enceladus-shared:10 lacks the module); import path uses top-level record_extensions until layer :11.",
   "change_log": [
+    {
+      "version": "2026-07-05.18",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-K26 hotfix: vendor record_extensions into feed_query/tracker_mutation Lambda zips via .build_extras — gamma was silently skipping extensions because enceladus-shared:10 lacks the new module."
+    },
     {
       "version": "2026-07-05.17",
       "date": "2026-07-05",
