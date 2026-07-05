@@ -1,12 +1,15 @@
 /**
  * Typed queryOptions factories — the single source of truth for reading each
  * of the six governance primitives (AC-13). Route loaders call
- * `queryClient.ensureQueryData(recordQueryOptions.task(id))` and route
- * components call `useSuspenseQuery(recordQueryOptions.task(id))`, so the data
- * is typed `Task` (never `Task | undefined`) — that is AC-14.
+ * `queryClient.ensureQueryData(recordQueryOptions.task(projectId, id))` and route
+ * components call `useSuspenseQuery(recordQueryOptions.task(projectId, id))`, so the
+ * data is typed `Task` (never `Task | undefined`) — that is AC-14.
  *
  * Every `queryFn` delegates to src/api/client.ts, which owns the only fetch()
  * calls in the app. No component ever fetches directly.
+ *
+ * Project slugs are threaded explicitly (ENC-TSK-L17) — never guessed from a
+ * hard-coded prefix map.
  */
 
 import { queryOptions } from '@tanstack/react-query'
@@ -22,66 +25,51 @@ import type {
   Task,
 } from '../types/records'
 
-/**
- * Resolve the owning project from a record ID prefix. Real record IDs look like
- * `ENC-TSK-K21`; the middle segment is not the project. The tracker API keys on
- * a project slug, which for the Enceladus program is `enceladus`. A prefix map
- * lets other programs slot in without touching the factories.
- */
-const PROJECT_BY_PREFIX: Record<string, string> = {
-  ENC: 'enceladus',
-}
-const DEFAULT_PROJECT = 'enceladus'
-
-export function resolveProject(recordId: string): string {
-  const prefix = recordId.split('-')[0]?.toUpperCase() ?? ''
-  return PROJECT_BY_PREFIX[prefix] ?? DEFAULT_PROJECT
-}
-
-/** Stable, hierarchical query keys — one namespace per record type. */
+/** Stable, hierarchical query keys — one namespace per record type + project. */
 export const recordKeys = {
   all: ['record'] as const,
-  detail: (type: RecordType, id: string) => ['record', type, id] as const,
+  detail: (type: RecordType, projectId: string, id: string) =>
+    ['record', type, projectId, id] as const,
 }
 
-export const taskQueryOptions = (recordId: string) =>
+export const taskQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
-    queryKey: recordKeys.detail('task', recordId),
+    queryKey: recordKeys.detail('task', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Task>('task', resolveProject(recordId), recordId, { signal }),
+      fetchTrackerRecord<Task>('task', projectId, recordId, { signal }),
   })
 
-export const issueQueryOptions = (recordId: string) =>
+export const issueQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
-    queryKey: recordKeys.detail('issue', recordId),
+    queryKey: recordKeys.detail('issue', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Issue>('issue', resolveProject(recordId), recordId, { signal }),
+      fetchTrackerRecord<Issue>('issue', projectId, recordId, { signal }),
   })
 
-export const featureQueryOptions = (recordId: string) =>
+export const featureQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
-    queryKey: recordKeys.detail('feature', recordId),
+    queryKey: recordKeys.detail('feature', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Feature>('feature', resolveProject(recordId), recordId, { signal }),
+      fetchTrackerRecord<Feature>('feature', projectId, recordId, { signal }),
   })
 
-export const planQueryOptions = (recordId: string) =>
+export const planQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
-    queryKey: recordKeys.detail('plan', recordId),
+    queryKey: recordKeys.detail('plan', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Plan>('plan', resolveProject(recordId), recordId, { signal }),
+      fetchTrackerRecord<Plan>('plan', projectId, recordId, { signal }),
   })
 
-export const lessonQueryOptions = (recordId: string) =>
+export const lessonQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
-    queryKey: recordKeys.detail('lesson', recordId),
+    queryKey: recordKeys.detail('lesson', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Lesson>('lesson', resolveProject(recordId), recordId, { signal }),
+      fetchTrackerRecord<Lesson>('lesson', projectId, recordId, { signal }),
   })
 
-export const documentQueryOptions = (recordId: string) =>
+export const documentQueryOptions = (recordId: string, projectId = 'global') =>
   queryOptions({
-    queryKey: recordKeys.detail('document', recordId),
+    queryKey: recordKeys.detail('document', projectId, recordId),
     queryFn: ({ signal }) => fetchDocumentRecord<Document>(recordId, { signal }),
   })
 
@@ -97,7 +85,10 @@ export const recordQueryOptions = {
   lesson: lessonQueryOptions,
   document: documentQueryOptions,
 } satisfies {
-  [K in RecordType]: (
-    recordId: string,
-  ) => ReturnType<typeof queryOptions<RecordShapeMap[K]>>
+  [K in RecordType]: K extends 'document'
+    ? (recordId: string, projectId?: string) => ReturnType<typeof queryOptions<RecordShapeMap[K]>>
+    : (
+        projectId: string,
+        recordId: string,
+      ) => ReturnType<typeof queryOptions<RecordShapeMap[K]>>
 }
