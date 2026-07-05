@@ -200,12 +200,24 @@ jobs:
           # by _build.yml build-mcp-code from tools/enceladus-mcp-server/ (ENC-TSK-I39).
           FNS+=("mcp_code")
 
+          # ENC-ISS-494: build-mcp-code always builds x86_64-py3.11 only (matches
+          # v3-prod's arch by coincidence), regardless of the target environment's
+          # own arch/py. Every other function uses KEY_PREFIX; mcp_code always uses
+          # the fixed x86_64-py3.11 prefix, or the probe 404s for every arm64 target
+          # (v4-gamma, v4-prod) even when every other artifact is present.
+          MCP_CODE_KEY_PREFIX="${{ env.ARTIFACT_KEY_PREFIX }}/x86_64-py3.11"
+
           echo "Probing ${#FNS[@]} Lambda functions for SHA=${SHA}, arch=${ARCH}-py${PY}"
 
           MISSING=()
           > /tmp/vid_map.txt
           for fn in "${FNS[@]}"; do
-            KEY="${KEY_PREFIX}/${fn}-${SHA}.zip"
+            if [[ "$fn" == "mcp_code" ]]; then
+              FN_KEY_PREFIX="$MCP_CODE_KEY_PREFIX"
+            else
+              FN_KEY_PREFIX="$KEY_PREFIX"
+            fi
+            KEY="${FN_KEY_PREFIX}/${fn}-${SHA}.zip"
             VID=$(aws s3api head-object \
               --bucket "$BUCKET" \
               --key "$KEY" \
@@ -347,6 +359,10 @@ jobs:
           py     = os.environ['PY_VERSION']
           sha    = os.environ['SHA']
           prefix = f"lambda-artifacts/{arch}-py{py}"
+          # ENC-ISS-494: mcp_code is always built x86_64-py3.11 only (see the
+          # matching probe-step special case) regardless of the target
+          # environment's own arch/py.
+          mcp_code_prefix = "lambda-artifacts/x86_64-py3.11"
           region = 'us-west-2'
           env_suffix = os.environ.get('ENVIRONMENT_SUFFIX', '')
           codedeploy_app = f"enceladus-lambda{env_suffix}"
@@ -442,7 +458,8 @@ jobs:
               if not mapped_name:
                   log(f'[skip] {fn}  (not in function_name_map)')
                   return {'fn': fn, 'status': 'skip'}
-              s3_key = f"{prefix}/{fn}-{sha}.zip"
+              fn_prefix = mcp_code_prefix if fn == 'mcp_code' else prefix
+              s3_key = f"{fn_prefix}/{fn}-{sha}.zip"
               log(f'[deploy] {fn} -> {mapped_name}  s3://{bucket}/{s3_key}@{version_id} (stage->{staging_bucket})')
 
               # ENC-ISS-454: stage the exact same-run artifact version into the
