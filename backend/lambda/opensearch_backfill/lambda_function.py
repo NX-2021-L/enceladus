@@ -4,7 +4,7 @@
 Paginated scan of tracker + documents DynamoDB tables, bulk-indexing into
 OpenSearch via records_write (or a physical records_v{n} index during reindex).
 Uses the same document mapping and external-version idempotency contract as the
-L41 CDC indexer (search_index_core).
+L41 CDC indexer (search_index_core). Gamma-only; manual invoke.
 
 Invocation (product-lead terminal):
     aws lambda invoke --function-name devops-opensearch-backfill-gamma \\
