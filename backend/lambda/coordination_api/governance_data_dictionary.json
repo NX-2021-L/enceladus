@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.10",
-  "updated_at": "2026-07-05T08:30:00Z",
-  "last_change_summary": "ENC-TSK-L27 (B67 WaveC): version_seq + version-seq-index GSI + GET /api/v1/feed/delta incremental sync. ENC-TSK-L10 (B64 Ph3): mcp_streaming_gateway Lambda + McpStreamingRestApi (gamma-only).",
+  "version": "2026-07-05.11",
+  "updated_at": "2026-07-05T08:42:00Z",
+  "last_change_summary": "ENC-TSK-L27 follow-up: tracker_mutation bundles version_seq_util fallback so writes stamp version_seq before shared layer ships enceladus_shared.version_seq.",
   "owners": [
     "enceladus-platform"
   ],
