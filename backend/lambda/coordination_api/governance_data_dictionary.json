@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-01.02",
-  "updated_at": "2026-07-01T22:06:00Z",
-  "last_change_summary": "ENC-TSK-J41 v3-prod port (SEV-1 ENC-ISS-465 cost kill, via DOC-B716E8FB10B6 Channel A): graph_query_api adds GDS_HARD_DISABLED env gate (_check_gds_available->False; forces cypher_fallback, no Aura Graph Analytics session). 02-compute.yaml prefix->AWS::NoValue, GDS_HARD_DISABLED=1, StandingProjectionRefreshSchedule State=DISABLED. Env-gate only; no new record schema/edge types.",
+  "version": "2026-07-05.1",
+  "updated_at": "2026-07-05T00:00:00Z",
+  "last_change_summary": "ENC-TSK checkout_service fix: added tracker.task.github_repo per-task GitHub repo override field, checked by the new checkout_service._resolve_task_github_repo before falling back to project-level repo resolution at the committed/pr/merged-main/closed GitHub-validation gates (ENC-FTR-119 satellite-repo support).",
   "owners": [
     "enceladus-platform"
   ],
@@ -301,6 +301,11 @@
             "undeclared"
           ],
           "definition": "Deploy target for this task. 'prod' targets v3/main, 'gamma' targets v4/gamma stack, 'undeclared' (default) awaits labeling."
+        },
+        "github_repo": {
+          "type": "string",
+          "definition": "Optional per-task GitHub repo override, as \"owner/repo\" or a full https://github.com/owner/repo URL. ENC-FTR-119: satellite repos (e.g. enceladus-support) host code for tasks that still live under the primary project's project_id, so the project-level repo field alone (projects table / checkout_service._resolve_github_repo) cannot express \"this one task's code is in a different repo than its siblings.\" When set, checkout_service._resolve_task_github_repo checks this field BEFORE falling back to the project-level default, for every commit/PR/merged-main/closed gate that validates against GitHub -- no per-call transition_evidence.owner/repo required. Unset by default; ordinary same-repo tasks are unaffected.",
+          "usage_guidance": "Set via ordinary tracker.set field update (field=github_repo) any time prior to the first GitHub-validated advance (committed). Per-call transition_evidence.owner/repo still takes precedence over this field when both are present. A malformed value (no '/' and not an http(s) URL) is ignored with a warning and falls back to the project-level resolution rather than failing the advance."
         },
         "closed_count": {
           "type": "integer",
@@ -5838,6 +5843,11 @@
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
   "change_log": [
+    {
+      "version": "2026-07-05.1",
+      "date": "2026-07-05",
+      "summary": "Added tracker.task.github_repo optional field: durable per-task override of GitHub owner/repo for commit/PR/merge validation in checkout_service (new _resolve_task_github_repo helper), so ENC-FTR-119 satellite-repo tasks (e.g. code living in enceladus-support under the enceladus project_id) do not need transition_evidence.owner/repo passed on every advance."
+    },
     {
       "version": "2026-06-30.01",
       "date": "2026-06-30",
