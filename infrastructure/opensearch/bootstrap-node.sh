@@ -37,15 +37,20 @@ install -d -m 0750 -o "${OPENSEARCH_USER}" -g "${OPENSEARCH_USER}" /var/log/open
 
 TARBALL="opensearch-${OPENSEARCH_VERSION}-linux-arm64.tar.gz"
 URL="https://artifacts.opensearch.org/releases/bundle/opensearch/${OPENSEARCH_VERSION}/${TARBALL}"
-TMP="/tmp/${TARBALL}"
+# /tmp is tmpfs (RAM-backed, ~50% of instance RAM -- ~924MB on t4g.small), too
+# small for the OpenSearch download + extracted tree (>1GB with bundled SQL/ML
+# plugins). /var/tmp lives on the real root EBS volume; use it instead.
+BUILD_DIR="/var/tmp/opensearch-build"
+TMP="${BUILD_DIR}/${TARBALL}"
 
 if [[ ! -x "${OPENSEARCH_HOME}/bin/opensearch" ]]; then
   log "Downloading OpenSearch ${OPENSEARCH_VERSION} (${URL})"
+  mkdir -p "${BUILD_DIR}"
   curl -fsSL "${URL}" -o "${TMP}"
-  tar -xzf "${TMP}" -C /tmp
+  tar -xzf "${TMP}" -C "${BUILD_DIR}"
   rm -rf "${OPENSEARCH_HOME:?}"/*
-  cp -a "/tmp/opensearch-${OPENSEARCH_VERSION}"/* "${OPENSEARCH_HOME}/"
-  rm -f "${TMP}"
+  cp -a "${BUILD_DIR}/opensearch-${OPENSEARCH_VERSION}"/* "${OPENSEARCH_HOME}/"
+  rm -rf "${BUILD_DIR}"
 fi
 
 chown -R "${OPENSEARCH_USER}:${OPENSEARCH_USER}" "${OPENSEARCH_HOME}" /var/lib/opensearch /var/log/opensearch
