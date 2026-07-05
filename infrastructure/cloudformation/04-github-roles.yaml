@@ -335,6 +335,207 @@ Resources:
                   - s3:GetObject
                 Resource: !Sub "arn:aws:s3:::${CfnStagingBucket}/*"
 
+        # ENC-TSK-L55 codify: live inline policy 'CFN-IAM-Inspect-LambdaRoles' (uncodified out-of-band grant)
+        - PolicyName: CFN-IAM-Inspect-LambdaRoles
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InspectLambdaExecutionRoles
+                Effect: Allow
+                Action:
+                  - "iam:GetRole"
+                  - "iam:GetRolePolicy"
+                  - "iam:ListRolePolicies"
+                  - "iam:ListAttachedRolePolicies"
+                Resource: "arn:aws:iam::356364570033:role/*"
+        # ENC-TSK-L55 codify: live inline policy 'enceladus-cfn-deploy-eventbridge-listrules-v1' (uncodified out-of-band grant)
+        - PolicyName: enceladus-cfn-deploy-eventbridge-listrules-v1
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CfnDriftAuditEventBridgeRead
+                Effect: Allow
+                Action: "events:ListRules"
+                Resource: "arn:aws:events:us-west-2:356364570033:rule/*"
+        # ENC-TSK-L55 codify: live inline policy 'enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1' (uncodified out-of-band grant)
+        - PolicyName: enceladus-cfn-deploy-gamma-cloudwatch-dashboard-v1
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: GammaCloudWatchDashboardBootstrap
+                Effect: Allow
+                Action:
+                  - "cloudwatch:PutDashboard"
+                  - "cloudwatch:GetDashboard"
+                  - "cloudwatch:DeleteDashboards"
+                  - "cloudwatch:ListDashboards"
+                Resource: "arn:aws:cloudwatch::356364570033:dashboard/enceladus-v4-architecture-gamma"
+        # ENC-TSK-L55 codify: live inline policy 'enceladus-cfn-deploy-gamma-ddb-sns-v1' (uncodified out-of-band grant)
+        - PolicyName: enceladus-cfn-deploy-gamma-ddb-sns-v1
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: GammaDynamoDBBootstrap
+                Effect: Allow
+                Action:
+                  - "dynamodb:CreateTable"
+                  - "dynamodb:DescribeTable"
+                  - "dynamodb:UpdateTable"
+                  - "dynamodb:DeleteTable"
+                  - "dynamodb:TagResource"
+                  - "dynamodb:UntagResource"
+                  - "dynamodb:ListTagsOfResource"
+                  - "dynamodb:DescribeTimeToLive"
+                  - "dynamodb:UpdateTimeToLive"
+                  - "dynamodb:DescribeContinuousBackups"
+                  - "dynamodb:UpdateContinuousBackups"
+                Resource: "arn:aws:dynamodb:us-west-2:356364570033:table/*-gamma"
+              - Sid: GammaSNSBootstrap
+                Effect: Allow
+                Action:
+                  - "sns:CreateTopic"
+                  - "sns:GetTopicAttributes"
+                  - "sns:SetTopicAttributes"
+                  - "sns:DeleteTopic"
+                  - "sns:TagResource"
+                  - "sns:UntagResource"
+                  - "sns:ListTagsForResource"
+                  - "sns:Subscribe"
+                  - "sns:Unsubscribe"
+                  - "sns:GetSubscriptionAttributes"
+                  - "sns:ListSubscriptionsByTopic"
+                Resource: "arn:aws:sns:us-west-2:356364570033:enceladus-*-gamma"
+              - Sid: GammaSQSBootstrap
+                Effect: Allow
+                Action:
+                  - "sqs:GetQueueAttributes"
+                  - "sqs:GetQueueUrl"
+                  - "sqs:ListQueueTags"
+                  - "sqs:CreateQueue"
+                  - "sqs:SetQueueAttributes"
+                  - "sqs:TagQueue"
+                  - "sqs:UntagQueue"
+                Resource:
+                  - "arn:aws:sqs:us-west-2:356364570033:devops-*-gamma*"
+                  - "arn:aws:sqs:us-west-2:356364570033:enceladus-*-gamma*"
+              - Sid: S3GovernanceBucketNotification
+                Effect: Allow
+                Action:
+                  - "s3:GetBucketLocation"
+                  - "s3:GetBucketNotification"
+                  - "s3:PutBucketNotification"
+                  - "s3:GetBucketNotificationConfiguration"
+                  - "s3:PutBucketNotificationConfiguration"
+                Resource: "arn:aws:s3:::jreese-net"
+              - Sid: LambdaGovernancePermission
+                Effect: Allow
+                Action:
+                  - "lambda:AddPermission"
+                  - "lambda:RemovePermission"
+                  - "lambda:GetPolicy"
+                Resource: "arn:aws:lambda:us-west-2:356364570033:function:devops-recompute-governance*"
+              - Sid: SNSGovernanceRelayUSWest1
+                Effect: Allow
+                Action:
+                  - "sns:CreateTopic"
+                  - "sns:GetTopicAttributes"
+                  - "sns:SetTopicAttributes"
+                  - "sns:DeleteTopic"
+                  - "sns:TagResource"
+                  - "sns:Subscribe"
+                  - "sns:Unsubscribe"
+                  - "sns:GetSubscriptionAttributes"
+                  - "sns:ListSubscriptionsByTopic"
+                Resource: "arn:aws:sns:us-west-1:356364570033:enceladus-*-gamma"
+        # ENC-TSK-L55 codify: live inline policy 'enceladus-cfn-deploy-role-agent-auth-cognito-v1' (uncodified out-of-band grant)
+        - PolicyName: enceladus-cfn-deploy-role-agent-auth-cognito-v1
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AgentAuthCognitoUserPoolLifecycle
+                Effect: Allow
+                Action:
+                  - "cognito-idp:CreateUserPool"
+                  - "cognito-idp:DeleteUserPool"
+                  - "cognito-idp:UpdateUserPool"
+                  - "cognito-idp:DescribeUserPool"
+                  - "cognito-idp:CreateUserPoolDomain"
+                  - "cognito-idp:DeleteUserPoolDomain"
+                  - "cognito-idp:DescribeUserPoolDomain"
+                  - "cognito-idp:CreateUserPoolClient"
+                  - "cognito-idp:DeleteUserPoolClient"
+                  - "cognito-idp:UpdateUserPoolClient"
+                  - "cognito-idp:DescribeUserPoolClient"
+                  - "cognito-idp:CreateResourceServer"
+                  - "cognito-idp:DeleteResourceServer"
+                  - "cognito-idp:UpdateResourceServer"
+                  - "cognito-idp:DescribeResourceServer"
+                  - "cognito-idp:TagResource"
+                  - "cognito-idp:UntagResource"
+                  - "cognito-idp:ListTagsForResource"
+                Resource: "*"
+              - Sid: AgentM2MSecretLifecycle
+                Effect: Allow
+                Action:
+                  - "secretsmanager:CreateSecret"
+                  - "secretsmanager:DeleteSecret"
+                  - "secretsmanager:UpdateSecret"
+                  - "secretsmanager:TagResource"
+                  - "secretsmanager:UntagResource"
+                  - "secretsmanager:RotateSecret"
+                  - "secretsmanager:CancelRotateSecret"
+                  - "secretsmanager:GetResourcePolicy"
+                  - "secretsmanager:PutResourcePolicy"
+                Resource: "arn:aws:secretsmanager:us-west-2:356364570033:secret:enceladus/agent-m2m/client-secret*"
+              - Sid: AgentM2MRotationLambdaInvokeForSecretsManager
+                Effect: Allow
+                Action: "lambda:InvokeFunction"
+                Resource: "arn:aws:lambda:us-west-2:356364570033:function:enceladus-agent-m2m-rotation-gamma"
+        # ENC-TSK-L55 codify: live inline policy 'enceladus-cfn-deploy-role-loggroups-v1' (uncodified out-of-band grant)
+        - PolicyName: enceladus-cfn-deploy-role-loggroups-v1
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AgentAuthLogGroupLifecycle
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:DeleteLogGroup"
+                  - "logs:PutRetentionPolicy"
+                  - "logs:TagResource"
+                  - "logs:ListTagsForResource"
+                Resource: "arn:aws:logs:us-west-2:356364570033:log-group:/aws/lambda/enceladus-agent-*"
+        # ENC-TSK-L55 codify: live inline policy 'enceladus-cloudformation-api-unblock-v1' (uncodified out-of-band grant)
+        - PolicyName: enceladus-cloudformation-api-unblock-v1
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowCloudFormationApiStackLifecycle
+                Effect: Allow
+                Action:
+                  - "cloudformation:CreateChangeSet"
+                  - "cloudformation:DeleteChangeSet"
+                  - "cloudformation:DescribeChangeSet"
+                  - "cloudformation:DescribeStackEvents"
+                  - "cloudformation:DescribeStacks"
+                  - "cloudformation:ExecuteChangeSet"
+                  - "cloudformation:GetTemplateSummary"
+                  - "cloudformation:UpdateStack"
+                  - "cloudformation:ValidateTemplate"
+                Resource: "*"
+              - Sid: AllowApiGatewayMutations
+                Effect: Allow
+                Action: "apigateway:*"
+                Resource: "*"
+              - Sid: AllowLambdaPermissionMutationsForApiIntegrations
+                Effect: Allow
+                Action:
+                  - "lambda:AddPermission"
+                  - "lambda:RemovePermission"
+                  - "lambda:GetPolicy"
+                  - "lambda:GetFunctionConfiguration"
+                Resource: "*"
+
   # ---------------------------------------------------------------------------
   # Backend Deploy Role (ENC-TSK-E31 / ENC-ISS-237)
   # Used by:
@@ -425,6 +626,8 @@ Resources:
   # cannot grow (10,240-byte role inline quota exhausted by out-of-band patches).
   EventBridgeSchedulerOpsPolicy:
     Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       ManagedPolicyName: enceladus-cfn-deploy-scheduler-v1
       Roles:
@@ -444,6 +647,7 @@ Resources:
               - scheduler:GetSchedule
               - scheduler:UpdateSchedule
               - scheduler:ListSchedules
+              - scheduler:ListTagsForResource
               - scheduler:TagResource
               - scheduler:UntagResource
             Resource:
@@ -452,14 +656,84 @@ Resources:
               - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule-group/enceladus-*"
               - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule/enceladus-*/*"
 
+  # ENC-TSK-L55 codify: enceladus-ui-cdn-deploy was created out-of-band
+  # (v4 UI CDN bootstrap, K54/ENC-TSK-K65 lineage) and attached to
+  # CloudFormationDeployRole without ever being represented in this stack.
+  # Same attached-managed-policy pattern as CodeDeployStackOpsPolicy /
+  # LambdaFunctionUrlConfigPolicy / EventBridgeSchedulerOpsPolicy above.
+  UiCdnDeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: enceladus-ui-cdn-deploy
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CloudFrontUiCdn
+            Effect: Allow
+            Action:
+              - cloudfront:CreateOriginAccessControl
+              - cloudfront:GetOriginAccessControl
+              - cloudfront:UpdateOriginAccessControl
+              - cloudfront:DeleteOriginAccessControl
+              - cloudfront:CreateDistribution
+              - cloudfront:GetDistribution
+              - cloudfront:GetDistributionConfig
+              - cloudfront:UpdateDistribution
+              - cloudfront:DeleteDistribution
+              - cloudfront:TagResource
+              - cloudfront:UntagResource
+              - cloudfront:ListTagsForResource
+              - cloudfront:CreateInvalidation
+              - cloudfront:GetInvalidation
+            Resource: "*"
+          - Sid: S3UiCdnBucket
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:PutBucketPolicy
+              - s3:GetBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:PutBucketVersioning
+              - s3:GetBucketVersioning
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetBucketPublicAccessBlock
+              - s3:PutEncryptionConfiguration
+              - s3:GetEncryptionConfiguration
+              - s3:PutBucketTagging
+              - s3:GetBucketTagging
+              - s3:PutBucketOwnershipControls
+              - s3:GetBucketOwnershipControls
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - "arn:aws:s3:::enceladus-ui-v2*"
+              - "arn:aws:s3:::enceladus-ui-v2*/*"
+          - Sid: CloudFrontUiCdnFunctions
+            Effect: Allow
+            Action:
+              - cloudfront:CreateFunction
+              - cloudfront:GetFunction
+              - cloudfront:DescribeFunction
+              - cloudfront:UpdateFunction
+              - cloudfront:DeleteFunction
+              - cloudfront:PublishFunction
+            Resource: "arn:aws:cloudfront::356364570033:function/enceladus-ui-v2-spa-rewrite*"
+
   BackendDeployRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: enceladus-backend-deploy-github-role
-      Description: >
-        GitHub Actions OIDC role for Lambda backend deployments and
-        artifact build/upload. Used by lambda-deploy-reusable.yml,
-        build-lambda-artifacts.yml, and deploy-orchestration.yml.
+      # ENC-TSK-L55 codify: description drifted from out-of-band io-dev-admin edit.
+      Description: >-
+        GitHub Actions OIDC role for backend Lambda deployments. Explicit deny
+        on governed tables (tracker, projects, documents) and governance S3.
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -776,10 +1050,10 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       RoleName: GitHubActions-Build-Role
-      Description: >
-        GitHub Actions OIDC role for _build.yml artifact compilation and
-        _deploy.yml resolve-job S3 artifact probe (ENC-FTR-090).
-        Scoped to S3 lambda-artifacts read/write only — no Lambda mutate.
+      # ENC-TSK-L55 codify: description drifted from out-of-band io-dev-admin edit.
+      Description: >-
+        OIDC build role for _build.yml and _deploy.yml (ENC-FTR-090). S3
+        artifact read/write only.
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -843,7 +1117,9 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       RoleName: GitHubActions-V4Gamma-DeployRole
-      Description: >
+      # ENC-TSK-L55 codify: chomping indicator was clip (>), producing a trailing
+      # newline the live description doesn't have; strip (>-) to match exactly.
+      Description: >-
         GitHub Actions OIDC role assumed exclusively by _deploy.yml when
         deploying to the v4-gamma environment (ENC-FTR-090 AC-1).
         Scoped to Lambda code updates for v4-gamma stack functions only.
@@ -905,6 +1181,30 @@ Resources:
                 Condition:
                   StringLike:
                     s3:prefix: "lambda-artifacts/*"
+
+        # ENC-TSK-L55 codify: live inline policy 'V4GammaPWADeployPolicy' (uncodified
+        # out-of-band grant, K54/ENC-TSK-K65 v4 UI CDN lineage).
+        - PolicyName: V4GammaPWADeployPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3GammaPWAWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: "arn:aws:s3:::jreese-net/enceladus-gamma/*"
+              - Sid: S3GammaPWAList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: "arn:aws:s3:::jreese-net"
+                Condition:
+                  StringLike:
+                    s3:prefix: "enceladus-gamma/*"
+              - Sid: CloudFrontGammaPWAInvalidate
+                Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: "arn:aws:cloudfront::356364570033:distribution/E2CO2UXUONVQZH"
 
   # ---------------------------------------------------------------------------
   # CloudFormation Staging Bucket (ENC-TSK-E84 / ENC-ISS-257)
