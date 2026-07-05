@@ -1296,7 +1296,10 @@ def _get_agent_session(session_id: str) -> Optional[Dict]:
 
 
 def _touch_session_activity(session_id: str) -> None:
-    """Refresh the session's last_activity_at heartbeat (J83 pattern).
+    """Refresh the session's last_activity_at + updated_at heartbeat (J83 pattern,
+    extended by ENC-TSK-L35 to also stamp ``updated_at`` so the SES record's
+    updated-time bumps on every session-requiring call, matching the
+    updated_at convention every other tracker record type already exposes).
 
     Conditional on the session still being live (allocated/claimed); a retired
     or vanished session is a silent no-op — the touch must NEVER fail the
@@ -1306,7 +1309,7 @@ def _touch_session_activity(session_id: str) -> None:
         _get_ddb().update_item(
             TableName=AGENT_SESSIONS_TABLE,
             Key={"session_id": {"S": session_id}},
-            UpdateExpression="SET last_activity_at = :now",
+            UpdateExpression="SET last_activity_at = :now, updated_at = :now",
             ConditionExpression=(
                 "attribute_exists(session_id) AND (#st = :allocated OR #st = :claimed)"
             ),
@@ -1335,8 +1338,12 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[Dict]:
 
     Callers invoke this only when ``session_id`` matches _AGENT_SESSION_ID_RE.
     Returns None when the mutation may proceed (grandfathered session or valid
-    SCI, in which case last_activity_at is touched), else the 403 rejection
-    response naming the specific failure mode.
+    SCI), else the 403 rejection response naming the specific failure mode.
+
+    ENC-TSK-L35: the session heartbeat/updated_at touch now happens in
+    ``_sci_gate_for_request`` (the sole caller) BEFORE this function runs, so
+    it fires unconditionally — including for grandfathered sessions and
+    checkout-service-exempt requests that never reach this function at all.
     """
     # Step 1: the session must exist — a fabricated ENC-SES id must not bypass
     # the gate (fail closed).
@@ -1400,8 +1407,8 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[Dict]:
             f"'{token.get('session_id')}', not '{session_id}'.",
         )
 
-    # Valid SCI — refresh the session heartbeat (never fails the mutation).
-    _touch_session_activity(session_id)
+    # Valid SCI. The heartbeat/updated_at touch already ran at
+    # _sci_gate_for_request entry (ENC-TSK-L35), so no further touch here.
     return None
 
 
@@ -1416,11 +1423,19 @@ def _sci_gate_for_request(body: Dict, event: Optional[Dict]) -> Optional[Dict]:
     the identical gate at its own edge and the ENC-FTR-037 chain does not
     forward `sci` (same trust model / rollout semantics as the FTR-037 status
     gate, including permissive mode while CHECKOUT_SERVICE_KEY is unset).
+
+    ENC-TSK-L35: every agent-origin session-requiring call reaching this
+    function bumps the session's own last_activity_at/updated_at, UNCONDITIONALLY
+    — before the checkout-service exemption and before any SCI/grandfather
+    outcome — so the SES record's updated-time reflects every session-requiring
+    call it makes across every record type routed through this shared
+    mutation Lambda (task/issue/feature/lesson/plan/generation).
     """
     ws = _normalize_write_source(body)
     session_id = str(ws.get("provider", "")).strip()
     if not _AGENT_SESSION_ID_RE.match(session_id):
         return None
+    _touch_session_activity(session_id)
     if _is_checkout_service_request(event):
         return None
     return _validate_sci_gate(session_id, body.get("sci"))
@@ -5523,6 +5538,67 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
         return _error(500, "Database write failed. Please try again.")
 
 
+def _mirror_worklog_to_session(
+    session_id: str,
+    record_type: str,
+    record_id: str,
+    description: str,
+    timestamp: str,
+) -> None:
+    """Mirror a worklog entry onto the acting session's own SES record
+    (ENC-TSK-L35: session detail + worklog mirroring, B67 PWA2.0).
+
+    Whenever a session (write_source.provider is a minted ENC-SES id) appends
+    a worklog entry to ANY record via ``_handle_log`` — the single shared
+    ``/{project}/{type}/{id}/log`` endpoint for every record type (task,
+    issue, feature, lesson, plan, generation) — a copy of that same entry is
+    also appended onto the session's own ``history`` list in
+    AGENT_SESSIONS_TABLE, keyed by ``session_id``. The mirrored description is
+    prefixed with the source record so the SES worklog reads as a session
+    activity feed across every record it touched.
+
+    Best-effort and NON-blocking by contract, matching ``_touch_session_activity``:
+    a missing/retired session, or any DynamoDB error, is logged and swallowed —
+    mirroring must never fail the primary worklog append it rides on. Does NOT
+    depend on the SCI gate outcome (mirroring is opportunistic bookkeeping, not
+    an authorization decision) and applies equally to grandfathered sessions
+    and checkout-service-forwarded requests.
+    """
+    session_id = str(session_id or "").strip()
+    if not _AGENT_SESSION_ID_RE.match(session_id):
+        return
+    mirrored_entry = {"M": {
+        "timestamp": _ser_s(timestamp),
+        "status": _ser_s("worklog"),
+        "description": _ser_s(f"[{record_type}:{record_id}] {description}"),
+        "source_record_type": _ser_s(record_type),
+        "source_record_id": _ser_s(record_id),
+    }}
+    try:
+        _get_ddb().update_item(
+            TableName=AGENT_SESSIONS_TABLE,
+            Key={"session_id": {"S": session_id}},
+            UpdateExpression=(
+                "SET history = list_append(if_not_exists(history, :empty), :hentry)"
+            ),
+            ConditionExpression="attribute_exists(session_id)",
+            ExpressionAttributeValues={
+                ":hentry": {"L": [mirrored_entry]},
+                ":empty": {"L": []},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — mirroring is best-effort by contract
+        if _is_conditional_check_failed(exc):
+            logger.info(
+                "[INFO] Worklog mirror skipped for %s (session not found)", session_id,
+            )
+        else:
+            logger.warning(
+                "[ERROR] Worklog mirror to session %s failed (continuing): %s",
+                session_id, exc,
+            )
+
+
 def _handle_log(
     project_id: str,
     record_type: str,
@@ -5616,6 +5692,10 @@ def _handle_log(
     except Exception as exc:
         logger.error("update_item (log) failed: %s", exc)
         return _error(500, "Database write failed.")
+
+    # ENC-TSK-L35: mirror this worklog entry onto the acting session's own
+    # SES record (best-effort; never fails the primary append above).
+    _mirror_worklog_to_session(provider, record_type, record_id, description, now)
 
     return _response(200, {"success": True, "record_id": record_id, "updated_at": now})
 

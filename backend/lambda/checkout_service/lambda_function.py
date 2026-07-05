@@ -1003,6 +1003,23 @@ _SCI_TOKEN_RE = re.compile(r"^SCI-[0-9a-f]{32}$")
 # I37 minted session ids: ENC-SES-NNN (base-36, uppercase)
 _AGENT_SESSION_ID_RE = re.compile(r"^ENC-SES-[0-9A-Z]+$")
 
+
+def _touch_if_agent_session(provider: Any) -> None:
+    """ENC-TSK-L35: best-effort session heartbeat/updated_at bump for a
+    session-requiring call whose provider is a minted ENC-SES id.
+
+    Unlike ``_validate_sci_gate`` this performs NO enforcement — it never
+    rejects the request and never validates an SCI. It exists so that plan
+    checkout/advance/log (which do not run the SCI enforcement gate today)
+    still bump the acting session's own updated_at, matching the AC that a
+    session record's updated-time bumps on every session-requiring call. Task
+    handlers do not need this helper: their SCI gate call already performs the
+    (now gate-entry-ordered) touch.
+    """
+    provider_id = str(provider or "").strip()
+    if _AGENT_SESSION_ID_RE.match(provider_id):
+        _touch_session_activity(provider_id)
+
 _SCI_REMEDIATION = (
     "Obtain a Session Claim ID via coordination agent.claim (register->claim "
     "handshake, ENC-FTR-117 / ENC-ISS-441) and pass it as 'sci' on this request."
@@ -1078,7 +1095,10 @@ def _get_agent_session(session_id: str) -> Optional[dict]:
 
 
 def _touch_session_activity(session_id: str) -> None:
-    """Refresh the session's last_activity_at heartbeat (J83 pattern).
+    """Refresh the session's last_activity_at + updated_at heartbeat (J83 pattern,
+    extended by ENC-TSK-L35 to also stamp ``updated_at`` so the SES record's
+    updated-time bumps on every session-requiring call, matching the
+    updated_at convention every other tracker record type already exposes).
 
     Conditional on the session still being live (allocated/claimed); a retired
     or vanished session is a silent no-op — the touch must NEVER fail the
@@ -1089,7 +1109,7 @@ def _touch_session_activity(session_id: str) -> None:
         _ddb.update_item(
             TableName=AGENT_SESSIONS_TABLE,
             Key={"session_id": {"S": session_id}},
-            UpdateExpression="SET last_activity_at = :now",
+            UpdateExpression="SET last_activity_at = :now, updated_at = :now",
             ConditionExpression=(
                 "attribute_exists(session_id) AND (#st = :allocated OR #st = :claimed)"
             ),
@@ -1123,8 +1143,13 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[dict]:
 
     Callers invoke this only when ``session_id`` matches _AGENT_SESSION_ID_RE.
     Returns None when the mutation may proceed (grandfathered session or valid
-    SCI, in which case last_activity_at is touched), else the 403 rejection
-    response naming the specific failure mode.
+    SCI), else the 403 rejection response naming the specific failure mode.
+
+    ENC-TSK-L35: the session heartbeat (last_activity_at / updated_at) is
+    touched unconditionally for every call that reaches this gate — BEFORE the
+    grandfather-epoch short-circuit below — so the SES record's updated-time
+    bumps on every session-requiring call, not only post-epoch SCI-validated
+    ones. (Previously grandfathered sessions were never touched here.)
     """
     # Step 1: the session must exist — a fabricated ENC-SES id must not bypass
     # the gate (fail closed).
@@ -1135,6 +1160,11 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[dict]:
             f"Agent session '{session_id}' is not a registered session; "
             "mutation rejected (fail-closed).",
         )
+
+    # ENC-TSK-L35: bump the session's own heartbeat/updated_at now, before any
+    # further gating, so every session-requiring call is reflected on the SES
+    # record regardless of SCI outcome below.
+    _touch_session_activity(session_id)
 
     # Step 2: grandfather epoch gate — sessions created before the Phase 3
     # ship instant pass without an SCI (skip token validation entirely).
@@ -1188,8 +1218,8 @@ def _validate_sci_gate(session_id: str, sci: Any) -> Optional[dict]:
             f"'{token.get('session_id')}', not '{session_id}'.",
         )
 
-    # Valid SCI — refresh the session heartbeat (never fails the mutation).
-    _touch_session_activity(session_id)
+    # Valid SCI. The heartbeat/updated_at touch already ran at gate entry
+    # (ENC-TSK-L35), so no further touch is needed here.
     return None
 
 
@@ -3244,6 +3274,10 @@ def _handle_plan_checkout(project_id: str, plan_id: str, body: dict) -> dict:
             example_fix=_example_plan_checkout_fix(plan_id),
         )
 
+    # ENC-TSK-L35: plan checkout is session-requiring; bump the acting
+    # session's own updated_at (best-effort, no enforcement change).
+    _touch_if_agent_session(provider)
+
     status, result = _checkout_plan(project_id, plan_id, provider)
     if status not in (200, 201):
         return _error(
@@ -3428,6 +3462,10 @@ def _handle_plan_advance(project_id: str, plan_id: str, body: dict) -> dict:
             example_fix=_example_plan_advance_fix(plan_id, target_status),
         )
 
+    # ENC-TSK-L35: plan advance is session-requiring; bump the acting
+    # session's own updated_at (best-effort, no enforcement change).
+    _touch_if_agent_session(provider)
+
     status, plan = _get_plan(project_id, plan_id)
     if status != 200:
         return _error(status, plan.get("error", f"Plan not found: {plan_id}"))
@@ -3514,6 +3552,13 @@ def _handle_plan_log(project_id: str, plan_id: str, body: dict) -> dict:
         )
     provider = body.get("provider")
     governance_hash = body.get("governance_hash")
+
+    # ENC-TSK-L35: plan worklog append is session-requiring; bump the acting
+    # session's own updated_at (best-effort, no enforcement change). Worklog
+    # mirroring onto the session's own history happens centrally in
+    # tracker_mutation._handle_log (the shared /log endpoint for every record
+    # type), not here.
+    _touch_if_agent_session(provider)
 
     status, plan = _get_plan(project_id, plan_id)
     if status != 200:

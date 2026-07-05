@@ -14976,6 +14976,28 @@ def _handle_agent_session_list(event: Dict[str, Any]) -> Dict[str, Any]:
     return _response(200, {"sessions": sessions, "count": len(sessions)})
 
 
+def _handle_agent_session_get(session_id: str) -> Dict[str, Any]:
+    """GET /api/v1/coordination/agents/sessions/{id} — single session detail
+    (ENC-TSK-L35: B67 PWA2.0 session detail + worklog mirroring).
+
+    Returns the full session item exactly as persisted (SESSION_NODE_PROPERTIES
+    plus post-mint attributes: last_activity_at, updated_at, sci_token_id,
+    credential_id, and — as of ENC-TSK-L35 — the mirrored ``history`` list
+    populated by tracker_mutation._mirror_worklog_to_session whenever this
+    session appends a worklog entry to any record).
+    """
+    if not session_id:
+        return _error(400, "session_id is required", retryable=False)
+    try:
+        session = _agent_id_alloc.get_session(session_id)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] get_session failed for %s: %s", session_id, exc)
+        return _error(500, "Failed to fetch session")
+    if session is None:
+        return _error(404, f"Session not found: {session_id}", retryable=False)
+    return _response(200, {"session": session})
+
+
 def _handle_agent_session_retire(
     session_id: str, event: Dict[str, Any], claims: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -16309,6 +16331,13 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # POST /api/v1/coordination/agents/sessions/claim
     if method == "POST" and path == "/api/v1/coordination/agents/sessions/claim":
         return _handle_agent_session_claim(event, claims or {})
+
+    # GET /api/v1/coordination/agents/sessions/{id} (ENC-TSK-L35 session detail page)
+    match_session_get = re.fullmatch(
+        r"/api/v1/coordination/agents/sessions/([A-Za-z0-9_\-]+)", path
+    )
+    if method == "GET" and match_session_get:
+        return _handle_agent_session_get(match_session_get.group(1))
 
     # POST /api/v1/coordination/agents/sessions/{id}/retire
     match_session_retire = re.fullmatch(
