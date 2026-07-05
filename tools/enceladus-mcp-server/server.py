@@ -6035,6 +6035,76 @@ async def _tracker_set(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
+async def _tracker_relate(args: dict) -> list[TextContent]:
+    """ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): convenience action that adds
+    target_id to source_id's related_<target_type>_ids under a single
+    governance-hash-gated PATCH. The reverse pointer (source_id onto
+    target_id's related_<source_type>_ids) is written atomically, server-side,
+    by tracker_mutation's reverse-edge propagation within that same request —
+    so both sides land under the one governance hash check this action performs."""
+    governance_error = _require_governance_hash(args)
+    if governance_error:
+        return _result_text({"error": governance_error})
+
+    source_id = str(args.get("source_id", "")).strip()
+    target_id = str(args.get("target_id", "")).strip()
+    if not source_id or not target_id:
+        return _result_text({"error": "source_id and target_id are required."})
+    if source_id.upper() == target_id.upper():
+        return _result_text({"error": "source_id and target_id must not be the same record."})
+
+    try:
+        project_id, source_type, source_rid = _parse_record_id(source_id)
+        _, target_type, _ = _parse_record_id(target_id)
+    except ValueError as exc:
+        return _result_text({"error": str(exc)})
+
+    field = f"related_{target_type}_ids"
+    if field not in ("related_task_ids", "related_issue_ids", "related_feature_ids"):
+        return _result_text({
+            "error": (
+                f"tracker.relate does not support target_id type '{target_type}'. "
+                "Supported target record types: task, issue, feature."
+            )
+        })
+
+    # Read-modify-write: tracker_set PATCH replaces the field's value outright, so
+    # fetch the source's current list first and append rather than clobber it.
+    get_resp = _tracker_api_request("GET", f"/{project_id}/{source_type}/{source_rid}")
+    if get_resp.get("error"):
+        return _result_text(get_resp)
+    record = get_resp.get("record", get_resp)
+    current_ids = [str(x).strip().upper() for x in (record.get(field) or [])]
+    if target_id.upper() in current_ids:
+        return _result_text({
+            "success": True, "already_related": True,
+            "source_id": source_id, "target_id": target_id, "field": field,
+        })
+    new_ids = current_ids + [target_id.upper()]
+
+    payload: Dict[str, Any] = {
+        "field": field,
+        "value": new_ids,
+        "governance_hash": args.get("governance_hash", ""),
+    }
+    if args.get("provider"):
+        payload["provider"] = args["provider"]
+    if args.get("coordination_request_id"):
+        payload["coordination_request_id"] = args["coordination_request_id"]
+    sci = (args.get("sci") or "").strip()
+    if sci:
+        payload["sci"] = sci
+
+    resp = _tracker_api_request("PATCH", f"/{project_id}/{source_type}/{source_rid}", payload=payload)
+    if resp.get("error"):
+        return _result_text(resp)
+    return _result_text({
+        "success": True, "source_id": source_id, "target_id": target_id,
+        "field": field, "value": new_ids,
+        "note": "Reverse edge mirrored onto target's related_" + source_type + "_ids server-side.",
+    })
+
+
 async def _tracker_log(args: dict) -> list[TextContent]:
     governance_error = _require_governance_hash(args)
     if governance_error:
@@ -7749,6 +7819,9 @@ _COORDINATION_ACTIONS: Dict[str, Dict[str, Any]] = {
 _EXECUTE_ACTIONS: Dict[str, Dict[str, Any]] = {
     "tracker.create": {"tool": "tracker_create", "requires_governance_hash": True},
     "tracker.set": {"tool": "tracker_set", "requires_governance_hash": True},
+    # ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): simple symmetric cross-reference
+    # convenience, distinct from the typed tracker.create_relationship edge graph.
+    "tracker.relate": {"tool": "tracker_relate", "requires_governance_hash": True},
     "tracker.log": {"tool": "tracker_log", "requires_governance_hash": True},
     "tracker.set_acceptance_evidence": {
         "tool": "tracker_set_acceptance_evidence",
@@ -10701,6 +10774,7 @@ _TOOL_HANDLERS = {
     "tracker_list": _tracker_list,
     "tracker_pending_updates": _tracker_pending_updates,
     "tracker_set": _tracker_set,
+    "tracker_relate": _tracker_relate,
     "tracker_log": _tracker_log,
     "tracker_create": _tracker_create,
     "tracker_set_acceptance_evidence": _tracker_set_acceptance_evidence,
