@@ -23,8 +23,7 @@ if [[ -f "${MARKER}" ]]; then
 fi
 
 log "Installing prerequisites"
-# --allowerasing: AL2023 preinstalls curl-minimal, which conflicts with the full
-# curl package on package name; let dnf swap it in (ENC-TSK-L39 bootstrap bug).
+# --allowerasing: AL2023's curl-minimal conflicts with the full curl package.
 dnf install -y --allowerasing java-17-amazon-corretto-headless tar gzip curl jq amazon-cloudwatch-agent
 
 if ! id "${OPENSEARCH_USER}" &>/dev/null; then
@@ -37,9 +36,7 @@ install -d -m 0750 -o "${OPENSEARCH_USER}" -g "${OPENSEARCH_USER}" /var/log/open
 
 TARBALL="opensearch-${OPENSEARCH_VERSION}-linux-arm64.tar.gz"
 URL="https://artifacts.opensearch.org/releases/bundle/opensearch/${OPENSEARCH_VERSION}/${TARBALL}"
-# /tmp is tmpfs (RAM-backed, ~50% of instance RAM -- ~924MB on t4g.small), too
-# small for the OpenSearch download + extracted tree (>1GB with bundled SQL/ML
-# plugins). /var/tmp lives on the real root EBS volume; use it instead.
+# /tmp is tmpfs (~924MB on t4g.small), too small for the >1GB extracted tree; use /var/tmp (real EBS).
 BUILD_DIR="/var/tmp/opensearch-build"
 TMP="${BUILD_DIR}/${TARBALL}"
 
@@ -63,16 +60,13 @@ ADMIN_PASSWORD="$(tr -d '\n' < "${ADMIN_PASSWORD_FILE}")"
 export OPENSEARCH_INITIAL_ADMIN_PASSWORD="${ADMIN_PASSWORD}"
 
 log "Writing opensearch.yml"
-# Do NOT add any plugins.security.* key here: the demo installer below
-# (org.opensearch.security.tools.democonfig.Installer) treats presence of
-# any such key as "already configured" and silently quits without
-# generating TLS certs (ENC-TSK-L70) -- security is enabled by default,
-# so no explicit setting is needed anyway.
+# Do NOT add any plugins.security.* key here: the demo installer's presence
+# check (ENC-TSK-L70) treats ANY such key as "already configured" and skips
+# TLS cert generation. Security is on by default; no explicit key needed.
 CFG="${OPENSEARCH_HOME}/config/opensearch.yml"
 TLS_NODE_PEM="${OPENSEARCH_HOME}/config/esnode.pem"
-# Failed prior boots (or older bootstrap scripts) can leave
-# plugins.security.disabled on the persisted EBS volume; strip so the demo
-# installer actually generates demo TLS material on retry.
+# Failed prior boots can leave plugins.security.disabled on the EBS volume;
+# strip it so the demo installer actually regenerates TLS material on retry.
 if [[ ! -f "${TLS_NODE_PEM}" ]]; then
   log "TLS certs missing; stripping stale plugins.security.* keys before demo install"
   sed -i '/^plugins\.security\./d' "${CFG}"
@@ -103,13 +97,10 @@ EOF
 log "Running opensearch-tar-install.sh (TLS + security plugin demo certs)"
 cd "${OPENSEARCH_HOME}"
 chmod +x ./opensearch-tar-install.sh
-# OpenSearch refuses to start as root ("can not run opensearch as root");
-# opensearch-tar-install.sh launches OpenSearch internally to generate the
-# demo TLS/security config, so it must run as the unprivileged opensearch
-# user. --preserve-environment carries OPENSEARCH_INITIAL_ADMIN_PASSWORD.
-# The script execs into becoming the OpenSearch server process itself once
-# cert generation finishes (ENC-TSK-L71) -- it never returns control, so it
-# must be backgrounded; poll for the generated cert instead of waiting on it.
+# Must run as the unprivileged opensearch user (OpenSearch refuses root).
+# --preserve-environment carries OPENSEARCH_INITIAL_ADMIN_PASSWORD. The script
+# execs into the OpenSearch server itself once certs are generated (L71) and
+# never returns, so background it and poll for the cert instead of waiting.
 runuser -u "${OPENSEARCH_USER}" --preserve-environment -- ./opensearch-tar-install.sh &
 INSTALLER_PID=$!
 for i in $(seq 1 60); do
@@ -118,8 +109,7 @@ for i in $(seq 1 60); do
   fi
   sleep 5
 done
-# Ad hoc foreground process (installer, or the OpenSearch server it exec'd
-# into) is superseded by the systemd unit below; ensure clean handoff.
+# Superseded by the systemd unit below; ensure clean handoff.
 kill "${INSTALLER_PID}" 2>/dev/null || true
 pkill -u "${OPENSEARCH_USER}" || true
 sleep 2
@@ -172,10 +162,8 @@ curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_index_temp
   -H 'Content-Type: application/json' \
   -d '{"index_patterns":["enceladus-*"],"template":{"settings":{"number_of_shards":1,"number_of_replicas":0}}}'
 
-# ENC-TSK-L44 -- audit logging (DOC-77D6C714867E §14.5 AC-1/AC-2). Applied via
-# opensearch.yml (not the demo-installer path) so the earlier "no plugins.security.*
-# before demo install" guard (ENC-TSK-L70) is untouched; requires a restart to take
-# effect, done here, after TLS/security bootstrap and before fine-grained roles.
+# ENC-TSK-L44 audit logging: via opensearch.yml post-bootstrap (not the demo
+# installer path, per the L70 guard above); needs a restart to take effect.
 if ! grep -q 'ENC-TSK-L44 audit' "${CFG}"; then
   log "Enabling security-plugin audit logging"
   cat >> "${CFG}" <<EOF
@@ -199,8 +187,7 @@ else
   log "ENC-TSK-L44 audit config already present; skipping restart"
 fi
 
-# ENC-TSK-L44 -- fine-grained security-plugin roles (AC-1) + credential rotation
-# via Secrets Manager (AC-2). Idempotent: safe to re-run on every boot/replacement.
+# ENC-TSK-L44 fine-grained roles + Secrets Manager rotation; idempotent re-run.
 log "Provisioning fine-grained security roles + Secrets Manager credentials"
 
 AWS_REGION_RESOLVED="${AWS_REGION:-$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-west-2)}"
@@ -242,86 +229,25 @@ QUERY_PASSWORD="$(tr -d '\n' < "${QUERY_PASSWORD_FILE}")"
 _put_secret "indexer" "${INDEXER_PASSWORD}"
 _put_secret "query" "${QUERY_PASSWORD}"
 
-log "Applying indexer_role / query_role (write-only vs read-only) via Security REST API"
-curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/roles/indexer_role" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "cluster_permissions": ["cluster_composite_ops", "cluster:monitor/*"],
-    "index_permissions": [{
-      "index_patterns": ["records_write", "records_v*"],
-      "allowed_actions": ["indices:data/write/*", "indices:admin/create", "indices:admin/mapping/put", "indices:admin/aliases", "indices:monitor/*"]
-    }]
-  }'
+log "Applying indexer_role / query_role via Security REST API"
+SEC="https://127.0.0.1:9200/_plugins/_security/api"
+_sec_put() { curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "${SEC}/$1" -H 'Content-Type: application/json' -d "$2"; }
+_sec_put "roles/indexer_role" '{"cluster_permissions":["cluster_composite_ops","cluster:monitor/*"],"index_permissions":[{"index_patterns":["records_write","records_v*"],"allowed_actions":["indices:data/write/*","indices:admin/create","indices:admin/mapping/put","indices:admin/aliases","indices:monitor/*"]}]}'
+_sec_put "roles/query_role" '{"cluster_permissions":["cluster:monitor/*"],"index_permissions":[{"index_patterns":["records_read","records_v*"],"allowed_actions":["indices:data/read/*","indices:monitor/*"]}]}'
+_sec_put "internalusers/indexer" "$(jq -n --arg p "${INDEXER_PASSWORD}" '{password:$p, backend_roles:["indexer_backend"], description:"L44 write-only"}')"
+_sec_put "internalusers/query" "$(jq -n --arg p "${QUERY_PASSWORD}" '{password:$p, backend_roles:["query_backend"], description:"L44 read-only"}')"
+_sec_put "rolesmapping/indexer_role" '{"backend_roles":["indexer_backend"],"users":["indexer"]}'
+_sec_put "rolesmapping/query_role" '{"backend_roles":["query_backend"],"users":["query"]}'
 
-curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/roles/query_role" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "cluster_permissions": ["cluster:monitor/*"],
-    "index_permissions": [{
-      "index_patterns": ["records_read", "records_v*"],
-      "allowed_actions": ["indices:data/read/*", "indices:monitor/*"]
-    }]
-  }'
-
-curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/internalusers/indexer" \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -n --arg p "${INDEXER_PASSWORD}" '{password:$p, backend_roles:["indexer_backend"], description:"ENC-TSK-L44 write-only indexer account (records_write)"}')"
-
-curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/internalusers/query" \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -n --arg p "${QUERY_PASSWORD}" '{password:$p, backend_roles:["query_backend"], description:"ENC-TSK-L44 read-only query account (records_read)"}')"
-
-curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/rolesmapping/indexer_role" \
-  -H 'Content-Type: application/json' \
-  -d '{"backend_roles": ["indexer_backend"], "users": ["indexer"]}'
-
-curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/rolesmapping/query_role" \
-  -H 'Content-Type: application/json' \
-  -d '{"backend_roles": ["query_backend"], "users": ["query"]}'
-
-# ENC-TSK-L45 -- CloudWatch monitoring (AC-1). Standard EC2 metrics (CPUUtilization,
-# StatusCheckFailed) need no agent; disk-used-percent needs the CloudWatch Agent;
-# JVM heap has no native EC2/agent metric, so it is pushed as a custom metric by a
-# small cron script polling OpenSearch's own _nodes/stats API. Idempotent: config
-# files and the cron entry are simply (re)written on every fresh bootstrap.
-log "Configuring CloudWatch Agent (disk + heartbeat) and JVM heap custom-metric cron"
-
+# ENC-TSK-L45 monitoring (AC-1): disk via CW Agent; JVM heap has no native
+# metric, pushed by a cron polling OpenSearch's own stats API instead.
+log "Configuring CloudWatch Agent + JVM heap heartbeat cron"
 CW_NAMESPACE="Enceladus/OpenSearch"
-CW_DIMENSIONS="EnvironmentSuffix=${EnvironmentSuffix:-${OPENSEARCH_SECRET_ENV:-gamma}}"
-
 mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
 cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
-{
-  "metrics": {
-    "namespace": "${CW_NAMESPACE}",
-    "append_dimensions": {
-      "InstanceId": "\${aws:InstanceId}"
-    },
-    "aggregation_dimensions": [["InstanceId", "path"], ["InstanceId"]],
-    "metrics_collected": {
-      "disk": {
-        "measurement": ["used_percent"],
-        "resources": ["/"],
-        "ignore_file_system_types": ["sysfs", "devtmpfs", "tmpfs"],
-        "drop_device": true
-      },
-      "mem": {
-        "measurement": ["mem_used_percent"]
-      },
-      "procstat": [
-        {
-          "pattern": "opensearch",
-          "measurement": ["cpu_usage", "memory_rss"]
-        }
-      ]
-    }
-  }
-}
+{"metrics":{"namespace":"${CW_NAMESPACE}","append_dimensions":{"InstanceId":"\${aws:InstanceId}"},"aggregation_dimensions":[["InstanceId","path"],["InstanceId"]],"metrics_collected":{"disk":{"measurement":["used_percent"],"resources":["/"],"ignore_file_system_types":["sysfs","devtmpfs","tmpfs"],"drop_device":true},"mem":{"measurement":["mem_used_percent"]},"procstat":[{"pattern":"opensearch","measurement":["cpu_usage","memory_rss"]}]}}}
 EOF
-
-/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-  -a fetch-config -m ec2 -s \
-  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
 cat > /usr/local/bin/opensearch-jvm-heartbeat.sh <<'HEARTBEAT'
 #!/usr/bin/env bash
@@ -329,31 +255,18 @@ set -euo pipefail
 ADMIN_PASSWORD_FILE="${OPENSEARCH_ADMIN_PASSWORD_FILE:-/root/.opensearch-admin-password}"
 NAMESPACE="${CW_NAMESPACE:-Enceladus/OpenSearch}"
 REGION="$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-west-2)"
-INSTANCE_ID="$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo unknown)"
-ADMIN_PASSWORD="$(tr -d '\n' < "${ADMIN_PASSWORD_FILE}" 2>/dev/null || true)"
-
-if [[ -z "${ADMIN_PASSWORD}" ]]; then
-  exit 0
-fi
-
-STATS="$(curl -ks -m 5 -u "admin:${ADMIN_PASSWORD}" "https://127.0.0.1:9200/_nodes/stats/jvm" 2>/dev/null || true)"
+IID="$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo unknown)"
+PW="$(tr -d '\n' < "${ADMIN_PASSWORD_FILE}" 2>/dev/null || true)"
+[[ -z "${PW}" ]] && exit 0
+STATS="$(curl -ks -m 5 -u "admin:${PW}" "https://127.0.0.1:9200/_nodes/stats/jvm" 2>/dev/null || true)"
 if [[ -z "${STATS}" ]]; then
-  # OpenSearch unreachable -- push NodeUp=0 so the node-down alarm can fire;
-  # do NOT push a JVMHeapPercent point (missing data, not a false zero).
-  aws cloudwatch put-metric-data --region "${REGION}" --namespace "${NAMESPACE}" \
-    --metric-data "MetricName=NodeUp,Value=0,Unit=Count,Dimensions=[{Name=InstanceId,Value=${INSTANCE_ID}}]"
+  # unreachable: push NodeUp=0 (not a JVMHeapPercent point -- missing data, not a false zero)
+  aws cloudwatch put-metric-data --region "${REGION}" --namespace "${NAMESPACE}" --metric-data "MetricName=NodeUp,Value=0,Unit=Count,Dimensions=[{Name=InstanceId,Value=${IID}}]"
   exit 0
 fi
-
-HEAP_PCT="$(echo "${STATS}" | jq -r '.nodes | to_entries[0].value.jvm.mem.heap_used_percent // empty')"
-
-aws cloudwatch put-metric-data --region "${REGION}" --namespace "${NAMESPACE}" \
-  --metric-data "MetricName=NodeUp,Value=1,Unit=Count,Dimensions=[{Name=InstanceId,Value=${INSTANCE_ID}}]"
-
-if [[ -n "${HEAP_PCT}" ]]; then
-  aws cloudwatch put-metric-data --region "${REGION}" --namespace "${NAMESPACE}" \
-    --metric-data "MetricName=JVMHeapPercent,Value=${HEAP_PCT},Unit=Percent,Dimensions=[{Name=InstanceId,Value=${INSTANCE_ID}}]"
-fi
+HEAP="$(echo "${STATS}" | jq -r '.nodes | to_entries[0].value.jvm.mem.heap_used_percent // empty')"
+aws cloudwatch put-metric-data --region "${REGION}" --namespace "${NAMESPACE}" --metric-data "MetricName=NodeUp,Value=1,Unit=Count,Dimensions=[{Name=InstanceId,Value=${IID}}]"
+[[ -n "${HEAP}" ]] && aws cloudwatch put-metric-data --region "${REGION}" --namespace "${NAMESPACE}" --metric-data "MetricName=JVMHeapPercent,Value=${HEAP},Unit=Percent,Dimensions=[{Name=InstanceId,Value=${IID}}]"
 HEARTBEAT
 chmod +x /usr/local/bin/opensearch-jvm-heartbeat.sh
 
