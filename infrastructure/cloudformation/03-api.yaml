@@ -926,6 +926,100 @@ Resources:
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-L10 (B64 Ph3): REST API Gateway (v1) for Lambda response streaming.
+  # A SEPARATE API from HttpApi above -- HTTP API v2 (AWS::ApiGatewayV2) does not
+  # support responseTransferMode=STREAM; only REST API (AWS::ApiGateway) does,
+  # via the InvokeWithResponseStream Lambda API. Gamma-only (Condition: IsGamma):
+  # McpStreamingGatewayFunction (02-compute.yaml) only exists on gamma.
+  # HttpApi (v2) is retained unchanged as the non-streaming fallback (AC-3).
+  # ---------------------------------------------------------------------------
+  McpStreamingRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "enceladus-mcp-streaming${EnvironmentSuffix}"
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  McpStreamingResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      ParentId: !GetAtt McpStreamingRestApi.RootResourceId
+      PathPart: mcp
+
+  McpStreamingProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      ParentId: !Ref McpStreamingResource
+      PathPart: "{proxy+}"
+
+  # ANY on /mcp and /mcp/{proxy+} — the MCP Streamable HTTP transport handles its
+  # own sub-paths (GET/POST/DELETE on the same endpoint); AWS_PROXY + STREAM only
+  # needs one method per resource, not one per verb.
+  McpStreamingMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      ResourceId: !Ref McpStreamingResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        ResponseTransferMode: STREAM
+        TimeoutInMillis: 29000
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-streaming-gateway${EnvironmentSuffix}/response-streaming-invocations"
+
+  McpStreamingProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      ResourceId: !Ref McpStreamingProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.proxy: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        ResponseTransferMode: STREAM
+        TimeoutInMillis: 29000
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-streaming-gateway${EnvironmentSuffix}/response-streaming-invocations"
+
+  McpStreamingGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsGamma
+    Properties:
+      FunctionName: !Sub "enceladus-mcp-streaming-gateway${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${McpStreamingRestApi}/*/*/mcp*"
+
+  McpStreamingDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Condition: IsGamma
+    DependsOn:
+      - McpStreamingMethod
+      - McpStreamingProxyMethod
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+
+  McpStreamingStage:
+    Type: AWS::ApiGateway::Stage
+    Condition: IsGamma
+    Properties:
+      RestApiId: !Ref McpStreamingRestApi
+      DeploymentId: !Ref McpStreamingDeployment
+      StageName: v1
+
   # ENC-TSK-L25 / ENC-FTR-127 AC-10/16/17: per-user preferences service.
   # Gamma-only (Condition: IsGamma) — function only exists on gamma.
   UserPreferencesApiIntegration:

@@ -129,7 +129,9 @@ jobs:
             # server.py from the function zip root (ENCELADUS_MCP_SERVER_PATH=server.py).
             # Package the full MCP server runtime module set — telemetry_rank and siblings
             # are required (mcp.jreese.net Function URL -> enceladus-mcp-streamable*).
-            if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ] || [ "$fn" = "mcp_streamable" ]; then
+            # ENC-TSK-L10: mcp_streaming_gateway also imports `from server import app`
+            # (see asgi_app.py) for the REST API Gateway response-streaming endpoint.
+            if [ "$fn" = "mcp_code" ] || [ "$fn" = "coordination_api" ] || [ "$fn" = "mcp_streamable" ] || [ "$fn" = "mcp_streaming_gateway" ]; then
               for py in tools/enceladus-mcp-server/*.py; do
                 base=$(basename "$py")
                 case "$base" in
