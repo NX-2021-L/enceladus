@@ -1527,6 +1527,25 @@ def _verify_token(token: str) -> Dict[str, Any]:
     return claims
 
 
+def _extract_if_match(event: Optional[Dict]) -> Optional[str]:
+    """Extract the If-Match header value (ENC-TSK-L47 revision-conflict contract).
+
+    Returns the raw revision token as a string (quotes stripped per ETag convention),
+    or None if the header is absent. Absence means "no concurrency check requested" —
+    callers must preserve today's unconditional-write behavior in that case.
+    """
+    if not event:
+        return None
+    headers = event.get("headers") or {}
+    raw = headers.get("if-match") or headers.get("If-Match")
+    if raw is None:
+        return None
+    raw = str(raw).strip()
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        raw = raw[1:-1]
+    return raw or None
+
+
 def _is_checkout_service_request(event: Optional[Dict]) -> bool:
     """Return True if request carries the CHECKOUT_SERVICE_KEY header (ENC-FTR-037).
 
@@ -4454,6 +4473,28 @@ def _handle_update_field(
     item_data = _deser_item(raw_item)
     warnings: List[str] = []
 
+    # --- ENC-TSK-L47: If-Match / HTTP 409 per-record revision contract ---
+    # Own lightweight counter (sync_version), decoupled from ENC-TSK-L27's version_seq.
+    # Absent header preserves today's unconditional-write behavior (backward compatible).
+    try:
+        _current_rev = int(item_data.get("sync_version", 0) or 0)
+    except (TypeError, ValueError):
+        _current_rev = 0
+    _if_match = _extract_if_match(event)
+    if _if_match is not None and _if_match != str(_current_rev):
+        return _error(
+            409,
+            f"If-Match revision mismatch: client expected revision '{_if_match}', "
+            f"server is at revision {_current_rev}.",
+            code="REVISION_CONFLICT",
+            field=field,
+            record_id=record_id,
+            record_type=record_type,
+            expected_revision=_if_match,
+            current_revision=_current_rev,
+            current=item_data,
+        )
+
     # --- ENC-ISS-092: user-initiated transitions (Cognito-only, bypass checkout gate) ---
     # Must be checked BEFORE session-ownership enforcement and the ENC-FTR-037 gate so
     # human operators can transition tasks that are checked out by another agent.
@@ -5183,13 +5224,41 @@ def _handle_update_field(
         attr_values[":optout"] = {"BOOL": True}
     attr_values.update(extra_vals)
 
+    # ENC-TSK-L47: when the caller presented If-Match, guard the commit itself
+    # (not just the pre-check above) against a write that landed in between —
+    # mirrors the existing sync_version CAS pattern used by _handle_pwa_action.
+    update_kwargs: Dict[str, Any] = {
+        "TableName": DYNAMODB_TABLE, "Key": key,
+        "UpdateExpression": update_expr,
+        "ExpressionAttributeNames": {"#fld": field},
+        "ExpressionAttributeValues": attr_values,
+    }
+    if _if_match is not None:
+        update_kwargs["ConditionExpression"] = "sync_version = :if_match_expected"
+        attr_values[":if_match_expected"] = {"N": str(_current_rev)}
+
     try:
-        ddb.update_item(
-            TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression=update_expr,
-            ExpressionAttributeNames={"#fld": field},
-            ExpressionAttributeValues=attr_values,
-        )
+        ddb.update_item(**update_kwargs)
+    except ClientError as exc:
+        if _is_conditional_check_failed(exc):
+            try:
+                _refreshed_raw = _get_record_raw(project_id, record_type, record_id)
+                _refreshed = _deser_item(_refreshed_raw) if _refreshed_raw else item_data
+            except Exception:  # noqa: BLE001
+                _refreshed = item_data
+            return _error(
+                409,
+                "Record was modified concurrently: If-Match revision is no longer current.",
+                code="REVISION_CONFLICT",
+                field=field,
+                record_id=record_id,
+                record_type=record_type,
+                expected_revision=_if_match,
+                current_revision=_refreshed.get("sync_version"),
+                current=_refreshed,
+            )
+        logger.error("update_item failed: %s", exc)
+        return _error(500, "Database write failed.")
     except Exception as exc:
         logger.error("update_item failed: %s", exc)
         return _error(500, "Database write failed.")
@@ -5223,6 +5292,7 @@ def _handle_update_field(
     result: Dict[str, Any] = {
         "success": True, "record_id": record_id,
         "field": field, "value": value, "updated_at": now,
+        "sync_version": _current_rev + 1,
     }
     if warnings:
         result["warnings"] = warnings
