@@ -624,6 +624,7 @@ Resources:
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           FEED_PUBLISHER_FUNCTION: !Sub "devops-feed-publisher${EnvironmentSuffix}"
+          DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
@@ -3717,6 +3718,8 @@ Resources:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}/index/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

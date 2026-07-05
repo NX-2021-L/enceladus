@@ -32,6 +32,12 @@ export function FeedPane() {
   const reconnectAttempt = useFeedConnectionStore((s) => s.reconnectAttempt)
   const p50LatencyMs = useFeedConnectionStore((s) => s.p50LatencyMs)
   const p99LatencyMs = useFeedConnectionStore((s) => s.p99LatencyMs)
+  const keystrokeP50 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p50Ms)
+  const keystrokeP95 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p95Ms)
+  const localP50 = useFeedConnectionStore((s) => s.requestFirstPageLocal.p50Ms)
+  const localP95 = useFeedConnectionStore((s) => s.requestFirstPageLocal.p95Ms)
+  const serverP50 = useFeedConnectionStore((s) => s.requestFirstPageServer.p50Ms)
+  const serverP95 = useFeedConnectionStore((s) => s.requestFirstPageServer.p95Ms)
   const errorMessage = useFeedConnectionStore((s) => s.errorMessage)
 
   const { events, isHydrating, isSnapshotError, refetchSnapshot, manualReconnect } =
@@ -83,8 +89,32 @@ export function FeedPane() {
         </p>
         {p50LatencyMs !== null && (
           <p style={{ margin: 'var(--space-1) 0 0', fontSize: 'var(--text-xs)', color: 'var(--fg-muted)' }}>
-            P50 {Math.round(p50LatencyMs)}ms
+            WSS P50 {Math.round(p50LatencyMs)}ms
             {p99LatencyMs !== null ? ` · P99 ${Math.round(p99LatencyMs)}ms` : ''}
+          </p>
+        )}
+        {(keystrokeP50 !== null || localP50 !== null || serverP50 !== null) && (
+          <p style={{ margin: 'var(--space-1) 0 0', fontSize: 'var(--text-xs)', color: 'var(--fg-muted)' }}>
+            {keystrokeP50 !== null && (
+              <>
+                Key→suggest P50 {Math.round(keystrokeP50)}ms
+                {keystrokeP95 !== null ? ` · P95 ${Math.round(keystrokeP95)}ms` : ''}
+              </>
+            )}
+            {localP50 !== null && (
+              <>
+                {keystrokeP50 !== null ? ' · ' : ''}
+                Req→page local P50 {Math.round(localP50)}ms
+                {localP95 !== null ? ` · P95 ${Math.round(localP95)}ms` : ''}
+              </>
+            )}
+            {serverP50 !== null && (
+              <>
+                {' · '}
+                Req→page server P50 {Math.round(serverP50)}ms
+                {serverP95 !== null ? ` · P95 ${Math.round(serverP95)}ms` : ''}
+              </>
+            )}
           </p>
         )}
       </div>

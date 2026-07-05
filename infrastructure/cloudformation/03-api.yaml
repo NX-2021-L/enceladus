@@ -603,6 +603,13 @@ Resources:
       RouteKey: GET /api/v1/feed/tasks.json
       Target: !Sub integrations/${FeedQueryIntegration}
 
+  RouteFeedCorpus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/feed/corpus
+      Target: !Sub integrations/${FeedQueryIntegration}
+
   RouteFeedRefresh:
     Type: AWS::ApiGatewayV2::Route
     Properties:
