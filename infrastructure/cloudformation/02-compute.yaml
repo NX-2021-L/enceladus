@@ -6072,6 +6072,20 @@ Resources:
       VpcEndpointType: Gateway
       RouteTableIds: !Ref OpenSearchIndexerRouteTableIds
 
+  # ENC-TSK-L42: VPC Lambdas resolve Secrets Manager creds without public egress.
+  OpenSearchSecretsManagerVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      VpcId: !Ref OpenSearchIndexerVpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref OpenSearchIndexerSubnetIds
+      SecurityGroupIds:
+        - !Ref OpenSearchIndexerSecurityGroup
+
   OpenSearchIndexerRole:
     Type: AWS::IAM::Role
     Condition: IsGamma
