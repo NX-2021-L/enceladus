@@ -69,7 +69,16 @@ log "Writing opensearch.yml"
 # generating TLS certs (ENC-TSK-L70) -- security is enabled by default,
 # so no explicit setting is needed anyway.
 CFG="${OPENSEARCH_HOME}/config/opensearch.yml"
-cat >> "${CFG}" <<EOF
+TLS_NODE_PEM="${OPENSEARCH_HOME}/config/esnode.pem"
+# Failed prior boots (or older bootstrap scripts) can leave
+# plugins.security.disabled on the persisted EBS volume; strip so the demo
+# installer actually generates demo TLS material on retry.
+if [[ ! -f "${TLS_NODE_PEM}" ]]; then
+  log "TLS certs missing; stripping stale plugins.security.* keys before demo install"
+  sed -i '/^plugins\.security\./d' "${CFG}"
+fi
+if ! grep -q 'ENC-TSK-L39 generated' "${CFG}"; then
+  cat >> "${CFG}" <<EOF
 
 ########## ENC-TSK-L39 generated ##########
 cluster.name: ${CLUSTER_NAME}
@@ -81,6 +90,9 @@ path.logs: /var/log/opensearch
 action.auto_create_index: true
 ########## END ENC-TSK-L39 generated ##########
 EOF
+else
+  log "ENC-TSK-L39 opensearch.yml block already present; skipping append"
+fi
 
 install -d -m 0755 "${OPENSEARCH_HOME}/config/jvm.options.d"
 cat > "${OPENSEARCH_HOME}/config/jvm.options.d/heap.options" <<EOF
@@ -99,6 +111,10 @@ runuser -u "${OPENSEARCH_USER}" --preserve-environment -- ./opensearch-tar-insta
 # Demo installer may leave a foreground process; ensure clean handoff to systemd.
 pkill -u "${OPENSEARCH_USER}" || true
 sleep 2
+if [[ ! -f "${TLS_NODE_PEM}" ]]; then
+  log "ERROR: demo installer did not generate TLS certs (${TLS_NODE_PEM} missing)"
+  exit 1
+fi
 
 log "Installing systemd unit"
 cat > /etc/systemd/system/opensearch.service <<EOF
