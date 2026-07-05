@@ -21,6 +21,7 @@ import {
 } from './feedEventReducer'
 import { useFeedConnectionStore } from '../store/feedConnectionStore'
 import type { FeedRealtimeEvent } from '../types/feedEvents'
+import { getCacheEngine, tier1FromFeedEvent } from '../sync/cacheEngine'
 
 interface RealtimeFeedContextValue {
   events: FeedRealtimeEvent[]
@@ -96,6 +97,23 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
           break
         case 'feed_event':
           recordLatency(event.latencyMs)
+          void (async () => {
+            const engine = getCacheEngine()
+            const feedEvent = event.event
+            const tier1 = tier1FromFeedEvent({
+              recordId: feedEvent.recordId,
+              recordType: feedEvent.record_type,
+              projectId: '',
+              title: feedEvent.summary,
+              status: feedEvent.action,
+            })
+            if (!tier1) return
+            if (feedEvent.action === 'removed') {
+              await engine.markTombstone(tier1.recordKey, tier1.recordId)
+            } else {
+              await engine.upsertTier1(tier1)
+            }
+          })()
           setEvents((prev) => {
             const merged = mergeFeedEvents(prev, [event.event])
             queryClient.setQueryData(REALTIME_FEED_QUERY_KEY, merged)

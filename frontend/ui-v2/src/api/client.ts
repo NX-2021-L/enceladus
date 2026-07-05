@@ -14,6 +14,7 @@
 
 import type { HybridGraphsearchResponse, HybridSearchParams } from '../types/search'
 import type { UserPreferences } from '../types/userPreferences'
+import type { FeedCorpusPage } from '../sync/types'
 
 /**
  * Read API base URL. Defaults to `/api/v1`, matching the existing app's
@@ -186,4 +187,27 @@ export async function fetchHybridGraphsearch(
   }
   if (!res.ok) throw new Error(`Request failed (${res.status}): ${url}`)
   return (await res.json()) as HybridGraphsearchResponse
+}
+
+/**
+ * Feed corpus pagination (ENC-TSK-L23 / L24 seed). GET /api/v1/feed/corpus returns
+ * cursor-paginated Tier-1 identity rows for cache warm-start.
+ */
+export async function fetchFeedCorpusPage(
+  params: {
+    cursor?: string
+    limit?: number
+    sort?: string
+    q?: string
+  } = {},
+  init?: FetchInit,
+): Promise<FeedCorpusPage> {
+  const qs = new URLSearchParams()
+  if (params.limit != null) qs.set('limit', String(params.limit))
+  if (params.cursor) qs.set('cursor', params.cursor)
+  if (params.sort) qs.set('sort', params.sort)
+  if (params.q) qs.set('q', params.q)
+  const suffix = qs.toString()
+  const url = `${API_BASE}/feed/corpus${suffix ? `?${suffix}` : ''}`
+  return requestJson<FeedCorpusPage>(url, init)
 }
