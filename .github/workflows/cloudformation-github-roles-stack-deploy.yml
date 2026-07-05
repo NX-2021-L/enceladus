@@ -75,6 +75,10 @@ jobs:
         id: changeset
         run: |
           set -euo pipefail
+          # 04-github-roles.yaml exceeds the 51,200-byte direct-upload limit since
+          # ENC-TSK-L55 (~58 KiB). BackendDeployRole must hold S3CfnStagingAccess
+          # on enceladus-cfn-staging-us-west-2 (ENC-TSK-L61); PR #837's no-S3 path
+          # is obsolete. Same bucket/prefix convention as compute/api/monitoring CFN workflows.
 
           aws cloudformation deploy \
             --region "${AWS_REGION}" \
@@ -82,7 +86,9 @@ jobs:
             --template-file "${TEMPLATE_FILE}" \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
-            --no-execute-changeset 2>&1 | tee /tmp/plan.log
+            --no-execute-changeset \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 04-github-roles/ 2>&1 | tee /tmp/plan.log
 
           if grep -q "No changes to deploy" /tmp/plan.log; then
             echo "has_changes=false" >> "${GITHUB_OUTPUT}"
