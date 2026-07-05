@@ -94,6 +94,21 @@ except ModuleNotFoundError:  # pragma: no cover - packaging fallback
     _agent_id_alloc = importlib.util.module_from_spec(_AIA_SPEC)  # type: ignore[arg-type]
     _AIA_SPEC.loader.exec_module(_agent_id_alloc)  # type: ignore[union-attr]
 
+# ENC-TSK-L11 / B64 Ph3: provider adapter interface + registry.
+try:
+    from provider_adapters import (
+        dispatch_via_provider_adapter,
+        wire_default_provider_adapters,
+    )
+except ModuleNotFoundError:  # pragma: no cover - packaging fallback
+    _PA_PATH = pathlib.Path(__file__).with_name("provider_adapters")
+    _PA_INIT = _PA_PATH / "__init__.py"
+    _PA_SPEC = importlib.util.spec_from_file_location("provider_adapters", _PA_INIT)
+    _PA_MODULE = importlib.util.module_from_spec(_PA_SPEC)  # type: ignore[arg-type]
+    _PA_SPEC.loader.exec_module(_PA_MODULE)  # type: ignore[union-attr]
+    dispatch_via_provider_adapter = _PA_MODULE.dispatch_via_provider_adapter
+    wire_default_provider_adapters = _PA_MODULE.wire_default_provider_adapters
+
 try:
     import jwt
     from jwt.algorithms import RSAAlgorithm
@@ -5814,6 +5829,21 @@ def _dispatch_claude_api(request: Dict[str, Any], prompt: Optional[str], dispatc
         "status": "succeeded",
         "provider_result": provider_result,
     }
+
+
+_PROVIDER_ADAPTERS_WIRED = False
+
+
+def _ensure_provider_adapters_wired() -> None:
+    global _PROVIDER_ADAPTERS_WIRED
+    if _PROVIDER_ADAPTERS_WIRED:
+        return
+    wire_default_provider_adapters(
+        claude_dispatch=_dispatch_claude_api,
+        codex_dispatch=_dispatch_openai_codex_api,
+        bedrock_dispatch=_dispatch_bedrock_api,
+    )
+    _PROVIDER_ADAPTERS_WIRED = True
 
 
 def _dispatch_claude_batch_api(
@@ -12918,6 +12948,7 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                 request.get("related_record_ids") or []
             )
 
+        dispatch_meta: Optional[Dict[str, Any]] = None
         if execution_mode == "claude_agent_sdk":
             is_batch = bool((request.get("provider_session") or {}).get("batch_eligible"))
             if is_batch:
@@ -12933,26 +12964,15 @@ def _handle_dispatch_request(event: Dict[str, Any], request_id: str) -> Dict[str
                     prompt=prompt,
                     dispatch_id=dispatch_id,
                 )
-            else:
-                dispatch_meta = _dispatch_claude_api(
-                    request=request,
-                    prompt=prompt,
-                    dispatch_id=dispatch_id,
-                )
-        elif execution_mode in {"codex_app_server", "codex_full_auto"}:
-            dispatch_meta = _dispatch_openai_codex_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
-                execution_mode=execution_mode,
+        if dispatch_meta is None:
+            _ensure_provider_adapters_wired()
+            dispatch_meta = dispatch_via_provider_adapter(
+                execution_mode,
+                request,
+                prompt,
+                dispatch_id,
             )
-        elif execution_mode == "bedrock_agent":
-            dispatch_meta = _dispatch_bedrock_api(
-                request=request,
-                prompt=prompt,
-                dispatch_id=dispatch_id,
-            )
-        else:
+        if dispatch_meta is None:
             dispatch_meta = _send_dispatch(
                 request,
                 execution_mode=execution_mode,
