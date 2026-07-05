@@ -3,3 +3,8 @@ export { AppLayout } from '../../../design-system-2/v2/components/AppLayout/AppL
 export { SideNavigation } from '../../../design-system-2/v2/components/SideNavigation/SideNavigation.jsx'
 export { TopNavigation } from '../../../design-system-2/v2/components/TopNavigation/TopNavigation.jsx'
 export { Button } from '../../../design-system-2/v2/components/Button/Button.jsx'
+export { PropertyFilter } from '../../../design-system-2/v2/components/PropertyFilter/PropertyFilter.jsx'
+export { Cards } from '../../../design-system-2/v2/components/Cards/Cards.jsx'
+export { Autosuggest } from '../../../design-system-2/v2/components/Autosuggest/Autosuggest.jsx'
+export { ButtonDropdown } from '../../../design-system-2/v2/components/ButtonDropdown/ButtonDropdown.jsx'
+export { Input } from '../../../design-system-2/v2/components/Input/Input.jsx'

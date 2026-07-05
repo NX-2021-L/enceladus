@@ -5,6 +5,7 @@ import {
   Outlet,
 } from '@tanstack/react-router'
 import { AppShell } from '../shell/AppShell'
+import { FeedRoute } from './FeedRoute'
 import { HomeRoute } from './HomeRoute'
 import { PlaceholderRoute } from './PlaceholderRoute'
 import { createDocumentRecordRoute, createRecordRoute } from './recordRoute'
@@ -69,9 +70,14 @@ const documentRoute = createDocumentRecordRoute({
   queryOptionsFor: documentQueryOptions,
 })
 
+const feedRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/feed',
+  component: FeedRoute,
+})
+
 const shellNavRoutes = [
   { path: '/projects', title: 'Projects' },
-  { path: '/feed', title: 'Feed' },
   { path: '/docs', title: 'Docs' },
   { path: '/coordination', title: 'Coordination' },
   { path: '/component-registry', title: 'Component registry' },
@@ -90,6 +96,7 @@ const placeholderRoutes = shellNavRoutes.map(({ path, title }) =>
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  feedRoute,
   ...placeholderRoutes,
   taskRoute,
   issueRoute,
