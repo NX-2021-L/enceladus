@@ -8,6 +8,12 @@ import { AppShell } from '../shell/AppShell'
 import { FeedRoute } from './FeedRoute'
 import { HomeRoute } from './HomeRoute'
 import { PlaceholderRoute } from './PlaceholderRoute'
+import { ProjectsRoute } from './ProjectsRoute'
+import { DocsRoute } from './DocsRoute'
+import { ChangelogRoute } from './ChangelogRoute'
+import { CoordinationRoute } from './CoordinationRoute'
+import { createSessionDetailRoute } from './SessionDetailRoute'
+import { createAgentDetailRoute } from './AgentDetailRoute'
 import { parseFeedSearch } from '../search/feedSearchParams'
 import { createDocumentRecordRoute, createRecordRoute } from './recordRoute'
 import {
@@ -78,10 +84,32 @@ const feedRoute = createRoute({
   component: FeedRoute,
 })
 
+const projectsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/projects',
+  component: ProjectsRoute,
+})
+const docsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/docs',
+  component: DocsRoute,
+})
+const changelogRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/changelog',
+  component: ChangelogRoute,
+})
+const coordinationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/coordination',
+  component: CoordinationRoute,
+})
+const sessionRoute = createSessionDetailRoute(() => rootRoute)
+const agentDetailRoute = createAgentDetailRoute({ getParentRoute: () => rootRoute })
+
+// Remaining shell nav placeholders not yet built out (component registry,
+// deployment manager, access tokens, terminal sessions).
 const shellNavRoutes = [
-  { path: '/projects', title: 'Projects' },
-  { path: '/docs', title: 'Docs' },
-  { path: '/coordination', title: 'Coordination' },
   { path: '/component-registry', title: 'Component registry' },
   { path: '/deployments', title: 'Deployment manager' },
   { path: '/access-tokens', title: 'Access tokens' },
@@ -99,6 +127,12 @@ const placeholderRoutes = shellNavRoutes.map(({ path, title }) =>
 const routeTree = rootRoute.addChildren([
   indexRoute,
   feedRoute,
+  projectsRoute,
+  docsRoute,
+  changelogRoute,
+  coordinationRoute,
+  sessionRoute,
+  agentDetailRoute,
   ...placeholderRoutes,
   taskRoute,
   issueRoute,
