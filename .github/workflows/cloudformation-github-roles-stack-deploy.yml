@@ -1,0 +1,166 @@
+name: CloudFormation GitHub Roles Stack Deploy
+
+# ENC-TSK-L50 / ENC-PLN-068: 04-github-roles.yaml has no push-deploy lane.
+# Durable IAM fixes (EventBridge Scheduler for Rhythm Cycle) require updating the
+# live enceladus-github-roles stack. Plan/apply split with v3-prod gate per
+# DOC-B716E8FB10B6 Channel C + ENC-FTR-120 (ENC-TSK-J62/J64).
+
+on:
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: "CloudFormation stack name for 04-github-roles template"
+        type: string
+        required: false
+        default: "enceladus-github-roles"
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "Apply 04-github-roles.yaml to live IAM (scheduler grant / ENC-PLN-068)"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: cloudformation-github-roles-stack-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  TEMPLATE_FILE: infrastructure/cloudformation/04-github-roles.yaml
+  DEFAULT_STACK_NAME: enceladus-github-roles
+
+jobs:
+  plan:
+    name: Plan github-roles stack change-set
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      stack_name: ${{ steps.params.outputs.stack_name }}
+      has_changes: ${{ steps.changeset.outputs.has_changes }}
+      changeset_arn: ${{ steps.changeset.outputs.changeset_arn }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify backend deploy role secret is set
+        run: |
+          if [ -z "${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}" ]; then
+            echo "::error::AWS_BACKEND_ROLE_TO_ASSUME secret is not set or empty."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (BackendDeployRole)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment parameters
+        id: params
+        env:
+          INPUT_STACK_NAME: ${{ github.event.inputs.stack_name }}
+        run: |
+          set -euo pipefail
+          stack_name="${INPUT_STACK_NAME:-${DEFAULT_STACK_NAME}}"
+          echo "stack_name=${stack_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create github-roles stack change-set (no execute)
+        id: changeset
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --template-file "${TEMPLATE_FILE}" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --no-execute-changeset \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 04-github-roles/ 2>&1 | tee /tmp/plan.log
+
+          if grep -q "No changes to deploy" /tmp/plan.log; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "changeset_arn=" >> "${GITHUB_OUTPUT}"
+            {
+              echo "## github-roles stack plan — ${{ steps.params.outputs.stack_name }}"
+              echo "No changes to deploy."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          changeset_arn=$(grep -oE 'arn:aws:cloudformation:[^ "]*changeSet/[^ "]*' /tmp/plan.log | head -1)
+          if [ -z "${changeset_arn}" ]; then
+            echo "::error::Change-set creation output did not contain a change-set ARN."
+            exit 1
+          fi
+          echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          echo "changeset_arn=${changeset_arn}" >> "${GITHUB_OUTPUT}"
+
+      - name: Write change-set summary for the approval screen
+        if: steps.changeset.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## github-roles stack plan — ${{ steps.params.outputs.stack_name }}"
+            echo ""
+            echo "Change-set: \`${{ steps.changeset.outputs.changeset_arn }}\`"
+            echo ""
+            echo '```'
+            aws cloudformation describe-change-set \
+              --region "${AWS_REGION}" \
+              --change-set-name "${{ steps.changeset.outputs.changeset_arn }}" \
+              --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}' \
+              --output table
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Apply github-roles stack change-set
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: v3-prod
+
+    steps:
+      - name: Configure AWS credentials (BackendDeployRole)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Execute reviewed change-set
+        run: |
+          set -euo pipefail
+          changeset_type=$(aws cloudformation describe-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}" \
+            --query 'ChangeSetType' --output text 2>/dev/null || echo "UPDATE")
+          aws cloudformation execute-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}"
+          if [ "${changeset_type}" = "CREATE" ]; then
+            aws cloudformation wait stack-create-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${{ needs.plan.outputs.stack_name }}"
+          else
+            aws cloudformation wait stack-update-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${{ needs.plan.outputs.stack_name }}"
+          fi
+
+      - name: Verify stack status
+        run: |
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'Stacks[0].{Name:StackName,Status:StackStatus}' \
+            --output table
