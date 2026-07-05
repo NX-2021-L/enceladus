@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.2",
-  "updated_at": "2026-07-05T06:35:00Z",
-  "last_change_summary": "ENC-TSK-L14: migrate governance-audit + convergence-telemetry tracker stream triggers to EventBridge Pipes (Pipe->Lambda). Handler touch only; no governed record schema change — dictionary bump satisfies CI guard.",
+  "version": "2026-07-05.3",
+  "updated_at": "2026-07-05T06:50:00Z",
+  "last_change_summary": "ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional relation enforcement -- tracker_mutation PATCH now atomically mirrors newly-added related_task_ids/related_issue_ids/related_feature_ids onto each target's reverse field; document_api PUT/PATCH mirrors related_items onto each named tracker record's new related_document_ids field; new tracker.relate(source_id, target_id) MCP convenience action performs the append under one governance hash check. inverse_of declared across tracker.task/issue/feature/lesson and docstore.document.",
   "owners": [
     "enceladus-platform"
   ],
@@ -306,8 +306,9 @@
             "type": "string"
           },
           "definition": "IDs of related tasks. Cross-references for traceability.",
-          "usage_guidance": "tracker_set(field='related_task_ids', value=['ENC-TSK-NNN', ...]). Accepts list or JSON-stringified list.",
-          "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays (e.g. '[\"ENC-TSK-100\"]') and bare ID strings to proper DynamoDB List type. Prevents storage as DynamoDB S type instead of L type."
+          "usage_guidance": "tracker_set(field='related_task_ids', value=['ENC-TSK-NNN', ...]). Accepts list or JSON-stringified list. ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target task record's related_task_ids in the same request.",
+          "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays (e.g. '[\"ENC-TSK-100\"]') and bare ID strings to proper DynamoDB List type. Prevents storage as DynamoDB S type instead of L type.",
+          "inverse_of": "tracker.task.related_task_ids"
         },
         "related_issue_ids": {
           "type": "array",
@@ -315,8 +316,9 @@
             "type": "string"
           },
           "definition": "IDs of related issues. Cross-references for traceability.",
-          "usage_guidance": "tracker_set(field='related_issue_ids', value=['ENC-ISS-NNN', ...]). Accepts list or JSON-stringified list.",
-          "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+          "usage_guidance": "tracker_set(field='related_issue_ids', value=['ENC-ISS-NNN', ...]). Accepts list or JSON-stringified list. ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target issue record's related_task_ids in the same request.",
+          "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type.",
+          "inverse_of": "tracker.issue.related_task_ids"
         },
         "related_feature_ids": {
           "type": "array",
@@ -324,8 +326,9 @@
             "type": "string"
           },
           "definition": "IDs of related features. Cross-references for traceability.",
-          "usage_guidance": "tracker_set(field='related_feature_ids', value=['ENC-FTR-NNN', ...]). Accepts list or JSON-stringified list.",
-          "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+          "usage_guidance": "tracker_set(field='related_feature_ids', value=['ENC-FTR-NNN', ...]). Accepts list or JSON-stringified list. ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target feature record's related_task_ids in the same request.",
+          "patch_coercion": "ENC-ISS-059: The Lambda coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type.",
+          "inverse_of": "tracker.feature.related_task_ids"
         },
         "deploy_target": {
           "type": "enum",
@@ -407,6 +410,15 @@
           ],
           "definition": "ENC-TSK-I07: list of edges migrated from this record onto the canonical (superseding) record during supersession. Each entry: {rel_type, other_id, created_on_canonical(bool)}. Drives idempotent re-pointing (no duplicate edges on the canonical) and exact rollback on un-supersession. Server-written; read-only to clients.",
           "usage_guidance": "Read-only. Populated only when status=superseded."
+        },
+        "related_document_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "DOC-* document IDs that declare this record in their related_items.",
+          "usage_guidance": "Server-written only. ENC-TSK-L07 (B65 AC-5/AC-7): document_api's PUT/PATCH related_items handler atomically mirrors the document's own ID here (contains-check conditional append) whenever the document names this record in related_items. Not intended for direct tracker_set writes -- edit related_items on the document instead.",
+          "inverse_of": "docstore.document.related_items"
         }
       }
     },
@@ -461,7 +473,9 @@
             "type": "string"
           },
           "definition": "IDs of related tasks. Cross-references for traceability.",
-          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type.",
+          "inverse_of": "tracker.task.related_issue_ids",
+          "usage_guidance": "IDs of related tasks. Cross-references for traceability. ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target task record's related_issue_ids in the same request."
         },
         "related_issue_ids": {
           "type": "array",
@@ -469,7 +483,9 @@
             "type": "string"
           },
           "definition": "IDs of related issues. Cross-references for traceability.",
-          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type.",
+          "inverse_of": "tracker.issue.related_issue_ids",
+          "usage_guidance": "IDs of related issues. Cross-references for traceability. ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target issue record's related_issue_ids in the same request."
         },
         "related_feature_ids": {
           "type": "array",
@@ -477,7 +493,9 @@
             "type": "string"
           },
           "definition": "IDs of related features. Cross-references for traceability.",
-          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type.",
+          "inverse_of": "tracker.feature.related_issue_ids",
+          "usage_guidance": "IDs of related features. Cross-references for traceability. ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target feature record's related_issue_ids in the same request."
         },
         "hypothesis": {
           "type": "string",
@@ -542,6 +560,15 @@
           ],
           "definition": "ENC-TSK-I07: list of edges migrated from this record onto the canonical (superseding) record during supersession. Each entry: {rel_type, other_id, created_on_canonical(bool)}. Drives idempotent re-pointing (no duplicate edges on the canonical) and exact rollback on un-supersession. Server-written; read-only to clients.",
           "usage_guidance": "Read-only. Populated only when status=superseded."
+        },
+        "related_document_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "DOC-* document IDs that declare this record in their related_items.",
+          "usage_guidance": "Server-written only. ENC-TSK-L07 (B65 AC-5/AC-7): document_api's PUT/PATCH related_items handler atomically mirrors the document's own ID here (contains-check conditional append) whenever the document names this record in related_items. Not intended for direct tracker_set writes -- edit related_items on the document instead.",
+          "inverse_of": "docstore.document.related_items"
         }
       }
     },
@@ -597,7 +624,9 @@
             "type": "string"
           },
           "definition": "IDs of related tasks. Cross-references for traceability.",
-          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type.",
+          "inverse_of": "tracker.task.related_feature_ids",
+          "usage_guidance": "IDs of related tasks. Cross-references for traceability. ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target task record's related_feature_ids in the same request."
         },
         "related_issue_ids": {
           "type": "array",
@@ -605,7 +634,9 @@
             "type": "string"
           },
           "definition": "IDs of related issues. Cross-references for traceability.",
-          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type.",
+          "inverse_of": "tracker.issue.related_feature_ids",
+          "usage_guidance": "IDs of related issues. Cross-references for traceability. ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target issue record's related_feature_ids in the same request."
         },
         "related_feature_ids": {
           "type": "array",
@@ -613,7 +644,9 @@
             "type": "string"
           },
           "definition": "IDs of related features. Cross-references for traceability.",
-          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type."
+          "patch_coercion": "ENC-ISS-059: Coerces JSON-stringified arrays and bare ID strings to proper DynamoDB List type.",
+          "inverse_of": "tracker.feature.related_feature_ids",
+          "usage_guidance": "IDs of related features. Cross-references for traceability. ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target feature record's related_feature_ids in the same request."
         },
         "ogtm_required": {
           "type": "boolean",
@@ -636,6 +669,15 @@
           "default": false,
           "definition": "ENC-FTR-111 / ENC-TSK-H83 (Universal Arc-Walker Phase 1 circuit breaker). When true, the Universal Arc-Walker MUST NOT auto-advance this record across any lifecycle gate. Default false. The tracker_mutation write path auto-latches this true on any human-initiated non-forward transition (a regression / backward status move, or -- for tasks -- a coding-updates re-entry) and emits an Artifact-Genesis audit record (a history entry plus an EventBridge 'record.auto_walk_opt_out.latched' event). The arc-walker can never clear it (ENC-FTR-111 AC-2).",
           "usage_guidance": "Settable and clearable by humans or agents via execute tracker.set(field='auto_walk_opt_out', value=true|false); a 'true'/'false' string is coerced to a real DynamoDB BOOL. Auto-latched true by the write path on human-initiated non-forward transitions; no manual action required. The arc-walker (write_source provider/channel 'system:arc-walker') is forbidden from clearing it: tracker_mutation rejects walker-origin attempts to set it false with HTTP 403. Cleared only by an explicit non-walker tracker.set to false."
+        },
+        "related_document_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "DOC-* document IDs that declare this record in their related_items.",
+          "usage_guidance": "Server-written only. ENC-TSK-L07 (B65 AC-5/AC-7): document_api's PUT/PATCH related_items handler atomically mirrors the document's own ID here (contains-check conditional append) whenever the document names this record in related_items. Not intended for direct tracker_set writes -- edit related_items on the document instead.",
+          "inverse_of": "docstore.document.related_items"
         }
       }
     },
@@ -3972,7 +4014,10 @@
         ],
         "feature_flag": "ENABLE_TYPED_RELATIONSHIPS",
         "feature_flag_default": "false"
-      }
+      },
+      "notes": [
+        "ENC-TSK-L07: tracker.relate(source_id, target_id) is a DISTINCT, simpler convenience action for the flat related_task_ids/related_issue_ids/related_feature_ids/related_lesson_ids symmetric cross-reference fields -- not the typed relationship_type edge graph this entity describes. Use tracker.create_relationship for typed/directional edges (DESIGNS, IMPLEMENTS, superseded-by, ...); use tracker.relate for simple 'these two records reference each other' links."
+      ]
     },
     "context.node": {
       "description": "Context Node primitive for mathematically-optimized context assembly (ENC-FTR-050). Each node wraps a tracker record or document with scored metadata enabling greedy knapsack context packing within a token budget. Created and updated by DynamoDB Streams consumer on tracker mutations. Gated behind ENABLE_CONTEXT_NODES feature flag.",
@@ -4238,6 +4283,42 @@
             "principle"
           ],
           "definition": "Classification of the lesson's origin and nature."
+        },
+        "related_task_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "IDs of related tasks. Cross-references for traceability.",
+          "usage_guidance": "tracker_set(field='related_task_ids', value=['ENC-...']). ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target task record's related_lesson_ids in the same request.",
+          "inverse_of": "tracker.task.related_lesson_ids"
+        },
+        "related_issue_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "IDs of related issues. Cross-references for traceability.",
+          "usage_guidance": "tracker_set(field='related_issue_ids', value=['ENC-...']). ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target issue record's related_lesson_ids in the same request.",
+          "inverse_of": "tracker.issue.related_lesson_ids"
+        },
+        "related_feature_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "IDs of related features. Cross-references for traceability.",
+          "usage_guidance": "tracker_set(field='related_feature_ids', value=['ENC-...']). ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional -- tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID here onto the target feature record's related_lesson_ids in the same request.",
+          "inverse_of": "tracker.feature.related_lesson_ids"
+        },
+        "related_document_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "DOC-* document IDs that declare this record in their related_items.",
+          "usage_guidance": "Server-written only. ENC-TSK-L07 (B65 AC-5/AC-7): document_api's PUT/PATCH related_items handler atomically mirrors the document's own ID here (contains-check conditional append) whenever the document names this record in related_items. Not intended for direct tracker_set writes -- edit related_items on the document instead.",
+          "inverse_of": "docstore.document.related_items"
         }
       },
       "dynamodb_key_schema": {
@@ -5169,6 +5250,15 @@
           "type": "rule",
           "definition": "ENC-TSK-G06: graph_sync normalizes document stream images so INSERT/MODIFY and REMOVE project by the same bare document identity. REMOVE resolves Keys.record_id, Keys.document_id, then Keys.item_id, and falls back to OldImage fields before deleting the Neo4j node. This prevents DOC-* nodes from surviving a documents-table delete solely because the stream key lacked record_id.",
           "write_authority": "graph_sync Lambda (derived index behavior)."
+        },
+        "related_items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "definition": "Cross-references to governed records (ENC-TSK-*/ENC-ISS-*/ENC-FTR-*/ENC-LSN-*/ENC-PLN-*) this document relates to.",
+          "usage_guidance": "documents.put / documents.patch(field include related_items). ENC-TSK-L07 (B65 AC-5/AC-7): bidirectional -- document_api atomically mirrors this document's ID onto each named tracker record's related_document_ids in the same request (contains-check conditional append; best-effort, non-blocking to the document write).",
+          "inverse_of": "tracker.<task|issue|feature|lesson>.related_document_ids"
         }
       }
     },
@@ -7197,6 +7287,11 @@
   },
   "change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda -- nightly EventBridge (gamma, cron 06:00 UTC, after K41's 05:00 CEE scan) consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (fence_missing_language, metadata_field_missing) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent session involvement. DATA-SAFETY: only the deterministic whitelist is auto-remediated; ambiguous/content-changing warnings are left for agent review; every auto-patch is logged with before/after compliance_score. Dry-run default-on (GDMP_DRY_RUN=1) plus a 3-run io-approval ramp (GDMP_IO_APPROVAL_RUNS=3, GDMP_MUTATION_ENABLED=0) reuse the FTR-106 / ENC-TSK-K03 unlearning Lambda's S3 run-counter pattern verbatim. CEE_GDMP_HARD_DISABLED=1 kill switch ships ON by default. Idempotent: is_already_compliant guards against re-patching already-compliant documents. New entity corpus_entropy_gdmp_remediation.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "change_log": [
+    {
+      "version": "2026-07-05.3",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional relation enforcement -- tracker_mutation PATCH now atomically mirrors newly-added related_task_ids/related_issue_ids/related_feature_ids onto each target's reverse field; document_api PUT/PATCH mirrors related_items onto each named tracker record's new related_document_ids field; new tracker.relate(source_id, target_id) MCP convenience action performs the append under one governance hash check. inverse_of declared across tracker.task/issue/feature/lesson and docstore.document."
+    },
     {
       "version": "2026-07-02.32",
       "date": "2026-07-02",
