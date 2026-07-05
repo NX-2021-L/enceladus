@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# ENC-TSK-L39 — single-node OpenSearch bootstrap for gamma (t4g.small / arm64).
-# Installed by 10-opensearch-node.yaml UserData. Idempotent on re-run except first
-# cluster formation (guarded by marker file).
+# ENC-TSK-L39 single-node OpenSearch bootstrap (gamma, t4g.small/arm64). Idempotent except first cluster formation.
 set -euo pipefail
 
 exec > /var/log/opensearch-bootstrap.log 2>&1
 
 OPENSEARCH_VERSION="${OPENSEARCH_VERSION:-2.19.1}"
-OPENSEARCH_HOME="${OPENSEARCH_HOME:-/usr/share/opensearch}"
-OPENSEARCH_USER="${OPENSEARCH_USER:-opensearch}"
+OSH="${OPENSEARCH_HOME:-/usr/share/opensearch}"
+OSU="${OPENSEARCH_USER:-opensearch}"
 CLUSTER_NAME="${OPENSEARCH_CLUSTER_NAME:-enceladus-search-gamma}"
 NODE_NAME="${OPENSEARCH_NODE_NAME:-search-node-1}"
 ADMIN_PASSWORD_FILE="${OPENSEARCH_ADMIN_PASSWORD_FILE:-/root/.opensearch-admin-password}"
@@ -26,13 +24,13 @@ log "Installing prerequisites"
 # --allowerasing: AL2023's curl-minimal conflicts with the full curl package.
 dnf install -y --allowerasing java-17-amazon-corretto-headless tar gzip curl jq amazon-cloudwatch-agent
 
-if ! id "${OPENSEARCH_USER}" &>/dev/null; then
-  useradd --system --home-dir "${OPENSEARCH_HOME}" --shell /sbin/nologin "${OPENSEARCH_USER}"
+if ! id "${OSU}" &>/dev/null; then
+  useradd --system --home-dir "${OSH}" --shell /sbin/nologin "${OSU}"
 fi
 
-install -d -m 0755 "${OPENSEARCH_HOME}"
-install -d -m 0750 -o "${OPENSEARCH_USER}" -g "${OPENSEARCH_USER}" /var/lib/opensearch
-install -d -m 0750 -o "${OPENSEARCH_USER}" -g "${OPENSEARCH_USER}" /var/log/opensearch
+install -d -m 0755 "${OSH}"
+install -d -m 0750 -o "${OSU}" -g "${OSU}" /var/lib/opensearch
+install -d -m 0750 -o "${OSU}" -g "${OSU}" /var/log/opensearch
 
 TARBALL="opensearch-${OPENSEARCH_VERSION}-linux-arm64.tar.gz"
 URL="https://artifacts.opensearch.org/releases/bundle/opensearch/${OPENSEARCH_VERSION}/${TARBALL}"
@@ -40,17 +38,17 @@ URL="https://artifacts.opensearch.org/releases/bundle/opensearch/${OPENSEARCH_VE
 BUILD_DIR="/var/tmp/opensearch-build"
 TMP="${BUILD_DIR}/${TARBALL}"
 
-if [[ ! -x "${OPENSEARCH_HOME}/bin/opensearch" ]]; then
+if [[ ! -x "${OSH}/bin/opensearch" ]]; then
   log "Downloading OpenSearch ${OPENSEARCH_VERSION} (${URL})"
   mkdir -p "${BUILD_DIR}"
   curl -fsSL "${URL}" -o "${TMP}"
   tar -xzf "${TMP}" -C "${BUILD_DIR}"
-  rm -rf "${OPENSEARCH_HOME:?}"/*
-  cp -a "${BUILD_DIR}/opensearch-${OPENSEARCH_VERSION}"/* "${OPENSEARCH_HOME}/"
+  rm -rf "${OSH:?}"/*
+  cp -a "${BUILD_DIR}/opensearch-${OPENSEARCH_VERSION}"/* "${OSH}/"
   rm -rf "${BUILD_DIR}"
 fi
 
-chown -R "${OPENSEARCH_USER}:${OPENSEARCH_USER}" "${OPENSEARCH_HOME}" /var/lib/opensearch /var/log/opensearch
+chown -R "${OSU}:${OSU}" "${OSH}" /var/lib/opensearch /var/log/opensearch
 
 if [[ ! -f "${ADMIN_PASSWORD_FILE}" ]]; then
   openssl rand -base64 24 > "${ADMIN_PASSWORD_FILE}"
@@ -60,21 +58,18 @@ ADMIN_PASSWORD="$(tr -d '\n' < "${ADMIN_PASSWORD_FILE}")"
 export OPENSEARCH_INITIAL_ADMIN_PASSWORD="${ADMIN_PASSWORD}"
 
 log "Writing opensearch.yml"
-# Do NOT add any plugins.security.* key here: the demo installer's presence
-# check (ENC-TSK-L70) treats ANY such key as "already configured" and skips
-# TLS cert generation. Security is on by default; no explicit key needed.
-CFG="${OPENSEARCH_HOME}/config/opensearch.yml"
-TLS_NODE_PEM="${OPENSEARCH_HOME}/config/esnode.pem"
-# Failed prior boots can leave plugins.security.disabled on the EBS volume;
-# strip it so the demo installer actually regenerates TLS material on retry.
+# No plugins.security.* key here: demo installer (L70) treats its presence as already-configured and skips TLS cert gen.
+CFG="${OSH}/config/opensearch.yml"
+TLS_NODE_PEM="${OSH}/config/esnode.pem"
+# Strip any stale plugins.security.disabled so retries regenerate TLS material.
 if [[ ! -f "${TLS_NODE_PEM}" ]]; then
   log "TLS certs missing; stripping stale plugins.security.* keys before demo install"
   sed -i '/^plugins\.security\./d' "${CFG}"
 fi
-if ! grep -q 'ENC-TSK-L39 generated' "${CFG}"; then
+if ! grep -q 'L39-cfg' "${CFG}"; then
   cat >> "${CFG}" <<EOF
 
-########## ENC-TSK-L39 generated ##########
+# L39-cfg
 cluster.name: ${CLUSTER_NAME}
 node.name: ${NODE_NAME}
 discovery.type: single-node
@@ -82,26 +77,23 @@ network.host: 0.0.0.0
 path.data: /var/lib/opensearch
 path.logs: /var/log/opensearch
 action.auto_create_index: true
-########## END ENC-TSK-L39 generated ##########
+# end-L39-cfg
 EOF
 else
-  log "ENC-TSK-L39 opensearch.yml block already present; skipping append"
+  log "L39 cfg present; skip"
 fi
 
-install -d -m 0755 "${OPENSEARCH_HOME}/config/jvm.options.d"
-cat > "${OPENSEARCH_HOME}/config/jvm.options.d/heap.options" <<EOF
+install -d -m 0755 "${OSH}/config/jvm.options.d"
+cat > "${OSH}/config/jvm.options.d/heap.options" <<EOF
 -Xms${JVM_HEAP}
 -Xmx${JVM_HEAP}
 EOF
 
 log "Running opensearch-tar-install.sh (TLS + security plugin demo certs)"
-cd "${OPENSEARCH_HOME}"
+cd "${OSH}"
 chmod +x ./opensearch-tar-install.sh
-# Must run as the unprivileged opensearch user (OpenSearch refuses root).
-# --preserve-environment carries OPENSEARCH_INITIAL_ADMIN_PASSWORD. The script
-# execs into the OpenSearch server itself once certs are generated (L71) and
-# never returns, so background it and poll for the cert instead of waiting.
-runuser -u "${OPENSEARCH_USER}" --preserve-environment -- ./opensearch-tar-install.sh &
+# Runs as opensearch user (no root); execs into the server itself once certs are made (L71) and never returns -- background + poll.
+runuser -u "${OSU}" --preserve-environment -- ./opensearch-tar-install.sh &
 INSTALLER_PID=$!
 for i in $(seq 1 60); do
   if [[ -f "${TLS_NODE_PEM}" ]]; then
@@ -109,9 +101,8 @@ for i in $(seq 1 60); do
   fi
   sleep 5
 done
-# Superseded by the systemd unit below; ensure clean handoff.
 kill "${INSTALLER_PID}" 2>/dev/null || true
-pkill -u "${OPENSEARCH_USER}" || true
+pkill -u "${OSU}" || true
 sleep 2
 if [[ ! -f "${TLS_NODE_PEM}" ]]; then
   log "ERROR: demo installer did not generate TLS certs (${TLS_NODE_PEM} missing)"
@@ -127,13 +118,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=${OPENSEARCH_USER}
-Group=${OPENSEARCH_USER}
-Environment=OPENSEARCH_HOME=${OPENSEARCH_HOME}
-Environment=OPENSEARCH_PATH_CONF=${OPENSEARCH_HOME}/config
-Environment=OPENSEARCH_JAVA_HOME=${OPENSEARCH_HOME}/jdk
-WorkingDirectory=${OPENSEARCH_HOME}
-ExecStart=${OPENSEARCH_HOME}/bin/opensearch
+User=${OSU}
+Group=${OSU}
+Environment=OPENSEARCH_HOME=${OSH}
+Environment=OPENSEARCH_PATH_CONF=${OSH}/config
+Environment=OPENSEARCH_JAVA_HOME=${OSH}/jdk
+WorkingDirectory=${OSH}
+ExecStart=${OSH}/bin/opensearch
 Restart=on-failure
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
@@ -146,15 +137,14 @@ systemctl daemon-reload
 systemctl enable opensearch
 systemctl restart opensearch
 
-log "Waiting for cluster health GREEN"
-for i in $(seq 1 60); do
-  if curl -ks -u "admin:${ADMIN_PASSWORD}" "https://127.0.0.1:9200/_cluster/health" \
-    | jq -e '.status == "green" or .status == "yellow"' >/dev/null 2>&1; then
-    break
-  fi
-  sleep 5
-done
-
+_wait_green() {
+  log "Waiting for cluster health GREEN"
+  for i in $(seq 1 60); do
+    curl -ks -u "admin:${ADMIN_PASSWORD}" "https://127.0.0.1:9200/_cluster/health" | jq -e '.status=="green" or .status=="yellow"' >/dev/null 2>&1 && break
+    sleep 5
+  done
+}
+_wait_green
 curl -ks -u "admin:${ADMIN_PASSWORD}" "https://127.0.0.1:9200/_cluster/health?wait_for_status=green&timeout=120s" | tee /var/log/opensearch-cluster-health.json
 
 log "Applying default index template (number_of_replicas: 0)"
@@ -162,27 +152,19 @@ curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_index_temp
   -H 'Content-Type: application/json' \
   -d '{"index_patterns":["enceladus-*"],"template":{"settings":{"number_of_shards":1,"number_of_replicas":0}}}'
 
-# ENC-TSK-L44 audit logging: via opensearch.yml post-bootstrap (not the demo
-# installer path, per the L70 guard above); needs a restart to take effect.
-if ! grep -q 'ENC-TSK-L44 audit' "${CFG}"; then
+# ENC-TSK-L44 audit logging via opensearch.yml post-bootstrap (L70 guard above); needs a restart.
+if ! grep -q 'L44-audit' "${CFG}"; then
   log "Enabling security-plugin audit logging"
   cat >> "${CFG}" <<EOF
 
-########## ENC-TSK-L44 audit ##########
+# L44-audit
 plugins.security.audit.type: internal_opensearch
 plugins.security.audit.config.disabled_rest_categories: NONE
 plugins.security.audit.config.disabled_transport_categories: NONE
-########## END ENC-TSK-L44 audit ##########
+# end-L44-audit
 EOF
   systemctl restart opensearch
-  log "Waiting for cluster health GREEN after audit-log restart"
-  for i in $(seq 1 60); do
-    if curl -ks -u "admin:${ADMIN_PASSWORD}" "https://127.0.0.1:9200/_cluster/health" \
-      | jq -e '.status == "green" or .status == "yellow"' >/dev/null 2>&1; then
-      break
-    fi
-    sleep 5
-  done
+  _wait_green
 else
   log "ENC-TSK-L44 audit config already present; skipping restart"
 fi
@@ -190,9 +172,9 @@ fi
 # ENC-TSK-L44 fine-grained roles + Secrets Manager rotation; idempotent re-run.
 log "Provisioning fine-grained security roles + Secrets Manager credentials"
 
-AWS_REGION_RESOLVED="${AWS_REGION:-$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-west-2)}"
-SECRET_PREFIX="${OPENSEARCH_SECRET_PREFIX:-enceladus/opensearch}"
-SECRET_ENV="${OPENSEARCH_SECRET_ENV:-gamma}"
+RGN="${AWS_REGION:-$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-west-2)}"
+SECPFX="${OPENSEARCH_SECRET_PREFIX:-enceladus/opensearch}"
+SECENV="${OPENSEARCH_SECRET_ENV:-gamma}"
 
 if ! command -v aws &>/dev/null; then
   dnf install -y awscli || pip3 install --quiet awscli
@@ -200,31 +182,31 @@ fi
 
 _put_secret() {
   local username="$1" password="$2"
-  local secret_id="${SECRET_PREFIX}/${SECRET_ENV}-${username}"
+  local secret_id="${SECPFX}/${SECENV}-${username}"
   local payload
   payload="$(jq -n --arg u "${username}" --arg p "${password}" '{username:$u, password:$p}')"
-  if aws secretsmanager describe-secret --secret-id "${secret_id}" --region "${AWS_REGION_RESOLVED}" >/dev/null 2>&1; then
-    aws secretsmanager put-secret-value --secret-id "${secret_id}" --secret-string "${payload}" --region "${AWS_REGION_RESOLVED}" >/dev/null
+  if aws secretsmanager describe-secret --secret-id "${secret_id}" --region "${RGN}" >/dev/null 2>&1; then
+    aws secretsmanager put-secret-value --secret-id "${secret_id}" --secret-string "${payload}" --region "${RGN}" >/dev/null
   else
-    aws secretsmanager create-secret --name "${secret_id}" --secret-string "${payload}" --region "${AWS_REGION_RESOLVED}" >/dev/null
+    aws secretsmanager create-secret --name "${secret_id}" --secret-string "${payload}" --region "${RGN}" >/dev/null
   fi
   log "Secrets Manager: synced ${secret_id}"
 }
 
 _put_secret "admin" "${ADMIN_PASSWORD}"
 
-INDEXER_PASSWORD_FILE="/root/.opensearch-indexer-password"
-QUERY_PASSWORD_FILE="/root/.opensearch-query-password"
-if [[ ! -f "${INDEXER_PASSWORD_FILE}" ]]; then
-  openssl rand -base64 24 > "${INDEXER_PASSWORD_FILE}"
-  chmod 0600 "${INDEXER_PASSWORD_FILE}"
+IPWF="/root/.opensearch-indexer-password"
+QPWF="/root/.opensearch-query-password"
+if [[ ! -f "${IPWF}" ]]; then
+  openssl rand -base64 24 > "${IPWF}"
+  chmod 0600 "${IPWF}"
 fi
-if [[ ! -f "${QUERY_PASSWORD_FILE}" ]]; then
-  openssl rand -base64 24 > "${QUERY_PASSWORD_FILE}"
-  chmod 0600 "${QUERY_PASSWORD_FILE}"
+if [[ ! -f "${QPWF}" ]]; then
+  openssl rand -base64 24 > "${QPWF}"
+  chmod 0600 "${QPWF}"
 fi
-INDEXER_PASSWORD="$(tr -d '\n' < "${INDEXER_PASSWORD_FILE}")"
-QUERY_PASSWORD="$(tr -d '\n' < "${QUERY_PASSWORD_FILE}")"
+INDEXER_PASSWORD="$(tr -d '\n' < "${IPWF}")"
+QUERY_PASSWORD="$(tr -d '\n' < "${QPWF}")"
 
 _put_secret "indexer" "${INDEXER_PASSWORD}"
 _put_secret "query" "${QUERY_PASSWORD}"
