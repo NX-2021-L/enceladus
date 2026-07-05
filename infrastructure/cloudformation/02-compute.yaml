@@ -2367,36 +2367,68 @@ Resources:
       Enabled: true
 
   # ---------------------------------------------------------------------------
-  # DynamoDB Stream -> Lambda (Governance Audit)
+  # EventBridge Pipes (Tracker Stream -> Lambda) — replace direct stream glue
+  # ENC-TSK-L14 / B65 AC-5: migrate GovernanceAudit + ConvergenceTelemetry
+  # DynamoDB Stream EventSourceMappings to EventBridge Pipes.
   # ---------------------------------------------------------------------------
 
-  GovernanceAuditStreamTrigger:
-    Type: AWS::Lambda::EventSourceMapping
+  TrackerToGovernanceAuditPipe:
+    Type: AWS::Pipes::Pipe
     DeletionPolicy: Retain
     Properties:
-      EventSourceArn: !ImportValue
+      Name: !Sub "enceladus-tracker-to-governance-audit${EnvironmentSuffix}"
+      RoleArn: !GetAtt GovernanceAuditPipeRole.Arn
+      Source: !ImportValue
         Fn::Sub: ${DataStackName}-TrackerStreamArn
-      FunctionName: !Ref GovernanceAuditFunction
-      BatchSize: 25
-      MaximumBatchingWindowInSeconds: 30
-      StartingPosition: LATEST
-      Enabled: true
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+      Target: !GetAtt GovernanceAuditFunction.Arn
+      TargetParameters:
+        LambdaFunctionParameters:
+          InvocationType: FIRE_AND_FORGET
 
-  # ENC-FTR-086 Ph1 / ENC-TSK-I82: tracker DynamoDB Stream -> convergence fan-out.
-  ConvergenceStreamTrigger:
-    Type: AWS::Lambda::EventSourceMapping
+  GovernanceAuditPipeInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: TrackerToGovernanceAuditPipe
+    Properties:
+      FunctionName: !Ref GovernanceAuditFunction
+      Action: lambda:InvokeFunction
+      Principal: pipes.amazonaws.com
+      SourceArn: !GetAtt TrackerToGovernanceAuditPipe.Arn
+
+  TrackerToConvergenceTelemetryPipe:
+    Type: AWS::Pipes::Pipe
     DeletionPolicy: Retain
     Properties:
-      EventSourceArn: !ImportValue
+      Name: !Sub "enceladus-tracker-to-convergence-telemetry${EnvironmentSuffix}"
+      RoleArn: !GetAtt ConvergenceTelemetryPipeRole.Arn
+      Source: !ImportValue
         Fn::Sub: ${DataStackName}-TrackerStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+      Target: !GetAtt ConvergenceTelemetryFunction.Arn
+      TargetParameters:
+        LambdaFunctionParameters:
+          InvocationType: FIRE_AND_FORGET
+
+  ConvergenceTelemetryPipeInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: TrackerToConvergenceTelemetryPipe
+    Properties:
       FunctionName: !Ref ConvergenceTelemetryFunction
-      BatchSize: 25
-      MaximumBatchingWindowInSeconds: 30
-      StartingPosition: LATEST
-      FilterCriteria:
-        Filters:
-          - Pattern: '{"eventName":["INSERT","MODIFY"]}'
-      Enabled: true
+      Action: lambda:InvokeFunction
+      Principal: pipes.amazonaws.com
+      SourceArn: !GetAtt TrackerToConvergenceTelemetryPipe.Arn
 
   # ENC-FTR-086 Ph1 / ENC-TSK-I82: convergence SQS FIFO -> idempotent increment.
   ConvergenceSqsTrigger:
@@ -4280,19 +4312,6 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: DynamoDBStreamEventSource
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: ConsumeTrackerStream
-                Effect: Allow
-                Action:
-                  - dynamodb:GetRecords
-                  - dynamodb:GetShardIterator
-                  - dynamodb:DescribeStream
-                  - dynamodb:ListStreams
-                Resource: !ImportValue
-                  Fn::Sub: ${DataStackName}-TrackerStreamArn
         - PolicyName: CloudWatchLogs
           PolicyDocument:
             Version: '2012-10-17'
@@ -4717,6 +4736,41 @@ Resources:
   # D1 architectural separation: read-only on the tracker STREAM (never the
   # governance tables) + read/write only on its own counter table + consume/send
   # on its own FIFO queue. Governance Lambdas have no access to the counter table.
+  ConvergenceTelemetryPipeRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-convergence-telemetry-pipe-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pipes.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipeSourceTrackerStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+        - PolicyName: PipeTargetConvergenceTelemetryLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeConvergenceTelemetry
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ConvergenceTelemetryFunction.Arn
+
   ConvergenceTelemetryRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
@@ -4730,19 +4784,6 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: ReadTrackerStream
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: ConsumeTrackerStream
-                Effect: Allow
-                Action:
-                  - dynamodb:GetRecords
-                  - dynamodb:GetShardIterator
-                  - dynamodb:DescribeStream
-                  - dynamodb:ListStreams
-                Resource: !ImportValue
-                  Fn::Sub: ${DataStackName}-TrackerStreamArn
         - PolicyName: ConvergenceQueue
           PolicyDocument:
             Version: '2012-10-17'
@@ -5343,6 +5384,41 @@ Resources:
       Tags:
         - Key: Project
           Value: enceladus
+
+  GovernanceAuditPipeRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-governance-audit-pipe-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pipes.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipeSourceTrackerStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+        - PolicyName: PipeTargetGovernanceAuditLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeGovernanceAudit
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt GovernanceAuditFunction.Arn
 
   GraphPipeRole:
     Type: AWS::IAM::Role

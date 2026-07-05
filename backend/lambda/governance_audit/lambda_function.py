@@ -197,25 +197,41 @@ def _publish_alert(
 # Lambda handler
 # ---------------------------------------------------------------------------
 
-def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Process DynamoDB Streams events and detect write-source anomalies.
+def _collect_stream_records(event: Any) -> List[Dict[str, Any]]:
+    """Normalize DynamoDB stream records from direct, SQS-wrapped, or Pipe invokes."""
+    if isinstance(event, list):
+        return [item for item in event if isinstance(item, dict) and item.get("dynamodb")]
 
-    Supports both direct DynamoDB Streams trigger and SQS-wrapped events.
-    """
-    records: List[Dict[str, Any]] = []
+    if not isinstance(event, dict):
+        return []
 
-    # Handle SQS-wrapped events (EventBridge Pipe -> SQS -> Lambda)
     if "Records" in event and event["Records"]:
         first = event["Records"][0]
         if first.get("eventSource") == "aws:sqs":
+            records: List[Dict[str, Any]] = []
             for sqs_record in event["Records"]:
                 body = json.loads(sqs_record.get("body", "{}"))
                 if isinstance(body, list):
                     records.extend(body)
                 elif isinstance(body, dict) and "dynamodb" in body:
                     records.append(body)
-        elif first.get("eventSource") == "aws:dynamodb":
-            records = event["Records"]
+            return records
+        if first.get("eventSource") == "aws:dynamodb":
+            return event["Records"]
+
+    if "dynamodb" in event:
+        return [event]
+
+    return []
+
+
+def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Process DynamoDB Streams events and detect write-source anomalies.
+
+    Supports direct DynamoDB Streams triggers, SQS-wrapped events, and
+    EventBridge Pipe -> Lambda invocations (ENC-TSK-L14).
+    """
+    records = _collect_stream_records(event)
 
     total = len(records)
     anomalies = 0
