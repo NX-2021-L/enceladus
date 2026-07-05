@@ -103,6 +103,8 @@ jobs:
       function_name_map_json: ${{ steps.manifest.outputs.function_name_map_json }}
       environment_suffix:    ${{ steps.manifest.outputs.environment_suffix }}
       codedeploy_app_name:   ${{ steps.manifest.outputs.codedeploy_app_name }}
+      full_scope:            ${{ steps.affected.outputs.full_scope }}
+      affected_functions_json: ${{ steps.affected.outputs.affected_functions_json }}
 
     steps:
       # ENC-TSK-I60: pin to the target SHA so the `find backend/lambda` probe
@@ -176,6 +178,28 @@ jobs:
           echo "Target=$TARGET  Arch=$ARCH  Runtime=$RUNTIME  Role=$ROLE"
           echo "function_name_map: $(echo "$FNMAP_JSON" | python3 -c 'import json,sys; m=json.load(sys.stdin); print(f"{len(m)} entries")')"
 
+      - name: Compute affected-set (ENC-TSK-J40)
+        id: affected
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.DM_GITHUB_READ_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          python3 tools/compute_affected_targets.py \
+            --environment "${{ steps.manifest.outputs.environment }}" \
+            --head-sha "${{ steps.sha.outputs.commit_sha }}" \
+            --repo "${{ github.repository }}"
+
+      - name: Assert component deploy_targets coverage (ENC-TSK-J40 AC-2)
+        if: steps.affected.outputs.full_scope == 'false'
+        shell: bash
+        env:
+          COORDINATION_INTERNAL_API_KEY: ${{ secrets.COORDINATION_INTERNAL_API_KEY }}
+        run: |
+          set -euo pipefail
+          python3 tools/assert_deploy_target_coverage.py \
+            --affected-functions-json '${{ steps.affected.outputs.affected_functions_json }}'
+
       - name: Configure AWS credentials (build role — S3 artifact probe)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -192,13 +216,40 @@ jobs:
           PY="${{ steps.manifest.outputs.py_version }}"
           KEY_PREFIX="${{ env.ARTIFACT_KEY_PREFIX }}/${ARCH}-py${PY}"
           BUCKET="${{ env.ARTIFACT_BUCKET }}"
+          FULL_SCOPE="${{ steps.affected.outputs.full_scope }}"
+          AFFECTED_JSON='${{ steps.affected.outputs.affected_functions_json }}'
 
-          mapfile -t FNS < <(find backend/lambda -maxdepth 2 -name lambda_function.py \
+          mapfile -t ALL_FNS < <(find backend/lambda -maxdepth 2 -name lambda_function.py \
             | sed -E 's|backend/lambda/([^/]+)/lambda_function.py|\1|' | sort -u)
 
           # mcp_code (enceladus-mcp-code) has no lambda_function.py — it is packaged
           # by _build.yml build-mcp-code from tools/enceladus-mcp-server/ (ENC-TSK-I39).
-          FNS+=("mcp_code")
+          ALL_FNS+=("mcp_code")
+
+          # ENC-TSK-J40 AC-1/AC-4: narrow to the affected set unless full_scope
+          # (no prior deployment, cross-cutting change, or diff failure --
+          # "ambiguity widens, never narrows", see tools/compute_affected_targets.py).
+          if [[ "$FULL_SCOPE" == "true" ]]; then
+            FNS=("${ALL_FNS[@]}")
+            echo "Full-scope deploy: probing all ${#FNS[@]} functions."
+          else
+            mapfile -t AFFECTED < <(echo "$AFFECTED_JSON" | python3 -c 'import json,sys; [print(f) for f in json.load(sys.stdin)]')
+            FNS=()
+            for fn in "${ALL_FNS[@]}"; do
+              for a in "${AFFECTED[@]}"; do
+                if [[ "$fn" == "$a" ]]; then
+                  FNS+=("$fn")
+                  break
+                fi
+              done
+            done
+            echo "Narrowed deploy: probing ${#FNS[@]} of ${#ALL_FNS[@]} functions (affected-set: ${AFFECTED[*]:-none})."
+            if [[ ${#FNS[@]} -eq 0 ]]; then
+              echo "No affected functions and not full_scope -- nothing to deploy."
+              echo "version_ids_json={}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
 
           # ENC-ISS-494: build-mcp-code always builds x86_64-py3.11 only (matches
           # v3-prod's arch by coincidence), regardless of the target environment's
