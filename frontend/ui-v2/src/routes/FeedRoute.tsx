@@ -30,6 +30,8 @@ import {
 import { buildSearchCorpus } from '../search/searchCorpus'
 import { sortSearchHits } from '../search/sortSearchHits'
 import { useTieredSearch } from '../search/useTieredSearch'
+import { getCacheEngine } from '../sync/cacheEngine'
+import { useCacheEngineState } from '../sync/CacheEngineProvider'
 import {
   useKeystrokeSuggestionTelemetry,
   useRequestFirstPageTelemetry,
@@ -81,7 +83,14 @@ export function FeedRoute() {
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const { events, isHydrating } = useRealtimeFeed()
-  const corpus = buildSearchCorpus(events, projects)
+  const { isWarm } = useCacheEngineState()
+  const corpus = useMemo(() => {
+    const fromEvents = buildSearchCorpus(events, projects)
+    if (!isWarm) return fromEvents
+    const byId = new Map(getCacheEngine().searchIndex.all().map((row) => [row.recordId, row]))
+    for (const row of fromEvents) byId.set(row.recordId, row)
+    return [...byId.values()]
+  }, [events, projects, isWarm])
   const projectId = projects[0]?.project_id ?? 'enceladus'
 
   const tiered = useTieredSearch({ projectId, query: q }, corpus)
@@ -95,22 +104,29 @@ export function FeedRoute() {
   const requestKey = `${q}|${f}|${op}|${sort}`
   useRequestFirstPageTelemetry(requestKey, hybridEnabled, tiered.hybridPending)
 
-  const searchSuggestions = useMemo(
-    () =>
-      corpus
-        .filter((row) => {
-          const needle = q.trim().toLowerCase()
-          if (!needle) return true
-          return row.recordId.toLowerCase().includes(needle) || row.title.toLowerCase().includes(needle)
-        })
-        .slice(0, 12)
+  const searchSuggestions = useMemo(() => {
+    if (isWarm) {
+      return getCacheEngine()
+        .searchIndex.suggest(q, 12)
         .map((row) => ({
           value: row.recordId,
           description: row.title,
           tag: row.recordType,
-        })),
-    [corpus, q],
-  )
+        }))
+    }
+    return corpus
+      .filter((row) => {
+        const needle = q.trim().toLowerCase()
+        if (!needle) return true
+        return row.recordId.toLowerCase().includes(needle) || row.title.toLowerCase().includes(needle)
+      })
+      .slice(0, 12)
+      .map((row) => ({
+        value: row.recordId,
+        description: row.title,
+        tag: row.recordType,
+      }))
+  }, [corpus, q, isWarm])
 
   const suggestionsKey = searchSuggestions.map((row) => row.value).join(',')
   const { markKeystroke } = useKeystrokeSuggestionTelemetry(suggestionsKey)

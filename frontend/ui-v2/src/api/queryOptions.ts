@@ -13,7 +13,10 @@
  */
 
 import { queryOptions } from '@tanstack/react-query'
-import { fetchDocumentRecord, fetchTrackerRecord } from './client'
+import {
+  readThroughDocumentRecord,
+  readThroughTrackerRecord,
+} from '../sync/readThrough'
 import type {
   Document,
   Feature,
@@ -36,41 +39,41 @@ export const taskQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
     queryKey: recordKeys.detail('task', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Task>('task', projectId, recordId, { signal }),
+      readThroughTrackerRecord<Task>('task', projectId, recordId, { signal }),
   })
 
 export const issueQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
     queryKey: recordKeys.detail('issue', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Issue>('issue', projectId, recordId, { signal }),
+      readThroughTrackerRecord<Issue>('issue', projectId, recordId, { signal }),
   })
 
 export const featureQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
     queryKey: recordKeys.detail('feature', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Feature>('feature', projectId, recordId, { signal }),
+      readThroughTrackerRecord<Feature>('feature', projectId, recordId, { signal }),
   })
 
 export const planQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
     queryKey: recordKeys.detail('plan', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Plan>('plan', projectId, recordId, { signal }),
+      readThroughTrackerRecord<Plan>('plan', projectId, recordId, { signal }),
   })
 
 export const lessonQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
     queryKey: recordKeys.detail('lesson', projectId, recordId),
     queryFn: ({ signal }) =>
-      fetchTrackerRecord<Lesson>('lesson', projectId, recordId, { signal }),
+      readThroughTrackerRecord<Lesson>('lesson', projectId, recordId, { signal }),
   })
 
 export const documentQueryOptions = (recordId: string, projectId = 'global') =>
   queryOptions({
     queryKey: recordKeys.detail('document', projectId, recordId),
-    queryFn: ({ signal }) => fetchDocumentRecord<Document>(recordId, { signal }),
+    queryFn: ({ signal }) => readThroughDocumentRecord<Document>(recordId, { signal }),
   })
 
 /**
