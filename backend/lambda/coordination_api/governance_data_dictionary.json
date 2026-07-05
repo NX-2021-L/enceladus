@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.18",
-  "updated_at": "2026-07-05T11:56:00Z",
-  "last_change_summary": "ENC-TSK-K26 hotfix: vendor record_extensions.py into feed_query/tracker_mutation function zips via .build_extras until enceladus-shared layer :11 ships.",
+  "version": "2026-07-05.19",
+  "updated_at": "2026-07-05T12:20:00Z",
+  "last_change_summary": "ENC-TSK-K26 hotfix: tracker GET promotes item_id to {type}_id before record_extensions attach so context_node and typed_relationships appear on detail pages.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7497,8 +7497,13 @@
       "telemetry_eligible": true
     }
   },
-  "change_summary": "ENC-TSK-K26 hotfix: feed_query + tracker_mutation vendor record_extensions.py via .build_extras (enceladus-shared:10 lacks the module); import path uses top-level record_extensions until layer :11.",
+  "change_summary": "ENC-TSK-K26 hotfix: tracker GET promotes item_id to typed {type}_id before record_extensions attach (detail pages lacked context_node while feed worked).",
   "change_log": [
+    {
+      "version": "2026-07-05.19",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-K26 hotfix: tracker_mutation GET maps item_id -> plan_id (etc.) before attach_record_extensions — gamma detail pages were missing context_node because _deser_item only exposes item_id."
+    },
     {
       "version": "2026-07-05.18",
       "date": "2026-07-05",

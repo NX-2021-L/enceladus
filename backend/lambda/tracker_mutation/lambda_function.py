@@ -2685,6 +2685,11 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
         return _error(404, f"Record not found: {record_id}")
 
     id_key = f"{record_type}_id"
+    # _deser_item exposes item_id; feed_query maps that to {type}_id. Align GET
+    # responses so record_extensions can resolve the canonical id (ENC-TSK-K26).
+    canonical_id = str(item.get(id_key) or item.get("item_id") or record_id or "")
+    if canonical_id and not item.get(id_key):
+        item[id_key] = canonical_id
     try:
         from record_extensions import (
             attach_record_extensions,

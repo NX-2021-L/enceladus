@@ -217,6 +217,15 @@ class RecordExtensionsTests(unittest.TestCase):
         self.assertGreater(ctx["structural_importance"], 0)
         self.assertGreater(ctx["information_density"], 0)
 
+    def test_attach_record_extensions_requires_typed_id_key(self):
+        """Tracker GET deserializes item_id only; handler must promote to plan_id first."""
+        record = {"item_id": "ENC-PLN-006", "title": "Plan", "updated_at": "2026-07-01T00:00:00Z"}
+        attach_record_extensions([record], "plan_id", "plan", {}, max_degree=1)
+        self.assertNotIn("context_node", record)
+        record["plan_id"] = record["item_id"]
+        attach_record_extensions([record], "plan_id", "plan", {}, max_degree=1)
+        self.assertIn("context_node", record)
+
     def test_compute_freshness_missing_timestamp_defaults(self):
         self.assertEqual(compute_freshness(None, "task"), 0.5)
 
