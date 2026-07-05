@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.10",
-  "updated_at": "2026-07-05T08:30:00Z",
-  "last_change_summary": "ENC-TSK-L27 (B67 WaveC): version_seq + version-seq-index GSI + GET /api/v1/feed/delta incremental sync. ENC-TSK-L10 (B64 Ph3): mcp_streaming_gateway Lambda + McpStreamingRestApi (gamma-only).",
+  "version": "2026-07-05.11",
+  "updated_at": "2026-07-05T08:41:00Z",
+  "last_change_summary": "ENC-TSK-L58 (L10 follow-up): added backend/lambda/mcp_streaming_gateway/lambda_function.py as a build-discovery marker (Gen2 requires this exact filename to package a Lambda dir; the real entry point remains asgi_app.py via the AWS Lambda Web Adapter). No new schema/behavior -- the handler only exists to be discovered and raises if ever actually invoked directly.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7398,6 +7398,11 @@
   },
   "change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda -- nightly EventBridge (gamma, cron 06:00 UTC, after K41's 05:00 CEE scan) consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (fence_missing_language, metadata_field_missing) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent session involvement. DATA-SAFETY: only the deterministic whitelist is auto-remediated; ambiguous/content-changing warnings are left for agent review; every auto-patch is logged with before/after compliance_score. Dry-run default-on (GDMP_DRY_RUN=1) plus a 3-run io-approval ramp (GDMP_IO_APPROVAL_RUNS=3, GDMP_MUTATION_ENABLED=0) reuse the FTR-106 / ENC-TSK-K03 unlearning Lambda's S3 run-counter pattern verbatim. CEE_GDMP_HARD_DISABLED=1 kill switch ships ON by default. Idempotent: is_already_compliant guards against re-patching already-compliant documents. New entity corpus_entropy_gdmp_remediation.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "change_log": [
+    {
+      "version": "2026-07-05.11",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L58 (L10 follow-up): added backend/lambda/mcp_streaming_gateway/lambda_function.py as a build-discovery marker (Gen2 requires this exact filename to package a Lambda dir; the real entry point remains asgi_app.py via the AWS Lambda Web Adapter). No new schema/behavior -- the handler only exists to be discovered and raises if ever actually invoked directly."
+    },
     {
       "version": "2026-07-05.9",
       "date": "2026-07-05",
