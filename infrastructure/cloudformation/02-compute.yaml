@@ -230,6 +230,7 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           COORDINATION_TABLE: !Sub "coordination-requests${EnvironmentSuffix}"
           TRACKER_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          RELATIONSHIPS_TABLE: !Sub "enceladus-relationships${EnvironmentSuffix}"
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           # ENC-TSK-J57: DocumentsTableRead/DocumentsTableCandidateDecisionWrite grant
           # access to documents${EnvironmentSuffix}, but this env var was never wired
@@ -328,6 +329,7 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          RELATIONSHIPS_TABLE: !Sub "enceladus-relationships${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
@@ -646,6 +648,7 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
+          RELATIONSHIPS_TABLE: !Sub "enceladus-relationships${EnvironmentSuffix}"
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           FEED_PUBLISHER_FUNCTION: !Sub "devops-feed-publisher${EnvironmentSuffix}"
@@ -3219,6 +3222,18 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: RelationshipsTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-relationships${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-relationships${EnvironmentSuffix}/index/*"
               - Sid: ProjectsTableRead
                 Effect: Allow
                 Action:
@@ -3489,6 +3504,19 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              - Sid: RelationshipsTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-relationships${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-relationships${EnvironmentSuffix}/index/*"
         - PolicyName: projects-read
           PolicyDocument:
             Version: '2012-10-17'
@@ -3897,6 +3925,8 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-relationships${EnvironmentSuffix}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-relationships${EnvironmentSuffix}/index/*"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/projects${EnvironmentSuffix}/index/*"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/documents${EnvironmentSuffix}"
