@@ -3021,7 +3021,7 @@ Resources:
         Fn::Sub: ${DataStackName}-SearchIndexQueueArn
       TargetParameters:
         SqsQueueParameters:
-          MessageGroupId: tracker
+          MessageGroupId: $.dynamodb.NewImage.project_id.S
           MessageDeduplicationId: $.dynamodb.Keys.record_id.S
 
   DocumentsToSearchIndexPipe:
