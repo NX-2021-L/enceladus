@@ -1,7 +1,7 @@
 import type { RecordType } from '../types/records'
 import * as idb from './idbStore'
 import { CorpusSearchIndex } from './searchIndex'
-import { cacheKey, shouldAcceptVersion, versionSeqFromUpdatedAt } from './recordKey'
+import { cacheKey, shouldAcceptVersion, versionSeqFromItem, versionSeqFromUpdatedAt } from './recordKey'
 import type { FeedCorpusItem, Tier1Record, Tier2Record } from './types'
 import { DEFAULT_CACHE_BUDGET } from './types'
 
@@ -15,7 +15,7 @@ function normalizeRecordType(raw: string): RecordType | null {
 export function corpusItemToTier1(item: FeedCorpusItem): Tier1Record | null {
   const recordType = normalizeRecordType(item.record_type)
   if (!recordType) return null
-  const versionSeq = versionSeqFromUpdatedAt(item.updated_at)
+  const versionSeq = versionSeqFromItem(item)
   return {
     projectId: item.project_id || (recordType === 'document' ? 'global' : 'enceladus'),
     recordId: item.record_id,

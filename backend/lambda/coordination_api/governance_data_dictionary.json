@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.8",
-  "updated_at": "2026-07-05T08:19:00Z",
-  "last_change_summary": "ENC-TSK-L29 (B67 Search2.0 WaveC / DOC-77D6C714867E §15m): appsync_feed_publisher now attaches a full record body (deserialized NewImage) to the /records/{recordId} channel's event only -- /feed/updates and /projects/{id} stay at the fixed AC-23 lightweight payload. New entity appsync_feed_publisher.full_record_body_l29.",
+  "version": "2026-07-05.9",
+  "updated_at": "2026-07-05T08:27:00Z",
+  "last_change_summary": "ENC-TSK-L27 (B67 WaveC / DOC-77D6C714867E §9C/§10.3): monotonic version_seq + version-seq-index GSI on devops-project-tracker; GET /api/v1/feed/delta?since=<version_seq> returns changed corpus items + delete tombstones; ui-v2 cache gap-heals incrementally.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3458,6 +3458,23 @@
         "attrs": {
           "type": "object",
           "definition": "Compact per-record attribute map: status, priority, category, severity (issues), tags (documents), document_subtype, subtypepattern."
+        }
+      }
+    },
+    "feed_query.delta": {
+      "description": "ENC-TSK-L27 (B67 WaveC / DOC-77D6C714867E §9C/§10.3): GET /api/v1/feed/delta?since=<version_seq> returns incremental corpus changes ordered by monotonic tracker.version_seq via the version-seq-index GSI (feed_scope=global). Response includes changed Tier-1 corpus items (with version_seq), delete tombstones, and latest_version_seq watermark for client gap-healing. Distinct from legacy GET /api/v1/feed?since=<ISO8601> incremental path.",
+      "fields": {
+        "since": {
+          "type": "integer",
+          "definition": "Non-negative integer version_seq watermark. Returns all tracker rows and feed_tombstone rows with version_seq strictly greater than since."
+        },
+        "latest_version_seq": {
+          "type": "integer",
+          "definition": "High-water version_seq observed in this response; clients persist and pass on the next delta poll."
+        },
+        "tombstones": {
+          "type": "array",
+          "definition": "Delete/evict hints: {record_key, record_id, record_type, project_id, version_seq} for feed_tombstone rows and stale-closed records."
         }
       }
     },

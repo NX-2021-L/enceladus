@@ -610,6 +610,13 @@ Resources:
       RouteKey: GET /api/v1/feed/corpus
       Target: !Sub integrations/${FeedQueryIntegration}
 
+  RouteFeedDelta:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/feed/delta
+      Target: !Sub integrations/${FeedQueryIntegration}
+
   RouteFeedRefresh:
     Type: AWS::ApiGatewayV2::Route
     Properties:
