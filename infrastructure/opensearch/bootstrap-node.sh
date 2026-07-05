@@ -279,5 +279,88 @@ curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_s
   -H 'Content-Type: application/json' \
   -d '{"backend_roles": ["query_backend"], "users": ["query"]}'
 
+# ENC-TSK-L45 -- CloudWatch monitoring (AC-1). Standard EC2 metrics (CPUUtilization,
+# StatusCheckFailed) need no agent; disk-used-percent needs the CloudWatch Agent;
+# JVM heap has no native EC2/agent metric, so it is pushed as a custom metric by a
+# small cron script polling OpenSearch's own _nodes/stats API. Idempotent: config
+# files and the cron entry are simply (re)written on every fresh bootstrap.
+log "Configuring CloudWatch Agent (disk + heartbeat) and JVM heap custom-metric cron"
+
+CW_NAMESPACE="Enceladus/OpenSearch"
+CW_DIMENSIONS="EnvironmentSuffix=${EnvironmentSuffix:-${OPENSEARCH_SECRET_ENV:-gamma}}"
+
+mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
+{
+  "metrics": {
+    "namespace": "${CW_NAMESPACE}",
+    "append_dimensions": {
+      "InstanceId": "\${aws:InstanceId}"
+    },
+    "aggregation_dimensions": [["InstanceId", "path"], ["InstanceId"]],
+    "metrics_collected": {
+      "disk": {
+        "measurement": ["used_percent"],
+        "resources": ["/"],
+        "ignore_file_system_types": ["sysfs", "devtmpfs", "tmpfs"],
+        "drop_device": true
+      },
+      "mem": {
+        "measurement": ["mem_used_percent"]
+      },
+      "procstat": [
+        {
+          "pattern": "opensearch",
+          "measurement": ["cpu_usage", "memory_rss"]
+        }
+      ]
+    }
+  }
+}
+EOF
+
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+cat > /usr/local/bin/opensearch-jvm-heartbeat.sh <<'HEARTBEAT'
+#!/usr/bin/env bash
+set -euo pipefail
+ADMIN_PASSWORD_FILE="${OPENSEARCH_ADMIN_PASSWORD_FILE:-/root/.opensearch-admin-password}"
+NAMESPACE="${CW_NAMESPACE:-Enceladus/OpenSearch}"
+REGION="$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-west-2)"
+INSTANCE_ID="$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo unknown)"
+ADMIN_PASSWORD="$(tr -d '\n' < "${ADMIN_PASSWORD_FILE}" 2>/dev/null || true)"
+
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+  exit 0
+fi
+
+STATS="$(curl -ks -m 5 -u "admin:${ADMIN_PASSWORD}" "https://127.0.0.1:9200/_nodes/stats/jvm" 2>/dev/null || true)"
+if [[ -z "${STATS}" ]]; then
+  # OpenSearch unreachable -- push NodeUp=0 so the node-down alarm can fire;
+  # do NOT push a JVMHeapPercent point (missing data, not a false zero).
+  aws cloudwatch put-metric-data --region "${REGION}" --namespace "${NAMESPACE}" \
+    --metric-data "MetricName=NodeUp,Value=0,Unit=Count,Dimensions=[{Name=InstanceId,Value=${INSTANCE_ID}}]"
+  exit 0
+fi
+
+HEAP_PCT="$(echo "${STATS}" | jq -r '.nodes | to_entries[0].value.jvm.mem.heap_used_percent // empty')"
+
+aws cloudwatch put-metric-data --region "${REGION}" --namespace "${NAMESPACE}" \
+  --metric-data "MetricName=NodeUp,Value=1,Unit=Count,Dimensions=[{Name=InstanceId,Value=${INSTANCE_ID}}]"
+
+if [[ -n "${HEAP_PCT}" ]]; then
+  aws cloudwatch put-metric-data --region "${REGION}" --namespace "${NAMESPACE}" \
+    --metric-data "MetricName=JVMHeapPercent,Value=${HEAP_PCT},Unit=Percent,Dimensions=[{Name=InstanceId,Value=${INSTANCE_ID}}]"
+fi
+HEARTBEAT
+chmod +x /usr/local/bin/opensearch-jvm-heartbeat.sh
+
+cat > /etc/cron.d/opensearch-jvm-heartbeat <<EOF
+* * * * * root CW_NAMESPACE="${CW_NAMESPACE}" /usr/local/bin/opensearch-jvm-heartbeat.sh >> /var/log/opensearch-jvm-heartbeat.log 2>&1
+EOF
+chmod 0644 /etc/cron.d/opensearch-jvm-heartbeat
+
 touch "${MARKER}"
 log "Bootstrap complete"
