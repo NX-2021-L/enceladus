@@ -15,10 +15,15 @@ single-node OpenSearch cluster provisioned by ENC-TSK-L39
   current physical index. `records_write` is the alias's `is_write_index`.
 - **L41** (indexer, not yet built) must write exclusively via `records_write`.
 - **L43** (query layer, not yet built) must read exclusively via `records_read`.
-- To reindex (mapping change, etc.): create `records_v{n+1}`, backfill, then
-  atomically repoint both aliases via `_aliases` (as `apply_records_index.py`
-  does for the initial version) and delete the old physical index once
-  traffic has drained.
+- To reindex (mapping change, etc.):
+  1. `apply_records_index.py --mode create-only --version {n+1}` — creates
+     `records_v{n+1}` without touching aliases (read traffic stays on current index).
+  2. Invoke `devops-opensearch-backfill` with `"target_index": "records_v{n+1}"`
+     (ENC-TSK-L42) to bulk-load the full corpus into the new physical index.
+  3. `apply_records_index.py --mode swap --version {n+1}` — atomically repoint
+     `records_read` and `records_write` via `_aliases` (zero read downtime).
+  4. Optionally `--delete-old` on step 3 to drop the superseded physical index.
+  Re-runs are idempotent: backfill uses the same external-version contract as L41.
 
 ## Schema (`index-templates/records-v1.json`)
 
