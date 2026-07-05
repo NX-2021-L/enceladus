@@ -41,11 +41,17 @@ def _request(host, method, path, admin_password, body=None):
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    def _parse(raw):
+        # HEAD responses (and some error responses) have no body.
+        if not raw:
+            return {}
+        return json.loads(raw)
+
     try:
         with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-            return resp.status, json.loads(resp.read())
+            return resp.status, _parse(resp.read())
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
+        return exc.code, _parse(exc.read())
 
 
 def main():
