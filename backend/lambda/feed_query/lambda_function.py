@@ -4,6 +4,7 @@ Lambda API for Enceladus feed read and subscription lifecycle.
 
 Routes (via API Gateway proxy):
     GET     /api/v1/feed
+    GET     /api/v1/feed/corpus
     POST    /api/v1/feed/refresh
     POST    /api/v1/feed/subscriptions
     GET     /api/v1/feed/subscriptions/{subscriptionId}
@@ -22,6 +23,7 @@ Environment variables:
     COORDINATION_TABLE        default: coordination-requests
     DYNAMODB_REGION           default: us-west-2
     PROJECTS_TABLE            default: projects
+    DOCUMENTS_TABLE           default: documents
 """
 
 from __future__ import annotations
@@ -39,6 +41,8 @@ import urllib.request
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
+
+import corpus as feed_corpus
 
 try:
     import jwt
@@ -68,6 +72,7 @@ SUBSCRIPTIONS_TABLE = os.environ.get("SUBSCRIPTIONS_TABLE", "feed-subscriptions"
 COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-west-2")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 FEED_PUBLISHER_FUNCTION = os.environ.get("FEED_PUBLISHER_FUNCTION", "devops-feed-publisher")
@@ -111,6 +116,10 @@ _JWKS_TTL = 3600.0
 _project_cache: Optional[List[Dict[str, str]]] = None
 _project_cache_at: float = 0.0
 _PROJECT_CACHE_TTL = 300.0
+
+_corpus_cache_entries: Optional[List[Dict[str, Any]]] = None
+_corpus_cache_at: float = 0.0
+_CORPUS_CACHE_TTL = 30.0
 
 _ddb = None
 
@@ -1226,6 +1235,125 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
     return all_tasks, all_issues, all_features, all_lessons, all_plans
 
 
+def _query_corpus_tracker_records() -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+]:
+    """Load the full tracker corpus without per-type refresh caps (ENC-TSK-L23)."""
+    ddb = _get_ddb()
+    projects = _get_active_projects()
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
+
+    all_tasks: List[Dict[str, Any]] = []
+    all_issues: List[Dict[str, Any]] = []
+    all_features: List[Dict[str, Any]] = []
+    all_lessons: List[Dict[str, Any]] = []
+    all_plans: List[Dict[str, Any]] = []
+
+    for proj in projects:
+        pid = proj["project_id"]
+        paginator = ddb.get_paginator("query")
+        try:
+            for page in paginator.paginate(
+                TableName=DYNAMODB_TABLE,
+                IndexName="project-type-index",
+                KeyConditionExpression="project_id = :pid",
+                ExpressionAttributeValues={":pid": {"S": pid}},
+            ):
+                for raw_item in page.get("Items", []):
+                    record_type = _ddb_str(raw_item, "record_type")
+                    if record_type not in _TRANSFORM:
+                        continue
+                    try:
+                        if _is_stale_closed(raw_item, cutoff):
+                            continue
+                        transformed = _TRANSFORM[record_type](raw_item, pid)
+                    except Exception as rec_exc:  # noqa: BLE001
+                        logger.error(
+                            "feed_query corpus: skipping record_type=%s item_id=%s project=%s: %s",
+                            record_type,
+                            _ddb_str(raw_item, "item_id") or "?",
+                            pid,
+                            rec_exc,
+                        )
+                        continue
+                    if record_type == "task":
+                        all_tasks.append(transformed)
+                    elif record_type == "issue":
+                        all_issues.append(transformed)
+                    elif record_type == "feature":
+                        all_features.append(transformed)
+                    elif record_type == "lesson":
+                        all_lessons.append(transformed)
+                    elif record_type == "plan":
+                        all_plans.append(transformed)
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("Corpus tracker query failed for project %s: %s", pid, exc)
+            continue
+
+    return all_tasks, all_issues, all_features, all_lessons, all_plans
+
+
+def _deserialize_document_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "document_id": _ddb_str(item, "document_id"),
+        "project_id": _ddb_str(item, "project_id"),
+        "title": _ddb_str(item, "title"),
+        "status": _ddb_str(item, "status") or "active",
+        "updated_at": _ddb_str(item, "updated_at") or None,
+        "created_at": _ddb_str(item, "created_at") or None,
+        "document_subtype": _ddb_str(item, "document_subtype") or "general",
+        "subtypepattern": _ddb_str(item, "subtypepattern") or "",
+        "keywords": _ddb_str_set(item, "keywords"),
+    }
+
+
+def _scan_documents_for_corpus() -> List[Dict[str, Any]]:
+    ddb = _get_ddb()
+    items: List[Dict[str, Any]] = []
+    scan_params: Dict[str, Any] = {"TableName": DOCUMENTS_TABLE}
+    try:
+        while True:
+            resp = ddb.scan(**scan_params)
+            for raw_item in resp.get("Items", []):
+                try:
+                    items.append(_deserialize_document_item(raw_item))
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("feed_query corpus: skipping document item: %s", exc)
+            last_key = resp.get("LastEvaluatedKey")
+            if not isinstance(last_key, dict) or not last_key:
+                break
+            scan_params["ExclusiveStartKey"] = last_key
+    except (BotoCoreError, ClientError) as exc:
+        logger.error("Corpus documents scan failed: %s", exc)
+    return items
+
+
+def _get_corpus_entries() -> List[Dict[str, Any]]:
+    global _corpus_cache_entries, _corpus_cache_at
+    now = time.time()
+    if _corpus_cache_entries is not None and now - _corpus_cache_at < _CORPUS_CACHE_TTL:
+        return _corpus_cache_entries
+
+    tasks, issues, features, lessons, plans = _query_corpus_tracker_records()
+    tracker_entries = feed_corpus.build_tracker_entries_from_records(
+        tasks, issues, features, lessons, plans
+    )
+    document_entries = [
+        entry
+        for entry in (
+            feed_corpus.build_document_entry(doc) for doc in _scan_documents_for_corpus()
+        )
+        if entry
+    ]
+    _corpus_cache_entries = tracker_entries + document_entries
+    _corpus_cache_at = now
+    return _corpus_cache_entries
+
+
 # ---------------------------------------------------------------------------
 # Typed relationship edges (ENC-ISS-137 / ENC-FTR-049 / ENC-TSK-A57)
 # ---------------------------------------------------------------------------
@@ -1528,6 +1656,39 @@ def _handle_snapshot() -> Dict[str, Any]:
     }
 
 
+def _handle_corpus(qs: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/feed/corpus — cursor-paginated multi-table feed corpus (ENC-TSK-L23)."""
+    query = feed_corpus.parse_corpus_query(qs or {})
+    if query["sort"] not in feed_corpus.VALID_SORTS:
+        return _error(400, f"Invalid sort '{query['sort']}'")
+
+    if query["cursor"] and feed_corpus.decode_cursor(query["cursor"]) is None:
+        return _error(400, "Invalid cursor")
+
+    try:
+        entries = _get_corpus_entries()
+        page = feed_corpus.paginate_corpus(entries, query)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("feed corpus query failed: %s", exc)
+        return _error(500, "Failed to query feed corpus. Please try again.")
+
+    body = {
+        "success": True,
+        "generated_at": _now_z(),
+        "version": "1.0",
+        **page,
+    }
+    return {
+        "statusCode": 200,
+        "headers": {
+            **_cors_headers(),
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+        "body": json.dumps(body),
+    }
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     method = (
         (event.get("requestContext") or {}).get("http", {}).get("method")
@@ -1596,6 +1757,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # /mobile/v1/tasks.json S3 object. JWT already enforced above.
     if method == "GET" and re.search(r"/api/v1/feed/tasks\.json/?$", path):
         return _handle_snapshot()
+
+    if method == "GET" and re.search(r"/api/v1/feed/corpus/?$", path):
+        return _handle_corpus(event.get("queryStringParameters") or {})
 
     if method != "GET" or not re.search(r"/api/v1/feed/?$", path):
         return _error(404, f"Unsupported route: {method} {path}")

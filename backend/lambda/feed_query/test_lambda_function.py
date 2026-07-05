@@ -62,6 +62,56 @@ def test_invalid_since_returns_400(monkeypatch):
     assert "since" in payload["error"]
 
 
+def _corpus_get_event(**params: str) -> dict:
+    return {
+        "requestContext": {"http": {"method": "GET"}},
+        "rawPath": "/api/v1/feed/corpus",
+        "headers": {"Cookie": "enceladus_id_token=test-token"},
+        "queryStringParameters": params or None,
+    }
+
+
+def test_corpus_requires_auth():
+    resp = feed_query.lambda_handler(
+        {
+            "requestContext": {"http": {"method": "GET"}},
+            "rawPath": "/api/v1/feed/corpus",
+            "headers": {},
+        },
+        None,
+    )
+    assert resp["statusCode"] == 401
+
+
+def test_corpus_returns_paginated_payload(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    monkeypatch.setattr(
+        feed_query,
+        "_get_corpus_entries",
+        lambda: feed_query.feed_corpus.build_tracker_entries_from_records(
+            [{"task_id": "ENC-TSK-1", "project_id": "enceladus", "title": "One", "status": "open", "priority": "P1", "updated_at": "2026-07-05T10:00:00Z"}],
+            [],
+            [],
+            [],
+            [],
+        ),
+    )
+
+    resp = feed_query.lambda_handler(_corpus_get_event(limit="10"), None)
+    assert resp["statusCode"] == 200
+    payload = json.loads(resp["body"])
+    assert payload["success"] is True
+    assert payload["items"][0]["record_id"] == "ENC-TSK-1"
+    assert "facets" in payload
+    assert payload["total_matches"] == 1
+
+
+def test_corpus_invalid_cursor_returns_400(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    resp = feed_query.lambda_handler(_corpus_get_event(cursor="bad-cursor"), None)
+    assert resp["statusCode"] == 400
+
+
 # ---------------------------------------------------------------------------
 # _ddb_history defensive behavior (ENC-TSK-C31)
 #
