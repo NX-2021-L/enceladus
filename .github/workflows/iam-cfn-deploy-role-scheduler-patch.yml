@@ -4,8 +4,9 @@ name: IAM CFN Deploy Role — EventBridge Scheduler Patch
 # Scheduler API actions), blocking Rhythm Cycle ScheduleGroup creation on gamma compute
 # deploy (UPDATE_ROLLBACK_COMPLETE 2026-07-02). Durable fix in 04-github-roles.yaml;
 # this one-off dispatch applies the grant live ahead of the next github-roles stack deploy.
-# Uses an attached customer-managed policy (not inline): the role's inline quota is
-# exhausted (~10 KiB), so put-role-policy fails with LimitExceeded (2026-07-05).
+# 2026-07-05: separate inline policy hits role inline quota (LimitExceeded); managed
+# policy needs iam:CreatePolicy on backend role (AccessDenied). Merge the scheduler
+# statement into the existing CloudFormationDeployPolicy inline document instead.
 
 on:
   workflow_dispatch:
@@ -36,65 +37,66 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Apply managed policy — EventBridge Scheduler
+      - name: Merge scheduler statement into CloudFormationDeployPolicy
         run: |
           set -euo pipefail
           ROLE_NAME="enceladus-cloudformation-deploy-github-role"
-          POLICY_NAME="enceladus-cfn-deploy-scheduler-v1"
+          POLICY_NAME="CloudFormationDeployPolicy"
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${POLICY_NAME}"
-          cat > /tmp/cfn-deploy-role-scheduler.json <<JSON
-          {
-            "Version": "2012-10-17",
-            "Statement": [
-              {
-                "Sid": "RhythmCycleSchedulerOps",
-                "Effect": "Allow",
-                "Action": [
-                  "scheduler:CreateScheduleGroup",
-                  "scheduler:DeleteScheduleGroup",
-                  "scheduler:GetScheduleGroup",
-                  "scheduler:ListScheduleGroups",
-                  "scheduler:CreateSchedule",
-                  "scheduler:DeleteSchedule",
-                  "scheduler:GetSchedule",
-                  "scheduler:UpdateSchedule",
-                  "scheduler:ListSchedules",
-                  "scheduler:TagResource",
-                  "scheduler:UntagResource"
-                ],
-                "Resource": [
-                  "arn:aws:scheduler:us-west-2:${ACCOUNT_ID}:schedule-group/rhythm-*",
-                  "arn:aws:scheduler:us-west-2:${ACCOUNT_ID}:schedule/rhythm-*/*",
-                  "arn:aws:scheduler:us-west-2:${ACCOUNT_ID}:schedule-group/enceladus-*",
-                  "arn:aws:scheduler:us-west-2:${ACCOUNT_ID}:schedule/enceladus-*/*"
-                ]
-              }
-            ]
-          }
-          JSON
-
-          if aws iam get-policy --policy-arn "${POLICY_ARN}" >/dev/null 2>&1; then
-            aws iam create-policy-version \
-              --policy-arn "${POLICY_ARN}" \
-              --policy-document "file:///tmp/cfn-deploy-role-scheduler.json" \
-              --set-as-default
-          else
-            aws iam create-policy \
-              --policy-name "${POLICY_NAME}" \
-              --policy-document "file:///tmp/cfn-deploy-role-scheduler.json"
-          fi
-
-          aws iam attach-role-policy \
+          aws iam get-role-policy \
             --role-name "${ROLE_NAME}" \
-            --policy-arn "${POLICY_ARN}"
+            --policy-name "${POLICY_NAME}" \
+            --query PolicyDocument \
+            --output json > /tmp/cfn-deploy-policy-current.json
 
-      - name: Verify managed policy attached
+          ACCOUNT_ID="${ACCOUNT_ID}" python3 <<'PY'
+          import json, os
+          from pathlib import Path
+
+          account_id = os.environ["ACCOUNT_ID"]
+          doc = json.loads(Path("/tmp/cfn-deploy-policy-current.json").read_text())
+          statements = doc.setdefault("Statement", [])
+          target_sids = {"EventBridgeSchedulerOps", "RhythmCycleSchedulerOps"}
+          if any(s.get("Sid") in target_sids for s in statements):
+              print("Scheduler statement already present — no merge needed")
+          else:
+              statements.append(
+                  {
+                      "Sid": "EventBridgeSchedulerOps",
+                      "Effect": "Allow",
+                      "Action": [
+                          "scheduler:CreateScheduleGroup",
+                          "scheduler:DeleteScheduleGroup",
+                          "scheduler:GetScheduleGroup",
+                          "scheduler:ListScheduleGroups",
+                          "scheduler:CreateSchedule",
+                          "scheduler:DeleteSchedule",
+                          "scheduler:GetSchedule",
+                          "scheduler:UpdateSchedule",
+                          "scheduler:ListSchedules",
+                          "scheduler:TagResource",
+                          "scheduler:UntagResource",
+                      ],
+                      "Resource": [
+                          f"arn:aws:scheduler:us-west-2:{account_id}:schedule-group/rhythm-*",
+                          f"arn:aws:scheduler:us-west-2:{account_id}:schedule/rhythm-*/*",
+                          f"arn:aws:scheduler:us-west-2:{account_id}:schedule-group/enceladus-*",
+                          f"arn:aws:scheduler:us-west-2:{account_id}:schedule/enceladus-*/*",
+                      ],
+                  }
+              )
+          Path("/tmp/cfn-deploy-policy-merged.json").write_text(json.dumps(doc))
+          PY
+
+          aws iam put-role-policy \
+            --role-name "${ROLE_NAME}" \
+            --policy-name "${POLICY_NAME}" \
+            --policy-document "file:///tmp/cfn-deploy-policy-merged.json"
+
+      - name: Verify scheduler statement present
         run: |
-          set -euo pipefail
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/enceladus-cfn-deploy-scheduler-v1"
-          aws iam list-attached-role-policies \
+          aws iam get-role-policy \
             --role-name "enceladus-cloudformation-deploy-github-role" \
-            --query "AttachedPolicies[?PolicyArn=='${POLICY_ARN}'].{PolicyName:PolicyName,PolicyArn:PolicyArn}" \
-            --output table
+            --policy-name "CloudFormationDeployPolicy" \
+            --query "PolicyDocument.Statement[?Sid=='EventBridgeSchedulerOps'].Sid" \
+            --output text
