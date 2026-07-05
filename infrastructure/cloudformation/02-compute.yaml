@@ -149,6 +149,31 @@ Parameters:
       ENC-PLN-068: gamma rhythm tier schedules; when true, legacy superseded
       gamma EventBridge rules are disabled (K91).
 
+  # ENC-TSK-L41 / B67 Search2.0: gamma OpenSearch CDC indexer (VPC-private node).
+  OpenSearchHttpsEndpoint:
+    Type: String
+    Default: https://172.31.28.54:9200
+    Description: HTTPS endpoint for the gamma OpenSearch node (private VPC IP).
+  OpenSearchAdminSecretName:
+    Type: String
+    Default: enceladus/opensearch/gamma-admin
+    Description: Optional Secrets Manager secret with {"password":"..."} when env var unset.
+  OpenSearchAdminPassword:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: >
+      Gamma OpenSearch admin password for basic auth. Prefer passing via deploy
+      --parameter-overrides; when empty the Lambda falls back to Secrets Manager.
+  OpenSearchIndexerVpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-8ad4a8f2
+    Description: VPC hosting the gamma OpenSearch node and indexer Lambda ENI.
+  OpenSearchIndexerSubnetIds:
+    Type: CommaDelimitedList
+    Default: subnet-0a27ee72
+    Description: Subnet(s) for the indexer Lambda ENI (must route to OpenSearch :9200).
+
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
   IsGamma: !Not [!Equals [!Ref EnvironmentSuffix, ""]]
@@ -1374,6 +1399,39 @@ Resources:
         - Key: Component
           Value: graph
 
+  # ENC-TSK-L41 / B67 Search2.0: CDC indexer Lambda (gamma-only until prod OpenSearch).
+  OpenSearchIndexerFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "devops-opensearch-indexer${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: lambda_function.handler
+      MemorySize: 256
+      Timeout: 60
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt OpenSearchIndexerRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref OpenSearchIndexerSecurityGroup
+        SubnetIds: !Ref OpenSearchIndexerSubnetIds
+      Environment:
+        Variables:
+          OPENSEARCH_ENDPOINT: !Ref OpenSearchHttpsEndpoint
+          OPENSEARCH_WRITE_ALIAS: records_write
+          OPENSEARCH_ADMIN_PASSWORD: !Ref OpenSearchAdminPassword
+          OPENSEARCH_SECRET_NAME: !Ref OpenSearchAdminSecretName
+          SECRETS_REGION: !Ref AWS::Region
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
+
   GraphQueryApiFunction:
     Type: AWS::Lambda::Function
     DeletionPolicy: Retain
@@ -2461,6 +2519,19 @@ Resources:
       BatchSize: 10
       Enabled: true
 
+  SearchIndexSqsTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-SearchIndexQueueArn
+      FunctionName: !Ref OpenSearchIndexerFunction
+      BatchSize: 10
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      Enabled: true
+
   # ---------------------------------------------------------------------------
   # EventBridge Pipes (Tracker Stream -> Lambda) — replace direct stream glue
   # ENC-TSK-L14 / B65 AC-5: migrate GovernanceAudit + ConvergenceTelemetry
@@ -2923,6 +2994,52 @@ Resources:
             - Pattern: '{"eventName":["INSERT","MODIFY"]}'
       Target: !ImportValue
         Fn::Sub: ${DataStackName}-GraphSyncQueueArn
+      TargetParameters:
+        SqsQueueParameters:
+          MessageGroupId: document
+          MessageDeduplicationId: $.dynamodb.Keys.document_id.S
+
+  # ENC-TSK-L41 / B67 Search2.0: dedicated search-index FIFO (NOT GraphSyncQueue).
+  TrackerToSearchIndexPipe:
+    Type: AWS::Pipes::Pipe
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-tracker-to-search-index-queue${EnvironmentSuffix}"
+      RoleArn: !GetAtt SearchIndexPipeRole.Arn
+      Source: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+            - Pattern: '{"eventName":["REMOVE"],"dynamodb":{"OldImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+      Target: !ImportValue
+        Fn::Sub: ${DataStackName}-SearchIndexQueueArn
+      TargetParameters:
+        SqsQueueParameters:
+          MessageGroupId: tracker
+          MessageDeduplicationId: $.dynamodb.Keys.record_id.S
+    Type: AWS::Pipes::Pipe
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Sub "devops-documents-to-search-index-queue${EnvironmentSuffix}"
+      RoleArn: !GetAtt SearchIndexPipeRole.Arn
+      Source: !ImportValue
+        Fn::Sub: ${DataStackName}-DocumentsStreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 10
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName":["INSERT","MODIFY","REMOVE"]}'
+      Target: !ImportValue
+        Fn::Sub: ${DataStackName}-SearchIndexQueueArn
       TargetParameters:
         SqsQueueParameters:
           MessageGroupId: document
@@ -5596,6 +5713,137 @@ Resources:
                 Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !GetAtt GovernanceAuditFunction.Arn
+
+  # ENC-TSK-L41: EventBridge Pipes role for tracker/documents -> SearchIndexQueue.
+  SearchIndexPipeRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-search-index-pipe-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pipes.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipeSourceStreams
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+              - Sid: ReadDocumentsStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-DocumentsStreamArn
+        - PolicyName: PipeTargetSearchIndexQueue
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteSearchIndexQueue
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-SearchIndexQueueArn
+      Tags:
+        - Key: Project
+          Value: enceladus
+
+  OpenSearchIndexerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      GroupDescription: !Sub "OpenSearch CDC indexer Lambda ${EnvironmentSuffix}"
+      VpcId: !Ref OpenSearchIndexerVpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 9200
+          ToPort: 9200
+          CidrIp: 172.31.0.0/16
+          Description: OpenSearch REST (TLS) within VPC
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Secrets Manager / AWS API egress when subnet routes public
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
+
+  OpenSearchIndexerRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "devops-opensearch-indexer-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: SqsEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeSearchIndexQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-SearchIndexQueueArn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: SecretsManagerOpenSearch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerOpenSearch
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/opensearch/*"
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
 
   GraphPipeRole:
     Type: AWS::IAM::Role

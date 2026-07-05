@@ -129,6 +129,12 @@
       "deploy_script": "backend/lambda/graph_sync/deploy.sh"
     },
     {
+      "function_name": "devops-opensearch-indexer",
+      "lambda_dir": "backend/lambda/opensearch_indexer",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/opensearch_indexer/deploy.sh"
+    },
+    {
       "function_name": "devops-project-service",
       "lambda_dir": "backend/lambda/project_service",
       "workflow_file": ".github/workflows/_deploy.yml",

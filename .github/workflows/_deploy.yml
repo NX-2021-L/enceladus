@@ -425,6 +425,7 @@ jobs:
               'enceladus-bedrock-agent-actions': 'bedrock-agent-actions',
               'devops-changelog-api':           'changelog-api',
               'devops-graph-sync':              'graph-sync',
+              'devops-opensearch-indexer':      'opensearch-indexer',
               'enceladus-neo4j-backup':         'neo4j-backup',
               'enceladus-graph-health-metrics': 'graph-health-metrics',
               'devops-env-drift-auditor':       'env-drift-auditor',
