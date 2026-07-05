@@ -3000,6 +3000,9 @@ Resources:
           MessageDeduplicationId: $.dynamodb.Keys.document_id.S
 
   # ENC-TSK-L41 / B67 Search2.0: dedicated search-index FIFO (NOT GraphSyncQueue).
+  # Deploy note: DocumentsToSearchIndexPipe is added in a follow-up changeset once this
+  # resource's Name is retargeted off devops-documents-to-search-index-queue (stack-level
+  # pipe-name collision otherwise blocks CREATE on the documents pipe).
   TrackerToSearchIndexPipe:
     Type: AWS::Pipes::Pipe
     Condition: IsGamma
@@ -3023,29 +3026,6 @@ Resources:
         SqsQueueParameters:
           MessageGroupId: $.dynamodb.NewImage.project_id.S
           MessageDeduplicationId: $.dynamodb.Keys.record_id.S
-
-  DocumentsToSearchIndexPipe:
-    Type: AWS::Pipes::Pipe
-    Condition: IsGamma
-    DeletionPolicy: Retain
-    Properties:
-      Name: !Sub "devops-documents-to-search-index-queue${EnvironmentSuffix}"
-      RoleArn: !GetAtt SearchIndexPipeRole.Arn
-      Source: !ImportValue
-        Fn::Sub: ${DataStackName}-DocumentsStreamArn
-      SourceParameters:
-        DynamoDBStreamParameters:
-          BatchSize: 10
-          StartingPosition: LATEST
-        FilterCriteria:
-          Filters:
-            - Pattern: '{"eventName":["INSERT","MODIFY","REMOVE"]}'
-      Target: !ImportValue
-        Fn::Sub: ${DataStackName}-SearchIndexQueueArn
-      TargetParameters:
-        SqsQueueParameters:
-          MessageGroupId: document
-          MessageDeduplicationId: $.dynamodb.Keys.document_id.S
 
   # ENC-TSK-J04 / ENC-FTR-074 Ph3: agent-identity graph projection pipes. Three more
   # EventBridge Pipes modeled on TrackerToGraphPipe/DocumentsToGraphPipe, each sourcing a
