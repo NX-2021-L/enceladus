@@ -1,0 +1,24 @@
+<!-- @dsCard group="v2 · Layout" viewport="720x420" name="Drawer" subtitle="Right-edge panel · mono record-ID header" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;font-family:var(--font-body);height:420px;display:flex;justify-content:flex-end}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const { Drawer, Steps } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+ReactDOM.createRoot(document.getElementById('root')).render(
+  e('div',{style:{width:340,height:'100%'}},
+    e(Drawer,{header:'Task detail',recordId:'ENC-TSK-A57',onClose:()=>{}},
+      e('p',{style:{marginTop:0}},'Implement governed lesson primitive lifecycle gates.'),
+      e(Steps,{steps:[
+        {header:'Coding complete',status:'success'},
+        {header:'Committed',status:'success'},
+        {header:'Merged to main',status:'loading'},
+        {header:'Deploy success',status:'pending'}
+      ]})))
+);
+</script>
+</body></html>

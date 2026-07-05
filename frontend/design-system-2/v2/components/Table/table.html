@@ -1,0 +1,42 @@
+<!-- @dsCard group="v2 · Collections" viewport="820x420" name="Table" subtitle="Sortable · multi-select · mono cells · header tools" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;padding:24px;font-family:var(--font-body)}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const NS = window.EnceladusDesignSystem_7eb1fe;
+const { Table, Header, Badge, StatusIndicator, Link } = NS;
+const e = React.createElement;
+const rows = [
+  { id:'ENC-TSK-A57', title:'Lesson primitive lifecycle gates', status:'in-progress', priority:'P1', score:0.82 },
+  { id:'ENC-ISS-041', title:'Tracker API JWT library missing', status:'error', priority:'P0', score:null },
+  { id:'ENC-LSN-004', title:'Never build Lambda on macOS', status:'success', priority:'P2', score:0.82 },
+  { id:'ENC-TSK-A58', title:'pillar_composite rollup', status:'pending', priority:'P2', score:null },
+];
+const statusText = { 'in-progress':'in-progress', error:'blocked', success:'closed', pending:'open' };
+const cols = [
+  { id:'id', header:'Record', sortingField:'id', cell:(r)=>e(Link,{variant:'record'},r.id) },
+  { id:'title', header:'Title', sortingField:'title', cell:(r)=>r.title },
+  { id:'status', header:'Status', cell:(r)=>e(StatusIndicator,{type:r.status},statusText[r.status]) },
+  { id:'priority', header:'Priority', sortingField:'priority', cell:(r)=>e(Badge,{color:r.priority==='P0'?'crimson':r.priority==='P1'?'amber':'dust'},r.priority) },
+  { id:'score', header:'Composite', sortingField:'score', cell:(r)=>r.score?e('span',{className:'ev2-table__mono'},r.score.toFixed(2)):e('span',{style:{color:'#6B8A94'}},'—') },
+];
+function Demo(){
+  const [sel,setSel]=React.useState([rows[0]]);
+  const [sort,setSort]=React.useState({col:{sortingField:'id'},desc:false});
+  const sorted=[...rows].sort((a,b)=>{const f=sort.col.sortingField;let x=a[f],y=b[f];x=x==null?'':x;y=y==null?'':y;return (x>y?1:x<y?-1:0)*(sort.desc?-1:1);});
+  return e(Table,{
+    columnDefinitions:cols, items:sorted, selectionType:'multi', selectedItems:sel, trackBy:'id',
+    sortingColumn:sort.col, sortingDescending:sort.desc,
+    onSelectionChange:(ev)=>setSel(ev.detail.selectedItems),
+    onSortingChange:(ev)=>setSort({col:ev.detail.sortingColumn,desc:ev.detail.isDescending}),
+    header: e(Header,{variant:'h2',counter:'('+sel.length+'/'+rows.length+')',
+      actions:e('span',{className:'ev2-table__count'},'updated 4m ago')},'Tracker feed')
+  });
+}
+ReactDOM.createRoot(document.getElementById('root')).render(e(Demo));
+</script>
+</body></html>

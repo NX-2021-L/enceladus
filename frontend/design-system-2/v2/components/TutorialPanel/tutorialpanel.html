@@ -1,0 +1,21 @@
+<!-- @dsCard group="v2 · Overlays" viewport="720x420" name="TutorialPanel" subtitle="Tutorial cards · teal progress bars" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;font-family:var(--font-body);height:420px;display:flex;justify-content:flex-end}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const { TutorialPanel } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+ReactDOM.createRoot(document.getElementById('root')).render(
+  e('div',{style:{width:340,height:'100%'}},
+    e(TutorialPanel,{subtitle:'Learn the governance primitives.',tutorials:[
+      {title:'Create your first Lesson',description:'Score a lesson against the four constitutional pillars.',stepsCount:5,completedSteps:2},
+      {title:'Evidence-gated lifecycle',description:'Walk a task from open to closed with evidence at every gate.',stepsCount:8,completedSteps:8},
+      {title:'Coordinate multiple agents',description:'Dispatch parallel child tasks without collisions.',stepsCount:4,completedSteps:0}
+    ]}))
+);
+</script>
+</body></html>

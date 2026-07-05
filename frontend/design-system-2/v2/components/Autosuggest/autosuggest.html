@@ -1,0 +1,24 @@
+<!-- @dsCard group="v2 · Forms" viewport="720x240" name="Autosuggest" subtitle="v2 Input + filtered menu · teal match highlight" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;padding:24px;font-family:var(--font-body)}.w{max-width:340px}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const { Autosuggest } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+const opts=[
+  {value:'ENC-FTR-052',description:'Governed Lesson Primitive',tag:'feature'},
+  {value:'ENC-TSK-A57',description:'Lifecycle gates',tag:'task'},
+  {value:'ENC-ISS-041',description:'JWT library missing',tag:'issue'},
+  {value:'ENC-LSN-004',description:'macOS Lambda build',tag:'lesson'},
+];
+function Demo(){
+  const [v,setV]=React.useState('ENC-');
+  return e('div',{className:'w'},e(Autosuggest,{value:v,options:opts,placeholder:'Find a record…',onChange:(ev)=>setV(ev.detail.value),ariaLabel:'record search'}));
+}
+ReactDOM.createRoot(document.getElementById('root')).render(e(Demo));
+</script>
+</body></html>

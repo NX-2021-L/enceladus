@@ -1,0 +1,25 @@
+<!-- @dsCard group="v2 · Overlays" viewport="720x130" name="ButtonGroup" subtitle="Icon action strip · mono feedback tooltip" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../styles.css">
+<style>body{background:var(--enc-void);margin:0;padding:24px 24px 60px;font-family:var(--font-body)}</style>
+</head><body><div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../../../_ds_bundle.js"></script>
+<script>
+const { ButtonGroup } = window.EnceladusDesignSystem_7eb1fe;
+const e = React.createElement;
+const ic=(d)=>e('svg',{viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.75,strokeLinecap:'round',strokeLinejoin:'round'},d);
+const copy=ic([e('rect',{key:1,x:9,y:9,width:12,height:12,rx:2}),e('path',{key:2,d:'M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1'})]);
+const link=ic(e('path',{d:'M10 13a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1M14 11a5 5 0 00-7 0l-3 3a5 5 0 007 7l1-1'}));
+const star=ic(e('polygon',{points:'12 2 15 9 22 9 16 14 18 22 12 17 6 22 8 14 2 9 9 9'}));
+ReactDOM.createRoot(document.getElementById('root')).render(
+  e(ButtonGroup,{items:[
+    {id:'copy',text:'Copy record ID',icon:copy,popoverFeedback:'Copied'},
+    {id:'link',text:'Copy link',icon:link,popoverFeedback:'Linked'},
+    {type:'separator'},
+    {id:'watch',text:'Watch',icon:star}
+  ]})
+);
+</script>
+</body></html>
