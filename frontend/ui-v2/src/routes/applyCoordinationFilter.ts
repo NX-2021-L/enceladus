@@ -9,13 +9,14 @@
  */
 import type { PropertyFilterQuery } from '../../../design-system-2/v2/components/PropertyFilter/PropertyFilter.jsx'
 
-type RecordRow = Record<string, unknown>
+export type RecordRow = Record<string, unknown>
 
-export function applyTokens<T extends RecordRow>(items: T[], query: PropertyFilterQuery): T[] {
+export function applyTokens<T extends object>(items: T[], query: PropertyFilterQuery): T[] {
   if (query.tokens.length === 0) return items
   return items.filter((item) => {
+    const row = item as RecordRow
     const results = query.tokens.map((token) => {
-      const raw = item[token.propertyKey]
+      const raw = row[token.propertyKey]
       const haystack = raw == null ? '' : String(raw).toLowerCase()
       return haystack.includes(token.value.toLowerCase())
     })

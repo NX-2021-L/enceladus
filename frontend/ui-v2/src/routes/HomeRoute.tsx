@@ -44,26 +44,29 @@ const NOOP_QUERY = {
 function detailQueryFor(
   type: RecordType,
   summary: FeedCorpusItem | undefined,
-): UseQueryOptions<DetailRecord | null> {
+): UseQueryOptions<DetailRecord | null, Error, DetailRecord | null, readonly unknown[]> {
   if (!summary) {
     return { queryKey: ['home', 'detail', 'pending', type], ...NOOP_QUERY }
   }
-  switch (type) {
-    case 'task':
-      return recordQueryOptions.task(summary.project_id, summary.record_id)
-    case 'issue':
-      return recordQueryOptions.issue(summary.project_id, summary.record_id)
-    case 'feature':
-      return recordQueryOptions.feature(summary.project_id, summary.record_id)
-    case 'plan':
-      return recordQueryOptions.plan(summary.project_id, summary.record_id)
-    case 'lesson':
-      return recordQueryOptions.lesson(summary.project_id, summary.record_id)
-    case 'document':
-      return recordQueryOptions.document(summary.record_id)
-    default:
-      return { queryKey: ['home', 'detail', 'pending', type], ...NOOP_QUERY }
-  }
+  const options = (() => {
+    switch (type) {
+      case 'task':
+        return recordQueryOptions.task(summary.project_id, summary.record_id)
+      case 'issue':
+        return recordQueryOptions.issue(summary.project_id, summary.record_id)
+      case 'feature':
+        return recordQueryOptions.feature(summary.project_id, summary.record_id)
+      case 'plan':
+        return recordQueryOptions.plan(summary.project_id, summary.record_id)
+      case 'lesson':
+        return recordQueryOptions.lesson(summary.project_id, summary.record_id)
+      case 'document':
+        return recordQueryOptions.document(summary.record_id)
+      default:
+        return { queryKey: ['home', 'detail', 'pending', type], ...NOOP_QUERY }
+    }
+  })()
+  return options as UseQueryOptions<DetailRecord | null, Error, DetailRecord | null, readonly unknown[]>
 }
 
 /** Lesson has no `description` field (it has `observation`/`insight`) —
@@ -74,7 +77,7 @@ function descriptionOf(type: RecordType, record: DetailRecord | null | undefined
   return (record as Task | Issue | Feature | Plan | Document).description ?? ''
 }
 
-function statusOf(type: RecordType, record: DetailRecord | null | undefined): string | undefined {
+function statusOf(record: DetailRecord | null | undefined): string | undefined {
   if (!record) return undefined
   return (record as { status?: string }).status
 }
@@ -132,7 +135,7 @@ export function HomeRoute() {
       recordId,
       title,
       description: truncateDescription(descriptionOf(type, detail)),
-      status: statusOf(type, detail),
+      status: statusOf(detail),
       href: recordId
         ? type === 'document'
           ? documentHref(recordId)

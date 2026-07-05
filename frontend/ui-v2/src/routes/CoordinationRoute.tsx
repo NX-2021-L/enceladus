@@ -12,13 +12,7 @@
  */
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Cards, PropertyFilter } from '../design-system'
-// Tabs is not yet exported from the design-system barrel (frontend/ui-v2/src/design-system) --
-// import its component module directly (same pattern the barrel itself uses for every
-// design-system-2 component). Report to the coordinator: add `export { Tabs } from
-// '../../../design-system-2/v2/components/Tabs/Tabs.jsx'` to index.js/index.d.ts so future
-// consumers can import it from '../design-system' like everything else.
-import { Tabs } from '../../../design-system-2/v2/components/Tabs/Tabs.jsx'
+import { Cards, PropertyFilter, Tabs } from '../design-system'
 import { StatusChip } from '../components/StatusChip'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import {
