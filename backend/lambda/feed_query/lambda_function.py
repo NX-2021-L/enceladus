@@ -5,6 +5,7 @@ Lambda API for Enceladus feed read and subscription lifecycle.
 Routes (via API Gateway proxy):
     GET     /api/v1/feed
     GET     /api/v1/feed/corpus
+    GET     /api/v1/feed/delta
     POST    /api/v1/feed/refresh
     POST    /api/v1/feed/subscriptions
     GET     /api/v1/feed/subscriptions/{subscriptionId}
@@ -43,6 +44,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 import corpus as feed_corpus
+import delta as feed_delta
 
 try:
     import jwt
@@ -1656,6 +1658,66 @@ def _handle_snapshot() -> Dict[str, Any]:
     }
 
 
+def _delta_corpus_entry(raw_item: Dict[str, Any], project_id: str) -> Optional[Dict[str, Any]]:
+    record_type = _ddb_str(raw_item, "record_type")
+    if record_type not in _TRANSFORM:
+        return None
+    transformed = _TRANSFORM[record_type](raw_item, project_id)
+    item_id = _ddb_str(raw_item, "item_id") or transformed.get(f"{record_type}_id", "")
+    attrs: Dict[str, Any] = {}
+    for key in ("status", "priority", "category", "severity"):
+        value = transformed.get(key)
+        if value:
+            attrs[key] = value
+    return feed_corpus.build_tracker_entry(
+        record_type,
+        str(item_id),
+        project_id,
+        str(transformed.get("title") or item_id),
+        transformed.get("updated_at"),
+        attrs,
+    )
+
+
+def _handle_delta(qs: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/feed/delta?since=<version_seq> — version-ordered incremental sync (ENC-TSK-L27)."""
+    since = feed_delta.parse_since_version((qs or {}).get("since"))
+    if since is None:
+        return _error(400, "'since' must be a non-negative integer version_seq")
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
+    try:
+        items, tombstones, latest = feed_delta.query_version_delta(
+            _get_ddb(),
+            DYNAMODB_TABLE,
+            since,
+            is_stale_closed=_is_stale_closed,
+            transform_record=_delta_corpus_entry,
+            cutoff=cutoff,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("feed delta query failed: %s", exc)
+        return _error(500, "Failed to query feed delta. Please try again.")
+
+    body = {
+        "success": True,
+        "generated_at": _now_z(),
+        "since": since,
+        "latest_version_seq": latest,
+        "items": items,
+        "tombstones": tombstones,
+    }
+    return {
+        "statusCode": 200,
+        "headers": {
+            **_cors_headers(),
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+        "body": json.dumps(body),
+    }
+
+
 def _handle_corpus(qs: Dict[str, Any]) -> Dict[str, Any]:
     """GET /api/v1/feed/corpus — cursor-paginated multi-table feed corpus (ENC-TSK-L23)."""
     query = feed_corpus.parse_corpus_query(qs or {})
@@ -1760,6 +1822,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     if method == "GET" and re.search(r"/api/v1/feed/corpus/?$", path):
         return _handle_corpus(event.get("queryStringParameters") or {})
+
+    if method == "GET" and re.search(r"/api/v1/feed/delta/?$", path):
+        return _handle_delta(event.get("queryStringParameters") or {})
 
     if method != "GET" or not re.search(r"/api/v1/feed/?$", path):
         return _error(404, f"Unsupported route: {method} {path}")

@@ -92,12 +92,33 @@ Resources:
           AttributeType: S
         - AttributeName: updated_at
           AttributeType: S
+        - AttributeName: feed_scope
+          AttributeType: S
+        - AttributeName: version_seq
+          AttributeType: N
       KeySchema:
         - AttributeName: project_id
           KeyType: HASH
         - AttributeName: record_id
           KeyType: RANGE
       GlobalSecondaryIndexes:
+        - IndexName: version-seq-index
+          KeySchema:
+            - AttributeName: feed_scope
+              KeyType: HASH
+            - AttributeName: version_seq
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - project_id
+              - record_id
+              - record_type
+              - item_id
+              - updated_at
+              - target_project_id
+              - target_record_id
+              - target_record_type
         - IndexName: type-updated-index
           KeySchema:
             - AttributeName: record_type
