@@ -11,6 +11,7 @@
 /* Design-system tokens: the canonical --enc-* palette, type scale, radii,
  * easing and the semantic element styles. Imported, never copied. */
 @import '../../design-system-2/colors_and_type.css';
+@import '../../design-system-2/v2/tokens.css';
 
 /* Tailwind v4 — utilities layered on top of the token system. */
 @import 'tailwindcss';

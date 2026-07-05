@@ -1,7 +1,27 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+
+const uiRoot = path.dirname(fileURLToPath(import.meta.url))
+
+/** design-system-2 JSX uses React.Fragment without importing React. */
+function designSystemReactInject(): Plugin {
+  return {
+    name: 'design-system-react-inject',
+    transform(code, id) {
+      if (!id.includes('design-system-2/v2/components/') || !id.endsWith('.jsx')) {
+        return null
+      }
+      if (code.includes("from 'react'") || code.includes('from "react"')) {
+        return null
+      }
+      return { code: `import React from 'react'\n${code}`, map: null }
+    },
+  }
+}
 
 // ENC-TSK-K21 · PWA 2.0 scaffold
 //
@@ -10,7 +30,20 @@ import { VitePWA } from 'vite-plugin-pwa'
 // active, manual memoization (useMemo / useCallback / React.memo) is redundant
 // and MUST NOT appear in component files.
 export default defineConfig({
+  // design-system-2 JSX components live outside this package root.
+  server: {
+    fs: {
+      allow: ['..'],
+    },
+  },
+  resolve: {
+    alias: {
+      react: path.resolve(uiRoot, 'node_modules/react'),
+      'react-dom': path.resolve(uiRoot, 'node_modules/react-dom'),
+    },
+  },
   plugins: [
+    designSystemReactInject(),
     react({
       babel: {
         plugins: [

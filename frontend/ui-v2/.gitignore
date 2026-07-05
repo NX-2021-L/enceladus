@@ -4,3 +4,4 @@ dev-dist
 *.local
 .DS_Store
 node_modules/.tmp
+.adherence.oxlintrc.json
