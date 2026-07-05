@@ -1247,6 +1247,56 @@ Resources:
         - Key: Component
           Value: changelog
 
+  # ENC-TSK-L10 (B64 Ph3): MCP Streamable HTTP over true Lambda response streaming.
+  # Distinct from enceladus-mcp-streamable (ENC-FTR-025, Function URL, BUFFERED,
+  # event-per-invocation) -- this runs as a persistent Starlette/uvicorn server
+  # behind the AWS Lambda Web Adapter so API Gateway REST API's
+  # responseTransferMode=STREAM integration (03-api.yaml) can invoke it via
+  # InvokeWithResponseStream. Reuses server.py's tool surface (asgi_app.py).
+  # SnapStart explicitly NOT enabled -- unproven combination with a Web-Adapter
+  # subprocess model; correctness over cold-start optimization for this first cut.
+  # Gamma-only (Condition: IsGamma), 15-min timeout per AC.
+  McpStreamingGatewayFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Sub "enceladus-mcp-streaming-gateway${EnvironmentSuffix}"
+      Code:
+        ZipFile: "# managed outside CloudFormation"
+      Runtime: !If [IsGamma, python3.12, python3.11]
+      Handler: run.sh
+      MemorySize: 512
+      Timeout: 900
+      Architectures:
+        - !If [IsGamma, arm64, x86_64]
+      Role: !GetAtt McpStreamingGatewayRole.Arn
+      Layers:
+        - !Ref SharedLayerArn
+        - !If
+          - IsGamma
+          - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerArm64:28"
+          - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:28"
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_PORT: "8080"
+          AWS_LWA_INVOKE_MODE: response_stream
+          ENCELADUS_MCP_TRANSPORT: streamable_http
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          ENCELADUS_COORDINATION_API_URL: https://enceladus-gamma.jreese.net/api/v1
+          ENCELADUS_TRACKER_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker
+          ENCELADUS_GRAPH_QUERY_API_BASE: https://enceladus-gamma.jreese.net/api/v1/tracker/graphsearch
+          CORS_ORIGIN: !Ref CorsOrigin
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: mcp-streaming-gateway
+        - Key: Feature
+          Value: ENC-TSK-L10
+
   # ENC-TSK-L25 / ENC-FTR-127 AC-10/16/17: per-user preferences service (saved
   # searches, recently-viewed, prefs). Gamma-only (Condition: IsGamma): this is
   # B67 Search2.0 wave work under the v4 gamma freeze (DOC-499FA089EC30).
@@ -4553,6 +4603,47 @@ Resources:
                   - "arn:aws:s3:::jreese-net"
                   - !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
                   - "arn:aws:s3:::jreese-net/reference/*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
+
+  # ENC-TSK-L10: least-privilege role for the streaming gateway -- CloudWatch
+  # Logs + AppConfig read (enceladus_shared.appconfig_flags import). Calls out
+  # to coordination/tracker/graph APIs over plain HTTPS, not the AWS SDK, so no
+  # DynamoDB/S3 grants are needed here.
+  McpStreamingGatewayRole:
+    Type: AWS::IAM::Role
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub "enceladus-mcp-streaming-gateway-lambda-role${EnvironmentSuffix}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: enceladus-mcp-streaming-gateway-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/enceladus-mcp-streaming-gateway${EnvironmentSuffix}*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'

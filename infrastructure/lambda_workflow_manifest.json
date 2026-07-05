@@ -240,6 +240,12 @@
       "cfn_managed": false
     },
     {
+      "function_name": "enceladus-mcp-streaming-gateway",
+      "lambda_dir": "backend/lambda/mcp_streaming_gateway",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/mcp_streaming_gateway/deploy.sh"
+    },
+    {
       "function_name": "enceladus-memory-consolidation",
       "lambda_dir": "backend/lambda/memory_consolidation",
       "workflow_file": ".github/workflows/_deploy.yml",
