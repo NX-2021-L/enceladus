@@ -491,6 +491,27 @@ def _error(status_code: int, message: str, **extra) -> Dict[str, Any]:
 # Authentication
 # ---------------------------------------------------------------------------
 
+def _has_enceladus_id_token(event: Dict) -> bool:
+    """True when the request carries an enceladus_id_token cookie (header or APIGW v2 array)."""
+    headers = event.get("headers") or {}
+    cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
+    cookie_parts = [
+        part.strip()
+        for part in cookie_header.split(";")
+        if isinstance(part, str) and part.strip()
+    ]
+    event_cookies = event.get("cookies") or []
+    if isinstance(event_cookies, list):
+        cookie_parts.extend(
+            part.strip()
+            for part in event_cookies
+            if isinstance(part, str) and part.strip()
+        )
+    elif isinstance(event_cookies, str) and event_cookies.strip():
+        cookie_parts.append(event_cookies.strip())
+    return any(part.startswith("enceladus_id_token=") for part in cookie_parts)
+
+
 def _authenticate(event: Dict) -> Optional[str]:
     """Validate auth. Returns error message or None if authenticated."""
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
@@ -504,9 +525,8 @@ def _authenticate(event: Dict) -> Optional[str]:
         if internal_key.strip() in valid_keys:
             return None
 
-    # Check Cognito JWT cookie (simplified -- real validation done by API GW or in-Lambda)
-    cookies = headers.get("cookie", "")
-    if "enceladus_id_token=" in cookies:
+    # Cognito session cookie — APIGW HTTP API v2 may pass cookies via event.cookies[].
+    if _has_enceladus_id_token(event):
         return None
 
     # Check Authorization header
