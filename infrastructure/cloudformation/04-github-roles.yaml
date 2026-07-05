@@ -189,26 +189,8 @@ Resources:
                   - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/enceladus-*"
                   - !Sub "arn:aws:events:us-west-2:${AWS::AccountId}:rule/on-project-json-sync*"
 
-              # ENC-PLN-068: Rhythm Cycle EventBridge Scheduler groups/schedules
-              - Sid: EventBridgeSchedulerOps
-                Effect: Allow
-                Action:
-                  - scheduler:CreateScheduleGroup
-                  - scheduler:DeleteScheduleGroup
-                  - scheduler:GetScheduleGroup
-                  - scheduler:ListScheduleGroups
-                  - scheduler:CreateSchedule
-                  - scheduler:DeleteSchedule
-                  - scheduler:GetSchedule
-                  - scheduler:UpdateSchedule
-                  - scheduler:ListSchedules
-                  - scheduler:TagResource
-                  - scheduler:UntagResource
-                Resource:
-                  - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule-group/rhythm-*"
-                  - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule/rhythm-*/*"
-                  - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule-group/enceladus-*"
-                  - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule/enceladus-*/*"
+              # EventBridgeSchedulerOps moved to EventBridgeSchedulerOpsPolicy
+              # (managed attachment) — inline quota exhausted on this role.
 
               - Sid: PipesOps
                 Effect: Allow
@@ -437,6 +419,38 @@ Resources:
             Resource:
               - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-mcp-code-gamma"
               - !Sub "arn:aws:lambda:us-west-2:${AWS::AccountId}:function:enceladus-mcp-code-gamma:*"
+
+  # ENC-PLN-068 / ENC-TSK-L51 — Rhythm Cycle EventBridge Scheduler groups/schedules.
+  # Same failure class as CodeDeployStackOpsPolicy: inline CloudFormationDeployPolicy
+  # cannot grow (10,240-byte role inline quota exhausted by out-of-band patches).
+  EventBridgeSchedulerOpsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-scheduler-v1
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EventBridgeSchedulerOps
+            Effect: Allow
+            Action:
+              - scheduler:CreateScheduleGroup
+              - scheduler:DeleteScheduleGroup
+              - scheduler:GetScheduleGroup
+              - scheduler:ListScheduleGroups
+              - scheduler:CreateSchedule
+              - scheduler:DeleteSchedule
+              - scheduler:GetSchedule
+              - scheduler:UpdateSchedule
+              - scheduler:ListSchedules
+              - scheduler:TagResource
+              - scheduler:UntagResource
+            Resource:
+              - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule-group/rhythm-*"
+              - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule/rhythm-*/*"
+              - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule-group/enceladus-*"
+              - !Sub "arn:aws:scheduler:us-west-2:${AWS::AccountId}:schedule/enceladus-*/*"
 
   BackendDeployRole:
     Type: AWS::IAM::Role
