@@ -5,6 +5,7 @@ import { queryClient } from '../api/queryClient'
 import { RecordDetailBreadcrumbs } from '../components/RecordDetailBreadcrumbs'
 import { SkeletonCard } from '../components/SkeletonCard'
 import { getPrimitive } from '../primitives/registry'
+import { useRecordRealtimeSync } from '../realtime/useRecordRealtimeSync'
 import type { RecordShapeMap, RecordType } from '../types/records'
 
 type TrackerRecordType = Exclude<RecordType, 'document'>
@@ -34,6 +35,7 @@ export function createRecordRoute<K extends TrackerRecordType>(config: {
   function RecordComponent() {
     const { project, id } = route.useParams() as { project: string; id: string }
     const { data } = useSuspenseQuery(queryOptionsFor(project, id))
+    useRecordRealtimeSync(type, project, id)
     const Primitive = getPrimitive(type)
     return (
       <>

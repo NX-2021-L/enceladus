@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.7",
-  "updated_at": "2026-07-05T08:12:00Z",
-  "last_change_summary": "ENC-TSK-L53 / ENC-ISS-489: graph_query_api._authenticate accepts enceladus_id_token from APIGW HTTP API v2 event.cookies[] (parity with feed_query/user_preferences/tracker_mutation); fixes cookie-only 401 on hybrid graphsearch for ui-v2.",
+  "version": "2026-07-05.8",
+  "updated_at": "2026-07-05T08:19:00Z",
+  "last_change_summary": "ENC-TSK-L29 (B67 Search2.0 WaveC / DOC-77D6C714867E §15m): appsync_feed_publisher now attaches a full record body (deserialized NewImage) to the /records/{recordId} channel's event only -- /feed/updates and /projects/{id} stay at the fixed AC-23 lightweight payload. New entity appsync_feed_publisher.full_record_body_l29.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7353,6 +7353,16 @@
           "definition": "Every successful write on either path now echoes the post-write revision in the response body (sync_version on tracker_mutation, version on document_api) so the caller can update its local cache without an extra read."
         }
       }
+    },
+    "appsync_feed_publisher.full_record_body_l29": {
+      "description": "ENC-TSK-L29 (B67 Search2.0 WaveC): the appsync_feed_publisher Lambda (backend/lambda/appsync_feed_publisher, DISTINCT from the legacy backend/lambda/feed_publisher v1 S3 mobile-feed publisher) attaches the full current record body to the event delivered on a record's /records/{recordId} AppSync Events channel only. The /feed/updates (global firehose) and /projects/{projectId} channels are never given a body -- their payload stays exactly the pre-existing B67 AC-10 lightweight envelope (fixed ~500-byte AC-23 budget). Purpose: an open record-detail page's client-side Tier-1/Tier-2 mirror (ENC-TSK-L24) can upsert directly from a /records/{recordId} event with no follow-up GET.",
+      "fields": {
+        "record": {
+          "type": "object",
+          "definition": "Present only on /records/{recordId} channel events, for INSERT/MODIFY stream records. Deserialized DynamoDB NewImage -- every current field on the record, plain JSON (no {S:...}/{N:...} typed wrappers). Absent on /feed/updates and /projects/{id} events, and absent for REMOVE events (the client instead reacts to the existing lightweight envelope's action='removed' and marks a tombstone).",
+          "usage_guidance": "Client subscribes to /records/{recordId} (ENC-TSK-L29 AppSyncRealtimeClient.watchRecord) only while that record's detail page is open, and upserts event.record directly into the Tier-2 cache + the live query cache -- never re-fetches on receipt of this event."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda -- nightly EventBridge (gamma, cron 06:00 UTC, after K41's 05:00 CEE scan) consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (fence_missing_language, metadata_field_missing) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent session involvement. DATA-SAFETY: only the deterministic whitelist is auto-remediated; ambiguous/content-changing warnings are left for agent review; every auto-patch is logged with before/after compliance_score. Dry-run default-on (GDMP_DRY_RUN=1) plus a 3-run io-approval ramp (GDMP_IO_APPROVAL_RUNS=3, GDMP_MUTATION_ENABLED=0) reuse the FTR-106 / ENC-TSK-K03 unlearning Lambda's S3 run-counter pattern verbatim. CEE_GDMP_HARD_DISABLED=1 kill switch ships ON by default. Idempotent: is_already_compliant guards against re-patching already-compliant documents. New entity corpus_entropy_gdmp_remediation.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
@@ -7551,6 +7561,11 @@
       "version": "2026-07-05.6",
       "date": "2026-07-05",
       "summary": "ENC-TSK-L47 (B67 backend / FTR-127 AC-19, K25 AC-3): If-Match / HTTP 409 per-record revision-conflict contract added to tracker_mutation's generic field-update path (sync_version) and document_api's PATCH path (version). Absent header preserves prior unconditional-write behavior. New entity api.if_match_revision_contract; new error_envelope.code value REVISION_CONFLICT."
+    },
+    {
+      "version": "2026-07-05.8",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L29 (B67 Search2.0 WaveC / DOC-77D6C714867E §15m): appsync_feed_publisher now attaches a full record body (deserialized NewImage) to the /records/{recordId} channel's event only -- /feed/updates and /projects/{id} stay at the fixed AC-23 lightweight payload. New entity appsync_feed_publisher.full_record_body_l29."
     }
   ]
 }
