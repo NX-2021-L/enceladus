@@ -176,8 +176,13 @@ class ValidateSciGatePassTests(SciGateBase):
         self.put_session(session_id=PRE_EPOCH_SESSION, created_at=PRE_EPOCH_TS)
         resp = checkout_lambda._validate_sci_gate(PRE_EPOCH_SESSION, None)
         self.assertIsNone(resp)
-        # Token validation was skipped entirely — no heartbeat touch either.
-        self.assertNotIn("last_activity_at", self.get_session_item(PRE_EPOCH_SESSION))
+        # Token validation is skipped entirely (no SCI required), but ENC-TSK-L35
+        # makes the heartbeat/updated_at touch unconditional — it now runs before
+        # the grandfather short-circuit, so a grandfathered session IS still
+        # touched on this session-requiring call.
+        item = self.get_session_item(PRE_EPOCH_SESSION)
+        self.assertIn("last_activity_at", item)
+        self.assertIn("updated_at", item)
 
     def test_valid_sci_passes_and_touches_last_activity_at(self):
         self.put_session()
