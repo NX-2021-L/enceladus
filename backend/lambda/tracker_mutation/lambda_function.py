@@ -59,6 +59,12 @@ except ImportError:  # layer :7 lacks appconfig_flags — fall back to a direct 
     def _appconfig_flag(name, *, env_fallback=None, default=False):
         raw = os.environ.get(env_fallback, "") if env_fallback else ""
         return raw.strip().lower() == "true" if raw != "" else bool(default)
+try:
+    from enceladus_shared.version_seq import allocate_version_seq, version_seq_attr, version_seq_update_clause
+
+    _VERSION_SEQ_AVAILABLE = True
+except ImportError:
+    _VERSION_SEQ_AVAILABLE = False
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -974,6 +980,20 @@ def _get_ddb():
             config=Config(retries={"max_attempts": 3, "mode": "standard"}),
         )
     return _ddb
+
+
+def _stamp_version_seq_on_create_item(item: Dict[str, Dict[str, str]]) -> None:
+    if not _VERSION_SEQ_AVAILABLE:
+        return
+    seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
+    item.update(version_seq_attr(seq))
+
+
+def _version_seq_update_parts() -> Tuple[str, Dict[str, Dict[str, str]]]:
+    if not _VERSION_SEQ_AVAILABLE:
+        return "", {}
+    seq = allocate_version_seq(_get_ddb(), DYNAMODB_TABLE)
+    return version_seq_update_clause(seq)
 
 
 def _get_events():
@@ -3332,6 +3352,7 @@ def _handle_create_record(
             sk = f"{record_type}#{new_id}"
             item["record_id"] = _ser_s(sk)
             item["item_id"] = _ser_s(new_id)
+            _stamp_version_seq_on_create_item(item)
             try:
                 ddb.put_item(
                     TableName=DYNAMODB_TABLE, Item=item,
@@ -5223,6 +5244,10 @@ def _handle_update_field(
     if _optout_latch is not None:
         attr_values[":optout"] = {"BOOL": True}
     attr_values.update(extra_vals)
+
+    vseq_expr, vseq_vals = _version_seq_update_parts()
+    update_expr += vseq_expr
+    attr_values.update(vseq_vals)
 
     # ENC-TSK-L47: when the caller presented If-Match, guard the commit itself
     # (not just the pre-check above) against a write that landed in between —

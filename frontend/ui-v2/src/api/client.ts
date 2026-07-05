@@ -14,7 +14,7 @@
 
 import type { HybridGraphsearchResponse, HybridSearchParams } from '../types/search'
 import type { UserPreferences } from '../types/userPreferences'
-import type { FeedCorpusPage } from '../sync/types'
+import type { FeedCorpusPage, FeedDeltaPage } from '../sync/types'
 
 /**
  * Read API base URL. Defaults to `/api/v1`, matching the existing app's
@@ -210,4 +210,13 @@ export async function fetchFeedCorpusPage(
   const suffix = qs.toString()
   const url = `${API_BASE}/feed/corpus${suffix ? `?${suffix}` : ''}`
   return requestJson<FeedCorpusPage>(url, init)
+}
+
+/** Incremental feed delta (ENC-TSK-L27). */
+export async function fetchFeedDelta(
+  since: number,
+  init?: FetchInit,
+): Promise<FeedDeltaPage> {
+  const url = `${API_BASE}/feed/delta?since=${encodeURIComponent(String(since))}`
+  return requestJson<FeedDeltaPage>(url, init)
 }

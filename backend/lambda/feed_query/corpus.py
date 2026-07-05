@@ -221,8 +221,9 @@ def build_tracker_entry(
     title: str,
     updated_at: Optional[str],
     attrs: Mapping[str, Any],
+    version_seq: Optional[int] = None,
 ) -> Dict[str, Any]:
-    return {
+    entry = {
         "record_id": record_id,
         "record_type": record_type,
         "project_id": project_id,
@@ -232,6 +233,9 @@ def build_tracker_entry(
         "record_key": tracker_record_key(project_id, record_id),
         "attrs": dict(attrs),
     }
+    if version_seq is not None:
+        entry["version_seq"] = int(version_seq)
+    return entry
 
 
 def build_document_entry(item: Mapping[str, Any]) -> Optional[Dict[str, Any]]:

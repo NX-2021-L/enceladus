@@ -49,7 +49,24 @@ export interface FeedCorpusItem {
   updated_at?: string | null
   source: 'tracker' | 'document'
   record_key: string
+  version_seq?: number
   attrs?: Record<string, unknown>
+}
+
+export interface FeedDeltaTombstone {
+  record_key: string
+  record_id: string
+  record_type: string
+  project_id: string
+  version_seq: number
+}
+
+export interface FeedDeltaPage {
+  success: boolean
+  since: number
+  latest_version_seq: number
+  items: FeedCorpusItem[]
+  tombstones: FeedDeltaTombstone[]
 }
 
 export interface FeedCorpusPage {

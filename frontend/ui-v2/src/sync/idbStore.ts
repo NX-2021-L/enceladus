@@ -205,6 +205,23 @@ export async function loadQueryCache<T>(): Promise<T | null> {
   return (getMemoryDb().queryCache as T | null) ?? null
 }
 
+export async function getMeta(key: string): Promise<unknown | null> {
+  try {
+    const result = (await withStore('meta', 'readonly', (store) => store.get(key))) as unknown
+    return result ?? null
+  } catch {
+    return null
+  }
+}
+
+export async function setMeta(key: string, value: unknown): Promise<void> {
+  try {
+    await withStore('meta', 'readwrite', (store) => store.put(value, key))
+  } catch {
+    /* memory fallback not needed for version watermark in tests */
+  }
+}
+
 export function resetMemoryStoreForTests(): void {
   memoryDb = null
 }
