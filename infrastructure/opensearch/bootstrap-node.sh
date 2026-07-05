@@ -87,7 +87,11 @@ EOF
 log "Running opensearch-tar-install.sh (TLS + security plugin demo certs)"
 cd "${OPENSEARCH_HOME}"
 chmod +x ./opensearch-tar-install.sh
-./opensearch-tar-install.sh
+# OpenSearch refuses to start as root ("can not run opensearch as root");
+# opensearch-tar-install.sh launches OpenSearch internally to generate the
+# demo TLS/security config, so it must run as the unprivileged opensearch
+# user. --preserve-environment carries OPENSEARCH_INITIAL_ADMIN_PASSWORD.
+runuser -u "${OPENSEARCH_USER}" --preserve-environment -- ./opensearch-tar-install.sh
 # Demo installer may leave a foreground process; ensure clean handoff to systemd.
 pkill -u "${OPENSEARCH_USER}" || true
 sleep 2
