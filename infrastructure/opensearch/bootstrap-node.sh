@@ -107,8 +107,20 @@ chmod +x ./opensearch-tar-install.sh
 # opensearch-tar-install.sh launches OpenSearch internally to generate the
 # demo TLS/security config, so it must run as the unprivileged opensearch
 # user. --preserve-environment carries OPENSEARCH_INITIAL_ADMIN_PASSWORD.
-runuser -u "${OPENSEARCH_USER}" --preserve-environment -- ./opensearch-tar-install.sh
-# Demo installer may leave a foreground process; ensure clean handoff to systemd.
+# The script execs into becoming the OpenSearch server process itself once
+# cert generation finishes (ENC-TSK-L71) -- it never returns control, so it
+# must be backgrounded; poll for the generated cert instead of waiting on it.
+runuser -u "${OPENSEARCH_USER}" --preserve-environment -- ./opensearch-tar-install.sh &
+INSTALLER_PID=$!
+for i in $(seq 1 60); do
+  if [[ -f "${TLS_NODE_PEM}" ]]; then
+    break
+  fi
+  sleep 5
+done
+# Ad hoc foreground process (installer, or the OpenSearch server it exec'd
+# into) is superseded by the systemd unit below; ensure clean handoff.
+kill "${INSTALLER_PID}" 2>/dev/null || true
 pkill -u "${OPENSEARCH_USER}" || true
 sleep 2
 if [[ ! -f "${TLS_NODE_PEM}" ]]; then
