@@ -1,0 +1,220 @@
+name: CloudFormation OpenSearch Node Stack Deploy
+
+# ENC-TSK-L39 — gamma-only self-hosted OpenSearch node (t4g.small / single-AZ).
+# DEPLOY TARGET: gamma (v4) ONLY. v3-prod is FROZEN (DOC-499FA089EC30).
+# EscalatedPrereq: CFN deploy role needs ec2:RunInstances + iam:PassRole (DOC-359655466119).
+
+on:
+  push:
+    branches:
+      - 'v4/**'
+    paths:
+      - "infrastructure/cloudformation/10-opensearch-node.yaml"
+      - "infrastructure/opensearch/bootstrap-node.sh"
+      - ".github/workflows/cloudformation-opensearch-node-stack-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: "CloudFormation stack name for 10-opensearch-node template"
+        type: string
+        required: false
+        default: "enceladus-opensearch-node"
+      reason:
+        description: "Why this deploy is being triggered"
+        type: string
+        required: false
+        default: "manual OpenSearch node stack deploy (gamma)"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: cloudformation-opensearch-node-stack-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  TEMPLATE_FILE: infrastructure/cloudformation/10-opensearch-node.yaml
+  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  DEFAULT_STACK_NAME: enceladus-opensearch-node
+
+jobs:
+  guard-gamma-only:
+    name: Guard — gamma only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse non-gamma targets
+        run: |
+          set -euo pipefail
+          if [ "${ENVIRONMENT_SUFFIX}" != "-gamma" ]; then
+            echo "::error::OpenSearch node stack is gamma-only (v3-prod is FROZEN, DOC-499FA089EC30)."
+            exit 1
+          fi
+          echo "Gamma target confirmed (ENVIRONMENT_SUFFIX=${ENVIRONMENT_SUFFIX})."
+
+  plan:
+    name: Plan OpenSearch node stack change-set
+    needs: guard-gamma-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      stack_name: ${{ steps.params.outputs.stack_name }}
+      has_changes: ${{ steps.changeset.outputs.has_changes }}
+      changeset_arn: ${{ steps.changeset.outputs.changeset_arn }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync bootstrap script into CFN UserData (base64)
+        run: |
+          set -euo pipefail
+          python3 tools/sync_opensearch_bootstrap_cfn.py --check
+
+      - name: Configure AWS credentials (OIDC CloudFormation role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Resolve deployment parameters
+        id: params
+        run: |
+          set -euo pipefail
+          stack_name="${{ github.event.inputs.stack_name || env.DEFAULT_STACK_NAME }}${ENVIRONMENT_SUFFIX}"
+          echo "stack_name=${stack_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Clean up ROLLBACK_COMPLETE stack if present (gamma self-heal)
+        run: |
+          set -euo pipefail
+          stack_name="${{ steps.params.outputs.stack_name }}"
+          status=$(aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${stack_name}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          if [ "${status}" = "ROLLBACK_COMPLETE" ]; then
+            echo "Stack ${stack_name} is in ROLLBACK_COMPLETE — deleting before redeploy"
+            aws cloudformation delete-stack \
+              --region "${AWS_REGION}" \
+              --stack-name "${stack_name}"
+            aws cloudformation wait stack-delete-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${stack_name}"
+          fi
+
+      - name: Create OpenSearch node stack change-set (no execute)
+        id: changeset
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ steps.params.outputs.stack_name }}" \
+            --template-file "${TEMPLATE_FILE}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --no-execute-changeset \
+            --s3-bucket enceladus-cfn-staging-us-west-2 \
+            --s3-prefix 10-opensearch-node/ \
+            --parameter-overrides \
+              EnvironmentSuffix="${ENVIRONMENT_SUFFIX}" 2>&1 | tee /tmp/plan.log
+
+          if grep -q "No changes to deploy" /tmp/plan.log; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "changeset_arn=" >> "${GITHUB_OUTPUT}"
+            {
+              echo "## OpenSearch node stack plan — ${{ steps.params.outputs.stack_name }}"
+              echo "No changes to deploy."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          changeset_arn=$(grep -oE 'arn:aws:cloudformation:[^ "]*changeSet/[^ "]*' /tmp/plan.log | head -1)
+          if [ -z "${changeset_arn}" ]; then
+            echo "::error::Change-set creation output did not contain a change-set ARN."
+            exit 1
+          fi
+          echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          echo "changeset_arn=${changeset_arn}" >> "${GITHUB_OUTPUT}"
+
+      - name: Write change-set summary
+        if: steps.changeset.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## OpenSearch node stack plan — ${{ steps.params.outputs.stack_name }}"
+            echo ""
+            echo "Change-set: \`${{ steps.changeset.outputs.changeset_arn }}\`"
+            echo ""
+            echo '```'
+            aws cloudformation describe-change-set \
+              --region "${AWS_REGION}" \
+              --change-set-name "${{ steps.changeset.outputs.changeset_arn }}" \
+              --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}' \
+              --output table
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Apply OpenSearch node stack change-set
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: v4-gamma
+
+    steps:
+      - name: Configure AWS credentials (environment-scoped OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Execute reviewed change-set
+        id: deploy
+        run: |
+          set -euo pipefail
+          changeset_type=$(aws cloudformation describe-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}" \
+            --query 'ChangeSetType' --output text 2>/dev/null || echo "UPDATE")
+          aws cloudformation execute-change-set \
+            --region "${AWS_REGION}" \
+            --change-set-name "${{ needs.plan.outputs.changeset_arn }}"
+          if [ "${changeset_type}" = "CREATE" ]; then
+            aws cloudformation wait stack-create-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${{ needs.plan.outputs.stack_name }}"
+          else
+            aws cloudformation wait stack-update-complete \
+              --region "${AWS_REGION}" \
+              --stack-name "${{ needs.plan.outputs.stack_name }}"
+          fi
+
+      - name: Report stack events on failure
+        if: failure() && steps.deploy.conclusion == 'failure'
+        run: |
+          aws cloudformation describe-stack-events \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'StackEvents[:20].{Time:Timestamp,Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+            --output table || true
+
+      - name: Report deployed stack state
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,LastUpdatedTime:LastUpdatedTime}' \
+            --output table
+          aws cloudformation describe-stacks \
+            --region "${AWS_REGION}" \
+            --stack-name "${{ needs.plan.outputs.stack_name }}" \
+            --query 'Stacks[0].Outputs' \
+            --output table
