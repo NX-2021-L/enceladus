@@ -894,6 +894,42 @@ def _resolve_github_repo(project_id: str) -> Tuple[Optional[str], Optional[str]]
         return None, None
 
 
+def _resolve_task_github_repo(task: dict, project_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the GitHub owner/repo to validate a task's commit/PR/merge against.
+
+    ENC-FTR-119: satellite repos (e.g. enceladus-support) host code for tasks
+    that still live under the primary project's project_id, so the
+    project-level ``repo`` field alone (``_resolve_github_repo``) cannot
+    express "this one task's code is in a different repo than its siblings."
+    Previously the only way to correct that per-call was for the caller to
+    remember to pass ``transition_evidence.owner``/``repo`` at every single
+    advance (committed, pr, merged-main, closed) -- forgetting any one of them
+    silently fell back to the project default and produced a confusing GitHub
+    404/422 far from the real cause.
+
+    A task-level ``github_repo`` field (a plain "owner/repo" string or a full
+    https://github.com/owner/repo URL, settable via the ordinary tracker.set
+    field-update path) is now checked first and, once set, durably overrides
+    the project default for every subsequent advance on that task -- no
+    per-call evidence required. Falls back to ``_resolve_github_repo`` when
+    the task has no override, so ordinary same-repo tasks are unaffected.
+    """
+    task_repo = (task.get("github_repo") or "").strip()
+    if task_repo:
+        if task_repo.startswith("http"):
+            owner, repo = _parse_github_url(task_repo)
+        else:
+            owner, _, repo = task_repo.partition("/")
+            owner, repo = (owner or None), (repo or None)
+        if owner and repo:
+            return owner, repo
+        logger.warning(
+            "Task github_repo override '%s' could not be parsed as owner/repo; "
+            "falling back to project-level resolution.", task_repo,
+        )
+    return _resolve_github_repo(project_id)
+
+
 # ---------------------------------------------------------------------------
 # Token management (DynamoDB)
 # ---------------------------------------------------------------------------
@@ -2458,7 +2494,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         owner = transition_evidence.get("owner")
         repo = transition_evidence.get("repo")
         if not owner or not repo:
-            resolved_owner, resolved_repo = _resolve_github_repo(project_id)
+            resolved_owner, resolved_repo = _resolve_task_github_repo(task, project_id)
             owner = owner or resolved_owner
             repo = repo or resolved_repo
         if not owner or not repo:
@@ -2587,7 +2623,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         owner = transition_evidence.get("owner")
         repo = transition_evidence.get("repo")
         if not owner or not repo:
-            resolved_owner, resolved_repo = _resolve_github_repo(project_id)
+            resolved_owner, resolved_repo = _resolve_task_github_repo(task, project_id)
             owner = owner or resolved_owner
             repo = repo or resolved_repo
         if not owner or not repo:
@@ -2710,7 +2746,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                     owner = transition_evidence.get("owner")
                     repo = transition_evidence.get("repo")
                     if not owner or not repo:
-                        resolved_owner, resolved_repo = _resolve_github_repo(project_id)
+                        resolved_owner, resolved_repo = _resolve_task_github_repo(task, project_id)
                         owner = owner or resolved_owner
                         repo = repo or resolved_repo
                     if not owner or not repo:
