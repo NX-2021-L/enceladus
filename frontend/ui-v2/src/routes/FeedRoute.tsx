@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
-import { Autosuggest, ButtonDropdown, Cards } from '../design-system'
+import { useEffect, useRef, useState } from 'react'
+import { Autosuggest, ButtonDropdown, Cards, ColumnLayout } from '../design-system'
 import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
 import { SearchTierBadge } from '../components/SearchTierBadge'
 import { StatusChip } from '../components/StatusChip'
@@ -13,19 +13,33 @@ import {
   saveCurrentSearch,
   type SavedSearch,
 } from '../search/savedSearches'
+import {
+  getRecentlyViewed,
+  hitFromRecent,
+  trackRecentlyViewed,
+  type RecentlyViewedEntry,
+} from '../search/recentlyViewed'
 import { buildSearchCorpus } from '../search/searchCorpus'
 import { useTieredSearch } from '../search/useTieredSearch'
 import { documentHref, recordHrefForType } from '../routes/recordLink'
 import type { SearchResultHit } from '../types/search'
+import { FeedReadingPane } from './FeedReadingPane'
+import { RecentlyViewedNav } from './RecentlyViewedNav'
 import './feed.css'
 
 const EMPTY_FILTER: PropertyFilterQuery = { tokens: [], operation: 'and' }
+const LIST_CHUNK = 24
+const WIDE_MEDIA = '(min-width: 64rem)'
 
 export function FeedRoute() {
   const [query, setQuery] = useState('')
   const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>(EMPTY_FILTER)
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>(() => loadSavedSearches())
-  const [cardColumns, setCardColumns] = useState(1)
+  const [isWide, setIsWide] = useState(false)
+  const [selectedHit, setSelectedHit] = useState<SearchResultHit | null>(null)
+  const [visibleCount, setVisibleCount] = useState(LIST_CHUNK)
+  const [recentItems, setRecentItems] = useState<RecentlyViewedEntry[]>([])
+  const listRef = useRef<HTMLDivElement>(null)
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const { events, isHydrating } = useRealtimeFeed()
@@ -34,14 +48,66 @@ export function FeedRoute() {
 
   const tiered = useTieredSearch({ projectId, query }, corpus)
   const filteredHits = applyPropertyFilter(tiered.hits, filterQuery)
+  const visibleHits = filteredHits.slice(0, visibleCount)
+
+  const selectHit = (hit: SearchResultHit) => {
+    setSelectedHit(hit)
+    trackRecentlyViewed(hit)
+    setRecentItems(getRecentlyViewed(hit.recordType))
+  }
 
   useEffect(() => {
-    const desktop = window.matchMedia('(min-width: 48rem)')
-    const sync = () => setCardColumns(desktop.matches ? 3 : 1)
+    const mq = window.matchMedia(WIDE_MEDIA)
+    const sync = () => setIsWide(mq.matches)
     sync()
-    desktop.addEventListener('change', sync)
-    return () => desktop.removeEventListener('change', sync)
+    mq.addEventListener('change', sync)
+    return () => mq.removeEventListener('change', sync)
   }, [])
+
+  useEffect(() => {
+    setVisibleCount(LIST_CHUNK)
+  }, [query, filterQuery, filteredHits.length])
+
+  useEffect(() => {
+    if (!isWide) {
+      setSelectedHit(null)
+      return
+    }
+    if (filteredHits.length === 0) {
+      setSelectedHit(null)
+      return
+    }
+    if (selectedHit && filteredHits.some((h) => h.recordId === selectedHit.recordId)) {
+      return
+    }
+    const first = filteredHits[0]!
+    setSelectedHit(first)
+    trackRecentlyViewed(first)
+    setRecentItems(getRecentlyViewed(first.recordType))
+  }, [isWide, filteredHits, selectedHit])
+
+  useEffect(() => {
+    if (isWide) return
+    const onScroll = () => {
+      if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160) {
+        setVisibleCount((count) => Math.min(filteredHits.length, count + LIST_CHUNK))
+      }
+    }
+    window.addEventListener('scroll', onScroll)
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [isWide, filteredHits.length])
+
+  useEffect(() => {
+    const node = listRef.current
+    if (!node || !isWide) return
+    const onScroll = () => {
+      if (node.scrollTop + node.clientHeight >= node.scrollHeight - 120) {
+        setVisibleCount((count) => Math.min(filteredHits.length, count + LIST_CHUNK))
+      }
+    }
+    node.addEventListener('scroll', onScroll)
+    return () => node.removeEventListener('scroll', onScroll)
+  }, [filteredHits.length, isWide])
 
   const savedItems = [
     ...savedSearches.map((s) => ({
@@ -90,14 +156,73 @@ export function FeedRoute() {
       tag: row.recordType,
     }))
 
+  const cardDefinition = {
+    header: (hit: SearchResultHit) => <FeedCardTitle hit={hit} projects={projects} mobile={!isWide} />,
+    sections: [
+      {
+        id: 'status',
+        header: 'Status',
+        content: (hit: SearchResultHit) => (hit.status ? <StatusChip status={hit.status} /> : '—'),
+      },
+      {
+        id: 'tier',
+        header: 'Tier',
+        content: (hit: SearchResultHit) => <SearchTierBadge tier={hit.tier} />,
+      },
+      {
+        id: 'project',
+        header: 'Project',
+        content: (hit: SearchResultHit) => hit.projectId,
+      },
+    ],
+  }
+
+  const resultsBody =
+    isWide && filteredHits.length > 0 ? (
+      <ColumnLayout columns={2} borders="vertical">
+        <div className="feed-route__list-scroll" ref={listRef}>
+          <Cards
+            items={visibleHits}
+            trackBy="recordId"
+            columns={1}
+            selectionType="single"
+            selectedItems={selectedHit ? [selectedHit] : []}
+            onSelectionChange={(event) => {
+              const next = event.detail.selectedItems[0]
+              if (next) selectHit(next)
+            }}
+            cardDefinition={cardDefinition}
+          />
+          {visibleCount < filteredHits.length && (
+            <p className="feed-route__scroll-hint">Scroll for more results…</p>
+          )}
+        </div>
+        <div className="feed-route__pane">
+          <RecentlyViewedNav
+            items={recentItems}
+            currentRecordId={selectedHit?.recordId ?? null}
+            onSelect={(entry) => selectHit(hitFromRecent(entry))}
+          />
+          <FeedReadingPane hit={selectedHit} />
+        </div>
+      </ColumnLayout>
+    ) : (
+      <Cards
+        items={visibleHits}
+        trackBy="recordId"
+        columns={1}
+        cardDefinition={cardDefinition}
+      />
+    )
+
   return (
     <div className="feed-route">
       <header className="feed-route__header">
         <p className="feed-route__eyebrow">Search 2.0 · Feed</p>
         <h1 className="feed-route__title">Results</h1>
         <p className="feed-route__subtitle">
-          Local tier paints instantly; hybrid merges async. Property pills refine the card
-          collection below.
+          Local tier paints instantly; hybrid merges async. Wide viewports open a reading pane;
+          mobile opens the full record page.
         </p>
       </header>
 
@@ -135,31 +260,7 @@ export function FeedRoute() {
         <p className="feed-route__empty">No results — adjust search or filters.</p>
       )}
 
-      <Cards
-        items={filteredHits}
-        trackBy="recordId"
-        columns={cardColumns}
-        cardDefinition={{
-          header: (hit) => <FeedCardTitle hit={hit} projects={projects} />,
-          sections: [
-            {
-              id: 'status',
-              header: 'Status',
-              content: (hit) => (hit.status ? <StatusChip status={hit.status} /> : '—'),
-            },
-            {
-              id: 'tier',
-              header: 'Tier',
-              content: (hit) => <SearchTierBadge tier={hit.tier} />,
-            },
-            {
-              id: 'project',
-              header: 'Project',
-              content: (hit) => hit.projectId,
-            },
-          ],
-        }}
-      />
+      {filteredHits.length > 0 ? resultsBody : null}
     </div>
   )
 }
@@ -167,9 +268,11 @@ export function FeedRoute() {
 function FeedCardTitle({
   hit,
   projects,
+  mobile,
 }: {
   hit: SearchResultHit
   projects: Array<{ project_id: string; prefix: string }>
+  mobile: boolean
 }) {
   const project =
     hit.projectId || resolveProjectFromRecordId(hit.recordId, projects) || 'enceladus'
@@ -178,9 +281,13 @@ function FeedCardTitle({
       ? documentHref(hit.recordId)
       : recordHrefForType(project, hit.recordType, hit.recordId)
 
-  return (
-    <a href={href} className="feed-route__card-link">
-      {hit.recordId}
-    </a>
-  )
+  if (mobile) {
+    return (
+      <a href={href} className="feed-route__card-link">
+        {hit.recordId}
+      </a>
+    )
+  }
+
+  return <span className="feed-route__card-id">{hit.recordId}</span>
 }
