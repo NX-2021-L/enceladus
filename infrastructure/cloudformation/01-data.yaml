@@ -692,6 +692,32 @@ Resources:
         - Key: Feature
           Value: ENC-FTR-074
 
+  # ENC-TSK-L25 / ENC-FTR-127 AC-10/16/17: per-user preferences (saved searches,
+  # recently-viewed, prefs). PK = Cognito sub. Locked payload schema DOC-77D6C714867E
+  # §15h; read/written exclusively by user_preferences_api. Gamma-only
+  # (Condition: IsGamma): B67 Search2.0 wave work under the v4 gamma freeze
+  # (DOC-499FA089EC30) — matches the UserPreferencesApiFunction/Role condition.
+  UserPreferencesTable:
+    Type: AWS::DynamoDB::Table
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "user-preferences${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sub
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sub
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: user-preferences-api
+        - Key: Feature
+          Value: ENC-FTR-127
+
   # ENC-TSK-I27 / ENC-FTR-116 Wave 2: canonical governance-version record.
   # Single-item table (version_id = "governance-version-current") written exclusively
   # by the recompute-governance Lambda (IAM sole-writer enforced by I28).
@@ -731,6 +757,13 @@ Resources:
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: percolation-monitor
+        - Key: Feature
+          Value: ENC-FTR-085
   # ENC-FTR-086 Ph1 / ENC-TSK-I82: Convergence Surface attribute-value counter.
   # Frequency-ranked telemetry over canonical open-taxonomy values. One partition
   # per attribute (attribute_name = "{project_id}#{record_type}#{field}"); the
@@ -770,9 +803,6 @@ Resources:
         - Key: Project
           Value: enceladus
         - Key: Component
-          Value: percolation-monitor
-        - Key: Feature
-          Value: ENC-FTR-085
           Value: convergence
         - Key: Feature
           Value: ENC-FTR-086

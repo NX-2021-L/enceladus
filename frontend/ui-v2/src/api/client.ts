@@ -13,6 +13,7 @@
  */
 
 import type { HybridGraphsearchResponse, HybridSearchParams } from '../types/search'
+import type { UserPreferences } from '../types/userPreferences'
 
 /**
  * Read API base URL. Defaults to `/api/v1`, matching the existing app's
@@ -121,6 +122,32 @@ export async function fetchDocumentRecord<T>(
   const url = `${API_BASE}/documents/${encodeURIComponent(documentId)}`
   const body = await requestJson<{ document?: T } & Record<string, unknown>>(url, init)
   return (body.document ?? (body as unknown)) as T
+}
+
+/**
+ * User preferences (FTR-127 AC-10/16/17 / ENC-TSK-L25). GET/PUT
+ * /api/v1/user/preferences, Cognito-session-authed, server canonical for
+ * cross-device sync (offline mirror lives in src/sync/userPreferencesCache.ts).
+ */
+export async function fetchUserPreferences(init?: FetchInit): Promise<UserPreferences> {
+  return requestJson<UserPreferences>(`${API_BASE}/user/preferences`, init)
+}
+
+export async function saveUserPreferences(
+  preferences: UserPreferences,
+  init?: FetchInit,
+): Promise<UserPreferences> {
+  const res = await fetch(`${API_BASE}/user/preferences`, {
+    method: 'PUT',
+    signal: init?.signal,
+    headers: withDefaultHeaders({ ...init?.headers, 'content-type': 'application/json' }),
+    credentials: 'include',
+    cache: 'no-store',
+    body: JSON.stringify(preferences),
+  })
+  if (res.status === 401) throw new SessionExpiredError()
+  if (!res.ok) throw new Error(`Request failed (${res.status}): ${API_BASE}/user/preferences`)
+  return (await res.json()) as UserPreferences
 }
 
 /**

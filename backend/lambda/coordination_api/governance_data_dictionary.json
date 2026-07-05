@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.4",
-  "updated_at": "2026-07-05T07:20:00Z",
-  "last_change_summary": "ENC-TSK-L23 (FTR-127 AC-1..4/13): GET /api/v1/feed/corpus — cursor-paginated multi-project corpus spanning tracker + documents tables with filter/sort pushdown, source-tagged composite cursors, facet counts, and compact attrs projection.",
+  "version": "2026-07-05.5",
+  "updated_at": "2026-07-05T07:24:00Z",
+  "last_change_summary": "ENC-TSK-L25 (B67 Search2.0 WaveB / FTR-127 AC-10/16/17): new user_preferences_api Lambda + user-preferences DynamoDB table (PK=sub) + GET/PUT /api/v1/user/preferences routes, gamma-only. New entity user_preferences_api.lambda.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7304,10 +7304,50 @@
           "definition": "CloudWatch namespaces surfaced: AWS/Lambda, Enceladus/Prod (K44), Enceladus/GraphHealth (K43), Enceladus/CEE (K41), Enceladus/ArcWalk (H86)."
         }
       }
+    },
+    "user_preferences_api.lambda": {
+      "description": "ENC-TSK-L25 (B67 Search2.0 WaveB / ENC-FTR-127 AC-10/16/17): per-user preferences service (enceladus-user-preferences-api, gamma-only, arm64/python3.12). GET/PUT /api/v1/user/preferences, Cognito-JWT-only auth (no internal-key path -- purely a human-session surface), keyed on the caller's Cognito sub. Reads/writes the new user-preferences DynamoDB table (PK=sub) with the locked payload schema (DOC-77D6C714867E §15h): saved_searches[], recently_viewed{feed_type:[]}, prefs{}. Least-privilege IAM: GetItem/PutItem on its own table only. Provisioned by infrastructure/cloudformation/01-data.yaml (table) + 02-compute.yaml (function/role) + 03-api.yaml (integration/routes).",
+      "fields": {
+        "USER_PREFERENCES_TABLE": {
+          "definition": "DynamoDB table name for per-user preferences.",
+          "default": "user-preferences",
+          "type": "string"
+        },
+        "COGNITO_USER_POOL_ID": {
+          "definition": "Cognito User Pool ID for JWT verification (shared with other Cognito-fronted APIs).",
+          "type": "string"
+        },
+        "COGNITO_CLIENT_ID": {
+          "definition": "Cognito App Client ID; validated as the JWT audience.",
+          "type": "string"
+        },
+        "saved_searches": {
+          "definition": "Array of {name, query, filters, sort} saved-search entries; capped at 50.",
+          "type": "array"
+        },
+        "recently_viewed": {
+          "definition": "Object keyed by feed_type -> array of {record_id, project_id, viewed_at}; each feed_type capped at 50 entries.",
+          "type": "object"
+        },
+        "prefs": {
+          "definition": "Free-form per-user preference object (e.g. master-detail pin state).",
+          "type": "object"
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-K42 (B66 Ph5, ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda -- nightly EventBridge (gamma, cron 06:00 UTC, after K41's 05:00 CEE scan) consumes K41's Compliance/Semantic detector output and deterministically resolves a whitelist of compliance_warnings classes (fence_missing_language, metadata_field_missing) via document_api PATCH, advancing raw documents to compliant document_maturity_state with no agent session involvement. DATA-SAFETY: only the deterministic whitelist is auto-remediated; ambiguous/content-changing warnings are left for agent review; every auto-patch is logged with before/after compliance_score. Dry-run default-on (GDMP_DRY_RUN=1) plus a 3-run io-approval ramp (GDMP_IO_APPROVAL_RUNS=3, GDMP_MUTATION_ENABLED=0) reuse the FTR-106 / ENC-TSK-K03 unlearning Lambda's S3 run-counter pattern verbatim. CEE_GDMP_HARD_DISABLED=1 kill switch ships ON by default. Idempotent: is_already_compliant guards against re-patching already-compliant documents. New entity corpus_entropy_gdmp_remediation.lambda. Repo-file edit only -- governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED).",
   "change_log": [
+    {
+      "version": "2026-07-05.5",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L25 (B67 Search2.0 WaveB / FTR-127 AC-10/16/17): new user_preferences_api Lambda + user-preferences DynamoDB table (PK=sub) + GET/PUT /api/v1/user/preferences routes, gamma-only. New entity user_preferences_api.lambda."
+    },
+    {
+      "version": "2026-07-05.4",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L23 (FTR-127 AC-1..4/13): GET /api/v1/feed/corpus — cursor-paginated multi-project corpus spanning tracker + documents tables with filter/sort pushdown, source-tagged composite cursors, facet counts, and compact attrs projection."
+    },
     {
       "version": "2026-07-05.3",
       "date": "2026-07-05",
