@@ -1535,20 +1535,40 @@ def _process_record(driver, stream_record: Dict) -> None:
 # ---------------------------------------------------------------------------
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """SQS-triggered handler. Processes DynamoDB stream records from EventBridge Pipe."""
+    """SQS-triggered handler. Processes DynamoDB stream records from EventBridge Pipe.
+
+    ENC-TSK-L74: reports the Lambda partial-batch-failure contract
+    (batchItemFailures) so SQS retries only the records that actually failed.
+    Without this, a batch response of plain HTTP 200 -- which is what a bare
+    `except Exception: continue` produces regardless of per-record errors --
+    tells SQS the WHOLE batch succeeded, so it deletes every message in it,
+    including the ones that raised. Those records' MENTIONS edges (and any
+    other graph writes from _process_record) are then silently and
+    permanently lost, with no retry and no DLQ delivery, despite this
+    function's prior comments claiming otherwise. Requires
+    FunctionResponseTypes: [ReportBatchItemFailures] on the event source
+    mapping (infrastructure/cloudformation/02-compute.yaml
+    GraphSyncSqsTrigger) for batchItemFailures to actually take effect."""
     records = event.get("Records", [])
     if not records:
         return {"statusCode": 200, "body": "no records"}
 
     driver = _get_neo4j_driver()
     if driver is None:
-        logger.error("[ERROR] Neo4j driver unavailable; returning success to avoid infinite SQS retry")
-        return {"statusCode": 200, "body": "neo4j unavailable - skipping"}
+        logger.error("[ERROR] Neo4j driver unavailable; failing whole batch for retry")
+        # Report every message as failed so SQS retries the whole batch once
+        # Neo4j is reachable again, instead of deleting it and losing every
+        # record's graph write.
+        return {"batchItemFailures": [
+            {"itemIdentifier": r.get("messageId")} for r in records if r.get("messageId")
+        ]}
 
     processed = 0
     errors = 0
+    failed_message_ids: List[str] = []
 
     for sqs_record in records:
+        message_id = sqs_record.get("messageId")
         try:
             body = sqs_record.get("body", "{}")
             if isinstance(body, str):
@@ -1561,14 +1581,12 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         except Exception:
             errors += 1
             logger.exception("[ERROR] Failed to process SQS record")
-            # Don't re-raise; let the batch continue.
-            # Failed messages will be retried via SQS visibility timeout
-            # and eventually land in DLQ after maxReceiveCount.
+            if message_id:
+                failed_message_ids.append(message_id)
 
     logger.info("[INFO] Batch complete: processed=%d, errors=%d, total=%d", processed, errors, len(records))
 
-    # If ALL records failed, raise to trigger SQS retry for the batch
-    if errors > 0 and processed == 0:
-        raise RuntimeError(f"All {errors} records in batch failed")
+    if failed_message_ids:
+        return {"batchItemFailures": [{"itemIdentifier": mid} for mid in failed_message_ids]}
 
     return {"statusCode": 200, "body": json.dumps({"processed": processed, "errors": errors})}
