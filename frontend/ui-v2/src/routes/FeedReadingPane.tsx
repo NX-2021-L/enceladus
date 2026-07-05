@@ -1,3 +1,4 @@
+import { Link } from '@tanstack/react-router'
 import { Container, Header, Box } from '../design-system'
 import { SearchTierBadge } from '../components/SearchTierBadge'
 import { StatusChip } from '../components/StatusChip'
@@ -28,9 +29,9 @@ export function FeedReadingPane({ hit }: { hit: SearchResultHit | null }) {
         </Header>
       }
       footer={
-        <a href={href} className="feed-route__detail-link">
+        <Link to={href} className="feed-route__detail-link">
           Open full record →
-        </a>
+        </Link>
       }
     >
       <div className="feed-reading-pane__meta">

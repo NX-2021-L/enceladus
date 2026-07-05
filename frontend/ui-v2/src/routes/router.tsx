@@ -8,6 +8,7 @@ import { AppShell } from '../shell/AppShell'
 import { FeedRoute } from './FeedRoute'
 import { HomeRoute } from './HomeRoute'
 import { PlaceholderRoute } from './PlaceholderRoute'
+import { parseFeedSearch } from '../search/feedSearchParams'
 import { createDocumentRecordRoute, createRecordRoute } from './recordRoute'
 import {
   documentQueryOptions,
@@ -73,6 +74,7 @@ const documentRoute = createDocumentRecordRoute({
 const feedRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/feed',
+  validateSearch: parseFeedSearch,
   component: FeedRoute,
 })
 

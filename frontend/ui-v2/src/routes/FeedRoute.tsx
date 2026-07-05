@@ -1,12 +1,20 @@
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Autosuggest, ButtonDropdown, Cards, ColumnLayout } from '../design-system'
 import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
 import { SearchTierBadge } from '../components/SearchTierBadge'
 import { StatusChip } from '../components/StatusChip'
 import { useRealtimeFeed } from '../realtime/RealtimeFeedProvider'
-import { applyPropertyFilter, type PropertyFilterQuery } from '../search/applyPropertyFilter'
+import { applyPropertyFilter } from '../search/applyPropertyFilter'
 import { FeedPropertyFilter } from '../search/FeedPropertyFilter'
+import {
+  parseFilterQuery,
+  persistFeedReturnSearch,
+  serializeFilterQuery,
+  type FeedRouteSearch,
+  type FeedSort,
+} from '../search/feedSearchParams'
 import {
   deleteSavedSearch,
   loadSavedSearches,
@@ -20,20 +28,34 @@ import {
   type RecentlyViewedEntry,
 } from '../search/recentlyViewed'
 import { buildSearchCorpus } from '../search/searchCorpus'
+import { sortSearchHits } from '../search/sortSearchHits'
 import { useTieredSearch } from '../search/useTieredSearch'
+import {
+  useKeystrokeSuggestionTelemetry,
+  useRequestFirstPageTelemetry,
+} from '../search/useSearchTelemetry'
+import { useFeedConnectionStore } from '../store/feedConnectionStore'
 import { documentHref, recordHrefForType } from '../routes/recordLink'
 import type { SearchResultHit } from '../types/search'
 import { FeedReadingPane } from './FeedReadingPane'
 import { RecentlyViewedNav } from './RecentlyViewedNav'
+import { useFeedScrollRestore } from './useFeedScrollRestore'
 import './feed.css'
 
-const EMPTY_FILTER: PropertyFilterQuery = { tokens: [], operation: 'and' }
 const LIST_CHUNK = 24
 const WIDE_MEDIA = '(min-width: 64rem)'
+const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
+  { value: 'tier', label: 'Tier (default)' },
+  { value: 'id', label: 'Record ID' },
+  { value: 'title', label: 'Title' },
+  { value: 'status', label: 'Status' },
+]
 
 export function FeedRoute() {
-  const [query, setQuery] = useState('')
-  const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>(EMPTY_FILTER)
+  const feedSearch = useSearch({ from: '/feed' })
+  const navigate = useNavigate({ from: '/feed' })
+  const { q, f, op, sort, scroll } = feedSearch
+
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>(() => loadSavedSearches())
   const [isWide, setIsWide] = useState(false)
   const [selectedHit, setSelectedHit] = useState<SearchResultHit | null>(null)
@@ -41,20 +63,76 @@ export function FeedRoute() {
   const [recentItems, setRecentItems] = useState<RecentlyViewedEntry[]>([])
   const listRef = useRef<HTMLDivElement>(null)
 
+  const filterQuery = useMemo(() => parseFilterQuery(f, op), [f, op])
+
+  const patchFeedSearch = useCallback(
+    (patch: Partial<FeedRouteSearch>, replace = true) => {
+      navigate({
+        search: (prev) => {
+          const next = { ...prev, ...patch }
+          persistFeedReturnSearch(next)
+          return next
+        },
+        replace,
+      })
+    },
+    [navigate],
+  )
+
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const { events, isHydrating } = useRealtimeFeed()
   const corpus = buildSearchCorpus(events, projects)
   const projectId = projects[0]?.project_id ?? 'enceladus'
 
-  const tiered = useTieredSearch({ projectId, query }, corpus)
-  const filteredHits = applyPropertyFilter(tiered.hits, filterQuery)
+  const tiered = useTieredSearch({ projectId, query: q }, corpus)
+  const filteredHits = useMemo(
+    () => sortSearchHits(applyPropertyFilter(tiered.hits, filterQuery), sort),
+    [tiered.hits, filterQuery, sort],
+  )
   const visibleHits = filteredHits.slice(0, visibleCount)
+
+  const hybridEnabled = Boolean(q.trim())
+  const requestKey = `${q}|${f}|${op}|${sort}`
+  useRequestFirstPageTelemetry(requestKey, hybridEnabled, tiered.hybridPending)
+
+  const searchSuggestions = useMemo(
+    () =>
+      corpus
+        .filter((row) => {
+          const needle = q.trim().toLowerCase()
+          if (!needle) return true
+          return row.recordId.toLowerCase().includes(needle) || row.title.toLowerCase().includes(needle)
+        })
+        .slice(0, 12)
+        .map((row) => ({
+          value: row.recordId,
+          description: row.title,
+          tag: row.recordType,
+        })),
+    [corpus, q],
+  )
+
+  const suggestionsKey = searchSuggestions.map((row) => row.value).join(',')
+  const { markKeystroke } = useKeystrokeSuggestionTelemetry(suggestionsKey)
+
+  const keystrokeP50 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p50Ms)
+  const keystrokeP95 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p95Ms)
+  const localP50 = useFeedConnectionStore((s) => s.requestFirstPageLocal.p50Ms)
+  const localP95 = useFeedConnectionStore((s) => s.requestFirstPageLocal.p95Ms)
+  const serverP50 = useFeedConnectionStore((s) => s.requestFirstPageServer.p50Ms)
+  const serverP95 = useFeedConnectionStore((s) => s.requestFirstPageServer.p95Ms)
 
   const selectHit = (hit: SearchResultHit) => {
     setSelectedHit(hit)
     trackRecentlyViewed(hit)
     setRecentItems(getRecentlyViewed(hit.recordType))
   }
+
+  useFeedScrollRestore(scroll, isWide, listRef, (nextScroll) => patchFeedSearch({ scroll: nextScroll }), filteredHits.length > 0)
+
+  useEffect(() => {
+    persistFeedReturnSearch(feedSearch)
+  }, [feedSearch])
 
   useEffect(() => {
     const mq = window.matchMedia(WIDE_MEDIA)
@@ -66,7 +144,7 @@ export function FeedRoute() {
 
   useEffect(() => {
     setVisibleCount(LIST_CHUNK)
-  }, [query, filterQuery, filteredHits.length])
+  }, [q, f, op, sort, filteredHits.length])
 
   useEffect(() => {
     if (!isWide) {
@@ -129,7 +207,7 @@ export function FeedRoute() {
     if (id === '__save') {
       const name = window.prompt('Name this search')
       if (!name) return
-      setSavedSearches(saveCurrentSearch(savedSearches, name, query, filterQuery))
+      setSavedSearches(saveCurrentSearch(savedSearches, name, q, filterQuery))
       return
     }
     if (id.startsWith('__delete:')) {
@@ -139,25 +217,18 @@ export function FeedRoute() {
     }
     const saved = savedSearches.find((s) => s.id === id)
     if (!saved) return
-    setQuery(saved.query)
-    setFilterQuery(saved.filterQuery)
+    patchFeedSearch({
+      q: saved.query,
+      f: serializeFilterQuery(saved.filterQuery),
+      op: saved.filterQuery.operation ?? 'and',
+      scroll: 0,
+    })
   }
 
-  const searchSuggestions = corpus
-    .filter((row) => {
-      const q = query.trim().toLowerCase()
-      if (!q) return true
-      return row.recordId.toLowerCase().includes(q) || row.title.toLowerCase().includes(q)
-    })
-    .slice(0, 12)
-    .map((row) => ({
-      value: row.recordId,
-      description: row.title,
-      tag: row.recordType,
-    }))
-
   const cardDefinition = {
-    header: (hit: SearchResultHit) => <FeedCardTitle hit={hit} projects={projects} mobile={!isWide} />,
+    header: (hit: SearchResultHit) => (
+      <FeedCardTitle hit={hit} projects={projects} mobile={!isWide} feedSearch={feedSearch} />
+    ),
     sections: [
       {
         id: 'status',
@@ -207,12 +278,7 @@ export function FeedRoute() {
         </div>
       </ColumnLayout>
     ) : (
-      <Cards
-        items={visibleHits}
-        trackBy="recordId"
-        columns={1}
-        cardDefinition={cardDefinition}
-      />
+      <Cards items={visibleHits} trackBy="recordId" columns={1} cardDefinition={cardDefinition} />
     )
 
   return (
@@ -221,27 +287,55 @@ export function FeedRoute() {
         <p className="feed-route__eyebrow">Search 2.0 · Feed</p>
         <h1 className="feed-route__title">Results</h1>
         <p className="feed-route__subtitle">
-          Local tier paints instantly; hybrid merges async. Wide viewports open a reading pane;
-          mobile opens the full record page.
+          Local tier paints instantly; hybrid merges async. Search state lives in the URL so back
+          navigation and breadcrumb return restore filters and scroll.
         </p>
       </header>
 
       <div className="feed-route__toolbar">
         <div className="feed-route__search">
           <Autosuggest
-            value={query}
+            value={q}
             options={searchSuggestions}
             placeholder="Search records or saved name…"
             ariaLabel="Feed search"
-            onChange={(event) => setQuery(event.detail.value)}
+            onChange={(event) => {
+              markKeystroke()
+              patchFeedSearch({ q: event.detail.value, scroll: 0 })
+            }}
           />
         </div>
+        <label className="feed-route__sort">
+          <span>Sort</span>
+          <select
+            value={sort}
+            onChange={(event) =>
+              patchFeedSearch({ sort: event.target.value as FeedSort, scroll: 0 })
+            }
+          >
+            {SORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <ButtonDropdown items={savedItems} onItemClick={(event) => handleSavedClick(event.detail.id)}>
           Saved searches
         </ButtonDropdown>
       </div>
 
-      <FeedPropertyFilter query={filterQuery} corpus={corpus} onChange={setFilterQuery} />
+      <FeedPropertyFilter
+        query={filterQuery}
+        corpus={corpus}
+        onChange={(next) =>
+          patchFeedSearch({
+            f: serializeFilterQuery(next),
+            op: next.operation ?? 'and',
+            scroll: 0,
+          })
+        }
+      />
 
       <div className="feed-route__meta">
         <span>
@@ -250,6 +344,30 @@ export function FeedRoute() {
         </span>
         {tiered.hybridError && (
           <span className="feed-route__meta-error">{tiered.hybridError.message}</span>
+        )}
+        {(keystrokeP50 !== null || localP50 !== null || serverP50 !== null) && (
+          <span className="feed-route__telemetry">
+            {keystrokeP50 !== null && (
+              <>
+                keystroke→suggest p50 {Math.round(keystrokeP50)}ms
+                {keystrokeP95 !== null ? ` / p95 ${Math.round(keystrokeP95)}ms` : ''}
+              </>
+            )}
+            {localP50 !== null && (
+              <>
+                {keystrokeP50 !== null ? ' · ' : ''}
+                request→page (local) p50 {Math.round(localP50)}ms
+                {localP95 !== null ? ` / p95 ${Math.round(localP95)}ms` : ''}
+              </>
+            )}
+            {serverP50 !== null && (
+              <>
+                {' · '}
+                request→page (server) p50 {Math.round(serverP50)}ms
+                {serverP95 !== null ? ` / p95 ${Math.round(serverP95)}ms` : ''}
+              </>
+            )}
+          </span>
         )}
       </div>
 
@@ -269,10 +387,12 @@ function FeedCardTitle({
   hit,
   projects,
   mobile,
+  feedSearch,
 }: {
   hit: SearchResultHit
   projects: Array<{ project_id: string; prefix: string }>
   mobile: boolean
+  feedSearch: FeedRouteSearch
 }) {
   const project =
     hit.projectId || resolveProjectFromRecordId(hit.recordId, projects) || 'enceladus'
@@ -283,9 +403,13 @@ function FeedCardTitle({
 
   if (mobile) {
     return (
-      <a href={href} className="feed-route__card-link">
+      <Link
+        to={href}
+        className="feed-route__card-link"
+        onClick={() => persistFeedReturnSearch(feedSearch)}
+      >
         {hit.recordId}
-      </a>
+      </Link>
     )
   }
 

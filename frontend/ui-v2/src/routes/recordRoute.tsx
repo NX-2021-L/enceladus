@@ -2,6 +2,7 @@ import { Suspense } from 'react'
 import { useSuspenseQuery, type UseSuspenseQueryOptions } from '@tanstack/react-query'
 import { createRoute, type AnyRoute } from '@tanstack/react-router'
 import { queryClient } from '../api/queryClient'
+import { RecordDetailBreadcrumbs } from '../components/RecordDetailBreadcrumbs'
 import { SkeletonCard } from '../components/SkeletonCard'
 import { getPrimitive } from '../primitives/registry'
 import type { RecordShapeMap, RecordType } from '../types/records'
@@ -34,7 +35,12 @@ export function createRecordRoute<K extends TrackerRecordType>(config: {
     const { project, id } = route.useParams() as { project: string; id: string }
     const { data } = useSuspenseQuery(queryOptionsFor(project, id))
     const Primitive = getPrimitive(type)
-    return <Primitive record={data} />
+    return (
+      <>
+        <RecordDetailBreadcrumbs recordId={id} />
+        <Primitive record={data} />
+      </>
+    )
   }
 
   function RouteComponent() {
@@ -70,7 +76,12 @@ export function createDocumentRecordRoute(config: {
     const { id } = route.useParams() as { id: string }
     const { data } = useSuspenseQuery(queryOptionsFor(id))
     const Primitive = getPrimitive('document')
-    return <Primitive record={data} />
+    return (
+      <>
+        <RecordDetailBreadcrumbs recordId={id} />
+        <Primitive record={data} />
+      </>
+    )
   }
 
   function RouteComponent() {
