@@ -6061,6 +6061,19 @@ Resources:
         - Key: Component
           Value: search
 
+  # ENC-TSK-L43 follow-up: Secrets Manager interface endpoint ENIs share this SG;
+  # without self-ingress on :443, in-VPC Lambdas cannot reach the endpoint.
+  OpenSearchIndexerSecurityGroupVpcEndpointIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: IsGamma
+    Properties:
+      GroupId: !Ref OpenSearchIndexerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref OpenSearchIndexerSecurityGroup
+      Description: Lambda ENI to Secrets Manager VPC endpoint (shared SG)
+
   OpenSearchIndexerRole:
     Type: AWS::IAM::Role
     Condition: IsGamma
