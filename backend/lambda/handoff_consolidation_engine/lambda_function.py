@@ -79,6 +79,13 @@ GDMP_MIN_SHARED_REFS = int(os.environ.get("HCE_GDMP_MIN_SHARED_REFS", "1"))
 # edge lands on a real, traversable node.
 PROPOSER_ID = os.environ.get("HCE_PROPOSER_ID", "ENC-FTR-064")
 
+# AC-5 (ENC-TSK-L15): block candidate dispatch when the lesson primitive is disabled.
+_ENABLE_LESSON_RAW = os.environ.get("ENABLE_LESSON_PRIMITIVE", "true")
+
+
+def _lesson_primitive_enabled() -> bool:
+    return str(_ENABLE_LESSON_RAW).strip().lower() in ("1", "true", "yes", "on")
+
 # FSRS-6 initial-stability mapping bounds (see initial_stability_from_recurrence).
 FSRS_S0_FLOOR = float(os.environ.get("HCE_FSRS_S0_FLOOR", "2.0"))
 FSRS_S0_CEIL = float(os.environ.get("HCE_FSRS_S0_CEIL", "15.0"))
@@ -607,6 +614,19 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     since_iso = event.get("since")
     run_id = f"hce-{int(time.time())}"
     logger.info("[START] HCE cycle %s (force=%s dry_run=%s)", run_id, force, dry_run)
+
+    if not _lesson_primitive_enabled():
+        logger.info("[INFO] HCE cycle %s skipped: ENABLE_LESSON_PRIMITIVE disabled", run_id)
+        return {
+            "statusCode": 200,
+            "body": json.dumps(
+                {
+                    "run_id": run_id,
+                    "skipped": True,
+                    "reason": "ENABLE_LESSON_PRIMITIVE disabled",
+                }
+            ),
+        }
 
     now = _now()
     cutoff = now - timedelta(days=LOOKBACK_DAYS)

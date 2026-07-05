@@ -7514,10 +7514,41 @@
       "owner": "search",
       "source": "ENC-TSK-L41 / B67 Search2.0",
       "telemetry_eligible": true
+    },
+    "handoff_consolidation_engine.lambda": {
+      "description": "ENC-TSK-L15 / ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-096: Handoff Consolidation Engine (enceladus-handoff-consolidation-engine; gamma twin enceladus-handoff-consolidation-engine-gamma). Scheduled adaptive scan-cluster-propose cycle over Handoff documents; proposes lesson-candidate documents via governed Document API invoke (read-only DynamoDB, no direct writes). Emits OGTM CONSOLIDATED_FROM/PROPOSED_BY fields; GDMP Stage-2 provenance annotation; FSRS-6 stability seeding on candidates.",
+      "fields": {
+        "DOCUMENTS_TABLE": {
+          "definition": "Documents DynamoDB table name (read-only Query/Scan).",
+          "type": "string"
+        },
+        "DOCUMENT_API_LAMBDA_NAME": {
+          "definition": "Target devops-document-api Lambda for governed candidate create + provenance PATCH invokes.",
+          "type": "string"
+        },
+        "ADAPTIVE_TRIGGER_MIN_HANDOFFS": {
+          "definition": "Minimum new Handoffs since last cycle before a scheduled fire runs a full cycle.",
+          "default": "3",
+          "type": "string"
+        },
+        "HCE_GDMP_PROVENANCE_ENABLED": {
+          "definition": "When true, annotate compliant documents with informed_by context (contextualized maturity).",
+          "default": "true",
+          "type": "string"
+        }
+      },
+      "owner": "coordination",
+      "source": "ENC-TSK-L15 / ENC-FTR-096",
+      "telemetry_eligible": true
     }
   },
-  "change_summary": "ENC-TSK-K26 hotfix: tracker GET promotes item_id to typed {type}_id before record_extensions attach (detail pages lacked context_node while feed worked).",
+  "change_summary": "ENC-TSK-L15: register handoff_consolidation_engine.lambda entity for HCE Lambda (C08/L15).",
   "change_log": [
+    {
+      "version": "2026-07-05.20",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L15 (C08/FTR-096): new handoff_consolidation_engine.lambda entity for enceladus-handoff-consolidation-engine scheduled HCE Lambda (Document API write path, OGTM edges, GDMP Stage-2 provenance)."
+    },
     {
       "version": "2026-07-05.19",
       "date": "2026-07-05",
