@@ -415,7 +415,14 @@ jobs:
           print(json.dumps({
               "project_id": "enceladus",
               "change_type": "patch",
-              "deployment_type": "ui_update",
+              # ENC-ISS-451: "ui_update" is not a member of VALID_DEPLOYMENT_TYPES
+              # in backend/lambda/deploy_intake (every submission 400s). This is
+              # also deploy_intake's own default deployment_type for exactly this
+              # case (a UI deploy) -- picking it means the non_ui_config block
+              # below stays inert (github_public_static is not in
+              # NON_UI_SERVICE_GROUP_BY_TYPE, so no service_group/target_arn
+              # validation applies), so no other field needs to change.
+              "deployment_type": "github_public_static",
               "summary": f"ui-v2 PWA deploy to {env} @ {sha[:7]} (PR #{pr_id})",
               "changes": [
                   f"commit_sha: {sha}",
