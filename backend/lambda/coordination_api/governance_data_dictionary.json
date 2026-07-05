@@ -1,12 +1,7 @@
 {
-  "version": "2026-07-05.9",
-<<<<<<< HEAD
-  "updated_at": "2026-07-05T08:27:00Z",
-  "last_change_summary": "ENC-TSK-L27 (B67 WaveC / DOC-77D6C714867E §9C/§10.3): monotonic version_seq + version-seq-index GSI on devops-project-tracker; GET /api/v1/feed/delta?since=<version_seq> returns changed corpus items + delete tombstones; ui-v2 cache gap-heals incrementally.",
-=======
-  "updated_at": "2026-07-05T08:26:00Z",
-  "last_change_summary": "ENC-TSK-L10 (B64 Ph3): new mcp_streaming_gateway Lambda (Lambda Web Adapter + Starlette/uvicorn, reusing server.py's MCP tool surface) + dedicated REST API Gateway v1 (McpStreamingRestApi) with responseTransferMode=STREAM, gamma-only. New entity mcp_streaming_gateway.lambda.",
->>>>>>> origin/v4/main
+  "version": "2026-07-05.10",
+  "updated_at": "2026-07-05T08:30:00Z",
+  "last_change_summary": "ENC-TSK-L27 (B67 WaveC): version_seq + version-seq-index GSI + GET /api/v1/feed/delta incremental sync. ENC-TSK-L10 (B64 Ph3): mcp_streaming_gateway Lambda + McpStreamingRestApi (gamma-only).",
   "owners": [
     "enceladus-platform"
   ],
