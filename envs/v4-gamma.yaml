@@ -84,6 +84,7 @@ function_name_map:
   graph_sync: devops-graph-sync-gamma
   opensearch_indexer: devops-opensearch-indexer-gamma
   memory_consolidation: enceladus-memory-consolidation-gamma
+  handoff_consolidation_engine: enceladus-handoff-consolidation-engine-gamma
   neo4j_backup: enceladus-neo4j-backup-gamma
   percolation_monitor: enceladus-percolation-monitor-gamma
   unlearning: enceladus-unlearning-gamma

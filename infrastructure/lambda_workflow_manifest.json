@@ -258,6 +258,12 @@
       "deploy_script": "backend/lambda/memory_consolidation/deploy.sh"
     },
     {
+      "function_name": "enceladus-handoff-consolidation-engine",
+      "lambda_dir": "backend/lambda/handoff_consolidation_engine",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/handoff_consolidation_engine/deploy.sh"
+    },
+    {
       "function_name": "enceladus-neo4j-backup",
       "lambda_dir": "backend/lambda/neo4j_backup",
       "workflow_file": ".github/workflows/_deploy.yml",
