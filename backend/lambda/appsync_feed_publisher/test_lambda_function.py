@@ -334,3 +334,124 @@ def test_composite_record_id_without_item_id_falls_back_to_suffix():
     assert payload is not None
     assert payload["recordId"] == "ENC-LSN-057"
     assert "/records/ENC-LSN-057" in payload["channels"]
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-L29: full record body on /records/{recordId} only (not /feed/updates
+# or /projects/{id}), so the client's Tier-1/Tier-2 mirror (ENC-TSK-L24) can
+# upsert directly with no follow-up fetch.
+# ---------------------------------------------------------------------------
+
+
+def test_build_full_record_body_returns_new_image_for_insert():
+    rec = _stream_record(
+        event_name="INSERT",
+        new_image={
+            "record_id": "task#ENC-TSK-L29T",
+            "item_id": "ENC-TSK-L29T",
+            "record_type": "task",
+            "project_id": "enceladus",
+            "title": "Full body row",
+            "status": "open",
+        },
+    )
+    full_body = mod.build_full_record_body(rec)
+    assert full_body is not None
+    assert full_body["item_id"] == "ENC-TSK-L29T"
+    assert full_body["title"] == "Full body row"
+    assert full_body["status"] == "open"
+
+
+def test_build_full_record_body_returns_new_image_for_modify():
+    rec = _stream_record(
+        event_name="MODIFY",
+        new_image={"record_id": "task#ENC-TSK-L29T", "item_id": "ENC-TSK-L29T", "status": "closed"},
+        old_image={"record_id": "task#ENC-TSK-L29T", "item_id": "ENC-TSK-L29T", "status": "open"},
+    )
+    full_body = mod.build_full_record_body(rec)
+    assert full_body is not None
+    assert full_body["status"] == "closed"
+
+
+def test_build_full_record_body_returns_none_for_remove():
+    rec = _stream_record(
+        event_name="REMOVE",
+        old_image={"record_id": "task#ENC-TSK-L29T", "item_id": "ENC-TSK-L29T", "status": "open"},
+    )
+    full_body = mod.build_full_record_body(rec)
+    assert full_body is None
+
+
+class _FakeResponse:
+    def __init__(self, status=200):
+        self.status = status
+
+    def getcode(self):
+        return self.status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_publish_to_appsync_attaches_record_only_to_records_channel():
+    rec = _stream_record(
+        event_name="INSERT",
+        new_image={
+            "record_id": "task#ENC-TSK-L29T",
+            "item_id": "ENC-TSK-L29T",
+            "record_type": "task",
+            "project_id": "enceladus",
+            "title": "Full body row",
+        },
+    )
+    payload = mod.build_event_payload(rec, 0)
+    full_body = mod.build_full_record_body(rec)
+    assert payload is not None and full_body is not None
+
+    sent_bodies = {}
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        body = json.loads(req.data.decode("utf-8"))
+        sent_bodies[body["channel"]] = json.loads(body["events"][0])
+        return _FakeResponse(200)
+
+    with patch.object(mod.urllib.request, "urlopen", side_effect=_fake_urlopen):
+        mod.publish_to_appsync(payload, full_body)
+
+    assert set(sent_bodies.keys()) == {"/feed/updates", "/records/ENC-TSK-L29T", "/projects/enceladus"}
+    assert "record" not in sent_bodies["/feed/updates"]
+    assert "record" not in sent_bodies["/projects/enceladus"]
+    assert sent_bodies["/records/ENC-TSK-L29T"]["record"] == full_body
+    # AC-23: the lightweight channels must stay exactly as small as before —
+    # no accidental leakage of the full body onto the fixed-budget channels.
+    assert sent_bodies["/feed/updates"] == payload
+
+
+def test_publish_to_appsync_without_full_body_is_unchanged():
+    rec = _stream_record(
+        event_name="REMOVE",
+        old_image={
+            "record_id": "task#ENC-TSK-L29T",
+            "item_id": "ENC-TSK-L29T",
+            "record_type": "task",
+            "project_id": "enceladus",
+        },
+    )
+    payload = mod.build_event_payload(rec, 0)
+    assert payload is not None
+
+    sent_bodies = {}
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        body = json.loads(req.data.decode("utf-8"))
+        sent_bodies[body["channel"]] = json.loads(body["events"][0])
+        return _FakeResponse(200)
+
+    with patch.object(mod.urllib.request, "urlopen", side_effect=_fake_urlopen):
+        mod.publish_to_appsync(payload)
+
+    for body in sent_bodies.values():
+        assert "record" not in body

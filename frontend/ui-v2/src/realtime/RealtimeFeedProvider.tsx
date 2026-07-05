@@ -29,6 +29,12 @@ interface RealtimeFeedContextValue {
   isSnapshotError: boolean
   refetchSnapshot: () => void
   manualReconnect: () => void
+  /**
+   * ENC-TSK-L29: subscribe to full-body events for a single record over the
+   * shared realtime connection. No-op (safe, returns a no-op unsubscribe) if
+   * realtime is disabled or not yet connected.
+   */
+  watchRecord: (recordId: string, onEvent: (event: FeedRealtimeEvent) => void) => () => void
 }
 
 const RealtimeFeedContext = createContext<RealtimeFeedContextValue | null>(null)
@@ -171,6 +177,10 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
       clientRef.current?.manualRetry()
       resetFailedReconnects()
       setPhase('connecting')
+    },
+    watchRecord: (recordId, onRecordEvent) => {
+      if (!clientRef.current) return () => {}
+      return clientRef.current.watchRecord(recordId, onRecordEvent)
     },
   }
 
