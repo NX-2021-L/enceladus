@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 
-def _load_module():
+def _load_module(name: str, filename: str):
     if "boto3" not in sys.modules:
         fake_boto3 = types.ModuleType("boto3")
         fake_boto3.client = lambda *a, **k: None
@@ -21,13 +21,16 @@ def _load_module():
         sys.modules["botocore.exceptions"] = fake_botocore
 
     here = pathlib.Path(__file__).resolve().parent
-    spec = importlib.util.spec_from_file_location("opensearch_indexer_under_test", here / "lambda_function.py")
+    spec = importlib.util.spec_from_file_location(name, here / filename)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
-IDX = _load_module()
+CORE = _load_module("search_index_core_under_test", "search_index_core.py")
+sys.modules["search_index_core"] = CORE
+IDX = _load_module("opensearch_indexer_under_test", "lambda_function.py")
 
 
 class TestRecordMapping(unittest.TestCase):
@@ -44,10 +47,10 @@ class TestRecordMapping(unittest.TestCase):
             "created_at": "2026-07-05T00:00:00Z",
             "updated_at": "2026-07-05T01:00:00Z",
         }
-        doc = IDX._build_search_document(record)
+        doc = CORE._build_search_document(record)
         self.assertEqual(doc["title"], "Fix search")
-        self.assertEqual(doc["version_seq"], IDX._parse_epoch_ms(record["updated_at"]))
-        doc_id = IDX._stable_doc_id("enceladus", "task", record["record_id"])
+        self.assertEqual(doc["version_seq"], CORE._parse_epoch_ms(record["updated_at"]))
+        doc_id = CORE._stable_doc_id("enceladus", "task", record["record_id"])
         self.assertEqual(doc_id, "enceladus#task#ENC-TSK-123")
 
     def test_document_uses_full_description_as_body(self):
@@ -60,13 +63,13 @@ class TestRecordMapping(unittest.TestCase):
             "status": "active",
             "updated_at": "2026-07-05T02:00:00Z",
         }
-        doc = IDX._build_search_document(record)
+        doc = CORE._build_search_document(record)
         self.assertEqual(doc["body"], "Long body text")
         self.assertEqual(doc["record_type"], "document")
 
     def test_reference_records_skipped(self):
         self.assertIsNone(
-            IDX._build_search_document(
+            CORE._build_search_document(
                 {"project_id": "enceladus", "record_type": "reference", "record_id": "ref#1"}
             )
         )
@@ -109,10 +112,10 @@ class TestStreamActions(unittest.TestCase):
 
 class TestHandler(unittest.TestCase):
     @patch.dict(
-        IDX.__dict__,
+        CORE.__dict__,
         {"OPENSEARCH_ENDPOINT": "https://127.0.0.1:9200", "_admin_password": "secret"},
     )
-    @patch.object(IDX, "_bulk_execute")
+    @patch.object(IDX, "bulk_execute")
     def test_report_batch_item_failures(self, bulk_execute):
         bulk_execute.return_value = [(500, {"error": "boom"})]
         event = {
@@ -140,10 +143,10 @@ class TestHandler(unittest.TestCase):
         self.assertEqual(result, {"batchItemFailures": [{"itemIdentifier": "good-1"}]})
 
     @patch.dict(
-        IDX.__dict__,
+        CORE.__dict__,
         {"OPENSEARCH_ENDPOINT": "https://127.0.0.1:9200", "_admin_password": "secret"},
     )
-    @patch.object(IDX, "_bulk_execute")
+    @patch.object(IDX, "bulk_execute")
     def test_version_conflict_is_success(self, bulk_execute):
         bulk_execute.return_value = [(409, {"error": {"type": "version_conflict_engine_exception"}})]
         event = {

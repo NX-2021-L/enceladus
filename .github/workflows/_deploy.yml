@@ -426,6 +426,7 @@ jobs:
               'devops-changelog-api':           'changelog-api',
               'devops-graph-sync':              'graph-sync',
               'devops-opensearch-indexer':      'opensearch-indexer',
+              'devops-opensearch-backfill':     'opensearch-backfill',
               'enceladus-neo4j-backup':         'neo4j-backup',
               'enceladus-graph-health-metrics': 'graph-health-metrics',
               'devops-env-drift-auditor':       'env-drift-auditor',

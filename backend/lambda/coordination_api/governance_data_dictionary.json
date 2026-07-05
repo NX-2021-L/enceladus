@@ -7520,6 +7520,45 @@
       "source": "ENC-TSK-L41 / B67 Search2.0; credentials hardened by ENC-TSK-L44",
       "telemetry_eligible": true
     },
+    "opensearch_backfill.lambda": {
+      "description": "ENC-TSK-L42 (B67 Search2.0 WaveB): OpenSearch full-corpus backfill + reindex job Lambda (devops-opensearch-backfill; gamma twin devops-opensearch-backfill-gamma, arm64/python3.12). Paginated Scan of devops-project-tracker + documents tables; bulk-indexes into OpenSearch via records_write alias or a physical records_v{n} target during zero-downtime reindex. Shares search_index_core mapping + external-version idempotency with devops-opensearch-indexer (L41). Manual invoke only (no SQS trigger). Runs in VPC to reach gamma OpenSearch node. Pair with infrastructure/opensearch/apply_records_index.py --mode create-only/swap for AC-2 alias swap.",
+      "fields": {
+        "TRACKER_TABLE": {
+          "definition": "Tracker DynamoDB table name (Scan).",
+          "type": "string"
+        },
+        "DOCUMENTS_TABLE": {
+          "definition": "Documents DynamoDB table name (Scan; active rows only).",
+          "type": "string"
+        },
+        "OPENSEARCH_ENDPOINT": {
+          "definition": "HTTPS URL of the gamma OpenSearch node (VPC-private IP).",
+          "type": "string"
+        },
+        "OPENSEARCH_WRITE_ALIAS": {
+          "definition": "Default bulk target when invoke payload omits target_index; records_write per L40 contract.",
+          "default": "records_write",
+          "type": "string"
+        },
+        "OPENSEARCH_ADMIN_PASSWORD": {
+          "definition": "Admin basic-auth password when set; takes precedence over Secrets Manager lookup.",
+          "type": "string"
+        },
+        "OPENSEARCH_SECRET_NAME": {
+          "definition": "Secrets Manager secret id holding {\"password\":\"...\"} when OPENSEARCH_ADMIN_PASSWORD is empty.",
+          "default": "enceladus/opensearch/gamma-admin",
+          "type": "string"
+        },
+        "SECRETS_REGION": {
+          "definition": "Region for Secrets Manager client.",
+          "default": "us-west-2",
+          "type": "string"
+        }
+      },
+      "owner": "search",
+      "source": "ENC-TSK-L42 / B67 Search2.0",
+      "telemetry_eligible": true
+    },
     "handoff_consolidation_engine.lambda": {
       "description": "ENC-TSK-L15 / ENC-TSK-C08 / ENC-FTR-064 / ENC-FTR-096: Handoff Consolidation Engine (enceladus-handoff-consolidation-engine; gamma twin enceladus-handoff-consolidation-engine-gamma). Scheduled adaptive scan-cluster-propose cycle over Handoff documents; proposes lesson-candidate documents via governed Document API invoke (read-only DynamoDB, no direct writes). Emits OGTM CONSOLIDATED_FROM/PROPOSED_BY fields; GDMP Stage-2 provenance annotation; FSRS-6 stability seeding on candidates.",
       "fields": {
@@ -7547,8 +7586,13 @@
       "telemetry_eligible": true
     }
   },
-  "change_summary": "ENC-TSK-L44: opensearch_indexer.lambda now authenticates as the scoped indexer security-plugin user (OPENSEARCH_USERNAME), not admin.",
+  "change_summary": "ENC-TSK-L42: register opensearch_backfill.lambda; merge L44 scoped indexer auth into search_index_core.",
   "change_log": [
+    {
+      "version": "2026-07-05.23",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L42 (B67 Search2.0): new opensearch_backfill.lambda entity for devops-opensearch-backfill scan+bulk job (records_write / records_v{n} target, shared search_index_core with L41 indexer; L44 scoped indexer credentials)."
+    },
     {
       "version": "2026-07-05.22",
       "date": "2026-07-05",
