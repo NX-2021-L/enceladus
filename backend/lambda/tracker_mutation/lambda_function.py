@@ -2684,6 +2684,35 @@ def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dic
     if item is None:
         return _error(404, f"Record not found: {record_id}")
 
+    id_key = f"{record_type}_id"
+    try:
+        from enceladus_shared.record_extensions import (
+            attach_record_extensions,
+            query_typed_relationships_for_projects,
+        )
+
+        def _ddb_str(raw: Dict, key: str) -> str:
+            val = raw.get(key, {})
+            return val.get("S", "") if isinstance(val, dict) else ""
+
+        def _ddb_float(raw: Dict, key: str) -> float:
+            val = raw.get(key, {})
+            try:
+                return float(val.get("N", "0"))
+            except (TypeError, ValueError):
+                return 0.0
+
+        edges_by_source = query_typed_relationships_for_projects(
+            _get_ddb(),
+            DYNAMODB_TABLE,
+            [project_id],
+            ddb_str=_ddb_str,
+            ddb_float=_ddb_float,
+        )
+        attach_record_extensions([item], id_key, record_type, edges_by_source)
+    except Exception as exc:
+        logger.warning("Failed to attach record extensions for %s: %s", record_id, exc)
+
     return _response(200, {"success": True, "record": item})
 
 

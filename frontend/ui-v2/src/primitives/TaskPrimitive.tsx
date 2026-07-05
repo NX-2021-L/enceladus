@@ -1,5 +1,7 @@
 import { ListChecks } from 'lucide-react'
 import type { Task } from '../types/records'
+import { ContextNodeBadges } from '../components/ContextNodeBadges'
+import { TypedRelationshipSection } from '../components/TypedRelationshipSection'
 import { MetaRow, Metric, PrimitiveCard, Prose } from '../components/PrimitiveCard'
 
 export function TaskPrimitive({ record }: { record: Task }) {
@@ -29,6 +31,13 @@ export function TaskPrimitive({ record }: { record: Task }) {
         </Metric>{' '}
         edges
       </MetaRow>
+      <ContextNodeBadges contextNode={record.context_node} />
+      {record.typed_relationships?.length ? (
+        <TypedRelationshipSection
+          projectId={record.project_id}
+          edges={record.typed_relationships}
+        />
+      ) : null}
     </PrimitiveCard>
   )
 }

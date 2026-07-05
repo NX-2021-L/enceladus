@@ -1,5 +1,8 @@
 import { Map as MapIcon } from 'lucide-react'
 import type { Plan } from '../types/records'
+import { ContextNodeBadges } from '../components/ContextNodeBadges'
+import { PlanGraphExplorer } from '../components/PlanGraphExplorer'
+import { TypedRelationshipSection } from '../components/TypedRelationshipSection'
 import { MetaRow, Metric, PrimitiveCard, Prose } from '../components/PrimitiveCard'
 
 export function PlanPrimitive({ record }: { record: Plan }) {
@@ -22,6 +25,18 @@ export function PlanPrimitive({ record }: { record: Plan }) {
       <MetaRow label="Attached docs">
         <Metric>{record.attached_documents?.length ?? 0}</Metric>
       </MetaRow>
+      <PlanGraphExplorer
+        projectId={record.project_id}
+        planId={record.plan_id}
+        objectiveIds={record.objectives_set ?? []}
+      />
+      <ContextNodeBadges contextNode={record.context_node} />
+      {record.typed_relationships?.length ? (
+        <TypedRelationshipSection
+          projectId={record.project_id}
+          edges={record.typed_relationships}
+        />
+      ) : null}
     </PrimitiveCard>
   )
 }

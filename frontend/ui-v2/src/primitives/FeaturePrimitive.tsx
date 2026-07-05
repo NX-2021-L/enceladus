@@ -1,5 +1,7 @@
 import { Sparkles } from 'lucide-react'
 import type { Feature } from '../types/records'
+import { ContextNodeBadges } from '../components/ContextNodeBadges'
+import { TypedRelationshipSection } from '../components/TypedRelationshipSection'
 import { MetaRow, Metric, PrimitiveCard, Prose } from '../components/PrimitiveCard'
 
 export function FeaturePrimitive({ record }: { record: Feature }) {
@@ -23,6 +25,13 @@ export function FeaturePrimitive({ record }: { record: Feature }) {
       <MetaRow label="Related tasks">
         <Metric>{record.related_task_ids?.length ?? 0}</Metric>
       </MetaRow>
+      <ContextNodeBadges contextNode={record.context_node} />
+      {record.typed_relationships?.length ? (
+        <TypedRelationshipSection
+          projectId={record.project_id}
+          edges={record.typed_relationships}
+        />
+      ) : null}
     </PrimitiveCard>
   )
 }

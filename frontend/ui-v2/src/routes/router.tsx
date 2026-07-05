@@ -10,6 +10,7 @@ import { HomeRoute } from './HomeRoute'
 import { PlaceholderRoute } from './PlaceholderRoute'
 import { ProjectsRoute } from './ProjectsRoute'
 import { DocsRoute } from './DocsRoute'
+import { GovernanceRoute } from './GovernanceRoute'
 import { ChangelogRoute } from './ChangelogRoute'
 import { CoordinationRoute } from './CoordinationRoute'
 import { createSessionDetailRoute } from './SessionDetailRoute'
@@ -94,6 +95,11 @@ const docsRoute = createRoute({
   path: '/docs',
   component: DocsRoute,
 })
+const governanceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/governance',
+  component: GovernanceRoute,
+})
 const changelogRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/changelog',
@@ -129,6 +135,7 @@ const routeTree = rootRoute.addChildren([
   feedRoute,
   projectsRoute,
   docsRoute,
+  governanceRoute,
   changelogRoute,
   coordinationRoute,
   sessionRoute,

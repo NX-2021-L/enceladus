@@ -21,6 +21,28 @@ export interface HistoryEntry {
   description: string
 }
 
+export interface TypedRelationshipEdge {
+  relationship_type: string
+  target_id: string
+  weight: number
+  confidence: number
+  reason: string | null
+  created_at: string | null
+}
+
+export interface ContextNodeMeta {
+  freshness_score: number
+  structural_importance: number
+  information_density: number
+  access_frequency: number
+}
+
+export interface RecordExtensions {
+  typed_relationships?: TypedRelationshipEdge[]
+  context_node?: ContextNodeMeta
+  subtask_ids?: string[]
+}
+
 export interface Task {
   task_id: string
   project_id: string
@@ -38,6 +60,9 @@ export interface Task {
   updated_at: string | null
   created_at: string | null
   sync_version?: number
+  typed_relationships?: TypedRelationshipEdge[]
+  context_node?: ContextNodeMeta
+  subtask_ids?: string[]
 }
 
 export interface Issue {
@@ -53,6 +78,8 @@ export interface Issue {
   history: HistoryEntry[]
   updated_at: string | null
   created_at: string | null
+  typed_relationships?: TypedRelationshipEdge[]
+  context_node?: ContextNodeMeta
 }
 
 export interface Feature {
@@ -67,6 +94,8 @@ export interface Feature {
   history: HistoryEntry[]
   updated_at: string | null
   created_at: string | null
+  typed_relationships?: TypedRelationshipEdge[]
+  context_node?: ContextNodeMeta
 }
 
 export interface Plan {
@@ -83,6 +112,8 @@ export interface Plan {
   history: HistoryEntry[]
   updated_at: string | null
   created_at: string | null
+  typed_relationships?: TypedRelationshipEdge[]
+  context_node?: ContextNodeMeta
 }
 
 export interface PillarScores {

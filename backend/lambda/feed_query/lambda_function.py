@@ -1883,18 +1883,29 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             logger.error("feed query failed: %s", exc)
             return _error(500, "Failed to query feed data. Please try again.")
 
-        # --- Attach typed relationship edges (ENC-ISS-137 / ENC-TSK-A57) ---
+        # --- Attach typed relationship edges + context node scores (ENC-TSK-A57/K26) ---
         try:
             project_ids = list({r.get("project_id", "") for r in tasks + issues + features + lessons + plans if r.get("project_id")})
             if project_ids:
-                edges_by_source = _query_typed_relationships(project_ids)
-                _attach_typed_relationships(tasks, "task_id", edges_by_source)
-                _attach_typed_relationships(issues, "issue_id", edges_by_source)
-                _attach_typed_relationships(features, "feature_id", edges_by_source)
-                _attach_typed_relationships(lessons, "lesson_id", edges_by_source)
-                _attach_typed_relationships(plans, "plan_id", edges_by_source)
+                from enceladus_shared.record_extensions import (
+                    attach_record_extensions,
+                    query_typed_relationships_for_projects,
+                )
+
+                edges_by_source = query_typed_relationships_for_projects(
+                    _get_ddb(),
+                    DYNAMODB_TABLE,
+                    project_ids,
+                    ddb_str=_ddb_str,
+                    ddb_float=_ddb_float,
+                )
+                attach_record_extensions(tasks, "task_id", "task", edges_by_source)
+                attach_record_extensions(issues, "issue_id", "issue", edges_by_source)
+                attach_record_extensions(features, "feature_id", "feature", edges_by_source)
+                attach_record_extensions(lessons, "lesson_id", "lesson", edges_by_source)
+                attach_record_extensions(plans, "plan_id", "plan", edges_by_source)
         except Exception as exc:
-            logger.warning("Failed to attach typed relationships: %s", exc)
+            logger.warning("Failed to attach record extensions: %s", exc)
 
         subscription_meta = {
             "subscription_id": None,
