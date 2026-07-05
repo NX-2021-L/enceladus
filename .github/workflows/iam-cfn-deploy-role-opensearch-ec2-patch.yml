@@ -1,0 +1,110 @@
+name: IAM CFN Deploy Role — OpenSearch EC2 Patch
+
+# ENC-TSK-L39 / DOC-359655466119 — grant the shared CFN deploy role the minimum EC2
+# permissions to stand up enceladus-opensearch-node-gamma (t4g.small in default VPC).
+# io-gated: environment v3-prod (required reviewer).
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "Grant EC2+PassRole for enceladus-opensearch-node-gamma CFN stack (ENC-TSK-L39)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with OpenSearch EC2 permissions
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy — OpenSearch node EC2 bootstrap (gamma)
+        run: |
+          set -euo pipefail
+          cat > /tmp/opensearch-ec2-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "OpenSearchNodeEc2Describe",
+                "Effect": "Allow",
+                "Action": [
+                  "ec2:DescribeVpcs",
+                  "ec2:DescribeSubnets",
+                  "ec2:DescribeSecurityGroups",
+                  "ec2:DescribeImages",
+                  "ec2:DescribeInstances",
+                  "ec2:DescribeInstanceStatus",
+                  "ec2:DescribeNetworkInterfaces",
+                  "ec2:DescribeVolumes",
+                  "ec2:DescribeAccountAttributes"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "OpenSearchNodeEc2MutateGamma",
+                "Effect": "Allow",
+                "Action": [
+                  "ec2:RunInstances",
+                  "ec2:TerminateInstances",
+                  "ec2:StartInstances",
+                  "ec2:StopInstances",
+                  "ec2:CreateTags",
+                  "ec2:DeleteTags",
+                  "ec2:CreateSecurityGroup",
+                  "ec2:DeleteSecurityGroup",
+                  "ec2:AuthorizeSecurityGroupIngress",
+                  "ec2:AuthorizeSecurityGroupEgress",
+                  "ec2:RevokeSecurityGroupIngress",
+                  "ec2:RevokeSecurityGroupEgress",
+                  "ec2:ModifyInstanceAttribute"
+                ],
+                "Resource": "*",
+                "Condition": {
+                  "StringEquals": {
+                    "aws:RequestedRegion": "us-west-2"
+                  }
+                }
+              },
+              {
+                "Sid": "OpenSearchNodePassInstanceProfile",
+                "Effect": "Allow",
+                "Action": "iam:PassRole",
+                "Resource": "arn:aws:iam::356364570033:role/enceladus-opensearch-node-role-gamma",
+                "Condition": {
+                  "StringEquals": {
+                    "iam:PassedToService": "ec2.amazonaws.com"
+                  }
+                }
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-opensearch-ec2-v1" \
+            --policy-document "file:///tmp/opensearch-ec2-policy.json"
+
+      - name: Verify inline policy attached
+        run: |
+          aws iam get-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-opensearch-ec2-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table
