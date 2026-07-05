@@ -1,5 +1,7 @@
 import { AlertTriangle } from 'lucide-react'
 import type { Issue } from '../types/records'
+import { ContextNodeBadges } from '../components/ContextNodeBadges'
+import { TypedRelationshipSection } from '../components/TypedRelationshipSection'
 import { MetaRow, PrimitiveCard, Prose } from '../components/PrimitiveCard'
 
 export function IssuePrimitive({ record }: { record: Issue }) {
@@ -24,6 +26,13 @@ export function IssuePrimitive({ record }: { record: Issue }) {
       </MetaRow>
       {record.hypothesis ? (
         <MetaRow label="Hypothesis">{record.hypothesis}</MetaRow>
+      ) : null}
+      <ContextNodeBadges contextNode={record.context_node} />
+      {record.typed_relationships?.length ? (
+        <TypedRelationshipSection
+          projectId={record.project_id}
+          edges={record.typed_relationships}
+        />
       ) : null}
     </PrimitiveCard>
   )

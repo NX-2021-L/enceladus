@@ -23,6 +23,12 @@ from enceladus_shared.auth import (
 from enceladus_shared.aws_clients import _get_ddb, _get_s3, _get_sqs
 from enceladus_shared.http_utils import _error, _parse_body, _path_method, _response
 from enceladus_shared.serialization import _deserialize, _now_z, _serialize, _unix_now
+from enceladus_shared.record_extensions import (
+    attach_record_extensions,
+    compute_freshness,
+    compute_max_degree,
+    compute_structural_importance,
+)
 
 
 class AuthTests(unittest.TestCase):
@@ -184,6 +190,35 @@ class AwsClientTests(unittest.TestCase):
         mock_boto3.client.assert_called_once()
 
         clients._ddb = None  # Clean up
+
+
+class RecordExtensionsTests(unittest.TestCase):
+    def test_structural_importance_absolute_degree(self):
+        edges = {
+            "A": [{"target_id": "B"}, {"target_id": "C"}],
+            "B": [{"target_id": "A"}],
+        }
+        max_degree = compute_max_degree(edges)
+        self.assertEqual(compute_structural_importance("A", edges, max_degree), 1.0)
+        self.assertEqual(compute_structural_importance("C", edges, max_degree), 1 / 3)
+
+    def test_attach_record_extensions_sets_context_node(self):
+        edges = {"ENC-TSK-001": [{"relationship_type": "relates-to", "target_id": "ENC-TSK-002"}]}
+        record = {
+            "task_id": "ENC-TSK-001",
+            "title": "Example",
+            "description": "x" * 100,
+            "updated_at": "2026-07-01T00:00:00Z",
+        }
+        attach_record_extensions([record], "task_id", "task", edges, max_degree=2)
+        self.assertEqual(len(record["typed_relationships"]), 1)
+        ctx = record["context_node"]
+        self.assertIn("freshness_score", ctx)
+        self.assertGreater(ctx["structural_importance"], 0)
+        self.assertGreater(ctx["information_density"], 0)
+
+    def test_compute_freshness_missing_timestamp_defaults(self):
+        self.assertEqual(compute_freshness(None, "task"), 0.5)
 
 
 if __name__ == "__main__":
