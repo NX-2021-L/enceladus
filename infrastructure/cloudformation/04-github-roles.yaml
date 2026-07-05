@@ -4,7 +4,9 @@ Description: >
   Part of ENC-ISS-056: Provision the missing CloudFormation deploy role so
   the cloudformation-api-stack-deploy workflow can authenticate.
 
-  Deploy manually once with admin credentials:
+  Deploy via GitHub Actions (io-gated):
+    workflow_dispatch: cloudformation-github-roles-stack-deploy.yml
+  Or manually once with admin credentials:
     aws cloudformation deploy --stack-name enceladus-github-roles \
       --template-file infrastructure/cloudformation/04-github-roles.yaml \
       --capabilities CAPABILITY_NAMED_IAM --region us-west-2

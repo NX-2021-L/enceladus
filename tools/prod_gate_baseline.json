@@ -50,6 +50,13 @@
       ],
       "notes": "v4/main-only file; gamma-only by construction (guard-gamma-only job refuses non-gamma, v3-prod FROZEN per DOC-499FA089EC30); ENC-TSK-J63 plan/apply split with apply environment: v4-gamma"
     },
+    "cloudformation-github-roles-stack-deploy.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-L51 / DOC-B716E8FB10B6 Channel C: dispatch-only enceladus-github-roles stack deploy; apply job environment: v3-prod"
+    },
     "cloudformation-api-stack-deploy.yml": {
       "class": "conditional",
       "gated_jobs": [
