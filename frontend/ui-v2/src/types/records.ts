@@ -101,6 +101,7 @@ export interface Lesson {
   provenance: string
   confidence: number
   pillar_scores: PillarScores
+  pillar_composite: number
   resonance_score: number
   category: string
   status: string

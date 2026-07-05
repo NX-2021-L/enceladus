@@ -13,3 +13,5 @@ export { Header } from '../../../design-system-2/v2/components/Header/Header.jsx
 export { Pagination } from '../../../design-system-2/v2/components/Pagination/Pagination.jsx'
 export { Box } from '../../../design-system-2/v2/components/Box/Box.jsx'
 export { BreadcrumbGroup } from '../../../design-system-2/v2/components/BreadcrumbGroup/BreadcrumbGroup.jsx'
+export { KeyValuePairs } from '../../../design-system-2/v2/components/KeyValuePairs/KeyValuePairs.jsx'
+export { BarChart } from '../../../design-system-2/v2/components/BarChart/BarChart.jsx'
