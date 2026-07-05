@@ -164,3 +164,124 @@ describe('AppSyncRealtimeClient', () => {
     client.stop()
   })
 })
+
+describe('AppSyncRealtimeClient — per-record watch (ENC-TSK-L29)', () => {
+  afterEach(() => {
+    MockWebSocket.instances = []
+  })
+
+  it('subscribes to /records/{recordId} and routes matching data frames to the watch handler only', () => {
+    const globalEvents: string[] = []
+    const client = new AppSyncRealtimeClient({
+      config,
+      lastCursor: 0,
+      onEvent: (event) => globalEvents.push(event.type),
+      webSocketFactory: (url, protocols) => new MockWebSocket(url, protocols) as unknown as WebSocket,
+    })
+
+    client.start()
+    const socket = MockWebSocket.instances[0]
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+
+    const recordEvents: unknown[] = []
+    client.watchRecord('ENC-TSK-L29T', (event) => recordEvents.push(event))
+
+    const subscribeFrame = socket.sent
+      .map((raw) => JSON.parse(raw))
+      .find((frame) => frame.type === 'subscribe' && frame.channel === '/records/ENC-TSK-L29T')
+    expect(subscribeFrame).toBeDefined()
+
+    const detailPayload = {
+      eventId: 'evt-detail-1',
+      recordId: 'ENC-TSK-L29T',
+      record_type: 'task',
+      action: 'updated',
+      actorType: 'agent',
+      actorId: 'ENC-SES-1',
+      summary: 'updated task',
+      cursor: 1_700_000_000_001,
+      channels: ['/records/ENC-TSK-L29T'],
+      record: { item_id: 'ENC-TSK-L29T', title: 'Full body' },
+    }
+    socket.emit({ type: 'data', id: subscribeFrame.id, event: JSON.stringify(detailPayload) })
+
+    expect(recordEvents).toHaveLength(1)
+    expect((recordEvents[0] as { record?: { title?: string } }).record?.title).toBe('Full body')
+    // Per-record events never reach the global feed_event handler.
+    expect(globalEvents).not.toContain('feed_event')
+    client.stop()
+  })
+
+  it('unsubscribe stops routing further events and sends an unsubscribe frame', () => {
+    const client = new AppSyncRealtimeClient({
+      config,
+      lastCursor: 0,
+      onEvent: () => {},
+      webSocketFactory: (url, protocols) => new MockWebSocket(url, protocols) as unknown as WebSocket,
+    })
+
+    client.start()
+    const socket = MockWebSocket.instances[0]
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+
+    const recordEvents: unknown[] = []
+    const unsubscribe = client.watchRecord('ENC-TSK-L29T', (event) => recordEvents.push(event))
+    const subscribeFrame = socket.sent
+      .map((raw) => JSON.parse(raw))
+      .find((frame) => frame.type === 'subscribe' && frame.channel === '/records/ENC-TSK-L29T')
+
+    unsubscribe()
+    expect(
+      socket.sent.map((raw) => JSON.parse(raw)).some((f) => f.type === 'unsubscribe' && f.id === subscribeFrame.id),
+    ).toBe(true)
+
+    socket.emit({
+      type: 'data',
+      id: subscribeFrame.id,
+      event: JSON.stringify({
+        eventId: 'evt-detail-2',
+        recordId: 'ENC-TSK-L29T',
+        record_type: 'task',
+        action: 'updated',
+        actorType: 'agent',
+        actorId: 'ENC-SES-1',
+        summary: 'updated task',
+        cursor: 1_700_000_000_002,
+        channels: ['/records/ENC-TSK-L29T'],
+        record: { item_id: 'ENC-TSK-L29T' },
+      }),
+    })
+    expect(recordEvents).toHaveLength(0)
+    client.stop()
+  })
+
+  it('resubscribes watched records after a reconnect', () => {
+    vi.useFakeTimers()
+    const client = new AppSyncRealtimeClient({
+      config,
+      lastCursor: 0,
+      onEvent: () => {},
+      webSocketFactory: (url, protocols) => new MockWebSocket(url, protocols) as unknown as WebSocket,
+    })
+
+    client.start()
+    let socket = MockWebSocket.instances[0]
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+    client.watchRecord('ENC-TSK-L29T', () => {})
+
+    socket.close()
+    vi.advanceTimersByTime(BACKOFF_BASE_MS * 4)
+    socket = MockWebSocket.instances.at(-1)!
+    socket.open()
+    socket.emit({ type: 'connection_ack' })
+
+    const resubscribed = socket.sent
+      .map((raw) => JSON.parse(raw))
+      .some((frame) => frame.type === 'subscribe' && frame.channel === '/records/ENC-TSK-L29T')
+    expect(resubscribed).toBe(true)
+    client.stop()
+  })
+})

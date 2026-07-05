@@ -13,6 +13,14 @@ export interface FeedRealtimeEvent {
   summary: string
   cursor: number
   channels: string[]
+  /**
+   * ENC-TSK-L29: the full current record body, present ONLY on events
+   * delivered over a per-record `/records/{recordId}` subscription (never on
+   * the `/feed/updates` or `/projects/{id}` channels, which keep the fixed
+   * AC-23 payload budget). Lets the client mirror (ENC-TSK-L24) upsert
+   * directly with no follow-up fetch.
+   */
+  record?: Record<string, unknown>
 }
 
 export interface FeedSnapshot {

@@ -355,6 +355,22 @@ def channel_targets(payload: Dict[str, Any]) -> List[str]:
     return list(payload.get("channels", []))
 
 
+def build_full_record_body(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Full record body for the /records/{recordId} channel only (ENC-TSK-L29).
+
+    Returns the deserialized NewImage (current field values) for INSERT/MODIFY
+    events so the client's Tier-1/Tier-2 mirror (ENC-TSK-L24) can upsert
+    directly with no follow-up fetch. Returns None for REMOVE events (and when
+    there is no NewImage) — the client instead reacts to the lightweight
+    payload's action='removed' and marks a tombstone. Deliberately a SEPARATE
+    function from build_event_payload so the /feed/updates and /projects/{id}
+    channels (B67 AC-23 fixed ~500-byte budget) are never touched by this.
+    """
+    ddb = record.get("dynamodb", {}) or {}
+    new_image = _deserialize_image(ddb.get("NewImage"))
+    return new_image or None
+
+
 # ---------------------------------------------------------------------------
 # AppSync Events HTTP publish (stdlib urllib; SigV4 documented alternative)
 # ---------------------------------------------------------------------------
@@ -394,12 +410,17 @@ def _sigv4_headers(body: bytes, host: str) -> Dict[str, str]:
     return headers
 
 
-def publish_to_appsync(payload: Dict[str, Any]) -> None:
+def publish_to_appsync(payload: Dict[str, Any], full_body: Optional[Dict[str, Any]] = None) -> None:
     """POST one event as an AppSync Events publish frame to its channels.
 
     AppSync Events HTTP publish shape: {"channel": <path>, "events": [<json str>]}.
     We publish to each target channel (global, per-record, per-project). Raises
     on HTTP/transport failure so the caller can mark the record for retry.
+
+    ENC-TSK-L29: when full_body is provided, the /records/{recordId} channel's
+    event carries an additional "record" field with the complete current
+    record body — /feed/updates and /projects/{id} always get the lightweight
+    payload unchanged (AC-23 budget).
     """
     url = _endpoint_url()
     if not url:
@@ -407,9 +428,18 @@ def publish_to_appsync(payload: Dict[str, Any]) -> None:
 
     host = url.split("://", 1)[-1].split("/", 1)[0]
     event_json = json.dumps(payload, separators=(",", ":"))
+    detail_event_json = (
+        json.dumps({**payload, "record": full_body}, separators=(",", ":"))
+        if full_body is not None
+        else event_json
+    )
 
     for channel in channel_targets(payload):
-        body_obj = {"channel": channel, "events": [event_json]}
+        is_record_channel = channel.startswith("/records/")
+        body_obj = {
+            "channel": channel,
+            "events": [detail_event_json if is_record_channel else event_json],
+        }
         body = json.dumps(body_obj, separators=(",", ":")).encode("utf-8")
 
         headers = {"Content-Type": "application/json", "host": host}
@@ -481,15 +511,19 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 )
                 continue
 
+            full_body = build_full_record_body(record)
+
             if DRY_RUN:
                 logger.info(
-                    "appsync_feed_publisher: DRY_RUN — would publish event=%s action=%s channels=%s",
+                    "appsync_feed_publisher: DRY_RUN — would publish event=%s action=%s channels=%s "
+                    "full_body=%s",
                     payload["eventId"],
                     payload["action"],
                     payload["channels"],
+                    full_body is not None,
                 )
             else:
-                publish_to_appsync(payload)
+                publish_to_appsync(payload, full_body)
             published += 1
         except Exception as exc:  # noqa: BLE001 — isolate per-record failure
             logger.error(
