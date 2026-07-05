@@ -173,6 +173,14 @@ Parameters:
     Type: String
     Default: indexer
     Description: ENC-TSK-L44 security-plugin user bound to indexer_role (write-only).
+  OpenSearchQueryUsername:
+    Type: String
+    Default: query
+    Description: ENC-TSK-L44 security-plugin user bound to query_role (read-only).
+  OpenSearchQuerySecretName:
+    Type: String
+    Default: enceladus/opensearch/gamma-query
+    Description: ENC-TSK-L43 read-only OpenSearch credentials for graph_query_api hybrid keyword arm.
   OpenSearchIndexerVpcId:
     Type: AWS::EC2::VPC::Id
     Default: vpc-8ad4a8f2
@@ -681,6 +689,8 @@ Resources:
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
+          COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
       Tags:
         - Key: Project
           Value: enceladus
@@ -1536,6 +1546,18 @@ Resources:
           # env_drift_registry.json so the env-parity gate protects them.
           PATHWAY_TELEMETRY_BUCKET: !Ref S3Bucket
           PATHWAY_TELEMETRY_PREFIX: !Sub "${S3EnvPrefix}pathway-telemetry"
+          # ENC-TSK-L43 (B67 Search2.0): OpenSearch keyword arm + within-search facets.
+          OPENSEARCH_ENDPOINT: !If [IsGamma, !Ref OpenSearchHttpsEndpoint, !Ref "AWS::NoValue"]
+          OPENSEARCH_READ_ALIAS: !If [IsGamma, "records_read", !Ref "AWS::NoValue"]
+          OPENSEARCH_SECRET_NAME: !If [IsGamma, !Ref OpenSearchQuerySecretName, !Ref "AWS::NoValue"]
+          OPENSEARCH_USERNAME: !If [IsGamma, !Ref OpenSearchQueryUsername, !Ref "AWS::NoValue"]
+          FEED_API_BASE: !If [IsGamma, "https://enceladus-gamma.jreese.net/api/v1/feed", !Ref "AWS::NoValue"]
+      VpcConfig: !If
+        - IsGamma
+        - SecurityGroupIds:
+            - !Ref OpenSearchIndexerSecurityGroup
+          SubnetIds: !Ref OpenSearchIndexerSubnetIds
+        - !Ref "AWS::NoValue"
       Tags:
         - Key: Project
           Value: enceladus
@@ -5286,6 +5308,8 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
       Policies:
         - PolicyName: AppConfigAccess
           PolicyDocument:
@@ -5337,6 +5361,16 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/neo4j/auradb-credentials${EnvironmentSuffix}*"
+        # ENC-TSK-L43: read-only OpenSearch query credentials (gamma).
+        - PolicyName: SecretsManagerOpenSearchQuery
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerOpenSearchQuery
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:enceladus/opensearch/*"
         # ENC-FTR-087 Phase 1 (ENC-TSK-I85): write the per-wave drift-telemetry
         # record + read the per-project time series via the GSI.
         - PolicyName: DriftTelemetryTableAccess
