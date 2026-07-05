@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.3",
-  "updated_at": "2026-07-05T06:50:00Z",
-  "last_change_summary": "ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7): bidirectional relation enforcement -- tracker_mutation PATCH now atomically mirrors newly-added related_task_ids/related_issue_ids/related_feature_ids onto each target's reverse field; document_api PUT/PATCH mirrors related_items onto each named tracker record's new related_document_ids field; new tracker.relate(source_id, target_id) MCP convenience action performs the append under one governance hash check. inverse_of declared across tracker.task/issue/feature/lesson and docstore.document.",
+  "version": "2026-07-05.4",
+  "updated_at": "2026-07-05T07:20:00Z",
+  "last_change_summary": "ENC-TSK-L23 (FTR-127 AC-1..4/13): GET /api/v1/feed/corpus — cursor-paginated multi-project corpus spanning tracker + documents tables with filter/sort pushdown, source-tagged composite cursors, facet counts, and compact attrs projection.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3437,6 +3437,27 @@
         "response_error": {
           "type": "object",
           "definition": "Error response (502): returned when feed_publisher invoke fails or returns a function error."
+        }
+      }
+    },
+    "feed_query.corpus": {
+      "description": "ENC-TSK-L23 / FTR-127 AC-1..4/13: GET /api/v1/feed/corpus returns the full multi-project feed corpus from BOTH the tracker table and the documents table as a cursor-paginated stream. Minimal identity projection plus compact attrs map (status, priority, tags/keywords, document_subtype). Filter and sort pushdown via query params; facet counts are the browse/filter authority until ENC-TSK-L43 OpenSearch ships.",
+      "fields": {
+        "endpoint": {
+          "type": "string",
+          "definition": "GET /api/v1/feed/corpus — JWT-gated (401 unauthenticated). Query params: limit, cursor, sort, q, record_type, status, project_id, priority."
+        },
+        "cursor": {
+          "type": "string",
+          "definition": "Base64url-encoded composite cursor over (sort_value, record_key). record_key is source-tagged: tracker:{project_id}:{record_id} or document::{document_id}."
+        },
+        "facets": {
+          "type": "object",
+          "definition": "Facet counts for record_type, status, priority, and project_id over the filtered corpus slice."
+        },
+        "attrs": {
+          "type": "object",
+          "definition": "Compact per-record attribute map: status, priority, category, severity (issues), tags (documents), document_subtype, subtypepattern."
         }
       }
     },
