@@ -28,6 +28,7 @@ import {
   type RecentlyViewedEntry,
 } from '../search/recentlyViewed'
 import { buildSearchCorpus } from '../search/searchCorpus'
+import { excludeRecordType } from '../search/recordTypeScope'
 import { sortSearchHits } from '../search/sortSearchHits'
 import { useTieredSearch } from '../search/useTieredSearch'
 import { getCacheEngine } from '../sync/cacheEngine'
@@ -91,11 +92,14 @@ export function FeedRoute() {
     for (const row of fromEvents) byId.set(row.recordId, row)
     return [...byId.values()]
   }, [events, projects, isWarm])
+  // ENC-TSK-L32: feed search is reciprocally scoped to exclude document
+  // records — the Docs page (DocsRoute) owns document-scoped search.
+  const feedCorpus = useMemo(() => excludeRecordType(corpus, 'document'), [corpus])
   const projectId = projects[0]?.project_id ?? 'enceladus'
 
-  const tiered = useTieredSearch({ projectId, query: q }, corpus)
+  const tiered = useTieredSearch({ projectId, query: q }, feedCorpus)
   const filteredHits = useMemo(
-    () => sortSearchHits(applyPropertyFilter(tiered.hits, filterQuery), sort),
+    () => excludeRecordType(sortSearchHits(applyPropertyFilter(tiered.hits, filterQuery), sort), 'document'),
     [tiered.hits, filterQuery, sort],
   )
   const visibleHits = filteredHits.slice(0, visibleCount)
@@ -106,15 +110,14 @@ export function FeedRoute() {
 
   const searchSuggestions = useMemo(() => {
     if (isWarm) {
-      return getCacheEngine()
-        .searchIndex.suggest(q, 12)
+      return excludeRecordType(getCacheEngine().searchIndex.suggest(q, 12), 'document')
         .map((row) => ({
           value: row.recordId,
           description: row.title,
           tag: row.recordType,
         }))
     }
-    return corpus
+    return feedCorpus
       .filter((row) => {
         const needle = q.trim().toLowerCase()
         if (!needle) return true
@@ -126,7 +129,7 @@ export function FeedRoute() {
         description: row.title,
         tag: row.recordType,
       }))
-  }, [corpus, q, isWarm])
+  }, [feedCorpus, q, isWarm])
 
   const suggestionsKey = searchSuggestions.map((row) => row.value).join(',')
   const { markKeystroke } = useKeystrokeSuggestionTelemetry(suggestionsKey)
@@ -343,7 +346,7 @@ export function FeedRoute() {
 
       <FeedPropertyFilter
         query={filterQuery}
-        corpus={corpus}
+        corpus={feedCorpus}
         onChange={(next) =>
           patchFeedSearch({
             f: serializeFilterQuery(next),

@@ -1,0 +1,111 @@
+.docs-route {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: calc(var(--space-16) * 56);
+}
+
+.docs-route__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.docs-route__eyebrow {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-muted);
+}
+
+.docs-route__title {
+  margin: var(--space-0);
+  font-family: var(--font-heading);
+  font-weight: var(--fw-bold);
+  font-size: var(--text-3xl);
+  line-height: var(--lh-tight);
+  color: var(--fg-display);
+}
+
+.docs-route__subtitle {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--lh-relaxed);
+  color: var(--fg-muted);
+}
+
+.docs-route__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.docs-route__search {
+  flex: 1;
+  min-width: calc(var(--space-16) * 12);
+}
+
+.docs-route__sort {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.docs-route__sort select {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--fg);
+}
+
+.docs-route__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.docs-route__meta-error {
+  color: var(--status-blocked);
+}
+
+.docs-route__empty {
+  margin: var(--space-0);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+.docs-route__card-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-family: var(--font-heading);
+  font-size: var(--text-sm);
+}
+
+.docs-route__card-link:hover {
+  color: var(--accent-hover);
+}
+
+.docs-route__card-id {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+@media (max-width: 48rem) {
+  .docs-route .ev2-cards__grid {
+    grid-template-columns: 1fr !important;
+  }
+}
