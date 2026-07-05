@@ -839,6 +839,18 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                 Resource: "arn:aws:s3:::jreese-net/deploy/*"
+              # S3 staging for `aws cloudformation deploy --s3-bucket` (ENC-TSK-L61).
+              # Required since 04-github-roles.yaml crossed the 51,200-byte inline
+              # limit after ENC-TSK-L55 drift reconciliation (~58 KiB). Mirrors
+              # CloudFormationDeployRole S3CfnStagingAccess. PR #837 removed
+              # workflow S3 staging when the template was ~44 KiB; that path is
+              # obsolete — restore both grant and workflow staging together.
+              - Sid: S3CfnStagingAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${CfnStagingBucket}/*"
               - Sid: SecretsRead
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
