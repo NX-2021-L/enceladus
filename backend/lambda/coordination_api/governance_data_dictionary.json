@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.21",
-  "updated_at": "2026-07-05T12:53:00Z",
-  "last_change_summary": "ENC-TSK-L13: enceladus-relationships dedicated table + enceladus_shared.relationship_store dual-write/read-merge migration off devops-project-tracker rel# rows.",
+  "version": "2026-07-05.22",
+  "updated_at": "2026-07-05T13:57:00Z",
+  "last_change_summary": "ENC-TSK-L44: devops-opensearch-indexer now authenticates to the OpenSearch node as the scoped 'indexer' security-plugin user (OPENSEARCH_USERNAME env var, default 'admin' for backward compat) instead of the admin superuser; OPENSEARCH_SECRET_NAME now points at enceladus/opensearch/gamma-indexer by default.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7485,7 +7485,7 @@
       }
     },
     "opensearch_indexer.lambda": {
-      "description": "ENC-TSK-L41 (B67 Search2.0 WaveB / DOC-77D6C714867E \u00a715): OpenSearch CDC indexer Lambda (devops-opensearch-indexer; gamma twin devops-opensearch-indexer-gamma, arm64/python3.12). DISTINCT from graph_sync \u2014 consumes a DEDICATED devops-search-index-queue.fifo fed by TrackerToSearchIndexPipe + DocumentsToSearchIndexPipe (second DynamoDB-stream reader group on tracker + documents tables). Bulk-upserts INSERT/MODIFY tracker/document stream records into OpenSearch via the records_write alias; REMOVE deletes by stable natural key _id={project_id}#{record_type}#{bare_record_id}. Interim external-version contract: version = updated_at epoch-ms (version_seq field) until ENC-TSK-L27 version_seq cutover. SQS trigger uses ReportBatchItemFailures + DLQ redrive. Runs in VPC to reach the gamma single-node OpenSearch cluster (TLS basic auth via OPENSEARCH_ADMIN_PASSWORD env or Secrets Manager enceladus/opensearch/gamma-admin). Skips reference and relationship record_types. Provisioned by infrastructure/cloudformation/01-data.yaml (SearchIndexQueue) + 02-compute.yaml (pipes, function, role, event source mapping).",
+      "description": "ENC-TSK-L41 (B67 Search2.0 WaveB / DOC-77D6C714867E \u00a715): OpenSearch CDC indexer Lambda (devops-opensearch-indexer; gamma twin devops-opensearch-indexer-gamma, arm64/python3.12). DISTINCT from graph_sync \u2014 consumes a DEDICATED devops-search-index-queue.fifo fed by TrackerToSearchIndexPipe + DocumentsToSearchIndexPipe (second DynamoDB-stream reader group on tracker + documents tables). Bulk-upserts INSERT/MODIFY tracker/document stream records into OpenSearch via the records_write alias; REMOVE deletes by stable natural key _id={project_id}#{record_type}#{bare_record_id}. Interim external-version contract: version = updated_at epoch-ms (version_seq field) until ENC-TSK-L27 version_seq cutover. SQS trigger uses ReportBatchItemFailures + DLQ redrive. Runs in VPC to reach the gamma single-node OpenSearch cluster. ENC-TSK-L44: authenticates as the scoped 'indexer' security-plugin user (write-only on records_write/records_v*), not the admin superuser \u2014 TLS basic auth via OPENSEARCH_ADMIN_PASSWORD env or Secrets Manager enceladus/opensearch/gamma-indexer. Skips reference and relationship record_types. Provisioned by infrastructure/cloudformation/01-data.yaml (SearchIndexQueue) + 02-compute.yaml (pipes, function, role, event source mapping) + 10-opensearch-node.yaml (node security roles).",
       "fields": {
         "OPENSEARCH_ENDPOINT": {
           "definition": "HTTPS URL of the gamma OpenSearch node (VPC-private IP, e.g. https://172.31.28.54:9200).",
@@ -7497,12 +7497,17 @@
           "type": "string"
         },
         "OPENSEARCH_ADMIN_PASSWORD": {
-          "definition": "Admin basic-auth password when set; takes precedence over Secrets Manager lookup.",
+          "definition": "Basic-auth password for OPENSEARCH_USERNAME when set; takes precedence over Secrets Manager lookup.",
           "type": "string"
         },
         "OPENSEARCH_SECRET_NAME": {
-          "definition": "Secrets Manager secret id holding {\"password\":\"...\"} when OPENSEARCH_ADMIN_PASSWORD is empty.",
-          "default": "enceladus/opensearch/gamma-admin",
+          "definition": "Secrets Manager secret id holding {\"username\":\"...\",\"password\":\"...\"} when OPENSEARCH_ADMIN_PASSWORD is empty. ENC-TSK-L44: defaults to the scoped indexer secret, not the admin secret.",
+          "default": "enceladus/opensearch/gamma-indexer",
+          "type": "string"
+        },
+        "OPENSEARCH_USERNAME": {
+          "definition": "ENC-TSK-L44: security-plugin username for basic auth. Defaults to 'admin' for backward compat with pre-L44 admin-only secrets; production wiring sets this to 'indexer' (write-only indexer_role).",
+          "default": "admin",
           "type": "string"
         },
         "SECRETS_REGION": {
@@ -7512,7 +7517,7 @@
         }
       },
       "owner": "search",
-      "source": "ENC-TSK-L41 / B67 Search2.0",
+      "source": "ENC-TSK-L41 / B67 Search2.0; credentials hardened by ENC-TSK-L44",
       "telemetry_eligible": true
     },
     "handoff_consolidation_engine.lambda": {
@@ -7542,8 +7547,13 @@
       "telemetry_eligible": true
     }
   },
-  "change_summary": "ENC-TSK-L15: register handoff_consolidation_engine.lambda entity for HCE Lambda (C08/L15).",
+  "change_summary": "ENC-TSK-L44: opensearch_indexer.lambda now authenticates as the scoped indexer security-plugin user (OPENSEARCH_USERNAME), not admin.",
   "change_log": [
+    {
+      "version": "2026-07-05.22",
+      "date": "2026-07-05",
+      "summary": "ENC-TSK-L44 (B67 Search2.0 hardening): opensearch_indexer.lambda gains OPENSEARCH_USERNAME field; OPENSEARCH_SECRET_NAME default switched from enceladus/opensearch/gamma-admin to enceladus/opensearch/gamma-indexer (write-only scoped credential). Repo-file edit only — governance sync is a post-merge action (GOVERNANCE_SYNC_REQUIRED)."
+    },
     {
       "version": "2026-07-05.20",
       "date": "2026-07-05",
