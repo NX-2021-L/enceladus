@@ -444,6 +444,7 @@ Resources:
               - scheduler:GetSchedule
               - scheduler:UpdateSchedule
               - scheduler:ListSchedules
+              - scheduler:ListTagsForResource
               - scheduler:TagResource
               - scheduler:UntagResource
             Resource:
