@@ -6,8 +6,7 @@ import {
 } from '@tanstack/react-router'
 import { AppShell } from '../shell/AppShell'
 import { HomeRoute } from './HomeRoute'
-import { createRecordRoute } from './recordRoute'
-import { RouteError } from '../auth/RouteError'
+import { createDocumentRecordRoute, createRecordRoute } from './recordRoute'
 import {
   documentQueryOptions,
   featureQueryOptions,
@@ -35,38 +34,37 @@ const indexRoute = createRoute({
 // + route-level Suspense contract enforced by createRecordRoute.
 const taskRoute = createRecordRoute({
   getParentRoute: () => rootRoute,
-  path: '/task/$id',
+  path: '/$project/task/$id',
   type: 'task',
   queryOptionsFor: taskQueryOptions,
 })
 const issueRoute = createRecordRoute({
   getParentRoute: () => rootRoute,
-  path: '/issue/$id',
+  path: '/$project/issue/$id',
   type: 'issue',
   queryOptionsFor: issueQueryOptions,
 })
 const featureRoute = createRecordRoute({
   getParentRoute: () => rootRoute,
-  path: '/feature/$id',
+  path: '/$project/feature/$id',
   type: 'feature',
   queryOptionsFor: featureQueryOptions,
 })
 const planRoute = createRecordRoute({
   getParentRoute: () => rootRoute,
-  path: '/plan/$id',
+  path: '/$project/plan/$id',
   type: 'plan',
   queryOptionsFor: planQueryOptions,
 })
 const lessonRoute = createRecordRoute({
   getParentRoute: () => rootRoute,
-  path: '/lesson/$id',
+  path: '/$project/lesson/$id',
   type: 'lesson',
   queryOptionsFor: lessonQueryOptions,
 })
-const documentRoute = createRecordRoute({
+const documentRoute = createDocumentRecordRoute({
   getParentRoute: () => rootRoute,
   path: '/document/$id',
-  type: 'document',
   queryOptionsFor: documentQueryOptions,
 })
 
@@ -83,9 +81,6 @@ const routeTree = rootRoute.addChildren([
 export const router = createRouter({
   routeTree,
   defaultPreload: 'intent',
-  // ENC-TSK-K95 — a 401 (SessionExpiredError) from any loader/query renders the
-  // sign-in prompt instead of the generic crash.
-  defaultErrorComponent: RouteError,
 })
 
 declare module '@tanstack/react-router' {
