@@ -156,15 +156,23 @@ Parameters:
     Description: HTTPS endpoint for the gamma OpenSearch node (private VPC IP).
   OpenSearchAdminSecretName:
     Type: String
-    Default: enceladus/opensearch/gamma-admin
-    Description: Optional Secrets Manager secret with {"password":"..."} when env var unset.
+    Default: enceladus/opensearch/gamma-indexer
+    Description: >
+      ENC-TSK-L44: Secrets Manager secret with {"username":"indexer","password":"..."}
+      for the write-only security-plugin user (not the admin superuser). Name kept for
+      backward compat with pre-L44 deploys.
   OpenSearchAdminPassword:
     Type: String
     NoEcho: true
     Default: ""
     Description: >
-      Gamma OpenSearch admin password for basic auth. Prefer passing via deploy
-      --parameter-overrides; when empty the Lambda falls back to Secrets Manager.
+      Override password for basic auth (pairs with OpenSearchIndexerUsername).
+      Prefer passing via deploy --parameter-overrides; when empty the Lambda falls
+      back to Secrets Manager.
+  OpenSearchIndexerUsername:
+    Type: String
+    Default: indexer
+    Description: ENC-TSK-L44 security-plugin user bound to indexer_role (write-only).
   OpenSearchIndexerVpcId:
     Type: AWS::EC2::VPC::Id
     Default: vpc-8ad4a8f2
@@ -1444,6 +1452,7 @@ Resources:
           OPENSEARCH_WRITE_ALIAS: records_write
           OPENSEARCH_ADMIN_PASSWORD: !Ref OpenSearchAdminPassword
           OPENSEARCH_SECRET_NAME: !Ref OpenSearchAdminSecretName
+          OPENSEARCH_USERNAME: !Ref OpenSearchIndexerUsername
           SECRETS_REGION: !Ref AWS::Region
       Tags:
         - Key: Project
@@ -1479,6 +1488,7 @@ Resources:
           OPENSEARCH_WRITE_ALIAS: records_write
           OPENSEARCH_ADMIN_PASSWORD: !Ref OpenSearchAdminPassword
           OPENSEARCH_SECRET_NAME: !Ref OpenSearchAdminSecretName
+          OPENSEARCH_USERNAME: !Ref OpenSearchIndexerUsername
           SECRETS_REGION: !Ref AWS::Region
       Tags:
         - Key: Project

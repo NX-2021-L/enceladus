@@ -108,7 +108,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if not records:
         return {}
 
-    parsed: List[Tuple[str, Optional[Tuple[str, Dict[str, Any]]]]] = []
     failed_message_ids: List[str] = []
     bulk_actions: List[Tuple[str, Dict[str, Any]]] = []
     bulk_message_indexes: List[int] = []
@@ -120,10 +119,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             body = json.loads(body_raw) if isinstance(body_raw, str) else body_raw
             stream_record = _extract_stream_record(body)
             if not stream_record or "dynamodb" not in stream_record:
-                parsed.append((message_id, None))
                 continue
             action = _stream_record_to_action(stream_record)
-            parsed.append((message_id, action))
             if action is not None:
                 bulk_message_indexes.append(idx)
                 bulk_actions.append(action)

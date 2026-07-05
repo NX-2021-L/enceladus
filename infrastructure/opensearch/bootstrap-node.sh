@@ -172,5 +172,112 @@ curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_index_temp
   -H 'Content-Type: application/json' \
   -d '{"index_patterns":["enceladus-*"],"template":{"settings":{"number_of_shards":1,"number_of_replicas":0}}}'
 
+# ENC-TSK-L44 -- audit logging (DOC-77D6C714867E §14.5 AC-1/AC-2). Applied via
+# opensearch.yml (not the demo-installer path) so the earlier "no plugins.security.*
+# before demo install" guard (ENC-TSK-L70) is untouched; requires a restart to take
+# effect, done here, after TLS/security bootstrap and before fine-grained roles.
+if ! grep -q 'ENC-TSK-L44 audit' "${CFG}"; then
+  log "Enabling security-plugin audit logging"
+  cat >> "${CFG}" <<EOF
+
+########## ENC-TSK-L44 audit ##########
+plugins.security.audit.type: internal_opensearch
+plugins.security.audit.config.disabled_rest_categories: NONE
+plugins.security.audit.config.disabled_transport_categories: NONE
+########## END ENC-TSK-L44 audit ##########
+EOF
+  systemctl restart opensearch
+  log "Waiting for cluster health GREEN after audit-log restart"
+  for i in $(seq 1 60); do
+    if curl -ks -u "admin:${ADMIN_PASSWORD}" "https://127.0.0.1:9200/_cluster/health" \
+      | jq -e '.status == "green" or .status == "yellow"' >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5
+  done
+else
+  log "ENC-TSK-L44 audit config already present; skipping restart"
+fi
+
+# ENC-TSK-L44 -- fine-grained security-plugin roles (AC-1) + credential rotation
+# via Secrets Manager (AC-2). Idempotent: safe to re-run on every boot/replacement.
+log "Provisioning fine-grained security roles + Secrets Manager credentials"
+
+AWS_REGION_RESOLVED="${AWS_REGION:-$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-west-2)}"
+SECRET_PREFIX="${OPENSEARCH_SECRET_PREFIX:-enceladus/opensearch}"
+SECRET_ENV="${OPENSEARCH_SECRET_ENV:-gamma}"
+
+if ! command -v aws &>/dev/null; then
+  dnf install -y awscli || pip3 install --quiet awscli
+fi
+
+_put_secret() {
+  local username="$1" password="$2"
+  local secret_id="${SECRET_PREFIX}/${SECRET_ENV}-${username}"
+  local payload
+  payload="$(jq -n --arg u "${username}" --arg p "${password}" '{username:$u, password:$p}')"
+  if aws secretsmanager describe-secret --secret-id "${secret_id}" --region "${AWS_REGION_RESOLVED}" >/dev/null 2>&1; then
+    aws secretsmanager put-secret-value --secret-id "${secret_id}" --secret-string "${payload}" --region "${AWS_REGION_RESOLVED}" >/dev/null
+  else
+    aws secretsmanager create-secret --name "${secret_id}" --secret-string "${payload}" --region "${AWS_REGION_RESOLVED}" >/dev/null
+  fi
+  log "Secrets Manager: synced ${secret_id}"
+}
+
+_put_secret "admin" "${ADMIN_PASSWORD}"
+
+INDEXER_PASSWORD_FILE="/root/.opensearch-indexer-password"
+QUERY_PASSWORD_FILE="/root/.opensearch-query-password"
+if [[ ! -f "${INDEXER_PASSWORD_FILE}" ]]; then
+  openssl rand -base64 24 > "${INDEXER_PASSWORD_FILE}"
+  chmod 0600 "${INDEXER_PASSWORD_FILE}"
+fi
+if [[ ! -f "${QUERY_PASSWORD_FILE}" ]]; then
+  openssl rand -base64 24 > "${QUERY_PASSWORD_FILE}"
+  chmod 0600 "${QUERY_PASSWORD_FILE}"
+fi
+INDEXER_PASSWORD="$(tr -d '\n' < "${INDEXER_PASSWORD_FILE}")"
+QUERY_PASSWORD="$(tr -d '\n' < "${QUERY_PASSWORD_FILE}")"
+
+_put_secret "indexer" "${INDEXER_PASSWORD}"
+_put_secret "query" "${QUERY_PASSWORD}"
+
+log "Applying indexer_role / query_role (write-only vs read-only) via Security REST API"
+curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/roles/indexer_role" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "cluster_permissions": ["cluster_composite_ops", "cluster:monitor/*"],
+    "index_permissions": [{
+      "index_patterns": ["records_write", "records_v*"],
+      "allowed_actions": ["indices:data/write/*", "indices:admin/create", "indices:admin/mapping/put", "indices:admin/aliases", "indices:monitor/*"]
+    }]
+  }'
+
+curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/roles/query_role" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "cluster_permissions": ["cluster:monitor/*"],
+    "index_permissions": [{
+      "index_patterns": ["records_read", "records_v*"],
+      "allowed_actions": ["indices:data/read/*", "indices:monitor/*"]
+    }]
+  }'
+
+curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/internalusers/indexer" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg p "${INDEXER_PASSWORD}" '{password:$p, backend_roles:["indexer_backend"], description:"ENC-TSK-L44 write-only indexer account (records_write)"}')"
+
+curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/internalusers/query" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg p "${QUERY_PASSWORD}" '{password:$p, backend_roles:["query_backend"], description:"ENC-TSK-L44 read-only query account (records_read)"}')"
+
+curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/rolesmapping/indexer_role" \
+  -H 'Content-Type: application/json' \
+  -d '{"backend_roles": ["indexer_backend"], "users": ["indexer"]}'
+
+curl -ks -u "admin:${ADMIN_PASSWORD}" -X PUT "https://127.0.0.1:9200/_plugins/_security/api/rolesmapping/query_role" \
+  -H 'Content-Type: application/json' \
+  -d '{"backend_roles": ["query_backend"], "users": ["query"]}'
+
 touch "${MARKER}"
 log "Bootstrap complete"
