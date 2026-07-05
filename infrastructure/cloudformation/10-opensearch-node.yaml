@@ -59,6 +59,13 @@ Parameters:
     Default: "2.19.1"
     Description: OpenSearch tarball version installed by bootstrap-node.sh.
 
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-0aca5422add5908e3
+    Description: >
+      Amazon Linux 2023 arm64 AMI (t4g). Pin updated manually; avoids SSM dynamic
+      reference which requires ssm:GetParameters on the CFN deploy role at plan time.
+
   SnapshotBucketName:
     Type: String
     Default: ""
@@ -131,7 +138,7 @@ Resources:
     Properties:
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref OpenSearchNodeInstanceProfile
-      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64}}'
+      ImageId: !Ref AmiId
       SubnetId: !Ref SubnetId
       SecurityGroupIds:
         - !Ref OpenSearchNodeSecurityGroup
