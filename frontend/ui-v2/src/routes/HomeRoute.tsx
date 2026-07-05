@@ -1,6 +1,8 @@
 import { Link } from '@tanstack/react-router'
+import { useQuery } from '@tanstack/react-query'
 import { ArrowUpRight } from 'lucide-react'
-import { RECORD_ROUTE_PATH } from './recordLink'
+import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
+import { DOCUMENT_ROUTE_PATH, trackerRoutePath } from './recordLink'
 import { RecordId } from '../components/RecordId'
 import type { RecordType } from '../types/records'
 
@@ -18,7 +20,24 @@ const ENTRY: Array<{ type: RecordType; label: string; sampleId: string }> = [
   { type: 'document', label: 'Document', sampleId: 'DOC-12A69AF1D3BE' },
 ]
 
+function entryLinkProps(
+  type: RecordType,
+  sampleId: string,
+  projects: Array<{ project_id: string; prefix: string }>,
+) {
+  if (type === 'document') {
+    return { to: DOCUMENT_ROUTE_PATH as '/document/$id', params: { id: sampleId } }
+  }
+  const project = resolveProjectFromRecordId(sampleId, projects) ?? 'enceladus'
+  return {
+    to: trackerRoutePath(type) as '/$project/task/$id',
+    params: { project, id: sampleId },
+  }
+}
+
 export function HomeRoute() {
+  const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
+
   return (
     <div style={{ maxWidth: '72ch' }}>
       <p
@@ -64,8 +83,7 @@ export function HomeRoute() {
         {ENTRY.map(({ type, label, sampleId }) => (
           <li key={type}>
             <Link
-              to={RECORD_ROUTE_PATH[type]}
-              params={{ id: sampleId }}
+              {...entryLinkProps(type, sampleId, projects)}
               style={{
                 display: 'flex',
                 flexDirection: 'column',

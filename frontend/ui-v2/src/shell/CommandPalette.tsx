@@ -1,29 +1,15 @@
 import { useNavigate } from '@tanstack/react-router'
+import { useQuery } from '@tanstack/react-query'
 import { Search } from 'lucide-react'
+import { projectRegistryQueryOptions, inferRecordNavigation } from '../api/projectRegistry'
 import { useUiStore } from '../store/uiStore'
-import { RECORD_ROUTE_PATH } from '../routes/recordLink'
-import type { RecordType } from '../types/records'
+import { DOCUMENT_ROUTE_PATH, trackerRoutePath } from '../routes/recordLink'
 
 /**
  * Command palette. Open-state and query string live in the Zustand UI store
- * (AC-13). Given a `TYPE-...` record id it routes to that record's detail page.
+ * (AC-13). Given a `TYPE-...` record id it routes to that record's detail page
+ * using the project registry (ENC-TSK-L17 / ENC-ISS-487).
  */
-const PREFIX_TO_TYPE: Record<string, RecordType> = {
-  TSK: 'task',
-  ISS: 'issue',
-  FTR: 'feature',
-  PLN: 'plan',
-  LSN: 'lesson',
-  DOC: 'document',
-}
-
-function inferType(query: string): RecordType | null {
-  const upper = query.toUpperCase()
-  if (upper.startsWith('DOC-')) return 'document'
-  const mid = upper.split('-')[1]
-  return (mid && PREFIX_TO_TYPE[mid]) ?? null
-}
-
 export function CommandPalette() {
   const open = useUiStore((s) => s.commandPaletteOpen)
   const query = useUiStore((s) => s.commandQuery)
@@ -32,17 +18,25 @@ export function CommandPalette() {
   const selectRecord = useUiStore((s) => s.selectRecord)
   const navigate = useNavigate()
 
+  const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
+
   if (!open) return null
 
-  const type = inferType(query)
-  const canGo = type !== null && query.trim().length > 0
+  const nav = inferRecordNavigation(query, projects)
+  const canGo = nav !== null && (nav.type === 'document' || nav.projectId !== null)
 
   function submit() {
-    if (!type || !canGo) return
-    const id = query.trim().toUpperCase()
-    selectRecord(id)
+    if (!nav || !canGo) return
+    selectRecord(nav.id)
     closeCommandPalette()
-    navigate({ to: RECORD_ROUTE_PATH[type], params: { id } })
+    if (nav.type === 'document') {
+      navigate({ to: DOCUMENT_ROUTE_PATH, params: { id: nav.id } })
+      return
+    }
+    navigate({
+      to: trackerRoutePath(nav.type),
+      params: { project: nav.projectId as string, id: nav.id },
+    })
   }
 
   return (
@@ -104,14 +98,25 @@ export function CommandPalette() {
             fontFamily: 'var(--font-body)',
           }}
         >
-          {canGo ? (
+          {canGo && nav ? (
             <span>
               Enter to open{' '}
               <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
-                {query.trim().toUpperCase()}
+                {nav.id}
               </span>{' '}
-              as {type}
+              as {nav.type}
+              {nav.projectId ? (
+                <>
+                  {' '}
+                  in{' '}
+                  <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
+                    {nav.projectId}
+                  </span>
+                </>
+              ) : null}
             </span>
+          ) : nav && nav.type !== 'document' && !nav.projectId ? (
+            <span>Unknown project prefix — check GET /api/v1/projects registry</span>
           ) : (
             <span>Type a record id (TSK / ISS / FTR / PLN / LSN / DOC)</span>
           )}
