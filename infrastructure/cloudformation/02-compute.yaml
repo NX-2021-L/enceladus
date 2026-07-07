@@ -256,7 +256,7 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: !Sub "escalation-decision-authorizer-role${EnvironmentSuffix}"
+      RoleName: !Sub "enceladus-escalation-decision-authorizer-role${EnvironmentSuffix}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
