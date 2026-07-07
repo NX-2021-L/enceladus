@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.2",
-  "updated_at": "2026-07-07T04:20:00Z",
-  "last_change_summary": "ENC-TSK-B66 (PLN-006 Phase 5 Gate AC-3): new entity observability.xray_tracing_config documents the AWS X-Ray active-tracing posture across the 5-service gamma trace set (Record/Lifecycle/Scoring/Checkout/MCP-Server-standin) declared in infrastructure/cloudformation/02-compute.yaml, including the CoordinationApiFunction MCP-Server-standin architectural decision (ENC-TSK-K45) and the documented enceladus-mcp-code-gamma prod-stack-ownership constraint (Condition:IsProduction, out of reach for gamma-only compute deploys). CEE (5 categories), Fiedler lambda2, F_governance, and ArcWalk telemetry entities were already adequately documented by prior K41/K42/K43/H86 work -- confirmed via review, no changes needed to those entities.",
+  "version": "2026-07-07.3",
+  "updated_at": "2026-07-07T04:25:00Z",
+  "last_change_summary": "ENC-TSK-L06: new ID Service Lambda (enceladus-id-service{-gamma}) extraction (B63 Phase 2 AC-6) -- IAM-isolated record-ID allocation via dedicated enceladus-id-counters table, idempotency-key contract (enceladus-id-idempotency), HMAC-SHA256 item_id_provenance signing + graph_sync verification-on-projection, and a trust-score violation counter (enceladus-id-violations) fed by tracker_mutation's extended ID_BOUNDARY_VIOLATION edge-layer guard (now also rejects client-supplied item_id_provenance). New tracker.record_id.item_id_provenance field + tracker.id_boundary_enforcement entity documenting the full contract.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4553,6 +4553,28 @@
           "type": "constraint",
           "definition": "Record IDs are exclusively server-assigned. Agents must not predict, infer, scan for, or reason about the next available ID before submitting tracker.create. The ID returned in the create response is the only authoritative source. Agents that anticipate IDs violate the system's single-source-of-truth principle and introduce brittle sequence dependencies (ENC-TSK-B99).",
           "usage_guidance": "Submit tracker.create with required attributes only. Do not inspect existing records to determine what the next ID will be. Read the returned record_id from the success response. Use it in all subsequent operations."
+        },
+        "item_id_provenance": {
+          "type": "string",
+          "definition": "ENC-TSK-L06 / B63 Phase 2 AC-6: HMAC-SHA256 hex signature over `item_id||created_at||record_type`, stamped on every record allocated through the ID Service (enable_id_service_extraction flag ON). Signed with a shared secret held in Secrets Manager (enceladus/id-service/hmac-key{-gamma}, CFN-generated via GenerateSecretString — never hardcoded, never logged). Verified (warning-only, never blocking) by graph_sync before projecting a node into Neo4j. Absent on records created before this feature or while the flag was OFF (see tracker.id_boundary_enforcement backfill_and_quarantine for the AC-5 backfill status of pre-existing records).",
+          "usage_guidance": "Server-generated only, exactly like item_id/record_id. A tracker.create payload carrying a client-supplied item_id_provenance is rejected with the same ID_BOUNDARY_VIOLATION error as a client-supplied item_id/record_id."
+        }
+      }
+    },
+    "tracker.id_boundary_enforcement": {
+      "description": "ENC-TSK-L06 / B63 Phase 2 AC-6 (extends ENC-FTR-069's ENC-TSK-B99 ID Boundary Rule with a dedicated ID Service, idempotency contract, cryptographic provenance, and a trust-score feedback loop). The contract: (1) IAM isolation — record-ID counter items live in a dedicated enceladus-id-counters{-gamma} DynamoDB table that ONLY the ID Service Lambda's IAM role can access (tracker_mutation's role has no grant referencing that table's ARN at all — ordinary resource-scoped IAM, not a same-table dynamodb:LeadingKeys condition, which cannot constrain a sort-key prefix and would be a silent no-op on the shared tracker table's project_id-partitioned schema); (2) idempotency-key contract — a client-supplied idempotency_key on tracker.create returns the SAME record_id on retry (backed by enceladus-id-idempotency{-gamma}, TTL 24h); (3) cryptographic provenance — item_id_provenance HMAC-SHA256 signature stamped at allocation time and verified (warning-only) by graph_sync before projection; (4) edge-layer rejection — tracker_mutation's _handle_create_record rejects any create payload carrying top-level item_id, record_id, OR item_id_provenance with HTTP 400 error_envelope.code=ID_BOUNDARY_VIOLATION (ENC-ISS-132 origin, extended here); (5) trust-score feedback — every rejection fire-and-forget invokes the ID Service's record_violation action, incrementing a per-caller_identity counter (enceladus-id-violations{-gamma}) and flagging callers past VIOLATION_THRESHOLD (default 5); (6) backfill verification — tools/backfill_item_id_provenance.py stamps item_id_provenance on pre-existing records or reports them as a documented quarantine exemption (reusing the ENC-FTR-069 / ENC-TSK-D29 quarantine list: ENC-TSK-1291, ENC-TSK-1292).",
+      "fields": {
+        "enable_id_service_extraction": {
+          "type": "boolean",
+          "definition": "AppConfig flag (env_fallback ENABLE_ID_SERVICE, default false), read at request time via enceladus_shared.appconfig_flags.flag(). When ON, tracker_mutation delegates record-ID allocation to the standalone ID Service Lambda (enceladus-id-service{-gamma}) via a synchronous, FAIL-CLOSED RequestResponse invoke — mirroring the enable_lifecycle_service_extraction (ENC-TSK-H46) posture exactly: any invoke failure rejects the create (HTTP 503, code=ID_SERVICE_UNAVAILABLE), never silently falling back to the inline _next_record_id path (a silent fallback would defeat the IAM isolation property). When OFF (default), the inline counter-based allocation in tracker_mutation runs unchanged (zero-behavior-change rollback path) and continues reading/writing legacy counter#* rows in the shared tracker table."
+        },
+        "id_boundary_violation_error_code": {
+          "type": "string",
+          "definition": "error_envelope.code value returned on any rejected create carrying item_id/record_id/item_id_provenance: 'ID_BOUNDARY_VIOLATION'. Distinguishable from the generic 'INVALID_INPUT' code so callers and log-based alerting can specifically detect ID-boundary probing/regression attempts."
+        },
+        "backfill_and_quarantine": {
+          "type": "string",
+          "definition": "tools/backfill_item_id_provenance.py scans devops-project-tracker{-gamma}, computing + stamping item_id_provenance on any record with item_id + created_at + record_type but no existing signature. Records that cannot be signed (missing required fields) OR that match the ENC-FTR-069 quarantine list (ENC-TSK-1291, ENC-TSK-1292 — both already adjudicated as an intentional exemption, not re-litigated here) are reported as a documented quarantine exemption, never fabricated. Idempotent: re-running after a successful pass produces zero writes."
         }
       }
     },
@@ -7653,8 +7675,13 @@
       "source": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0)"
     }
   },
-  "change_summary": "ENC-TSK-B66 (PLN-006 Phase 5 Gate AC-3): new entity observability.xray_tracing_config documents the AWS X-Ray active-tracing posture across the 5-service gamma trace set (Record/Lifecycle/Scoring/Checkout/MCP-Server-standin) declared in infrastructure/cloudformation/02-compute.yaml, including the CoordinationApiFunction MCP-Server-standin architectural decision (ENC-TSK-K45) and the documented enceladus-mcp-code-gamma prod-stack-ownership constraint (Condition:IsProduction, out of reach for gamma-only compute deploys). CEE (5 categories), Fiedler lambda2, F_governance, and ArcWalk telemetry entities were already adequately documented by prior K41/K42/K43/H86 work -- confirmed via review, no changes needed to those entities.",
+  "change_summary": "ENC-TSK-L06: new ID Service Lambda extraction (B63 Phase 2 AC-6) with IAM-isolated counter allocation, idempotency contract, HMAC provenance signing, and trust-score feedback loop.",
   "change_log": [
+    {
+      "version": "2026-07-07.3",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L06 (B63 Phase 2 AC-6): new ID Service Lambda (enceladus-id-service{-gamma}) is the sole authority for record-ID allocation (dedicated enceladus-id-counters table, IAM-isolated from tracker_mutation's role), the idempotency-key contract (enceladus-id-idempotency, TTL 24h), and HMAC-SHA256 item_id_provenance signing (verified, warning-only, by graph_sync before projection). tracker_mutation's edge-layer guard now also rejects client-supplied item_id_provenance (extends ENC-ISS-132/ENC-FTR-069's ID_BOUNDARY_VIOLATION contract) and fires a fire-and-forget trust-score violation counter (enceladus-id-violations) on every rejection. New tracker.record_id.item_id_provenance field + tracker.id_boundary_enforcement entity."
+    },
     {
       "version": "2026-07-07.2",
       "date": "2026-07-07",

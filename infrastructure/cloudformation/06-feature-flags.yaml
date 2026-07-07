@@ -78,6 +78,7 @@ Resources:
                 "enable_mcp_governance_prompt": { "type": "boolean" },
                 "enable_lifecycle_service_extraction": { "type": "boolean" },
                 "enable_scoring_service_extraction": { "type": "boolean" },
+                "enable_id_service_extraction": { "type": "boolean" },
                 "enable_dedup_auto_merge": { "type": "boolean" },
                 "dedup_auto_merge_kill_switch": { "type": "boolean" }
               },

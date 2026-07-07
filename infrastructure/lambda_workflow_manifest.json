@@ -238,6 +238,12 @@
       "deploy_script": "backend/lambda/lifecycle_service/deploy.sh"
     },
     {
+      "function_name": "enceladus-id-service",
+      "lambda_dir": "backend/lambda/id_service",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/id_service/deploy.sh"
+    },
+    {
       "function_name": "enceladus-mcp-code",
       "lambda_dir": "backend/lambda/mcp_code",
       "workflow_file": ".github/workflows/_deploy.yml",

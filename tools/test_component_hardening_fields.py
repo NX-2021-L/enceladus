@@ -47,11 +47,12 @@ def _active_enceladus_components(seed_module):
 def test_all_active_enceladus_components_declare_all_five_hardening_fields():
     seed = _load_seed()
     components = _active_enceladus_components(seed)
-    assert len(components) == 9, (
-        "Expected 9 active enceladus-project components at time of writing "
+    assert len(components) == 10, (
+        "Expected 10 active enceladus-project components at time of writing "
         "(comp-checkout-service, comp-lifecycle-service, comp-scoring-service, "
-        "comp-coordination-api, comp-tracker-mutation, comp-enceladus-mcp-server, "
-        "comp-enceladus-pwa, comp-cloudformation-data, comp-cloudformation-app). "
+        "comp-id-service, comp-coordination-api, comp-tracker-mutation, "
+        "comp-enceladus-mcp-server, comp-enceladus-pwa, comp-cloudformation-data, "
+        "comp-cloudformation-app). ENC-TSK-L06 added comp-id-service. "
         "If this fails because a new component was added, extend this test's "
         "expectations rather than deleting the assertion."
     )
@@ -90,7 +91,7 @@ def test_lambda_components_have_nonempty_iam_actions_or_documented_reason():
     seed = _load_seed()
     components = _active_enceladus_components(seed)
     lambda_components = [c for c in components if c.get("category") == "lambda"]
-    assert len(lambda_components) == 5
+    assert len(lambda_components) == 6
     for comp in lambda_components:
         cid = comp["component_id"]
         actions = comp["required_iam_actions"]
@@ -102,15 +103,16 @@ def test_lambda_components_have_nonempty_iam_actions_or_documented_reason():
 
 
 def test_apigw_routes_empty_for_non_http_lambdas():
-    """comp-lifecycle-service and comp-scoring-service are invoked
-    synchronously / via SNS respectively, never over HTTP -- their
-    required_apigw_routes must be empty, and non-empty for the three that do
-    serve routes."""
+    """comp-lifecycle-service, comp-scoring-service, and comp-id-service (ENC-TSK-L06)
+    are invoked synchronously / via SNS / via direct Lambda invoke respectively, never
+    over HTTP -- their required_apigw_routes must be empty, and non-empty for the three
+    that do serve routes."""
     seed = _load_seed()
     by_id = {c["component_id"]: c for c in _active_enceladus_components(seed)}
 
     assert by_id["comp-lifecycle-service"]["required_apigw_routes"] == []
     assert by_id["comp-scoring-service"]["required_apigw_routes"] == []
+    assert by_id["comp-id-service"]["required_apigw_routes"] == []
 
     for cid in ("comp-checkout-service", "comp-coordination-api", "comp-tracker-mutation"):
         assert by_id[cid]["required_apigw_routes"], f"{cid} should have non-empty required_apigw_routes"
@@ -132,5 +134,5 @@ def test_verify_script_passes_against_current_seed_manifest():
     verify = _load_module("verify_component_hardening_fields.py", "enceladus_verify_hardening_fields_under_test")
     components = verify._load_seed_components()
     failures, audited = verify._audit_seed(components)
-    assert audited == 9
+    assert audited == 10
     assert failures == []

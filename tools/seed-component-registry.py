@@ -263,6 +263,72 @@ KNOWN_COMPONENTS = [
         "required_lambda_env_vars": ["DYNAMODB_TABLE", "DYNAMODB_REGION"],
     },
     {
+        "component_id": "comp-id-service",
+        "component_name": "ID Service Lambda",
+        "project_id": "enceladus",
+        "category": "lambda",
+        "transition_type": "github_pr_deploy",
+        "required_transition_type": "github_pr_deploy",
+        "description": "Enceladus ID Service Lambda (B63 Phase 2 AC-6 / ENC-TSK-L06) — sole authority for record-ID allocation (dedicated enceladus-id-counters table, IAM-isolated from tracker_mutation), the idempotency-key contract (client-supplied idempotency_key returns the same record_id on retry), and HMAC-SHA256 item_id_provenance signing. Also owns the per-caller trust-score violation counter for ID_BOUNDARY_VIOLATION rejections. Synchronously invoked (RequestResponse, fail-closed) by tracker_mutation behind the enable_id_service_extraction feature flag; the violation counter is invoked fire-and-forget (Event).",
+        "github_repo": "NX-2021-L/enceladus",
+        "status": "active",
+        "source_paths": {
+            "primary": "backend/lambda/id_service/lambda_function.py",
+            "directory": "backend/lambda/id_service/",
+            "workflow": ".github/workflows/_deploy.yml",
+            "deploy_script": "backend/lambda/id_service/deploy.sh",
+            "related": [
+                "backend/lambda/tracker_mutation/lambda_function.py",
+                "backend/lambda/graph_sync/lambda_function.py",
+                "backend/lambda/shared_layer/",
+            ],
+            "architecture_sections": ["4.17"],
+        },
+        "deploy_targets": ["id_service"],
+        # ENC-TSK-L05 AC-1 hardening fields. Role IdServiceRole is CFN-managed
+        # (02-compute.yaml IdServiceRole) -- exclusive owner of the dedicated
+        # enceladus-id-counters table (AC-0 isolation), read/write on
+        # enceladus-id-idempotency + enceladus-id-violations, read-only Query
+        # fallback on the shared tracker table (_max_existing_number cold-start
+        # seed), and GetSecretValue scoped to its own HMAC signing secret.
+        "required_iam_actions": [
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
+            "xray:PutTraceSegments",
+            "xray:PutTelemetryRecords",
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+            "dynamodb:Query",
+            "secretsmanager:GetSecretValue",
+        ],
+        "required_env_secrets": ["DM_GITHUB_READ_TOKEN", "COORDINATION_INTERNAL_API_KEY"],
+        # No API Gateway Integration targets this function -- it is invoked
+        # synchronously (RequestResponse, allocate) and fire-and-forget (Event,
+        # record_violation) by tracker_mutation via lambda:InvokeFunction
+        # (TrackerMutationRole's invoke-id-service policy), never over HTTP.
+        # Empty is correct, not an oversight.
+        "required_apigw_routes": [],
+        "required_cfn_resources": [
+            "IdServiceFunction",
+            "IdServiceRole",
+            "IdServiceHmacSecret",
+            "IdCountersTable",
+            "IdIdempotencyTable",
+            "IdViolationsTable",
+        ],
+        "required_lambda_env_vars": [
+            "DYNAMODB_TABLE",
+            "DYNAMODB_REGION",
+            "ID_COUNTERS_TABLE",
+            "IDEMPOTENCY_TABLE",
+            "VIOLATIONS_TABLE",
+            "HMAC_SECRET_ARN",
+            "VIOLATION_THRESHOLD",
+        ],
+    },
+    {
         "component_id": "comp-coordination-api",
         "component_name": "Coordination API Lambda",
         "project_id": "enceladus",

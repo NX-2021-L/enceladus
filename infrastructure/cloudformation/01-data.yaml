@@ -459,6 +459,88 @@ Resources:
         - Key: Component
           Value: governance
 
+  # ENC-TSK-L06 / B63 Phase 2 AC-6 — dedicated counter-allocation table (AC-0 IAM
+  # isolation). Moved OUT of devops-project-tracker's counter#* rows into its own table
+  # so isolation can be enforced with an ordinary resource-ARN-scoped IAM Allow/Deny:
+  # only IdServiceRole references this table's ARN anywhere in the account's policies.
+  # (A same-table dynamodb:LeadingKeys condition DENY was considered and rejected — that
+  # IAM condition key can only constrain the PARTITION key, which is project_id on the
+  # tracker table, not the record_id sort key where counter#* actually lives; it would
+  # have been a silent no-op. True table separation is the correct, verifiable fix.)
+  # One item per (project_id, record_type) or (project_id, subtask#parent_root) pairing,
+  # matching the exact shape of the legacy counter#* items it replaces (next_num,
+  # created_at, updated_at, record_type, item_id). Legacy counter#* rows already written
+  # to the tracker table by the pre-L06 inline path are left in place as historical data
+  # (harmless, just unread once the flag is ON) — no migration/backfill of counter VALUES
+  # is needed since _max_existing_number's fallback scan (IdServiceRole's read-only
+  # TrackerReadOnlyForSeed grant) reconstructs the correct seed from existing record IDs
+  # the first time each counter is used here, exactly like the pre-L06 cold-start path.
+  IdCountersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "enceladus-id-counters${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: counter_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: counter_key
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: id-service
+
+  # ENC-TSK-L06 / B63 Phase 2 AC-6 — ID Service idempotency-key contract (AC-1). A
+  # client-supplied idempotency_key maps to the record_id allocated on its first use;
+  # a retry with the same key returns that SAME record_id instead of allocating a new
+  # one. TTL'd (expires_at, 24h) so the table self-prunes instead of growing forever.
+  IdIdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "enceladus-id-idempotency${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: idempotency_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: idempotency_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: id-service
+
+  # ENC-TSK-L06 / B63 Phase 2 AC-6 — ID Service trust-score feedback loop (AC-4). One
+  # item per caller_identity tracking violation_count + last_violation_at, incremented
+  # by the ID Service's record_violation action whenever tracker_mutation's edge-layer
+  # guard rejects an ID_BOUNDARY_VIOLATION create payload. Queryable by the Phase 5
+  # observability dashboard (ENC-TSK-B66) or any get_compact_context-style reader.
+  IdViolationsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "enceladus-id-violations${EnvironmentSuffix}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: caller_identity
+          AttributeType: S
+      KeySchema:
+        - AttributeName: caller_identity
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: id-service
+
   # ---------------------------------------------------------------------------
   # SQS Queues
   # ---------------------------------------------------------------------------
