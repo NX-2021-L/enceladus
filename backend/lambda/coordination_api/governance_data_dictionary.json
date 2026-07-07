@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.6",
-  "updated_at": "2026-07-07T11:50:28Z",
-  "last_change_summary": "ENC-TSK-L89: FTR-122 retirement sweeps now atomically release task checkouts held by retiring sessions, add an account-wide retired-session checkout-release backfill action, and expose the action through the MCP coordination surface.",
+  "version": "2026-07-07.7",
+  "updated_at": "2026-07-07T12:45:00Z",
+  "last_change_summary": "ENC-TSK-L92 / ENC-ISS-501 (SEV-1): escalation approve/deny now requires the decider's Cognito email to be on a Console-edit-only S3 allowlist (ESCALATION_APPROVER_ALLOWLIST_BUCKET/_KEY), on top of the existing _is_cognito_session check, which was found to be a fail-open blocklist that let a non-human identity self-approve governance-bypass escalations.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7083,7 +7083,7 @@
       }
     },
     "coordination.escalations": {
-      "description": "ENC-FTR-121 Ph3 (ENC-TSK-J70, DOC-5B888FCA43B8 sections 5.7 + 6): io's escalation approval surface on coordination_api - the SOLE origin of override authorization in the platform. Every route verifies a genuine Cognito human session server-side per call (_is_cognito_session); internal-key, SCI, and managed-token credentials are structurally rejected with 403. No MCP action maps to approve or deny. Approve stamps approved_by {sub, email}, walks requested->approved under a ConditionExpression race guard, and drives applyEscalatedMutation (ENC-TSK-J69) in tracker_mutation via direct Lambda invoke (TRACKER_MUTATION_LAMBDA_NAME + X-Coordination-Internal-Key); the approval is durable even if the applier invoke fails (fail-soft: the escalation stays approved and the idempotent apply route can be re-driven - the agent never resubmits the cached mutation). Deny walks requested->denied, or requested->denied_with_guidance when a guidance_note is supplied; the note is stored on the item AND rides the denial event so watch polling (Ph4) delivers it to the agent.",
+      "description": "ENC-FTR-121 Ph3 (ENC-TSK-J70, DOC-5B888FCA43B8 sections 5.7 + 6): io's escalation approval surface on coordination_api - the SOLE origin of override authorization in the platform. Every route verifies a genuine Cognito session server-side per call (_is_cognito_session); internal-key and managed-token credentials are structurally rejected with 403. ENC-TSK-L92 / ENC-ISS-501 (SEV-1, 2026-07-07): _is_cognito_session alone was found to be a fail-open BLOCKLIST (it excludes only auth_mode in {internal-key, managed-token} -- any OTHER or absent auth_mode passed), which let a non-human Cognito-authenticated identity self-approve escalations within seconds of filing with no human review. The approve/deny routes now ALSO require the decider's Cognito email claim to appear in a positive allowlist (_is_allowlisted_escalation_decider) sourced from a Console-edit-only S3 document that no Lambda role -- including this one -- has write access to; the allowlist check fails CLOSED on any fetch/parse error. No MCP action maps to approve or deny. Approve stamps approved_by {sub, email}, walks requested->approved under a ConditionExpression race guard, and drives applyEscalatedMutation (ENC-TSK-J69) in tracker_mutation via direct Lambda invoke (TRACKER_MUTATION_LAMBDA_NAME + X-Coordination-Internal-Key); the approval is durable even if the applier invoke fails (fail-soft: the escalation stays approved and the idempotent apply route can be re-driven - the agent never resubmits the cached mutation). Deny walks requested->denied, or requested->denied_with_guidance when a guidance_note is supplied; the note is stored on the item AND rides the denial event so watch polling (Ph4) delivers it to the agent.",
       "fields": {
         "GET /api/v1/coordination/escalations": {
           "type": "route",
@@ -7091,11 +7091,19 @@
         },
         "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve": {
           "type": "route",
-          "definition": "Non-delegable approve: requested->approved + approved_by + event, then drives the applier. Returns applied:true|false with apply_result or apply_error+retry."
+          "definition": "Non-delegable approve: requested->approved + approved_by + event, then drives the applier. Returns applied:true|false with apply_result or apply_error+retry. ENC-TSK-L92: gated by _is_cognito_session AND _is_allowlisted_escalation_decider (both must pass); an allowlist-miss returns 403 before any DynamoDB write."
         },
         "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny": {
           "type": "route",
-          "definition": "Non-delegable deny: requested->denied (or denied_with_guidance when body.guidance_note is non-empty). Denied escalations are never applied."
+          "definition": "Non-delegable deny: requested->denied (or denied_with_guidance when body.guidance_note is non-empty). Denied escalations are never applied. ENC-TSK-L92: same dual gate as approve."
+        },
+        "ESCALATION_APPROVER_ALLOWLIST_BUCKET": {
+          "type": "string",
+          "definition": "ENC-TSK-L92 / ENC-ISS-501. Env var (default 'jreese-net'). S3 bucket holding the escalation-approver allowlist document."
+        },
+        "ESCALATION_APPROVER_ALLOWLIST_KEY": {
+          "type": "string",
+          "definition": "ENC-TSK-L92 / ENC-ISS-501. Env var (default 'security/escalation-approvers.md'). S3 key of the allowlist document. coordination_api's Lambda role is granted s3:GetObject ONLY on this exact key (EscalationApproverAllowlistRead statement, infrastructure/cloudformation/02-compute.yaml) -- no role in the account, including this Lambda's own, has PutObject/DeleteObject on it. The document is a markdown file with a fenced yaml block of `- email: \"...\"` list entries, parsed without a yaml dependency by _load_escalation_approver_allowlist (60s in-memory cache). Edits require an AWS Console-authenticated human; there is deliberately no programmatic write path."
         },
         "GET /api/v1/coordination/escalations/watch": {
           "type": "route",
