@@ -12,8 +12,11 @@ Environment variables (can be set instead of flags):
     CHECKOUT_ASSISTANT_KEY                   — checkout-service-assistant key (allows setting
                                                non-default transition_type at create time)
     COORDINATION_DIRECT_APIGW_BASE           — direct APIGW URL used for assistant-key calls
-                                               (bypasses CloudFront header stripping);
-                                               default: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/coordination
+                                               (bypasses CloudFront header stripping).
+                                               REQUIRED whenever --assistant-key/CHECKOUT_ASSISTANT_KEY
+                                               is used for a real (non-dry-run) write. There is
+                                               deliberately NO default (ENC-ISS-507: a stale prod
+                                               default silently misrouted gamma-intended writes to prod).
 
 Auth note for non-default transition_type:
     Creating a component with a non-default transition_type (anything other than
@@ -1369,8 +1372,20 @@ def seed(
         # Build create payload; use assistant key + direct APIGW for non-default types
         create_payload = dict(comp)
         if needs_type_auth and assistant_key:
+            # ENC-ISS-507: never silently fall back to base_url here. CloudFront
+            # strips the assistant-key header, so a create against base_url would
+            # either fail or (worse, with a stale default) land against the wrong
+            # environment. Require an explicit direct APIGW base; refuse otherwise.
+            if not direct_apigw_base:
+                print(
+                    " — ERROR: assistant-key create needs an explicit --direct-apigw-base"
+                    "/COORDINATION_DIRECT_APIGW_BASE (CloudFront strips the assistant-key"
+                    " header); skipping to avoid a cross-environment misroute (ENC-ISS-507)"
+                )
+                err_count += 1
+                continue
             extra = {"X-Checkout-Assistant-Key": assistant_key}
-            create_base = (direct_apigw_base or base_url).rstrip("/")
+            create_base = direct_apigw_base.rstrip("/")
             status, result = _api_request(
                 create_base, api_key, "POST", "/components", create_payload, extra
             )
@@ -1405,6 +1420,40 @@ def seed(
         sys.exit(1)
 
 
+def resolve_direct_apigw_base(
+    explicit: str | None,
+    env_value: str,
+    assistant_key: str,
+    dry_run: bool,
+) -> str:
+    """Resolve the direct API Gateway base URL for assistant-key component writes.
+
+    ENC-ISS-507: there is deliberately NO hardcoded default. The previous default
+    resolved to prod's API Gateway, so an assistant-key run intended for gamma that
+    forgot to pass --direct-apigw-base silently misrouted its component writes to
+    prod. When an assistant key is actually in play for a real request we now refuse
+    to guess a target and fail loudly instead.
+
+    Resolution order: explicit flag, then env var. If neither is set:
+      * assistant_key in use AND not a dry run  -> raise (fail loud, ISS-507)
+      * otherwise (no assistant key, or dry run) -> return "" (no direct APIGW needed;
+        dry runs make no request, and non-assistant-key runs go via base_url).
+    """
+    value = (explicit or env_value or "").strip().rstrip("/")
+    if value:
+        return value
+    if assistant_key and not dry_run:
+        raise ValueError(
+            "No --direct-apigw-base/COORDINATION_DIRECT_APIGW_BASE set while "
+            "--assistant-key/CHECKOUT_ASSISTANT_KEY is in use. Refusing to guess a "
+            "target: this script previously defaulted to prod's API Gateway and "
+            "silently misrouted gamma-intended writes to prod (ENC-ISS-507). Pass "
+            "the target APIGW base explicitly, e.g. --direct-apigw-base "
+            "https://<id>.execute-api.<region>.amazonaws.com/api/v1/coordination"
+        )
+    return ""
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Seed Enceladus component registry (ENC-FTR-041)",
@@ -1429,7 +1478,8 @@ def main() -> None:
         help=(
             "Direct API Gateway base URL for assistant-key requests (bypasses CloudFront). "
             "Env var: COORDINATION_DIRECT_APIGW_BASE. "
-            "Default: https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/coordination"
+            "REQUIRED when --assistant-key is used for a real write — there is no default "
+            "(a stale prod default previously misrouted gamma writes; ENC-ISS-507)."
         ),
     )
     args = parser.parse_args()
@@ -1445,11 +1495,16 @@ def main() -> None:
         or os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
     )
     assistant_key = args.assistant_key or os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
-    direct_apigw_base = (
-        args.direct_apigw_base
-        or os.environ.get("COORDINATION_DIRECT_APIGW_BASE", "")
-        or "https://8nkzqkmxqc.execute-api.us-west-2.amazonaws.com/api/v1/coordination"
-    )
+    try:
+        direct_apigw_base = resolve_direct_apigw_base(
+            args.direct_apigw_base,
+            os.environ.get("COORDINATION_DIRECT_APIGW_BASE", ""),
+            assistant_key,
+            args.dry_run,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     if not api_key and not args.dry_run:
         print(
@@ -1459,7 +1514,7 @@ def main() -> None:
         sys.exit(1)
 
     print(f"Base URL:      {base_url}")
-    print(f"Direct APIGW:  {direct_apigw_base}")
+    print(f"Direct APIGW:  {direct_apigw_base or '(none — not needed unless assistant-key writes)'}")
     print(f"Dry run:       {args.dry_run}")
     print(f"Assistant key: {'set' if assistant_key else 'not set — non-default types will default to github_pr_deploy'}")
     print(f"Components:    {len(KNOWN_COMPONENTS)}")
