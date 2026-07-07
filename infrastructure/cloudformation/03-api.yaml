@@ -84,6 +84,35 @@ Resources:
       IntegrationMethod: POST
       PayloadFormatVersion: '2.0'
 
+  # ENC-TSK-L92/L95 / ENC-ISS-501 (SEV-1): standalone REQUEST authorizer for
+  # the escalation approve/deny decision routes ONLY. Verifies a genuine
+  # Cognito ID token (RS256, human user pool) AND checks the decider's email
+  # against a Console-edit-only S3 allowlist -- closing the gap where
+  # coordination_api's own in-Lambda check (a fail-open blocklist) let a
+  # non-human identity self-approve. Deliberately a brand-new, self-contained
+  # Lambda that does not modify coordination_api at all; its check runs in
+  # ADDITION to (in front of) the existing in-Lambda check, not instead of it.
+  EscalationDecisionAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
+      AuthorizerType: REQUEST
+      AuthorizerPayloadFormatVersion: '2.0'
+      EnableSimpleResponses: true
+      AuthorizerResultTtlInSeconds: 0
+      IdentitySource:
+        - "$request.header.Cookie"
+      AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:escalation-decision-authorizer${EnvironmentSuffix}/invocations"
+
+  EscalationDecisionAuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "escalation-decision-authorizer${EnvironmentSuffix}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/authorizers/${EscalationDecisionAuthorizer}"
+
   TrackerMutationIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
@@ -2243,6 +2272,11 @@ Resources:
       RouteKey: "GET /api/v1/coordination/escalations/watch"
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-L95 / ENC-ISS-501: AuthorizerId added -- these are the two
+  # decision-making (non-read-only) escalation routes, gated by
+  # EscalationDecisionAuthorizer in addition to coordination_api's own
+  # existing in-Lambda check. Feed/Watch (read-only) are intentionally left
+  # unauthorized here, matching the original ENC-ISS-501 remediation scope.
   RouteEscalationsApprove:
     Type: AWS::ApiGatewayV2::Route
     Condition: IsProduction
@@ -2250,6 +2284,8 @@ Resources:
       ApiId: !Ref HttpApi
       RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve"
       Target: !Sub integrations/${CoordinationApiIntegration}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref EscalationDecisionAuthorizer
 
   RouteEscalationsDeny:
     Type: AWS::ApiGatewayV2::Route
@@ -2258,6 +2294,8 @@ Resources:
       ApiId: !Ref HttpApi
       RouteKey: "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny"
       Target: !Sub integrations/${CoordinationApiIntegration}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref EscalationDecisionAuthorizer
 
   RouteTrackerEscalationApply:
     Type: AWS::ApiGatewayV2::Route
