@@ -2763,6 +2763,13 @@ Resources:
         - ReportBatchItemFailures
       Enabled: true
 
+  # ENC-TSK-L84: disabled, not deleted. TrackerToSearchIndexPipe /
+  # DocumentsToSearchIndexPipe (EventBridge Pipes, DynamoDB Streams source)
+  # were confirmed account-wide non-functional (ENC-ISS-497) -- this SQS
+  # trigger was the downstream leg of that dead path. CDC now runs via
+  # SearchIndexTrackerStreamTrigger / SearchIndexDocumentsStreamTrigger below,
+  # a direct Lambda EventSourceMapping on the same streams. Left in place
+  # (Enabled: false) for rollback, not removed.
   SearchIndexSqsTrigger:
     Type: AWS::Lambda::EventSourceMapping
     Condition: IsGamma
@@ -2774,6 +2781,57 @@ Resources:
       BatchSize: 10
       FunctionResponseTypes:
         - ReportBatchItemFailures
+      Enabled: false
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-L84: DynamoDB Stream -> Lambda EventSourceMapping (direct, no
+  # SQS/Pipes intermediary). Replaces TrackerToSearchIndexPipe /
+  # DocumentsToSearchIndexPipe after EventBridge Pipes with a DynamoDB
+  # Streams source were confirmed account-wide non-functional (ENC-ISS-497:
+  # StateReason=No records processed, zero throughput across IAM/trust/
+  # filter/restart/full-recreate remediation attempts, also affects
+  # TrackerToGovernanceAuditPipe + TrackerToConvergenceTelemetryPipe).
+  # Mirrors the already-proven-working AppSyncFeedTrackerStreamTrigger
+  # pattern in 06-appsync-events.yaml. FilterCriteria matches the retired
+  # Pipes exactly so downstream indexing semantics are unchanged.
+  # ---------------------------------------------------------------------------
+
+  SearchIndexTrackerStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      FunctionName: !Ref OpenSearchIndexerFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 0
+      StartingPosition: LATEST
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+          - Pattern: '{"eventName":["REMOVE"],"dynamodb":{"OldImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+      Enabled: true
+
+  SearchIndexDocumentsStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-DocumentsStreamArn
+      FunctionName: !Ref OpenSearchIndexerFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 0
+      StartingPosition: LATEST
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+          - Pattern: '{"eventName":["REMOVE"],"dynamodb":{"OldImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
       Enabled: true
 
   # ---------------------------------------------------------------------------
@@ -6388,6 +6446,32 @@ Resources:
                   - sqs:GetQueueAttributes
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-SearchIndexQueueArn
+        # ENC-TSK-L84: direct DynamoDB Streams EventSourceMapping replacing the
+        # dead Pipes-DynamoDB-source path (ENC-ISS-497). SqsEventSource above
+        # is retained (not removed) since SearchIndexSqsTrigger stays defined,
+        # just disabled, for rollback.
+        - PolicyName: DynamoDbStreamEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+              - Sid: ReadDocumentsStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-DocumentsStreamArn
         - PolicyName: CloudWatchLogs
           PolicyDocument:
             Version: '2012-10-17'
