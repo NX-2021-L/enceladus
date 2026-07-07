@@ -1,7 +1,7 @@
 name: IAM CFN Deploy Role — NAT Gateway Patch
 
-# ENC-TSK-L43 Option A: refresh enceladus-cfn-deploy-opensearch-ec2-v1 with NAT +
-# route-table grants (merged — do NOT add a separate inline policy; role is at cap).
+# ENC-TSK-L43 Option A: attach a managed policy with NAT + route-table grants.
+# The shared CFN deploy role is at inline-policy capacity (LimitExceeded on PutRolePolicy).
 # io-gated: environment v3-prod (required reviewer).
 
 on:
@@ -11,7 +11,7 @@ on:
         description: "Why this patch is needed"
         type: string
         required: false
-        default: "Refresh OpenSearch EC2 inline policy with NAT gateway grants (ENC-TSK-L43)"
+        default: "Attach managed NAT gateway policy for enceladus-compute-gamma (ENC-TSK-L43)"
 
 permissions:
   contents: read
@@ -33,26 +33,23 @@ jobs:
       - name: Verify caller identity
         run: aws sts get-caller-identity
 
-      - name: Apply inline policy — OpenSearch EC2 + NAT (gamma)
+      - name: Create or update managed policy — OpenSearch NAT (gamma)
         run: |
           set -euo pipefail
-          cat > /tmp/opensearch-ec2-policy.json <<'JSON'
+          POLICY_NAME="enceladus-cfn-deploy-opensearch-nat-gamma"
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${POLICY_NAME}"
+
+          cat > /tmp/opensearch-nat-managed.json <<'JSON'
           {
             "Version": "2012-10-17",
             "Statement": [
               {
-                "Sid": "OpenSearchNodeEc2Describe",
+                "Sid": "OpenSearchNatEc2Describe",
                 "Effect": "Allow",
                 "Action": [
                   "ec2:DescribeVpcs",
                   "ec2:DescribeSubnets",
-                  "ec2:DescribeSecurityGroups",
-                  "ec2:DescribeImages",
-                  "ec2:DescribeInstances",
-                  "ec2:DescribeInstanceStatus",
-                  "ec2:DescribeNetworkInterfaces",
-                  "ec2:DescribeVolumes",
-                  "ec2:DescribeAccountAttributes",
                   "ec2:DescribeRouteTables",
                   "ec2:DescribeNatGateways",
                   "ec2:DescribeAddresses"
@@ -60,22 +57,9 @@ jobs:
                 "Resource": "*"
               },
               {
-                "Sid": "OpenSearchNodeEc2MutateGamma",
+                "Sid": "OpenSearchNatEc2MutateGamma",
                 "Effect": "Allow",
                 "Action": [
-                  "ec2:RunInstances",
-                  "ec2:TerminateInstances",
-                  "ec2:StartInstances",
-                  "ec2:StopInstances",
-                  "ec2:CreateTags",
-                  "ec2:DeleteTags",
-                  "ec2:CreateSecurityGroup",
-                  "ec2:DeleteSecurityGroup",
-                  "ec2:AuthorizeSecurityGroupIngress",
-                  "ec2:AuthorizeSecurityGroupEgress",
-                  "ec2:RevokeSecurityGroupIngress",
-                  "ec2:RevokeSecurityGroupEgress",
-                  "ec2:ModifyInstanceAttribute",
                   "ec2:AllocateAddress",
                   "ec2:ReleaseAddress",
                   "ec2:CreateNatGateway",
@@ -94,31 +78,34 @@ jobs:
                     "aws:RequestedRegion": "us-west-2"
                   }
                 }
-              },
-              {
-                "Sid": "OpenSearchNodePassInstanceProfile",
-                "Effect": "Allow",
-                "Action": "iam:PassRole",
-                "Resource": "arn:aws:iam::356364570033:role/enceladus-opensearch-node-role-gamma",
-                "Condition": {
-                  "StringEquals": {
-                    "iam:PassedToService": "ec2.amazonaws.com"
-                  }
-                }
               }
             ]
           }
           JSON
 
-          aws iam put-role-policy \
-            --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-opensearch-ec2-v1" \
-            --policy-document "file:///tmp/opensearch-ec2-policy.json"
+          if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
+            VERSIONS="$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text)"
+            for vid in $VERSIONS; do
+              aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$vid"
+            done
+            aws iam create-policy-version \
+              --policy-arn "$POLICY_ARN" \
+              --policy-document file:///tmp/opensearch-nat-managed.json \
+              --set-as-default
+          else
+            aws iam create-policy \
+              --policy-name "$POLICY_NAME" \
+              --policy-document file:///tmp/opensearch-nat-managed.json \
+              --description "ENC-TSK-L43 gamma NAT gateway EC2 grants for CFN deploy role"
+          fi
 
-      - name: Verify inline policy attached
-        run: |
-          aws iam get-role-policy \
+          aws iam attach-role-policy \
             --role-name "enceladus-cloudformation-deploy-github-role" \
-            --policy-name "enceladus-cfn-deploy-opensearch-ec2-v1" \
-            --query 'PolicyDocument.Statement[*].Sid' \
+            --policy-arn "$POLICY_ARN" 2>/dev/null || true
+
+      - name: Verify managed policy attached
+        run: |
+          aws iam list-attached-role-policies \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --query 'AttachedPolicies[?PolicyName==`enceladus-cfn-deploy-opensearch-nat-gamma`]' \
             --output table
