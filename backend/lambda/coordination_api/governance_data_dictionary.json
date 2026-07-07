@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.10",
-  "updated_at": "2026-07-07T14:36:13Z",
-  "last_change_summary": "ENC-TSK-L87: deploy_parity_validator.lambda mentions_drift_audit -- _run_mentions_drift_audit now threads each sampled record's own project_id into _current_mentions_for (previously hardcoded to 'enceladus', causing every non-enceladus-project sample to read back as a false-positive full mismatch). No new fields/entities; behavioral bugfix only.",
+  "version": "2026-07-07.11",
+  "updated_at": "2026-07-07T14:54:26Z",
+  "last_change_summary": "ENC-TSK-L87: graph_query_api.lambda _query_neighbors no longer requires neighbor.project_id = start's project_id -- MENTIONS (and other) edges are legitimately cross-project and the filter silently hid every such edge from every 'neighbors' consumer. No new fields/entities; behavioral bugfix only.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7786,8 +7786,13 @@
       "source": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0)"
     }
   },
-  "change_summary": "ENC-TSK-L87: mentions_drift_audit false-positive fix -- project_id threading + gamma graphsearch comparison target.",
+  "change_summary": "ENC-TSK-L87: mentions_drift_audit false-positive fixes -- gamma comparison target, project_id threading, and cross-project neighbor visibility.",
   "change_log": [
+    {
+      "version": "2026-07-07.11",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L87: graph_query_api.lambda _query_neighbors dropped the `neighbor.project_id = $project_id` Cypher filter (only the START node stays project-scoped). MENTIONS edges are legitimately cross-project -- graph_sync's write path MERGEs by record_id only -- so this read-side filter silently hid every correctly-written cross-project edge from every 'neighbors' consumer, not just mentions_drift_audit. Previously zero test coverage for this function; added dedicated tests including a Cypher-text regression test."
+    },
     {
       "version": "2026-07-07.10",
       "date": "2026-07-07",
