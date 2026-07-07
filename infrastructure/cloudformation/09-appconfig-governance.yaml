@@ -156,6 +156,124 @@ Resources:
       DeploymentStrategyId: !Ref BudgetHierarchyDeploymentStrategy
       Description: "Initial activation - placeholder, ENC-TSK-K33"
 
+  # ---------------------------------------------------------------------------
+  # energy-function — graph_query_api retrieval-energy lambda weights
+  # (ENC-TSK-I98 / ENC-FTR-104). Activates energy_function.py::load_lambda_weights(),
+  # which has read this profile by convention since I98 but had no CFN resource
+  # behind it — every read fell through to the env-var/hardcoded-default path
+  # and logged a ConfigurationProfile-not-found error on every graph_query_api
+  # invocation (found live 2026-07-07 during ENC-TSK-B66 dashboard validation).
+  # ---------------------------------------------------------------------------
+
+  EnergyFunctionProfile:
+    Type: AWS::AppConfig::ConfigurationProfile
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      Name: energy-function
+      LocationUri: hosted
+      Description: >-
+        Retrieval-energy lambda weights (lambda_graph, lambda_kw), live-
+        overridable per ENC-TSK-I98.
+      Validators:
+        - Type: JSON_SCHEMA
+          Content: |
+            {
+              "$schema": "http://json-schema.org/draft-04/schema#",
+              "type": "object",
+              "properties": {
+                "lambda_graph": { "type": "number", "minimum": 0 },
+                "lambda_kw":    { "type": "number", "minimum": 0 }
+              },
+              "additionalProperties": { "type": "number" }
+            }
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: energy-function
+
+  EnergyFunctionInitialVersion:
+    Type: AWS::AppConfig::HostedConfigurationVersion
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      ConfigurationProfileId: !Ref EnergyFunctionProfile
+      ContentType: application/json
+      Description: >-
+        Initial version - mirrors DEFAULT_LAMBDA_GRAPH/DEFAULT_LAMBDA_KW in
+        energy_function.py exactly, so activation is a no-op until someone
+        deliberately pushes a change.
+      Content: |
+        {
+          "lambda_graph": 1.0,
+          "lambda_kw": 0.1
+        }
+
+  EnergyFunctionInitialDeployment:
+    Type: AWS::AppConfig::Deployment
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      EnvironmentId: !Ref AppConfigEnvironmentId
+      ConfigurationProfileId: !Ref EnergyFunctionProfile
+      ConfigurationVersion: !Ref EnergyFunctionInitialVersion
+      DeploymentStrategyId: !Ref BudgetHierarchyDeploymentStrategy
+      Description: "Initial activation - defaults match hardcoded fallback, closes missing-profile log noise"
+
+  # ---------------------------------------------------------------------------
+  # corroboration-function — graph_query_api corroboration Weber-Fechner
+  # constant (ENC-FTR-110). Same class of gap as energy-function above: read
+  # by convention since corroboration.py landed, no CFN resource behind it.
+  # ---------------------------------------------------------------------------
+
+  CorroborationFunctionProfile:
+    Type: AWS::AppConfig::ConfigurationProfile
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      Name: corroboration-function
+      LocationUri: hosted
+      Description: >-
+        Corroboration Weber-Fechner constant (weber_k), live-overridable per
+        ENC-FTR-110.
+      Validators:
+        - Type: JSON_SCHEMA
+          Content: |
+            {
+              "$schema": "http://json-schema.org/draft-04/schema#",
+              "type": "object",
+              "properties": {
+                "weber_k": { "type": "number", "minimum": 0 }
+              },
+              "additionalProperties": { "type": "number" }
+            }
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: corroboration-function
+
+  CorroborationFunctionInitialVersion:
+    Type: AWS::AppConfig::HostedConfigurationVersion
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      ConfigurationProfileId: !Ref CorroborationFunctionProfile
+      ContentType: application/json
+      Description: >-
+        Initial version - mirrors DEFAULT_WEBER_K in corroboration.py exactly,
+        so activation is a no-op until someone deliberately pushes a change.
+      Content: |
+        {
+          "weber_k": 0.3
+        }
+
+  CorroborationFunctionInitialDeployment:
+    Type: AWS::AppConfig::Deployment
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      EnvironmentId: !Ref AppConfigEnvironmentId
+      ConfigurationProfileId: !Ref CorroborationFunctionProfile
+      ConfigurationVersion: !Ref CorroborationFunctionInitialVersion
+      DeploymentStrategyId: !Ref BudgetHierarchyDeploymentStrategy
+      Description: "Initial activation - defaults match hardcoded fallback, closes missing-profile log noise"
+
 Outputs:
   BudgetHierarchyProfileId:
     Value: !Ref BudgetHierarchyProfile
@@ -166,3 +284,13 @@ Outputs:
     Value: !Ref GovernanceDoctrineProfile
     Export:
       Name: !Sub "${AWS::StackName}-GovernanceDoctrineProfileId"
+
+  EnergyFunctionProfileId:
+    Value: !Ref EnergyFunctionProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-EnergyFunctionProfileId"
+
+  CorroborationFunctionProfileId:
+    Value: !Ref CorroborationFunctionProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-CorroborationFunctionProfileId"
