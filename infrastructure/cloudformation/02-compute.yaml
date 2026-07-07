@@ -557,7 +557,22 @@ Resources:
           # function's TracingConfig against the template's declared
           # Mode=Active -- this tag bump is a real property change so the
           # next Apply actually pushes TracingConfig.Mode=Active live.
-          Value: "ENC-TSK-K45-reconcile-20260702"
+          #
+          # ENC-TSK-B66 follow-up (2026-07-07): the 2026-07-02 tag bump did NOT
+          # reconcile live state -- confirmed via `aws cloudformation
+          # detect-stack-drift` / describe-stack-resource-drifts, which reports
+          # StackResourceDriftStatus=MODIFIED with a genuine PropertyDifferences
+          # entry for /TracingConfig/Mode (Expected=Active, Actual=PassThrough)
+          # and /Layers/0 (Expected=:10, Actual=:7), even though `aws
+          # cloudformation deploy --no-execute-changeset` (the exact mechanism
+          # cloudformation-compute-stack-deploy.yml uses) reports ZERO planned
+          # changes for this resource on the most recent gamma apply
+          # (2026-07-07T03:40Z, change-set only touched OpenSearch NAT
+          # resources). The single prior tag bump was insufficient to force
+          # the changeset generator to re-touch TracingConfig/Layers on this
+          # IMPORTed resource. Bumping the tag value again as a forced,
+          # guaranteed-fresh property diff.
+          Value: "ENC-TSK-B66-reconcile-20260707"
 
   # ENC-TSK-H47 / B63 Phase 2B — Scoring Service. Standalone, SNS-triggered ASYNC consumer that owns
   # lesson constitutional scoring (pillar_composite + resonance_score, ENC-FTR-054) and the lesson

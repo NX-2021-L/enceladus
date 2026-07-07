@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.1",
-  "updated_at": "2026-07-07T04:07:54Z",
-  "last_change_summary": "ENC-TSK-L80: graph_query_api._query_adjacency bound project_id on its node_count/edge_count Cypher queries (previously referenced $project_id in the query text but never passed it as a session.run() parameter, causing ParameterMissing on every offset=0 call). No schema/entity change — bugfix only, repo-file version bump per CI guard.",
+  "version": "2026-07-07.2",
+  "updated_at": "2026-07-07T04:20:00Z",
+  "last_change_summary": "ENC-TSK-B66 (PLN-006 Phase 5 Gate AC-3): new entity observability.xray_tracing_config documents the AWS X-Ray active-tracing posture across the 5-service gamma trace set (Record/Lifecycle/Scoring/Checkout/MCP-Server-standin) declared in infrastructure/cloudformation/02-compute.yaml, including the CoordinationApiFunction MCP-Server-standin architectural decision (ENC-TSK-K45) and the documented enceladus-mcp-code-gamma prod-stack-ownership constraint (Condition:IsProduction, out of reach for gamma-only compute deploys). CEE (5 categories), Fiedler lambda2, F_governance, and ArcWalk telemetry entities were already adequately documented by prior K41/K42/K43/H86 work -- confirmed via review, no changes needed to those entities.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7629,10 +7629,37 @@
       "owner": "coordination",
       "source": "ENC-TSK-L15 / ENC-FTR-096",
       "telemetry_eligible": true
+    },
+    "observability.xray_tracing_config": {
+      "description": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0/AC-3): AWS X-Ray active distributed tracing (TracingConfig.Mode=Active) across the gamma 5-service trace set that PLN-006 Phase 5 designates as the operational-hardening tracing baseline: Record (devops-tracker-mutation-api, CFN logical id TrackerMutationFunction), Lifecycle (enceladus-lifecycle-service, LifecycleServiceFunction), Scoring (enceladus-scoring-service, ScoringServiceFunction), Checkout (enceladus-checkout-service, CheckoutServiceFunction), and MCP Server (devops-coordination-api, CoordinationApiFunction -- the gamma-deployable stand-in for the 'MCP Server' trace slot; enceladus-mcp-code-gamma is the literal MCP code-mode Lambda but is Condition:IsProduction / prod-stack-owned in 02-compute.yaml and out of reach for a gamma-only compute deploy, so it is intentionally excluded from this gamma trace set). All five declare TracingConfig.Mode: Active in infrastructure/cloudformation/02-compute.yaml. CheckoutServiceFunction was IMPORTed into enceladus-compute-gamma out-of-band (cfn-resource-import.yml) and required a forced ReconciledBy tag-bump (ENC-TSK-K45-reconcile-20260702, then ENC-TSK-B66-reconcile-20260707) to make `aws cloudformation deploy`'s change-set diff actually pick up the template's declared TracingConfig against the function's live post-IMPORT PassThrough state -- confirmed via `aws cloudformation detect-stack-drift` / describe-stack-resource-drifts, which reports this resource's live TracingConfig.Mode as drifted from the template even when the change-set diff engine reports no pending change.",
+      "fields": {
+        "tracing_mode": {
+          "type": "string",
+          "definition": "Lambda TracingConfig.Mode. Active enables X-Ray sampling/segment capture; PassThrough (the AWS default) only forwards an existing trace header without sampling.",
+          "usage_guidance": "All 5 trace-set functions declare Mode: Active in 02-compute.yaml Properties.TracingConfig. Verify live state with `aws lambda get-function-configuration --function-name <fn> --query TracingConfig` -- a CFN template declaration is not proof of live state for IMPORTed resources (see ReconciledBy note above)."
+        },
+        "mcp_server_trace_standin": {
+          "type": "string",
+          "definition": "Architectural decision (ENC-TSK-K45): CoordinationApiFunction (devops-coordination-api${EnvironmentSuffix}) is the gamma-deployable stand-in for the 'MCP Server' slot in the 5-service X-Ray trace set.",
+          "usage_guidance": "enceladus-mcp-code-gamma is NOT part of this trace set -- it is Condition:IsProduction (prod-stack-owned per ENC-TSK-H29/ENC-ISS-386 name-collision guard) and a gamma-only compute deploy cannot reach it. Do not attempt to add TracingConfig to EnceladusMcpCodeGammaFunction from a gamma-scoped change; that would require a v3-prod deploy."
+        },
+        "reconciled_by_tag": {
+          "type": "string",
+          "definition": "Tag key used as a forced-diff mechanism on IMPORTed Lambda::Function resources whose live TracingConfig/Layers/Environment properties silently fail to reconcile via a normal `aws cloudformation deploy` change-set (the change-set diff engine reports no pending change even though `aws cloudformation detect-stack-drift` proves real drift).",
+          "usage_guidance": "Bump the Tags[].ReconciledBy Value string to any new literal value to force CFN to recompute a genuine property diff for that resource on the next compute-stack deploy. Precedent: ProdHealthMonitorFunction (ENC-TSK-K44), CheckoutServiceFunction (ENC-TSK-K45, ENC-TSK-B66)."
+        }
+      },
+      "owner": "devops-infrastructure",
+      "source": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0)"
     }
   },
-  "change_summary": "ENC-TSK-L80: bugfix, no schema change — graph_query_api._query_adjacency now binds project_id on its count queries.",
+  "change_summary": "ENC-TSK-B66 (PLN-006 Phase 5 Gate AC-3): new entity observability.xray_tracing_config documents the AWS X-Ray active-tracing posture across the 5-service gamma trace set (Record/Lifecycle/Scoring/Checkout/MCP-Server-standin) declared in infrastructure/cloudformation/02-compute.yaml, including the CoordinationApiFunction MCP-Server-standin architectural decision (ENC-TSK-K45) and the documented enceladus-mcp-code-gamma prod-stack-ownership constraint (Condition:IsProduction, out of reach for gamma-only compute deploys). CEE (5 categories), Fiedler lambda2, F_governance, and ArcWalk telemetry entities were already adequately documented by prior K41/K42/K43/H86 work -- confirmed via review, no changes needed to those entities.",
   "change_log": [
+    {
+      "version": "2026-07-07.2",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-B66 (PLN-006 Phase 5 Gate AC-3): new entity observability.xray_tracing_config documents the AWS X-Ray active-tracing posture across the 5-service gamma trace set (Record/Lifecycle/Scoring/Checkout/MCP-Server-standin) declared in infrastructure/cloudformation/02-compute.yaml, including the CoordinationApiFunction MCP-Server-standin architectural decision (ENC-TSK-K45) and the documented enceladus-mcp-code-gamma prod-stack-ownership constraint (Condition:IsProduction, out of reach for gamma-only compute deploys). CEE (5 categories), Fiedler lambda2, F_governance, and ArcWalk telemetry entities were already adequately documented by prior K41/K42/K43/H86 work -- confirmed via review, no changes needed to those entities."
+    },
     {
       "version": "2026-07-07.1",
       "date": "2026-07-07",
