@@ -173,6 +173,83 @@ class TestHandler(unittest.TestCase):
         result = IDX.handler(event, None)
         self.assertEqual(result, {})
 
+    @patch.dict(
+        CORE.__dict__,
+        {"OPENSEARCH_ENDPOINT": "https://127.0.0.1:9200", "_admin_password": "secret"},
+    )
+    @patch.object(IDX, "bulk_execute")
+    def test_direct_ddb_stream_esm_shape_success(self, bulk_execute):
+        """ENC-TSK-L84: direct EventSourceMapping delivers the raw stream
+        record with no SQS body/messageId wrapper."""
+        bulk_execute.return_value = [(200, {})]
+        event = {
+            "Records": [
+                {
+                    "eventID": "abc123",
+                    "eventName": "MODIFY",
+                    "dynamodb": {
+                        "SequenceNumber": "111000000000000000001",
+                        "NewImage": {
+                            "project_id": {"S": "enceladus"},
+                            "record_type": {"S": "task"},
+                            "record_id": {"S": "ENC-TSK-3"},
+                            "title": {"S": "Direct ESM"},
+                            "updated_at": {"S": "2026-07-05T00:00:00Z"},
+                        },
+                    },
+                }
+            ]
+        }
+        result = IDX.handler(event, None)
+        self.assertEqual(result, {})
+        bulk_execute.assert_called_once()
+
+    @patch.dict(
+        CORE.__dict__,
+        {"OPENSEARCH_ENDPOINT": "https://127.0.0.1:9200", "_admin_password": "secret"},
+    )
+    @patch.object(IDX, "bulk_execute")
+    def test_direct_ddb_stream_esm_reports_sequence_number_on_failure(self, bulk_execute):
+        """Failure identifier for a direct-stream record must be
+        dynamodb.SequenceNumber, not eventID (AWS DynamoDB Streams ESM
+        ReportBatchItemFailures contract)."""
+        bulk_execute.return_value = [(500, {"error": "boom"})]
+        event = {
+            "Records": [
+                {
+                    "eventID": "abc123",
+                    "eventName": "MODIFY",
+                    "dynamodb": {
+                        "SequenceNumber": "222000000000000000002",
+                        "NewImage": {
+                            "project_id": {"S": "enceladus"},
+                            "record_type": {"S": "task"},
+                            "record_id": {"S": "ENC-TSK-4"},
+                            "title": {"S": "Direct ESM fail"},
+                            "updated_at": {"S": "2026-07-05T00:00:00Z"},
+                        },
+                    },
+                }
+            ]
+        }
+        result = IDX.handler(event, None)
+        self.assertEqual(
+            result, {"batchItemFailures": [{"itemIdentifier": "222000000000000000002"}]}
+        )
+
+    def test_source_classification_sqs_vs_ddb_stream(self):
+        sqs_record = {"messageId": "m-1", "body": "{}"}
+        self.assertEqual(IDX._record_source_and_identifier(sqs_record), ("sqs", "m-1"))
+
+        ddb_record = {
+            "eventID": "e-1",
+            "eventName": "INSERT",
+            "dynamodb": {"SequenceNumber": "999"},
+        }
+        self.assertEqual(
+            IDX._record_source_and_identifier(ddb_record), ("ddb_stream", "999")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

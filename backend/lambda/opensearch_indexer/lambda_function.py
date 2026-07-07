@@ -1,10 +1,24 @@
 #!/usr/bin/env python3
 """devops-opensearch-indexer — CDC indexer for B67 Search2.0 (ENC-TSK-L41).
 
-Consumes DynamoDB stream records from a dedicated SQS FIFO queue fed by
-TrackerToSearchIndexPipe + DocumentsToSearchIndexPipe. Bulk-upserts tracker and
-document mutations into OpenSearch via the records_write alias; REMOVE deletes
-by stable natural key.
+ENC-TSK-L84: EventBridge Pipes with a DynamoDB Streams source were confirmed
+account-wide non-functional (StateReason=No records processed, zero
+throughput across 6 clean remediation attempts including a full delete+
+recreate -- see ENC-ISS-497). CDC now runs via direct
+AWS::Lambda::EventSourceMapping on the tracker and documents DynamoDB streams
+(same pattern as the working AppSyncFeedTrackerStreamTrigger in
+06-appsync-events.yaml). This handler accepts BOTH event shapes so the old
+SQS-fed path (SearchIndexSqsTrigger, now disabled but not deleted) and the new
+direct-stream path can coexist during rollback windows:
+  - SQS-wrapped: event.Records[].body is a JSON string containing the raw
+    DynamoDB stream record. Failure identifier = SQS messageId.
+  - Direct DynamoDB Streams ESM: event.Records[] IS the raw stream record
+    (eventName/dynamodb at the top level, no body/messageId). Failure
+    identifier = dynamodb.SequenceNumber per the DynamoDB Streams
+    ReportBatchItemFailures contract (NOT eventID).
+
+Bulk-upserts tracker and document mutations into OpenSearch via the
+records_write alias; REMOVE deletes by stable natural key.
 
 Idempotency (interim until ENC-TSK-L27 version_seq):
   _id = {project_id}#{record_type}#{bare_record_id}
@@ -57,6 +71,18 @@ def _extract_stream_record(sqs_body: Dict[str, Any]) -> Optional[Dict[str, Any]]
     return sqs_body
 
 
+def _record_source_and_identifier(raw_record: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """Classify a Records[] entry as 'sqs' or 'ddb_stream' and return its
+    ReportBatchItemFailures identifier (messageId for SQS, SequenceNumber for
+    a direct DynamoDB Streams ESM)."""
+    if "body" in raw_record or "messageId" in raw_record or "messageID" in raw_record:
+        message_id = raw_record.get("messageId") or raw_record.get("messageID")
+        return "sqs", message_id
+    # Direct DynamoDB Streams ESM: the record itself has eventName/dynamodb.
+    sequence_number = (raw_record.get("dynamodb") or {}).get("SequenceNumber")
+    return "ddb_stream", sequence_number
+
+
 def _stream_record_to_action(stream_record: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
     """Return ('index', meta+doc) or ('delete', meta) or None to skip."""
     event_name = stream_record.get("eventName", "")
@@ -90,14 +116,14 @@ def _stream_record_to_action(stream_record: Dict[str, Any]) -> Optional[Tuple[st
     return None
 
 
-def _batch_failure_response(message_ids: List[str]) -> Dict[str, Any]:
+def _batch_failure_response(identifiers: List[str]) -> Dict[str, Any]:
     failures = []
     seen = set()
-    for message_id in message_ids:
-        if not message_id or message_id in seen:
+    for identifier in identifiers:
+        if not identifier or identifier in seen:
             continue
-        seen.add(message_id)
-        failures.append({"itemIdentifier": message_id})
+        seen.add(identifier)
+        failures.append({"itemIdentifier": identifier})
     if not failures:
         return {}
     return {"batchItemFailures": failures}
@@ -108,26 +134,33 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if not records:
         return {}
 
-    failed_message_ids: List[str] = []
+    failed_identifiers: List[str] = []
     bulk_actions: List[Tuple[str, Dict[str, Any]]] = []
-    bulk_message_indexes: List[int] = []
+    bulk_record_indexes: List[int] = []
+    record_identifiers: List[Optional[str]] = []
 
-    for idx, sqs_record in enumerate(records):
-        message_id = sqs_record.get("messageId") or sqs_record.get("messageID")
+    for idx, raw_record in enumerate(records):
+        source, identifier = _record_source_and_identifier(raw_record)
+        record_identifiers.append(identifier)
         try:
-            body_raw = sqs_record.get("body", "{}")
-            body = json.loads(body_raw) if isinstance(body_raw, str) else body_raw
-            stream_record = _extract_stream_record(body)
+            if source == "sqs":
+                body_raw = raw_record.get("body", "{}")
+                body = json.loads(body_raw) if isinstance(body_raw, str) else body_raw
+                stream_record = _extract_stream_record(body)
+            else:
+                stream_record = raw_record
             if not stream_record or "dynamodb" not in stream_record:
                 continue
             action = _stream_record_to_action(stream_record)
             if action is not None:
-                bulk_message_indexes.append(idx)
+                bulk_record_indexes.append(idx)
                 bulk_actions.append(action)
         except Exception:
-            logger.exception("[ERROR] Failed to parse SQS record messageId=%s", message_id)
-            if message_id:
-                failed_message_ids.append(message_id)
+            logger.exception(
+                "[ERROR] Failed to parse %s record identifier=%s", source, identifier
+            )
+            if identifier:
+                failed_identifiers.append(identifier)
 
     if bulk_actions:
         try:
@@ -135,21 +168,21 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             for bulk_idx, (status, _result) in enumerate(bulk_results):
                 if is_success_status(status):
                     continue
-                msg_idx = bulk_message_indexes[bulk_idx]
-                message_id = records[msg_idx].get("messageId") or records[msg_idx].get("messageID")
-                if message_id:
-                    failed_message_ids.append(message_id)
+                rec_idx = bulk_record_indexes[bulk_idx]
+                identifier = record_identifiers[rec_idx]
+                if identifier:
+                    failed_identifiers.append(identifier)
         except Exception:
             logger.exception("[ERROR] OpenSearch bulk execute failed")
-            for msg_idx in bulk_message_indexes:
-                message_id = records[msg_idx].get("messageId") or records[msg_idx].get("messageID")
-                if message_id:
-                    failed_message_ids.append(message_id)
+            for rec_idx in bulk_record_indexes:
+                identifier = record_identifiers[rec_idx]
+                if identifier:
+                    failed_identifiers.append(identifier)
 
     logger.info(
         "[INFO] Batch complete: total=%d bulk=%d failures=%d",
         len(records),
         len(bulk_actions),
-        len(failed_message_ids),
+        len(failed_identifiers),
     )
-    return _batch_failure_response(failed_message_ids)
+    return _batch_failure_response(failed_identifiers)
