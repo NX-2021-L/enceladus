@@ -1,6 +1,6 @@
 {
-  "version": "2026-07-07.5",
-  "updated_at": "2026-07-07T11:35:33Z",
+  "version": "2026-07-07.6",
+  "updated_at": "2026-07-07T11:50:28Z",
   "last_change_summary": "ENC-TSK-L89: FTR-122 retirement sweeps now atomically release task checkouts held by retiring sessions, add an account-wide retired-session checkout-release backfill action, and expose the action through the MCP coordination surface.",
   "owners": [
     "enceladus-platform"
@@ -7704,9 +7704,14 @@
   "change_summary": "ENC-TSK-L89: FTR-122 retirement sweeps now atomically release task checkouts held by retired sessions, add an account-wide retired-session checkout-release backfill action, and expose the action through the MCP coordination surface.",
   "change_log": [
     {
-      "version": "2026-07-07.5",
+      "version": "2026-07-07.6",
       "date": "2026-07-07",
       "summary": "ENC-TSK-L89 / FTR-122: agent-session retirement now atomically releases task checkouts held by the retiring session in the same DynamoDB transaction as session retire + SCI revocation for both the idle and unclaim sweeps. Added coordination.agent_session_checkout_release_backfill plus MCP coordination action agent.checkout_release_backfill for the one-time retired-session stale-lock repair, including the ENC-TSK-L06 / ENC-SES-057 class."
+    },
+    {
+      "version": "2026-07-07.5",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L85: graph_sync.lambda CDC transport swapped from EventBridge Pipes (DynamoDB-stream source, confirmed account-wide non-functional per ENC-ISS-497, same fix pattern as ENC-TSK-L84) to a direct Lambda EventSourceMapping (GraphSyncTrackerStreamTrigger / GraphSyncDocumentsStreamTrigger) on the tracker + documents DynamoDB streams. Gamma only: GraphSyncFunction/GraphSyncRole/GraphSyncSqsTrigger are shared prod(v3)+gamma resources with no Condition, so every change is scoped via Fn::If or a new Condition: IsGamma resource -- v3-prod's deployed behavior is unchanged even on a future redeploy of this template. Handler now accepts both the legacy SQS-wrapped shape and the native direct-stream shape (correct messageId vs SequenceNumber failure identifiers). Legacy GraphSyncSqsTrigger disabled on gamma only, left enabled on prod/v3, not deleted; Pipes left in place."
     },
     {
       "version": "2026-07-07.3",

@@ -2477,8 +2477,10 @@ Resources:
   # Compliance/Semantic detector output and deterministically resolves a
   # whitelist of compliance_warnings classes via documents.patch, advancing
   # raw documents to compliant maturity_state with no agent involvement.
-  # DATA-SAFETY: GDMP_DRY_RUN=1, GDMP_MUTATION_ENABLED=0, GDMP_IO_APPROVAL_RUNS=3
+  # DATA-SAFETY: GDMP_DRY_RUN=0, GDMP_MUTATION_ENABLED=1, GDMP_IO_APPROVAL_RUNS=3
   # (FTR-106 AC-4 io-approval-ramp pattern, same shape as UnlearningFunction).
+  # Stage-1 mutation-ramp ARMED 2026-07-07 per io directive #2 (ENC-TSK-L90);
+  # code-enforced ramp still holds the next 3 live nightly runs candidate-only.
   # CEE_GDMP_HARD_DISABLED is the mandatory kill switch (ISS-465 cost-preflight
   # precedent), checked first thing in the handler. Gamma-only (Condition:
   # IsGamma): v3-prod is frozen (DOC-499FA089EC30).
@@ -2518,19 +2520,24 @@ Resources:
           GDMP_STATE_BUCKET: !Ref S3Bucket
           GDMP_STATE_PREFIX: !Sub "${S3EnvPrefix}gdmp-remediation-state"
           GDMP_MAX_DOCS_PER_RUN: "200"
-          # DATA-SAFETY defaults -- io clears CEE_GDMP_HARD_DISABLED and later
-          # flips GDMP_MUTATION_ENABLED only after IO_APPROVAL_RUNS candidate
-          # reports have been reviewed. Mirrors UNLEARNING_* (K03) convention.
-          GDMP_DRY_RUN: "1"
-          GDMP_MUTATION_ENABLED: "0"
+          # DATA-SAFETY: Stage-1 mutation-ramp ARMED 2026-07-07 per io directive
+          # #2 (ENC-TSK-L90). After the initial IO_APPROVAL_RUNS candidate
+          # reports were reviewed, io flipped GDMP_DRY_RUN "1"->"0" and
+          # GDMP_MUTATION_ENABLED "0"->"1". Mirrors UNLEARNING_* (K03) convention.
+          # Mutation remains gated by the code-enforced io-approval ramp: the
+          # handler's mutation_allowed() keeps the next 3 live nightly runs
+          # candidate-report-only (run_count < GDMP_IO_APPROVAL_RUNS; the counter
+          # increments only on non-dry runs and is currently 0) before the 4th
+          # live run performs real documents.patch remediation.
+          GDMP_DRY_RUN: "0"
+          GDMP_MUTATION_ENABLED: "1"
           GDMP_IO_APPROVAL_RUNS: "3"
           # ISS-465-style kill switch -- installed disabled by default; io
           # clears to "0" to enable. Mirrors CEE_HARD_DISABLED (K41) /
           # UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
-          # Cleared 2026-07-02 per io: lets the Lambda run on its initial
-          # nightly schedule. GDMP_DRY_RUN stays "1" / GDMP_MUTATION_ENABLED
-          # stays "0" -- this produces real candidate reports without
-          # mutating any documents yet (ENC-TSK-K42).
+          # Cleared 2026-07-02 per io; remains "0" through the 2026-07-07
+          # mutation-ramp flip -- the io-approval ramp (not this kill switch)
+          # now governs when live mutation begins (ENC-TSK-K42 / ENC-TSK-L90).
           CEE_GDMP_HARD_DISABLED: "0"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -2745,6 +2752,17 @@ Resources:
         - ReportBatchItemFailures
       Enabled: true
 
+  # ENC-TSK-L85: TrackerToGraphPipe/DocumentsToGraphPipe (EventBridge Pipes,
+  # DynamoDB Streams source) were confirmed account-wide non-functional
+  # (ENC-ISS-497, same root cause already fixed for search-index via
+  # ENC-TSK-L84). This SQS trigger was the downstream leg of that dead path.
+  # On gamma, CDC now runs via GraphSyncTrackerStreamTrigger /
+  # GraphSyncDocumentsStreamTrigger below, a direct Lambda
+  # EventSourceMapping on the same streams. GraphSyncFunction/GraphSyncRole
+  # are shared prod(v3)+gamma resources (no Condition), so the disable is
+  # scoped with Fn::If rather than a resource-level Condition -- v3-prod
+  # keeps Enabled: true unchanged; only gamma flips to false. Left defined
+  # (not removed) for rollback.
   GraphSyncSqsTrigger:
     Type: AWS::Lambda::EventSourceMapping
     DeletionPolicy: Retain
@@ -2761,6 +2779,61 @@ Resources:
       # FeedPublisherSqsTrigger above.
       FunctionResponseTypes:
         - ReportBatchItemFailures
+      Enabled: !If [IsGamma, false, true]
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-L85: DynamoDB Stream -> Lambda EventSourceMapping (direct, no
+  # SQS/Pipes intermediary), gamma only. Replaces TrackerToGraphPipe /
+  # DocumentsToGraphPipe after EventBridge Pipes with a DynamoDB Streams
+  # source were confirmed account-wide non-functional (ENC-ISS-497:
+  # StateReason=No records processed, zero throughput -- same root cause
+  # already fixed for search-index via ENC-TSK-L84). Mirrors the
+  # already-proven-working AppSyncFeedTrackerStreamTrigger pattern in
+  # 06-appsync-events.yaml and the ENC-TSK-L84 SearchIndex*StreamTrigger
+  # pattern above. FilterCriteria preserves the retired Pipes' record_type
+  # scoping, and additionally splits INSERT/MODIFY (NewImage-based filter)
+  # from REMOVE (OldImage-based filter) so REMOVE events -- which have no
+  # NewImage -- are no longer silently dropped by a NewImage-only filter
+  # (a latent gap in the original Pipes' filter design, independent of the
+  # account-wide outage).
+  # ---------------------------------------------------------------------------
+
+  GraphSyncTrackerStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      FunctionName: !Ref GraphSyncFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 0
+      StartingPosition: LATEST
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+          - Pattern: '{"eventName":["REMOVE"],"dynamodb":{"OldImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+      Enabled: true
+
+  GraphSyncDocumentsStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-DocumentsStreamArn
+      FunctionName: !Ref GraphSyncFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 0
+      StartingPosition: LATEST
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+          - Pattern: '{"eventName":["REMOVE"]}'
       Enabled: true
 
   # ENC-TSK-L84: disabled, not deleted. TrackerToSearchIndexPipe /
@@ -5497,6 +5570,35 @@ Resources:
                   - bedrock:InvokeModel
                 Resource:
                   - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+        # ENC-TSK-L85: direct DynamoDB Streams EventSourceMapping replacing the
+        # dead Pipes-DynamoDB-source path (ENC-ISS-497), gamma only for now
+        # (v3-prod frozen). Added unconditionally on this shared role (like
+        # the policies above) since it's an inert read-only grant with no new
+        # ESM configured against it in prod under this template -- SqsEventSource
+        # above is retained (not removed) since GraphSyncSqsTrigger stays
+        # defined, just disabled on gamma, for rollback.
+        - PolicyName: DynamoDbStreamEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+              - Sid: ReadDocumentsStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-DocumentsStreamArn
       Tags:
         - Key: Project
           Value: enceladus
