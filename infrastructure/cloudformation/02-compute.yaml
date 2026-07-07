@@ -206,6 +206,11 @@ Resources:
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
           APPCONFIG_CONFIGURATION: feature-flags
+          # ENC-TSK-L92/L95 / ENC-ISS-501: escalation approve/deny decider allowlist.
+          # This role is granted s3:GetObject only on this exact key -- no Lambda
+          # role, including this one, has write access. Edits are Console-only.
+          ESCALATION_APPROVER_ALLOWLIST_BUCKET: !Ref S3Bucket
+          ESCALATION_APPROVER_ALLOWLIST_KEY: security/escalation-approvers.md
       Tags:
         - Key: Project
           Value: enceladus
@@ -1755,6 +1760,14 @@ Resources:
                   - s3:HeadBucket
                   - s3:GetBucketLocation
                 Resource: "arn:aws:s3:::jreese-net"
+              # ENC-TSK-L92/L95 / ENC-ISS-501: escalation approver allowlist -- READ ONLY.
+              # Deliberately no s3:PutObject/DeleteObject grant here or anywhere else
+              # in this role; the allowlist document is Console-edit-only by design.
+              - Sid: EscalationApproverAllowlistRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/security/escalation-approvers.md"
               - Sid: SSMDispatch
                 Effect: Allow
                 Action:

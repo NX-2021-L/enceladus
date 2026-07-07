@@ -1,12 +1,25 @@
 {
-  "version": "2026-07-05.2",
-  "updated_at": "2026-07-05T00:00:00Z",
-  "last_change_summary": "ENC-TSK-J40: added component_registry.component.deploy_targets (stack names + function-name globs a component owns) to the ENC-TSK-E68 capability-declaration field set, consumed by tools/assert_deploy_target_coverage.py to fail closed when a component's declared targets are narrower than a merge's diff-inferred affected set.",
+  "version": "2026-07-07.1",
+  "updated_at": "2026-07-07T13:00:00Z",
+  "last_change_summary": "ENC-TSK-L95 / ENC-ISS-501 (SEV-1) v3-prod leg: escalation approve/deny now requires the decider's Cognito email to be on a Console-edit-only S3 allowlist (ESCALATION_APPROVER_ALLOWLIST_BUCKET/_KEY), closing a gap where _is_cognito_session (a fail-open blocklist) let a non-human identity self-approve governance-bypass escalations. NOTE: this repo's main-branch coordination_api/lambda_function.py source is stale relative to the live devops-coordination-api function (code deploys via the Gen2 artifact pipeline built from v4/main, independent of main's git tree) -- the live function already has the full escalation approve/deny feature; only the allowlist env vars + IAM read grant needed to land here since this Lambda's CFN definition (unlike its code) IS git-tracked. See coordination.escalations on v4/main's dictionary for the full feature description.",
   "owners": [
     "enceladus-platform"
   ],
   "backward_compatibility_policy": "Additive changes are preferred. Removing enum values or required fields requires explicit migration notes and coordinated rollout.",
   "entities": {
+    "coordination.escalation_approver_allowlist": {
+      "description": "ENC-TSK-L92/L95 / ENC-ISS-501 (SEV-1): positive allowlist gating the coordination_api escalation approve/deny routes, on top of the existing _is_cognito_session check (which was found to be a fail-open blocklist -- it excludes only auth_mode in {internal-key, managed-token}; any other or absent auth_mode passed as human). The decider's Cognito email claim must appear in a Console-edit-only S3 document; the allowlist check fails CLOSED on any fetch/parse error (denies everyone rather than falling back to allow-everyone).",
+      "fields": {
+        "ESCALATION_APPROVER_ALLOWLIST_BUCKET": {
+          "type": "string",
+          "definition": "Env var (default 'jreese-net'). S3 bucket holding the escalation-approver allowlist document."
+        },
+        "ESCALATION_APPROVER_ALLOWLIST_KEY": {
+          "type": "string",
+          "definition": "Env var (default 'security/escalation-approvers.md'). S3 key of the allowlist document, shared by BOTH gamma and prod coordination_api Lambdas (no env-suffix distinction). This Lambda's role is granted s3:GetObject ONLY on this exact key (EscalationApproverAllowlistRead statement, infrastructure/cloudformation/02-compute.yaml) -- no role in the account, including this Lambda's own, has PutObject/DeleteObject on it. The document is a markdown file with a fenced yaml block of `- email: \"...\"` list entries, parsed without a yaml dependency (60s in-memory cache). Edits require an AWS Console-authenticated human; there is deliberately no programmatic write path."
+        }
+      }
+    },
     "tracker.task": {
       "description": "Task tracker records created via MCP and tracker mutation APIs.",
       "fields": {
