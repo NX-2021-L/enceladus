@@ -2,12 +2,19 @@ import { useEffect, useState } from 'react'
 import { Alert, Button, Flashbar, Modal } from '../design-system'
 import { useOfflineStore } from '../store/offlineStore'
 import { replayQueuedMutation } from '../api/mutations'
+import { mergeConflictFields } from '../api/mutations'
+import type { ConflictMergeState, MutationErrorState } from '../hooks/useRecordMutation'
 import {
-  mergeConflictFields,
-  type RevisionConflictError,
-} from '../api/mutations'
-import type { ConflictMergeState } from '../hooks/useRecordMutation'
-import { registerConflictMergeHandler } from '../hooks/useRecordMutation'
+  registerConflictMergeHandler,
+  registerMutationErrorHandler,
+} from '../hooks/useRecordMutation'
+
+const CLOSED_MUTATION_ERROR_STATE: MutationErrorState = {
+  open: false,
+  message: '',
+  vars: null,
+  retry: null,
+}
 
 export function OfflinePendingFlashbar() {
   const pendingCount = useOfflineStore((s) => s.pendingCount)
@@ -47,6 +54,55 @@ export function OfflinePendingFlashbar() {
   }
 
   if (items.length === 0) return null
+  return <Flashbar items={items} />
+}
+
+/**
+ * ENC-TSK-K23 (B67 AC-7): atomic-rollback surface for non-conflict mutation
+ * failures (network error, 5xx, mid-flight session expiry). The optimistic
+ * write already reverted synchronously in useRecordMutation's onError before
+ * this ever renders — this is purely the user-facing "it failed, want to
+ * retry?" notice, not part of the rollback itself.
+ */
+export function MutationErrorFlashbar() {
+  const [state, setState] = useState<MutationErrorState>(CLOSED_MUTATION_ERROR_STATE)
+
+  useEffect(() => {
+    registerMutationErrorHandler(setState)
+    return () => registerMutationErrorHandler(() => {})
+  }, [])
+
+  if (!state.open) return null
+
+  const dismiss = () => setState(CLOSED_MUTATION_ERROR_STATE)
+
+  const items = [
+    {
+      id: 'mutation-error',
+      type: 'error' as const,
+      header: 'Change failed to save',
+      dismissible: true,
+      onDismiss: dismiss,
+      content: (
+        <div className="flex items-center gap-3">
+          <span>{state.message}</span>
+          {state.retry ? (
+            <Button
+              variant="normal"
+              recordId={state.vars?.recordId}
+              onClick={() => {
+                state.retry?.()
+                dismiss()
+              }}
+            >
+              Retry
+            </Button>
+          ) : null}
+        </div>
+      ),
+    },
+  ]
+
   return <Flashbar items={items} />
 }
 
