@@ -1,0 +1,93 @@
+name: IAM CFN Deploy Role — NAT Gateway Patch
+
+# ENC-TSK-L43 Option A: grant the shared CFN deploy role EC2 permissions to
+# create NAT gateway + route table resources in the OpenSearch/Lambda VPC path.
+# io-gated: environment v3-prod (required reviewer).
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "Grant NAT gateway EC2 permissions for enceladus-compute-gamma (ENC-TSK-L43)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with NAT gateway EC2 permissions
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy — OpenSearch NAT gateway (gamma)
+        run: |
+          set -euo pipefail
+          cat > /tmp/opensearch-nat-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "OpenSearchNatEc2Describe",
+                "Effect": "Allow",
+                "Action": [
+                  "ec2:DescribeVpcs",
+                  "ec2:DescribeSubnets",
+                  "ec2:DescribeRouteTables",
+                  "ec2:DescribeNatGateways",
+                  "ec2:DescribeAddresses"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "OpenSearchNatEc2MutateGamma",
+                "Effect": "Allow",
+                "Action": [
+                  "ec2:AllocateAddress",
+                  "ec2:ReleaseAddress",
+                  "ec2:CreateNatGateway",
+                  "ec2:DeleteNatGateway",
+                  "ec2:CreateRouteTable",
+                  "ec2:DeleteRouteTable",
+                  "ec2:CreateRoute",
+                  "ec2:ReplaceRoute",
+                  "ec2:DeleteRoute",
+                  "ec2:AssociateRouteTable",
+                  "ec2:DisassociateRouteTable"
+                ],
+                "Resource": "*",
+                "Condition": {
+                  "StringEquals": {
+                    "aws:RequestedRegion": "us-west-2"
+                  }
+                }
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-opensearch-nat-v1" \
+            --policy-document "file:///tmp/opensearch-nat-policy.json"
+
+      - name: Verify inline policy attached
+        run: |
+          aws iam get-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-opensearch-nat-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table
