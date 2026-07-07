@@ -64,6 +64,12 @@ logger.setLevel(logging.INFO)
 
 NEO4J_SECRET_NAME = os.environ.get("NEO4J_SECRET_NAME", "enceladus/neo4j/auradb-credentials")
 SECRETS_REGION = os.environ.get("SECRETS_REGION", "us-west-2")
+# ENC-TSK-L06 / B63 Phase 2 AC-6 AC-2 ("...and verified on projection"): the same shared
+# HMAC secret the ID Service signs item_id_provenance with. Empty by default (inert) so a
+# gamma/prod environment that hasn't wired this env var yet degrades to "verification
+# skipped, not attempted" rather than erroring — this is an observability/quarantine-flag
+# feature, never a hard MERGE gate (existing pre-L06 records have no provenance at all).
+ID_SERVICE_HMAC_SECRET_ARN = os.environ.get("ID_SERVICE_HMAC_SECRET_ARN", "")
 
 # ---------------------------------------------------------------------------
 # Lazy singletons (cold-start cached)
@@ -90,6 +96,72 @@ def _get_neo4j_credentials() -> Dict[str, str]:
     sm = _get_secretsmanager()
     resp = sm.get_secret_value(SecretId=NEO4J_SECRET_NAME)
     return json.loads(resp["SecretString"])
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-L06 / B63 Phase 2 AC-6 AC-2 — provenance verification on projection.
+# ---------------------------------------------------------------------------
+
+_id_hmac_key_cache: Optional[bytes] = None
+
+
+def _get_id_hmac_key() -> Optional[bytes]:
+    """Fetch the ID Service's HMAC signing secret, cached for the life of the execution
+    environment. Returns None (never raises) when ID_SERVICE_HMAC_SECRET_ARN is unset or
+    the fetch fails — verification is a best-effort observability feature, not a hard
+    dependency of the sync pipeline."""
+    global _id_hmac_key_cache
+    if _id_hmac_key_cache is not None:
+        return _id_hmac_key_cache
+    if not ID_SERVICE_HMAC_SECRET_ARN:
+        return None
+    try:
+        sm = _get_secretsmanager()
+        resp = sm.get_secret_value(SecretId=ID_SERVICE_HMAC_SECRET_ARN)
+        secret_string = resp.get("SecretString", "")
+        try:
+            parsed = json.loads(secret_string)
+            if isinstance(parsed, dict) and "hmac_key" in parsed:
+                secret_string = parsed["hmac_key"]
+        except (ValueError, TypeError):
+            pass
+        _id_hmac_key_cache = secret_string.encode("utf-8")
+        return _id_hmac_key_cache
+    except Exception:  # noqa: BLE001 — best-effort; never blocks the sync pipeline
+        logger.warning("[ID-PROVENANCE] could not fetch ID Service HMAC secret; verification skipped")
+        return None
+
+
+def _verify_item_id_provenance(record: Dict[str, Any]) -> None:
+    """Recompute + compare item_id_provenance for a record about to be MERGEd into the
+    graph. Logs (never raises, never blocks the MERGE) on mismatch or absence — pre-L06
+    records have no provenance at all (expected, not an error; see AC-5 backfill/
+    quarantine), and this check must stay proportionate: a warning/metric signal, not a
+    hard gate that would break ingestion for the entire pre-existing dataset."""
+    provenance = record.get("item_id_provenance")
+    if not provenance:
+        return  # No provenance stamped (pre-L06 record, or flag was OFF at create time) — silent, expected.
+    key = _get_id_hmac_key()
+    if key is None:
+        return  # Secret not wired in this environment — verification not attempted.
+    record_id = str(record.get("item_id") or _bare_id(record.get("record_id", "")))
+    created_at = str(record.get("created_at") or "")
+    record_type = str(record.get("record_type") or "")
+    if not (record_id and created_at and record_type):
+        return
+    try:
+        import hashlib
+        import hmac as _hmac
+        message = f"{record_id}||{created_at}||{record_type}".encode("utf-8")
+        expected = _hmac.new(key, message, hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(expected, str(provenance)):
+            logger.warning(
+                "[ID-PROVENANCE] MISMATCH for %s (record_type=%s) — stamped provenance does not "
+                "match recomputed signature. Flagging for quarantine review (AC-5), not blocking sync.",
+                record_id, record_type,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort; never blocks the sync pipeline
+        logger.warning("[ID-PROVENANCE] verification error for %s: %s", record_id, exc)
 
 
 def _get_neo4j_driver():
@@ -321,6 +393,10 @@ NODE_PROPERTIES = [
     # ENC-TSK-I07 (Dedup P3): canonical pointer on a superseded node, so
     # retrieval/triage can exclude superseded records and surface the survivor.
     "superseded_by",
+    # ENC-TSK-L06 / B63 Phase 2 AC-6: projected so the signature is queryable in the graph
+    # (e.g. for an operator to spot-check or for a future dashboard read), even though
+    # verification itself happens in _verify_item_id_provenance before the MERGE below.
+    "item_id_provenance",
 ]
 
 
@@ -432,6 +508,11 @@ def _upsert_node(tx, record: Dict[str, Any]) -> None:
     record_id = _bare_id(record.get("record_id", record.get("item_id", "")))
     if not record_id:
         return
+
+    # ENC-TSK-L06 / B63 Phase 2 AC-6 AC-2: verify (never block on) item_id_provenance
+    # before projecting. Logs a warning on mismatch/absence for AC-5 quarantine review;
+    # the MERGE below always proceeds regardless of the verification outcome.
+    _verify_item_id_provenance(record)
 
     props = {k: record.get(k) for k in NODE_PROPERTIES if record.get(k) is not None}
     props["record_id"] = record_id

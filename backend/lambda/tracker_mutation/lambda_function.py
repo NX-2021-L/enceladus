@@ -273,6 +273,81 @@ def _invoke_lifecycle_service(payload: dict):
         return None
 
 # ---------------------------------------------------------------------------
+# ENC-TSK-L06 / B63 Phase 2 AC-6 — ID Service extraction.
+# When enable_id_service_extraction is ON, the standalone ID Service is the SOLE authority
+# for record-ID allocation (counter items now live in a dedicated enceladus-id-counters
+# table that only the ID Service's IAM role can touch — AC-0), the idempotency-key
+# contract, and HMAC provenance signing. Invocation is synchronous and FAIL-CLOSED,
+# mirroring the Lifecycle Service (H46) posture exactly: any invoke failure REJECTS the
+# create — there is no inline fallback to a different generation path when the flag is ON
+# (an ID-generation failure silently falling back would defeat the IAM isolation
+# property). The inline _next_record_id()/_encode_base36() path below (which still reads/
+# writes legacy counter#* rows in THIS table) is retained ONLY as the flag-OFF rollback
+# (zero-behavior-change deploy, matching the H46/H47 precedent).
+# ---------------------------------------------------------------------------
+ID_SERVICE_FUNCTION = os.environ.get("ID_SERVICE_FUNCTION", "")
+
+
+def _id_service_enabled() -> bool:
+    """Read the AppConfig flag at request time (independent toggle + rollback, ENC-TSK-L06)."""
+    return _appconfig_flag("enable_id_service_extraction", env_fallback="ENABLE_ID_SERVICE")
+
+
+def _invoke_id_service(payload: dict):
+    """Synchronously invoke the ID Service and return its verdict dict, or None on ANY
+    failure (function not configured, invoke error, FunctionError, malformed verdict).
+    Returning None signals the caller to FAIL CLOSED — there is no inline fallback when the
+    flag is ON (ENC-TSK-L06, mirrors ENC-TSK-H46 AC #2)."""
+    fn = ID_SERVICE_FUNCTION
+    if not fn:
+        logger.error("[L06] ID_SERVICE_FUNCTION not configured; failing closed")
+        return None
+    try:
+        resp = _get_lambda_client().invoke(
+            FunctionName=fn,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        if resp.get("FunctionError"):
+            logger.error("[L06] ID Service FunctionError=%s", resp.get("FunctionError"))
+            return None
+        body = resp.get("Payload")
+        raw = body.read() if hasattr(body, "read") else body
+        verdict = json.loads(raw)
+        if not isinstance(verdict, dict) or "allow" not in verdict:
+            logger.error("[L06] ID Service returned malformed verdict: %r", verdict)
+            return None
+        return verdict
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[L06] ID Service invoke failed: %s", exc)
+        return None
+
+
+def _record_id_boundary_violation(body: dict, record_type: str, field: str) -> None:
+    """ENC-TSK-L06 AC-4: best-effort trust-score feedback on an ID_BOUNDARY_VIOLATION reject.
+    Fires the ID Service's record_violation action (fire-and-forget style — failures are
+    logged and swallowed, matching the Scoring Service SNS-publish failure-isolation
+    precedent: the 400 rejection to the caller is the source of truth and must never be
+    blocked or altered by a violation-logging side-channel issue)."""
+    if not ID_SERVICE_FUNCTION:
+        return
+    try:
+        ws = _normalize_write_source(body)
+        caller_identity = ws.get("provider") or "unknown"
+        _get_lambda_client().invoke(
+            FunctionName=ID_SERVICE_FUNCTION,
+            InvocationType="Event",  # fire-and-forget; never blocks the 400 response
+            Payload=json.dumps({
+                "action": "record_violation",
+                "caller_identity": caller_identity,
+                "record_type": record_type,
+                "detail": f"forbidden field '{field}' present in create payload",
+            }).encode("utf-8"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[L06] ID boundary violation trust-score notify failed: %s", exc)
+
+# ---------------------------------------------------------------------------
 # ENC-TSK-H47 / B63 Phase 2B — Scoring Service extraction.
 # When enable_scoring_service_extraction is ON, the standalone, SNS-triggered Scoring Service is the
 # SOLE owner of lesson constitutional scoring: tracker_mutation writes the lesson with
@@ -2973,6 +3048,10 @@ def _handle_create_record(
     dispatch_id = str(body.get("dispatch_id") or "").strip()
     is_child = bool(body.get("is_child", False))
     parent_task_id = str(body.get("parent_task_id") or "").strip()
+    # ENC-TSK-L06 AC-1: optional client-supplied idempotency key. A retry with the same
+    # key returns the SAME record_id instead of allocating a new one (ID Service contract;
+    # inert when enable_id_service_extraction is OFF).
+    idempotency_key = str(body.get("idempotency_key") or "").strip()
     # ENC-TSK-C26 / ENC-ISS-175: read transition_type at create time so the
     # create-time-only sealed values (no_code, code_only per ENC-FTR-060) can
     # actually be applied. Field-level immutability is enforced separately by
@@ -3383,49 +3462,114 @@ def _handle_create_record(
             if ids:
                 item[field_name] = {"L": [_ser_s(i) for i in ids]}
 
-    # ENC-ISS-132: Reject externally-provided record IDs — IDs are server-generated only
-    for forbidden_field in ("item_id", "record_id"):
+    # ENC-ISS-132 / ENC-TSK-L06 AC-3: Reject externally-provided record IDs — IDs are
+    # generated server-side only. AC-4: every rejection here also feeds the ID Service's
+    # per-caller trust-score violation counter (best-effort, fire-and-forget — the 400
+    # rejection itself never depends on or is delayed by the notify call).
+    for forbidden_field in ("item_id", "record_id", "item_id_provenance"):
         if body.get(forbidden_field):
-            return _error(400, f"Field '{forbidden_field}' must not be provided — record IDs are generated server-side.")
+            _record_id_boundary_violation(body, record_type, forbidden_field)
+            return _error(
+                400,
+                f"Field '{forbidden_field}' must not be provided — record IDs and their provenance "
+                f"are generated server-side.",
+                code="ID_BOUNDARY_VIOLATION",
+            )
     # ENC-TSK-F41 reserved-counter-field guard runs at the top of this handler
     # (before project prefix lookup) so body-level seed attempts fail fast.
 
-    # Create with counter-based ID allocation (or hierarchical sub-task ID)
-    try:
-        for attempt in range(1, _TRACKER_CREATE_MAX_ATTEMPTS + 1):
-            if is_child and parent_task_id:
-                # ENC-FTR-056: Generate hierarchical sub-task ID
-                parent_upper = parent_task_id.upper()
-                parent_parts = parent_upper.split("-")
-                parent_root = "-".join(parent_parts[:3])  # PREFIX-TSK-CCC
-                suffix = _next_subtask_suffix(project_id, parent_root)
-                new_id = f"{parent_root}-{suffix}"
-                item["parent"] = _ser_s(parent_upper)
+    # ENC-TSK-L06 / B63 Phase 2 AC-6: when enable_id_service_extraction is ON, the standalone
+    # ID Service is the SOLE authority for record-ID allocation, the idempotency-key contract,
+    # and HMAC provenance signing. FAIL-CLOSED — an invoke failure rejects the create; the
+    # inline counter-based allocation below runs only as the flag-OFF rollback path.
+    item_id_provenance: str = ""
+    if _id_service_enabled():
+        ws = _normalize_write_source(body)
+        _id_verdict = _invoke_id_service({
+            "action": "allocate",
+            "project_id": project_id,
+            "prefix": prefix,
+            "record_type": record_type,
+            "idempotency_key": idempotency_key,
+            "is_child": is_child,
+            "parent_task_id": parent_task_id,
+            "created_at": now,
+            "caller_identity": ws.get("provider") or "",
+        })
+        if _id_verdict is None:
+            return _error(
+                503,
+                "ID Service unavailable; create rejected (fail-closed, ENC-TSK-L06). "
+                "Retry shortly, or disable the enable_id_service_extraction flag to fall "
+                "back to inline allocation.",
+                code="ID_SERVICE_UNAVAILABLE",
+                retryable=True,
+            )
+        if not _id_verdict.get("allow"):
+            _id_err = _id_verdict.get("error") or {}
+            return _error(
+                int(_id_err.get("status", 400) or 400),
+                _id_err.get("message", "ID Service rejected the allocation."),
+                code=_id_err.get("code", "INVALID_INPUT"),
+            )
+        new_id = _id_verdict["record_id"]
+        item_id_provenance = _id_verdict.get("item_id_provenance", "")
+        if is_child and parent_task_id:
+            item["parent"] = _ser_s(parent_task_id.upper())
+        sk = f"{record_type}#{new_id}"
+        item["record_id"] = _ser_s(sk)
+        item["item_id"] = _ser_s(new_id)
+        if item_id_provenance:
+            item["item_id_provenance"] = _ser_s(item_id_provenance)
+        _stamp_version_seq_on_create_item(item)
+        try:
+            ddb.put_item(
+                TableName=DYNAMODB_TABLE, Item=item,
+                ConditionExpression="attribute_not_exists(record_id)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("create failed (ID Service path): %s", exc)
+            return _error(500, "Database write failed.")
+        # Falls through to the shared post-write continuation below (lesson scoring publish,
+        # parent subtask_ids update, bidirectional relationships, response construction) —
+        # identical for both the ID-Service and inline-rollback allocation paths.
+    else:
+        # --- Flag-OFF rollback path: inline counter-based allocation (unchanged from pre-L06) ---
+        try:
+            for attempt in range(1, _TRACKER_CREATE_MAX_ATTEMPTS + 1):
+                if is_child and parent_task_id:
+                    # ENC-FTR-056: Generate hierarchical sub-task ID
+                    parent_upper = parent_task_id.upper()
+                    parent_parts = parent_upper.split("-")
+                    parent_root = "-".join(parent_parts[:3])  # PREFIX-TSK-CCC
+                    suffix = _next_subtask_suffix(project_id, parent_root)
+                    new_id = f"{parent_root}-{suffix}"
+                    item["parent"] = _ser_s(parent_upper)
+                else:
+                    new_id = _next_record_id(project_id, prefix, record_type)
+                sk = f"{record_type}#{new_id}"
+                item["record_id"] = _ser_s(sk)
+                item["item_id"] = _ser_s(new_id)
+                _stamp_version_seq_on_create_item(item)
+                try:
+                    ddb.put_item(
+                        TableName=DYNAMODB_TABLE, Item=item,
+                        ConditionExpression="attribute_not_exists(record_id)",
+                    )
+                    break
+                except ClientError as exc:
+                    if _is_conditional_check_failed(exc) and attempt < _TRACKER_CREATE_MAX_ATTEMPTS:
+                        continue
+                    raise
             else:
-                new_id = _next_record_id(project_id, prefix, record_type)
-            sk = f"{record_type}#{new_id}"
-            item["record_id"] = _ser_s(sk)
-            item["item_id"] = _ser_s(new_id)
-            _stamp_version_seq_on_create_item(item)
-            try:
-                ddb.put_item(
-                    TableName=DYNAMODB_TABLE, Item=item,
-                    ConditionExpression="attribute_not_exists(record_id)",
-                )
-                break
-            except ClientError as exc:
-                if _is_conditional_check_failed(exc) and attempt < _TRACKER_CREATE_MAX_ATTEMPTS:
-                    continue
-                raise
-        else:
-            return _error(500, f"Failed to allocate unique record ID after {_TRACKER_CREATE_MAX_ATTEMPTS} attempts.")
-    except ValueError as ve:
-        # Sub-task capacity exhausted
-        logger.error("create failed (capacity): %s", ve)
-        return _error(400, str(ve))
-    except Exception as exc:
-        logger.error("create failed: %s", exc)
-        return _error(500, "Database write failed.")
+                return _error(500, f"Failed to allocate unique record ID after {_TRACKER_CREATE_MAX_ATTEMPTS} attempts.")
+        except ValueError as ve:
+            # Sub-task capacity exhausted
+            logger.error("create failed (capacity): %s", ve)
+            return _error(400, str(ve))
+        except Exception as exc:
+            logger.error("create failed: %s", exc)
+            return _error(500, "Database write failed.")
 
     # ENC-TSK-H47 / B63 Phase 2B: a lesson written with scoring_status='pending' (flag ON) needs the
     # async Scoring Service kicked off. Publish AFTER the write succeeds (the lesson is the source of
