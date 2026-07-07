@@ -347,10 +347,14 @@ Resources:
           TRAINING_HARD_DISABLED: "1"
           INTENT_TRAINING_BUCKET: !Ref S3Bucket
           INTENT_TRAINING_PREFIX: !Sub "${S3EnvPrefix}intent-training"
-          # ENC-TSK-L92 / ENC-ISS-501: escalation approve/deny decider allowlist.
-          # This role is granted s3:GetObject only on this exact key -- no Lambda
-          # role, including this one, has write access. Edits are Console-only.
-          ESCALATION_APPROVER_ALLOWLIST_BUCKET: !Ref S3Bucket
+          # ENC-TSK-L92 / ENC-ISS-501 / ENC-ISS-505: escalation approve/deny decider
+          # allowlist. This role is granted s3:GetObject only on this exact key --
+          # no Lambda role, including this one, has write access. Edits are
+          # Console-only. ENC-ISS-505: relocated off !Ref S3Bucket (jreese-net) --
+          # that bucket is served publicly on the open web via CloudFront, which
+          # made this allowlist (approver identities + this control's own
+          # design) publicly readable. This bucket has no CloudFront origin.
+          ESCALATION_APPROVER_ALLOWLIST_BUCKET: enceladus-356364570033-us-west-2-an
           ESCALATION_APPROVER_ALLOWLIST_KEY: security/escalation-approvers.md
       Tags:
         - Key: Project
@@ -404,6 +408,10 @@ Resources:
           # is ON. The flag itself lives in AppConfig (independently toggleable); it defaults OFF
           # so this var is inert until the flag is flipped — a zero-behavior-change deploy.
           LIFECYCLE_SERVICE_FUNCTION: !Sub "enceladus-lifecycle-service${EnvironmentSuffix}"
+          # ENC-TSK-L06 / B63 Ph2 AC-6: the ID Service to invoke when
+          # enable_id_service_extraction is ON. Inert until the (default-OFF) flag is
+          # flipped -- matches the LIFECYCLE_SERVICE_FUNCTION pattern above.
+          ID_SERVICE_FUNCTION: !Sub "enceladus-id-service${EnvironmentSuffix}"
           # ENC-TSK-H47: the lesson-scoring SNS topic tracker_mutation publishes to when
           # enable_scoring_service_extraction is ON. Inert until the (default-OFF) flag is flipped.
           LESSON_SCORING_TOPIC_ARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-lesson-scoring${EnvironmentSuffix}"
@@ -3806,7 +3814,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/security/escalation-approvers.md"
+                Resource: "arn:aws:s3:::enceladus-356364570033-us-west-2-an/security/escalation-approvers.md"
               - Sid: SSMDispatch
                 Effect: Allow
                 Action:

@@ -1,5 +1,5 @@
 {
-  "version": "2026-07-07.11",
+  "version": "2026-07-07.12",
   "updated_at": "2026-07-07T14:54:26Z",
   "last_change_summary": "ENC-TSK-L87: graph_query_api.lambda _query_neighbors no longer requires neighbor.project_id = start's project_id -- MENTIONS (and other) edges are legitimately cross-project and the filter silently hid every such edge from every 'neighbors' consumer. No new fields/entities; behavioral bugfix only.",
   "owners": [
@@ -7165,7 +7165,7 @@
         },
         "ESCALATION_APPROVER_ALLOWLIST_BUCKET": {
           "type": "string",
-          "definition": "ENC-TSK-L92 / ENC-ISS-501. Env var (default 'jreese-net'). S3 bucket holding the escalation-approver allowlist document."
+          "definition": "ENC-TSK-L92 / ENC-ISS-501 / ENC-ISS-505. Env var (default 'enceladus-356364570033-us-west-2-an'). S3 bucket holding the escalation-approver allowlist document. ENC-ISS-505 (SEV-1): originally 'jreese-net', which is served publicly on the open web via CloudFront (multiple distributions) -- the allowlist was readable by anyone at https://jreese.net/security/escalation-approvers.md with no auth. Relocated to this bucket, which has no CloudFront origin and full S3 Public Access Block enabled."
         },
         "ESCALATION_APPROVER_ALLOWLIST_KEY": {
           "type": "string",
@@ -7789,12 +7789,12 @@
   "change_summary": "ENC-TSK-L87: mentions_drift_audit false-positive fixes -- gamma comparison target, project_id threading, and cross-project neighbor visibility.",
   "change_log": [
     {
-      "version": "2026-07-07.11",
+      "version": "2026-07-07.12",
       "date": "2026-07-07",
       "summary": "ENC-TSK-L87: graph_query_api.lambda _query_neighbors dropped the `neighbor.project_id = $project_id` Cypher filter (only the START node stays project-scoped). MENTIONS edges are legitimately cross-project -- graph_sync's write path MERGEs by record_id only -- so this read-side filter silently hid every correctly-written cross-project edge from every 'neighbors' consumer, not just mentions_drift_audit. Previously zero test coverage for this function; added dedicated tests including a Cypher-text regression test."
     },
     {
-      "version": "2026-07-07.10",
+      "version": "2026-07-07.11",
       "date": "2026-07-07",
       "summary": "ENC-TSK-L87: deploy_parity_validator.lambda mentions_drift_audit -- two independent root causes fixed for the escalating MENTIONS drift ratio (43/96 -> 59/96). (1) DeployParityValidatorFunction's TRACKER_API_URL/graphsearch fallback was hardcoded to the prod API Gateway on both prod and gamma; the gamma validator was comparing gamma DynamoDB content against PROD's Neo4j graph. Fixed via a gamma-scoped GRAPHSEARCH_URL CFN env var (Fn::If on IsGamma; the code already supported this override, it was never wired up). (2) _run_mentions_drift_audit's sample spans every project in the shared tracker table (type-updated-index has no project_id key), but _current_mentions_for was called with no project_id, always defaulting to 'enceladus'; any non-enceladus-project sample read back as a false-positive full mismatch. Fixed by threading record.get('project_id') through. No new fields/entities; behavioral bugfixes only."
     },
