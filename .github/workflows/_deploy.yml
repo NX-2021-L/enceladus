@@ -504,32 +504,9 @@ jobs:
               # checkout_service -auto twin) may exist OOB without CFN Architectures.
               # Align runtime+arch to the manifest BEFORE publishing arm64 artifacts.
               # ENC-TSK-M03 / ENC-TSK-L96: OOB x86 Gen2 targets (github_integration,
-              # checkout_service -auto) — bump runtime via config, then publish arm64
-              # artifacts with --architectures (supported on update-function-code even
-              # when the runner AWS CLI lacks Architectures on update-function-configuration).
-              target_runtime = f'python{py}'
-              if arch == 'arm64' and fn in ('github_integration', 'checkout_service'):
-                  cfg_r = run_with_retry(
-                      ['aws', 'lambda', 'update-function-configuration',
-                       '--region', region, '--function-name', mapped_name,
-                       '--runtime', target_runtime],
-                      what=f'update-function-configuration runtime {mapped_name}',
-                      skip_on=('ResourceNotFoundException', 'Function not found'),
-                  )
-                  if cfg_r is None:
-                      log(f'  [skip] {mapped_name}: not provisioned in this environment yet')
-                      return {'fn': fn, 'mapped_name': mapped_name, 'status': 'skip'}
-                  if cfg_r.returncode != 0:
-                      log(f'::error::update-function-configuration failed for {mapped_name}: '
-                          f'{(cfg_r.stderr or "").strip()}', err=True)
-                      return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error',
-                              'error': 'update-function-configuration'}
-                  subprocess.run(
-                      ['aws', 'lambda', 'wait', 'function-updated-v2',
-                       '--region', region, '--function-name', mapped_name],
-                      check=False,
-                  )
-
+              # checkout_service -auto) — publish arm64 artifacts with
+              # update-function-code --architectures (deploy role has UpdateFunctionCode
+              # but not UpdateFunctionConfiguration).
               code_cmd = [
                   'aws', 'lambda', 'update-function-code',
                   '--region', region, '--function-name', mapped_name,
