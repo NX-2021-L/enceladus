@@ -209,7 +209,12 @@ Resources:
           # ENC-TSK-L92/L95 / ENC-ISS-501: escalation approve/deny decider allowlist.
           # This role is granted s3:GetObject only on this exact key -- no Lambda
           # role, including this one, has write access. Edits are Console-only.
-          ESCALATION_APPROVER_ALLOWLIST_BUCKET: !Ref S3Bucket
+          # NOTE (ENC-TSK-M08/ENC-ISS-505): these env vars are dictionary-documented
+          # as unused residue on this function -- main's CoordinationApiFunction code
+          # was never patched with the enforcement logic (that landed on the separate
+          # EscalationDecisionAuthorizerFunction below instead). Kept in sync with
+          # the real bucket anyway to avoid stale/misleading config.
+          ESCALATION_APPROVER_ALLOWLIST_BUCKET: enceladus-356364570033-us-west-2-an
           ESCALATION_APPROVER_ALLOWLIST_KEY: security/escalation-approvers.md
       Tags:
         - Key: Project
@@ -244,7 +249,11 @@ Resources:
         Variables:
           COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
           COGNITO_CLIENT_ID: !Ref CognitoClientId
-          ESCALATION_APPROVER_ALLOWLIST_BUCKET: !Ref S3Bucket
+          # ENC-ISS-505 (SEV-1): relocated off !Ref S3Bucket (jreese-net) -- that
+          # bucket is served publicly on the open web via CloudFront, which made
+          # this allowlist (approver identities + this control's own design)
+          # publicly readable. This bucket has no CloudFront origin.
+          ESCALATION_APPROVER_ALLOWLIST_BUCKET: enceladus-356364570033-us-west-2-an
           ESCALATION_APPROVER_ALLOWLIST_KEY: security/escalation-approvers.md
       Tags:
         - Key: Project
@@ -284,7 +293,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/security/escalation-approvers.md"
+                Resource: "arn:aws:s3:::enceladus-356364570033-us-west-2-an/security/escalation-approvers.md"
       Tags:
         - Key: Project
           Value: enceladus
@@ -1841,7 +1850,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: !Sub "arn:aws:s3:::${S3Bucket}/security/escalation-approvers.md"
+                Resource: "arn:aws:s3:::enceladus-356364570033-us-west-2-an/security/escalation-approvers.md"
               - Sid: SSMDispatch
                 Effect: Allow
                 Action:
