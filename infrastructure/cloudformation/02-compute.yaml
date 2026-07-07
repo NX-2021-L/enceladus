@@ -1173,6 +1173,27 @@ Resources:
           DOCUMENTS_TABLE:  !Sub "documents${EnvironmentSuffix}"
           MENTIONS_AUDIT_SAMPLE_SIZE: "100"
           MENTIONS_AUDIT_THRESHOLD:   "0.01"
+          # ENC-TSK-L87: root cause of the escalating MENTIONS drift ratio.
+          # TRACKER_TABLE/DOCUMENTS_TABLE above are correctly environment-scoped
+          # (via EnvironmentSuffix) so "expected" mentions are extracted from
+          # THIS environment's DynamoDB rows, but TRACKER_API_URL above is
+          # hardcoded to the prod API Gateway (8nkzqkmxqc) on both prod and
+          # gamma -- so _current_mentions_for()'s graphsearch lookup (the
+          # "actual" side of the diff) was comparing gamma DynamoDB content
+          # against PROD's Neo4j graph on the gamma validator, not gamma's own
+          # graph. Verified live: prod graphsearch for ENC-TSK-005 returned the
+          # stale 2026-02-23 seed updated_at while gamma's own graph reflected
+          # a same-day write -- proof the two graphs are genuinely independent.
+          # graph_query_api._current_mentions_for already supports this exact
+          # override (falls back to TRACKER_API_URL/graphsearch only if unset)
+          # -- it was simply never wired up in CFN. TRACKER_API_URL itself is
+          # left untouched (both environments still emit drift ENC-ISS records
+          # into the shared meta-governance tracker for cross-environment
+          # visibility); only the comparison target changes for gamma.
+          GRAPHSEARCH_URL: !If
+            - IsGamma
+            - https://hi0dzmvqrc.execute-api.us-west-2.amazonaws.com/api/v1/tracker/graphsearch
+            - !Ref "AWS::NoValue"
           # Required for the audit to POST drift findings to tracker_api
           # (X-Coordination-Internal-Key) and to query graph_query_api when
           # they enforce internal-key auth on service-to-service calls.
