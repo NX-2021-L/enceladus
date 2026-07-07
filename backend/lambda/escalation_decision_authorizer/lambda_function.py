@@ -32,8 +32,15 @@ Two checks, both required:
 Environment variables:
     COGNITO_USER_POOL_ID              (enceladus_shared.auth)
     COGNITO_CLIENT_ID                 (enceladus_shared.auth)
-    ESCALATION_APPROVER_ALLOWLIST_BUCKET   default: jreese-net
+    ESCALATION_APPROVER_ALLOWLIST_BUCKET   default: enceladus-356364570033-us-west-2-an
     ESCALATION_APPROVER_ALLOWLIST_KEY      default: security/escalation-approvers.md
+
+ENC-ISS-505 (SEV-1): originally defaulted to jreese-net, which is served
+publicly on the open web via CloudFront (multiple distributions, one with a
+broad, path-unrestricted s3:GetObject grant on jreese-net/*) -- the allowlist
+was readable by anyone at https://jreese.net/security/escalation-approvers.md
+with no auth. Relocated to a private bucket with no CloudFront origin and
+full S3 Public Access Block enabled.
 """
 
 from __future__ import annotations
@@ -50,7 +57,9 @@ from enceladus_shared.auth import _authenticate
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-ESCALATION_APPROVER_ALLOWLIST_BUCKET = os.environ.get("ESCALATION_APPROVER_ALLOWLIST_BUCKET", "jreese-net")
+ESCALATION_APPROVER_ALLOWLIST_BUCKET = os.environ.get(
+    "ESCALATION_APPROVER_ALLOWLIST_BUCKET", "enceladus-356364570033-us-west-2-an"
+)
 ESCALATION_APPROVER_ALLOWLIST_KEY = os.environ.get(
     "ESCALATION_APPROVER_ALLOWLIST_KEY", "security/escalation-approvers.md"
 )
