@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.9",
-  "updated_at": "2026-07-07T13:35:00Z",
-  "last_change_summary": "ENC-TSK-L91: corpus_entropy_gdmp_remediation.lambda -- CEE_GDMP_HARD_DISABLED redefined to gate MUTATION only (candidate scan/report/breakdown still run while disarmed; ramp counter not advanced), new GDMP_RUN_BREAKDOWN_SINK audit artifact, and the fresh-GET/recompute optimistic-concurrency guard before PATCH.",
+  "version": "2026-07-07.10",
+  "updated_at": "2026-07-07T14:25:00Z",
+  "last_change_summary": "ENC-TSK-M08 / ENC-ISS-505 (SEV-1): relocated the escalation approver allowlist (ESCALATION_APPROVER_ALLOWLIST_BUCKET) off jreese-net -- that bucket is served publicly on the open web via CloudFront (multiple distributions), making the allowlist document publicly readable with no auth. Moved to enceladus-356364570033-us-west-2-an, a private bucket with full S3 Public Access Block and no CloudFront origin. Same key (security/escalation-approvers.md), same read-only IAM grant shape.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7165,7 +7165,7 @@
         },
         "ESCALATION_APPROVER_ALLOWLIST_BUCKET": {
           "type": "string",
-          "definition": "ENC-TSK-L92 / ENC-ISS-501. Env var (default 'jreese-net'). S3 bucket holding the escalation-approver allowlist document."
+          "definition": "ENC-TSK-L92 / ENC-ISS-501 / ENC-ISS-505. Env var (default 'enceladus-356364570033-us-west-2-an'). S3 bucket holding the escalation-approver allowlist document. ENC-ISS-505 (SEV-1): originally 'jreese-net', which is served publicly on the open web via CloudFront (multiple distributions) -- the allowlist was readable by anyone at https://jreese.net/security/escalation-approvers.md with no auth. Relocated to this bucket, which has no CloudFront origin and full S3 Public Access Block enabled."
         },
         "ESCALATION_APPROVER_ALLOWLIST_KEY": {
           "type": "string",

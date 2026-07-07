@@ -9127,7 +9127,9 @@ def _is_assistant_request(event: Dict[str, Any]) -> bool:
 # governance-bypass escalations. This adds a positive allowlist on top: the
 # decider's claims.email must appear in a human-Console-only S3 document that
 # no Lambda role (including this one) has write access to -- only s3:GetObject.
-ESCALATION_APPROVER_ALLOWLIST_BUCKET = os.environ.get("ESCALATION_APPROVER_ALLOWLIST_BUCKET", "jreese-net")
+ESCALATION_APPROVER_ALLOWLIST_BUCKET = os.environ.get(
+    "ESCALATION_APPROVER_ALLOWLIST_BUCKET", "enceladus-356364570033-us-west-2-an"
+)
 ESCALATION_APPROVER_ALLOWLIST_KEY = os.environ.get(
     "ESCALATION_APPROVER_ALLOWLIST_KEY", "security/escalation-approvers.md"
 )
