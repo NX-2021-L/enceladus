@@ -142,6 +142,13 @@
       ],
       "notes": "ENC-TSK-K59: environment: v3-prod \u2014 despite the gamma-scoped grant, it patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-gamma-patch.yml)"
     },
+    "iam-cfn-deploy-role-appconfig-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-L83: environment: v3-prod -- despite the gamma-scoped grant, it patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-cloudwatch-dashboard-patch.yml / iam-cfn-deploy-role-gamma-patch.yml)"
+    },
     "iam-cfn-deploy-role-opensearch-ec2-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
