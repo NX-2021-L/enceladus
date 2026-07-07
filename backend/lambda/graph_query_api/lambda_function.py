@@ -2750,13 +2750,15 @@ def _query_adjacency(driver, project_id: str, params: Dict) -> Dict:
         if offset == 0:
             node_count = int(
                 session.run(
-                    f"MATCH (n) WHERE {node_filter} RETURN count(n) AS c"
+                    f"MATCH (n) WHERE {node_filter} RETURN count(n) AS c",
+                    project_id=project_id,
                 ).single()["c"]
             )
             edge_count = int(
                 session.run(
                     f"{edge_match} "
-                    "RETURN count(DISTINCT [a.record_id, b.record_id]) AS c"
+                    "RETURN count(DISTINCT [a.record_id, b.record_id]) AS c",
+                    project_id=project_id,
                 ).single()["c"]
             )
         page = session.run(
