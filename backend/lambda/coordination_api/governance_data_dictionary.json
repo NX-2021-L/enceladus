@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.13",
-  "updated_at": "2026-07-07T15:18:41Z",
-  "last_change_summary": "ENC-TSK-L05 (B63 Ph2 H-BACKFILL AC2-6, DOC-157A790F9E8B): populated the v3 component-registry identity fields (component_address, component_repo_dir, component_address_class, component_class) and migrated required_transition_type to the v3 enum on all active enceladus components in tools/seed-component-registry.py; decomposed comp-enceladus-pwa into comp-enceladus-pwa-frontend/-pwa-cdn/-api-gateway (T2, no file split -- 03-api.yaml already API-Gateway-only, CDN already in 07-ui-cdn.yaml); registered comp-enceladus-neo4j + infrastructure/external/neo4j-auradb.yaml (T3); nine per-CFN-file umbrellas + narrowed comp-cloudformation-data/-app (T4a MECE); comp-enceladus-mcp-server single MCP umbrella (ENC-FTR-094 debt, T1); comp-umbrella-governance-documentation meta umbrella (AC-6). Schema was already v3 (ENC-TSK-L77); this records the registry-instance expansion. AC-5 task migration + live legacy-row rename/deprecation are io-Cognito follow-ups.",
+  "version": "2026-07-07.14",
+  "updated_at": "2026-07-07T17:05:00Z",
+  "last_change_summary": "ENC-TSK-L93: documents-list include_content=false metadata-only projection for skill catalog (runtime_hint derived field).",
   "owners": [
     "enceladus-platform"
   ],
@@ -5456,6 +5456,16 @@
           "definition": "Cross-references to governed records (ENC-TSK-*/ENC-ISS-*/ENC-FTR-*/ENC-LSN-*/ENC-PLN-*) this document relates to.",
           "usage_guidance": "documents.put / documents.patch(field include related_items). ENC-TSK-L07 (B65 AC-5/AC-7): bidirectional -- document_api atomically mirrors this document's ID onto each named tracker record's related_document_ids in the same request (contains-check conditional append; best-effort, non-blocking to the document write).",
           "inverse_of": "tracker.<task|issue|feature|lesson>.related_document_ids"
+        },
+        "list_include_content": {
+          "type": "query_parameter",
+          "definition": "GET /api/v1/documents?project= query param (ENC-TSK-L93). When include_content=false (or content=false alias), list responses omit body-heavy fields. document_subtype=skill rows collapse to document_id, title, description, version, updated_at, runtime_hint; other subtypes omit full_description, claude_description, content, agentskills_manifest, agentskills_spec_version, runtime_variants. Default true (omitted) preserves existing full-metadata list behavior.",
+          "usage_guidance": "Use include_content=false for PWA skill-library catalog views (ENC-TSK-L94). MCP documents.list forwards include_content to the HTTP query string."
+        },
+        "list_runtime_hint": {
+          "type": "string",
+          "definition": "ENC-TSK-L93 list projection field (skill subtype, include_content=false only). Comma-separated sorted keys from runtime_variants when present; otherwise the literal 'claude,agentskills' indicating dual-projection default.",
+          "usage_guidance": "Read-only derived field; not stored in DynamoDB."
         }
       }
     },
@@ -7786,8 +7796,13 @@
       "source": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0)"
     }
   },
-  "change_summary": "ENC-TSK-L87: mentions_drift_audit false-positive fixes -- gamma comparison target, project_id threading, and cross-project neighbor visibility.",
+  "change_summary": "ENC-TSK-L93: documents-list metadata-only projection via include_content=false (skill catalog fields + runtime_hint).",
   "change_log": [
+    {
+      "version": "2026-07-07.14",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L93: document_api GET ?project= list now honors include_content=false (and content=false alias) for body-excluded metadata projection. Skill rows return document_id, title, description, version (from agentskills_manifest.version), updated_at, runtime_hint (runtime_variants keys or 'claude,agentskills' default). Non-skill rows omit full_description/claude_description/content/agentskills fields. Default include_content=true unchanged. MCP documents.list forwards include_content. New docstore.document.list_include_content + list_runtime_hint dictionary fields."
+    },
     {
       "version": "2026-07-07.13",
       "date": "2026-07-07",

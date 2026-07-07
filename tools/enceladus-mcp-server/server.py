@@ -3988,6 +3988,18 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Pagination cursor from previous response's next_cursor.",
                     },
+                    "document_subtype": {
+                        "type": "string",
+                        "description": "Filter by document_subtype (e.g. skill, handoff).",
+                    },
+                    "include_content": {
+                        "type": "boolean",
+                        "description": (
+                            "When false, list returns metadata-only projection "
+                            "(skill rows: id, title, description, version, updated_at, runtime_hint). "
+                            "Default true preserves full metadata."
+                        ),
+                    },
                 },
                 "required": ["project_id"],
             },
@@ -6348,9 +6360,9 @@ async def _documents_list(args: dict) -> list[TextContent]:
     # ENC-TSK-J46 / ENC-FTR-096 Ph2: thread through document_subtype /
     # handoff_status filters (the latter also covers the lesson-candidate
     # curation-state field) and the created_at sort used by candidate queues.
-    for passthrough_key in ("document_subtype", "handoff_status", "maturity_state", "sort"):
+    for passthrough_key in ("document_subtype", "handoff_status", "maturity_state", "sort", "include_content", "content"):
         value = args.get(passthrough_key)
-        if value:
+        if value is not None and value != "":
             query[passthrough_key] = value
     resp = _document_api_request("GET", query=query)
     if isinstance(resp, dict) and resp.get("error"):

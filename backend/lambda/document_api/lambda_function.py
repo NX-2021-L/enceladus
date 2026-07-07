@@ -2165,6 +2165,67 @@ def _get_single(document_id: str, qs: Dict) -> Dict:
     return _response(200, payload)
 
 
+# ENC-TSK-L93: body fields stripped from list responses when include_content=false.
+_LIST_BODY_FIELDS = frozenset({
+    "full_description", "claude_description", "content",
+    "agentskills_manifest", "agentskills_spec_version", "runtime_variants",
+})
+
+
+def _parse_include_content(qs: Dict) -> bool:
+    """Parse list/get include_content; accepts content=false alias (ENC-TSK-L93)."""
+    if "include_content" in qs:
+        return str(qs.get("include_content", "true")).strip().lower() in ("true", "1", "yes")
+    if "content" in qs:
+        val = str(qs.get("content", "true")).strip().lower()
+        return val not in ("false", "0", "no")
+    return True
+
+
+def _parse_json_field(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+    return value
+
+
+def _skill_list_version(doc: Dict[str, Any]) -> str:
+    manifest = _parse_json_field(doc.get("agentskills_manifest"))
+    if isinstance(manifest, dict):
+        ver = manifest.get("version")
+        if ver:
+            return str(ver)
+    ver = doc.get("version")
+    return str(ver) if ver else ""
+
+
+def _skill_runtime_hint(doc: Dict[str, Any]) -> str:
+    variants = _parse_json_field(doc.get("runtime_variants"))
+    if isinstance(variants, dict) and variants:
+        return ",".join(sorted(str(k) for k in variants.keys()))
+    return "claude,agentskills"
+
+
+def _project_list_document(doc: Dict[str, Any], include_content: bool) -> Dict[str, Any]:
+    """Apply list projection. Default (include_content=true) returns full metadata unchanged."""
+    if include_content:
+        return doc
+    subtype = str(doc.get("document_subtype") or "general").lower()
+    if subtype == "skill":
+        return {
+            "document_id": doc.get("document_id"),
+            "title": doc.get("title"),
+            "description": doc.get("description"),
+            "version": _skill_list_version(doc),
+            "updated_at": doc.get("updated_at"),
+            "runtime_hint": _skill_runtime_hint(doc),
+            "document_subtype": "skill",
+        }
+    return {k: v for k, v in doc.items() if k not in _LIST_BODY_FIELDS}
+
+
 def _list_by_project(qs: Dict) -> Dict:
     """List documents for a project using strongly consistent table scan.
 
@@ -2219,6 +2280,8 @@ def _list_by_project(qs: Dict) -> Dict:
         docs.sort(key=lambda d: d.get("created_at", "") or "")
     else:
         docs.sort(key=lambda d: d.get("updated_at", "") or "", reverse=True)
+    include_content = _parse_include_content(qs)
+    docs = [_project_list_document(d, include_content) for d in docs]
     sliced = docs[:PAGE_SIZE]
     return _response(
         200,
