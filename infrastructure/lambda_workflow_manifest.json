@@ -16,6 +16,12 @@
       "deploy_script": "backend/lambda/auth_refresh/deploy.sh"
     },
     {
+      "function_name": "escalation-decision-authorizer",
+      "lambda_dir": "backend/lambda/escalation_decision_authorizer",
+      "workflow_file": ".github/workflows/_deploy.yml",
+      "deploy_script": "backend/lambda/escalation_decision_authorizer/deploy.sh"
+    },
+    {
       "function_name": "devops-coordination-api",
       "lambda_dir": "backend/lambda/coordination_api",
       "workflow_file": ".github/workflows/_deploy.yml",
