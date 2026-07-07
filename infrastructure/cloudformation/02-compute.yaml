@@ -2752,6 +2752,17 @@ Resources:
         - ReportBatchItemFailures
       Enabled: true
 
+  # ENC-TSK-L85: TrackerToGraphPipe/DocumentsToGraphPipe (EventBridge Pipes,
+  # DynamoDB Streams source) were confirmed account-wide non-functional
+  # (ENC-ISS-497, same root cause already fixed for search-index via
+  # ENC-TSK-L84). This SQS trigger was the downstream leg of that dead path.
+  # On gamma, CDC now runs via GraphSyncTrackerStreamTrigger /
+  # GraphSyncDocumentsStreamTrigger below, a direct Lambda
+  # EventSourceMapping on the same streams. GraphSyncFunction/GraphSyncRole
+  # are shared prod(v3)+gamma resources (no Condition), so the disable is
+  # scoped with Fn::If rather than a resource-level Condition -- v3-prod
+  # keeps Enabled: true unchanged; only gamma flips to false. Left defined
+  # (not removed) for rollback.
   GraphSyncSqsTrigger:
     Type: AWS::Lambda::EventSourceMapping
     DeletionPolicy: Retain
@@ -2768,6 +2779,61 @@ Resources:
       # FeedPublisherSqsTrigger above.
       FunctionResponseTypes:
         - ReportBatchItemFailures
+      Enabled: !If [IsGamma, false, true]
+
+  # ---------------------------------------------------------------------------
+  # ENC-TSK-L85: DynamoDB Stream -> Lambda EventSourceMapping (direct, no
+  # SQS/Pipes intermediary), gamma only. Replaces TrackerToGraphPipe /
+  # DocumentsToGraphPipe after EventBridge Pipes with a DynamoDB Streams
+  # source were confirmed account-wide non-functional (ENC-ISS-497:
+  # StateReason=No records processed, zero throughput -- same root cause
+  # already fixed for search-index via ENC-TSK-L84). Mirrors the
+  # already-proven-working AppSyncFeedTrackerStreamTrigger pattern in
+  # 06-appsync-events.yaml and the ENC-TSK-L84 SearchIndex*StreamTrigger
+  # pattern above. FilterCriteria preserves the retired Pipes' record_type
+  # scoping, and additionally splits INSERT/MODIFY (NewImage-based filter)
+  # from REMOVE (OldImage-based filter) so REMOVE events -- which have no
+  # NewImage -- are no longer silently dropped by a NewImage-only filter
+  # (a latent gap in the original Pipes' filter design, independent of the
+  # account-wide outage).
+  # ---------------------------------------------------------------------------
+
+  GraphSyncTrackerStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-TrackerStreamArn
+      FunctionName: !Ref GraphSyncFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 0
+      StartingPosition: LATEST
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+          - Pattern: '{"eventName":["REMOVE"],"dynamodb":{"OldImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
+      Enabled: true
+
+  GraphSyncDocumentsStreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      EventSourceArn: !ImportValue
+        Fn::Sub: ${DataStackName}-DocumentsStreamArn
+      FunctionName: !Ref GraphSyncFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 0
+      StartingPosition: LATEST
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT","MODIFY"]}'
+          - Pattern: '{"eventName":["REMOVE"]}'
       Enabled: true
 
   # ENC-TSK-L84: disabled, not deleted. TrackerToSearchIndexPipe /
@@ -5504,6 +5570,35 @@ Resources:
                   - bedrock:InvokeModel
                 Resource:
                   - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+        # ENC-TSK-L85: direct DynamoDB Streams EventSourceMapping replacing the
+        # dead Pipes-DynamoDB-source path (ENC-ISS-497), gamma only for now
+        # (v3-prod frozen). Added unconditionally on this shared role (like
+        # the policies above) since it's an inert read-only grant with no new
+        # ESM configured against it in prod under this template -- SqsEventSource
+        # above is retained (not removed) since GraphSyncSqsTrigger stays
+        # defined, just disabled on gamma, for rollback.
+        - PolicyName: DynamoDbStreamEventSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTrackerStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-TrackerStreamArn
+              - Sid: ReadDocumentsStream
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  Fn::Sub: ${DataStackName}-DocumentsStreamArn
       Tags:
         - Key: Project
           Value: enceladus

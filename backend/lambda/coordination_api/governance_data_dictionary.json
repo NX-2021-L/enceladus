@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.4",
-  "updated_at": "2026-07-07T05:41:00Z",
-  "last_change_summary": "ENC-TSK-L84: opensearch_indexer.lambda CDC transport swapped from EventBridge Pipes (DynamoDB-stream source, confirmed account-wide non-functional per ENC-ISS-497) to a direct Lambda EventSourceMapping on the tracker + documents DynamoDB streams. Handler now accepts both the legacy SQS-wrapped shape and the native direct-stream shape. Legacy SQS trigger + Pipes disabled, not deleted.",
+  "version": "2026-07-07.5",
+  "updated_at": "2026-07-07T11:35:12Z",
+  "last_change_summary": "ENC-TSK-L85: graph_sync.lambda CDC transport swapped from EventBridge Pipes (DynamoDB-stream source, confirmed account-wide non-functional per ENC-ISS-497, same fix pattern as ENC-TSK-L84) to a direct Lambda EventSourceMapping on the tracker + documents DynamoDB streams, gamma only. Handler now accepts both the legacy SQS-wrapped shape and the native direct-stream shape. Legacy SQS trigger disabled on gamma only (Fn::If, v3-prod unchanged), not deleted; Pipes left in place.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7675,8 +7675,13 @@
       "source": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0)"
     }
   },
-  "change_summary": "ENC-TSK-L06: new ID Service Lambda extraction (B63 Phase 2 AC-6) with IAM-isolated counter allocation, idempotency contract, HMAC provenance signing, and trust-score feedback loop.",
+  "change_summary": "ENC-TSK-L85: graph_sync CDC transport swapped from dead EventBridge Pipes to direct Lambda EventSourceMapping, gamma only.",
   "change_log": [
+    {
+      "version": "2026-07-07.5",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L85: graph_sync.lambda CDC transport swapped from EventBridge Pipes (DynamoDB-stream source, confirmed account-wide non-functional per ENC-ISS-497, same fix pattern as ENC-TSK-L84) to a direct Lambda EventSourceMapping (GraphSyncTrackerStreamTrigger / GraphSyncDocumentsStreamTrigger) on the tracker + documents DynamoDB streams. Gamma only: GraphSyncFunction/GraphSyncRole/GraphSyncSqsTrigger are shared prod(v3)+gamma resources with no Condition, so every change is scoped via Fn::If or a new Condition: IsGamma resource -- v3-prod's deployed behavior is unchanged even on a future redeploy of this template. Handler now accepts both the legacy SQS-wrapped shape and the native direct-stream shape (correct messageId vs SequenceNumber failure identifiers). Legacy GraphSyncSqsTrigger disabled on gamma only, left enabled on prod/v3, not deleted; Pipes left in place."
+    },
     {
       "version": "2026-07-07.3",
       "date": "2026-07-07",

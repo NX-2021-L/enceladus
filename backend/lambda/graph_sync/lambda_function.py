@@ -4,8 +4,27 @@ Triggered by SQS FIFO queue (devops-graph-sync-queue.fifo) which receives
 events from an EventBridge Pipe connected to the devops-project-tracker
 DynamoDB Stream.
 
-Flow:
+ENC-TSK-L85: EventBridge Pipes with a DynamoDB Streams source were confirmed
+account-wide non-functional (StateReason=No records processed, zero
+throughput -- see ENC-ISS-497, same root cause already fixed for
+search-index via ENC-TSK-L84). On gamma, CDC now runs via direct
+AWS::Lambda::EventSourceMapping on the tracker and documents DynamoDB
+streams (GraphSyncTrackerStreamTrigger / GraphSyncDocumentsStreamTrigger).
+This handler accepts BOTH event shapes so the old SQS-fed path
+(GraphSyncSqsTrigger, disabled on gamma but left enabled on prod/v3, not
+deleted) and the new direct-stream path can coexist during rollback windows:
+  - SQS-wrapped: event.Records[].body is a JSON string containing the raw
+    DynamoDB stream record. Failure identifier = SQS messageId.
+  - Direct DynamoDB Streams ESM: event.Records[] IS the raw stream record
+    (eventName/dynamodb at the top level, no body/messageId). Failure
+    identifier = dynamodb.SequenceNumber per the DynamoDB Streams
+    ReportBatchItemFailures contract (NOT eventID).
+
+Flow (prod/v3, unchanged):
   DynamoDB Streams -> EventBridge Pipe -> SQS FIFO -> This Lambda
+  -> MERGE/DELETE Cypher operations against AuraDB Free
+Flow (gamma):
+  DynamoDB Streams -> Lambda EventSourceMapping (direct) -> This Lambda
   -> MERGE/DELETE Cypher operations against AuraDB Free
 
 The graph is a READ-ONLY derived index. DynamoDB remains the sole source
@@ -1491,6 +1510,18 @@ def _delete_node(tx, record_id: str) -> None:
 # SQS event processing
 # ---------------------------------------------------------------------------
 
+def _record_source_and_identifier(raw_record: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """Classify a Records[] entry as 'sqs' or 'ddb_stream' and return its
+    ReportBatchItemFailures identifier (messageId for SQS, SequenceNumber for
+    a direct DynamoDB Streams ESM). See ENC-TSK-L85 / ENC-TSK-L84."""
+    if "body" in raw_record or "messageId" in raw_record or "messageID" in raw_record:
+        message_id = raw_record.get("messageId") or raw_record.get("messageID")
+        return "sqs", message_id
+    # Direct DynamoDB Streams ESM: the record itself has eventName/dynamodb.
+    sequence_number = (raw_record.get("dynamodb") or {}).get("SequenceNumber")
+    return "ddb_stream", sequence_number
+
+
 def _extract_stream_record(sqs_body: Dict) -> Optional[Dict]:
     """Extract the DynamoDB stream record from an SQS message body."""
     # EventBridge Pipe wraps stream records in the SQS body
@@ -1676,20 +1707,26 @@ def _process_record(driver, stream_record: Dict) -> None:
 # ---------------------------------------------------------------------------
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """SQS-triggered handler. Processes DynamoDB stream records from EventBridge Pipe.
+    """Processes DynamoDB stream records, from either the legacy SQS-fed path
+    (GraphSyncSqsTrigger, prod/v3) or the direct DynamoDB Streams
+    EventSourceMapping (GraphSyncTrackerStreamTrigger /
+    GraphSyncDocumentsStreamTrigger, gamma -- ENC-TSK-L85). See
+    _record_source_and_identifier for the shape-classification contract.
 
     ENC-TSK-L74: reports the Lambda partial-batch-failure contract
-    (batchItemFailures) so SQS retries only the records that actually failed.
-    Without this, a batch response of plain HTTP 200 -- which is what a bare
-    `except Exception: continue` produces regardless of per-record errors --
-    tells SQS the WHOLE batch succeeded, so it deletes every message in it,
-    including the ones that raised. Those records' MENTIONS edges (and any
-    other graph writes from _process_record) are then silently and
-    permanently lost, with no retry and no DLQ delivery, despite this
-    function's prior comments claiming otherwise. Requires
+    (batchItemFailures) so the source retries only the records that actually
+    failed. Without this, a batch response of plain HTTP 200 -- which is what
+    a bare `except Exception: continue` produces regardless of per-record
+    errors -- tells the source the WHOLE batch succeeded, so it deletes every
+    message/record in it, including the ones that raised. Those records'
+    MENTIONS edges (and any other graph writes from _process_record) are then
+    silently and permanently lost, with no retry and no DLQ delivery, despite
+    this function's prior comments claiming otherwise. Requires
     FunctionResponseTypes: [ReportBatchItemFailures] on the event source
     mapping (infrastructure/cloudformation/02-compute.yaml
-    GraphSyncSqsTrigger) for batchItemFailures to actually take effect."""
+    GraphSyncSqsTrigger / GraphSyncTrackerStreamTrigger /
+    GraphSyncDocumentsStreamTrigger) for batchItemFailures to actually take
+    effect."""
     records = event.get("Records", [])
     if not records:
         return {"statusCode": 200, "body": "no records"}
@@ -1697,37 +1734,44 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     driver = _get_neo4j_driver()
     if driver is None:
         logger.error("[ERROR] Neo4j driver unavailable; failing whole batch for retry")
-        # Report every message as failed so SQS retries the whole batch once
-        # Neo4j is reachable again, instead of deleting it and losing every
-        # record's graph write.
-        return {"batchItemFailures": [
-            {"itemIdentifier": r.get("messageId")} for r in records if r.get("messageId")
-        ]}
+        # Report every record as failed so the source retries the whole batch
+        # once Neo4j is reachable again, instead of deleting it and losing
+        # every record's graph write. Identifier depends on event shape
+        # (ENC-TSK-L85): SQS messageId, or direct-ESM SequenceNumber.
+        failures = []
+        for r in records:
+            _source, identifier = _record_source_and_identifier(r)
+            if identifier:
+                failures.append({"itemIdentifier": identifier})
+        return {"batchItemFailures": failures}
 
     processed = 0
     errors = 0
-    failed_message_ids: List[str] = []
+    failed_identifiers: List[str] = []
 
-    for sqs_record in records:
-        message_id = sqs_record.get("messageId")
+    for raw_record in records:
+        source, identifier = _record_source_and_identifier(raw_record)
         try:
-            body = sqs_record.get("body", "{}")
-            if isinstance(body, str):
-                body = json.loads(body)
+            if source == "sqs":
+                body = raw_record.get("body", "{}")
+                if isinstance(body, str):
+                    body = json.loads(body)
+                stream_record = _extract_stream_record(body)
+            else:
+                stream_record = raw_record
 
-            stream_record = _extract_stream_record(body)
             if stream_record and "dynamodb" in stream_record:
                 _process_record(driver, stream_record)
                 processed += 1
         except Exception:
             errors += 1
-            logger.exception("[ERROR] Failed to process SQS record")
-            if message_id:
-                failed_message_ids.append(message_id)
+            logger.exception("[ERROR] Failed to process %s record identifier=%s", source, identifier)
+            if identifier:
+                failed_identifiers.append(identifier)
 
     logger.info("[INFO] Batch complete: processed=%d, errors=%d, total=%d", processed, errors, len(records))
 
-    if failed_message_ids:
-        return {"batchItemFailures": [{"itemIdentifier": mid} for mid in failed_message_ids]}
+    if failed_identifiers:
+        return {"batchItemFailures": [{"itemIdentifier": fid} for fid in failed_identifiers]}
 
     return {"statusCode": 200, "body": json.dumps({"processed": processed, "errors": errors})}
