@@ -1,0 +1,100 @@
+name: IAM CFN Deploy Role — AppConfig Governance Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this patch is needed"
+        type: string
+        required: false
+        default: "Grant appconfig:Create*/Get*/Tag*/Delete* on the fhhcl7m application to the CFN deploy role (ENC-TSK-L83, enceladus-appconfig-governance-gamma UPDATE_ROLLBACK_COMPLETE due to missing appconfig:CreateConfigurationProfile permission)"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  patch-role:
+    name: Patch CFN deploy role with AppConfig governance-stack permissions
+    # ENC-TSK-K59 / ENC-FTR-120: live IAM mutation (shared/global role object) — pauses on the v3-prod required-reviewer rule, same as the sibling iam-cfn-deploy-role-*-patch.yml workflows.
+    environment: v3-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+
+      - name: Verify caller identity
+        run: aws sts get-caller-identity
+
+      - name: Apply inline policy — AppConfig governance stack bootstrap
+        run: |
+          set -euo pipefail
+          cat > /tmp/appconfig-governance-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "AppConfigGovernanceApplicationScope",
+                "Effect": "Allow",
+                "Action": [
+                  "appconfig:CreateConfigurationProfile",
+                  "appconfig:GetConfigurationProfile",
+                  "appconfig:UpdateConfigurationProfile",
+                  "appconfig:DeleteConfigurationProfile",
+                  "appconfig:ListConfigurationProfiles",
+                  "appconfig:TagResource",
+                  "appconfig:UntagResource",
+                  "appconfig:ListTagsForResource"
+                ],
+                "Resource": [
+                  "arn:aws:appconfig:us-west-2:356364570033:application/fhhcl7m",
+                  "arn:aws:appconfig:us-west-2:356364570033:application/fhhcl7m/configurationprofile/*"
+                ]
+              },
+              {
+                "Sid": "AppConfigGovernanceHostedVersionsAndDeployments",
+                "Effect": "Allow",
+                "Action": [
+                  "appconfig:CreateHostedConfigurationVersion",
+                  "appconfig:GetHostedConfigurationVersion",
+                  "appconfig:DeleteHostedConfigurationVersion",
+                  "appconfig:ListHostedConfigurationVersions",
+                  "appconfig:StartDeployment",
+                  "appconfig:GetDeployment",
+                  "appconfig:StopDeployment",
+                  "appconfig:ListDeployments"
+                ],
+                "Resource": [
+                  "arn:aws:appconfig:us-west-2:356364570033:application/fhhcl7m/configurationprofile/*",
+                  "arn:aws:appconfig:us-west-2:356364570033:application/fhhcl7m/environment/*"
+                ]
+              },
+              {
+                "Sid": "AppConfigGovernanceDeploymentStrategy",
+                "Effect": "Allow",
+                "Action": [
+                  "appconfig:GetDeploymentStrategy",
+                  "appconfig:ListDeploymentStrategies"
+                ],
+                "Resource": "arn:aws:appconfig:us-west-2:356364570033:deploymentstrategy/*"
+              }
+            ]
+          }
+          JSON
+
+          aws iam put-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-appconfig-governance-v1" \
+            --policy-document "file:///tmp/appconfig-governance-policy.json"
+
+      - name: Verify inline policy attached
+        run: |
+          aws iam get-role-policy \
+            --role-name "enceladus-cloudformation-deploy-github-role" \
+            --policy-name "enceladus-cfn-deploy-appconfig-governance-v1" \
+            --query '{RoleName:RoleName,PolicyName:PolicyName}' \
+            --output table
