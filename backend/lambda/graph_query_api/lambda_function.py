@@ -708,10 +708,19 @@ def _query_neighbors(driver, project_id: str, params: Dict) -> Dict:
     if min_weight:
         weight_filter = f"AND ALL(rel IN r WHERE COALESCE(rel.weight, 1.0) >= {float(min_weight)}) "
 
+    # ENC-TSK-L87: neighbor.project_id was previously required to equal the
+    # caller's project_id, but MENTIONS (and other) edges are legitimately
+    # cross-project -- graph_sync's own write path (_reconcile_mentions_edges)
+    # MERGEs edges by record_id only, with no project_id restriction, so a
+    # devops task mentioning an enceladus feature in prose gets a real
+    # cross-project edge in Neo4j. This read-side filter silently hid every
+    # such edge from every "neighbors" consumer (not just the audit), making
+    # correctly-written edges permanently unverifiable. Only the START node
+    # is scoped to project_id (that's the caller's actual query intent);
+    # neighbors may belong to any project.
     cypher = (
         f"MATCH (start)-{edge_pattern}-(neighbor) "
         f"WHERE start.record_id = $record_id AND start.project_id = $project_id "
-        f"AND neighbor.project_id = $project_id "
         f"{weight_filter}"
         "RETURN DISTINCT neighbor, "
         "[rel IN r | {type: type(rel), start: startNode(rel).record_id, end: endNode(rel).record_id}][-1] AS edge_info "
