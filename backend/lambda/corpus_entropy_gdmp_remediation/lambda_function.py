@@ -160,6 +160,93 @@ def _save_run_counter(run_count: int) -> None:
     )
 
 
+def _build_run_breakdown(
+    plans: List[Dict[str, Any]],
+    *,
+    now_iso: str,
+    run_count: int,
+    dry_run: bool,
+    mutation_allowed_flag: bool,
+    mutation_hard_disabled: bool,
+    applied: List[Dict[str, Any]],
+    skipped_idempotent: List[str],
+) -> Dict[str, Any]:
+    """ENC-TSK-L91: reviewable per-run audit record. Partitions the run's
+    candidates into safe-deterministic (auto-fixable whitelist) vs needs-human
+    (ambiguous warnings requiring agent/human review) and lists every candidate
+    doc, so io can audit the GDMP_IO_APPROVAL_RUNS ramp from persisted reports.
+    """
+    candidates: List[Dict[str, Any]] = []
+    safe_count = 0
+    needs_human_count = 0
+    for p in plans:
+        det = p.get("deterministic_findings") or []
+        amb = p.get("ambiguous_warnings") or []
+        is_safe = p.get("action") in ("remediate", "partial_remediate") and bool(det)
+        needs_human = bool(amb) or p.get("action") == "agent_review"
+        if is_safe:
+            safe_count += 1
+        if needs_human:
+            needs_human_count += 1
+        candidates.append({
+            "record_id": p.get("record_id"),
+            "action": p.get("action"),
+            "reason": p.get("reason"),
+            "safe_deterministic": is_safe,
+            "needs_human": needs_human,
+            "deterministic_classes": sorted({f.get("class") for f in det if f.get("class")}),
+            "deterministic_count": len(det),
+            "ambiguous_warnings": amb,
+            "ambiguous_count": len(amb),
+        })
+    return {
+        "schema": "gdmp.run_breakdown.v1",
+        "scanned_at": now_iso,
+        "project_id": PROJECT_ID,
+        "run_count": run_count,
+        "dry_run": dry_run,
+        "mutation_allowed": mutation_allowed_flag,
+        "mutation_hard_disabled": mutation_hard_disabled,
+        "totals": {
+            "candidates": len(plans),
+            "safe_deterministic": safe_count,
+            "needs_human": needs_human_count,
+            "remediated": len(applied),
+            "skipped_idempotent": len(skipped_idempotent),
+        },
+        "candidates": candidates,
+        "applied": applied,
+    }
+
+
+def _persist_run_breakdown(breakdown: Dict[str, Any]) -> Optional[str]:
+    """Write the per-run breakdown to S3 alongside the GDMP state prefix. Two
+    keys: a timestamped immutable record under breakdowns/ and a stable
+    latest.json for quick review. Best-effort -- never raises into the run.
+    """
+    if not GDMP_STATE_BUCKET:
+        logger.warning("[WARN] GDMP_STATE_BUCKET unset; run breakdown not persisted")
+        return None
+    prefix = GDMP_STATE_PREFIX.strip().strip("/")
+    safe_ts = str(breakdown.get("scanned_at") or "").replace(":", "").replace("-", "")
+    key = f"{prefix}/breakdowns/run-{safe_ts}-n{breakdown.get('run_count')}.json"
+    body = json.dumps(breakdown, indent=2, sort_keys=True).encode("utf-8")
+    try:
+        s3 = _get_s3()
+        s3.put_object(Bucket=GDMP_STATE_BUCKET, Key=key, Body=body, ContentType="application/json")
+        s3.put_object(
+            Bucket=GDMP_STATE_BUCKET,
+            Key=f"{prefix}/breakdowns/latest.json",
+            Body=body,
+            ContentType="application/json",
+        )
+        logger.info("[INFO] Persisted run breakdown to s3://%s/%s", GDMP_STATE_BUCKET, key)
+        return f"s3://{GDMP_STATE_BUCKET}/{key}"
+    except Exception as exc:  # noqa: BLE001 -- audit persistence must not break the run
+        logger.error("[ERROR] failed to persist run breakdown: %s", exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
@@ -167,19 +254,30 @@ def _save_run_counter(run_count: int) -> None:
 def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, Any]:
     event = event or {}
 
-    if is_hard_disabled(os.environ) or _cee_is_hard_disabled(os.environ):
-        logger.info("[SKIP] CEE_GDMP_HARD_DISABLED (or CEE_HARD_DISABLED) is set; GDMP Stage-1 skipped")
+    # CEE_HARD_DISABLED is the shared corpus-entropy engine-wide cost kill switch
+    # (ISS-465): when set it skips the entire run, including the read-only scan.
+    # Left as a full short-circuit -- unchanged.
+    if _cee_is_hard_disabled(os.environ):
+        logger.info("[SKIP] CEE_HARD_DISABLED is set; GDMP Stage-1 skipped")
         return {
             "statusCode": 200,
             "body": json.dumps({"success": True, "skipped": True, "reason": "hard_disabled"}),
         }
 
+    # ENC-TSK-L91: CEE_GDMP_HARD_DISABLED gates MUTATION only, not the whole run.
+    # While disarmed (=1) the deterministic candidate scan + report + per-run
+    # breakdown persistence still execute so the soak produces the auditable
+    # candidate reports io reviews before any re-enable -- but no documents.patch
+    # is ever issued, and the io-approval ramp counter is NOT advanced (a fresh
+    # GDMP_IO_APPROVAL_RUNS candidate-only buffer is preserved for after re-enable).
+    gdmp_mutation_hard_disabled = is_hard_disabled(os.environ)
+
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     dry_run = is_dry_run(event)
     run_count = _load_run_counter()
     logger.info(
-        "[START] GDMP Stage-1 remediation: project=%s dry_run=%s run_count=%s",
-        PROJECT_ID, dry_run, run_count,
+        "[START] GDMP Stage-1 remediation: project=%s dry_run=%s run_count=%s mutation_hard_disabled=%s",
+        PROJECT_ID, dry_run, run_count, gdmp_mutation_hard_disabled,
     )
 
     try:
@@ -203,7 +301,10 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
             enriched_finding["compliance_warnings"] = doc_row.get("compliance_warnings") or []
             plans.append(plan_remediation(enriched_finding))
 
-        allow_mutate = mutation_allowed(run_count=run_count, dry_run=dry_run)
+        allow_mutate = (
+            mutation_allowed(run_count=run_count, dry_run=dry_run)
+            and not gdmp_mutation_hard_disabled
+        )
 
         applied: List[Dict[str, Any]] = []
         skipped_idempotent: List[str] = []
@@ -230,8 +331,28 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
                 if not content:
                     continue
 
+                # ENC-TSK-L91 optimistic-concurrency guard. The queued `plan` was
+                # computed from the run-start scan (_fetch_documents, up to
+                # GDMP_MAX_DOCS_PER_RUN docs earlier -- a minutes-to-hours stale
+                # read). Re-derive the remediation plan from THIS fresh GET's
+                # compliance_warnings so the deterministic fixes are consistent
+                # with the exact content we are about to PATCH. If a concurrent
+                # human/agent edit already resolved or changed the warnings, the
+                # fresh plan collapses to a no-op skip instead of clobbering that
+                # edit with stale findings (the silent lost-update this task fixes).
+                fresh_plan = plan_remediation({
+                    "record_id": document_id,
+                    "compliance_warnings": doc.get("compliance_warnings") or [],
+                })
+                fresh_findings = fresh_plan.get("deterministic_findings") or []
+                if fresh_plan.get("action") not in ("remediate", "partial_remediate") or not fresh_findings:
+                    # Fresh state no longer needs (or no longer supports) the
+                    # queued deterministic remediation -- skip rather than patch.
+                    skipped_idempotent.append(document_id)
+                    continue
+
                 before_score = doc.get("compliance_score")
-                remediated_content = remediate_content(content, plan["deterministic_findings"])
+                remediated_content = remediate_content(content, fresh_findings)
                 if remediated_content == content:
                     # No actual text change produced (e.g. fixer found nothing
                     # left to do) -- idempotent no-op, do not PATCH.
@@ -263,7 +384,7 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
                         maturity_patch_resp and maturity_patch_resp.get("success", True)
                     ),
                     "deterministic_classes_applied": sorted(
-                        {f["class"] for f in plan["deterministic_findings"]}
+                        {f["class"] for f in fresh_findings}
                     ),
                 })
                 logger.info(
@@ -276,7 +397,25 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
             PROJECT_ID, plans, run_count=run_count, dry_run=dry_run, mutation_enabled=allow_mutate,
         )
 
-        if not dry_run:
+        # ENC-TSK-L91: persist the per-run candidate breakdown EVERY run (incl.
+        # disarmed candidate-only soak runs) so the ramp is auditable from S3.
+        breakdown = _build_run_breakdown(
+            plans,
+            now_iso=now_iso,
+            run_count=run_count,
+            dry_run=dry_run,
+            mutation_allowed_flag=allow_mutate,
+            mutation_hard_disabled=gdmp_mutation_hard_disabled,
+            applied=applied,
+            skipped_idempotent=skipped_idempotent,
+        )
+        breakdown_ref = _persist_run_breakdown(breakdown)
+
+        # Advance the io-approval ramp only on ARMED live runs. Disarmed
+        # (CEE_GDMP_HARD_DISABLED=1) candidate-only runs during the soak do NOT
+        # consume the ramp, preserving a fresh GDMP_IO_APPROVAL_RUNS buffer for
+        # after io re-enables (ENC-TSK-L91).
+        if not dry_run and not gdmp_mutation_hard_disabled:
             _save_run_counter(run_count + 1)
 
         result = {
@@ -289,7 +428,10 @@ def lambda_handler(event: Optional[Dict[str, Any]], context: Any) -> Dict[str, A
             "candidate_count": len(plans),
             "remediated_count": len(applied),
             "skipped_idempotent_count": len(skipped_idempotent),
+            "mutation_hard_disabled": gdmp_mutation_hard_disabled,
             "applied": applied,
+            "breakdown_ref": breakdown_ref,
+            "breakdown_totals": breakdown["totals"],
             "report_preview": report_body[:2000],
         }
         logger.info(

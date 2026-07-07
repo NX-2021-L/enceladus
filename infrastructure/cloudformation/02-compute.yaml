@@ -2501,8 +2501,11 @@ Resources:
   # raw documents to compliant maturity_state with no agent involvement.
   # DATA-SAFETY: GDMP_DRY_RUN=0, GDMP_MUTATION_ENABLED=1, GDMP_IO_APPROVAL_RUNS=3
   # (FTR-106 AC-4 io-approval-ramp pattern, same shape as UnlearningFunction).
-  # Stage-1 mutation-ramp ARMED 2026-07-07 per io directive #2 (ENC-TSK-L90);
-  # code-enforced ramp still holds the next 3 live nightly runs candidate-only.
+  # Stage-1 mutation-ramp ARMED 2026-07-07 per io directive #2 (ENC-TSK-L90),
+  # then DISARMED same day (ENC-TSK-L91): CEE_GDMP_HARD_DISABLED="1" pulls the
+  # ~2026-07-11 4th-run mutation fuse after a silent-data-loss race + unauditable
+  # ramp were confirmed. GDMP performs NO live documents.patch until io reviews
+  # 3 nights of persisted candidate reports and gives an explicit go.
   # CEE_GDMP_HARD_DISABLED is the mandatory kill switch (ISS-465 cost-preflight
   # precedent), checked first thing in the handler. Gamma-only (Condition:
   # IsGamma): v3-prod is frozen (DOC-499FA089EC30).
@@ -2554,13 +2557,16 @@ Resources:
           GDMP_DRY_RUN: "0"
           GDMP_MUTATION_ENABLED: "1"
           GDMP_IO_APPROVAL_RUNS: "3"
-          # ISS-465-style kill switch -- installed disabled by default; io
-          # clears to "0" to enable. Mirrors CEE_HARD_DISABLED (K41) /
+          # ISS-465-style kill switch -- checked FIRST in the handler, halts all
+          # mutation regardless of ramp state. Mirrors CEE_HARD_DISABLED (K41) /
           # UNLEARNING_MUTATION_ENABLED (K03) sibling convention.
-          # Cleared 2026-07-02 per io; remains "0" through the 2026-07-07
-          # mutation-ramp flip -- the io-approval ramp (not this kill switch)
-          # now governs when live mutation begins (ENC-TSK-K42 / ENC-TSK-L90).
-          CEE_GDMP_HARD_DISABLED: "0"
+          # DISARMED 2026-07-07 (ENC-TSK-L91): set "1" to pull the ~2026-07-11
+          # 4th-run mutation fuse after a silent-data-loss race + unauditable
+          # ramp were confirmed on the L90 flip (architect-ruled load-bearing).
+          # Codifies the live out-of-band disarm so no deploy reverts it.
+          # Re-enable is io's explicit call post-soak -- do NOT flip back to "0"
+          # without io go after 3 nights of persisted candidate reports.
+          CEE_GDMP_HARD_DISABLED: "1"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
           APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
