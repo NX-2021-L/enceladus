@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.9",
-  "updated_at": "2026-07-07T13:35:00Z",
-  "last_change_summary": "ENC-TSK-L91: corpus_entropy_gdmp_remediation.lambda -- CEE_GDMP_HARD_DISABLED redefined to gate MUTATION only (candidate scan/report/breakdown still run while disarmed; ramp counter not advanced), new GDMP_RUN_BREAKDOWN_SINK audit artifact, and the fresh-GET/recompute optimistic-concurrency guard before PATCH.",
+  "version": "2026-07-07.10",
+  "updated_at": "2026-07-07T14:36:13Z",
+  "last_change_summary": "ENC-TSK-L87: deploy_parity_validator.lambda mentions_drift_audit -- _run_mentions_drift_audit now threads each sampled record's own project_id into _current_mentions_for (previously hardcoded to 'enceladus', causing every non-enceladus-project sample to read back as a false-positive full mismatch). No new fields/entities; behavioral bugfix only.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7786,8 +7786,13 @@
       "source": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0)"
     }
   },
-  "change_summary": "ENC-TSK-L91: corpus_entropy_gdmp_remediation.lambda -- CEE_GDMP_HARD_DISABLED redefined to gate MUTATION only (candidate scan/report/breakdown still run while disarmed; ramp counter not advanced), new GDMP_RUN_BREAKDOWN_SINK audit artifact, and the fresh-GET/recompute optimistic-concurrency guard before PATCH.",
+  "change_summary": "ENC-TSK-L87: mentions_drift_audit false-positive fix -- project_id threading + gamma graphsearch comparison target.",
   "change_log": [
+    {
+      "version": "2026-07-07.10",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L87: deploy_parity_validator.lambda mentions_drift_audit -- two independent root causes fixed for the escalating MENTIONS drift ratio (43/96 -> 59/96). (1) DeployParityValidatorFunction's TRACKER_API_URL/graphsearch fallback was hardcoded to the prod API Gateway on both prod and gamma; the gamma validator was comparing gamma DynamoDB content against PROD's Neo4j graph. Fixed via a gamma-scoped GRAPHSEARCH_URL CFN env var (Fn::If on IsGamma; the code already supported this override, it was never wired up). (2) _run_mentions_drift_audit's sample spans every project in the shared tracker table (type-updated-index has no project_id key), but _current_mentions_for was called with no project_id, always defaulting to 'enceladus'; any non-enceladus-project sample read back as a false-positive full mismatch. Fixed by threading record.get('project_id') through. No new fields/entities; behavioral bugfixes only."
+    },
     {
       "version": "2026-07-07.6",
       "date": "2026-07-07",
