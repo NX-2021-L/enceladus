@@ -42,6 +42,10 @@ class _FakeAdjacencySession:
         return False
 
     def run(self, cypher, **params):
+        if "$project_id" in cypher:
+            assert "project_id" in params, (
+                f"cypher references $project_id but no project_id was bound: {cypher!r}"
+            )
         if "RETURN count(n) AS c" in cypher:
             return _FakeSingleResult(self._node_count)
         if "RETURN count(DISTINCT" in cypher:

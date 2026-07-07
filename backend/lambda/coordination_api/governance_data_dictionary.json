@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-05.23",
-  "updated_at": "2026-07-05T14:06:00Z",
-  "last_change_summary": "ENC-TSK-L43: graph_query_api hybrid keyword arm reads OpenSearch records_read (multi_match fuzziness AUTO + bool_prefix) with within-search facet aggs; circuit-breaker falls back to Neo4j keyword + feed/corpus facets. feed/corpus accepts X-Coordination-Internal-Key for service facet fallback.",
+  "version": "2026-07-07.1",
+  "updated_at": "2026-07-07T04:07:54Z",
+  "last_change_summary": "ENC-TSK-L80: graph_query_api._query_adjacency bound project_id on its node_count/edge_count Cypher queries (previously referenced $project_id in the query text but never passed it as a session.run() parameter, causing ParameterMissing on every offset=0 call). No schema/entity change — bugfix only, repo-file version bump per CI guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7631,8 +7631,13 @@
       "telemetry_eligible": true
     }
   },
-  "change_summary": "ENC-TSK-L42: register opensearch_backfill.lambda; merge L44 scoped indexer auth into search_index_core.",
+  "change_summary": "ENC-TSK-L80: bugfix, no schema change — graph_query_api._query_adjacency now binds project_id on its count queries.",
   "change_log": [
+    {
+      "version": "2026-07-07.1",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L80: graph_query_api._query_adjacency's node_count/edge_count session.run() calls now bind project_id=project_id (previously referenced $project_id in Cypher text only, causing Neo.ClientError.Statement.ParameterMissing on every offset=0 adjacency call — the exact call shape ENC-TSK-K41's CEE Lambda makes nightly). No entity/field/schema change; version bump only to satisfy the Governance Dictionary Guard's file-touched heuristic."
+    },
     {
       "version": "2026-07-05.23",
       "date": "2026-07-05",
