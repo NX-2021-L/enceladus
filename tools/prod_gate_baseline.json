@@ -85,6 +85,13 @@
       ],
       "notes": "ENC-TSK-J63 plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod); ROLLBACK_COMPLETE cleanup is gamma-self-heal / prod-fail-closed"
     },
+    "cloudformation-appconfig-governance-stack-deploy.yml": {
+      "class": "conditional",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-L82; mirrors cloudformation-monitoring-stack-deploy.yml plan/apply split; apply environment by ref (v4/* -> v4-gamma, else v3-prod); ROLLBACK_COMPLETE cleanup is gamma-self-heal / prod-fail-closed"
+    },
     "cloudformation-ui-cdn-stack-deploy.yml": {
       "class": "conditional",
       "gated_jobs": [
@@ -119,7 +126,7 @@
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-PLN-068: environment: v3-prod — grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
+      "notes": "ENC-PLN-068: environment: v3-prod \u2014 grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
     },
     "iam-cfn-deploy-role-gamma-patch.yml": {
       "class": "prod-mutating",
