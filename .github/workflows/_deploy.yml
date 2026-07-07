@@ -501,14 +501,18 @@ jobs:
                   return {'fn': fn, 'mapped_name': mapped_name, 'status': 'error', 'error': 'stage copy'}
 
               # ENC-TSK-M03 / ENC-TSK-L96: Gen2-only Lambdas (github_integration,
-              # checkout_service -auto twin, etc.) may exist OOB without CFN Architectures.
+              # checkout_service -auto twin) may exist OOB without CFN Architectures.
               # Align runtime+arch to the manifest BEFORE publishing arm64 artifacts.
-              if arch == 'arm64':
+              if arch == 'arm64' and fn in ('github_integration', 'checkout_service'):
                   target_runtime = f'python{py}'
+                  cfg_input = json.dumps({
+                      'Architectures': ['arm64'],
+                      'Runtime': target_runtime,
+                  })
                   cfg_r = run_with_retry(
                       ['aws', 'lambda', 'update-function-configuration',
                        '--region', region, '--function-name', mapped_name,
-                       '--architectures', 'arm64', '--runtime', target_runtime],
+                       '--cli-input-json', cfg_input],
                       what=f'update-function-configuration {mapped_name}',
                       skip_on=('ResourceNotFoundException', 'Function not found'),
                   )
