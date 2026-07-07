@@ -149,6 +149,13 @@
       ],
       "notes": "ENC-TSK-L83: environment: v3-prod -- despite the gamma-scoped grant, it patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-cloudwatch-dashboard-patch.yml / iam-cfn-deploy-role-gamma-patch.yml)"
     },
+    "iam-cfn-deploy-role-secretsmanager-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-L06: environment: v3-prod -- patches the SHARED CFN deploy role object with secretsmanager:GetRandomPassword (Resource: \"*\", required by CFN's GenerateSecretString mechanism) plus scoped CreateSecret/TagResource/DescribeSecret on enceladus/id-service/* (same shared-role pattern as iam-cfn-deploy-role-appconfig-patch.yml / iam-cfn-deploy-role-cloudwatch-dashboard-patch.yml / iam-cfn-deploy-role-gamma-patch.yml)"
+    },
     "iam-cfn-deploy-role-opensearch-ec2-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [

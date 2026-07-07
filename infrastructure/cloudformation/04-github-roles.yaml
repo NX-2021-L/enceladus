@@ -599,6 +599,32 @@ Resources:
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:devops/coordination/*"
+              # ENC-TSK-L06 / B63 Phase 2 AC-6: the ID Service's HMAC provenance-signing
+              # secret is declared as a CFN-managed AWS::SecretsManager::Secret resource
+              # (02-compute.yaml IdServiceHmacSecret) using GenerateSecretString so no
+              # plaintext ever passes through a git commit or an agent session. CFN's
+              # GenerateSecretString mechanism calls secretsmanager:GetRandomPassword
+              # internally to generate the value BEFORE the CreateSecret call -- that
+              # action does not support resource-level scoping in IAM (AWS requires
+              # Resource: "*" for it; confirmed via the live rollback failure on
+              # enceladus-compute-gamma 2026-07-07: "not authorized to perform:
+              # secretsmanager:GetRandomPassword ... (Service: SecretsManager)").
+              # CreateSecret/TagResource are scoped to the enceladus/id-service/*
+              # secret path only.
+              - Sid: SecretsManagerIdServiceProvision
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub "arn:aws:secretsmanager:us-west-2:${AWS::AccountId}:secret:enceladus/id-service/*"
+              - Sid: SecretsManagerGetRandomPassword
+                Effect: Allow
+                # GetRandomPassword has no resource type in IAM (must be "*"); it is the
+                # mechanism CFN's GenerateSecretString calls internally to mint secret
+                # material server-side, never exposing plaintext to this role's caller.
+                Action: secretsmanager:GetRandomPassword
+                Resource: "*"
               - Sid: EC2Fleet
                 Effect: Allow
                 Action:
