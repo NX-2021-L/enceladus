@@ -108,6 +108,60 @@ KNOWN_COMPONENTS = [
             "architecture_sections": ["4.17"],
         },
         "deploy_targets": ["checkout_service"],
+        # ENC-TSK-L05 AC-1 (ENC-TSK-E68/PLN-031 Ph3 hardening fields).
+        # Role enceladus-checkout-service-role${EnvironmentSuffix} is deliberately
+        # NOT CFN-managed (02-compute.yaml:493-506 -- agent identity has an explicit
+        # IAM deny on iam:GetRole/ListRolePolicies, so the live policy document
+        # cannot be read). Actions below are derived from the actual boto3 calls
+        # in backend/lambda/checkout_service/lambda_function.py (dynamodb get_item/
+        # put_item/update_item/scan calls + secretsmanager get_secret_value for the
+        # GitHub App private key), not from a CFN Policy document.
+        "required_iam_actions": [
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+            "dynamodb:Scan",
+            "secretsmanager:GetSecretValue",
+        ],
+        # _deploy.yml (Gen2 shared pipeline) is the only production-equivalent
+        # deploy path; it references exactly two secrets for every Lambda
+        # component it deploys (no per-component secret gating -- confirmed no
+        # matrix/strategy block, single `deploy` job, ThreadPoolExecutor fan-out).
+        "required_env_secrets": ["DM_GITHUB_READ_TOKEN", "COORDINATION_INTERNAL_API_KEY"],
+        # infrastructure/cloudformation/03-api.yaml: two Integrations target this
+        # function (CheckoutServiceIntegration lines 811-818 for the newer /plan/*
+        # routes; CheckoutApiIntegration lines 927-937, adopted out-of-band via
+        # ENC-TSK-J13 IMPORT, whose comment notes "live traffic uses this one" for
+        # the /task/* routes). Both integrations target the same live Lambda, so
+        # both route sets are declared here.
+        "required_apigw_routes": [
+            "POST /api/v1/checkout/{project}/plan/{planId}/checkout",
+            "DELETE /api/v1/checkout/{project}/plan/{planId}/checkout",
+            "POST /api/v1/checkout/{project}/plan/{planId}/advance",
+            "POST /api/v1/checkout/{project}/plan/{planId}/log",
+            "GET /api/v1/checkout/{project}/plan/{planId}/status",
+            "DELETE /api/v1/checkout/{project}/task/{taskId}/checkout",
+            "GET /api/v1/checkout/validate/commit-complete/{cciId}",
+            "GET /api/v1/checkout/{project}/task/{taskId}/status",
+            "POST /api/v1/checkout/{project}/task/{taskId}/advance",
+            "POST /api/v1/checkout/{project}/task/{taskId}/checkout",
+            "POST /api/v1/checkout/{project}/task/{taskId}/log",
+        ],
+        "required_cfn_resources": ["CheckoutServiceFunction", "CheckoutServiceIntegration", "CheckoutApiIntegration"],
+        "required_lambda_env_vars": [
+            "CHECKOUT_TOKENS_REGION",
+            "CHECKOUT_TOKENS_TABLE",
+            "COORDINATION_INTERNAL_API_KEY",
+            "ENCELADUS_COORDINATION_INTERNAL_API_KEY",
+            "GITHUB_PRIVATE_KEY_SECRET",
+            "GITHUB_APP_ID",
+            "GITHUB_INSTALLATION_ID",
+            "GITHUB_TOKEN",
+            "COGNITO_USER_POOL_ID",
+            "COGNITO_CLIENT_ID",
+            "CORS_ORIGIN",
+            "TRACKER_API_BASE",
+        ],
     },
     {
         "component_id": "comp-lifecycle-service",
@@ -131,6 +185,33 @@ KNOWN_COMPONENTS = [
             "architecture_sections": ["4.17"],
         },
         "deploy_targets": ["lifecycle_service"],
+        # ENC-TSK-L05 AC-1. Role LifecycleServiceRole is CFN-managed
+        # (02-compute.yaml:3749-3799, RoleName enceladus-lifecycle-service-lambda-role).
+        # Single inline policy grants read-only DynamoDB access (tracker,
+        # component-registry, projects tables) -- this service validates
+        # transitions, it does not invoke other Lambdas or publish events.
+        "required_iam_actions": [
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
+            "xray:PutTraceSegments",
+            "xray:PutTelemetryRecords",
+            "dynamodb:GetItem",
+            "dynamodb:Query",
+        ],
+        "required_env_secrets": ["DM_GITHUB_READ_TOKEN", "COORDINATION_INTERNAL_API_KEY"],
+        # No API Gateway Integration targets this function anywhere in
+        # 03-api.yaml -- it is invoked synchronously by tracker_mutation via
+        # lambda:InvokeFunction (TrackerMutationRole's invoke-lifecycle-service
+        # policy), never over HTTP. Empty is correct, not an oversight.
+        "required_apigw_routes": [],
+        "required_cfn_resources": ["LifecycleServiceFunction", "LifecycleServiceRole"],
+        "required_lambda_env_vars": [
+            "DYNAMODB_TABLE",
+            "DYNAMODB_REGION",
+            "COMPONENTS_TABLE",
+            "PROJECTS_TABLE",
+        ],
     },
     {
         "component_id": "comp-scoring-service",
@@ -154,6 +235,32 @@ KNOWN_COMPONENTS = [
             "architecture_sections": ["4.17"],
         },
         "deploy_targets": ["scoring_service"],
+        # ENC-TSK-L05 AC-1. Role ScoringServiceRole is CFN-managed
+        # (02-compute.yaml:3805-3841, RoleName enceladus-scoring-service-lambda-role).
+        # Pure SNS-triggered DynamoDB writer (lesson pillar_composite/resonance_score
+        # write-back on the tracker table) -- no other AWS API calls.
+        "required_iam_actions": [
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
+            "xray:PutTraceSegments",
+            "xray:PutTelemetryRecords",
+            "dynamodb:GetItem",
+            "dynamodb:UpdateItem",
+        ],
+        "required_env_secrets": ["DM_GITHUB_READ_TOKEN", "COORDINATION_INTERNAL_API_KEY"],
+        # No API Gateway Integration targets this function -- it subscribes to
+        # the enceladus-lesson-scoring SNS topic (ScoringServiceSubscription /
+        # ScoringServiceSnsPermission, 02-compute.yaml:603-617) and is never
+        # invoked over HTTP. Empty is correct, not an oversight.
+        "required_apigw_routes": [],
+        "required_cfn_resources": [
+            "ScoringServiceFunction",
+            "ScoringServiceRole",
+            "ScoringServiceSubscription",
+            "ScoringServiceSnsPermission",
+        ],
+        "required_lambda_env_vars": ["DYNAMODB_TABLE", "DYNAMODB_REGION"],
     },
     {
         "component_id": "comp-coordination-api",
@@ -177,6 +284,189 @@ KNOWN_COMPONENTS = [
             "architecture_sections": ["4.2", "5.1"],
         },
         "deploy_targets": ["coordination_api"],
+        # ENC-TSK-L05 AC-1. Role CoordinationApiRole is CFN-managed
+        # (02-compute.yaml:3302-3620, RoleName devops-coordination-api-lambda-role).
+        # Deduped action set across its Bedrock-dispatch + inline + AppConfig
+        # policies (this is the largest role in the stack -- coordination mode,
+        # governance, host-provisioning (EC2/SSM), Bedrock agent management, and
+        # Cognito client management all live in this one Lambda).
+        "required_iam_actions": [
+            "bedrock:InvokeAgent",
+            "lambda:InvokeFunction",
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
+            "xray:PutTraceSegments",
+            "xray:PutTelemetryRecords",
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+            "dynamodb:Query",
+            "dynamodb:Scan",
+            "dynamodb:DescribeTable",
+            "dynamodb:DeleteItem",
+            "s3:ListBucket",
+            "s3:GetObject",
+            "s3:PutObject",
+            "s3:HeadBucket",
+            "s3:GetBucketLocation",
+            "ssm:SendCommand",
+            "ssm:GetCommandInvocation",
+            "ssm:ListCommands",
+            "ssm:ListCommandInvocations",
+            "ssm:DescribeInstanceInformation",
+            "ec2:DescribeInstances",
+            "ec2:DescribeLaunchTemplates",
+            "ec2:DescribeLaunchTemplateVersions",
+            "ec2:RunInstances",
+            "ec2:TerminateInstances",
+            "ec2:CreateTags",
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:DescribeSecret",
+            "sns:Publish",
+            "cognito-idp:InitiateAuth",
+            "cognito-idp:CreateUserPoolClient",
+            "cognito-idp:DeleteUserPoolClient",
+            "cognito-idp:DescribeUserPoolClient",
+            "cognito-idp:UpdateUserPoolClient",
+            "bedrock:CreateAgent",
+            "bedrock:GetAgent",
+            "bedrock:DeleteAgent",
+            "bedrock:PrepareAgent",
+            "bedrock:CreateAgentActionGroup",
+            "bedrock:GetAgentActionGroup",
+            "bedrock:DeleteAgentActionGroup",
+            "bedrock:CreateAgentAlias",
+            "bedrock:GetAgentAlias",
+            "bedrock:DeleteAgentAlias",
+            "bedrock:AssociateAgentKnowledgeBase",
+            "bedrock:DisassociateAgentKnowledgeBase",
+            "iam:PassRole",
+            "appconfig:GetConfiguration",
+            "appconfig:GetLatestConfiguration",
+            "appconfig:StartConfigurationSession",
+        ],
+        "required_env_secrets": ["DM_GITHUB_READ_TOKEN", "COORDINATION_INTERNAL_API_KEY"],
+        # infrastructure/cloudformation/03-api.yaml: CoordinationApiIntegration
+        # (lines 78-86) backs ~111 Route resources (many IsProduction/IsGamma
+        # twins of the same RouteKey). Deduped distinct RouteKeys below.
+        "required_apigw_routes": [
+            "POST /api/v1/coordination/requests",
+            "GET /api/v1/coordination/requests/{requestId}",
+            "POST /api/v1/coordination/requests/{requestId}/dispatch",
+            "POST /api/v1/coordination/requests/{requestId}/callback",
+            "POST /api/v1/cursor/webhook",
+            "GET /api/v1/coordination/capabilities",
+            "GET /api/v1/coordination/mcp",
+            "POST /api/v1/coordination/mcp",
+            "GET /api/v1/coordination/components",
+            "POST /api/v1/coordination/components",
+            "GET /api/v1/coordination/agents/sessions",
+            "GET /api/v1/coordination/agents/types",
+            "GET /api/v1/coordination/components/{componentId}",
+            "PATCH /api/v1/coordination/components/{componentId}",
+            "DELETE /api/v1/coordination/components/{componentId}",
+            "POST /api/v1/coordination/components/{componentId}/add_edge",
+            "POST /api/v1/coordination/components/{componentId}/remove_edge",
+            "POST /api/v1/coordination/components/{componentId}/deprecate",
+            "POST /api/v1/coordination/components/{componentId}/restore",
+            "POST /api/v1/coordination/components/{componentId}/revert",
+            "POST /api/v1/coordination/sessions/{sessionId}/message",
+            "DELETE /api/v1/coordination/auth/oauth-clients/{clientId}",
+            "DELETE /api/v1/coordination/auth/tokens/{tokenId}",
+            "GET /api/v1/coordination/auth/oauth-clients",
+            "GET /api/v1/coordination/auth/tokens",
+            "GET /api/v1/coordination/projects",
+            "GET /api/v1/coordination/projects/{projectId}",
+            "GET /api/v1/governance/dictionary",
+            "GET /api/v1/governance/hash",
+            "GET /api/v1/governance/{fileName+}",
+            "GET /api/v1/health",
+            "OPTIONS /api/v1/coordination/auth/cognito/session",
+            "OPTIONS /api/v1/coordination/auth/oauth-clients",
+            "OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}",
+            "OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/permissions",
+            "OPTIONS /api/v1/coordination/auth/oauth-clients/{clientId}/usage",
+            "OPTIONS /api/v1/coordination/auth/permissions/{tokenId}",
+            "OPTIONS /api/v1/coordination/auth/tokens",
+            "OPTIONS /api/v1/coordination/auth/tokens/{tokenId}",
+            "OPTIONS /api/v1/coordination/capabilities",
+            "OPTIONS /api/v1/coordination/mcp",
+            "OPTIONS /api/v1/coordination/projects",
+            "OPTIONS /api/v1/coordination/projects/{projectId}",
+            "OPTIONS /api/v1/coordination/requests",
+            "OPTIONS /api/v1/coordination/requests/{requestId}",
+            "OPTIONS /api/v1/coordination/requests/{requestId}/callback",
+            "OPTIONS /api/v1/coordination/requests/{requestId}/dispatch",
+            "PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/permissions",
+            "PATCH /api/v1/coordination/auth/oauth-clients/{clientId}/usage",
+            "PATCH /api/v1/coordination/auth/permissions/{tokenId}",
+            "POST /api/v1/coordination/auth/cognito/session",
+            "POST /api/v1/coordination/auth/oauth-clients",
+            "POST /api/v1/coordination/auth/tokens",
+            "POST /api/v1/coordination/components/propose",
+            "POST /api/v1/coordination/components/{componentId}/advance",
+            "POST /api/v1/coordination/components/{componentId}/approve",
+            "POST /api/v1/coordination/components/{componentId}/cloudwatch_event",
+            "POST /api/v1/coordination/components/{componentId}/reject",
+            "PUT /api/v1/governance/{fileName+}",
+            "POST /api/v1/coordination/lesson-candidates/{documentId}/approve",
+            "POST /api/v1/coordination/lesson-candidates/{documentId}/reject",
+            "GET /api/v1/coordination/escalations",
+            "GET /api/v1/coordination/escalations/watch",
+            "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve",
+            "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny",
+        ],
+        "required_cfn_resources": [
+            "CoordinationApiFunction",
+            "CoordinationApiRole",
+            "CoordinationBatchPollerRule",
+            "CoordinationBatchPollerPermission",
+            "AgentSessionIdleSweepSchedule",
+            "AgentSessionIdleSweepPermission",
+            "AgentSessionUnclaimSweepSchedule",
+            "AgentSessionUnclaimSweepPermission",
+            "IntentClassifierTrainingSchedule",
+            "IntentClassifierTrainingPermission",
+        ],
+        "required_lambda_env_vars": [
+            "COORDINATION_INTERNAL_API_KEY",
+            "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+            "COGNITO_USER_POOL_ID",
+            "COGNITO_CLIENT_ID",
+            "COORDINATION_TABLE",
+            "TRACKER_TABLE",
+            "RELATIONSHIPS_TABLE",
+            "PROJECTS_TABLE",
+            "DOCUMENTS_TABLE",
+            "DYNAMODB_REGION",
+            "SSM_REGION",
+            "SECRETS_REGION",
+            "CORS_ORIGIN",
+            "ENCELADUS_MCP_INTERFACE_MODE",
+            "DOCUMENT_API_LAMBDA_NAME",
+            "TRACKER_MUTATION_LAMBDA_NAME",
+            "CURSOR_WEBHOOK_SECRET",
+            "COMPONENTS_TABLE",
+            "GOVERNANCE_POLICIES_TABLE",
+            "AUTH_TOKENS_TABLE",
+            "GOVERNANCE_VERSION_TABLE",
+            "AGENT_SESSIONS_TABLE",
+            "AGENT_TYPES_TABLE",
+            "AGENT_CREDENTIALS_TABLE",
+            "AGENT_SESSIONS_IDLE_SWEEP_ENABLED",
+            "AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS",
+            "AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED",
+            "AGENT_SESSIONS_UNCLAIM_TTL_MINUTES",
+            "CHECKOUT_TOKENS_TABLE",
+            "AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS",
+            "APPCONFIG_APPLICATION",
+            "APPCONFIG_ENVIRONMENT",
+            "APPCONFIG_CONFIGURATION",
+            "TRAINING_HARD_DISABLED",
+            "INTENT_TRAINING_BUCKET",
+            "INTENT_TRAINING_PREFIX",
+        ],
     },
     {
         "component_id": "comp-tracker-mutation",
@@ -197,6 +487,76 @@ KNOWN_COMPONENTS = [
             "architecture_sections": ["4.1", "5.1"],
         },
         "deploy_targets": ["tracker_mutation"],
+        # ENC-TSK-L05 AC-1. Role TrackerMutationRole is CFN-managed
+        # (02-compute.yaml:3621-3745, RoleName devops-tracker-mutation-lambda-role).
+        # Deduped across its tracker-dynamodb, projects-read, eventbridge-put-events,
+        # AppConfig, invoke-lifecycle-service, and publish-lesson-scoring policies.
+        "required_iam_actions": [
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+            "dynamodb:BatchWriteItem",
+            "dynamodb:Query",
+            "dynamodb:Scan",
+            "dynamodb:DescribeTable",
+            "events:PutEvents",
+            "appconfig:GetConfiguration",
+            "appconfig:GetLatestConfiguration",
+            "appconfig:StartConfigurationSession",
+            "lambda:InvokeFunction",
+            "sns:Publish",
+        ],
+        "required_env_secrets": ["DM_GITHUB_READ_TOKEN", "COORDINATION_INTERNAL_API_KEY"],
+        # infrastructure/cloudformation/03-api.yaml: TrackerMutationIntegration
+        # (lines 87-94) plus a gamma-only TrackerMutationGammaLiveIntegration
+        # (lines 405-414, :live-alias-qualified, adopted for the gamma dedup/
+        # escalation surfaces). Deduped distinct RouteKeys across both.
+        "required_apigw_routes": [
+            "PATCH /{projectId}/{recordType}/{recordId}",
+            "PATCH /api/v1/tracker/{projectId}/{recordType}/{recordId}",
+            "DELETE /api/v1/tracker/{projectId}/relationship",
+            "DELETE /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout",
+            "GET /api/v1/tracker/pending-updates",
+            "GET /api/v1/tracker/{projectId}",
+            "GET /api/v1/tracker/{projectId}/relationship",
+            "GET /api/v1/tracker/{projectId}/{recordType}/{recordId}",
+            "OPTIONS /api/v1/tracker/pending-updates",
+            "OPTIONS /api/v1/tracker/{projectId}",
+            "OPTIONS /api/v1/tracker/{projectId}/relationship",
+            "OPTIONS /api/v1/tracker/{projectId}/{recordType}",
+            "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}",
+            "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence",
+            "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout",
+            "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend",
+            "OPTIONS /api/v1/tracker/{projectId}/{recordType}/{recordId}/log",
+            "OPTIONS /{projectId}/{recordType}/{recordId}",
+            "POST /api/v1/tracker/{projectId}/{recordType}",
+            "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/acceptance-evidence",
+            "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/checkout",
+            "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/extend",
+            "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/log",
+            "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply",
+            "POST /api/v1/tracker/{projectId}/dedup-review",
+        ],
+        "required_cfn_resources": ["TrackerMutationFunction", "TrackerMutationRole"],
+        "required_lambda_env_vars": [
+            "COORDINATION_INTERNAL_API_KEY",
+            "COORDINATION_INTERNAL_API_KEY_PREVIOUS",
+            "COGNITO_USER_POOL_ID",
+            "COGNITO_CLIENT_ID",
+            "DYNAMODB_TABLE",
+            "RELATIONSHIPS_TABLE",
+            "DYNAMODB_REGION",
+            "PROJECTS_TABLE",
+            "AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS",
+            "APPCONFIG_APPLICATION",
+            "APPCONFIG_ENVIRONMENT",
+            "APPCONFIG_CONFIGURATION",
+            "LIFECYCLE_SERVICE_FUNCTION",
+            "LESSON_SCORING_TOPIC_ARN",
+            "ESCALATION_ALERTS_TOPIC_ARN",
+            "ENABLE_LESSON_PRIMITIVE",
+        ],
     },
     {
         "component_id": "comp-enceladus-mcp-server",
@@ -214,6 +574,27 @@ KNOWN_COMPONENTS = [
             "related": ["tools/enceladus-mcp-server/install_profile.sh"],
             "architecture_sections": ["8.1"],
         },
+        # ENC-TSK-L05 AC-1. This is a `library` component (server.py source), not
+        # a standalone deploy unit -- it has no `deploy_targets` entry (unlike the
+        # 5 lambda-category components above) and is architecturally different
+        # from them: the gamma runtime (EnceladusMcpCodeGammaFunction,
+        # 02-compute.yaml:6393-6501) is CFN-managed but Condition:IsProduction
+        # (created BY the prod stack, not gamma's own stack) and reuses the
+        # borrowed role devops-coordination-api-lambda-role-gamma rather than a
+        # role scoped to this component. The prod runtime (plain enceladus-mcp-code,
+        # no -gamma suffix) has NO CFN Function resource anywhere in the repo --
+        # it is entirely out-of-band/unmanaged and only appears as a literal ARN
+        # string in another component's (McpStreamingGatewayRole-adjacent
+        # DeployParityValidatorRole) IAM policy. Given this component owns neither
+        # a dedicated CFN-managed role nor a dedicated CFN Function resource of
+        # its own, all five fields are considered and left empty rather than
+        # attributing another component's borrowed/shared infrastructure to this
+        # one -- forcing values here would misrepresent drift-audit ownership.
+        "required_iam_actions": [],
+        "required_env_secrets": ["DM_GITHUB_READ_TOKEN", "COORDINATION_INTERNAL_API_KEY"],
+        "required_apigw_routes": [],
+        "required_cfn_resources": [],
+        "required_lambda_env_vars": [],
     },
     {
         "component_id": "comp-enceladus-pwa",
@@ -288,6 +669,22 @@ KNOWN_COMPONENTS = [
             },
             "architecture_sections": ["7.1", "7.2", "7.3", "7.4"],
         },
+        # ENC-TSK-L05 AC-1. Frontend component with no Lambda execution role of
+        # its own -- production-equivalent deploy path is .github/workflows/
+        # ui-backend-deploy.yml (job `deploy`, environment: v3-prod), which
+        # submits a DPL request via boto3/DynamoDB+SQS rather than calling
+        # S3/CloudFront APIs directly (the actual static-file publish executes
+        # in the devops-deployment-manager orchestrator, a different component's
+        # responsibility). required_iam_actions, required_apigw_routes,
+        # required_cfn_resources, and required_lambda_env_vars are considered
+        # and correctly empty: this component has no Lambda execution role, does
+        # not serve APIGW routes (it calls them, as a browser client), and has
+        # no dedicated CFN Function/resources of its own to track for drift.
+        "required_iam_actions": [],
+        "required_env_secrets": ["AWS_ROLE_TO_ASSUME", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+        "required_apigw_routes": [],
+        "required_cfn_resources": [],
+        "required_lambda_env_vars": [],
     },
     {
         "component_id": "comp-cloudformation-data",
@@ -304,6 +701,57 @@ KNOWN_COMPONENTS = [
             "directory": "infrastructure/cloudformation/",
             "architecture_sections": ["3.1", "3.2", "3.3"],
         },
+        # ENC-TSK-L05 AC-1. Infra-umbrella component -- this IS the entire
+        # 01-data.yaml template (no other component claims sub-resources within
+        # it), so listing its full logical-resource set is meaningful (unlike
+        # comp-cloudformation-app below, where 5 of ~35 Functions already have
+        # their own dedicated components). Deploy path: cloudformation-compute-
+        # stack-deploy.yml (data-stack change-set step; job-level
+        # AWS_CLOUDFORMATION_ROLE_TO_ASSUME secret, environment v3-prod/v4-gamma).
+        # required_iam_actions left empty: AWS_CLOUDFORMATION_ROLE_TO_ASSUME
+        # resolves to an externally-managed IAM role (GitHub secret, not a
+        # repo-declared CFN role) -- this agent's IAM identity is denied
+        # iam:GetRole/ListRolePolicies (per ENC-TSK-564), and no in-repo source
+        # enumerates that role's policy document, so this is a considered
+        # empty, not an oversight.
+        "required_iam_actions": [],
+        "required_env_secrets": ["AWS_CLOUDFORMATION_ROLE_TO_ASSUME"],
+        "required_apigw_routes": [],
+        "required_cfn_resources": [
+            "CoordinationRequestsTable",
+            "TrackerTable",
+            "RelationshipsTable",
+            "ProjectsTable",
+            "DocumentsTable",
+            "DriftTelemetryTable",
+            "StigmergicTraceTable",
+            "DeploymentManagerTable",
+            "GovernancePoliciesTable",
+            "ComponentRegistryTable",
+            "AgentComplianceViolationsTable",
+            "DeployQueue",
+            "FeedPublishQueue",
+            "GraphSyncQueue",
+            "GraphSyncDLQ",
+            "SearchIndexQueue",
+            "SearchIndexDLQ",
+            "ConvergenceTelemetryQueue",
+            "ConvergenceTelemetryDLQ",
+            "CoordinationDeadLetterTopic",
+            "FeedAlertsTopic",
+            "ParquetReadyTopic",
+            "ProjectJsonSyncTopic",
+            "ComponentRegistryEventsTopic",
+            "LessonScoringTopic",
+            "AgentSessionsTable",
+            "AgentTypesTable",
+            "AgentCredentialsTable",
+            "UserPreferencesTable",
+            "GovernanceVersionTable",
+            "PercolationTelemetryTable",
+            "ConvergenceTelemetryTable",
+        ],
+        "required_lambda_env_vars": [],
     },
     {
         "component_id": "comp-cloudformation-app",
@@ -321,6 +769,30 @@ KNOWN_COMPONENTS = [
             "related": ["infrastructure/lambda_workflow_manifest.json"],
             "architecture_sections": ["2.1", "4.0"],
         },
+        # ENC-TSK-L05 AC-1. Unlike comp-cloudformation-data, this umbrella's
+        # template (02-compute.yaml) already has 5 of its ~35 Lambda Functions
+        # registered as their OWN dedicated components (comp-checkout-service,
+        # comp-lifecycle-service, comp-scoring-service, comp-coordination-api,
+        # comp-tracker-mutation), each carrying its own required_cfn_resources
+        # now. Enumerating this umbrella's required_cfn_resources would mean
+        # either re-listing resources already owned/tracked by those dedicated
+        # components (double-booking drift ownership) or dumping the remaining
+        # ~30 unrelated Functions/Roles/EventBridge rules into a field with no
+        # scoping logic -- that re-scoping is explicitly ENC-TSK-L05 AC-4 (T4a,
+        # umbrella-per-CFn-file registration), which is out of scope for this
+        # AC-1-only pass and remains blocked on the same H-SCHEMA prerequisite
+        # as AC2-AC6. Left empty and considered, not force-filled, to avoid
+        # preempting AC-4's proper scoping decision.
+        "required_iam_actions": [],
+        "required_env_secrets": [
+            "AWS_CLOUDFORMATION_ROLE_TO_ASSUME",
+            "COORDINATION_INTERNAL_API_KEY",
+            "ENCELADUS_COGNITO_CLIENT_SECRET",
+            "CURSOR_WEBHOOK_SECRET",
+        ],
+        "required_apigw_routes": [],
+        "required_cfn_resources": [],
+        "required_lambda_env_vars": [],
     },
     # ── Harrisonfamily ───────────────────────────────────────────────────────
     {
