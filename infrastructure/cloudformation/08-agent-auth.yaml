@@ -103,11 +103,13 @@ Resources:
         ENC-FTR-074 Ph1 V3_0 pre-token generation trigger. On
         TokenGeneration_ClientCredentials, injects enc:agent_tier and enc:session_id custom claims
         into the M2M access token.
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: index.handler
       Role: !GetAtt PreTokenLambdaRole.Arn
       Timeout: 5
       MemorySize: 128
+      Architectures:
+        - arm64
       Code:
         ZipFile: |
           """ENC-FTR-074 Ph1 — Cognito V3_0 pre-token generation trigger.
@@ -363,11 +365,13 @@ Resources:
       Description: >
         ENC-FTR-074 Ph1 Secrets Manager rotation Lambda for the enceladus-agent-m2m client secret
         (standard 4-step rotation; createSecret hydrates AWSPENDING from the live Cognito client).
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: index.handler
       Role: !GetAtt SecretRotationLambdaRole.Arn
       Timeout: 30
       MemorySize: 128
+      Architectures:
+        - arm64
       Environment:
         Variables:
           USER_POOL_ID: !Ref AgentUserPool

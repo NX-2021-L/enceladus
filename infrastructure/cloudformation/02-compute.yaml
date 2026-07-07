@@ -4845,6 +4845,8 @@ Resources:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-code${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-streamable${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-coordination-api${EnvironmentSuffix}"
+                  # ENC-TSK-M03: github-integration Lambda is Gen2-managed (no CFN Function
+                  # resource yet); arm64/py3.12 enforced in _deploy.yml update-function-configuration.
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-github-integration${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-mcp-code-gamma"
               - Sid: DeployTableAccess
@@ -6988,6 +6990,8 @@ Resources:
   # clean Import/no-op change-set (rate(5 minutes), ENABLED, target the -auto Lambda).
   # NOTE: the events->lambda AWS::Lambda::Permission is NOT importable and stays
   # out-of-band (ENC-ISS-394 precedent); only the rule is adopted here.
+  # ENC-TSK-M03: enceladus-checkout-service-auto-gamma exists on gamma (Gen2 map);
+  # arm64/py3.12 enforced via _deploy.yml; prod-only rule below targets unsuffixed name.
   # After import, J14 drops the audit's documented-exception for enceladus-checkout-auto.
   CheckoutAutoScheduleRule:
     Type: AWS::Events::Rule
