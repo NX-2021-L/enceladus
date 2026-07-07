@@ -128,6 +128,13 @@
       ],
       "notes": "ENC-TSK-J64: environment: v3-prod \u2014 despite the name it patches the SHARED CFN deploy role object"
     },
+    "iam-cfn-deploy-role-nat-gateway-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-L43: environment: v3-prod — NAT gateway EC2 grants on shared CFN deploy role for gamma OpenSearch/Lambda subnet"
+    },
     "iam-cfn-deploy-role-cloudwatch-dashboard-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
