@@ -77,6 +77,7 @@ def build_action_registries(flags: ActionFeatureFlags) -> Tuple[
         "agent.claim": {"tool": "agent_claim"},
         "agent.list": {"tool": "agent_list"},
         "agent.retire": {"tool": "agent_retire"},
+        "agent.checkout_release_backfill": {"tool": "agent_checkout_release_backfill"},
         "agent.type.list": {"tool": "agent_type_list"},
         "agent.type.register": {"tool": "agent_type_register"},
     }

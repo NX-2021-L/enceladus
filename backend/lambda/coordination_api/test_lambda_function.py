@@ -653,6 +653,71 @@ class CoordinationLambdaUnitTests(unittest.TestCase):
         self.assertEqual(resp["statusCode"], 200)
         mock_route_handler.assert_called_once()
 
+    @patch.object(coordination_lambda._agent_id_alloc, "release_checkouts_for_retired_sessions")
+    def test_handle_agent_session_checkout_release_backfill_accepts_direct_event(
+        self,
+        mock_release,
+    ):
+        mock_release.return_value = {
+            "success": True,
+            "dry_run": True,
+            "released_task_count": 0,
+            "released_tasks": [],
+            "candidates_by_session": {"ENC-SES-057": ["ENC-TSK-L06"]},
+        }
+
+        resp = coordination_lambda._handle_agent_session_checkout_release_backfill({
+            "dry_run": True,
+            "session_ids": ["ENC-SES-057"],
+        })
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_release.assert_called_once_with(
+            dry_run=True,
+            session_ids=["ENC-SES-057"],
+        )
+        body = json.loads(resp["body"])
+        self.assertTrue(body["success"])
+        self.assertEqual(body["candidates_by_session"], {"ENC-SES-057": ["ENC-TSK-L06"]})
+
+    @patch.object(coordination_lambda, "_handle_agent_session_checkout_release_backfill")
+    def test_lambda_handler_routes_checkout_release_backfill_direct_action(self, mock_route_handler):
+        mock_route_handler.return_value = coordination_lambda._response(
+            200,
+            {"success": True, "released_task_count": 1},
+        )
+        event = {
+            "action": "agent_session_checkout_release_backfill",
+            "session_ids": ["ENC-SES-057"],
+        }
+
+        resp = coordination_lambda.lambda_handler(event, None)
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_route_handler.assert_called_once_with(event)
+
+    @patch.object(coordination_lambda, "_authenticate", return_value=({"auth_mode": "internal-key"}, None))
+    @patch.object(coordination_lambda, "_handle_agent_session_checkout_release_backfill")
+    def test_lambda_handler_routes_checkout_release_backfill_http(
+        self,
+        mock_route_handler,
+        _mock_auth,
+    ):
+        mock_route_handler.return_value = coordination_lambda._response(
+            200,
+            {"success": True, "released_task_count": 1},
+        )
+        event = {
+            "requestContext": {"http": {"method": "POST"}},
+            "rawPath": "/api/v1/coordination/agents/sessions/checkout-release-backfill",
+            "body": "{}",
+        }
+
+        resp = coordination_lambda.lambda_handler(event, None)
+
+        self.assertEqual(resp["statusCode"], 200)
+        mock_route_handler.assert_called_once_with(event)
+
     @patch.object(coordination_lambda, "DISPATCH_TIMEOUT_CEILING_SECONDS", 1800)
     @patch.object(coordination_lambda, "HOST_V2_TIMEOUT_SECONDS", 9999)
     @patch.object(coordination_lambda, "_build_ssm_commands", return_value=["echo ok"])

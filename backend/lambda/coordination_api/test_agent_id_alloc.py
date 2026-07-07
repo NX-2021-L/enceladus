@@ -21,6 +21,30 @@ import config  # noqa: E402
 import agent_id_alloc as alloc  # noqa: E402
 
 
+def _create_simple_table(ddb, table, key):
+    ddb.create_table(
+        TableName=table,
+        AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
+        KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+
+
+def _create_tracker_table(ddb):
+    ddb.create_table(
+        TableName=config.TRACKER_TABLE,
+        AttributeDefinitions=[
+            {"AttributeName": "project_id", "AttributeType": "S"},
+            {"AttributeName": "record_id", "AttributeType": "S"},
+        ],
+        KeySchema=[
+            {"AttributeName": "project_id", "KeyType": "HASH"},
+            {"AttributeName": "record_id", "KeyType": "RANGE"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+
+
 class EncodeSeqTest(unittest.TestCase):
     def test_encoding_is_min_width_3_and_unbounded(self):
         self.assertEqual(alloc.encode_seq(1), "001")
@@ -56,12 +80,8 @@ class MintingTest(unittest.TestCase):
             (config.AGENT_SESSIONS_TABLE, "session_id"),
             (config.AGENT_TYPES_TABLE, "agent_type_id"),
         ):
-            self.ddb.create_table(
-                TableName=table,
-                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
-                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
+            _create_simple_table(self.ddb, table, key)
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -178,12 +198,8 @@ class AgentMutationTest(unittest.TestCase):
             (config.AGENT_SESSIONS_TABLE, "session_id"),
             (config.AGENT_TYPES_TABLE, "agent_type_id"),
         ):
-            self.ddb.create_table(
-                TableName=table,
-                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
-                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
+            _create_simple_table(self.ddb, table, key)
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -371,6 +387,7 @@ class IdleSweepTest(unittest.TestCase):
                 KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
                 BillingMode="PAY_PER_REQUEST",
             )
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -520,12 +537,8 @@ class CredentialLifecycleTest(unittest.TestCase):
             (config.AGENT_TYPES_TABLE, "agent_type_id"),
             (config.AGENT_CREDENTIALS_TABLE, "credential_id"),
         ):
-            self.ddb.create_table(
-                TableName=table,
-                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
-                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
+            _create_simple_table(self.ddb, table, key)
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -709,12 +722,8 @@ class SciTokenTest(unittest.TestCase):
             (config.AGENT_TYPES_TABLE, "agent_type_id"),
             (config.CHECKOUT_TOKENS_TABLE, "pk"),
         ):
-            self.ddb.create_table(
-                TableName=table,
-                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
-                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
+            _create_simple_table(self.ddb, table, key)
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -824,6 +833,7 @@ class UnclaimAndRevocationSweepTest(unittest.TestCase):
                 KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
                 BillingMode="PAY_PER_REQUEST",
             )
+        _create_tracker_table(self.ddb)
         patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -839,6 +849,44 @@ class UnclaimAndRevocationSweepTest(unittest.TestCase):
             TableName=config.CHECKOUT_TOKENS_TABLE, Key={"pk": {"S": token_id}}
         )
         return resp.get("Item")
+
+    def _put_checked_out_task(self, task_id, session_id):
+        self.ddb.put_item(
+            TableName=config.TRACKER_TABLE,
+            Item={
+                "project_id": {"S": "enceladus"},
+                "record_id": {"S": f"task#{task_id}"},
+                "item_id": {"S": task_id},
+                "record_type": {"S": "task"},
+                "status": {"S": "in-progress"},
+                "active_agent_session": {"BOOL": True},
+                "active_agent_session_id": {"S": session_id},
+                "active_agent_session_parent": {"BOOL": False},
+                "checkout_state": {"S": "checked_out"},
+                "history": {"L": []},
+            },
+        )
+
+    def _get_task(self, task_id):
+        resp = self.ddb.get_item(
+            TableName=config.TRACKER_TABLE,
+            Key={"project_id": {"S": "enceladus"}, "record_id": {"S": f"task#{task_id}"}},
+        )
+        return resp.get("Item")
+
+    def _put_retired_session(self, session_id):
+        self.ddb.put_item(
+            TableName=config.AGENT_SESSIONS_TABLE,
+            Item={
+                "session_id": {"S": session_id},
+                "agent_type_id": {"S": "ENC-AGT-001"},
+                "parent_session_id": {"S": "root"},
+                "runtime": {"S": "dead-test-session"},
+                "created_at": {"S": "2026-07-01T00:00:00Z"},
+                "claimed_at": {"S": "2026-07-01T00:00:01Z"},
+                "status": {"S": "retired"},
+            },
+        )
 
     # -- config defaults per the io design decision on ENC-ISS-441 -----------
     def test_defaults_are_two_hours_and_ten_minutes(self):
@@ -894,12 +942,59 @@ class UnclaimAndRevocationSweepTest(unittest.TestCase):
         self.assertTrue(item["revoked"]["BOOL"])
         self.assertEqual(item["revocation_reason"]["S"], "idle_ttl_exceeded")
 
+    def test_idle_sweep_releases_checked_out_task_in_same_pass(self):
+        minted = self._mint(status="allocated")
+        session = alloc.claim_session(minted["session_id"])
+        sci = alloc.mint_sci(session)
+        self._put_checked_out_task("ENC-TSK-IDLE", session["session_id"])
+
+        summary = alloc.sweep_idle_sessions(idle_threshold_seconds=3600, now=self._future)
+
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertEqual(summary["revoked_sci_count"], 1)
+        self.assertIn(sci["token_id"], summary["revoked_scis"])
+        self.assertEqual(summary["released_task_count"], 1)
+        self.assertIn("ENC-TSK-IDLE", summary["released_tasks"])
+        task = self._get_task("ENC-TSK-IDLE")
+        self.assertFalse(task["active_agent_session"]["BOOL"])
+        self.assertEqual(task["active_agent_session_id"]["S"], "")
+        self.assertEqual(task["checkout_state"]["S"], "checked_in")
+
     def test_unclaim_sweep_without_sci_reports_zero_revocations(self):
         self._mint(status="allocated")
         summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
         self.assertEqual(summary["retired_count"], 1)
         self.assertEqual(summary["revoked_sci_count"], 0)
         self.assertEqual(summary["revoked_scis"], [])
+
+    def test_unclaim_sweep_releases_checked_out_task(self):
+        minted = self._mint(status="allocated")
+        self._put_checked_out_task("ENC-TSK-UNCLAIM", minted["session_id"])
+
+        summary = alloc.sweep_unclaimed_sessions(unclaim_ttl_minutes=10, now=self._future)
+
+        self.assertEqual(summary["retired_count"], 1)
+        self.assertEqual(summary["released_task_count"], 1)
+        self.assertIn("ENC-TSK-UNCLAIM", summary["released_tasks"])
+        task = self._get_task("ENC-TSK-UNCLAIM")
+        self.assertFalse(task["active_agent_session"]["BOOL"])
+        self.assertEqual(task["active_agent_session_id"]["S"], "")
+        self.assertEqual(task["checkout_state"]["S"], "checked_in")
+
+    def test_backfill_releases_l06_from_already_retired_session(self):
+        self._put_retired_session("ENC-SES-057")
+        self._put_checked_out_task("ENC-TSK-L06", "ENC-SES-057")
+
+        summary = alloc.release_checkouts_for_retired_sessions()
+
+        self.assertEqual(summary["candidate_session_count"], 1)
+        self.assertEqual(summary["candidate_task_count"], 1)
+        self.assertEqual(summary["released_task_count"], 1)
+        self.assertEqual(summary["released_by_session"], {"ENC-SES-057": ["ENC-TSK-L06"]})
+        task = self._get_task("ENC-TSK-L06")
+        self.assertFalse(task["active_agent_session"]["BOOL"])
+        self.assertEqual(task["active_agent_session_id"]["S"], "")
+        self.assertEqual(task["checkout_state"]["S"], "checked_in")
 
     def test_unclaim_sweep_is_idempotent_on_rerun(self):
         self._mint(status="allocated")

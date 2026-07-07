@@ -3357,8 +3357,8 @@ def _code_mode_tool_catalog() -> list[Tool]:
                             "Coordination action identifier. Orchestration: capabilities.get, "
                             "request.get, dispatch_plan.generate, dispatch_plan.dry_run, "
                             "auth.cognito_session. Agent identity (ENC-TSK-I38): agent.register, "
-                            "agent.claim, agent.list, agent.retire, agent.type.list, "
-                            "agent.type.register."
+                            "agent.claim, agent.list, agent.retire, "
+                            "agent.checkout_release_backfill, agent.type.list, agent.type.register."
                         ),
                     },
                     "arguments": {
@@ -8768,6 +8768,19 @@ async def _agent_retire(args: dict) -> list[TextContent]:
     return _result_text(result)
 
 
+async def _agent_checkout_release_backfill(args: dict) -> list[TextContent]:
+    """Release task checkouts held by already-retired ENC-SES sessions."""
+    payload: Dict[str, Any] = {}
+    if args.get("dry_run") is not None:
+        payload["dry_run"] = bool(args["dry_run"])
+    if args.get("session_ids") is not None:
+        payload["session_ids"] = args["session_ids"]
+    result = _coordination_api_request(
+        "POST", "/agents/sessions/checkout-release-backfill", payload=payload
+    )
+    return _result_text(result)
+
+
 async def _agent_type_list(args: dict) -> list[TextContent]:
     """List entries in the ENC-AGT agent-type directory (agent.type.list)."""
     query: Dict[str, Any] = {}
@@ -9786,6 +9799,7 @@ _TOOL_HANDLERS = {
     "agent_claim": _agent_claim,
     "agent_list": _agent_list,
     "agent_retire": _agent_retire,
+    "agent_checkout_release_backfill": _agent_checkout_release_backfill,
     "agent_type_list": _agent_type_list,
     "agent_type_register": _agent_type_register,
     "governance_update": _governance_update,

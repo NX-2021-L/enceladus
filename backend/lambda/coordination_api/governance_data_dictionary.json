@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.4",
-  "updated_at": "2026-07-07T05:41:00Z",
-  "last_change_summary": "ENC-TSK-L84: opensearch_indexer.lambda CDC transport swapped from EventBridge Pipes (DynamoDB-stream source, confirmed account-wide non-functional per ENC-ISS-497) to a direct Lambda EventSourceMapping on the tracker + documents DynamoDB streams. Handler now accepts both the legacy SQS-wrapped shape and the native direct-stream shape. Legacy SQS trigger + Pipes disabled, not deleted.",
+  "version": "2026-07-07.5",
+  "updated_at": "2026-07-07T11:35:33Z",
+  "last_change_summary": "ENC-TSK-L89: FTR-122 retirement sweeps now atomically release task checkouts held by retiring sessions, add an account-wide retired-session checkout-release backfill action, and expose the action through the MCP coordination surface.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7106,7 +7106,7 @@
       "apigw_routes": "03-api.yaml (Condition: IsGamma, prod promotion io-gated per DOC-B716E8FB10B6): RouteEscalationsFeed, RouteEscalationsApprove, RouteEscalationsDeny -> CoordinationApiIntegration; RouteTrackerEscalationApply (POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply) -> TrackerMutationIntegration as the HTTP lane to the idempotent applier."
     },
     "coordination.agent_session_idle_sweep": {
-      "description": "ENC-TSK-I71 / ENC-FTR-117 AC#8, backported to v4/main by ENC-TSK-J91 (ENC-ISS-441 Ph1). Scheduled idle-sweep backstop that reaps abandoned agent sessions. The AgentSessionIdleSweepSchedule EventBridge rule (infrastructure/cloudformation/02-compute.yaml, rate(1 hour)) invokes the coordination_api Lambda with Input {\"action\":\"agent_session_idle_sweep\"}; lambda_handler dispatches to _handle_agent_session_idle_sweep, which calls agent_id_alloc.sweep_idle_sessions. Sessions left in a live status (allocated or claimed) whose idle reference (last_activity_at heartbeat when present per ENC-TSK-J71/J83, else claimed_at, else created_at) is older than AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS are flipped to 'retired' via the SAME append-only conditional UpdateItem used by agent.retire (#st = :allocated OR #st = :claimed -> retired). Third leg of FTR-117 AC#8 (append-only storage + explicit agent.retire + TTL idle-sweep backstop). Deliberately NOT DynamoDB native TTL: native TTL hard-deletes and would violate the append-only retire model from ENC-TSK-I38. Idempotent - already-retired sessions are excluded by the live-status scan filter, and a candidate concurrently retired between scan and update is skipped. Not an HTTP route (no auth/claims); invoked only by EventBridge. ENC-ISS-441 Ph4 (ENC-TSK-J94) tightens the default threshold to 7200s and adds SCI revocation + the 10-minute unclaim sweep. ENC-TSK-J94: the sweep now also revokes each retired session's SCI (revocation_reason=idle_ttl_exceeded) and the default threshold is 7200s.",
+      "description": "ENC-TSK-I71 / ENC-FTR-117 AC#8, backported to v4/main by ENC-TSK-J91 (ENC-ISS-441 Ph1). Scheduled idle-sweep backstop that reaps abandoned agent sessions. The AgentSessionIdleSweepSchedule EventBridge rule (infrastructure/cloudformation/02-compute.yaml, rate(1 hour)) invokes the coordination_api Lambda with Input {\"action\":\"agent_session_idle_sweep\"}; lambda_handler dispatches to _handle_agent_session_idle_sweep, which calls agent_id_alloc.sweep_idle_sessions. Sessions left in a live status (allocated or claimed) whose idle reference (last_activity_at heartbeat when present per ENC-TSK-J71/J83, else claimed_at, else created_at) is older than AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS are flipped to 'retired' via the SAME append-only conditional UpdateItem used by agent.retire (#st = :allocated OR #st = :claimed -> retired). Third leg of FTR-117 AC#8 (append-only storage + explicit agent.retire + TTL idle-sweep backstop). Deliberately NOT DynamoDB native TTL: native TTL hard-deletes and would violate the append-only retire model from ENC-TSK-I38. Idempotent - already-retired sessions are excluded by the live-status scan filter, and a candidate concurrently retired between scan and update is skipped. Not an HTTP route (no auth/claims); invoked only by EventBridge. ENC-ISS-441 Ph4 (ENC-TSK-J94) tightens the default threshold to 7200s and adds SCI revocation + the 10-minute unclaim sweep. ENC-TSK-J94: the sweep now also revokes each retired session's SCI (revocation_reason=idle_ttl_exceeded) and the default threshold is 7200s. ENC-TSK-L89: retirement now uses one DynamoDB transaction per session to retire the session, revoke any unrevoked SCI, and release all task checkouts held by that session (active_agent_session=false, active_agent_session_id='', checkout_state=checked_in) so a dead session cannot strand a task lock.",
       "fields": {
         "AGENT_SESSIONS_IDLE_SWEEP_ENABLED": {
           "type": "boolean",
@@ -7122,7 +7122,7 @@
         },
         "summary": {
           "type": "object",
-          "definition": "Return value (CloudWatch only - no HTTP envelope): {enabled, dry_run, idle_threshold_seconds, cutoff, scanned_live, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped}."
+          "definition": "Return value (CloudWatch only - no HTTP envelope): {enabled, dry_run, idle_threshold_seconds, cutoff, scanned_live, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped, revoked_sci_count, revoked_scis, released_task_count, released_tasks, released_by_session}."
         },
         "revoked_scis": {
           "type": "array",
@@ -7168,7 +7168,7 @@
       }
     },
     "coordination.agent_session_unclaim_sweep": {
-      "description": "ENC-ISS-441 / ENC-TSK-J94 (ENC-FTR-122): 10-minute unclaim TTL sweep - retirement lifecycle part 1 from the io design decision on ENC-ISS-441. The AgentSessionUnclaimSweepSchedule EventBridge rule (02-compute.yaml, rate(10 minutes)) invokes coordination_api with Input {\"action\":\"agent_session_unclaim_sweep\"}; lambda_handler dispatches to _handle_agent_session_unclaim_sweep -> agent_id_alloc.sweep_unclaimed_sessions. Sessions in status=allocated (registered via agent.register but never claimed) whose created_at is older than AGENT_SESSIONS_UNCLAIM_TTL_MINUTES are flipped to 'retired' via the same append-only conditional UpdateItem as agent.retire, and any bound SCI is revoked (revocation_reason=unclaim_ttl_exceeded; defense-in-depth - allocated sessions normally have no SCI since SCIs mint at claim). Reference timestamp is strictly created_at. Idempotent; dry_run-capable; master-flag guarded. Closes the ghost-registration gap (10 of 24 prod sessions were unclaimed, the ENC-ISS-441 evidence).",
+      "description": "ENC-ISS-441 / ENC-TSK-J94 (ENC-FTR-122): 10-minute unclaim TTL sweep - retirement lifecycle part 1 from the io design decision on ENC-ISS-441. The AgentSessionUnclaimSweepSchedule EventBridge rule (02-compute.yaml, rate(10 minutes)) invokes coordination_api with Input {\"action\":\"agent_session_unclaim_sweep\"}; lambda_handler dispatches to _handle_agent_session_unclaim_sweep -> agent_id_alloc.sweep_unclaimed_sessions. Sessions in status=allocated (registered via agent.register but never claimed) whose created_at is older than AGENT_SESSIONS_UNCLAIM_TTL_MINUTES are flipped to 'retired' via the same append-only conditional UpdateItem as agent.retire, and any bound SCI is revoked (revocation_reason=unclaim_ttl_exceeded; defense-in-depth - allocated sessions normally have no SCI since SCIs mint at claim). Reference timestamp is strictly created_at. Idempotent; dry_run-capable; master-flag guarded. Closes the ghost-registration gap (10 of 24 prod sessions were unclaimed, the ENC-ISS-441 evidence). ENC-TSK-L89: the same retirement transaction also releases all task checkouts held by the retiring session, clearing active_agent_session and active_agent_session_id and marking checkout_state=checked_in.",
       "fields": {
         "AGENT_SESSIONS_UNCLAIM_SWEEP_ENABLED": {
           "type": "boolean",
@@ -7184,7 +7184,24 @@
         },
         "summary": {
           "type": "object",
-          "definition": "Return value (CloudWatch only): {enabled, dry_run, unclaim_ttl_minutes, cutoff, scanned_allocated, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped, revoked_sci_count, revoked_scis}."
+          "definition": "Return value (CloudWatch only): {enabled, dry_run, unclaim_ttl_minutes, cutoff, scanned_allocated, candidate_count, candidate_ids, retired_count, retired, skipped_count, skipped, revoked_sci_count, revoked_scis, released_task_count, released_tasks, released_by_session}."
+        }
+      }
+    },
+    "coordination.agent_session_checkout_release_backfill": {
+      "description": "ENC-TSK-L89 / ENC-FTR-122: one-time and on-demand repair surface for stale task checkouts held by already-retired ENC-SES sessions. coordination_api exposes POST /api/v1/coordination/agents/sessions/checkout-release-backfill and direct Lambda Input {\"action\":\"agent_session_checkout_release_backfill\"}; the MCP code-mode surface exposes coordination(action=\"agent.checkout_release_backfill\"). The helper scans checked-out task records account-wide, filters to owners whose agent-session row is status=retired, and releases those task locks per retired session in an atomic DynamoDB transaction. This is status-neutral: it does NOT advance, close, or override task lifecycle status, and is explicitly separate from direct_state_override.",
+      "fields": {
+        "dry_run": {
+          "type": "boolean",
+          "definition": "When true, reports candidate retired-session checkout locks without mutating tasks or SCI tokens."
+        },
+        "session_ids": {
+          "type": "array",
+          "definition": "Optional list of ENC-SES ids to restrict the backfill scan. Omit for account-wide repair."
+        },
+        "summary": {
+          "type": "object",
+          "definition": "Response: {success, dry_run, candidate_session_count, candidate_task_count, candidates_by_session, released_session_count, released_task_count, released_tasks, released_by_session, session_results, skipped_live_count, skipped_live}."
         }
       }
     },
@@ -7233,6 +7250,15 @@
         "sci": {
           "type": "string",
           "definition": "Optional on checkout_task / advance_task_status / append_worklog (and honored on plan/tracker mutation paths). Session Claim ID issued by coordination agent.claim (ENC-ISS-441). Required by the backend for agent sessions claimed after SCI_ENFORCEMENT_EPOCH; strip-and-forwarded, never validated at the MCP layer."
+        }
+      }
+    },
+    "mcp_server.agent_checkout_release_backfill": {
+      "description": "ENC-TSK-L89: code-mode coordination action agent.checkout_release_backfill maps to the coordination_api retired-session checkout-release backfill route. Args: dry_run? and session_ids?. Returns the coordination.agent_session_checkout_release_backfill summary unchanged so an agent can evidence the one-time L06/orphan release without direct DynamoDB access.",
+      "fields": {
+        "action": {
+          "type": "string",
+          "definition": "coordination(action=\"agent.checkout_release_backfill\", arguments={dry_run?: boolean, session_ids?: string[]})"
         }
       }
     },
@@ -7675,8 +7701,13 @@
       "source": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0)"
     }
   },
-  "change_summary": "ENC-TSK-L06: new ID Service Lambda extraction (B63 Phase 2 AC-6) with IAM-isolated counter allocation, idempotency contract, HMAC provenance signing, and trust-score feedback loop.",
+  "change_summary": "ENC-TSK-L89: FTR-122 retirement sweeps now atomically release task checkouts held by retired sessions, add an account-wide retired-session checkout-release backfill action, and expose the action through the MCP coordination surface.",
   "change_log": [
+    {
+      "version": "2026-07-07.5",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L89 / FTR-122: agent-session retirement now atomically releases task checkouts held by the retiring session in the same DynamoDB transaction as session retire + SCI revocation for both the idle and unclaim sweeps. Added coordination.agent_session_checkout_release_backfill plus MCP coordination action agent.checkout_release_backfill for the one-time retired-session stale-lock repair, including the ENC-TSK-L06 / ENC-SES-057 class."
+    },
     {
       "version": "2026-07-07.3",
       "date": "2026-07-07",

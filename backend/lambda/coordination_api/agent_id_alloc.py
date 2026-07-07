@@ -50,6 +50,7 @@ from config import (
     AGENT_SESSIONS_UNCLAIM_TTL_MINUTES,
     AGENT_TYPES_TABLE,
     CHECKOUT_TOKENS_TABLE,
+    TRACKER_TABLE,
     logger,
 )
 from aws_clients import _get_ddb
@@ -79,6 +80,7 @@ __all__ = [
     "get_credential",
     "claim_session",
     "retire_session",
+    "retire_session_with_checkout_release",
     "SCI_PREFIX",
     "SCI_TTL_SECONDS",
     "mint_sci",
@@ -88,6 +90,7 @@ __all__ = [
     "revoke_credential",
     "sweep_idle_sessions",
     "sweep_unclaimed_sessions",
+    "release_checkouts_for_retired_sessions",
     "list_sessions",
     "list_agent_types",
     "list_credentials",
@@ -460,34 +463,199 @@ def claim_session(
     return updated
 
 
-def retire_session(session_id: str) -> Dict[str, Any]:
-    """Flip a session to retired from any live state (allocated or claimed → retired).
+_MAX_RETIREMENT_TRANSACTION_ITEMS = 100
 
-    Append-only: once retired a session cannot be un-retired. Returns the
-    updated session item.
 
-    Raises ValueError when the session is missing or already retired.
+def _task_display_id(task: Mapping[str, Any]) -> str:
+    item_id = str(task.get("item_id") or "").strip()
+    if item_id:
+        return item_id
+    record_id = str(task.get("record_id") or "").strip()
+    return record_id.split("#", 1)[-1] if "#" in record_id else record_id
+
+
+def _checked_out_tasks_for_session(session_id: str) -> List[Dict[str, Any]]:
+    """Return task records whose checkout is currently held by ``session_id``."""
+    if not session_id:
+        return []
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "FilterExpression": (
+            "active_agent_session_id = :sid AND begins_with(#rid, :task_pfx) "
+            "AND (#active = :true OR checkout_state = :checked_out)"
+        ),
+        "ExpressionAttributeNames": {
+            "#rid": "record_id",
+            "#active": "active_agent_session",
+        },
+        "ExpressionAttributeValues": {
+            ":sid": _serialize(session_id),
+            ":task_pfx": _serialize("task#"),
+            ":true": _serialize(True),
+            ":checked_out": _serialize("checked_out"),
+        },
+    }
+
+    tasks: List[Dict[str, Any]] = []
+    scan = ddb.scan(**scan_kwargs)
+    while True:
+        tasks.extend(_deserialize(raw) for raw in scan.get("Items", []))
+        last_key = scan.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan = ddb.scan(ExclusiveStartKey=last_key, **scan_kwargs)
+    return tasks
+
+
+def _sci_revoke_transact_item(
+    session: Mapping[str, Any], *, reason: str, now: str
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    token_id = str(session.get("sci_token_id") or "").strip()
+    if not token_id:
+        return None, None
+
+    ddb = _get_ddb()
+    raw = ddb.get_item(
+        TableName=CHECKOUT_TOKENS_TABLE,
+        Key={"pk": _serialize(token_id)},
+    ).get("Item")
+    if not raw:
+        return None, None
+    token = _deserialize(raw)
+    if bool(token.get("revoked")):
+        return None, None
+
+    return {
+        "Update": {
+            "TableName": CHECKOUT_TOKENS_TABLE,
+            "Key": {"pk": _serialize(token_id)},
+            "UpdateExpression": (
+                "SET revoked = :t, revoked_at = :now, revocation_reason = :reason"
+            ),
+            "ConditionExpression": (
+                "attribute_exists(pk) AND (attribute_not_exists(revoked) OR revoked = :f)"
+            ),
+            "ExpressionAttributeValues": {
+                ":t": _serialize(True),
+                ":f": _serialize(False),
+                ":now": _serialize(now),
+                ":reason": _serialize(reason),
+            },
+        }
+    }, token_id
+
+
+def _checkout_release_transact_items(
+    session_id: str, tasks: List[Mapping[str, Any]], *, reason: str, now: str
+) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    note = f"Checkout released because agent session {session_id} retired ({reason})"
+    history_entry = {"M": {
+        "timestamp": _serialize(now),
+        "status": _serialize("worklog"),
+        "description": _serialize(f"[RETIREMENT-RELEASE] {note}"),
+    }}
+    for task in tasks:
+        project_id = str(task.get("project_id") or "").strip()
+        record_id = str(task.get("record_id") or "").strip()
+        if not project_id or not record_id:
+            continue
+        items.append({
+            "Update": {
+                "TableName": TRACKER_TABLE,
+                "Key": {
+                    "project_id": _serialize(project_id),
+                    "record_id": _serialize(record_id),
+                },
+                "UpdateExpression": (
+                    "SET active_agent_session = :f, "
+                    "active_agent_session_id = :empty_s, "
+                    "active_agent_session_parent = :f, "
+                    "checkout_state = :checked_in, "
+                    "checked_in_by = :sid, checked_in_at = :now, "
+                    "updated_at = :now, last_update_note = :note, "
+                    "sync_version = if_not_exists(sync_version, :zero) + :one, "
+                    "history = list_append(if_not_exists(history, :empty_l), :hentry)"
+                ),
+                "ConditionExpression": (
+                    "attribute_exists(#rid) AND active_agent_session_id = :sid"
+                ),
+                "ExpressionAttributeNames": {"#rid": "record_id"},
+                "ExpressionAttributeValues": {
+                    ":f": _serialize(False),
+                    ":empty_s": _serialize(""),
+                    ":checked_in": _serialize("checked_in"),
+                    ":sid": _serialize(session_id),
+                    ":now": _serialize(now),
+                    ":note": _serialize(note),
+                    ":zero": {"N": "0"},
+                    ":one": {"N": "1"},
+                    ":empty_l": {"L": []},
+                    ":hentry": {"L": [history_entry]},
+                },
+            }
+        })
+    return items
+
+
+def retire_session_with_checkout_release(
+    session_id: str, *, reason: str = "explicit_retire"
+) -> Dict[str, Any]:
+    """Retire a live session and atomically release task checkouts it owns.
+
+    The transaction includes the append-only session retirement, SCI revocation
+    when an unrevoked SCI exists, and every task checkout release currently held
+    by the session. A failure leaves all three surfaces untouched.
     """
     if not session_id:
         raise ValueError("session_id is required")
 
+    session = get_session(session_id)
+    if session is None:
+        raise ValueError(f"Session {session_id!r} not found")
+    status = str(session.get("status") or "").strip()
+    if status == "retired":
+        raise ValueError(f"Session {session_id!r} is already retired")
+    if status not in {"allocated", "claimed"}:
+        raise ValueError(f"Session {session_id!r} cannot be retired from status={status!r}")
+
     ddb = _get_ddb()
-    try:
-        resp = ddb.update_item(
-            TableName=AGENT_SESSIONS_TABLE,
-            Key={"session_id": _serialize(session_id)},
-            UpdateExpression="SET #st = :retired",
-            ConditionExpression="#st = :allocated OR #st = :claimed",
-            ExpressionAttributeNames={"#st": "status"},
-            ExpressionAttributeValues={
+    now = _now_z()
+    tasks = _checked_out_tasks_for_session(session_id)
+    task_ids = [_task_display_id(task) for task in tasks]
+
+    transact_items: List[Dict[str, Any]] = [{
+        "Update": {
+            "TableName": AGENT_SESSIONS_TABLE,
+            "Key": {"session_id": _serialize(session_id)},
+            "UpdateExpression": "SET #st = :retired",
+            "ConditionExpression": "#st = :allocated OR #st = :claimed",
+            "ExpressionAttributeNames": {"#st": "status"},
+            "ExpressionAttributeValues": {
                 ":retired": _serialize("retired"),
                 ":allocated": _serialize("allocated"),
                 ":claimed": _serialize("claimed"),
             },
-            ReturnValues="ALL_NEW",
+        }
+    }]
+    sci_item, sci_token_id = _sci_revoke_transact_item(session, reason=reason, now=now)
+    if sci_item:
+        transact_items.append(sci_item)
+    transact_items.extend(_checkout_release_transact_items(session_id, tasks, reason=reason, now=now))
+    if len(transact_items) > _MAX_RETIREMENT_TRANSACTION_ITEMS:
+        raise ValueError(
+            f"Session {session_id!r} has too many checkout releases for one atomic "
+            f"transaction ({len(transact_items)} items)."
         )
+
+    try:
+        ddb.transact_write_items(TransactItems=transact_items)
     except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+        if exc.response.get("Error", {}).get("Code") in {
+            "ConditionalCheckFailedException",
+            "TransactionCanceledException",
+        }:
             existing = get_session(session_id)
             if existing is None:
                 raise ValueError(f"Session {session_id!r} not found") from exc
@@ -498,8 +666,39 @@ def retire_session(session_id: str) -> Dict[str, Any]:
             ) from exc
         raise
 
-    updated = _deserialize(resp.get("Attributes", {}))
+    updated = get_session(session_id) or {**session, "status": "retired"}
     logger.info("[INFO] Retired session %s", session_id)
+    if task_ids:
+        logger.info(
+            "[INFO] Released %d checkout(s) for retired session %s: %s",
+            len(task_ids), session_id, task_ids,
+        )
+    if sci_token_id:
+        logger.info(
+            "[INFO] Revoked SCI %s for session %s (reason=%s)",
+            sci_token_id, session_id, reason,
+        )
+    return {
+        "session": updated,
+        "released_task_count": len(task_ids),
+        "released_tasks": task_ids,
+        "released_task_records": [
+            {
+                "project_id": str(task.get("project_id") or ""),
+                "record_id": str(task.get("record_id") or ""),
+                "task_id": _task_display_id(task),
+            }
+            for task in tasks
+        ],
+        "sci_revoked": bool(sci_token_id),
+        "sci_token_id": sci_token_id or "",
+    }
+
+
+def retire_session(session_id: str) -> Dict[str, Any]:
+    """Flip a session to retired from any live state and release its checkouts."""
+    result = retire_session_with_checkout_release(session_id, reason="explicit_retire")
+    updated = result["session"]
     return updated
 
 
@@ -764,20 +963,25 @@ def sweep_idle_sessions(
     retired: List[str] = []
     skipped: List[Dict[str, str]] = []
     revoked_scis: List[str] = []
+    released_tasks: List[str] = []
+    released_by_session: Dict[str, List[str]] = {}
     if not dry_run:
         for sid in candidate_ids:
             try:
-                retire_session(sid)
+                result = retire_session_with_checkout_release(
+                    sid, reason="idle_ttl_exceeded"
+                )
                 retired.append(sid)
             except ValueError as exc:
                 # Concurrently retired/transitioned between scan and update — idempotent skip.
                 skipped.append({"session_id": sid, "reason": str(exc)})
                 continue
-            # ENC-ISS-441 / ENC-TSK-J94: a swept session's SCI must never mutate again.
-            # Revocation failure is non-fatal (logged; the next sweep re-revokes).
-            token = _revoke_sci_after_sweep(sid, reason="idle_ttl_exceeded")
-            if token:
-                revoked_scis.append(token)
+            if result.get("sci_revoked") and result.get("sci_token_id"):
+                revoked_scis.append(str(result["sci_token_id"]))
+            task_ids = [str(t) for t in result.get("released_tasks", [])]
+            if task_ids:
+                released_tasks.extend(task_ids)
+                released_by_session[sid] = task_ids
 
     summary: Dict[str, Any] = {
         "enabled": True,
@@ -793,6 +997,9 @@ def sweep_idle_sessions(
         "skipped": skipped,
         "revoked_sci_count": len(revoked_scis),
         "revoked_scis": revoked_scis,
+        "released_task_count": len(released_tasks),
+        "released_tasks": released_tasks,
+        "released_by_session": released_by_session,
     }
     logger.info("[INFO] Agent-session idle-sweep: %s", json.dumps(summary, default=str))
     return summary
@@ -885,18 +1092,25 @@ def sweep_unclaimed_sessions(
     retired: List[str] = []
     skipped: List[Dict[str, str]] = []
     revoked_scis: List[str] = []
+    released_tasks: List[str] = []
+    released_by_session: Dict[str, List[str]] = {}
     if not dry_run:
         for sid in candidate_ids:
             try:
-                retire_session(sid)
+                result = retire_session_with_checkout_release(
+                    sid, reason="unclaim_ttl_exceeded"
+                )
                 retired.append(sid)
             except ValueError as exc:
                 # Claimed or retired between scan and update — idempotent skip.
                 skipped.append({"session_id": sid, "reason": str(exc)})
                 continue
-            token = _revoke_sci_after_sweep(sid, reason="unclaim_ttl_exceeded")
-            if token:
-                revoked_scis.append(token)
+            if result.get("sci_revoked") and result.get("sci_token_id"):
+                revoked_scis.append(str(result["sci_token_id"]))
+            task_ids = [str(t) for t in result.get("released_tasks", [])]
+            if task_ids:
+                released_tasks.extend(task_ids)
+                released_by_session[sid] = task_ids
 
     summary: Dict[str, Any] = {
         "enabled": True,
@@ -912,8 +1126,161 @@ def sweep_unclaimed_sessions(
         "skipped": skipped,
         "revoked_sci_count": len(revoked_scis),
         "revoked_scis": revoked_scis,
+        "released_task_count": len(released_tasks),
+        "released_tasks": released_tasks,
+        "released_by_session": released_by_session,
     }
     logger.info("[INFO] Agent-session unclaim-sweep: %s", json.dumps(summary, default=str))
+    return summary
+
+
+def _checked_out_session_task_candidates() -> List[Dict[str, Any]]:
+    ddb = _get_ddb()
+    scan_kwargs: Dict[str, Any] = {
+        "TableName": TRACKER_TABLE,
+        "FilterExpression": (
+            "begins_with(#rid, :task_pfx) AND active_agent_session_id <> :empty_s "
+            "AND (#active = :true OR checkout_state = :checked_out)"
+        ),
+        "ExpressionAttributeNames": {
+            "#rid": "record_id",
+            "#active": "active_agent_session",
+        },
+        "ExpressionAttributeValues": {
+            ":task_pfx": _serialize("task#"),
+            ":empty_s": _serialize(""),
+            ":true": _serialize(True),
+            ":checked_out": _serialize("checked_out"),
+        },
+    }
+    tasks: List[Dict[str, Any]] = []
+    scan = ddb.scan(**scan_kwargs)
+    while True:
+        tasks.extend(_deserialize(raw) for raw in scan.get("Items", []))
+        last_key = scan.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan = ddb.scan(ExclusiveStartKey=last_key, **scan_kwargs)
+    return tasks
+
+
+def _release_retired_session_checkouts(
+    session_id: str, tasks: List[Mapping[str, Any]], *, reason: str
+) -> Dict[str, Any]:
+    session = get_session(session_id)
+    if session is None:
+        return {
+            "session_id": session_id,
+            "released_task_count": 0,
+            "released_tasks": [],
+            "skipped": True,
+            "reason": "session_not_found",
+        }
+    if session.get("status") != "retired":
+        return {
+            "session_id": session_id,
+            "released_task_count": 0,
+            "released_tasks": [],
+            "skipped": True,
+            "reason": f"session_status_{session.get('status')}",
+        }
+
+    now = _now_z()
+    transact_items: List[Dict[str, Any]] = []
+    sci_item, sci_token_id = _sci_revoke_transact_item(session, reason=reason, now=now)
+    if sci_item:
+        transact_items.append(sci_item)
+    transact_items.extend(_checkout_release_transact_items(session_id, tasks, reason=reason, now=now))
+    if not transact_items:
+        return {
+            "session_id": session_id,
+            "released_task_count": 0,
+            "released_tasks": [],
+            "sci_revoked": False,
+        }
+    if len(transact_items) > _MAX_RETIREMENT_TRANSACTION_ITEMS:
+        raise ValueError(
+            f"Retired session {session_id!r} has too many checkout releases for one "
+            f"atomic transaction ({len(transact_items)} items)."
+        )
+
+    _get_ddb().transact_write_items(TransactItems=transact_items)
+    task_ids = [_task_display_id(task) for task in tasks]
+    return {
+        "session_id": session_id,
+        "released_task_count": len(task_ids),
+        "released_tasks": task_ids,
+        "released_task_records": [
+            {
+                "project_id": str(task.get("project_id") or ""),
+                "record_id": str(task.get("record_id") or ""),
+                "task_id": _task_display_id(task),
+            }
+            for task in tasks
+        ],
+        "sci_revoked": bool(sci_token_id),
+        "sci_token_id": sci_token_id or "",
+    }
+
+
+def release_checkouts_for_retired_sessions(
+    *, dry_run: bool = False, session_ids: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """One-time backfill: release task checkouts held by already-retired sessions."""
+    requested = {str(sid).strip() for sid in (session_ids or []) if str(sid).strip()}
+    checked_out = _checked_out_session_task_candidates()
+    by_session: Dict[str, List[Dict[str, Any]]] = {}
+    skipped_live: List[Dict[str, str]] = []
+    for task in checked_out:
+        sid = str(task.get("active_agent_session_id") or "").strip()
+        if not sid or (requested and sid not in requested):
+            continue
+        session = get_session(sid)
+        if session and session.get("status") == "retired":
+            by_session.setdefault(sid, []).append(task)
+        else:
+            skipped_live.append({
+                "session_id": sid,
+                "task_id": _task_display_id(task),
+                "reason": "session_not_retired" if session else "session_not_found",
+            })
+
+    released_tasks: List[str] = []
+    released_by_session: Dict[str, List[str]] = {}
+    session_results: List[Dict[str, Any]] = []
+    if not dry_run:
+        for sid, tasks in sorted(by_session.items()):
+            result = _release_retired_session_checkouts(
+                sid, tasks, reason="retired_session_backfill"
+            )
+            session_results.append(result)
+            task_ids = [str(t) for t in result.get("released_tasks", [])]
+            if task_ids:
+                released_tasks.extend(task_ids)
+                released_by_session[sid] = task_ids
+
+    candidates_by_session = {
+        sid: [_task_display_id(task) for task in tasks]
+        for sid, tasks in sorted(by_session.items())
+    }
+    summary = {
+        "success": True,
+        "dry_run": dry_run,
+        "candidate_session_count": len(by_session),
+        "candidate_task_count": sum(len(tasks) for tasks in by_session.values()),
+        "candidates_by_session": candidates_by_session,
+        "released_session_count": len(released_by_session),
+        "released_task_count": len(released_tasks),
+        "released_tasks": released_tasks,
+        "released_by_session": released_by_session,
+        "session_results": session_results,
+        "skipped_live_count": len(skipped_live),
+        "skipped_live": skipped_live,
+    }
+    logger.info(
+        "[INFO] Retired-session checkout backfill: %s",
+        json.dumps(summary, default=str),
+    )
     return summary
 
 

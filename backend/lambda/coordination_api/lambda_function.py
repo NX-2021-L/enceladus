@@ -14971,27 +14971,51 @@ def _handle_agent_session_retire(
     if not session_id:
         return _error(400, "session_id is required", retryable=False)
     try:
-        item = _agent_id_alloc.retire_session(session_id)
+        result = _agent_id_alloc.retire_session_with_checkout_release(
+            session_id, reason="explicit_retire"
+        )
     except ValueError as exc:
         return _error(400, str(exc), retryable=False)
     except (BotoCoreError, ClientError) as exc:
         logger.exception("[ERROR] retire_session failed: %s", exc)
         return _error(500, "DynamoDB error during session retire")
-    # ENC-ISS-441 / ENC-TSK-J92: retirement revokes the session's SCI. The retire itself
-    # is already durable (append-only flip above); a revocation failure is surfaced but
-    # non-fatal — the ENC-TSK-J94 sweeps re-revoke as a backstop.
-    payload: Dict[str, Any] = {"session": item}
-    try:
-        revoked = _agent_id_alloc.revoke_sci_for_session(session_id, reason="explicit_retire")
-    except (ValueError, BotoCoreError, ClientError) as exc:
-        logger.exception("[ERROR] SCI revocation failed on retire of %s: %s", session_id, exc)
-        payload["sci_revoked"] = False
-        payload["sci_revocation_error"] = "SCI revocation failed — the idle/unclaim sweep will re-revoke"
-    else:
-        payload["sci_revoked"] = bool(revoked)
-        if revoked:
-            payload["sci_token_id"] = revoked.get("token_id") or revoked.get("pk")
+    payload: Dict[str, Any] = {
+        "session": result["session"],
+        "sci_revoked": bool(result.get("sci_revoked")),
+        "released_task_count": int(result.get("released_task_count") or 0),
+        "released_tasks": result.get("released_tasks", []),
+    }
+    if result.get("sci_token_id"):
+        payload["sci_token_id"] = result["sci_token_id"]
     return _response(200, payload)
+
+
+def _handle_agent_session_checkout_release_backfill(event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /api/v1/coordination/agents/sessions/checkout-release-backfill.
+
+    One-time operational repair for tasks whose checkout owner is an already-retired
+    ENC-SES session. It is status-neutral: only checkout ownership fields are released.
+    """
+    body = _json_body(event) or {
+        key: event[key] for key in ("dry_run", "session_ids") if key in event
+    }
+    raw_session_ids = body.get("session_ids")
+    session_ids = None
+    if raw_session_ids is not None:
+        if not isinstance(raw_session_ids, list):
+            return _error(400, "session_ids must be a list when supplied", retryable=False)
+        session_ids = [str(sid).strip() for sid in raw_session_ids if str(sid).strip()]
+    try:
+        summary = _agent_id_alloc.release_checkouts_for_retired_sessions(
+            dry_run=bool(body.get("dry_run", False)),
+            session_ids=session_ids,
+        )
+    except ValueError as exc:
+        return _error(400, str(exc), retryable=False)
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] checkout-release backfill failed: %s", exc)
+        return _error(500, "DynamoDB error during checkout-release backfill")
+    return _response(200, summary)
 
 
 def _handle_agent_type_list(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -16070,6 +16094,10 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         logger.info("[INFO] Scheduled agent-session unclaim-sweep invoked")
         return _handle_agent_session_unclaim_sweep(event)
 
+    if event.get("action") == "agent_session_checkout_release_backfill":
+        logger.info("[INFO] Agent-session checkout-release backfill invoked")
+        return _handle_agent_session_checkout_release_backfill(event)
+
     # --- ENC-TSK-K02 / FTR-084 Ph2: weekly intent-classifier training ---
     if event.get("action") == "intent_classifier_training":
         logger.info("[INFO] Scheduled intent-classifier training invoked")
@@ -16297,6 +16325,10 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # POST /api/v1/coordination/agents/sessions/claim
     if method == "POST" and path == "/api/v1/coordination/agents/sessions/claim":
         return _handle_agent_session_claim(event, claims or {})
+
+    # POST /api/v1/coordination/agents/sessions/checkout-release-backfill
+    if method == "POST" and path == "/api/v1/coordination/agents/sessions/checkout-release-backfill":
+        return _handle_agent_session_checkout_release_backfill(event)
 
     # GET /api/v1/coordination/agents/sessions/{id} (ENC-TSK-L35 session detail page)
     match_session_get = re.fullmatch(
