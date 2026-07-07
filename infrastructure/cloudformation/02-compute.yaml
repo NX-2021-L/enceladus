@@ -319,6 +319,23 @@ Resources:
           # ENC-ISS-441 / ENC-TSK-J92: SCI tokens share the checkout service's token table
           # (pk = token id, token_type=SCI). Env-suffixed so gamma writes the -gamma twin.
           CHECKOUT_TOKENS_TABLE: !Sub "enceladus-checkout-tokens${EnvironmentSuffix}"
+          # ENC-TSK-L89: embedded MCP server.py HTTP-loopbacks must target this
+          # stack's API Gateway host, not the hardcoded prod default. Without
+          # these, gamma agent.retire hits prod coordination_api while tracker
+          # checkout state lives in devops-project-tracker-gamma — retirement
+          # never releases gamma task checkouts.
+          ENCELADUS_COORDINATION_API_BASE: !If
+            - IsGamma
+            - "https://enceladus-gamma.jreese.net/api/v1/coordination"
+            - "https://jreese.net/api/v1/coordination"
+          ENCELADUS_TRACKER_API_BASE: !If
+            - IsGamma
+            - "https://enceladus-gamma.jreese.net/api/v1/tracker"
+            - "https://jreese.net/api/v1/tracker"
+          CHECKOUT_SERVICE_API_BASE: !If
+            - IsGamma
+            - "https://enceladus-gamma.jreese.net/api/v1/checkout"
+            - "https://jreese.net/api/v1/checkout"
           # ENC-TSK-F63 AC-1: AppConfig extension env vars (feature flag polling)
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]

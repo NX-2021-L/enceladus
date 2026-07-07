@@ -287,6 +287,46 @@ Resources:
       RouteKey: GET /api/v1/coordination/agents/types
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-L89 / ENC-FTR-122: agent session mutation routes were implemented in
+  # coordination_api (ENC-TSK-I38/J43) but only list GET routes were wired (L34).
+  # Gamma MCP embeds server.py inside CoordinationApiFunction and HTTP-loopbacks
+  # agent.retire / checkout-release-backfill — these routes must exist on the
+  # same gateway the function targets via ENCELADUS_COORDINATION_API_BASE.
+  RouteAgentSessionsRegister:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentSessionsClaim:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions/claim
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentSessionsCheckoutReleaseBackfill:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions/checkout-release-backfill
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentSessionGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/agents/sessions/{sessionId}
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteAgentSessionRetire:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/v1/coordination/agents/sessions/{sessionId}/retire
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   RouteComponentsGet:
     Type: AWS::ApiGatewayV2::Route
     Properties:
