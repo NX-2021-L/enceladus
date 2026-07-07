@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.10",
-  "updated_at": "2026-07-07T14:25:00Z",
-  "last_change_summary": "ENC-TSK-M08 / ENC-ISS-505 (SEV-1): relocated the escalation approver allowlist (ESCALATION_APPROVER_ALLOWLIST_BUCKET) off jreese-net -- that bucket is served publicly on the open web via CloudFront (multiple distributions), making the allowlist document publicly readable with no auth. Moved to enceladus-356364570033-us-west-2-an, a private bucket with full S3 Public Access Block and no CloudFront origin. Same key (security/escalation-approvers.md), same read-only IAM grant shape.",
+  "version": "2026-07-07.11",
+  "updated_at": "2026-07-07T15:18:41Z",
+  "last_change_summary": "ENC-TSK-L05 (B63 Ph2 H-BACKFILL AC2-6, DOC-157A790F9E8B): populated the v3 component-registry identity fields (component_address, component_repo_dir, component_address_class, component_class) and migrated required_transition_type to the v3 enum on all active enceladus components in tools/seed-component-registry.py; decomposed the former comp-enceladus-pwa into comp-enceladus-pwa-frontend/-pwa-cdn/-api-gateway (T2, 03-api.yaml already API-Gateway-only and CDN already in 07-ui-cdn.yaml, no file split); registered comp-enceladus-neo4j external dependency + infrastructure/external/neo4j-auradb.yaml manifest (T3); registered nine per-CFN-file umbrella components + narrowed comp-cloudformation-data/-app to their own files (T4a, MECE non-overlap); registered the comp-enceladus-mcp-server single MCP umbrella with ENC-FTR-094 known-debt (T1); added comp-umbrella-governance-documentation meta umbrella (AC-6 v3 rename target). Component schema itself was already v3 (shipped by ENC-TSK-L77); this bump records the registry-instance expansion. AC-5 (active no_code/data_only task migration) and the live rename/deprecation of legacy rows are io-Cognito operations tracked separately.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7788,6 +7788,11 @@
   },
   "change_summary": "ENC-TSK-L91: corpus_entropy_gdmp_remediation.lambda -- CEE_GDMP_HARD_DISABLED redefined to gate MUTATION only (candidate scan/report/breakdown still run while disarmed; ramp counter not advanced), new GDMP_RUN_BREAKDOWN_SINK audit artifact, and the fresh-GET/recompute optimistic-concurrency guard before PATCH.",
   "change_log": [
+    {
+      "version": "2026-07-07.11",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L05 (B63 Ph2 H-BACKFILL AC2-6): v3 component-registry instance backfill in tools/seed-component-registry.py — added the four v3 identity fields + migrated required_transition_type to the v3 enum on all active enceladus components; PWA decomposition (frontend/cdn/api-gateway) superseding comp-enceladus-pwa; comp-enceladus-neo4j external dependency + infrastructure/external/neo4j-auradb.yaml manifest; nine per-CFN-file umbrellas + narrowed comp-cloudformation-data/-app (MECE, DOC-157A790F9E8B I2-I5); comp-enceladus-mcp-server single MCP umbrella (ENC-FTR-094 debt); comp-umbrella-governance-documentation meta umbrella. Extended tools/verify_component_hardening_fields.py + tests with a v3 identity/MECE audit; updated tools/verify_component_required_transition_type.py to the v3 enum. Component schema was already v3 (ENC-TSK-L77); this is the instance-population + tooling bump. AC-5 task migration and live legacy-row rename/deprecation are io-Cognito follow-ups."
+    },
     {
       "version": "2026-07-07.6",
       "date": "2026-07-07",

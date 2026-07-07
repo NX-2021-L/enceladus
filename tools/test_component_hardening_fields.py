@@ -47,12 +47,13 @@ def _active_enceladus_components(seed_module):
 def test_all_active_enceladus_components_declare_all_five_hardening_fields():
     seed = _load_seed()
     components = _active_enceladus_components(seed)
-    assert len(components) == 10, (
-        "Expected 10 active enceladus-project components at time of writing "
-        "(comp-checkout-service, comp-lifecycle-service, comp-scoring-service, "
-        "comp-id-service, comp-coordination-api, comp-tracker-mutation, "
-        "comp-enceladus-mcp-server, comp-enceladus-pwa, comp-cloudformation-data, "
-        "comp-cloudformation-app). ENC-TSK-L06 added comp-id-service. "
+    assert len(components) == 23, (
+        "Expected 23 active enceladus-project components after ENC-TSK-L05 "
+        "AC2-6 (v3 hardening). ENC-TSK-L06 added comp-id-service; AC-2 split "
+        "the former single comp-enceladus-pwa into comp-enceladus-pwa-frontend, "
+        "comp-enceladus-pwa-cdn, and comp-enceladus-api-gateway; AC-3 added "
+        "comp-enceladus-neo4j; AC-4 added nine comp-enceladus-cfn-* umbrellas; "
+        "AC-6 added comp-umbrella-governance-documentation. "
         "If this fails because a new component was added, extend this test's "
         "expectations rather than deleting the assertion."
     )
@@ -134,5 +135,118 @@ def test_verify_script_passes_against_current_seed_manifest():
     verify = _load_module("verify_component_hardening_fields.py", "enceladus_verify_hardening_fields_under_test")
     components = verify._load_seed_components()
     failures, audited = verify._audit_seed(components)
-    assert audited == 10
+    assert audited == 23
     assert failures == []
+
+
+# ── ENC-TSK-L05 AC2-6: v3 identity-field tests ───────────────────────────────
+
+_V3_IDENTITY_FIELDS = (
+    "component_address",
+    "component_repo_dir",
+    "component_address_class",
+    "component_class",
+)
+
+_VALID_ADDRESS_CLASSES = {
+    "aws_arn",
+    "https_url",
+    "cloudflare_resource",
+    "neo4j_auradb",
+    "external_manifest",
+    "meta",
+}
+
+_VALID_COMPONENT_CLASSES = {"physical", "external", "meta"}
+
+_VALID_REQUIRED_TRANSITION_TYPES = {"code", "external_deploy", "documentation"}
+
+
+def test_all_active_enceladus_components_have_valid_v3_identity_fields():
+    """(a) Every active enceladus seed component declares the four v3 identity
+    fields as non-empty strings with valid enum values, and a v3
+    required_transition_type."""
+    seed = _load_seed()
+    components = _active_enceladus_components(seed)
+    assert components, "sanity: expected active enceladus components"
+    for comp in components:
+        cid = comp["component_id"]
+        for field in _V3_IDENTITY_FIELDS:
+            assert field in comp, f"{cid} is missing v3 field '{field}'"
+            assert isinstance(comp[field], str), f"{cid}.{field} must be a str"
+            assert comp[field].strip(), f"{cid}.{field} must be non-empty"
+        assert comp["component_address_class"] in _VALID_ADDRESS_CLASSES, (
+            f"{cid}.component_address_class={comp['component_address_class']!r} "
+            f"not in {sorted(_VALID_ADDRESS_CLASSES)}"
+        )
+        assert comp["component_class"] in _VALID_COMPONENT_CLASSES, (
+            f"{cid}.component_class={comp['component_class']!r} "
+            f"not in {sorted(_VALID_COMPONENT_CLASSES)}"
+        )
+
+
+def test_required_transition_type_is_v3_value_for_enceladus_components():
+    """(c) required_transition_type is always a v3 value for active enceladus
+    components (code / external_deploy / documentation)."""
+    seed = _load_seed()
+    for comp in _active_enceladus_components(seed):
+        rtt = comp.get("required_transition_type")
+        assert rtt in _VALID_REQUIRED_TRANSITION_TYPES, (
+            f"{comp['component_id']}.required_transition_type={rtt!r} "
+            f"is not a v3 value ({sorted(_VALID_REQUIRED_TRANSITION_TYPES)})"
+        )
+
+
+def test_component_address_is_unique_across_active_enceladus_components():
+    """(b) MECE — no two active enceladus components share a
+    component_address."""
+    seed = _load_seed()
+    addrs = [c["component_address"] for c in _active_enceladus_components(seed)]
+    dupes = sorted({a for a in addrs if addrs.count(a) > 1})
+    assert not dupes, f"duplicate component_address values: {dupes}"
+
+
+def test_component_repo_dir_is_an_antichain_for_non_meta_components():
+    """(b) MECE — component_repo_dir values (excluding meta: sentinels) form an
+    antichain: none is a path-prefix of another."""
+    seed = _load_seed()
+    dirs = [
+        (c["component_id"], c["component_repo_dir"])
+        for c in _active_enceladus_components(seed)
+        if not c["component_repo_dir"].startswith("meta:")
+    ]
+    for cid_a, dir_a in dirs:
+        for cid_b, dir_b in dirs:
+            if cid_a == cid_b or dir_a == dir_b:
+                continue
+            assert not (dir_a + "/").startswith(dir_b + "/"), (
+                f"{dir_a!r} ({cid_a}) is nested under {dir_b!r} ({cid_b}); "
+                "component_repo_dir values must form an antichain"
+            )
+
+
+def test_meta_repo_dir_sentinels_are_unique():
+    """(b) MECE — meta: repo-dir sentinels are exempt from the prefix check but
+    must still be unique."""
+    seed = _load_seed()
+    meta_dirs = [
+        c["component_repo_dir"]
+        for c in _active_enceladus_components(seed)
+        if c["component_repo_dir"].startswith("meta:")
+    ]
+    assert len(meta_dirs) == len(set(meta_dirs)), (
+        f"meta: component_repo_dir sentinels must be unique: {meta_dirs}"
+    )
+
+
+def test_verify_script_v3_identity_audit_passes_against_current_seed():
+    """The v3 identity audit in verify_component_hardening_fields.py should
+    pass (no failures) against the current KNOWN_COMPONENTS."""
+    verify = _load_module(
+        "verify_component_hardening_fields.py",
+        "enceladus_verify_hardening_fields_v3_under_test",
+    )
+    components = verify._load_seed_components()
+    failures, audited = verify._audit_v3_identity(components)
+    assert audited == 23
+    assert failures == [], f"v3 identity audit failures: {failures}"
