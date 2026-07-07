@@ -1,5 +1,6 @@
 import {
   createContext,
+  startTransition,
   useContext,
   useEffect,
   useRef,
@@ -20,6 +21,7 @@ import {
   snapshotToFeedState,
 } from './feedEventReducer'
 import { useFeedConnectionStore } from '../store/feedConnectionStore'
+import { useFeedBufferStore } from '../store/feedBufferStore'
 import type { FeedRealtimeEvent } from '../types/feedEvents'
 import { getCacheEngine, tier1FromFeedEvent } from '../sync/cacheEngine'
 
@@ -29,6 +31,13 @@ interface RealtimeFeedContextValue {
   isSnapshotError: boolean
   refetchSnapshot: () => void
   manualReconnect: () => void
+  /**
+   * ENC-TSK-K24 (B67 AC-11): merges every buffered "new activity" into the
+   * visible list in one call — the only way a live-pushed event reaches
+   * `events`. Returns the number merged so the caller (FeedPane's banner)
+   * can decide whether to scroll to top.
+   */
+  mergeBufferedEvents: () => number
   /**
    * ENC-TSK-L29: subscribe to full-body events for a single record over the
    * shared realtime connection. No-op (safe, returns a no-op unsubscribe) if
@@ -120,10 +129,12 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
               await engine.upsertTier1(tier1)
             }
           })()
-          setEvents((prev) => {
-            const merged = mergeFeedEvents(prev, [event.event])
-            queryClient.setQueryData(REALTIME_FEED_QUERY_KEY, merged)
-            return merged
+          // ENC-TSK-K24 (B67 AC-11): buffer, never auto-inject. AC-15:
+          // startTransition keeps this low-priority relative to anything
+          // the user is actively doing (typing, clicking) — a burst of
+          // live events must not compete with input responsiveness.
+          startTransition(() => {
+            useFeedBufferStore.getState().bufferEvent(event.event)
           })
           break
         case 'gap_too_large':
@@ -177,6 +188,18 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
       clientRef.current?.manualRetry()
       resetFailedReconnects()
       setPhase('connecting')
+    },
+    mergeBufferedEvents: () => {
+      const drained = useFeedBufferStore.getState().drainBuffer()
+      if (drained.length === 0) return 0
+      startTransition(() => {
+        setEvents((prev) => {
+          const merged = mergeFeedEvents(prev, drained)
+          queryClient.setQueryData(REALTIME_FEED_QUERY_KEY, merged)
+          return merged
+        })
+      })
+      return drained.length
     },
     watchRecord: (recordId, onRecordEvent) => {
       if (!clientRef.current) return () => {}
