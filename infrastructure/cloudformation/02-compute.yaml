@@ -408,6 +408,10 @@ Resources:
           # is ON. The flag itself lives in AppConfig (independently toggleable); it defaults OFF
           # so this var is inert until the flag is flipped — a zero-behavior-change deploy.
           LIFECYCLE_SERVICE_FUNCTION: !Sub "enceladus-lifecycle-service${EnvironmentSuffix}"
+          # ENC-TSK-L06 / B63 Ph2 AC-6: the ID Service to invoke when
+          # enable_id_service_extraction is ON. Inert until the (default-OFF) flag is
+          # flipped -- matches the LIFECYCLE_SERVICE_FUNCTION pattern above.
+          ID_SERVICE_FUNCTION: !Sub "enceladus-id-service${EnvironmentSuffix}"
           # ENC-TSK-H47: the lesson-scoring SNS topic tracker_mutation publishes to when
           # enable_scoring_service_extraction is ON. Inert until the (default-OFF) flag is flipped.
           LESSON_SCORING_TOPIC_ARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:enceladus-lesson-scoring${EnvironmentSuffix}"
