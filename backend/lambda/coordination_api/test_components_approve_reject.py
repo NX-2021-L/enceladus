@@ -142,11 +142,11 @@ class ComponentApproveTests(unittest.TestCase):
         }
         with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake):
             resp = coordination_lambda._handle_components_approve(
-                "comp-x", _event({"transition_type": "code_only"}), COGNITO_CLAIMS
+                "comp-x", _event({"transition_type": "documentation"}), COGNITO_CLAIMS
             )
         self.assertEqual(resp["statusCode"], 200)
         kwargs = fake.update_item.call_args.kwargs
-        self.assertEqual(kwargs["ExpressionAttributeValues"][":tt"]["S"], "code_only")
+        self.assertEqual(kwargs["ExpressionAttributeValues"][":tt"]["S"], "documentation")
         self.assertIn("transition_type = :tt", kwargs["UpdateExpression"])
 
     # ENC-FTR-076 v2 / ENC-TSK-F40: approve accepts alarm_arn (optional,
@@ -203,19 +203,19 @@ class ComponentApproveTests(unittest.TestCase):
             "Attributes": {
                 "component_id": {"S": "comp-x"},
                 "lifecycle_status": {"S": "approved"},
-                "required_transition_type": {"S": "lambda_deploy"},
+                "required_transition_type": {"S": "external_deploy"},
             }
         }
         with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake):
             resp = coordination_lambda._handle_components_approve(
                 "comp-x",
-                _event({"required_transition_type": "lambda_deploy"}),
+                _event({"required_transition_type": "external_deploy"}),
                 COGNITO_CLAIMS,
             )
         self.assertEqual(resp["statusCode"], 200)
         kwargs = fake.update_item.call_args.kwargs
         self.assertEqual(
-            kwargs["ExpressionAttributeValues"][":rtt"]["S"], "lambda_deploy"
+            kwargs["ExpressionAttributeValues"][":rtt"]["S"], "external_deploy"
         )
         self.assertIn("required_transition_type = :rtt", kwargs["UpdateExpression"])
 

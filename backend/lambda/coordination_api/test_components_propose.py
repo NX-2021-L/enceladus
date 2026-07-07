@@ -36,7 +36,11 @@ def _valid_body(**overrides):
         "project_id": "enceladus",
         "source_paths": ["backend/lambda/test_service/"],
         "description": "A test component proposal",
-        "requested_minimum_transition_type": "lambda_deploy",
+        "requested_minimum_transition_type": "external_deploy",
+        "component_address": "neo4j+s://test-proposal.databases.neo4j.io",
+        "component_repo_dir": "infrastructure/external/test-proposal.yaml",
+        "component_address_class": "neo4j_auradb",
+        "component_class": "external",
         "proposing_agent_session_id": "agent-session-abc123",
         "governance_hash": "hash-xyz",
     }
@@ -101,6 +105,7 @@ class ComponentProposeTests(unittest.TestCase):
     def test_duplicate_returns_409_on_transaction_cancelled(self):
         """AC1-9: TransactionCanceledException with ConditionalCheckFailed -> 409."""
         fake_ddb = mock.MagicMock()
+        fake_ddb.scan.return_value = {"Items": []}
 
         class _TCE(Exception):
             pass
@@ -119,6 +124,7 @@ class ComponentProposeTests(unittest.TestCase):
     def test_happy_path_201_and_transact_write(self):
         """AC1-8, AC1-9: happy path writes component + rel# pair via TransactWriteItems."""
         fake_ddb = mock.MagicMock()
+        fake_ddb.scan.return_value = {"Items": []}
 
         class _TCE(Exception):
             pass

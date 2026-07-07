@@ -35,7 +35,11 @@ def _valid_body(**overrides):
         "project_id": "enceladus",
         "source_paths": ["backend/lambda/foo/"],
         "description": "SNS publish wiring test",
-        "requested_minimum_transition_type": "lambda_deploy",
+        "requested_minimum_transition_type": "external_deploy",
+        "component_address": "neo4j+s://test-sns.databases.neo4j.io",
+        "component_repo_dir": "infrastructure/external/test-sns.yaml",
+        "component_address_class": "neo4j_auradb",
+        "component_class": "external",
         "proposing_agent_session_id": "agent-session-sns-1",
     }
     body.update(overrides)
@@ -72,6 +76,7 @@ class ComponentProposeSnsTests(unittest.TestCase):
     def _ddb_ok(self):
         fake = mock.MagicMock()
         fake.exceptions.TransactionCanceledException = _TCE
+        fake.scan.return_value = {"Items": []}
         fake.transact_write_items.return_value = {}
         return fake
 
@@ -97,7 +102,7 @@ class ComponentProposeSnsTests(unittest.TestCase):
         self.assertEqual(payload["component_id"], "comp-test-sns")
         self.assertEqual(payload["project_id"], "enceladus")
         self.assertEqual(payload["proposing_agent_session_id"], "agent-session-sns-1")
-        self.assertEqual(payload["requested_minimum_transition_type"], "lambda_deploy")
+        self.assertEqual(payload["requested_minimum_transition_type"], "external_deploy")
         self.assertIn("jreese.net/components", payload["pwa_deep_link"])
 
     def test_no_topic_arn_skips_publish_silently(self):
@@ -124,6 +129,7 @@ class ComponentProposeSnsTests(unittest.TestCase):
     def test_publish_skipped_when_ddb_transaction_fails(self):
         fake_ddb = mock.MagicMock()
         fake_ddb.exceptions.TransactionCanceledException = _TCE
+        fake_ddb.scan.return_value = {"Items": []}
         fake_ddb.transact_write_items.side_effect = _TCE()
         fake_ddb.transact_write_items.side_effect.response = {
             "CancellationReasons": [{"Code": "ConditionalCheckFailed"}, {"Code": "None"}, {"Code": "None"}]
