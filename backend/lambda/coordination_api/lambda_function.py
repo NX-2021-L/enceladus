@@ -1233,6 +1233,8 @@ def _error(status_code: int, message: str, **extra: Any) -> Dict[str, Any]:
             code = "NOT_FOUND"
         elif status_code == 409:
             code = "CONFLICT"
+        elif status_code == 422:
+            code = "INVALID_INPUT"
         elif status_code == 429:
             code = "RATE_LIMITED"
         elif status_code >= 500:
@@ -8737,8 +8739,35 @@ _COMPONENT_CATEGORIES = frozenset({
     "lambda", "frontend", "infrastructure", "library", "workflow", "external"
 })
 _COMPONENT_TRANSITION_TYPES = frozenset({
-    "github_pr_deploy", "lambda_deploy", "web_deploy", "code_only", "no_code"
+    "code", "external_deploy", "documentation"
 })
+_LEGACY_COMPONENT_TRANSITION_TYPE_MAP = {
+    "github_pr_deploy": "code",
+    "lambda_deploy": "code",
+    "web_deploy": "code",
+    "code_only": "code",
+    "data_only": "code",
+    # no_code was split by authorship in DOC-157A790F9E8B. New writes must use
+    # v3 values; read-time compatibility defaults governance-only rows to docs.
+    "no_code": "documentation",
+}
+_COMPONENT_ADDRESS_CLASSES = frozenset({
+    "aws_arn",
+    "https_url",
+    "cloudflare_resource",
+    "neo4j_auradb",
+    "external_manifest",
+    "meta",
+})
+_COMPONENT_CLASSES = frozenset({"physical", "external", "meta"})
+_COMPONENT_ADDRESS_CLASS_DEFAULT_TRANSITION_TYPE = {
+    "aws_arn": "code",
+    "https_url": "code",
+    "cloudflare_resource": "external_deploy",
+    "neo4j_auradb": "external_deploy",
+    "external_manifest": "external_deploy",
+    "meta": "documentation",
+}
 _COMPONENT_STATUSES = frozenset({"active", "deprecated", "archived"})
 # ENC-TSK-E68 (ENC-PLN-031 Phase 3): capability-declaration fields accepted on
 # components_create / components_update / components_propose. All optional
@@ -8757,11 +8786,9 @@ _COMPONENT_CAPABILITY_FIELDS = (
     "deploy_targets",
 )
 _COMPONENT_STRICTNESS_RANK = {
-    "github_pr_deploy": 0,
-    "lambda_deploy": 1,
-    "web_deploy": 1,
-    "code_only": 2,
-    "no_code": 3,
+    "code": 0,
+    "external_deploy": 1,
+    "documentation": 2,
 }
 
 
@@ -8799,6 +8826,276 @@ def _component_validation_error(
     if example_fix:
         details["example_fix"] = example_fix
     return _error(status_code, message, **details)
+
+
+def _normalize_component_transition_type(value: Any) -> str:
+    """Return the v3 component transition type for legacy read compatibility."""
+    raw = str(value or "").strip().lower()
+    if raw in _COMPONENT_TRANSITION_TYPES:
+        return raw
+    return _LEGACY_COMPONENT_TRANSITION_TYPE_MAP.get(raw, "")
+
+
+def _component_record_with_v3_compat(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose legacy component rows through the v3 enum without mutating DDB."""
+    out = dict(record)
+    for field in (
+        "transition_type",
+        "required_transition_type",
+        "requested_minimum_transition_type",
+    ):
+        raw = str(out.get(field) or "").strip().lower()
+        mapped = _normalize_component_transition_type(raw)
+        if raw and mapped and raw != mapped:
+            out[f"legacy_{field}"] = raw
+            out[field] = mapped
+    return out
+
+
+def _component_repo_dir_overlaps(left: str, right: str) -> bool:
+    lval = left.rstrip("/")
+    rval = right.rstrip("/")
+    return lval == rval or lval.startswith(rval + "/") or rval.startswith(lval + "/")
+
+
+def _scan_component_registry_claims() -> list[Dict[str, Any]]:
+    ddb = _get_ddb()
+    items: list[Dict[str, Any]] = []
+    kwargs: Dict[str, Any] = {"TableName": COMPONENTS_TABLE}
+    while True:
+        resp = ddb.scan(**kwargs)
+        items.extend([_ddb_to_py(i) for i in resp.get("Items", [])])
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return items
+
+
+def _validate_component_registry_claims(
+    *,
+    component_id: str,
+    component_address: str = "",
+    component_repo_dir: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Enforce I1 address injection plus I2/I3 source injection/non-overlap."""
+    for existing in _scan_component_registry_claims():
+        existing_id = str(existing.get("component_id") or "").strip()
+        if existing_id == component_id:
+            continue
+
+        existing_address = str(existing.get("component_address") or "").strip()
+        if component_address and existing_address and existing_address == component_address:
+            return _component_validation_error(
+                409,
+                (
+                    "component_address must be unique across the component registry "
+                    f"(conflicts with {existing_id})."
+                ),
+                field="component_address",
+                component_id=component_id,
+                expected_type="unique string",
+                example_fix={"component_address": f"meta:{component_id}"},
+            )
+
+        lifecycle_status = str(existing.get("lifecycle_status") or existing.get("status") or "").strip().lower()
+        if lifecycle_status == "archived":
+            continue
+        existing_repo_dir = str(existing.get("component_repo_dir") or "").strip()
+        if component_repo_dir and existing_repo_dir and _component_repo_dir_overlaps(existing_repo_dir, component_repo_dir):
+            return _component_validation_error(
+                409,
+                (
+                    "component_repo_dir must be unique and non-overlapping under "
+                    f"the repo prefix order (conflicts with {existing_id}: {existing_repo_dir})."
+                ),
+                field="component_repo_dir",
+                component_id=component_id,
+                expected_type="repo-relative non-overlapping path",
+                example_fix={"component_repo_dir": f"infrastructure/external/{component_id.removeprefix('comp-')}.yaml"},
+            )
+    return None
+
+
+def _validate_component_hardening_fields(
+    body: Dict[str, Any],
+    component_id: str,
+    *,
+    require_all: bool,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, str]]:
+    """Validate DOC-157A790F9E8B v3 hardening fields for create/propose/update."""
+    parsed: Dict[str, str] = {}
+    required_fields = (
+        "component_address",
+        "component_repo_dir",
+        "component_address_class",
+        "component_class",
+    )
+    for field in required_fields:
+        if require_all and not str(body.get(field) or "").strip():
+            return (
+                _component_validation_error(
+                    400,
+                    f"{field} is required by the v3 component registry schema.",
+                    field=field,
+                    component_id=component_id,
+                    expected_type="string" if field in {"component_address", "component_repo_dir"} else "enum",
+                    allowed_values=(
+                        sorted(_COMPONENT_ADDRESS_CLASSES)
+                        if field == "component_address_class"
+                        else sorted(_COMPONENT_CLASSES)
+                        if field == "component_class"
+                        else None
+                    ),
+                ),
+                parsed,
+            )
+        if field in body and (body.get(field) is None or not str(body.get(field) or "").strip()):
+            return (
+                _component_validation_error(
+                    400,
+                    f"{field} cannot be unset to null/empty.",
+                    field=field,
+                    component_id=component_id,
+                    expected_type="string" if field in {"component_address", "component_repo_dir"} else "enum",
+                ),
+                parsed,
+            )
+        if field in body and body.get(field) is not None:
+            parsed[field] = str(body.get(field) or "").strip()
+
+    address_class = parsed.get("component_address_class", "")
+    if address_class:
+        address_class = address_class.lower()
+        if address_class not in _COMPONENT_ADDRESS_CLASSES:
+            return (
+                _component_validation_error(
+                    400,
+                    f"Invalid component_address_class '{address_class}'. Allowed: {sorted(_COMPONENT_ADDRESS_CLASSES)}",
+                    field="component_address_class",
+                    component_id=component_id,
+                    expected_type="enum",
+                    allowed_values=sorted(_COMPONENT_ADDRESS_CLASSES),
+                ),
+                parsed,
+            )
+        parsed["component_address_class"] = address_class
+
+    component_class = parsed.get("component_class", "")
+    if component_class:
+        component_class = component_class.lower()
+        if component_class not in _COMPONENT_CLASSES:
+            return (
+                _component_validation_error(
+                    400,
+                    f"Invalid component_class '{component_class}'. Allowed: {sorted(_COMPONENT_CLASSES)}",
+                    field="component_class",
+                    component_id=component_id,
+                    expected_type="enum",
+                    allowed_values=sorted(_COMPONENT_CLASSES),
+                ),
+                parsed,
+            )
+        parsed["component_class"] = component_class
+
+    address = parsed.get("component_address", "")
+    repo_dir = parsed.get("component_repo_dir", "")
+    if repo_dir:
+        if repo_dir.startswith("/") or any(part == ".." for part in repo_dir.split("/")):
+            return (
+                _component_validation_error(
+                    400,
+                    "component_repo_dir must be a repository-relative path without '..' segments.",
+                    field="component_repo_dir",
+                    component_id=component_id,
+                    expected_type="repo-relative path",
+                ),
+                parsed,
+            )
+        parsed["component_repo_dir"] = repo_dir.rstrip("/") if not repo_dir.startswith("meta:") else repo_dir
+
+    if address_class and address:
+        if address_class == "aws_arn" and not address.startswith("arn:aws:"):
+            return (
+                _component_validation_error(422, "component_address_class=aws_arn requires component_address to start with arn:aws:", field="component_address", component_id=component_id),
+                parsed,
+            )
+        if address_class == "https_url" and not address.startswith("https://"):
+            return (
+                _component_validation_error(422, "component_address_class=https_url requires an https:// component_address.", field="component_address", component_id=component_id),
+                parsed,
+            )
+        if address_class == "neo4j_auradb" and not address.startswith("neo4j+s://"):
+            return (
+                _component_validation_error(422, "component_address_class=neo4j_auradb requires a neo4j+s:// component_address.", field="component_address", component_id=component_id),
+                parsed,
+            )
+        if address_class == "meta" and address != f"meta:{component_id}":
+            return (
+                _component_validation_error(422, "component_address_class=meta requires component_address=meta:{component_id}.", field="component_address", component_id=component_id, example_fix={"component_address": f"meta:{component_id}"}),
+                parsed,
+            )
+
+    if component_class or address_class:
+        if (component_class == "meta") != (address_class == "meta"):
+            return (
+                _component_validation_error(
+                    422,
+                    "component_class=meta and component_address_class=meta must be used together.",
+                    field="component_class",
+                    component_id=component_id,
+                    expected_type="compatible enum pair",
+                ),
+                parsed,
+            )
+        if component_class == "external" and address_class == "aws_arn":
+            return (
+                _component_validation_error(
+                    422,
+                    "component_class=external cannot use component_address_class=aws_arn.",
+                    field="component_address_class",
+                    component_id=component_id,
+                    expected_type="compatible enum pair",
+                ),
+                parsed,
+            )
+
+    if component_class == "meta" and repo_dir and repo_dir != f"meta:{component_id}":
+        return (
+            _component_validation_error(
+                422,
+                "component_class=meta requires component_repo_dir=meta:{component_id}.",
+                field="component_repo_dir",
+                component_id=component_id,
+                example_fix={"component_repo_dir": f"meta:{component_id}"},
+            ),
+            parsed,
+        )
+
+    required_type = str(body.get("required_transition_type") or body.get("requested_minimum_transition_type") or "").strip().lower()
+    if address_class == "aws_arn" and required_type == "external_deploy":
+        return (
+            _component_validation_error(
+                422,
+                "component_address_class=aws_arn must not combine with required_transition_type=external_deploy; AWS-owned resources transition via code.",
+                field="required_transition_type",
+                component_id=component_id,
+                expected_type="compatible enum pair",
+                allowed_values=sorted(_COMPONENT_TRANSITION_TYPES - {"external_deploy"}),
+            ),
+            parsed,
+        )
+
+    if address or repo_dir:
+        conflict = _validate_component_registry_claims(
+            component_id=component_id,
+            component_address=address,
+            component_repo_dir=parsed.get("component_repo_dir", repo_dir),
+        )
+        if conflict:
+            return conflict, parsed
+
+    return None, parsed
 
 # Checkout-assistant key — allows updating transition_type without Cognito session
 CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
@@ -8965,6 +9262,7 @@ def _handle_components_list(event: Dict[str, Any]) -> Dict[str, Any]:
                     break
                 kwargs["ExclusiveStartKey"] = last
 
+        items = [_component_record_with_v3_compat(item) for item in items]
         return _response(200, {"success": True, "components": items, "count": len(items)})
     except Exception as exc:
         logger.exception("components_list failed")
@@ -8987,7 +9285,7 @@ def _handle_components_get(component_id: str) -> Dict[str, Any]:
         ls = _ddb_to_py(item).get("lifecycle_status", "")
         if ls in _COMPONENT_LIFECYCLE_OPAQUE_STATUSES:
             return _error(404, f"Component '{component_id}' not found")
-        return _response(200, {"success": True, "component": _ddb_to_py(item)})
+        return _response(200, {"success": True, "component": _component_record_with_v3_compat(_ddb_to_py(item))})
     except Exception as exc:
         logger.exception("components_get failed")
         return _error(500, f"Failed to get component: {exc}")
@@ -8996,7 +9294,7 @@ def _handle_components_get(component_id: str) -> Dict[str, Any]:
 def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """POST /api/v1/coordination/components — create a new component.
 
-    transition_type defaults to github_pr_deploy for non-Cognito callers.
+    transition_type defaults to code for non-Cognito callers.
     """
     try:
         body = json.loads(event.get("body") or "{}")
@@ -9039,7 +9337,13 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
             allowed_values=sorted(_COMPONENT_CATEGORIES),
         )
 
-    # transition_type: Cognito/assistant can set any value; internal key defaults to github_pr_deploy
+    # Build component_id from provided slug or derive from name. The v3 identity
+    # fields use this for meta sentinels, so compute it before schema validation.
+    component_id = (body.get("component_id") or "").strip()
+    if not component_id:
+        component_id = _component_slug(component_name)
+
+    # transition_type: Cognito/assistant can set any v3 value; internal key defaults to code
     requested_type = (body.get("transition_type") or "").strip().lower()
     if requested_type and requested_type not in _COMPONENT_TRANSITION_TYPES:
         return _component_validation_error(
@@ -9056,19 +9360,20 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
             (
                 "Setting transition_type at create time requires Cognito authentication "
                 "(PWA session) or checkout-service-assistant key. "
-                "Internal API key callers receive the default 'github_pr_deploy'."
+                "Internal API key callers receive the default 'code'."
             ),
             field="transition_type",
             expected_type="enum",
             allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
             example_fix={
-                "transition_type": "github_pr_deploy",
+                "transition_type": "code",
                 "note": "Retry without transition_type, or use a Cognito session / checkout-service-assistant key to set a less strict component type.",
             },
         )
-    transition_type = requested_type or "github_pr_deploy"
+    transition_type = requested_type or "code"
 
-    # F50/AC-6 (Option A, strict — see ENC-TSK-F50 and DOC-240A67973B13):
+    # ENC-TSK-L77 / DOC-157A790F9E8B: required_transition_type is the v3
+    # component policy enum. New writes must use code|external_deploy|documentation.
     # required_transition_type is a first-class invariant field. Absent field
     # returns 400 with a descriptive error envelope. No auto-fill from
     # transition_type — the governance intent must be stated explicitly at
@@ -9082,21 +9387,20 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
             400,
             (
                 "required_transition_type is required and must be one of "
-                f"{sorted(_COMPONENT_TRANSITION_TYPES)} (ENC-TSK-F50 / ENC-ISS-270). "
+                f"{sorted(_COMPONENT_TRANSITION_TYPES)} (ENC-TSK-L77 / DOC-157A790F9E8B). "
                 "This field governs the minimum task strictness enforced by "
                 "checkout_service for tasks modifying this component. See "
-                "DOC-240A67973B13 for per-component selection rationale."
+                "DOC-157A790F9E8B for the v3 component policy rationale."
             ),
             field="required_transition_type",
             expected_type="enum",
             allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
             example_fix={
-                "required_transition_type": "github_pr_deploy",
+                "required_transition_type": "code",
                 "hint": (
-                    "For Lambda code use github_pr_deploy; for frontend/PWA use "
-                    "web_deploy; for CFN / governance docs / admin-managed "
-                    "externals use no_code. Match the existing transition_type "
-                    "unless you have a deliberate reason to diverge."
+                    "Use code for repo-produced components, external_deploy for "
+                    "third-party or admin-managed resources, and documentation "
+                    "for governed docstore/meta components."
                 ),
             },
         )
@@ -9113,11 +9417,6 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
         )
     required_transition_type = requested_required_type
 
-    # Build component_id from provided slug or derive from name
-    component_id = (body.get("component_id") or "").strip()
-    if not component_id:
-        component_id = _component_slug(component_name)
-
     status_val = (body.get("status") or "active").strip().lower()
     if status_val not in _COMPONENT_STATUSES:
         return _component_validation_error(
@@ -9127,6 +9426,14 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
             expected_type="enum",
             allowed_values=sorted(_COMPONENT_STATUSES),
         )
+
+    hardening_error, hardening_fields = _validate_component_hardening_fields(
+        body,
+        component_id,
+        require_all=True,
+    )
+    if hardening_error:
+        return hardening_error
 
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -9142,6 +9449,7 @@ def _handle_components_create(event: Dict[str, Any], claims: Dict[str, Any]) -> 
         "status": status_val,
         "created_at": now,
         "updated_at": now,
+        **hardening_fields,
     }
     if body.get("description"):
         item["description"] = str(body["description"]).strip()
@@ -9194,7 +9502,11 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
       project_id: str
       source_paths: list[str]
       description: str
-      requested_minimum_transition_type: str (must be in STRICTNESS_RANK)
+      requested_minimum_transition_type: str (v3 enum: code|external_deploy|documentation)
+      component_address: str
+      component_repo_dir: str
+      component_address_class: str
+      component_class: str
       proposing_agent_session_id: str (optional; falls back to auth claims sub / write_source provider)
     """
     if not ENABLE_COMPONENT_PROPOSAL:
@@ -9275,6 +9587,14 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
             field="proposing_agent_session_id", expected_type="string",
         )
 
+    hardening_error, hardening_fields = _validate_component_hardening_fields(
+        {**body, "required_transition_type": requested_type},
+        component_id,
+        require_all=True,
+    )
+    if hardening_error:
+        return hardening_error
+
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
     component_item: Dict[str, Any] = {
@@ -9296,6 +9616,7 @@ def _handle_components_propose(event: Dict[str, Any], claims: Dict[str, Any]) ->
         "created_at": now,
         "updated_at": now,
         "proposed_at": now,
+        **hardening_fields,
     }
 
     # ENC-TSK-E68 (ENC-PLN-031 Phase 3): capability declarations at proposal
@@ -12007,7 +12328,7 @@ def _handle_components_update(
                 allowed_values=sorted(_COMPONENT_TRANSITION_TYPES),
             )
 
-    # F50/AC-7 (ENC-TSK-F50 / ENC-ISS-270 / DOC-240A67973B13):
+    # ENC-TSK-L77 / DOC-157A790F9E8B:
     # required_transition_type can be updated to any valid enum value but
     # NEVER unset back to null/empty/absent. Once populated, the field
     # remains a first-class governance invariant that checkout_service reads
@@ -12063,11 +12384,40 @@ def _handle_components_update(
         # the clean enum, not whatever case/whitespace the caller sent.
         body["required_transition_type"] = new_required
 
+    hardening_patch_fields = {
+        "component_address",
+        "component_repo_dir",
+        "component_address_class",
+        "component_class",
+    }
+    if hardening_patch_fields & set(body.keys()):
+        if not (_is_cognito_session(claims) or _is_assistant_request(event)):
+            return _component_validation_error(
+                403,
+                (
+                    "Updating component identity fields requires Cognito "
+                    "authentication (PWA session) or checkout-service-assistant key."
+                ),
+                field="component_address",
+                component_id=component_id,
+                expected_type="governed identity field",
+            )
+        hardening_error, hardening_fields = _validate_component_hardening_fields(
+            body,
+            component_id,
+            require_all=False,
+        )
+        if hardening_error:
+            return hardening_error
+        body.update(hardening_fields)
+
     # Build update expression
     updatable_fields = {
         "component_name", "project_id", "category", "transition_type",
         # F50/AC-7: include required_transition_type so validated PATCHes persist.
         "required_transition_type",
+        "component_address", "component_repo_dir", "component_address_class",
+        "component_class", "required_transition_type_rationale",
         "description", "github_repo", "status", "assistant_reason",
     }
     # source_paths is a nested map — serialized via TypeSerializer, not as plain string
@@ -12168,7 +12518,7 @@ def _handle_components_update(
             ConditionExpression="attribute_exists(component_id)",
             ReturnValues="ALL_NEW",
         )
-        updated = _ddb_to_py(resp.get("Attributes", {}))
+        updated = _component_record_with_v3_compat(_ddb_to_py(resp.get("Attributes", {})))
         return _response(200, {"success": True, "component": updated})
     except ddb.exceptions.ConditionalCheckFailedException:
         return _error(404, f"Component '{component_id}' not found")

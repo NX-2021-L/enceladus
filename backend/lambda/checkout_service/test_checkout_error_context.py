@@ -29,7 +29,7 @@ class CheckoutServiceErrorContextTests(unittest.TestCase):
         self.assertEqual(details["example_fix"][0]["tool"], "tracker_set")
         self.assertEqual(details["example_fix"][-1]["tool"], "checkout_task")
 
-    @patch.object(checkout_service, "_get_required_transition_type", return_value="github_pr_deploy")
+    @patch.object(checkout_service, "_get_required_transition_type", return_value="code")
     @patch.object(checkout_service, "_get_task")
     def test_advance_missing_deploy_evidence_includes_full_schema(self, mock_get_task, _mock_required_type):
         mock_get_task.return_value = (
@@ -137,7 +137,7 @@ class CheckoutServiceErrorContextTests(unittest.TestCase):
 
     @patch.object(checkout_service, "_validate_commit", return_value=(True, ""))
     @patch.object(checkout_service, "_resolve_github_repo", return_value=("NX-2021-L", "enceladus"))
-    @patch.object(checkout_service, "_get_required_transition_type", return_value="github_pr_deploy")
+    @patch.object(checkout_service, "_get_required_transition_type", return_value="code")
     @patch.object(checkout_service, "_get_task")
     def test_cai_missing_includes_token_semantics(
         self, mock_get_task, _mock_required_type, _mock_resolve, _mock_validate,
@@ -179,7 +179,7 @@ class CheckoutServiceErrorContextTests(unittest.TestCase):
         self.assertEqual(prereq["arguments"]["record_id"], "ENC-TSK-840")
         self.assertEqual(prereq["arguments"]["target_status"], "coding-complete")
 
-    @patch.object(checkout_service, "_get_required_transition_type", return_value="github_pr_deploy")
+    @patch.object(checkout_service, "_get_required_transition_type", return_value="code")
     @patch.object(checkout_service, "_get_task")
     def test_cci_missing_includes_token_semantics(self, mock_get_task, _mock_required_type):
         """CCI gate error includes token_type, token_purpose, prerequisite_call."""

@@ -88,8 +88,8 @@ class ComponentMisconfiguredHelperTests(unittest.TestCase):
         def fake_get_item(**kwargs):
             cid = kwargs["Key"]["component_id"]["S"]
             mapping = {
-                "comp-checkout-service": "github_pr_deploy",
-                "comp-governance-docs": "no_code",
+                "comp-checkout-service": "code",
+                "comp-governance-docs": "documentation",
             }
             return _registry_item(component_id=cid, required_value=mapping[cid])
 
@@ -97,8 +97,8 @@ class ComponentMisconfiguredHelperTests(unittest.TestCase):
             result = checkout_service._get_required_transition_type(
                 ["comp-checkout-service", "comp-governance-docs"]
             )
-        # github_pr_deploy has rank 0 (strictest) and wins.
-        self.assertEqual(result, "github_pr_deploy")
+        # code is stricter than documentation and wins.
+        self.assertEqual(result, "code")
 
     def test_missing_component_id_fails_open_with_warning(self):
         """A stale task.components entry (no registry row) must not hard block."""
@@ -150,7 +150,7 @@ class CheckoutHandlerCOMPONENT_MISCONFIGUREDTests(unittest.TestCase):
             "jreese.net/components/comp-checkout-service", details["remediation_url"]
         )
         self.assertIn("required_transition_type", details["remediation_guidance"])
-        self.assertIn("DOC-240A67973B13", details["rule_citation"])
+        self.assertIn("DOC-157A790F9E8B", details["rule_citation"])
 
     @patch.object(checkout_service, "_get_task")
     def test_handle_advance_surfaces_component_misconfigured_envelope(self, mock_get_task):

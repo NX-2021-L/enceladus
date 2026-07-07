@@ -60,6 +60,7 @@ def _happy_path_ddb(return_attrs: dict | None = None):
     fake.update_item.return_value = {
         "Attributes": return_attrs or {"component_id": {"S": "comp-x"}}
     }
+    fake.scan.return_value = {"Items": []}
     return fake
 
 
@@ -70,6 +71,10 @@ class CreateRequiredTransitionTypeTests(unittest.TestCase):
         "component_name": "Test Component",
         "project_id": "enceladus",
         "category": "lambda",
+        "component_address": "arn:aws:lambda:us-west-2:123456789012:function:test-component",
+        "component_repo_dir": "backend/lambda/test_component",
+        "component_address_class": "aws_arn",
+        "component_class": "physical",
     }
 
     def test_create_without_required_transition_type_returns_400(self):
@@ -82,11 +87,11 @@ class CreateRequiredTransitionTypeTests(unittest.TestCase):
         body = json.loads(resp["body"])
         details = body["error_envelope"]["details"]
         self.assertEqual(details["field"], "required_transition_type")
-        self.assertIn("github_pr_deploy", details["allowed_values"])
-        self.assertIn("no_code", details["allowed_values"])
+        self.assertIn("code", details["allowed_values"])
+        self.assertIn("documentation", details["allowed_values"])
         # Self-correcting envelope must surface the governance rule.
         self.assertIn("required_transition_type", body["error_envelope"]["message"])
-        self.assertIn("ENC-TSK-F50", body["error_envelope"]["message"])
+        self.assertIn("DOC-157A790F9E8B", body["error_envelope"]["message"])
 
     def test_create_with_invalid_required_transition_type_enum_returns_400(self):
         """AC-8(b): invalid enum value returns 400."""
@@ -106,7 +111,7 @@ class CreateRequiredTransitionTypeTests(unittest.TestCase):
     def test_create_with_valid_required_transition_type_persists_field(self):
         """Create happy path stamps both transition_type and required_transition_type."""
         body = dict(self._base_body)
-        body["required_transition_type"] = "github_pr_deploy"
+        body["required_transition_type"] = "code"
         fake = _happy_path_ddb()
         with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake):
             resp = coordination_lambda._handle_components_create(
@@ -121,7 +126,7 @@ class CreateRequiredTransitionTypeTests(unittest.TestCase):
         # DynamoDB value is wrapped as {"S": "<value>"}; tolerant extraction.
         required_ddb = item_ddb.get("required_transition_type")
         self.assertIsNotNone(required_ddb, "required_transition_type not persisted")
-        self.assertEqual(required_ddb.get("S"), "github_pr_deploy")
+        self.assertEqual(required_ddb.get("S"), "code")
 
     def test_create_with_whitespace_only_required_transition_type_returns_400(self):
         """Whitespace-only value should be treated as absent."""
@@ -190,7 +195,7 @@ class PatchRequiredTransitionTypeTests(unittest.TestCase):
         """Direct agent writes with internal key are not permitted."""
         resp = coordination_lambda._handle_components_update(
             "comp-checkout-service",
-            _event({"required_transition_type": "no_code"}, method="PATCH"),
+            _event({"required_transition_type": "documentation"}, method="PATCH"),
             INTERNAL_CLAIMS,
         )
         self.assertEqual(resp["statusCode"], 403)
@@ -200,13 +205,13 @@ class PatchRequiredTransitionTypeTests(unittest.TestCase):
         fake = _happy_path_ddb(
             return_attrs={
                 "component_id": {"S": "comp-checkout-service"},
-                "required_transition_type": {"S": "no_code"},
+                "required_transition_type": {"S": "documentation"},
             }
         )
         with mock.patch.object(coordination_lambda, "_get_ddb", return_value=fake):
             resp = coordination_lambda._handle_components_update(
                 "comp-checkout-service",
-                _event({"required_transition_type": "no_code"}, method="PATCH"),
+                _event({"required_transition_type": "documentation"}, method="PATCH"),
                 COGNITO_CLAIMS,
             )
         self.assertEqual(resp["statusCode"], 200)

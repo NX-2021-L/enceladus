@@ -41,6 +41,7 @@ Environment variables:
     CORS_ORIGIN                   default: https://jreese.net
     TOKEN_TTL_DAYS                token expiry in days (default: 90)
     COMPONENTS_TABLE              component registry DynamoDB table (default: component-registry)
+    DOCUMENT_API_BASE             document API base URL (defaults from TRACKER_API_BASE sibling)
     CHECKOUT_ASSISTANT_KEY        secret key for checkout-service-assistant auto-remediation
     COORDINATION_API_BASE         base URL for coordination API (default: https://jreese.net/api/v1/coordination)
 
@@ -55,11 +56,12 @@ identically to before.
 ENC-FTR-041: Added component registry enforcement. Tasks must declare ``components``
 (list of component_ids from component-registry table) before agent-initiated advances.
 The checkout service enforces that task.transition_type is at least as strict as the
-most restrictive component's transition_type (STRICTNESS_RANK ordering). Added
-``lambda_deploy`` transition_type arc (same as web_deploy but uses lambda_deploy_evidence
-at deploy-success). Added checkout-service-assistant inline auto-remediation: after 3
-consecutive deploy-success failures, the assistant infers the intended deploy method and
-loosens component registration if safe to do so.
+most restrictive component's artifact policy. Legacy component policy values are
+normalized to the v3 enum code|external_deploy|documentation at read time. Added
+``lambda_deploy`` task transition_type arc (same as web_deploy but uses
+lambda_deploy_evidence at deploy-success). Added checkout-service-assistant inline
+auto-remediation: after 3 consecutive deploy-success failures, the assistant infers
+the intended component policy if safe to do so.
 
 ENC-ISS-106: Added subtask lifecycle gate. Parent tasks (those with non-empty
 subtask_ids) cannot advance from coding-complete onward unless all direct children
@@ -86,6 +88,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
+import urllib.parse
 import urllib.request
 import urllib.error
 from urllib.parse import unquote
@@ -156,6 +159,10 @@ CHECKOUT_ASSISTANT_KEY = os.environ.get("CHECKOUT_ASSISTANT_KEY", "")
 COORDINATION_API_BASE = os.environ.get(
     "COORDINATION_API_BASE", "https://jreese.net/api/v1/coordination"
 )
+DOCUMENT_API_BASE = os.environ.get(
+    "DOCUMENT_API_BASE",
+    TRACKER_API_BASE.rsplit("/", 1)[0] + "/documents",
+).rstrip("/")
 # ENC-ISS-441 / ENC-TSK-J93: agent-sessions store (ENC-FTR-117 / ENC-TSK-I37)
 # read by the SCI enforcement gate for the grandfather-epoch check and the
 # last_activity_at heartbeat touch (J83 pattern).
@@ -422,6 +429,8 @@ def _error(
             code = "NOT_FOUND"
         elif status == 409:
             code = "CONFLICT"
+        elif status == 422:
+            code = "INVALID_INPUT"
         elif status >= 500:
             code = "INTERNAL_ERROR"
         else:
@@ -556,6 +565,29 @@ def _tracker_request(
     except Exception as exc:
         logger.error("Tracker API request failed (%s %s): %s", method, path, exc)
         return 503, {"error": f"Tracker API unavailable: {exc}"}
+
+
+def _document_api_request(method: str, path: str) -> Tuple[int, dict]:
+    """Make a read-only request to document API using the coordination internal key."""
+    url = f"{DOCUMENT_API_BASE}{path}"
+    headers: dict = {
+        "Content-Type": "application/json",
+        "X-Coordination-Internal-Key": _PRIMARY_INTERNAL_KEY,
+    }
+    req = urllib.request.Request(url, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode())
+            return resp.status, body
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode())
+        except Exception:
+            body = {"error": str(exc)}
+        return exc.code, body
+    except Exception as exc:
+        logger.error("Document API request failed (%s %s): %s", method, path, exc)
+        return 503, {"error": f"Document API unavailable: {exc}"}
 
 
 def _get_task(project_id: str, task_id: str) -> Tuple[int, dict]:
@@ -1311,8 +1343,8 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
             return _component_misconfigured_response(exc)
         if required_type is not None:
             task_rank = STRICTNESS_RANK.get(pre_transition_type, 99)
-            required_rank = STRICTNESS_RANK.get(required_type, 0)
-            if task_rank > required_rank:
+            required_rank = _COMPONENT_POLICY_TASK_MAX_RANK.get(required_type, -1)
+            if not _task_transition_satisfies_component_requirement(pre_transition_type, required_type):
                 # Identify the specific conflicting component for the error message.
                 # F50/AC-3: read required_transition_type, not the legacy transition_type.
                 conflicting_component = None
@@ -1325,15 +1357,15 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
                         item = resp.get("Item")
                         if not item:
                             continue
-                        comp_type = (
+                        raw_comp_type = (
                             item.get("required_transition_type", {}).get("S") or ""
                         ).strip()
-                        if not comp_type:
+                        if not raw_comp_type:
                             # Should be unreachable after _get_required_transition_type
                             # succeeded for this component; skip defensively.
                             continue
-                        comp_rank = STRICTNESS_RANK.get(comp_type, 0)
-                        if comp_rank < task_rank:
+                        comp_type = _normalize_component_required_transition_type(raw_comp_type, item)
+                        if not _task_transition_satisfies_component_requirement(pre_transition_type, comp_type):
                             conflicting_component = cid
                             break
                     except Exception:
@@ -1341,10 +1373,11 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
                 return _validation_error(
                     400,
                     (
-                        f"Task transition_type '{pre_transition_type}' (rank {task_rank}) is less strict "
-                        f"than required '{required_type}' (rank {required_rank}) enforced by component "
-                        f"'{conflicting_component or pre_components[0]}'. Update task.transition_type "
-                        f"to at least '{required_type}' before checking out."
+                        f"Task transition_type '{pre_transition_type}' (rank {task_rank}) cannot satisfy "
+                        f"component required_transition_type '{required_type}' (max task rank {required_rank}) "
+                        f"enforced by component '{conflicting_component or pre_components[0]}'. Update "
+                        "task.transition_type to a lifecycle arc that produces the required artifact class "
+                        "before checking out."
                     ),
                     task_id=task_id,
                     target_status="in-progress",
@@ -1361,7 +1394,7 @@ def _handle_checkout(project_id: str, task_id: str, body: dict) -> dict:
                         "arguments": {
                             "record_id": task_id,
                             "field": "transition_type",
-                            "value": required_type,
+                            "value": _recommended_task_transition_for_component_policy(required_type),
                             "governance_hash": "<governance_hash>",
                         },
                     },
@@ -1663,6 +1696,45 @@ _NO_CODE_EVIDENCE_SCHEMA: Dict[str, Any] = {
     "example": {
         "no_code_evidence": "Updated governance metadata and confirmed the new rules are visible to agents.",
     },
+}
+
+_EXTERNAL_DEPLOY_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "comp_external_id": {
+            "type": "string",
+            "format": "non-empty string",
+            "description": "Stable identifier retrieved from the external system for the live component resource.",
+        },
+        "retrieval_steps": {
+            "type": "string",
+            "format": "non-empty string, minimum 20 characters",
+            "description": "Concrete steps a future operator can follow to re-retrieve comp_external_id.",
+        },
+    },
+    "example": {
+        "external_deploy_evidence": {
+            "comp_external_id": "90df28c1",
+            "retrieval_steps": "Open the external console, select the production resource, and copy its instance identifier from the details panel.",
+        }
+    },
+}
+
+_DOCUMENTATION_EVIDENCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "required_fields": {
+        "documentation_evidence": {
+            "type": "array[string]",
+            "format": "non-empty DOC-* identifiers",
+            "description": "At least one DOC id must resolve to an extant document and be novel or fresh at close.",
+        },
+    },
+    "close_gate": {
+        "fresh_window_minutes": 15,
+        "novel": "not referenced by another closed task's documentation_evidence",
+        "fresh": "document.updated_at is within 15 minutes of the close attempt",
+    },
+    "example": {"documentation_evidence": ["DOC-EDEFF7CD0BD5"]},
 }
 
 
@@ -2006,6 +2078,184 @@ def _validate_code_on_main_evidence(
     return True, ""
 
 
+def _validate_external_deploy_evidence(evidence: Any) -> Tuple[bool, str]:
+    if not evidence or not isinstance(evidence, dict):
+        return False, "transition_evidence.external_deploy_evidence must be a JSON object"
+    comp_external_id = evidence.get("comp_external_id")
+    if not isinstance(comp_external_id, str) or not comp_external_id.strip():
+        return False, "external_deploy_evidence.comp_external_id is required and must be a non-empty string"
+    retrieval_steps = evidence.get("retrieval_steps")
+    if not isinstance(retrieval_steps, str) or not retrieval_steps.strip():
+        return False, "external_deploy_evidence.retrieval_steps is required and must be a non-empty string"
+    if len(retrieval_steps.strip()) < 20:
+        return False, "external_deploy_evidence.retrieval_steps must be at least 20 characters"
+    evidence["comp_external_id"] = comp_external_id.strip()
+    evidence["retrieval_steps"] = retrieval_steps.strip()
+    return True, ""
+
+
+_DOC_ID_RE = re.compile(r"^DOC-[0-9A-F]+$")
+_DOCUMENTATION_FRESH_WINDOW_SECONDS = 15 * 60
+
+
+def _parse_documentation_evidence(raw: Any) -> Tuple[list[str], Optional[str]]:
+    if not isinstance(raw, list) or not raw:
+        return [], "documentation_evidence must be a non-empty array of DOC-* strings"
+    doc_ids: list[str] = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            return [], "documentation_evidence entries must be non-empty strings"
+        doc_id = value.strip().upper()
+        if not _DOC_ID_RE.match(doc_id):
+            return [], f"documentation_evidence entry '{value}' must match DOC-*"
+        doc_ids.append(doc_id)
+    return doc_ids, None
+
+
+def _parse_jsonish_evidence(raw: Any) -> Any:
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return stripped
+    return raw
+
+
+def _extract_documentation_evidence_doc_ids(record: Dict[str, Any]) -> set[str]:
+    doc_ids: set[str] = set()
+    candidates = [
+        record.get("documentation_evidence"),
+        record.get("transition_evidence"),
+    ]
+    for candidate in candidates:
+        parsed = _parse_jsonish_evidence(candidate)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("documentation_evidence")
+        if isinstance(parsed, list):
+            ids, err = _parse_documentation_evidence(parsed)
+            if not err:
+                doc_ids.update(ids)
+    return doc_ids
+
+
+def _closed_documentation_evidence_doc_ids(project_id: str, current_task_id: str) -> set[str]:
+    used: set[str] = set()
+    cursor = ""
+    for _ in range(25):
+        path = f"/{project_id}?type=task&status=closed&page_size=200"
+        if cursor:
+            path += "&next_cursor=" + urllib.parse.quote(cursor, safe="")
+        status, body = _tracker_request("GET", path)
+        if status != 200:
+            raise RuntimeError(body.get("error", f"tracker list failed with HTTP {status}"))
+        for record in body.get("records") or body.get("items") or []:
+            if not isinstance(record, dict):
+                continue
+            rid = str(record.get("id") or record.get("record_id") or record.get("task_id") or "").strip()
+            if rid == current_task_id:
+                continue
+            used.update(_extract_documentation_evidence_doc_ids(record))
+        cursor = str(body.get("next_cursor") or "").strip()
+        if not cursor:
+            break
+    return used
+
+
+def _get_document_metadata(doc_id: str) -> Tuple[int, Dict[str, Any]]:
+    status, body = _document_api_request("GET", f"/{doc_id}")
+    if status != 200:
+        return status, body
+    if isinstance(body.get("document"), dict):
+        return status, body["document"]
+    return status, body if isinstance(body, dict) else {}
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_documentation_close_evidence(
+    *,
+    project_id: str,
+    task_id: str,
+    evidence: Any,
+    now: Optional[datetime] = None,
+) -> Tuple[bool, str, Dict[str, Any], list[str]]:
+    doc_ids, err = _parse_documentation_evidence(evidence)
+    if err:
+        return False, err, {"required_evidence_schema": _DOCUMENTATION_EVIDENCE_SCHEMA}, []
+
+    now_dt = now or datetime.now(timezone.utc)
+    try:
+        previously_used = _closed_documentation_evidence_doc_ids(project_id, task_id)
+    except Exception as exc:
+        return (
+            False,
+            f"documentation_evidence novelty check failed: {exc}",
+            {"policy": "P7 novelty-or-freshness close gate"},
+            doc_ids,
+        )
+
+    details: Dict[str, Any] = {
+        "policy": "P7 documentation close gate: at least one DOC id must be novel or fresh.",
+        "fresh_window_minutes": 15,
+        "doc_results": [],
+    }
+    qualifying: list[str] = []
+    non_qualifying: list[str] = []
+    for doc_id in doc_ids:
+        status, doc = _get_document_metadata(doc_id)
+        if status != 200:
+            details["doc_results"].append({
+                "document_id": doc_id,
+                "qualifies": False,
+                "reason": f"document lookup returned HTTP {status}",
+            })
+            non_qualifying.append(doc_id)
+            continue
+        updated_at = _parse_iso_datetime(doc.get("updated_at"))
+        is_fresh = (
+            updated_at is not None
+            and 0 <= (now_dt - updated_at).total_seconds() <= _DOCUMENTATION_FRESH_WINDOW_SECONDS
+        )
+        is_novel = doc_id not in previously_used
+        qualifies = is_novel or is_fresh
+        if qualifies:
+            qualifying.append(doc_id)
+        else:
+            non_qualifying.append(doc_id)
+        details["doc_results"].append({
+            "document_id": doc_id,
+            "qualifies": qualifies,
+            "novel": is_novel,
+            "fresh": is_fresh,
+            "updated_at": doc.get("updated_at", ""),
+        })
+
+    details["qualifying_doc_ids"] = qualifying
+    details["non_qualifying_doc_ids"] = non_qualifying
+    if not qualifying:
+        return (
+            False,
+            "documentation_evidence close gate failed: at least one DOC id must be novel or fresh.",
+            details,
+            doc_ids,
+        )
+    return True, "", details, doc_ids
+
+
 # ---------------------------------------------------------------------------
 # ENC-FTR-059: Matrix-driven deploy-success validator registry
 # Maps transition_type → validator function for deploy-success evidence.
@@ -2096,13 +2346,79 @@ def _validate_subtask_gate(
 
 # ---------------------------------------------------------------------------
 # ENC-FTR-041: Component registry enforcement helpers
-# ENC-TSK-F50 / ENC-ISS-270: required_transition_type is now the governed
-# enforcement field (see DOC-240A67973B13). The legacy `transition_type`
-# field on component records is NOT read here post-F50 — it is retained on
-# the record for back-compat and deploy-style documentation only. A missing
-# or invalid `required_transition_type` is an invariant violation and fails
-# loud with COMPONENT_MISCONFIGURED; no silent default remains.
+# DOC-157A790F9E8B v3: component.required_transition_type is now the component
+# policy enum {code, external_deploy, documentation}. Task.transition_type keeps
+# the existing lifecycle-arc enum in transition_type_matrix.py. This layer maps
+# legacy component rows at read time, then checks whether the task arc can
+# produce the artifact class required by the component policy.
 # ---------------------------------------------------------------------------
+
+_COMPONENT_REQUIRED_TRANSITION_TYPES = frozenset({
+    "code",
+    "external_deploy",
+    "documentation",
+})
+_LEGACY_COMPONENT_REQUIRED_TRANSITION_TYPE_MAP = {
+    "github_pr_deploy": "code",
+    "lambda_deploy": "code",
+    "web_deploy": "code",
+    "code_only": "code",
+    "data_only": "code",
+}
+_COMPONENT_POLICY_TASK_MAX_RANK = {
+    # Code components may use any code-producing lifecycle arc, including
+    # code_only. no_code remains too weak because it produces no repo artifact.
+    "code": STRICTNESS_RANK["code_only"],
+    # External deploy components need a deploy-success stage for P6 evidence.
+    "external_deploy": STRICTNESS_RANK["web_deploy"],
+    # Documentation components are satisfied by any task arc, but receive the
+    # P7 doc-evidence close gate below when the policy is present.
+    "documentation": STRICTNESS_RANK["no_code"],
+}
+_COMPONENT_POLICY_ORDER = {
+    name: rank for name, rank in sorted(
+        _COMPONENT_POLICY_TASK_MAX_RANK.items(),
+        key=lambda item: (item[1], item[0]),
+    )
+}
+
+
+def _component_looks_documentation_authored(item: Dict[str, Any]) -> bool:
+    address_class = (item.get("component_address_class", {}).get("S") or "").strip().lower()
+    component_class = (item.get("component_class", {}).get("S") or "").strip().lower()
+    address = (item.get("component_address", {}).get("S") or "").strip().lower()
+    repo_dir = (item.get("component_repo_dir", {}).get("S") or "").strip().lower()
+    return (
+        address_class == "meta"
+        or component_class == "meta"
+        or address.startswith("meta:")
+        or repo_dir.startswith("meta:")
+    )
+
+
+def _normalize_component_required_transition_type(raw_value: str, item: Optional[Dict[str, Any]] = None) -> str:
+    value = (raw_value or "").strip().lower()
+    if value in _COMPONENT_REQUIRED_TRANSITION_TYPES:
+        return value
+    if value == "no_code":
+        return "documentation" if _component_looks_documentation_authored(item or {}) else "code"
+    return _LEGACY_COMPONENT_REQUIRED_TRANSITION_TYPE_MAP.get(value, "")
+
+
+def _task_transition_satisfies_component_requirement(
+    task_transition_type: str,
+    required_policy: str,
+) -> bool:
+    task_rank = STRICTNESS_RANK.get(task_transition_type, 99)
+    return task_rank <= _COMPONENT_POLICY_TASK_MAX_RANK.get(required_policy, -1)
+
+
+def _recommended_task_transition_for_component_policy(required_policy: str) -> str:
+    if required_policy == "external_deploy":
+        return "github_pr_deploy"
+    if required_policy == "documentation":
+        return "no_code"
+    return "code_only"
 
 
 class ComponentMisconfiguredError(Exception):
@@ -2130,7 +2446,8 @@ class ComponentMisconfiguredError(Exception):
         if reason == "invalid_value":
             message = (
                 f"Component '{component_id}' has invalid required_transition_type="
-                f"'{bad_value}'; this is an invariant violation. Contact platform admin."
+                f"'{bad_value}'; expected one of code|external_deploy|documentation "
+                "or a recognized legacy value for read-time migration. Contact platform admin."
             )
         else:
             message = (
@@ -2156,12 +2473,12 @@ def _component_misconfigured_response(exc: ComponentMisconfiguredError) -> dict:
         "remediation_guidance": (
             "Set the component's `required_transition_type` in the registry "
             "(DynamoDB enceladus-component-registry) via the PWA /components "
-            "edit surface or via a product-lead terminal update-item. Valid "
-            "values: github_pr_deploy|lambda_deploy|web_deploy|code_only|no_code. "
+            "edit surface or via a product-lead terminal update-item. V3 valid "
+            "values: code|external_deploy|documentation. "
             "After the field is populated, retry the checkout."
         ),
         "rule_citation": (
-            "ENC-TSK-F50 / ENC-ISS-270 / DOC-240A67973B13 (AC-1 review document)"
+            "ENC-TSK-L77 / DOC-157A790F9E8B (v3 component hardening)"
         ),
     }
     if exc.bad_value is not None:
@@ -2181,14 +2498,12 @@ _BLOCKED_LIFECYCLE_STATUSES = frozenset({"proposed", "deprecated"})
 
 
 def _get_required_transition_type(component_ids: list) -> Optional[str]:
-    """Return the most restrictive ``required_transition_type`` across the
-    given component IDs.
+    """Return the most restrictive v3 component policy across component IDs.
 
-    F50/AC-3: reads the governed ``required_transition_type`` field on each
-    component registry record — NOT the legacy ``transition_type`` field.
-    If a component record exists but has no ``required_transition_type``
-    attribute, or the value is not a valid member of STRICTNESS_RANK,
-    raises :class:`ComponentMisconfiguredError` (no silent default).
+    DOC-157A790F9E8B / ENC-TSK-L77: reads the governed
+    ``required_transition_type`` field and normalizes legacy component enum
+    values at read time. Missing values still fail loud; the compatibility path
+    is for existing populated rows, not silent fallback.
 
     Missing components (component_id absent from the registry entirely)
     continue to fail-open with a WARNING log, preserving the ENC-FTR-041
@@ -2214,24 +2529,25 @@ def _get_required_transition_type(component_ids: list) -> Optional[str]:
                 )
                 continue
             required_attr = item.get("required_transition_type") or {}
-            comp_type = (required_attr.get("S") or "").strip()
-            if not comp_type:
+            raw_comp_type = (required_attr.get("S") or "").strip()
+            if not raw_comp_type:
                 logger.error(
                     "[F50/AC-3] Component '%s' is missing required_transition_type "
-                    "in the registry (see DOC-240A67973B13 for governance contract)",
+                    "in the registry (see DOC-157A790F9E8B for governance contract)",
                     cid,
                 )
                 raise ComponentMisconfiguredError(cid, reason="missing")
-            if comp_type not in STRICTNESS_RANK:
+            comp_type = _normalize_component_required_transition_type(raw_comp_type, item)
+            if comp_type not in _COMPONENT_REQUIRED_TRANSITION_TYPES:
                 logger.error(
                     "[F50/AC-3] Component '%s' has invalid required_transition_type='%s' "
-                    "(not in STRICTNESS_RANK)",
-                    cid, comp_type,
+                    "(not in v3 enum and not a recognized legacy value)",
+                    cid, raw_comp_type,
                 )
                 raise ComponentMisconfiguredError(
-                    cid, reason="invalid_value", bad_value=comp_type
+                    cid, reason="invalid_value", bad_value=raw_comp_type
                 )
-            rank = STRICTNESS_RANK[comp_type]
+            rank = _COMPONENT_POLICY_TASK_MAX_RANK[comp_type]
             if rank < min_rank:
                 min_rank = rank
                 required = comp_type
@@ -2240,6 +2556,37 @@ def _get_required_transition_type(component_ids: list) -> Optional[str]:
         except Exception as exc:
             logger.error("[FTR-041] Failed to fetch component '%s': %s", cid, exc)
     return required
+
+
+def _get_component_required_transition_types(component_ids: list) -> set[str]:
+    """Return all normalized v3 component policies present on the task."""
+    policies: set[str] = set()
+    if not component_ids:
+        return policies
+    for cid in component_ids:
+        try:
+            resp = _ddb.get_item(
+                TableName=COMPONENTS_TABLE,
+                Key={"component_id": {"S": str(cid)}},
+            )
+            item = resp.get("Item")
+            if not item:
+                continue
+            required_attr = item.get("required_transition_type") or {}
+            raw_comp_type = (required_attr.get("S") or "").strip()
+            if not raw_comp_type:
+                raise ComponentMisconfiguredError(cid, reason="missing")
+            comp_type = _normalize_component_required_transition_type(raw_comp_type, item)
+            if comp_type not in _COMPONENT_REQUIRED_TRANSITION_TYPES:
+                raise ComponentMisconfiguredError(
+                    cid, reason="invalid_value", bad_value=raw_comp_type
+                )
+            policies.add(comp_type)
+        except ComponentMisconfiguredError:
+            raise
+        except Exception as exc:
+            logger.error("[FTR-041] Failed to fetch component '%s': %s", cid, exc)
+    return policies
 
 
 def _get_components_lifecycle(component_ids: list) -> Dict[str, Dict[str, str]]:
@@ -2280,17 +2627,22 @@ def _get_components_lifecycle(component_ids: list) -> Dict[str, Dict[str, str]]:
 
 
 def _get_component_transition_type(component_id: str) -> str:
-    """Fetch current transition_type for a component from registry. Defaults to github_pr_deploy."""
+    """Fetch the current v3 component policy for assistant compatibility."""
     try:
         resp = _ddb.get_item(
             TableName=COMPONENTS_TABLE,
             Key={"component_id": {"S": str(component_id)}},
         )
         item = resp.get("Item") or {}
-        return item.get("transition_type", {}).get("S", "github_pr_deploy")
+        raw = (
+            item.get("required_transition_type", {}).get("S")
+            or item.get("transition_type", {}).get("S")
+            or "code"
+        )
+        return _normalize_component_required_transition_type(raw, item) or "code"
     except Exception as exc:
         logger.error("[ASSISTANT] Failed to fetch component '%s': %s", component_id, exc)
-        return "github_pr_deploy"
+        return "code"
 
 
 def _update_component_transition_type_via_api(
@@ -2300,6 +2652,7 @@ def _update_component_transition_type_via_api(
     url = f"{COORDINATION_API_BASE.rstrip('/')}/components/{component_id}"
     payload = json.dumps({
         "transition_type": new_type,
+        "required_transition_type": new_type,
         "assistant_reason": reason,
     }).encode()
     req = urllib.request.Request(
@@ -2374,19 +2727,14 @@ def _invoke_assistant(
         )
         return
 
-    inferred_type = (
-        "github_pr_deploy" if has_gha else
-        "web_deploy" if has_web else
-        "lambda_deploy" if has_lambda else
-        None
-    )
+    inferred_type = "code" if (has_gha or has_web or has_lambda) else None
     if not inferred_type:
         return
 
     for cid in components:
         current = _get_component_transition_type(cid)
-        current_rank = STRICTNESS_RANK.get(current, 0)
-        inferred_rank = STRICTNESS_RANK.get(inferred_type, 0)
+        current_rank = _COMPONENT_POLICY_TASK_MAX_RANK.get(current, 0)
+        inferred_rank = _COMPONENT_POLICY_TASK_MAX_RANK.get(inferred_type, 0)
         if inferred_rank >= current_rank:
             logger.info(
                 "[ASSISTANT] NOT loosening component '%s' (inferred=%s rank=%d >= current=%s rank=%d)",
@@ -2522,6 +2870,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
     # Human operators via the PWA UI (user_initiated=true) bypass this check to allow
     # closing legacy tasks that pre-date the component registry.
     components = task.get("components") or []
+    component_required_policies: set[str] = set()
     is_user_initiated = bool(body.get("user_initiated", False))
     if not components and not is_user_initiated:
         return _validation_error(
@@ -2614,16 +2963,18 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
         except ComponentMisconfiguredError as exc:
             return _component_misconfigured_response(exc)
         if required_type is not None:
+            component_required_policies = {required_type}
             task_rank = STRICTNESS_RANK.get(transition_type, 99)
-            required_rank = STRICTNESS_RANK.get(required_type, 0)
-            if task_rank > required_rank:
+            required_rank = _COMPONENT_POLICY_TASK_MAX_RANK.get(required_type, -1)
+            if not _task_transition_satisfies_component_requirement(transition_type, required_type):
                 return _validation_error(
                     400,
                     (
-                        f"Task transition_type '{transition_type}' (rank {task_rank}) is less strict "
-                        f"than required '{required_type}' (rank {required_rank}) enforced by the "
-                        f"component registry (ENC-FTR-041). Update task.transition_type to at least "
-                        f"'{required_type}', or fix the component registration."
+                        f"Task transition_type '{transition_type}' (rank {task_rank}) cannot satisfy "
+                        f"component required_transition_type '{required_type}' (max task rank {required_rank}) "
+                        "enforced by the component registry (ENC-FTR-041). Update task.transition_type "
+                        "to a lifecycle arc that produces the required artifact class, or fix the "
+                        "component registration."
                     ),
                     task_id=task_id,
                     current_status=current_status,
@@ -2638,7 +2989,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                             "arguments": {
                                 "record_id": task_id,
                                 "field": "transition_type",
-                                "value": required_type,
+                                "value": _recommended_task_transition_for_component_policy(required_type),
                                 "governance_hash": "<governance_hash>",
                             },
                         },
@@ -2646,7 +2997,7 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                             task_id,
                             target_status,
                             provider or session_id or "<provider>",
-                            required_type,
+                            _recommended_task_transition_for_component_policy(required_type),
                         ),
                     ],
                 )
@@ -2939,6 +3290,40 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                     required_fields=[ev_label],
                 )
         transition_evidence[ev_key] = evidence_obj
+        if components:
+            try:
+                component_required_policies = (
+                    _get_component_required_transition_types(components)
+                    or component_required_policies
+                )
+            except ComponentMisconfiguredError as exc:
+                return _component_misconfigured_response(exc)
+        if "external_deploy" in component_required_policies:
+            external_evidence = (
+                transition_evidence.get("external_deploy_evidence")
+                or body.get("external_deploy_evidence")
+            )
+            valid, reason = _validate_external_deploy_evidence(external_evidence)
+            if not valid:
+                return _error(
+                    422,
+                    f"external_deploy_evidence validation failed: {reason}",
+                    code="INVALID_INPUT",
+                    retryable=False,
+                    details={
+                        "task_id": task_id,
+                        "current_status": current_status,
+                        "target_status": target_status,
+                        "transition_type": transition_type,
+                        "component_required_transition_types": sorted(component_required_policies),
+                        "required_fields": [
+                            "transition_evidence.external_deploy_evidence.comp_external_id",
+                            "transition_evidence.external_deploy_evidence.retrieval_steps",
+                        ],
+                        "required_evidence_schema": _EXTERNAL_DEPLOY_EVIDENCE_SCHEMA,
+                    },
+                )
+            transition_evidence["external_deploy_evidence"] = external_evidence
         logger.info(
             "deploy-success gate passed for %s (type=%s, matrix_version=%d)",
             task_id, transition_type, MATRIX_VERSION,
@@ -3014,6 +3399,43 @@ def _handle_advance(project_id: str, task_id: str, body: dict) -> dict:
                 "closed gate passed for %s (type=%s, matrix_version=%d)",
                 task_id, transition_type, MATRIX_VERSION,
             )
+
+        if components:
+            try:
+                component_required_policies = (
+                    _get_component_required_transition_types(components)
+                    or component_required_policies
+                )
+            except ComponentMisconfiguredError as exc:
+                return _component_misconfigured_response(exc)
+        if "documentation" in component_required_policies:
+            documentation_evidence = (
+                transition_evidence.get("documentation_evidence")
+                or body.get("documentation_evidence")
+            )
+            valid, reason, details, doc_ids = _validate_documentation_close_evidence(
+                project_id=project_id,
+                task_id=task_id,
+                evidence=documentation_evidence,
+            )
+            if not valid:
+                return _error(
+                    422,
+                    reason,
+                    code="INVALID_INPUT",
+                    retryable=False,
+                    details={
+                        "task_id": task_id,
+                        "current_status": current_status,
+                        "target_status": target_status,
+                        "transition_type": transition_type,
+                        "component_required_transition_types": sorted(component_required_policies),
+                        "required_fields": ["transition_evidence.documentation_evidence"],
+                        "required_evidence_schema": _DOCUMENTATION_EVIDENCE_SCHEMA,
+                        **details,
+                    },
+                )
+            transition_evidence["documentation_evidence"] = doc_ids
 
         # ENC-FTR-048: Gate task closure on structured acceptance criteria evidence.
         # Only applies when the task has structured AC (object form with evidence_acceptance).

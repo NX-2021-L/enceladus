@@ -5404,6 +5404,18 @@ def _handle_update_field(
             me = transition_evidence["merge_evidence"]
             # ENC-ISS-097: merge_evidence may be a dict (checkout service) or a string (direct PATCH)
             extra_vals[":merge_ev"] = {"S": json.dumps(me, separators=(",", ":")) if isinstance(me, dict) else str(me).strip()}
+        if transition_evidence.get("external_deploy_evidence"):
+            extra_sets.append("external_deploy_evidence = :external_deploy_ev")
+            ede = transition_evidence["external_deploy_evidence"]
+            extra_vals[":external_deploy_ev"] = {
+                "S": json.dumps(ede, separators=(",", ":")) if isinstance(ede, dict) else str(ede).strip()
+            }
+        if transition_evidence.get("documentation_evidence"):
+            extra_sets.append("documentation_evidence = :documentation_ev")
+            docs = transition_evidence["documentation_evidence"]
+            extra_vals[":documentation_ev"] = {
+                "S": json.dumps(docs, separators=(",", ":")) if isinstance(docs, list) else str(docs).strip()
+            }
 
     update_expr = (
         "SET #fld = :val, updated_at = :now, last_update_note = :note, "
