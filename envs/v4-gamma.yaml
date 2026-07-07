@@ -5,6 +5,8 @@
 env_name: v4-gamma
 architecture: arm64
 runtime: python3.12
+# Gen2 _deploy.yml (ENC-TSK-M03) calls update-function-configuration to arm64/py3.12
+# before publishing artifacts — covers OOB Lambdas not yet in CFN.
 
 stack_name: enceladus-v4-gamma
 deploy_role_arn: arn:aws:iam::356364570033:role/GitHubActions-V4Gamma-DeployRole
