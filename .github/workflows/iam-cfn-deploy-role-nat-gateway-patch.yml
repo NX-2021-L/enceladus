@@ -1,7 +1,11 @@
 name: IAM CFN Deploy Role — NAT Gateway Patch
 
 # ENC-TSK-L43 Option A: attach a managed policy with NAT + route-table grants.
-# The shared CFN deploy role is at inline-policy capacity (LimitExceeded on PutRolePolicy).
+# Durable fix: OpenSearchNatGatewayPolicy in 04-github-roles.yaml (deploy via
+# cloudformation-github-roles-stack-deploy.yml). This one-off dispatch applies
+# the grant live ahead of the next github-roles stack deploy. The backend deploy
+# role lacks iam:CreatePolicy — if this workflow fails AccessDenied, apply with
+# product-lead/admin credentials or dispatch github-roles stack deploy instead.
 # io-gated: environment v3-prod (required reviewer).
 
 on:
