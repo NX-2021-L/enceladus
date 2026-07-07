@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.12",
-  "updated_at": "2026-07-07T14:54:26Z",
-  "last_change_summary": "ENC-TSK-L87: graph_query_api.lambda _query_neighbors no longer requires neighbor.project_id = start's project_id -- MENTIONS (and other) edges are legitimately cross-project and the filter silently hid every such edge from every 'neighbors' consumer. No new fields/entities; behavioral bugfix only.",
+  "version": "2026-07-07.13",
+  "updated_at": "2026-07-07T15:18:41Z",
+  "last_change_summary": "ENC-TSK-L05 (B63 Ph2 H-BACKFILL AC2-6, DOC-157A790F9E8B): populated the v3 component-registry identity fields (component_address, component_repo_dir, component_address_class, component_class) and migrated required_transition_type to the v3 enum on all active enceladus components in tools/seed-component-registry.py; decomposed comp-enceladus-pwa into comp-enceladus-pwa-frontend/-pwa-cdn/-api-gateway (T2, no file split -- 03-api.yaml already API-Gateway-only, CDN already in 07-ui-cdn.yaml); registered comp-enceladus-neo4j + infrastructure/external/neo4j-auradb.yaml (T3); nine per-CFN-file umbrellas + narrowed comp-cloudformation-data/-app (T4a MECE); comp-enceladus-mcp-server single MCP umbrella (ENC-FTR-094 debt, T1); comp-umbrella-governance-documentation meta umbrella (AC-6). Schema was already v3 (ENC-TSK-L77); this records the registry-instance expansion. AC-5 task migration + live legacy-row rename/deprecation are io-Cognito follow-ups.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7788,6 +7788,11 @@
   },
   "change_summary": "ENC-TSK-L87: mentions_drift_audit false-positive fixes -- gamma comparison target, project_id threading, and cross-project neighbor visibility.",
   "change_log": [
+    {
+      "version": "2026-07-07.13",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L05 (B63 Ph2 H-BACKFILL AC2-6): v3 component-registry instance backfill in tools/seed-component-registry.py -- four v3 identity fields + v3 required_transition_type on all active enceladus components; PWA decomposition (frontend/cdn/api-gateway) superseding comp-enceladus-pwa; comp-enceladus-neo4j external dep + infrastructure/external/neo4j-auradb.yaml; nine per-CFN-file umbrellas + narrowed comp-cloudformation-data/-app (MECE, I2-I5); comp-enceladus-mcp-server single MCP umbrella (ENC-FTR-094 debt); comp-umbrella-governance-documentation meta umbrella. Extended verify_component_hardening_fields.py + tests (v3 identity/MECE audit); verify_component_required_transition_type.py guard enum -> v3. Schema already v3 (ENC-TSK-L77). AC-5 + live legacy-row rename/deprecation are io-Cognito follow-ups."
+    },
     {
       "version": "2026-07-07.12",
       "date": "2026-07-07",

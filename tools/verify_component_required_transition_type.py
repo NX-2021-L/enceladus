@@ -42,12 +42,17 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+# ENC-TSK-L05 AC2-6 / ENC-TSK-L77 (DOC-157A790F9E8B): the v3 component policy
+# enum replaced the legacy {github_pr_deploy, lambda_deploy, web_deploy,
+# code_only, no_code} set. The live coordination-API create/update handlers now
+# accept ONLY these three values, so the pre-merge guard enforces the same set.
+# Legacy→v3 read-time mapping (github_pr_deploy/lambda_deploy/web_deploy/
+# code_only→code, no_code→documentation) lives in the coordination API's
+# _LEGACY_COMPONENT_TRANSITION_TYPE_MAP.
 _VALID_ENUM_VALUES = {
-    "github_pr_deploy",
-    "lambda_deploy",
-    "web_deploy",
-    "code_only",
-    "no_code",
+    "code",
+    "external_deploy",
+    "documentation",
 }
 
 

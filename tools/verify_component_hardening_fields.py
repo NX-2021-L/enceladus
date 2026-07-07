@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""ENC-TSK-L05 AC-1 — Pre-merge / spot-check guard for the five ENC-TSK-E68
-hardening fields on active enceladus-project component_registry entries.
+"""ENC-TSK-L05 AC-1/AC2-6 — Pre-merge / spot-check guard for the five
+ENC-TSK-E68 hardening fields AND the four v3 identity fields on active
+enceladus-project component_registry entries.
 
-Runs two checks:
+Runs three checks:
 
-1. **Seed manifest audit (always on).** Imports ``KNOWN_COMPONENTS`` from
+1. **Seed manifest E68 audit (always on).** Imports ``KNOWN_COMPONENTS`` from
    ``tools/seed-component-registry.py`` and fails with exit code 1 if any
    active enceladus-project entry is missing one of the five fields:
    required_iam_actions, required_env_secrets, required_apigw_routes,
@@ -16,10 +17,22 @@ Runs two checks:
    skipped, mirroring the AC-1 scope (this task never touched other
    projects' entries).
 
-2. **Live registry probe (optional, gated by env var).** When
+2. **Seed manifest v3 identity audit (always on, ENC-TSK-L05 AC2-6).** For
+   every active enceladus-project component, asserts the four v3 identity
+   fields — component_address, component_repo_dir, component_address_class,
+   component_class — are present and non-empty strings, that
+   component_address_class is one of the allowed address classes, that
+   component_class is one of {physical, external, meta}, and that
+   required_transition_type is one of the v3 values {code, external_deploy,
+   documentation}. Also runs a MECE check: no two active components may share
+   the same component_address, and no component_repo_dir may be a path prefix
+   of another (``meta:`` sentinels are exempt from the prefix check but must
+   still be unique). Fails with exit code 1 listing offenders.
+
+3. **Live registry probe (optional, gated by env var).** When
    ``VERIFY_COMPONENT_HARDENING_LIVE=1`` is set, also queries the
    coordination API and fails if any live enceladus-project component row is
-   missing one of the five fields.
+   missing one of the five E68 fields.
 
 Usage:
     # Default — audits the seed manifest only (used in PR CI / spot checks).
@@ -58,6 +71,29 @@ _HARDENING_FIELDS = (
     "required_cfn_resources",
     "required_lambda_env_vars",
 )
+
+# ENC-TSK-L05 AC2-6 — v3 component identity fields.
+_V3_IDENTITY_FIELDS = (
+    "component_address",
+    "component_repo_dir",
+    "component_address_class",
+    "component_class",
+)
+
+_VALID_ADDRESS_CLASSES = {
+    "aws_arn",
+    "https_url",
+    "cloudflare_resource",
+    "neo4j_auradb",
+    "external_manifest",
+    "meta",
+}
+
+_VALID_COMPONENT_CLASSES = {"physical", "external", "meta"}
+
+_VALID_REQUIRED_TRANSITION_TYPES = {"code", "external_deploy", "documentation"}
+
+_META_SENTINEL_PREFIX = "meta:"
 
 
 def _load_seed_components() -> list[dict[str, Any]]:
@@ -106,6 +142,128 @@ def _audit_seed(components: list[dict[str, Any]]) -> tuple[list[str], int]:
         if non_list:
             failures.append(f"  - {cid}: field(s) {non_list} present but not a list.")
     return failures, audited
+
+
+def _audit_v3_identity(components: list[dict[str, Any]]) -> tuple[list[str], int]:
+    """ENC-TSK-L05 AC2-6 v3 identity audit.
+
+    Returns (failure reasons, count of in-scope components audited). Checks
+    per-component field validity plus the two MECE properties (unique
+    component_address; component_repo_dir antichain / no-prefix-overlap among
+    non-meta entries).
+    """
+    failures: list[str] = []
+    in_scope = [c for c in components if _in_scope(c)]
+    audited = len(in_scope)
+
+    # Per-component field validity.
+    for comp in in_scope:
+        cid = comp.get("component_id") or "<unknown>"
+
+        missing = [f for f in _V3_IDENTITY_FIELDS if f not in comp]
+        if missing:
+            failures.append(
+                f"  - {cid}: missing v3 identity field(s) {missing} "
+                "(ENC-TSK-L05 AC2-6 — every active enceladus component must "
+                "declare component_address, component_repo_dir, "
+                "component_address_class, and component_class)."
+            )
+            continue
+
+        empty_or_nonstr = [
+            f
+            for f in _V3_IDENTITY_FIELDS
+            if not isinstance(comp.get(f), str) or not comp.get(f).strip()
+        ]
+        if empty_or_nonstr:
+            failures.append(
+                f"  - {cid}: v3 identity field(s) {empty_or_nonstr} present but "
+                "not a non-empty string."
+            )
+            continue
+
+        addr_class = comp["component_address_class"]
+        if addr_class not in _VALID_ADDRESS_CLASSES:
+            failures.append(
+                f"  - {cid}: component_address_class={addr_class!r} is not one of "
+                f"{sorted(_VALID_ADDRESS_CLASSES)}."
+            )
+
+        comp_class = comp["component_class"]
+        if comp_class not in _VALID_COMPONENT_CLASSES:
+            failures.append(
+                f"  - {cid}: component_class={comp_class!r} is not one of "
+                f"{sorted(_VALID_COMPONENT_CLASSES)}."
+            )
+
+        rtt = comp.get("required_transition_type")
+        if rtt not in _VALID_REQUIRED_TRANSITION_TYPES:
+            failures.append(
+                f"  - {cid}: required_transition_type={rtt!r} is not a v3 value "
+                f"({sorted(_VALID_REQUIRED_TRANSITION_TYPES)})."
+            )
+
+    # MECE 1 — unique component_address across all active components.
+    addr_owners: dict[str, list[str]] = {}
+    for comp in in_scope:
+        addr = comp.get("component_address")
+        if not isinstance(addr, str) or not addr.strip():
+            continue
+        addr_owners.setdefault(addr, []).append(comp.get("component_id") or "<unknown>")
+    for addr, owners in sorted(addr_owners.items()):
+        if len(owners) > 1:
+            failures.append(
+                f"  - duplicate component_address {addr!r} shared by {owners} "
+                "(ENC-TSK-L05 AC2-6 MECE — component_address must be unique)."
+            )
+
+    # MECE 2 — component_repo_dir antichain: no dir may be a path prefix of
+    # another. meta: sentinels are exempt from the prefix check but must still
+    # be unique.
+    repo_owners: dict[str, list[str]] = {}
+    for comp in in_scope:
+        rd = comp.get("component_repo_dir")
+        if not isinstance(rd, str) or not rd.strip():
+            continue
+        repo_owners.setdefault(rd, []).append(comp.get("component_id") or "<unknown>")
+    for rd, owners in sorted(repo_owners.items()):
+        if len(owners) > 1:
+            failures.append(
+                f"  - duplicate component_repo_dir {rd!r} shared by {owners} "
+                "(ENC-TSK-L05 AC2-6 MECE — component_repo_dir must be unique)."
+            )
+
+    non_meta_dirs = [
+        (comp.get("component_id") or "<unknown>", comp["component_repo_dir"])
+        for comp in in_scope
+        if isinstance(comp.get("component_repo_dir"), str)
+        and comp["component_repo_dir"].strip()
+        and not comp["component_repo_dir"].startswith(_META_SENTINEL_PREFIX)
+    ]
+    for cid_a, dir_a in non_meta_dirs:
+        for cid_b, dir_b in non_meta_dirs:
+            if dir_a == dir_b and cid_a == cid_b:
+                continue
+            if dir_a == dir_b:
+                continue  # duplicate case handled above
+            # dir_b is a proper path-prefix of dir_a.
+            if (dir_a + "/").startswith(dir_b + "/"):
+                failures.append(
+                    f"  - component_repo_dir {dir_a!r} ({cid_a}) is nested under "
+                    f"{dir_b!r} ({cid_b}) — repo dirs must form an antichain "
+                    "(ENC-TSK-L05 AC2-6 MECE, no-prefix-overlap)."
+                )
+
+    # De-dup failure lines (the antichain double-loop can emit a pair twice
+    # from opposite directions only if both are prefixes, which is impossible;
+    # this is defensive).
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for line in failures:
+        if line not in seen:
+            seen.add(line)
+            deduped.append(line)
+    return deduped, audited
 
 
 def _live_probe(base_url: str, api_key: str, timeout_s: float = 10.0) -> list[str]:
@@ -177,6 +335,22 @@ def main() -> int:
           "all five hardening fields (required_iam_actions, "
           "required_env_secrets, required_apigw_routes, "
           "required_cfn_resources, required_lambda_env_vars).")
+
+    v3_failures, v3_audited = _audit_v3_identity(components)
+    print(f"Auditing {v3_audited} active enceladus-project seed manifest entries "
+          "for the four v3 identity fields + MECE properties "
+          "(ENC-TSK-L05 AC2-6)…")
+    if v3_failures:
+        print("\nFAIL: seed manifest v3 identity audit", file=sys.stderr)
+        for line in v3_failures:
+            print(line, file=sys.stderr)
+        return 1
+
+    print("PASS: every active enceladus-project seed manifest entry declares "
+          "valid v3 identity fields (component_address, component_repo_dir, "
+          "component_address_class, component_class) with a v3 "
+          "required_transition_type, and the MECE properties hold "
+          "(unique component_address; component_repo_dir antichain).")
 
     do_live = args.live_probe or os.environ.get("VERIFY_COMPONENT_HARDENING_LIVE") in {"1", "true", "yes"}
     if not do_live:
