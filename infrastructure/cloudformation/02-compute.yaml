@@ -188,7 +188,17 @@ Parameters:
   OpenSearchIndexerSubnetIds:
     Type: CommaDelimitedList
     Default: subnet-0a27ee72
-    Description: Subnet(s) for the indexer Lambda ENI (must route to OpenSearch :9200).
+    Description: >
+      Subnet(s) for OpenSearch indexer + graph_query_api Lambda ENIs (must route
+      to OpenSearch :9200). Associated with OpenSearchIndexerSubnetRouteTable
+      (0.0.0.0/0 via NAT) so in-VPC Lambdas reach Neo4j Aura + Bedrock.
+  OpenSearchNatGatewaySubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-21fa106b
+    Description: >
+      ENC-TSK-L43 Option A: public subnet (IGW route via main RT) hosting the NAT
+      gateway ENI. Time-boxed cost tied to Neo4j Aura public egress — scheduled
+      for teardown at v5 FaulknerDB cutover (Aura replaced; NAT need self-resolves).
 
   # ENC-TSK-C08 / ENC-FTR-064: configurable HCE cadence. The engine's adaptive
   # trigger makes this an upper bound — a scheduled invoke runs a full
@@ -6030,6 +6040,70 @@ Resources:
         - Key: Project
           Value: enceladus
 
+  # ENC-TSK-L43 Option A: VPC-attached graph_query_api needs outbound internet for
+  # Neo4j Aura (:7687) and Bedrock (:443). Lambdas lack public IPs, so the OpenSearch
+  # subnet routes 0.0.0.0/0 through this NAT (not the VPC IGW). NAT itself sits in a
+  # separate public subnet that retains the main-table IGW route. Tear down at v5
+  # FaulknerDB cutover when Aura egress is retired.
+  OpenSearchIndexerNatGatewayEip:
+    Type: AWS::EC2::EIP
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
+        - Key: Note
+          Value: Time-boxed Neo4j Aura egress until v5 FaulknerDB cutover
+
+  OpenSearchIndexerNatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      AllocationId: !GetAtt OpenSearchIndexerNatGatewayEip.AllocationId
+      SubnetId: !Ref OpenSearchNatGatewaySubnetId
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
+        - Key: Note
+          Value: Time-boxed Neo4j Aura egress until v5 FaulknerDB cutover
+
+  OpenSearchIndexerSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      VpcId: !Ref OpenSearchIndexerVpcId
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: search
+        - Key: Description
+          Value: OpenSearch/Lambda subnet — NAT egress for Aura+Bedrock until v5
+
+  OpenSearchIndexerNatRoute:
+    Type: AWS::EC2::Route
+    Condition: IsGamma
+    DependsOn: OpenSearchIndexerNatGateway
+    Properties:
+      RouteTableId: !Ref OpenSearchIndexerSubnetRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref OpenSearchIndexerNatGateway
+
+  OpenSearchIndexerSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: IsGamma
+    Properties:
+      SubnetId: !Select [0, !Ref OpenSearchIndexerSubnetIds]
+      RouteTableId: !Ref OpenSearchIndexerSubnetRouteTable
+
   OpenSearchIndexerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Condition: IsGamma
@@ -6047,7 +6121,7 @@ Resources:
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
-          Description: Secrets Manager / AWS API egress when subnet routes public
+          Description: Bedrock + AWS APIs via NAT (SM also reachable on VPC endpoint)
         # ENC-TSK-L43 follow-up: graph_query_api shares this SG in-VPC for
         # OpenSearch :9200; hybrid search still needs Neo4j Aura Bolt (:7687).
         - IpProtocol: tcp
