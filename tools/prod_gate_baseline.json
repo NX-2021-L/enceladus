@@ -149,6 +149,13 @@
       ],
       "notes": "ENC-TSK-K09: environment: v3-prod — patches the SHARED CFN deploy role object with lambda:*FunctionUrlConfig on enceladus-mcp-code-gamma (ENC-TSK-K07 unblock)."
     },
+    "iam-cfn-deploy-role-secretsmanager-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-L06: environment v3-prod — patches the SHARED CFN deploy role object (SecretsManager GetSecretValue grant for the ID Service HMAC secret); same pattern as iam-cfn-deploy-role-gamma-patch.yml"
+    },
     "iam-cloudformation-unblock.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
