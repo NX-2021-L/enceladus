@@ -265,11 +265,66 @@ class _FakeS3:
         self._store[Key] = Body if isinstance(Body, bytes) else Body.encode("utf-8")
 
 
-def test_handler_respects_kill_switch(monkeypatch):
+def test_handler_gdmp_hard_disabled_reports_but_never_mutates(monkeypatch):
+    """ENC-TSK-L91: CEE_GDMP_HARD_DISABLED gates MUTATION only. Even with the
+    ramp cleared + dry_run off + mutation enabled (i.e. it WOULD mutate), the
+    disarm must block every _patch_document, must NOT advance the io-approval
+    ramp counter, yet must still run the candidate scan and persist the per-run
+    breakdown so the soak is auditable."""
     monkeypatch.setenv("CEE_GDMP_HARD_DISABLED", "1")
+    monkeypatch.delenv("CEE_HARD_DISABLED", raising=False)
+
+    import gdmp_remediation_core as gcore
+    monkeypatch.setattr(gcore, "GDMP_DRY_RUN", False)
+    monkeypatch.setattr(gcore, "GDMP_MUTATION_ENABLED", True)
+    monkeypatch.setattr(mod, "is_dry_run", lambda event=None: False)
+    monkeypatch.setattr(mod, "mutation_allowed", lambda **kw: gcore.mutation_allowed(
+        run_count=kw["run_count"], dry_run=False, mutation_enabled=True
+    ))
+    monkeypatch.setattr(mod, "_fetch_documents", lambda: [
+        {
+            "record_id": "DOC-RAW-DISARM",
+            "compliance_score": 40,
+            "document_maturity_state": "raw",
+            "compliance_warnings": ["Code fence at line 2 should include a language identifier."],
+        },
+    ])
+
+    def _boom_patch(*args, **kwargs):
+        raise AssertionError("must not PATCH while CEE_GDMP_HARD_DISABLED=1")
+
+    def _boom_counter(*args, **kwargs):
+        raise AssertionError("must not advance io-approval ramp while disarmed")
+
+    monkeypatch.setattr(mod, "_patch_document", _boom_patch)
+    monkeypatch.setattr(mod, "_save_run_counter", _boom_counter)
+    monkeypatch.setattr(mod, "GDMP_STATE_BUCKET", "fake-bucket")
+    fake = _FakeS3(initial_counter=3)  # ramp already cleared -> would mutate if armed
+    monkeypatch.setattr(mod, "_get_s3", lambda: fake)
+
+    result = mod.lambda_handler({}, None)
+    assert result["statusCode"] == 200
+    body = json.loads(result["body"])
+    assert body["mutation_hard_disabled"] is True
+    assert body["mutation_allowed"] is False
+    assert body["remediated_count"] == 0
+    assert body["candidate_count"] == 1  # scan still ran
+    assert body["breakdown_ref"] is not None
+    assert body["breakdown_totals"]["candidates"] == 1
+    # breakdown persisted to S3 (timestamped record + stable latest.json)
+    assert any(k.endswith("breakdowns/latest.json") for k in fake._store)
+    assert any("/breakdowns/run-" in k for k in fake._store)
+    monkeypatch.delenv("CEE_GDMP_HARD_DISABLED", raising=False)
+
+
+def test_handler_shared_cee_hard_disabled_short_circuits(monkeypatch):
+    """The shared engine-wide CEE_HARD_DISABLED cost kill switch (ISS-465) still
+    fully short-circuits the run: no document fetch, no scan, skipped=True."""
+    monkeypatch.delenv("CEE_GDMP_HARD_DISABLED", raising=False)
+    monkeypatch.setenv("CEE_HARD_DISABLED", "1")
 
     def _boom(*args, **kwargs):
-        raise AssertionError("must not fetch when kill switch is set")
+        raise AssertionError("must not fetch when CEE_HARD_DISABLED is set")
 
     monkeypatch.setattr(mod, "_fetch_documents", _boom)
     result = mod.lambda_handler({}, None)
@@ -277,7 +332,55 @@ def test_handler_respects_kill_switch(monkeypatch):
     assert result["statusCode"] == 200
     body = json.loads(result["body"])
     assert body["skipped"] is True
+    monkeypatch.delenv("CEE_HARD_DISABLED", raising=False)
+
+
+def test_concurrency_recompute_skips_when_fresh_doc_findings_differ(monkeypatch):
+    """ENC-TSK-L91 optimistic-concurrency guard: the queued plan (from the
+    run-start scan) had a deterministic auto-fixable warning, but the pre-PATCH
+    fresh GET shows the doc now carries only an AMBIGUOUS warning (a concurrent
+    human edit changed it). The handler must recompute from the fresh doc and
+    SKIP -- never apply the stale deterministic fix onto the changed content."""
     monkeypatch.delenv("CEE_GDMP_HARD_DISABLED", raising=False)
+    monkeypatch.delenv("CEE_HARD_DISABLED", raising=False)
+    import gdmp_remediation_core as gcore
+    monkeypatch.setattr(gcore, "GDMP_DRY_RUN", False)
+    monkeypatch.setattr(gcore, "GDMP_MUTATION_ENABLED", True)
+    monkeypatch.setattr(mod, "is_dry_run", lambda event=None: False)
+    monkeypatch.setattr(mod, "mutation_allowed", lambda **kw: gcore.mutation_allowed(
+        run_count=kw["run_count"], dry_run=False, mutation_enabled=True))
+    # Stale scan: deterministic (auto-fixable) fence warning -> plan=remediate.
+    monkeypatch.setattr(mod, "_fetch_documents", lambda: [
+        {
+            "record_id": "DOC-RACE",
+            "compliance_score": 40,
+            "document_maturity_state": "raw",
+            "compliance_warnings": ["Code fence at line 2 should include a language identifier."],
+        },
+    ])
+    # Fresh pre-PATCH GET: still raw + still non-compliant (so the idempotency
+    # guard does NOT short-circuit), but the warning is now ambiguous-only, so a
+    # fresh plan yields NO deterministic findings.
+    monkeypatch.setattr(mod, "_fetch_document_with_content", lambda doc_id: {
+        "record_id": doc_id,
+        "document_maturity_state": "raw",
+        "compliance_score": 45,
+        "compliance_warnings": ["Document appears to be empty or contains only whitespace."],
+        "content": "# Doc\n\nedited by a human mid-run\n",
+    })
+
+    def _boom_patch(*args, **kwargs):
+        raise AssertionError("must not apply stale deterministic fix to fresh content")
+
+    monkeypatch.setattr(mod, "_patch_document", _boom_patch)
+    monkeypatch.setattr(mod, "GDMP_STATE_BUCKET", "fake-bucket")
+    monkeypatch.setattr(mod, "_get_s3", lambda: _FakeS3(initial_counter=3))
+
+    result = mod.lambda_handler({}, None)
+    assert result["statusCode"] == 200
+    body = json.loads(result["body"])
+    assert body["remediated_count"] == 0
+    assert body["skipped_idempotent_count"] == 1
 
 
 def test_handler_dry_run_default_never_patches(monkeypatch):
