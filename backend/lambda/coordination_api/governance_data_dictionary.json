@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.8",
-  "updated_at": "2026-07-07T12:53:00Z",
-  "last_change_summary": "ENC-TSK-L77: component registry v3 hardening adds component_address/component_repo_dir/component_address_class/component_class, migrates component required_transition_type to code|external_deploy|documentation with legacy read-time mapping, and documents external_deploy_evidence plus documentation_evidence advance gates.",
+  "version": "2026-07-07.9",
+  "updated_at": "2026-07-07T13:35:00Z",
+  "last_change_summary": "ENC-TSK-L91: corpus_entropy_gdmp_remediation.lambda -- CEE_GDMP_HARD_DISABLED redefined to gate MUTATION only (candidate scan/report/breakdown still run while disarmed; ramp counter not advanced), new GDMP_RUN_BREAKDOWN_SINK audit artifact, and the fresh-GET/recompute optimistic-concurrency guard before PATCH.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7478,7 +7478,7 @@
       }
     },
     "corpus_entropy_gdmp_remediation.lambda": {
-      "description": "ENC-TSK-K42 / B66 Ph5 (ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda (enceladus-corpus-entropy-gdmp-remediation). EventBridge CorpusEntropyGdmpRemediationSchedule (gamma, cron 06:00 UTC, after K41's 05:00 detection scan) invokes lambda_handler per project. Reuses K41's corpus_entropy_core.detect_compliance_semantic_entropy unmodified (shared via .build_extras) to find raw documents with compliance_warnings, then classifies each warning against a fixed deterministic whitelist (gdmp_remediation_core.DETERMINISTIC_WARNING_CLASSIFIERS: fence_missing_language, metadata_field_missing) -- ambiguous/content-changing warnings (title format, empty document, heading hierarchy, list-marker consistency, table dividers, malformed alerts, COE section gaps) are left for agent/human review. For whitelisted findings, applies an additive pure-function text remediation (never deletes original content) and PATCHes the document via the governed document_api HTTP surface (documents.patch: content, then document_maturity_state=compliant once compliance_score clears COMPLIANCE_SCORE_THRESHOLD with zero remaining warnings) -- never direct DynamoDB/S3 document writes. Idempotency guard (is_already_compliant) skips any document already at compliant maturity or with zero compliance_warnings, so re-running Stage-1 on a compliant document is a no-op with no version churn. io-approval ramp (FTR-106 AC-4 / ENC-TSK-K03 pattern reuse, same S3 run-counter shape as UnlearningFunction): GDMP_DRY_RUN=1 (default) prevents all mutation; GDMP_MUTATION_ENABLED=0 (default) keeps report-only even when dry-run is off; GDMP_IO_APPROVAL_RUNS=3 gates the first three live (non-dry-run) invocations to candidate-report-only regardless of GDMP_MUTATION_ENABLED. CEE_GDMP_HARD_DISABLED kill switch (default \"1\") is checked first in the handler, mirroring CEE_HARD_DISABLED (K41). Every applied patch is logged with before/after compliance_score. Cost-preflight ISS-465: nightly-only cadence, well under $1/mo; CorpusEntropyGdmpRemediationCostHeadroomAlarm guards EventBridge invocation count (7-day window, threshold 10).",
+      "description": "ENC-TSK-K42 / B66 Ph5 (ENC-PLN-064): GDMP Stage-1 auto-remediation Lambda (enceladus-corpus-entropy-gdmp-remediation). EventBridge CorpusEntropyGdmpRemediationSchedule (gamma, cron 06:00 UTC, after K41's 05:00 detection scan) invokes lambda_handler per project. Reuses K41's corpus_entropy_core.detect_compliance_semantic_entropy unmodified (shared via .build_extras) to find raw documents with compliance_warnings, then classifies each warning against a fixed deterministic whitelist (gdmp_remediation_core.DETERMINISTIC_WARNING_CLASSIFIERS: fence_missing_language, metadata_field_missing) -- ambiguous/content-changing warnings (title format, empty document, heading hierarchy, list-marker consistency, table dividers, malformed alerts, COE section gaps) are left for agent/human review. For whitelisted findings, applies an additive pure-function text remediation (never deletes original content) and PATCHes the document via the governed document_api HTTP surface (documents.patch: content, then document_maturity_state=compliant once compliance_score clears COMPLIANCE_SCORE_THRESHOLD with zero remaining warnings) -- never direct DynamoDB/S3 document writes. Idempotency guard (is_already_compliant) skips any document already at compliant maturity or with zero compliance_warnings, so re-running Stage-1 on a compliant document is a no-op with no version churn. io-approval ramp (FTR-106 AC-4 / ENC-TSK-K03 pattern reuse, same S3 run-counter shape as UnlearningFunction): GDMP_DRY_RUN=1 (default) prevents all mutation; GDMP_MUTATION_ENABLED=0 (default) keeps report-only even when dry-run is off; GDMP_IO_APPROVAL_RUNS=3 gates the first three live (non-dry-run) invocations to candidate-report-only regardless of GDMP_MUTATION_ENABLED. CEE_GDMP_HARD_DISABLED kill switch (default \"1\") is checked first in the handler, mirroring CEE_HARD_DISABLED (K41). Every applied patch is logged with before/after compliance_score. Cost-preflight ISS-465: nightly-only cadence, well under $1/mo; CorpusEntropyGdmpRemediationCostHeadroomAlarm guards EventBridge invocation count (7-day window, threshold 10). ENC-TSK-L91 (mutation-ramp durable safety): the remediation path now re-GETs each document fresh and RECOMPUTES the remediation plan from the fresh compliance_warnings immediately before PATCH (was reusing the run-start scan's stale findings against fresh content -> silent lost update), collapsing the race window from hours to ms and skipping concurrently-edited documents; and persists a per-run candidate breakdown (see GDMP_RUN_BREAKDOWN_SINK). CEE_GDMP_HARD_DISABLED now gates mutation only (see field). Durable document_api If-Match precondition tracked as ENC-ISS-503.",
       "owner": "enceladus-platform",
       "source": "ENC-TSK-K42 / ENC-TSK-B66",
       "telemetry_eligible": true,
@@ -7486,7 +7486,7 @@
         "CEE_GDMP_HARD_DISABLED": {
           "type": "feature_flag",
           "default": "1",
-          "definition": "Mandatory kill switch, installed ON before first scheduled run. When truthy (1/true/yes), handler skips all governed reads/writes for that invocation. Mirrors CEE_HARD_DISABLED (K41)."
+          "definition": "Mandatory kill switch, installed ON (default \"1\"), checked first in the handler. ENC-TSK-L91: gates MUTATION ONLY -- when truthy (1/true/yes) the deterministic candidate scan, candidate report, and per-run breakdown persistence still execute (so the disarmed soak produces the auditable candidate reports io reviews before any re-enable), but NO documents.patch is issued and the io-approval ramp counter is NOT advanced (a fresh GDMP_IO_APPROVAL_RUNS candidate-only buffer is preserved for after io re-enables). Codified =1 in 02-compute.yaml (IsGamma) so no deploy reverts the disarm. Distinct from the shared engine-wide CEE_HARD_DISABLED (K41) cost kill switch, which still fully short-circuits the entire run (no scan)."
         },
         "GDMP_DRY_RUN": {
           "type": "feature_flag",
@@ -7507,6 +7507,10 @@
           "type": "integer",
           "default": 70,
           "definition": "A remediated document only advances document_maturity_state to compliant once its post-PATCH compliance_score is at or above this value AND zero compliance_warnings remain. Matches CEE's (K41) COMPLIANCE_SCORE_THRESHOLD."
+        },
+        "GDMP_RUN_BREAKDOWN_SINK": {
+          "type": "s3_artifact",
+          "definition": "ENC-TSK-L91: every run persists a per-run candidate breakdown JSON (schema gdmp.run_breakdown.v1) to s3://${GDMP_STATE_BUCKET}/${GDMP_STATE_PREFIX}/breakdowns/ as run-<ts>-n<run_count>.json plus a stable latest.json. Partitions candidates into safe_deterministic vs needs_human with a per-doc list (record_id, action, deterministic_classes, ambiguous_warnings), making the GDMP_IO_APPROVAL_RUNS ramp auditable during the disarmed soak. Best-effort write; never raises into the run."
         }
       }
     },
@@ -7782,7 +7786,7 @@
       "source": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0)"
     }
   },
-  "change_summary": "ENC-TSK-L77: component registry v3 hardening (component_address/component_repo_dir/component_address_class/component_class), required_transition_type v3 enum {code,external_deploy,documentation} with legacy read-time mapping, and external_deploy_evidence + documentation_evidence advance gates. Integrated onto v4/main 2026-07-07.7 (ENC-SES-05V).",
+  "change_summary": "ENC-TSK-L91: corpus_entropy_gdmp_remediation.lambda -- CEE_GDMP_HARD_DISABLED redefined to gate MUTATION only (candidate scan/report/breakdown still run while disarmed; ramp counter not advanced), new GDMP_RUN_BREAKDOWN_SINK audit artifact, and the fresh-GET/recompute optimistic-concurrency guard before PATCH.",
   "change_log": [
     {
       "version": "2026-07-07.6",
@@ -8068,6 +8072,11 @@
       "version": "2026-07-07.8",
       "date": "2026-07-07",
       "summary": "ENC-TSK-L77: component registry v3 hardening adds component_address/component_repo_dir/component_address_class/component_class, migrates component required_transition_type to code|external_deploy|documentation with legacy read-time mapping, and documents external_deploy_evidence plus documentation_evidence advance gates."
+    },
+    {
+      "version": "2026-07-07.9",
+      "date": "2026-07-07",
+      "summary": "ENC-TSK-L91: corpus_entropy_gdmp_remediation.lambda -- CEE_GDMP_HARD_DISABLED redefined to gate MUTATION only (candidate scan/report/breakdown still run while disarmed; ramp counter not advanced), new GDMP_RUN_BREAKDOWN_SINK audit artifact, and the fresh-GET/recompute optimistic-concurrency guard before PATCH."
     }
   ]
 }
