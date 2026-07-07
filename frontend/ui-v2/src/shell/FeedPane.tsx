@@ -1,9 +1,16 @@
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
+import { Button, Flashbar } from '../design-system'
 import { useUiStore } from '../store/uiStore'
 import { useFeedConnectionStore } from '../store/feedConnectionStore'
+import { useFeedBufferStore } from '../store/feedBufferStore'
 import { useRealtimeFeed } from '../realtime/RealtimeFeedProvider'
 import { filterFeedEvents } from '../realtime/feedEventReducer'
 import type { RecordType } from '../types/records'
+
+/** ENC-TSK-K24 (B67 AC-11): fixed height so the banner's appear/disappear
+ * never shifts the list below it — CLS 0.0 by construction (a reserved
+ * slot, not a conditionally-mounted element), not by measurement. */
+const NEW_ACTIVITIES_BANNER_HEIGHT = 40
 
 const FILTERABLE: RecordType[] = ['task', 'issue', 'feature', 'plan', 'lesson', 'document']
 
@@ -40,16 +47,26 @@ export function FeedPane() {
   const serverP95 = useFeedConnectionStore((s) => s.requestFirstPageServer.p95Ms)
   const errorMessage = useFeedConnectionStore((s) => s.errorMessage)
 
-  const { events, isHydrating, isSnapshotError, refetchSnapshot, manualReconnect } =
+  const { events, isHydrating, isSnapshotError, refetchSnapshot, manualReconnect, mergeBufferedEvents } =
     useRealtimeFeed()
+  const bufferedCount = useFeedBufferStore((s) => s.bufferedEvents.length)
+  const scrollRef = useRef<HTMLElement>(null)
 
   const visibleEvents = useMemo(
     () => filterFeedEvents(events, filters.recordTypes),
     [events, filters.recordTypes],
   )
 
+  const showNewActivities = () => {
+    mergeBufferedEvents()
+    if (typeof scrollRef.current?.scrollTo === 'function') {
+      scrollRef.current.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }
+
   return (
     <aside
+      ref={scrollRef}
       style={{
         width: 260,
         flexShrink: 0,
@@ -172,6 +189,35 @@ export function FeedPane() {
           </button>
         </div>
       )}
+
+      {/* ENC-TSK-K24 (B67 AC-11): reserved slot, always rendered at a fixed
+          height so appearing/disappearing content never shifts the list
+          below — CLS 0.0 by construction. */}
+      <div
+        data-testid="new-activities-banner-slot"
+        style={{ height: NEW_ACTIVITIES_BANNER_HEIGHT, flexShrink: 0, overflow: 'hidden' }}
+      >
+        {bufferedCount > 0 && (
+          <Flashbar
+            items={[
+              {
+                id: 'new-activities',
+                type: 'info',
+                content: (
+                  <div data-testid="new-activities-banner" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                    <span>
+                      {bufferedCount} new {bufferedCount === 1 ? 'activity' : 'activities'}
+                    </span>
+                    <Button variant="link" onClick={showNewActivities}>
+                      Show
+                    </Button>
+                  </div>
+                ),
+              },
+            ]}
+          />
+        )}
+      </div>
 
       <div style={{ flex: 1, minHeight: 0 }}>
         {isHydrating && visibleEvents.length === 0 && (
