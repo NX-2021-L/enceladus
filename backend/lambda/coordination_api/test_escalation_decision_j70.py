@@ -117,7 +117,8 @@ class TestNonDelegableGate(unittest.TestCase):
 
 
 class TestEscalationDecisions(unittest.TestCase):
-    def _decide(self, decision, ddb, body=None, apply_result=None, apply_raises=None):
+    def _decide(self, decision, ddb, body=None, apply_result=None, apply_raises=None,
+                claims=None, allowlist=None):
         patches = [mock.patch.object(coordination_lambda, "_get_ddb", return_value=ddb)]
         invoke = mock.MagicMock()
         if apply_raises is not None:
@@ -129,10 +130,17 @@ class TestEscalationDecisions(unittest.TestCase):
             }
         patches.append(mock.patch.object(
             coordination_lambda, "_invoke_tracker_mutation_api", invoke))
-        with patches[0], patches[1]:
+        # ENC-TSK-L92: the decider-allowlist check calls S3 in production; tests
+        # stub it directly rather than mocking boto3 so intent stays legible.
+        # Default allowlist matches COGNITO_CLAIMS's email, preserving every
+        # pre-L92 test's original pass-through behavior.
+        patches.append(mock.patch.object(
+            coordination_lambda, "_load_escalation_approver_allowlist",
+            return_value=allowlist if allowlist is not None else {"io@jreese.net"}))
+        with patches[0], patches[1], patches[2]:
             resp = coordination_lambda._handle_escalation_decision(
                 "enceladus", "ENC-ESC-001", decision,
-                _decision_event(body), COGNITO_CLAIMS)
+                _decision_event(body), claims or COGNITO_CLAIMS)
         return resp, ddb, invoke
 
     def test_approve_happy_path_stamps_identity_and_applies(self):
@@ -221,6 +229,94 @@ class TestEscalationDecisions(unittest.TestCase):
         self.assertEqual(409, resp["statusCode"])
         self.assertIn("concurrently", json.loads(resp["body"])["error"])
         invoke.assert_not_called()
+
+
+class TestEscalationApproverAllowlist(unittest.TestCase):
+    """ENC-TSK-L92 / ENC-ISS-501: positive allowlist on top of _is_cognito_session.
+
+    _is_cognito_session alone is a fail-open blocklist (excludes only
+    auth_mode in {"internal-key", "managed-token"}); it let a non-human
+    Cognito-authenticated identity self-approve escalations. These tests
+    cover the allowlist gate directly, independent of TestEscalationDecisions'
+    default-allowlisted fixture.
+    """
+
+    def test_cognito_identity_not_on_allowlist_gets_403(self):
+        not_allowlisted_claims = {
+            "auth_mode": "cognito", "sub": "c4b8e478-40e1-70ce-9f5d-caffd3e241df",
+            "email": "terminal-agent@enceladus.internal",
+        }
+        resp, ddb, invoke = self._decide_raw(
+            "approve", _fake_ddb(escalation=_escalation_item()),
+            claims=not_allowlisted_claims, allowlist={"io@jreese.net"})
+        self.assertEqual(403, resp["statusCode"])
+        self.assertIn("allowlist", json.loads(resp["body"])["error"])
+        ddb.update_item.assert_not_called()
+        invoke.assert_not_called()
+
+    def test_allowlisted_identity_still_passes(self):
+        resp, ddb, invoke = self._decide_raw(
+            "approve", _fake_ddb(escalation=_escalation_item()),
+            claims=COGNITO_CLAIMS, allowlist={"io@jreese.net"})
+        self.assertEqual(200, resp["statusCode"])
+        invoke.assert_called_once()
+
+    def test_missing_email_claim_gets_403(self):
+        no_email_claims = {"auth_mode": "cognito", "sub": "abc-123"}
+        resp, ddb, invoke = self._decide_raw(
+            "approve", _fake_ddb(escalation=_escalation_item()),
+            claims=no_email_claims, allowlist={"io@jreese.net"})
+        self.assertEqual(403, resp["statusCode"])
+        ddb.update_item.assert_not_called()
+
+    def test_parses_real_document_format(self):
+        """Regression lock for the S3 doc's actual fenced-yaml list-item shape."""
+        doc_body = (
+            "# Escalation Approver Allowlist\n\n"
+            "Some prose.\n\n"
+            "```yaml\n"
+            "approvers:\n"
+            "  - email: \"ai@jreese.net\"\n"
+            "    added_at: \"2026-07-07T12:00:00Z\"\n"
+            "    added_by: \"io (ENC-TSK-L92 initial provisioning)\"\n"
+            "    notes: \"test\"\n"
+            "```\n"
+        )
+        coordination_lambda._escalation_allowlist_cache["emails"] = None
+        coordination_lambda._escalation_allowlist_cache["fetched_at"] = 0.0
+        with mock.patch.object(coordination_lambda, "boto3") as fake_boto3:
+            fake_body = mock.MagicMock()
+            fake_body.read.return_value = doc_body.encode("utf-8")
+            fake_boto3.client.return_value.get_object.return_value = {"Body": fake_body}
+            emails = coordination_lambda._load_escalation_approver_allowlist()
+        self.assertEqual({"ai@jreese.net"}, emails)
+
+    def test_allowlist_fetch_failure_fails_closed(self):
+        """S3 GetObject error -> empty allowlist -> everyone denied, not everyone allowed."""
+        ddb = _fake_ddb(escalation=_escalation_item())
+        with mock.patch.object(coordination_lambda, "_get_ddb", return_value=ddb), \
+             mock.patch.object(coordination_lambda, "boto3") as fake_boto3:
+            fake_boto3.client.return_value.get_object.side_effect = RuntimeError("NoSuchKey")
+            coordination_lambda._escalation_allowlist_cache["emails"] = None
+            coordination_lambda._escalation_allowlist_cache["fetched_at"] = 0.0
+            resp = coordination_lambda._handle_escalation_decision(
+                "enceladus", "ENC-ESC-001", "approve", _decision_event(), COGNITO_CLAIMS)
+        self.assertEqual(403, resp["statusCode"])
+        ddb.update_item.assert_not_called()
+
+    def _decide_raw(self, decision, ddb, claims, allowlist, body=None):
+        invoke = mock.MagicMock()
+        invoke.return_value = {
+            "success": True, "status": "applied",
+            "result": {"before": {}, "after": {}}, "_status_code": 200,
+        }
+        with mock.patch.object(coordination_lambda, "_get_ddb", return_value=ddb), \
+             mock.patch.object(coordination_lambda, "_invoke_tracker_mutation_api", invoke), \
+             mock.patch.object(coordination_lambda, "_load_escalation_approver_allowlist",
+                                return_value=allowlist):
+            resp = coordination_lambda._handle_escalation_decision(
+                "enceladus", "ENC-ESC-001", decision, _decision_event(body), claims)
+        return resp, ddb, invoke
 
 
 class TestRenderDiff(unittest.TestCase):

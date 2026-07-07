@@ -347,6 +347,11 @@ Resources:
           TRAINING_HARD_DISABLED: "1"
           INTENT_TRAINING_BUCKET: !Ref S3Bucket
           INTENT_TRAINING_PREFIX: !Sub "${S3EnvPrefix}intent-training"
+          # ENC-TSK-L92 / ENC-ISS-501: escalation approve/deny decider allowlist.
+          # This role is granted s3:GetObject only on this exact key -- no Lambda
+          # role, including this one, has write access. Edits are Console-only.
+          ESCALATION_APPROVER_ALLOWLIST_BUCKET: !Ref S3Bucket
+          ESCALATION_APPROVER_ALLOWLIST_KEY: security/escalation-approvers.md
       Tags:
         - Key: Project
           Value: enceladus
@@ -3767,6 +3772,14 @@ Resources:
                   - s3:HeadBucket
                   - s3:GetBucketLocation
                 Resource: "arn:aws:s3:::jreese-net"
+              # ENC-TSK-L92 / ENC-ISS-501: escalation approver allowlist -- READ ONLY.
+              # Deliberately no s3:PutObject/DeleteObject grant here or anywhere else
+              # in this role; the allowlist document is Console-edit-only by design.
+              - Sid: EscalationApproverAllowlistRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/security/escalation-approvers.md"
               - Sid: SSMDispatch
                 Effect: Allow
                 Action:

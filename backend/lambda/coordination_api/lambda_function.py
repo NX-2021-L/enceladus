@@ -42,7 +42,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
@@ -8823,6 +8823,66 @@ def _is_assistant_request(event: Dict[str, Any]) -> bool:
     return key == CHECKOUT_ASSISTANT_KEY
 
 
+# ENC-TSK-L92 / ENC-ISS-501: escalation approve/deny decider allowlist.
+# _is_cognito_session is a fail-open blocklist (excludes only auth_mode in
+# {"internal-key", "managed-token"} -- any other or absent auth_mode passes),
+# which let a non-human Cognito-authenticated identity self-approve
+# governance-bypass escalations. This adds a positive allowlist on top: the
+# decider's claims.email must appear in a human-Console-only S3 document that
+# no Lambda role (including this one) has write access to -- only s3:GetObject.
+ESCALATION_APPROVER_ALLOWLIST_BUCKET = os.environ.get("ESCALATION_APPROVER_ALLOWLIST_BUCKET", "jreese-net")
+ESCALATION_APPROVER_ALLOWLIST_KEY = os.environ.get(
+    "ESCALATION_APPROVER_ALLOWLIST_KEY", "security/escalation-approvers.md"
+)
+_ESCALATION_ALLOWLIST_CACHE_TTL = 60.0
+_escalation_allowlist_cache: Dict[str, Any] = {"emails": None, "fetched_at": 0.0}
+
+
+def _load_escalation_approver_allowlist() -> Set[str]:
+    """Fetch and parse the escalation-approver allowlist S3 document, cached 60s.
+
+    Fails CLOSED: any fetch or parse error returns an empty set (nobody is
+    authorized) rather than silently falling back to "allow everyone" the way
+    the previous blocklist-only check did.
+    """
+    now = time.time()
+    cached = _escalation_allowlist_cache.get("emails")
+    fetched_at = _escalation_allowlist_cache.get("fetched_at") or 0.0
+    if cached is not None and (now - fetched_at) < _ESCALATION_ALLOWLIST_CACHE_TTL:
+        return cached
+    try:
+        s3 = boto3.client("s3", region_name=os.environ.get("SECRETS_REGION") or os.environ.get("AWS_REGION"))
+        obj = s3.get_object(Bucket=ESCALATION_APPROVER_ALLOWLIST_BUCKET, Key=ESCALATION_APPROVER_ALLOWLIST_KEY)
+        body = obj["Body"].read().decode("utf-8")
+        emails: Set[str] = set()
+        # Parsed without a yaml dependency: the document's fenced yaml block
+        # uses `- email: "..."` list entries; pull the value off any such
+        # line regardless of the leading "- " list marker.
+        for line in body.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                stripped = stripped[2:].strip()
+            if stripped.startswith("email:"):
+                value = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+                if value:
+                    emails.add(value.lower())
+        _escalation_allowlist_cache["emails"] = emails
+        _escalation_allowlist_cache["fetched_at"] = now
+        return emails
+    except Exception as exc:  # noqa: BLE001 — fail closed on any fetch/parse error
+        logger.error(
+            "escalation approver allowlist fetch failed (fail-closed, denying all deciders): %s", exc
+        )
+        return set()
+
+
+def _is_allowlisted_escalation_decider(claims: Dict[str, Any]) -> bool:
+    email = str((claims or {}).get("email") or "").strip().lower()
+    if not email:
+        return False
+    return email in _load_escalation_approver_allowlist()
+
+
 def _ddb_to_py(item: Dict[str, Any]) -> Dict[str, Any]:
     """Convert a DynamoDB low-level item dict to plain Python."""
     ds = TypeDeserializer()
@@ -10108,6 +10168,20 @@ def _handle_escalation_decision(
         return _error(403, (
             "Escalation approval/denial requires a Cognito session (human-only). "
             "Agent, SCI, and internal-key credentials are structurally rejected."
+        ))
+
+    # ENC-TSK-L92 / ENC-ISS-501: _is_cognito_session alone is insufficient --
+    # it is a fail-open blocklist, not a positive human check. Require the
+    # decider's email to be explicitly present in the Console-only allowlist.
+    if not _is_allowlisted_escalation_decider(claims):
+        logger.warning(
+            "escalation decision rejected: decider email %r not on approver allowlist "
+            "(escalation_id=%s, project_id=%s)",
+            claims.get("email"), escalation_id, project_id,
+        )
+        return _error(403, (
+            "Escalation approval/denial requires an explicitly allowlisted decider "
+            "email. This identity is not on the escalation approver allowlist."
         ))
 
     try:
