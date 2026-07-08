@@ -3596,6 +3596,13 @@ Resources:
       SnapStart:
         ApplyOn: PublishedVersions
       Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/devops-coordination-api-lambda-role-gamma"
+      # ENC-TSK-K45 / ENC-TSK-K66 / ENC-TSK-B66 leg-2: active X-Ray tracing (MCP Server
+      # / governed-mutation API surface — the fifth of the five-service trace). This
+      # resource is prod-stack-owned (Condition: IsProduction above), so a gamma-only
+      # compute deploy can never reach it; the prod compute stack template is the only
+      # place this property can be set.
+      TracingConfig:
+        Mode: Active
       Layers:
         - !Ref SharedLayerArn
         # ENC-TSK-F63 AC-1: AppConfig extension layer (arm64)
