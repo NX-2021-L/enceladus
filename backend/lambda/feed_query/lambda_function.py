@@ -133,7 +133,16 @@ def _get_ddb():
         _ddb = boto3.client(
             "dynamodb",
             region_name=DYNAMODB_REGION,
-            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+            # ENC-TSK-M36: botocore's default max_pool_connections is 10 --
+            # with _fan_out_by_project running _MAX_PROJECT_FANOUT_WORKERS
+            # (24) threads against this SAME shared client, anything beyond
+            # 10 concurrent Query calls would silently queue for a free
+            # pooled connection, capping real concurrency at 10 regardless of
+            # thread count. Sized to stay >= the fan-out width.
+            config=Config(
+                retries={"max_attempts": 3, "mode": "standard"},
+                max_pool_connections=32,
+            ),
         )
     return _ddb
 
@@ -1177,7 +1186,17 @@ _TRANSFORM = {
 # A plain constant rather than "len(projects)" unbounded, so an unexpectedly
 # large projects table can't spawn hundreds of simultaneous DynamoDB queries
 # from a single Lambda invocation.
-_MAX_PROJECT_FANOUT_WORKERS = 8
+#
+# Verified live against gamma post-deploy: with max_workers=8 the measured
+# /api/v1/feed/tasks.json Lambda execution `Duration` (CloudWatch REPORT
+# lines, not network/API-Gateway overhead) stayed ~19-24s -- essentially
+# unchanged from the pre-fix serial baseline. Each per-project Query is
+# I/O-bound (network + DynamoDB service time, no CPU work), so raising the
+# thread count costs nothing but connection-pool headroom; 8 was too narrow
+# relative to the number of active projects sharing project-type-index for
+# concurrency to move the wall-clock number. Raised to 24 -- still cheap for
+# a 256 MB Lambda making read-only Query calls.
+_MAX_PROJECT_FANOUT_WORKERS = 24
 
 
 def _query_project_tracker_records(
