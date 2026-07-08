@@ -6,17 +6,19 @@
   "description": "Enceladus PWA 2.0 governance cockpit scaffold (ENC-TSK-K21)",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && npm run assert:bundle-budget",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && npm run lint:adherence",
     "lint:adherence": "node scripts/run-adherence-lint.mjs",
+    "assert:bundle-budget": "node scripts/assert-bundle-budget.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.2",
     "@tanstack/react-router": "^1.170.17",
+    "@tanstack/react-virtual": "^3.14.5",
     "cytoscape": "^3.34.0",
     "lucide-react": "^1.23.0",
     "react": "^19.2.7",

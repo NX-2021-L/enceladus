@@ -2,18 +2,12 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   Outlet,
 } from '@tanstack/react-router'
 import { AppShell } from '../shell/AppShell'
-import { FeedRoute } from './FeedRoute'
 import { HomeRoute } from './HomeRoute'
 import { PlaceholderRoute } from './PlaceholderRoute'
-import { ProjectsRoute } from './ProjectsRoute'
-import { DocsRoute } from './DocsRoute'
-import { GovernanceRoute } from './GovernanceRoute'
-import { ChangelogRoute } from './ChangelogRoute'
-import { CoordinationRoute } from './CoordinationRoute'
-import { SkillLibraryRoute } from './SkillLibraryRoute'
 import { createSessionDetailRoute } from './SessionDetailRoute'
 import { createAgentDetailRoute } from './AgentDetailRoute'
 import { parseFeedSearch } from '../search/feedSearchParams'
@@ -79,32 +73,38 @@ const documentRoute = createDocumentRecordRoute({
   queryOptionsFor: documentQueryOptions,
 })
 
+// ENC-TSK-M18 (perf budget, AC-2): every non-Home top-level route is
+// code-split via lazyRouteComponent so the initial "/" bundle (mobile
+// default route) doesn't pay for Feed/Projects/Docs/Governance/Changelog/
+// Coordination/SkillLibrary JS it doesn't need. `parseFeedSearch` stays a
+// static import — it's a tiny pure function needed to validate the URL
+// before the Feed chunk loads, not the Feed UI itself.
 const feedRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/feed',
   validateSearch: parseFeedSearch,
-  component: FeedRoute,
+  component: lazyRouteComponent(() => import('./FeedRoute'), 'FeedRoute'),
 })
 
 const projectsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/projects',
-  component: ProjectsRoute,
+  component: lazyRouteComponent(() => import('./ProjectsRoute'), 'ProjectsRoute'),
 })
 const docsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/docs',
-  component: DocsRoute,
+  component: lazyRouteComponent(() => import('./DocsRoute'), 'DocsRoute'),
 })
 const governanceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/governance',
-  component: GovernanceRoute,
+  component: lazyRouteComponent(() => import('./GovernanceRoute'), 'GovernanceRoute'),
 })
 const changelogRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/changelog',
-  component: ChangelogRoute,
+  component: lazyRouteComponent(() => import('./ChangelogRoute'), 'ChangelogRoute'),
 })
 const coordinationRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -115,12 +115,12 @@ const coordinationRoute = createRoute({
   validateSearch: (raw: Record<string, unknown>) => ({
     tab: typeof raw.tab === 'string' ? raw.tab : '',
   }),
-  component: CoordinationRoute,
+  component: lazyRouteComponent(() => import('./CoordinationRoute'), 'CoordinationRoute'),
 })
 const skillLibraryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/skills',
-  component: SkillLibraryRoute,
+  component: lazyRouteComponent(() => import('./SkillLibraryRoute'), 'SkillLibraryRoute'),
 })
 const sessionRoute = createSessionDetailRoute(() => rootRoute)
 const agentDetailRoute = createAgentDetailRoute({ getParentRoute: () => rootRoute })
