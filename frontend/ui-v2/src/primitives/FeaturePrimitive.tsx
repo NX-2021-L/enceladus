@@ -22,7 +22,7 @@ export function FeaturePrimitive({ record }: { record: Feature }) {
       vitals={vitals}
       overview={
         <>
-          <Prose>{record.description}</Prose>
+          <Prose projectId={record.project_id}>{record.description}</Prose>
           <MetaRow label="Owners">
             {(record.owners ?? []).length > 0 ? (record.owners ?? []).join(', ') : 'Unowned'}
           </MetaRow>
@@ -42,7 +42,7 @@ export function FeaturePrimitive({ record }: { record: Feature }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
     />
   )
 }

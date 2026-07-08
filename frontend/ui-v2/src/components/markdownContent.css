@@ -1,0 +1,135 @@
+/* MarkdownContent -- shared record-body renderer (ENC-TSK-M32).
+ * Spec SS2 typography: body 13.5-14px starlight, line-height 1.65; long
+ * unbroken tokens wrap instead of forcing horizontal scroll (ISS-501). */
+
+.ev2-md {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ev2-md > *:last-child {
+  margin-bottom: 0;
+}
+
+.ev2-md__p {
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--enc-starlight);
+  margin: 0 0 var(--space-4);
+}
+
+.ev2-md__heading {
+  font-family: var(--font-heading);
+  font-weight: var(--fw-bold);
+  color: var(--enc-seafoam);
+  margin: var(--space-5) 0 var(--space-2);
+  line-height: var(--lh-snug);
+}
+
+h3.ev2-md__heading {
+  font-size: 16px;
+}
+
+h4.ev2-md__heading {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--enc-teal);
+}
+
+h5.ev2-md__heading {
+  font-size: 13px;
+  color: var(--enc-dust);
+}
+
+.ev2-md__list {
+  margin: 0 0 var(--space-4);
+  padding-left: 1.25em;
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--enc-starlight);
+}
+
+.ev2-md__list li {
+  margin-bottom: var(--space-1);
+}
+
+.ev2-md__quote {
+  border-left: 4px solid var(--enc-teal);
+  margin: var(--space-4) 0;
+  padding: var(--space-3) var(--space-5);
+  font-style: italic;
+  background: rgba(61, 155, 168, 0.08);
+  border-radius: var(--radius-md);
+  color: var(--enc-starlight);
+}
+
+.ev2-md__pre {
+  background: var(--enc-slate);
+  border: 1px solid rgba(61, 155, 168, 0.2);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0 0 var(--space-4);
+}
+
+.ev2-md__pre code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--enc-starlight);
+  background: none;
+  border: none;
+  padding: 0;
+  white-space: pre;
+}
+
+.ev2-md__code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  background: var(--enc-slate);
+  color: var(--enc-teal-light);
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid rgba(61, 155, 168, 0.2);
+  word-break: break-all;
+}
+
+.ev2-md__link {
+  color: var(--enc-teal-light);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-all;
+}
+
+.ev2-md__link:hover {
+  color: var(--enc-seafoam);
+}
+
+/* Inline record-ID auto-link (SS2 "Record ID": mono, teal, 11.5-12px). */
+.ev2-md__id-link,
+.ev2-md__id-plain {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  word-break: break-all;
+}
+
+.ev2-md__id-link {
+  color: var(--enc-teal);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(61, 155, 168, 0.35);
+  transition: color var(--dur-fast) var(--ease-orbit), border-color var(--dur-fast) var(--ease-orbit);
+}
+
+.ev2-md__id-link:hover {
+  color: var(--enc-teal-light);
+  border-bottom-color: var(--enc-teal-light);
+}
+
+.ev2-md__id-plain {
+  color: var(--enc-dust);
+}

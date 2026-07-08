@@ -19,7 +19,7 @@ export function DocumentPrimitive({ record }: { record: Document }) {
       vitals={vitals}
       overview={
         <>
-          <Prose>{record.description}</Prose>
+          <Prose projectId={record.project_id}>{record.description}</Prose>
           <MetaRow label="File">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
               <FileText size={14} strokeWidth={1.5} color="var(--accent)" />

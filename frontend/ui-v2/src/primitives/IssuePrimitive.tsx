@@ -25,7 +25,7 @@ export function IssuePrimitive({ record }: { record: Issue }) {
       vitals={vitals}
       overview={
         <>
-          <Prose>{record.description}</Prose>
+          <Prose projectId={record.project_id}>{record.description}</Prose>
           <MetaRow label="Severity">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
               <AlertTriangle
@@ -47,7 +47,7 @@ export function IssuePrimitive({ record }: { record: Issue }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
     />
   )
 }
