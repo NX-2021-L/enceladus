@@ -103,6 +103,20 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => desktop.removeEventListener('change', syncTools)
   }, [])
 
+  // Band-B polish (ENC-ISS-51x): Escape must dismiss the mobile nav drawer,
+  // matching the scrim tap-to-close affordance. Only listens while the
+  // drawer is open so it never intercepts Escape elsewhere in the app.
+  useEffect(() => {
+    if (!navigationOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSidebarOpen(false)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [navigationOpen, setSidebarOpen])
+
   const followNav = (event: { detail: { href?: string; text?: React.ReactNode } }) => {
     const href = event.detail.href
     if (href === LOGOUT_HREF) {

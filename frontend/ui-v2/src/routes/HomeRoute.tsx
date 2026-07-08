@@ -100,14 +100,21 @@ interface EntryCardRow {
   href: string
 }
 
-/** Filtered-view /feed searches for the counts strip. Both use /feed's
- * existing `status` property filter (a real, working reduction of the
- * corpus); priority and checkout_state aren't wired into Feed's
- * client-side property filter yet, so these land on the closest available
- * filtered view rather than an exact match — see the note under the strip. */
+/** Filtered-view /feed searches for the counts strip (ENC-FTR-130 Band-B).
+ * Tokens mirror the exact server-side semantics each count tile's own fetch
+ * uses (api/homeQueue.ts), so the destination list matches the number above
+ * it: "Open P0/P1" = status=open AND priority in (P0,P1); "Awaiting
+ * checkout" = status=open AND record_type=task AND checkout_state !=
+ * checked_out. */
 const OPEN_SEARCH: FeedRouteSearch = {
   ...FEED_SEARCH_DEFAULTS,
-  f: serializeFilterQuery({ tokens: [{ propertyKey: 'status', operator: '=', value: 'open' }], operation: 'and' }),
+  f: serializeFilterQuery({
+    tokens: [
+      { propertyKey: 'status', operator: '=', value: 'open' },
+      { propertyKey: 'priority', operator: 'in', value: 'p0,p1' },
+    ],
+    operation: 'and',
+  }),
 }
 const OPEN_TASKS_SEARCH: FeedRouteSearch = {
   ...FEED_SEARCH_DEFAULTS,
@@ -115,6 +122,7 @@ const OPEN_TASKS_SEARCH: FeedRouteSearch = {
     tokens: [
       { propertyKey: 'status', operator: '=', value: 'open' },
       { propertyKey: 'record_type', operator: '=', value: 'task' },
+      { propertyKey: 'checkout_state', operator: '!=', value: 'checked_out' },
     ],
     operation: 'and',
   }),
@@ -345,9 +353,8 @@ export function HomeRoute() {
         </Link>
       </section>
       <p className="home-route__counts-note">
-        Counts are exact (server-computed). Their links open the closest available Feed filter —
-        priority and checkout-state filtering aren’t wired into Feed’s client-side search yet, so
-        each destination list is a superset of the exact count above it.
+        Counts are exact (server-computed). Their links open Feed pre-filtered to match — results
+        may lag briefly behind the count while the local feed snapshot finishes syncing.
       </p>
 
       <section className="home-route__recent" aria-label="Recent activity">

@@ -22,6 +22,15 @@ const CORPUS: LocalSearchRecord[] = [
     title: 'Sample issue',
     status: 'open',
   },
+  {
+    recordId: 'ENC-TSK-M40',
+    recordType: 'task',
+    projectId: 'enceladus',
+    title: 'Open P0 task',
+    status: 'open',
+    priority: 'P0',
+    checkoutState: 'checked_out',
+  },
 ]
 
 describe('attributeRegistry', () => {
@@ -45,5 +54,16 @@ describe('attributeRegistry', () => {
   it('resolves hit fields for filter matching', () => {
     expect(fieldValueForProperty(CORPUS[0], 'status')).toBe('in-progress')
     expect(fieldValueForProperty(CORPUS[0], 'record_id')).toBe('ENC-TSK-L19')
+  })
+
+  it('registers priority and checkout_state as filterable properties (ENC-FTR-130 Band-B)', () => {
+    const props = buildAttributeRegistry(CORPUS)
+    expect(props.some((p) => p.key === 'priority')).toBe(true)
+    expect(props.some((p) => p.key === 'checkout_state')).toBe(true)
+  })
+
+  it('resolves priority and checkout_state hit fields for filter matching', () => {
+    expect(fieldValueForProperty(CORPUS[2], 'priority')).toBe('P0')
+    expect(fieldValueForProperty(CORPUS[2], 'checkout_state')).toBe('checked_out')
   })
 })
