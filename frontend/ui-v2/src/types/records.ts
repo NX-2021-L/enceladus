@@ -43,7 +43,25 @@ export interface RecordExtensions {
   subtask_ids?: string[]
 }
 
-export interface Task {
+/** AC evidence stamp (ENC-TSK-M23 / FND-03) -- the shape tracker.get returns
+ *  under `acceptance_criteria` for governed records. */
+export interface AcceptanceCriterion {
+  description: string
+  evidence: string
+  evidence_acceptance: boolean
+}
+
+/**
+ * Governed lifecycle metadata shared by every checked-out-able tracker
+ * record (ENC-TSK-M23 / FND-03).
+ */
+export interface GovernedLifecycleMeta {
+  transition_type?: string
+  checkout_state?: string
+  checked_out_by?: string | null
+}
+
+export interface Task extends GovernedLifecycleMeta {
   task_id: string
   project_id: string
   title: string
@@ -63,9 +81,10 @@ export interface Task {
   typed_relationships?: TypedRelationshipEdge[]
   context_node?: ContextNodeMeta
   subtask_ids?: string[]
+  acceptance_criteria?: AcceptanceCriterion[]
 }
 
-export interface Issue {
+export interface Issue extends GovernedLifecycleMeta {
   issue_id: string
   project_id: string
   title: string
@@ -82,7 +101,7 @@ export interface Issue {
   context_node?: ContextNodeMeta
 }
 
-export interface Feature {
+export interface Feature extends GovernedLifecycleMeta {
   feature_id: string
   project_id: string
   title: string
@@ -98,7 +117,7 @@ export interface Feature {
   context_node?: ContextNodeMeta
 }
 
-export interface Plan {
+export interface Plan extends GovernedLifecycleMeta {
   plan_id: string
   project_id: string
   title: string
@@ -158,11 +177,6 @@ export interface Document {
   document_subtype?: string
 }
 
-/**
- * Maps each record type to its concrete record interface. Used to keep the
- * query-options factories, the primitive registry, and the routes in lockstep
- * so `useSuspenseQuery` returns a fully-typed `T`, never `T | undefined`.
- */
 export interface RecordShapeMap {
   task: Task
   issue: Issue
