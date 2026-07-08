@@ -64,6 +64,37 @@ over what already exists):
   3. Confirm `records_read` search returns results and doc count is in the
      expected ~3k order of magnitude (ISS-487 evidence).
 
+### Failover drill (ENC-TSK-M13 / L46 AC-2)
+
+Agent CLI sessions (`enceladus-agent-cli`) are DENIED `ssm:SendCommand` and
+`ec2:StopInstances` by design (ENC-TSK-564) — do **not** try to stop the node
+from a terminal session. The sanctioned executor is the
+**OpenSearch Failover Drill (gamma)** workflow
+(`.github/workflows/opensearch-failover-drill.yml`, `workflow_dispatch` from a
+`v4/**` ref). It resolves the node by tag, SSM-stops the `opensearch` service
+(process-level failover — no instance/EBS churn, so no post-drill backfill),
+holds a configurable drill window (default 180s) during which the verifying
+session asserts keyword fallback (Neo4j) + facet fallback (`/feed/corpus`) via
+gamma search, then restarts the service and asserts recovery (`systemctl`
+active + `:9200` answering). Runs as `BackendDeployRole`, which already holds
+the needed `ssm:SendCommand`/`ssm:GetCommandInvocation`/`ec2:DescribeInstances`
+grants — no IAM change required.
+
+### CDC freshness (ENC-TSK-M13 / ENC-TSK-L84)
+
+CDC is direct DynamoDB Streams → Lambda ESM (`SearchIndexTrackerStreamTrigger`
+/ `SearchIndexDocumentsStreamTrigger` in `02-compute.yaml`; EventBridge Pipes
+with a DDB Streams source are account-wide dead, ENC-ISS-497). Measured
+delivery lag (CloudWatch `IteratorAge`, live gamma traffic): avg ~0.6s, max
+~2.6s — freshness budget met with wide margin. **Gotcha:** gamma tables are a
+fork snapshot fed by GDMP batch mirror; a mutation made through the *prod* MCP
+(`mcp.jreese.net` → `devops-project-tracker`) will NOT appear in gamma
+OpenSearch until the next mirror. Freshness probes must mutate the *gamma*
+tables (gamma MCP / gamma APIs). Poisoned records are bounded by
+`MaximumRetryAttempts`/`BisectBatchOnFunctionError`/`MaximumRecordAgeInSeconds`
+and dead-letter to `devops-search-index-cdc-dlq-gamma` (14-day retention) —
+alarm on DLQ depth if it ever goes nonzero.
+
 ## AC-3 — reindex, node replacement, cost guardrail
 
 ### Reindex (zero-downtime version bump)
