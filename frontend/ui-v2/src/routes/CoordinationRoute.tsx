@@ -16,6 +16,7 @@ import { useSearch } from '@tanstack/react-router'
 import { Cards, PropertyFilter, Tabs } from '../design-system'
 import { StatusChip } from '../components/StatusChip'
 import { RecordCard } from '../components/RecordCard'
+import { VirtualList } from '../components/VirtualList'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import {
@@ -88,17 +89,26 @@ export function CoordinationRoute() {
       label: 'Sessions',
       count: sessions.length,
       content: (
+        // ENC-TSK-M18 (AC-3): sessions is documented as a "<=200 row"
+        // dataset (see AC-16 note below) rendered with a bare .map() before
+        // this task -- VirtualList windows it past the 30-row threshold so
+        // an active-multi-agent day doesn't mount 100+ RecordCard DOM nodes
+        // at once.
         <div className="ev2-rc-grid ev2-rc-grid--2col">
-          {sessions.map((row) => (
-            <RecordCard
-              key={row.session_id}
-              recordId={row.session_id}
-              kindLabel={row.agent_type_id}
-              description={row.runtime ? `Runtime: ${row.runtime}` : undefined}
-              status={row.status}
-              variant="standard"
-            />
-          ))}
+          <VirtualList
+            items={sessions}
+            getKey={(row) => row.session_id}
+            estimateSize={96}
+            renderItem={(row) => (
+              <RecordCard
+                recordId={row.session_id}
+                kindLabel={row.agent_type_id}
+                description={row.runtime ? `Runtime: ${row.runtime}` : undefined}
+                status={row.status}
+                variant="standard"
+              />
+            )}
+          />
         </div>
       ),
     },
