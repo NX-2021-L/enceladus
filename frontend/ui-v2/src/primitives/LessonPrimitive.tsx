@@ -17,6 +17,7 @@ export function LessonPrimitive({ record }: { record: Lesson }) {
       kindLabel="Lesson"
       title={record.title}
       status={record.status}
+      recordType="lesson"
     >
       <div
         style={{
