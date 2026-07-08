@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-08.02",
-  "updated_at": "2026-07-08T02:55:00Z",
-  "last_change_summary": "ENC-ISS-509 (carrier ENC-TSK-M24): tracker_mutation._handle_get_record gains _get_record_full_with_gamma_fallback -- on gamma, a miss against the local devops-project-tracker-gamma table (one-time-seeded, never continuously synced from the canonical table) falls through to a single read-only GetItem against the canonical devops-project-tracker table so the gamma PWA detail route can render recently-created records. GET-detail only; no change to writes, list, or search. New least-privilege TrackerTableCanonicalReadFallback IAM statement (dynamodb:GetItem only) on TrackerMutationRole, gated !If [IsGamma] (infrastructure/cloudformation/02-compute.yaml).",
+  "version": "2026-07-08.03",
+  "updated_at": "2026-07-08T05:10:00Z",
+  "last_change_summary": "ENC-TSK-M27 (ENC-FTR-130): io-queue completeness. Two new read-only, Cognito-gated GET routes on coordination_api close the two M19 Home \"Data gap\" placeholder rows -- GET /api/v1/coordination/queue/paused-approvals (GitHub Actions runs blocked on the v3-prod Environment's required-reviewer gate; reuses the existing ENC-FTR-021 GitHub App installation-token path via new _get_github_installation_token/_github_queue_api_get helpers, no new secret minted) and GET /api/v1/coordination/queue/stale-locks (Scan of the projects table for checkout_state=checked_out task records past STALE_CHECKOUT_THRESHOLD_MINUTES, mirroring backend/lambda/stale_checkout_monitor's detection core so the PWA agrees with the scheduled monitor's signal). Both handlers add no mutation path. New least-privilege GitHubAppSecretRead IAM statement (secretsmanager:GetSecretValue/DescribeSecret scoped to devops/github-app/*) on CoordinationApiRole (infrastructure/cloudformation/02-compute.yaml, covers gamma + prod via EnvironmentSuffix); no new DynamoDB IAM needed (TrackerTableAccess/ProjectsTableRead already grant Scan). New gamma-only APIGW routes RouteQueuePausedApprovals + RouteQueueStaleLocks (infrastructure/cloudformation/03-api.yaml, Condition: IsGamma, same posture as the Escalations feed). frontend/ui-v2 Home route now fetches both live and replaces routes/homeQueue.ts::GAP_QUEUE_ROWS with pausedApprovalRows/staleLockRows mapping functions.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7802,10 +7802,50 @@
       },
       "owner": "devops-infrastructure",
       "source": "ENC-TSK-K45 / ENC-TSK-B66 (B66 Ph5 AC-0)"
+    },
+    "coordination.queue": {
+      "description": "ENC-TSK-M27 (ENC-FTR-130): the PWA Home \"Requires io\" queue's read surfaces for the two record classes that had no PWA-reachable data source before this task -- paused v3-prod Environment GitHub Actions approval runs, and stale checkout locks. Both routes are Cognito-session-gated (_is_cognito_session) exactly like coordination.escalations; neither adds a mutation path. Paused-approvals calls GitHub's REST API with an installation token minted via the existing ENC-FTR-021 GitHub App credential path (GITHUB_APP_ID/GITHUB_INSTALLATION_ID/GITHUB_PRIVATE_KEY_SECRET, already provisioned on this function's environment) -- no new GitHub credential. Stale-locks Scans the projects table with the same detection core as backend/lambda/stale_checkout_monitor/lambda_function.py.",
+      "fields": {
+        "GET /api/v1/coordination/queue/paused-approvals": {
+          "type": "route",
+          "definition": "Lists GitHub Actions workflow runs on GITHUB_QUEUE_REPO (default NX-2021-L/enceladus) with status=waiting, then calls pending_deployments per run and keeps only runs where an environment named 'v3-prod' (case-insensitive) is pending review (falls back to including a run if pending_deployments couldn't be read, rather than silently dropping a real approval need). Returns {id, run_url, requesting_workflow, environments, head_sha, created_at} per row. Returns an empty list with a note (not an error) when GITHUB_APP_ID/GITHUB_INSTALLATION_ID are unset. Cognito-only."
+        },
+        "GET /api/v1/coordination/queue/stale-locks": {
+          "type": "route",
+          "definition": "Scans PROJECTS_TABLE (default 'projects') for record_type=task AND checkout_state=checked_out, then filters to checked_out_at older than STALE_CHECKOUT_THRESHOLD_MINUTES (default 240, same env var and default as stale_checkout_monitor). Returns {record_id, holder_session, held_since, age_minutes} per row, newest-age-first, capped at a 500-item scan. Read-only; never mutates checkout_state. Cognito-only."
+        },
+        "GITHUB_APP_ID": {
+          "type": "string",
+          "definition": "Existing ENC-FTR-021 env var (already provisioned on CoordinationApiFunction in infrastructure/cloudformation/02-compute.yaml). Reused unmodified by ENC-TSK-M27; no new value."
+        },
+        "GITHUB_INSTALLATION_ID": {
+          "type": "string",
+          "definition": "Existing ENC-FTR-021 env var, reused unmodified by ENC-TSK-M27."
+        },
+        "GITHUB_PRIVATE_KEY_SECRET": {
+          "type": "string",
+          "definition": "Existing ENC-FTR-021 env var naming the Secrets Manager secret holding the GitHub App private key (default 'devops/github-app/private-key'). ENC-TSK-M27 adds the GitHubAppSecretRead IAM statement (GetSecretValue/DescribeSecret scoped to devops/github-app/*) so coordination_api can read it; no new secret value, no write access."
+        },
+        "GITHUB_QUEUE_REPO": {
+          "type": "string",
+          "definition": "New ENC-TSK-M27 env var: owner/repo to query for paused Environment approval runs. Default 'NX-2021-L/enceladus'."
+        },
+        "STALE_CHECKOUT_THRESHOLD_MINUTES": {
+          "type": "string",
+          "definition": "Optional env var (default 240): age threshold in minutes for the stale-locks route. Shares its name and default with backend/lambda/stale_checkout_monitor/lambda_function.py's identical env var so the two surfaces agree on what counts as stale; set independently per-Lambda (not a shared CFN parameter)."
+        }
+      },
+      "pwa_surface": "Home route's \"Requires io\" queue (frontend/ui-v2/src/routes/HomeRoute.tsx): pausedApprovalRows/staleLockRows (routes/homeQueue.ts) render live rows in place of the ENC-TSK-M19 GAP_QUEUE_ROWS placeholders. Paused-approval rows link directly to the GitHub Actions run (approve/reject stays a GitHub action, not a new PWA mutation); stale-lock rows are informational only, no click-through action.",
+      "apigw_routes": "03-api.yaml (Condition: IsGamma, same v3-prod-promotion posture as escalations): RouteQueuePausedApprovals, RouteQueueStaleLocks -> CoordinationApiIntegration."
     }
   },
   "change_summary": "ENC-TSK-L93: documents-list metadata-only projection via include_content=false (skill catalog fields + runtime_hint).",
   "change_log": [
+    {
+      "version": "2026-07-08.03",
+      "date": "2026-07-08",
+      "summary": "ENC-TSK-M27 (ENC-FTR-130): io-queue completeness. Two new read-only, Cognito-gated GET routes on coordination_api close the two M19 Home \"Data gap\" placeholder rows -- GET /api/v1/coordination/queue/paused-approvals (GitHub Actions runs blocked on the v3-prod Environment's required-reviewer gate; reuses the existing ENC-FTR-021 GitHub App installation-token path via new _get_github_installation_token/_github_queue_api_get helpers, no new secret minted) and GET /api/v1/coordination/queue/stale-locks (Scan of the projects table for checkout_state=checked_out task records past STALE_CHECKOUT_THRESHOLD_MINUTES, mirroring backend/lambda/stale_checkout_monitor's detection core so the PWA agrees with the scheduled monitor's signal). Both handlers add no mutation path. New least-privilege GitHubAppSecretRead IAM statement (secretsmanager:GetSecretValue/DescribeSecret scoped to devops/github-app/*) on CoordinationApiRole (infrastructure/cloudformation/02-compute.yaml, covers gamma + prod via EnvironmentSuffix); no new DynamoDB IAM needed (TrackerTableAccess/ProjectsTableRead already grant Scan). New gamma-only APIGW routes RouteQueuePausedApprovals + RouteQueueStaleLocks (infrastructure/cloudformation/03-api.yaml, Condition: IsGamma, same posture as the Escalations feed). frontend/ui-v2 Home route now fetches both live and replaces routes/homeQueue.ts::GAP_QUEUE_ROWS with pausedApprovalRows/staleLockRows mapping functions."
+    },
     {
       "version": "2026-07-08.01",
       "date": "2026-07-08",

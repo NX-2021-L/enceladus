@@ -5,13 +5,18 @@ import { BarChart, Box, Cards, Header, PieChart, Tabs } from '../design-system'
 import { feedCorpusByTypeQueryOptions, feedCorpusQueryOptions } from '../api/feedCorpusQueryOptions'
 import { recordQueryOptions } from '../api/queryOptions'
 import { fetchEscalations } from '../api/coordination'
-import { fetchAwaitingCheckoutCount, fetchOpenP0P1Count } from '../api/homeQueue'
+import {
+  fetchAwaitingCheckoutCount,
+  fetchOpenP0P1Count,
+  fetchPausedApprovals,
+  fetchStaleLocks,
+} from '../api/homeQueue'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { documentHref, recordHrefForType } from './recordLink'
 import { RecordId } from '../components/RecordId'
 import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { GAP_QUEUE_ROWS, pendingEscalationRows, type QueueRow } from './homeQueue'
+import { pausedApprovalRows, pendingEscalationRows, staleLockRows, type QueueRow } from './homeQueue'
 import { FEED_SEARCH_DEFAULTS, serializeFilterQuery, type FeedRouteSearch } from '../search/feedSearchParams'
 import {
   DASHBOARD_RECORD_TYPES,
@@ -164,9 +169,20 @@ export function HomeRoute() {
     queryKey: ['coordination', 'escalations', projectId] as const,
     queryFn: ({ signal }) => fetchEscalations(projectId, { signal }),
   })
+  // ENC-TSK-M27: paused v3-prod Environment approvals + stale-checkout locks,
+  // replacing the M19 "Data gap" placeholder rows with live fetches.
+  const pausedApprovalsQuery = useQuery({
+    queryKey: ['home', 'queue', 'paused-approvals'] as const,
+    queryFn: ({ signal }) => fetchPausedApprovals({ signal }),
+  })
+  const staleLocksQuery = useQuery({
+    queryKey: ['home', 'queue', 'stale-locks'] as const,
+    queryFn: ({ signal }) => fetchStaleLocks({ signal }),
+  })
   const queueRows: QueueRow[] = [
     ...pendingEscalationRows(escalationsQuery.data ?? []),
-    ...GAP_QUEUE_ROWS,
+    ...pausedApprovalRows(pausedApprovalsQuery.data ?? []),
+    ...staleLockRows(staleLocksQuery.data ?? []),
   ]
 
   // Actionable counts strip.

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { GAP_QUEUE_ROWS, pendingEscalationRows } from './homeQueue'
+import { pausedApprovalRows, pendingEscalationRows, staleLockRows } from './homeQueue'
 import type { EscalationRecord } from '../api/coordination'
+import type { PausedApprovalRun, StaleLockEntry } from '../api/homeQueue'
 
 function escalation(overrides: Partial<EscalationRecord>): EscalationRecord {
   return {
@@ -42,16 +43,34 @@ describe('pendingEscalationRows', () => {
   })
 })
 
-describe('GAP_QUEUE_ROWS', () => {
-  it('are all marked gap:true and never carry an href', () => {
-    for (const row of GAP_QUEUE_ROWS) {
-      expect(row.gap).toBe(true)
-      expect(row.href).toBeUndefined()
-    }
+describe('pausedApprovalRows', () => {
+  it('titles by requesting workflow when present, falls back to the run id', () => {
+    const withWorkflow = pausedApprovalRows([
+      { id: 42, requesting_workflow: 'promote-gamma-to-prod-request', run_url: 'https://github.com/x/y/actions/runs/42' } as PausedApprovalRun,
+    ])
+    expect(withWorkflow[0]?.title).toBe('promote-gamma-to-prod-request awaiting v3-prod approval')
+    expect(withWorkflow[0]?.href).toBe('https://github.com/x/y/actions/runs/42')
+
+    const withoutWorkflow = pausedApprovalRows([{ id: 7 } as PausedApprovalRun])
+    expect(withoutWorkflow[0]?.title).toBe('Run 7 awaiting v3-prod approval')
   })
 
-  it('covers paused prod runs and stale-lock/backfill flags', () => {
-    const ids = GAP_QUEUE_ROWS.map((row) => row.id)
-    expect(ids).toEqual(['gap-paused-prod', 'gap-stale-lock'])
+  it('handles an empty list', () => {
+    expect(pausedApprovalRows([])).toEqual([])
+  })
+})
+
+describe('staleLockRows', () => {
+  it('surfaces record id, holder session, and age', () => {
+    const rows = staleLockRows([
+      { record_id: 'ENC-TSK-K01', holder_session: 'ENC-SES-057', age_minutes: 312 } as StaleLockEntry,
+    ])
+    expect(rows[0]?.id).toBe('stale-lock-ENC-TSK-K01')
+    expect(rows[0]?.title).toBe('ENC-TSK-K01 checkout is stale')
+    expect(rows[0]?.description).toBe('Held by ENC-SES-057 — 312m')
+  })
+
+  it('handles an empty list', () => {
+    expect(staleLockRows([])).toEqual([])
   })
 })
