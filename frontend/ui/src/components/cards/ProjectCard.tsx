@@ -6,7 +6,7 @@ export function ProjectCard({ project }: { project: ProjectSummary }) {
   return (
     <Link
       to={`/projects/${project.project_id}`}
-      className="block bg-slate-800 rounded-lg p-4 hover:bg-slate-750 transition-colors active:bg-slate-700"
+      className="block bg-slate-800 rounded-lg p-4 border border-[color:var(--border-subtle)] hover:border-[color:var(--border-hover)] hover:bg-slate-750 transition-colors active:bg-slate-700"
     >
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">

@@ -35,7 +35,7 @@ export function RelatedItems({ groups, recordMap }: RelatedItemsProps) {
                 <Link
                   key={id}
                   to={`${group.routePrefix}/${id}`}
-                  className="flex items-start gap-2 rounded-md bg-slate-700/50 p-2 hover:bg-slate-700 transition-colors"
+                  className="flex items-start gap-2 rounded-lg bg-slate-700/50 p-2 border border-[color:var(--border-subtle)] hover:border-[color:var(--border-hover)] hover:bg-slate-700 transition-colors"
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-0.5">
