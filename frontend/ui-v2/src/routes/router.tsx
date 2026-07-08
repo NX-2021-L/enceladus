@@ -109,6 +109,12 @@ const changelogRoute = createRoute({
 const coordinationRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/coordination',
+  // ENC-TSK-M19: lets Home's "Requires io" queue deep-link an escalation row
+  // straight to the Escalations tab (?tab=escalations) instead of landing on
+  // the default Sessions tab.
+  validateSearch: (raw: Record<string, unknown>) => ({
+    tab: typeof raw.tab === 'string' ? raw.tab : '',
+  }),
   component: CoordinationRoute,
 })
 const skillLibraryRoute = createRoute({
