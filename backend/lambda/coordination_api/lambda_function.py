@@ -182,6 +182,15 @@ def _first_nonempty_env(*names: str) -> str:
 COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests")
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+# ENC-TSK-M27 deploy-nudge (2026-07-08): the queue-read surfaces below merged in
+# #958 but the v4-gamma affected-set detector (tools/compute_affected_targets.py
+# resolve_last_deployed_sha) raced a concurrent CFN stack deploy that posted its
+# own success Deployment record for the same commit, so base_sha==head_sha and
+# the Lambda deploy step skipped this function (0 functions deployed). This
+# comment-only touch gives the affected-set diff a real change to catch so the
+# already-merged code actually ships. See flagged follow-up: fix the detector's
+# base_sha resolution to not trust deployment records from sibling CFN-only
+# workflows for the same environment name.
 # ENC-TSK-M27: io-queue read surfaces. GITHUB_* envs are the existing ENC-FTR-021
 # GitHub App credential path (already provisioned on this function -- see
 # infrastructure/cloudformation/02-compute.yaml CoordinationApiFunction -- and
