@@ -11,6 +11,7 @@ export function IssuePrimitive({ record }: { record: Issue }) {
       kindLabel="Issue"
       title={record.title}
       status={record.status}
+      priority={record.priority}
     >
       <Prose>{record.description}</Prose>
       <MetaRow label="Priority">{record.priority}</MetaRow>
