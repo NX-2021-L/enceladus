@@ -137,7 +137,21 @@ export function DocsRoute() {
       </div>
 
       {filteredHits.length === 0 ? (
-        <p className="docs-route__empty">No documents match this search.</p>
+        <p className="docs-route__empty">
+          No documents match this search.
+          {(query || filterQuery.tokens.length > 0) && (
+            <button
+              type="button"
+              className="docs-route__empty-action"
+              onClick={() => {
+                setQuery('')
+                setFilterQuery({ tokens: [] })
+              }}
+            >
+              Clear filters
+            </button>
+          )}
+        </p>
       ) : (
         <Cards items={filteredHits} trackBy="recordId" columns={2} cardDefinition={cardDefinition} />
       )}
