@@ -3881,6 +3881,16 @@ Resources:
                   - secretsmanager:GetSecretValue
                   - secretsmanager:DescribeSecret
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/coordination/*"
+              # ENC-TSK-M27 (ENC-FTR-130): io-queue paused-approvals read reuses the
+              # existing ENC-FTR-021 GitHub App installation-token path (same secret
+              # already read by DeployDecideRole below) -- least-privilege GET-only
+              # scope, no new secret minted, no write-capable GitHub call added.
+              - Sid: GitHubAppSecretRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:devops/github-app/*"
               - Sid: ComponentEventsTopicPublish
                 Effect: Allow
                 Action:

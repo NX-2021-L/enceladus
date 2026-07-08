@@ -182,6 +182,19 @@ def _first_nonempty_env(*names: str) -> str:
 COORDINATION_TABLE = os.environ.get("COORDINATION_TABLE", "coordination-requests")
 TRACKER_TABLE = os.environ.get("TRACKER_TABLE", "devops-project-tracker")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
+# ENC-TSK-M27: io-queue read surfaces. GITHUB_* envs are the existing ENC-FTR-021
+# GitHub App credential path (already provisioned on this function -- see
+# infrastructure/cloudformation/02-compute.yaml CoordinationApiFunction -- and
+# mirrored from backend/lambda/deploy_decide/lambda_function.py). No new secret.
+GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID", "")
+GITHUB_INSTALLATION_ID = os.environ.get("GITHUB_INSTALLATION_ID", "")
+GITHUB_PRIVATE_KEY_SECRET = os.environ.get("GITHUB_PRIVATE_KEY_SECRET", "devops/github-app/private-key")
+GITHUB_QUEUE_REPO = os.environ.get("GITHUB_QUEUE_REPO", "NX-2021-L/enceladus")
+# Same default/threshold convention as backend/lambda/stale_checkout_monitor/lambda_function.py
+# (DOC-476D273C6566) so the PWA queue and the scheduled monitor agree on "stale".
+STALE_CHECKOUT_THRESHOLD_MINUTES = int(
+    os.environ.get("STALE_CHECKOUT_THRESHOLD_MINUTES", "") or 240
+)
 COMPONENTS_TABLE = os.environ.get("COMPONENTS_TABLE", "component-registry")
 DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 GOVERNANCE_POLICIES_TABLE = os.environ.get("GOVERNANCE_POLICIES_TABLE", "governance-policies")
@@ -987,6 +1000,76 @@ def _get_cognito():
             config=Config(retries={"max_attempts": 3, "mode": "standard"}),
         )
     return _cognito
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-M27: GitHub App installation-token path (io-queue paused-approvals
+# read). Same App/JWT/installation-token flow as
+# backend/lambda/deploy_decide/lambda_function.py -- reused here rather than
+# duplicated-and-diverged; no new GitHub credential is minted for this Lambda.
+# ---------------------------------------------------------------------------
+
+_github_installation_token_cache: Optional[str] = None
+_github_installation_token_fetched_at: float = 0.0
+_GITHUB_INSTALLATION_TOKEN_TTL = 8 * 60  # installation tokens live ~1h; refresh well inside that
+
+
+def _get_github_private_key() -> str:
+    resp = _get_secretsmanager().get_secret_value(SecretId=GITHUB_PRIVATE_KEY_SECRET)
+    return resp["SecretString"]
+
+
+def _generate_github_app_jwt() -> str:
+    if not _JWT_AVAILABLE:
+        raise ValueError("PyJWT not available in Lambda package (ENC-ISS-198)")
+    now = int(time.time())
+    payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": str(GITHUB_APP_ID)}
+    return jwt.encode(payload, _get_github_private_key(), algorithm="RS256")
+
+
+def _get_github_installation_token() -> str:
+    global _github_installation_token_cache, _github_installation_token_fetched_at
+    now = time.time()
+    if (
+        _github_installation_token_cache
+        and (now - _github_installation_token_fetched_at) < _GITHUB_INSTALLATION_TOKEN_TTL
+    ):
+        return _github_installation_token_cache
+    app_jwt = _generate_github_app_jwt()
+    url = f"https://api.github.com/app/installations/{GITHUB_INSTALLATION_ID}/access_tokens"
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        headers={"Authorization": f"Bearer {app_jwt}", "Accept": "application/vnd.github+json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+    _github_installation_token_cache = data["token"]
+    _github_installation_token_fetched_at = now
+    return _github_installation_token_cache
+
+
+def _github_queue_api_get(path: str) -> Tuple[int, Any]:
+    """Read-only GitHub REST GET with installation-token auth. Callers in this
+    module use this exclusively for GET paths (actions/runs, pending_deployments)
+    -- ENC-TSK-M27 AC3 adds no write-capable GitHub call."""
+    token = _get_github_installation_token()
+    url = f"https://api.github.com{path}"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode())
+        except Exception:
+            return exc.code, {"error": str(exc)}
+    except Exception as exc:
+        return 0, {"error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -10430,6 +10513,128 @@ def _render_escalation_diff(
     return diff
 
 
+def _handle_queue_paused_approvals(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/queue/paused-approvals -- ENC-TSK-M27 AC1.
+
+    Surfaces GitHub Actions workflow runs currently blocked on a required
+    reviewer for the v3-prod Environment (the promote-gamma-to-prod lane's
+    manual approval gate). Cognito-only, same as the escalations feed --
+    this is the human "Requires io" queue view, not an agent surface.
+    Read-only: two GitHub GET calls per request (list + pending_deployments
+    per candidate run), no mutation path.
+    """
+    if not _is_cognito_session(claims):
+        return _error(403, "The io-queue requires a Cognito session (PWA, human-only).")
+
+    if not (GITHUB_APP_ID and GITHUB_INSTALLATION_ID):
+        return _response(200, {
+            "success": True, "runs": [], "count": 0,
+            "note": "GitHub App credentials not configured in this environment",
+        })
+
+    status, runs_payload = _github_queue_api_get(
+        f"/repos/{GITHUB_QUEUE_REPO}/actions/runs?status=waiting&per_page=20"
+    )
+    if status != 200:
+        logger.error(
+            "queue/paused-approvals: GitHub runs list failed status=%s body=%s",
+            status, runs_payload,
+        )
+        return _error(502, "Failed to read paused GitHub Actions runs.")
+
+    paused: List[Dict[str, Any]] = []
+    for run in (runs_payload or {}).get("workflow_runs", [])[:20]:
+        run_id = run.get("id")
+        environments: List[str] = []
+        dep_status, deployments = _github_queue_api_get(
+            f"/repos/{GITHUB_QUEUE_REPO}/actions/runs/{run_id}/pending_deployments"
+        )
+        if dep_status == 200 and isinstance(deployments, list):
+            environments = [
+                str((dep.get("environment") or {}).get("name") or "")
+                for dep in deployments
+            ]
+        # Only surface runs actually paused on the v3-prod Environment gate;
+        # if pending_deployments couldn't be read, fall back to including the
+        # run rather than silently dropping a real approval need.
+        if environments and not any(env.lower() == "v3-prod" for env in environments):
+            continue
+        paused.append({
+            "id": run_id,
+            "run_url": run.get("html_url"),
+            "requesting_workflow": run.get("name") or run.get("path"),
+            "environments": environments,
+            "head_sha": run.get("head_sha"),
+            "created_at": run.get("created_at"),
+        })
+
+    return _response(200, {"success": True, "runs": paused, "count": len(paused)})
+
+
+def _handle_queue_stale_locks(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/coordination/queue/stale-locks -- ENC-TSK-M27 AC1.
+
+    Read-only Scan of the projects table for checked-out task records past
+    STALE_CHECKOUT_THRESHOLD_MINUTES, mirroring the detection core in
+    backend/lambda/stale_checkout_monitor/lambda_function.py (DOC-476D273C6566)
+    so the PWA queue agrees with the scheduled monitor's CloudWatch signal.
+    """
+    if not _is_cognito_session(claims):
+        return _error(403, "The io-queue requires a Cognito session (PWA, human-only).")
+
+    ddb = _get_ddb()
+    kwargs: Dict[str, Any] = {
+        "TableName": PROJECTS_TABLE,
+        "FilterExpression": "#rt = :task AND #cs = :checked_out",
+        "ExpressionAttributeNames": {"#rt": "record_type", "#cs": "checkout_state"},
+        "ExpressionAttributeValues": {
+            ":task": _serialize("task"),
+            ":checked_out": _serialize("checked_out"),
+        },
+    }
+    items: List[Dict[str, Any]] = []
+    try:
+        while True:
+            page = ddb.scan(**kwargs)
+            items.extend(_deserialize(raw) for raw in page.get("Items", []))
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key or len(items) >= 500:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+    except Exception as exc:
+        logger.error("queue/stale-locks scan failed: %s", exc)
+        return _error(500, "Failed to read stale-checkout locks.")
+
+    now = dt.datetime.now(dt.timezone.utc)
+    threshold = STALE_CHECKOUT_THRESHOLD_MINUTES
+    stale: List[Dict[str, Any]] = []
+    for item in items:
+        raw_ts = item.get("checked_out_at")
+        if not isinstance(raw_ts, str) or not raw_ts.strip():
+            continue
+        try:
+            ts = dt.datetime.fromisoformat(raw_ts.strip().replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=dt.timezone.utc)
+        age_minutes = int((now - ts).total_seconds() // 60)
+        if age_minutes < threshold:
+            continue
+        stale.append({
+            "record_id": item.get("item_id") or item.get("record_id"),
+            "holder_session": item.get("checked_out_by"),
+            "held_since": raw_ts,
+            "age_minutes": age_minutes,
+        })
+
+    stale.sort(key=lambda r: r["age_minutes"], reverse=True)
+    return _response(200, {
+        "success": True, "locks": stale, "count": len(stale),
+        "threshold_minutes": threshold,
+    })
+
+
 def _handle_escalations_feed(event: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
     """GET /api/v1/coordination/escalations — io's approval queue (§5.7).
 
@@ -16735,6 +16940,13 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # (DOC-5B888FCA43B8 §5.7). Cognito-gated inside the handlers; no agent path.
     if method == "GET" and path == "/api/v1/coordination/escalations":
         return _handle_escalations_feed(event, claims or {})
+
+    # ENC-TSK-M27 (ENC-FTR-130): io-queue completeness — paused v3-prod
+    # Environment approvals + stale-checkout locks. Read-only, Cognito-gated.
+    if method == "GET" and path == "/api/v1/coordination/queue/paused-approvals":
+        return _handle_queue_paused_approvals(event, claims or {})
+    if method == "GET" and path == "/api/v1/coordination/queue/stale-locks":
+        return _handle_queue_stale_locks(event, claims or {})
     match_escalation_decision = re.fullmatch(
         r"/api/v1/coordination/escalations/([a-z0-9_\-]+)/([A-Za-z0-9\-]+)/(approve|deny)", path
     )
