@@ -22,6 +22,13 @@ interface UiState {
   toggleSidebar: () => void
   setSidebarOpen: (open: boolean) => void
 
+  // Feed rail (ENC-ISS-513 / FND-01): opt-in, dismissible tools panel.
+  // Closed by default -- it echoes the /feed destination's own content, so
+  // it should only show when the operator asks for it, not on every page.
+  feedRailOpen: boolean
+  toggleFeedRail: () => void
+  setFeedRailOpen: (open: boolean) => void
+
   // Selected record (drives feed highlight / deep-link affordances)
   selectedRecordId: string | null
   selectRecord: (recordId: string | null) => void
@@ -46,6 +53,10 @@ export const useUiStore = create<UiState>((set) => ({
   sidebarOpen: true,
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
+
+  feedRailOpen: false,
+  toggleFeedRail: () => set((s) => ({ feedRailOpen: !s.feedRailOpen })),
+  setFeedRailOpen: (open) => set({ feedRailOpen: open }),
 
   selectedRecordId: null,
   selectRecord: (recordId) => set({ selectedRecordId: recordId }),

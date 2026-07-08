@@ -391,28 +391,31 @@ export function FeedRoute() {
           <span className="feed-route__meta-error">{tiered.hybridError.message}</span>
         )}
         {(keystrokeP50 !== null || localP50 !== null || serverP50 !== null) && (
-          <span className="feed-route__telemetry">
+          // ENC-ISS-513 / FND-01: this used to render inline, unconditionally
+          // visible, AND duplicated verbatim in the always-open Feed rail.
+          // It's the only copy now, and it's tucked behind a disclosure so
+          // the timing detail doesn't compete with the results themselves.
+          <details className="feed-route__telemetry">
+            <summary>Timing</summary>
             {keystrokeP50 !== null && (
-              <>
+              <div>
                 keystroke→suggest p50 {Math.round(keystrokeP50)}ms
                 {keystrokeP95 !== null ? ` / p95 ${Math.round(keystrokeP95)}ms` : ''}
-              </>
+              </div>
             )}
             {localP50 !== null && (
-              <>
-                {keystrokeP50 !== null ? ' · ' : ''}
+              <div>
                 request→page (local) p50 {Math.round(localP50)}ms
                 {localP95 !== null ? ` / p95 ${Math.round(localP95)}ms` : ''}
-              </>
+              </div>
             )}
             {serverP50 !== null && (
-              <>
-                {' · '}
+              <div>
                 request→page (server) p50 {Math.round(serverP50)}ms
                 {serverP95 !== null ? ` / p95 ${Math.round(serverP95)}ms` : ''}
-              </>
+              </div>
             )}
-          </span>
+          </details>
         )}
       </div>
 

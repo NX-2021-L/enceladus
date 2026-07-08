@@ -65,8 +65,8 @@ describe('staleLockRows', () => {
     const rows = staleLockRows([
       { record_id: 'ENC-TSK-K01', holder_session: 'ENC-SES-057', age_minutes: 312 } as StaleLockEntry,
     ])
-    expect(rows[0]?.id).toBe('stale-lock-ENC-TSK-K01')
-    expect(rows[0]?.title).toBe('ENC-TSK-K01 checkout is stale')
+    expect(rows[0]?.id).toBe('ENC-TSK-K01')
+    expect(rows[0]?.title).toBe('Checkout is stale')
     expect(rows[0]?.description).toBe('Held by ENC-SES-057 — 312m')
   })
 

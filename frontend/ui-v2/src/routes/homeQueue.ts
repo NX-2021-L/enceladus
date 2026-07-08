@@ -61,12 +61,16 @@ export function pausedApprovalRows(runs: PausedApprovalRun[]): QueueRow[] {
 /** ENC-TSK-M27: checkout locks held past the stale-checkout threshold, one
  * row per lock. Not directly actionable in the PWA (no new mutation path
  * per AC3) -- surfaces the record + holder + age so io knows what to chase
- * down via the tracker or a terminal session. */
+ * down via the tracker or a terminal session.
+ *
+ * ENC-ISS-513 / FND-01: `id` is the bare record id (no synthetic prefix) so
+ * RecordCard's header shows the real, clean id -- and `title` no longer
+ * repeats it as text. One id per card, per the RecordCard contract. */
 export function staleLockRows(locks: StaleLockEntry[]): QueueRow[] {
-  return locks.map((lock) => ({
-    id: `stale-lock-${lock.record_id}`,
+  return locks.map((lock, index) => ({
+    id: lock.record_id ?? `stale-lock-${index}`,
     kindLabel: 'Stale lock',
-    title: lock.record_id ? `${lock.record_id} checkout is stale` : 'Stale checkout lock',
+    title: 'Checkout is stale',
     description: [
       lock.holder_session ? `Held by ${lock.holder_session}` : undefined,
       typeof lock.age_minutes === 'number' ? `${lock.age_minutes}m` : undefined,
