@@ -344,6 +344,14 @@ jobs:
               'description': 'Gen2 deploy — ENC-FTR-090',
               'auto_merge': False,
               'required_contexts': [],
+              # ENC-ISS-519: durable discriminator so tools/compute_affected_targets.py's
+              # resolve_last_deployed_sha() can tell THIS Lambda code-deploy record apart
+              # from the GitHub-managed Deployment that cloudformation-api-stack-deploy.yml
+              # / cloudformation-compute-stack-deploy.yml auto-create for the same
+              # environment/sha via their `apply` job's `environment:` attribute. Keep this
+              # string in sync with LAMBDA_CODE_DEPLOY_TASK in
+              # tools/compute_affected_targets.py.
+              'task': 'lambda-artifacts',
           }))
           PY
           )
@@ -769,6 +777,31 @@ jobs:
 
           log(f'Deployed {deployed} Lambda functions  {arch}-py{py} @ {sha[:7]}')
           PY
+
+      # ENC-ISS-519 assertion: candidates 2+3 harden the *decision* of what to
+      # diff/deploy; this is the backstop that catches ANY other way a
+      # "0 Lambda updates but green run" false-positive could still slip
+      # through. Gamma-only (see the header comment): prod already carries
+      # its own CodeDeploy alarm-rollback + required-reviewer gate, and this
+      # step must never be the thing that risks that path. If it fails, this
+      # step's own non-zero exit fails the job, so the existing
+      # `if: success()` / `if: failure()` deployment-status steps below react
+      # correctly without any change to them.
+      - name: Assert post-deploy freshness (ENC-ISS-519)
+        if: contains(needs.resolve.outputs.environment, 'gamma')
+        env:
+          COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          FULL_SCOPE: ${{ needs.resolve.outputs.full_scope }}
+          AFFECTED_FUNCTIONS_JSON: ${{ needs.resolve.outputs.affected_functions_json }}
+          FUNCTION_NAME_MAP_JSON: ${{ needs.resolve.outputs.function_name_map_json }}
+        run: |
+          set -euo pipefail
+          python3 tools/assert_post_deploy_freshness.py \
+            --commit-sha "${COMMIT_SHA}" \
+            --full-scope "${FULL_SCOPE}" \
+            --affected-functions-json "${AFFECTED_FUNCTIONS_JSON}" \
+            --function-name-map-json "${FUNCTION_NAME_MAP_JSON}" \
+            --region "${{ env.AWS_REGION }}"
 
       - name: Set deployment status → success
         if: success()
