@@ -329,11 +329,11 @@ export function FeedRoute() {
   return (
     <div className="feed-route">
       <header className="feed-route__header">
-        <p className="feed-route__eyebrow">Search 2.0 · Feed</p>
+        <p className="feed-route__eyebrow">FEED · LIVE</p>
         <h1 className="feed-route__title">Results</h1>
         <p className="feed-route__subtitle">
-          Local tier paints instantly; hybrid merges async. Search state lives in the URL so back
-          navigation and breadcrumb return restore filters and scroll.
+          Search across every governed record type. Filters and scroll position are preserved on
+          your way back.
         </p>
       </header>
 

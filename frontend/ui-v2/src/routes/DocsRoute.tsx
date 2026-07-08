@@ -96,7 +96,7 @@ export function DocsRoute() {
   return (
     <div className="docs-route">
       <header className="docs-route__header">
-        <p className="docs-route__eyebrow">Search 2.0 · Documents</p>
+        <p className="docs-route__eyebrow">DOCUMENTS · LIVE</p>
         <h1 className="docs-route__title">Documents</h1>
         <p className="docs-route__subtitle">
           Search is scoped to document records only — tracker primitives (tasks, issues,
