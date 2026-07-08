@@ -2933,6 +2933,26 @@ Resources:
   # Pipes exactly so downstream indexing semantics are unchanged.
   # ---------------------------------------------------------------------------
 
+  # ENC-TSK-M13 (L46 AC-2 carrier): poisoned-record guardrails on both CDC
+  # ESMs. Without a retry cap, a single record that persistently fails
+  # (serialization bug, mapper regression) is retried until 24h stream expiry
+  # and head-of-line blocks ALL CDC freshness behind it -- exactly the failure
+  # mode observed live on devops-appsync-feed-publisher-gamma (Decimal
+  # serialization retry churn, same tracker stream, 2026-07-08). Failed
+  # batches are bisected to isolate the poison record, retried a bounded
+  # number of times, then their metadata is shipped to SearchIndexCdcDlq so
+  # the stream keeps flowing and freshness stays <=15s.
+  SearchIndexCdcDlq:
+    Type: AWS::SQS::Queue
+    Condition: IsGamma
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "devops-search-index-cdc-dlq${EnvironmentSuffix}"
+      MessageRetentionPeriod: 1209600  # 14 days -- max, for replay forensics
+      Tags:
+        - Key: enceladus:component
+          Value: opensearch-cdc
+
   SearchIndexTrackerStreamTrigger:
     Type: AWS::Lambda::EventSourceMapping
     Condition: IsGamma
@@ -2946,6 +2966,13 @@ Resources:
       StartingPosition: LATEST
       FunctionResponseTypes:
         - ReportBatchItemFailures
+      # ENC-TSK-M13: bounded retries + bisect + DLQ (see SearchIndexCdcDlq).
+      BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: 10
+      MaximumRecordAgeInSeconds: 3600
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt SearchIndexCdcDlq.Arn
       FilterCriteria:
         Filters:
           - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
@@ -2965,6 +2992,13 @@ Resources:
       StartingPosition: LATEST
       FunctionResponseTypes:
         - ReportBatchItemFailures
+      # ENC-TSK-M13: bounded retries + bisect + DLQ (see SearchIndexCdcDlq).
+      BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: 10
+      MaximumRecordAgeInSeconds: 3600
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt SearchIndexCdcDlq.Arn
       FilterCriteria:
         Filters:
           - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"record_type":{"S":[{"anything-but":"reference"}]}}}}'
@@ -6648,6 +6682,13 @@ Resources:
                   - dynamodb:ListStreams
                 Resource: !ImportValue
                   Fn::Sub: ${DataStackName}-DocumentsStreamArn
+              # ENC-TSK-M13: the Lambda service uses the FUNCTION execution
+              # role to deliver stream-ESM OnFailure metadata to the DLQ.
+              - Sid: SendToCdcDlq
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt SearchIndexCdcDlq.Arn
         - PolicyName: CloudWatchLogs
           PolicyDocument:
             Version: '2012-10-17'

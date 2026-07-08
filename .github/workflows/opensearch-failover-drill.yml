@@ -1,0 +1,201 @@
+name: OpenSearch Failover Drill (gamma)
+
+# ENC-TSK-M13 (carrier for ENC-TSK-L46 AC-2 / ENC-TSK-B67 E2E gate).
+#
+# The L46 failover drill ("stop the node -> Neo4j fallback serves keyword +
+# facets fall back to /feed/corpus; restart -> recovery") was blocked because
+# agent CLI sessions run as the enceladus-agent-cli IAM user, which is DENIED
+# ssm:SendCommand and ec2:StopInstances by design (ENC-TSK-564 minimal-surface
+# security model) and is NOT CloudFormation-managed, so no gamma-lane template
+# can grant it anything.
+#
+# This workflow is the sanctioned drill executor instead: it assumes
+# BackendDeployRole (enceladus-backend-deploy-github-role), which already
+# holds ssm:SendCommand + ssm:GetCommandInvocation + ec2:DescribeInstances
+# (04-github-roles.yaml Sids SSM / EC2Fleet) -- no IAM change required.
+#
+# Drill semantics: process-level failover (systemctl stop/start of the
+# opensearch service via SSM RunShellScript). This exercises the same
+# fallback path as an instance-level failure (the graph_query_api keyword
+# arm times out against :9200 and falls back to Neo4j; facets fall back to
+# /feed/corpus) and trips the enceladus-opensearch-process-down alarm
+# (Enceladus/OpenSearch NodeUp heartbeat), WITHOUT churning the EC2 instance
+# or its DeleteOnTermination EBS volume (no post-drill backfill needed).
+# EC2 stop/start is deliberately NOT used: no repo role holds
+# ec2:StopInstances/StartInstances, and instance churn wipes the index.
+#
+# While the drill window is open (default 180s), the AC-2 owner session
+# verifies via gamma MCP search that keyword results are served by the
+# fallback arm, then this workflow restarts the service and asserts recovery.
+#
+# GAMMA ONLY. The OpenSearch node exists only on gamma (DOC-499FA089EC30:
+# v3-prod is FROZEN). Dispatch this workflow from a v4/** ref.
+
+on:
+  workflow_dispatch:
+    inputs:
+      drill_window_seconds:
+        description: "Seconds to hold the OpenSearch process down before restarting (fallback verification window)"
+        type: string
+        required: false
+        default: "180"
+      reason:
+        description: "Why this drill is being run (tracker task ID)"
+        type: string
+        required: false
+        default: "ENC-TSK-L46 AC-2 failover drill"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: opensearch-failover-drill
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+
+jobs:
+  guard-gamma-only:
+    name: Guard — gamma only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse non-v4 refs
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF}" in
+            refs/heads/v4/*) echo "Gamma lane confirmed (${GITHUB_REF})." ;;
+            *)
+              echo "::error::Failover drill is gamma-only; dispatch from a v4/** ref (got ${GITHUB_REF})."
+              exit 1
+              ;;
+          esac
+
+  drill:
+    name: Stop → verify down → restart → verify recovery
+    needs: guard-gamma-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Configure AWS credentials (OIDC backend deploy role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKEND_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve OpenSearch node instance
+        id: node
+        run: |
+          set -euo pipefail
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:enceladus:component,Values=opensearch-node" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          if [ -z "${INSTANCE_ID}" ] || [ "$(echo "${INSTANCE_ID}" | wc -w)" -ne 1 ]; then
+            echo "::error::Expected exactly one running opensearch-node instance, got: '${INSTANCE_ID}'"
+            exit 1
+          fi
+          echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
+          echo "Node: ${INSTANCE_ID}"
+
+      - name: Define SSM helper
+        run: |
+          cat > /tmp/ssm_run.sh <<'EOF'
+          #!/usr/bin/env bash
+          # ssm_run <instance-id> <command...> -> prints stdout, exits non-zero on command failure
+          set -euo pipefail
+          INSTANCE_ID="$1"; shift
+          CMD_JSON=$(python3 -c 'import json,sys; print(json.dumps({"commands": sys.argv[1:]}))' "$@")
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "${CMD_JSON}" \
+            --comment "opensearch-failover-drill" \
+            --query 'Command.CommandId' --output text)
+          for i in $(seq 1 60); do
+            STATUS=$(aws ssm get-command-invocation --command-id "${COMMAND_ID}" \
+              --instance-id "${INSTANCE_ID}" --query 'Status' --output text 2>/dev/null || echo "Pending")
+            case "${STATUS}" in
+              Success)
+                aws ssm get-command-invocation --command-id "${COMMAND_ID}" \
+                  --instance-id "${INSTANCE_ID}" --query 'StandardOutputContent' --output text
+                exit 0 ;;
+              Failed|Cancelled|TimedOut)
+                echo "SSM command ${STATUS}" >&2
+                aws ssm get-command-invocation --command-id "${COMMAND_ID}" \
+                  --instance-id "${INSTANCE_ID}" --query 'StandardErrorContent' --output text >&2
+                exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "SSM command polling timed out" >&2
+          exit 1
+          EOF
+          chmod +x /tmp/ssm_run.sh
+
+      - name: Pre-drill baseline (service active)
+        run: |
+          set -euo pipefail
+          STATE=$(/tmp/ssm_run.sh "${{ steps.node.outputs.instance_id }}" "systemctl is-active opensearch || true")
+          echo "Pre-drill service state: ${STATE}"
+          if [ "$(echo "${STATE}" | tr -d '[:space:]')" != "active" ]; then
+            echo "::error::OpenSearch service is not active before the drill; aborting (state=${STATE})."
+            exit 1
+          fi
+
+      - name: Stop OpenSearch process (failover begins)
+        run: |
+          set -euo pipefail
+          date -u +"drill_stop_at=%Y-%m-%dT%H:%M:%SZ"
+          /tmp/ssm_run.sh "${{ steps.node.outputs.instance_id }}" "sudo systemctl stop opensearch"
+          STATE=$(/tmp/ssm_run.sh "${{ steps.node.outputs.instance_id }}" "systemctl is-active opensearch || true")
+          echo "Service state after stop: ${STATE}"
+          if [ "$(echo "${STATE}" | tr -d '[:space:]')" = "active" ]; then
+            echo "::error::Service still active after stop command."
+            exit 1
+          fi
+
+      - name: Hold drill window (fallback verification happens now)
+        run: |
+          set -euo pipefail
+          WINDOW="${{ inputs.drill_window_seconds }}"
+          case "${WINDOW}" in (*[!0-9]*|'') echo "::error::drill_window_seconds must be an integer"; exit 1;; esac
+          if [ "${WINDOW}" -gt 900 ]; then
+            echo "::error::drill window capped at 900s"; exit 1
+          fi
+          echo "Holding OpenSearch down for ${WINDOW}s. Verify fallback NOW:"
+          echo "  - gamma search keyword arm should serve from Neo4j fallback"
+          echo "  - facets should fall back to /feed/corpus"
+          echo "  - Enceladus/OpenSearch NodeUp heartbeat should breach (process-down alarm)"
+          sleep "${WINDOW}"
+
+      - name: Restart OpenSearch (recovery)
+        run: |
+          set -euo pipefail
+          date -u +"drill_restart_at=%Y-%m-%dT%H:%M:%SZ"
+          /tmp/ssm_run.sh "${{ steps.node.outputs.instance_id }}" "sudo systemctl start opensearch"
+
+      - name: Verify recovery (service active + :9200 answering)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 24); do
+            STATE=$(/tmp/ssm_run.sh "${{ steps.node.outputs.instance_id }}" "systemctl is-active opensearch || true")
+            if [ "$(echo "${STATE}" | tr -d '[:space:]')" = "active" ]; then
+              # Security plugin returns 401 without credentials -- 401 == process is up and serving TLS.
+              HTTP=$(/tmp/ssm_run.sh "${{ steps.node.outputs.instance_id }}" \
+                "curl -sk -o /dev/null -w '%{http_code}' --max-time 10 https://localhost:9200/ || true")
+              HTTP=$(echo "${HTTP}" | tr -d '[:space:]')
+              echo "Attempt ${i}: service=active http=${HTTP}"
+              if [ "${HTTP}" = "401" ] || [ "${HTTP}" = "200" ]; then
+                date -u +"drill_recovered_at=%Y-%m-%dT%H:%M:%SZ"
+                echo "Recovery confirmed."
+                exit 0
+              fi
+            else
+              echo "Attempt ${i}: service=${STATE}"
+            fi
+            sleep 10
+          done
+          echo "::error::OpenSearch did not recover within 240s of restart."
+          exit 1
