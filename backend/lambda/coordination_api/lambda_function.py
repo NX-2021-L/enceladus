@@ -9182,6 +9182,69 @@ def _is_allowlisted_escalation_decider(claims: Dict[str, Any]) -> bool:
     return email in _load_escalation_approver_allowlist()
 
 
+# ENC-TSK-M12 / ENC-ISS-501: structural human-principal enforcement.
+# The email allowlist above authorizes WHICH identities may decide; this
+# predicate enforces WHAT KIND of token may decide at all. _verify_token in
+# this module deliberately accepts Cognito ACCESS tokens (token_use=access,
+# client_id match) for the general API surface, and machine-operated Cognito
+# users in the human pool (e.g. terminal-agent@enceladus.internal, mintable
+# via coordination auth.cognito_session) carry genuine ID tokens. Neither may
+# ever decide an escalation, regardless of allowlist contents: escalations
+# exist specifically to route FSM-forbidden mutations through io's explicit
+# HUMAN approval. Fail-closed on every absent or unrecognized claim.
+def _escalation_human_client_ids() -> Set[str]:
+    """App clients whose ID tokens may represent a human escalation decider.
+
+    ESCALATION_HUMAN_CLIENT_IDS (comma-separated) when set; otherwise the
+    interactive PWA client (COGNITO_CLIENT_ID). Read per-call so tests and
+    live config changes take effect without module reload.
+    """
+    raw = os.environ.get("ESCALATION_HUMAN_CLIENT_IDS", "") or COGNITO_CLIENT_ID or ""
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _escalation_machine_email_domains() -> Set[str]:
+    """Email domains that mark a machine-operated Cognito principal."""
+    raw = os.environ.get("ESCALATION_MACHINE_EMAIL_DOMAINS", "enceladus.internal")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def _is_human_cognito_principal(claims: Dict[str, Any]) -> bool:
+    """True only for an interactive human Cognito ID-token principal.
+
+    Rejects (fail-closed, in order):
+      - anything but a Cognito ID token (token_use != "id"): access tokens,
+        client_credentials/M2M grants, internal-key and managed-token modes
+        (which carry no token_use at all);
+      - bare machine-client shapes (client_id claim without an aud claim);
+      - ID tokens minted for an app client outside the human-client allowlist
+        (e.g. the agent M2M client) or when no allowlist is configured;
+      - identities whose email is absent or under a machine principal domain
+        (e.g. *@enceladus.internal).
+    """
+    claims = claims or {}
+    if str(claims.get("token_use") or "").strip().lower() != "id":
+        return False
+    if claims.get("client_id") and not claims.get("aud"):
+        return False
+    aud = claims.get("aud")
+    if isinstance(aud, (list, tuple, set)):
+        aud_values = {str(a or "").strip() for a in aud}
+    else:
+        aud_values = {str(aud or "").strip()}
+    aud_values.discard("")
+    allowed_clients = _escalation_human_client_ids()
+    if not allowed_clients or not (aud_values & allowed_clients):
+        return False
+    email = str(claims.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return False
+    domain = email.rsplit("@", 1)[1]
+    if domain in _escalation_machine_email_domains():
+        return False
+    return True
+
+
 def _ddb_to_py(item: Dict[str, Any]) -> Dict[str, Any]:
     """Convert a DynamoDB low-level item dict to plain Python."""
     ds = TypeDeserializer()
@@ -10491,6 +10554,25 @@ def _handle_escalation_decision(
         return _error(403, (
             "Escalation approval/denial requires a Cognito session (human-only). "
             "Agent, SCI, and internal-key credentials are structurally rejected."
+        ))
+
+    # ENC-TSK-M12 / ENC-ISS-501: structural principal-type gate. Only an
+    # interactive human Cognito ID token (token_use=id, human app client,
+    # non-machine email domain) may reach the allowlist check at all --
+    # access tokens, client_credentials/M2M grants, and machine-operated
+    # Cognito users (e.g. terminal-agent@enceladus.internal) are rejected
+    # here regardless of allowlist contents.
+    if not _is_human_cognito_principal(claims):
+        logger.warning(
+            "escalation decision rejected: non-human principal "
+            "(token_use=%r, aud=%r, client_id=%r, email=%r, escalation_id=%s, project_id=%s)",
+            claims.get("token_use"), claims.get("aud"), claims.get("client_id"),
+            claims.get("email"), escalation_id, project_id,
+        )
+        return _error(403, (
+            "Escalation approval/denial requires an interactive human Cognito "
+            "ID token. Machine principals (access tokens, client_credentials/M2M "
+            "grants, machine-operated Cognito users) are structurally rejected."
         ))
 
     # ENC-TSK-L92 / ENC-ISS-501: _is_cognito_session alone is insufficient --

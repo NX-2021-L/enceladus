@@ -27,11 +27,20 @@ _SPEC.loader.exec_module(coordination_lambda)
 
 INTERNAL_CLAIMS = {"auth_mode": "internal-key"}
 MANAGED_CLAIMS = {"auth_mode": "managed-token"}
+
+# ENC-TSK-M12 / ENC-ISS-501: the escalation decision gate now requires a
+# structurally human Cognito ID token — token_use=id, aud on the human
+# app-client allowlist, non-machine email domain. The test human client id is
+# injected via ESCALATION_HUMAN_CLIENT_IDS (read per-call by the module).
+TEST_HUMAN_CLIENT_ID = "test-pwa-client-id"
+os.environ.setdefault("ESCALATION_HUMAN_CLIENT_IDS", TEST_HUMAN_CLIENT_ID)
 COGNITO_CLAIMS = {
     "auth_mode": "cognito",
     "sub": "abc-123",
     "email": "io@jreese.net",
     "cognito:username": "io",
+    "token_use": "id",
+    "aud": TEST_HUMAN_CLIENT_ID,
 }
 
 
@@ -242,9 +251,12 @@ class TestEscalationApproverAllowlist(unittest.TestCase):
     """
 
     def test_cognito_identity_not_on_allowlist_gets_403(self):
+        # Structurally human token shape (id token, human client, human email
+        # domain) so the request reaches the allowlist gate itself.
         not_allowlisted_claims = {
-            "auth_mode": "cognito", "sub": "c4b8e478-40e1-70ce-9f5d-caffd3e241df",
-            "email": "terminal-agent@enceladus.internal",
+            "auth_mode": "cognito", "sub": "someone-else",
+            "email": "someone-else@jreese.net",
+            "token_use": "id", "aud": TEST_HUMAN_CLIENT_ID,
         }
         resp, ddb, invoke = self._decide_raw(
             "approve", _fake_ddb(escalation=_escalation_item()),
@@ -262,7 +274,10 @@ class TestEscalationApproverAllowlist(unittest.TestCase):
         invoke.assert_called_once()
 
     def test_missing_email_claim_gets_403(self):
-        no_email_claims = {"auth_mode": "cognito", "sub": "abc-123"}
+        no_email_claims = {
+            "auth_mode": "cognito", "sub": "abc-123",
+            "token_use": "id", "aud": TEST_HUMAN_CLIENT_ID,
+        }
         resp, ddb, invoke = self._decide_raw(
             "approve", _fake_ddb(escalation=_escalation_item()),
             claims=no_email_claims, allowlist={"io@jreese.net"})
@@ -317,6 +332,97 @@ class TestEscalationApproverAllowlist(unittest.TestCase):
             resp = coordination_lambda._handle_escalation_decision(
                 "enceladus", "ENC-ESC-001", decision, _decision_event(body), claims)
         return resp, ddb, invoke
+
+
+class TestHumanPrincipalGate(unittest.TestCase):
+    """ENC-TSK-M12 / ENC-ISS-501: structural human-principal enforcement.
+
+    The email allowlist authorizes WHICH identities decide; this gate enforces
+    WHAT KIND of token may decide at all. Machine token shapes must be
+    rejected 403 even when their email IS on the allowlist -- the allowlist
+    must never be the only barrier between a machine principal and an
+    escalation approval.
+    """
+
+    ALLOWLIST = {"io@jreese.net", "terminal-agent@enceladus.internal"}
+
+    def _decide(self, claims, decision="approve"):
+        ddb = _fake_ddb(escalation=_escalation_item())
+        invoke = mock.MagicMock()
+        invoke.return_value = {
+            "success": True, "status": "applied",
+            "result": {"before": {}, "after": {}}, "_status_code": 200,
+        }
+        with mock.patch.object(coordination_lambda, "_get_ddb", return_value=ddb), \
+             mock.patch.object(coordination_lambda, "_invoke_tracker_mutation_api", invoke), \
+             mock.patch.object(coordination_lambda, "_load_escalation_approver_allowlist",
+                                return_value=self.ALLOWLIST):
+            resp = coordination_lambda._handle_escalation_decision(
+                "enceladus", "ENC-ESC-001", decision, _decision_event(), claims)
+        return resp, ddb, invoke
+
+    def _assert_machine_rejected(self, claims):
+        for decision in ("approve", "deny"):
+            resp, ddb, invoke = self._decide(claims, decision=decision)
+            self.assertEqual(403, resp["statusCode"])
+            self.assertIn("structurally rejected", json.loads(resp["body"])["error"])
+            ddb.update_item.assert_not_called()
+            invoke.assert_not_called()
+
+    def test_access_token_rejected_even_when_email_allowlisted(self):
+        self._assert_machine_rejected({
+            "auth_mode": "cognito", "sub": "abc-123", "email": "io@jreese.net",
+            "token_use": "access", "client_id": TEST_HUMAN_CLIENT_ID,
+            "username": "io",
+        })
+
+    def test_client_credentials_m2m_token_rejected(self):
+        # client_credentials grant: token_use=access, bare client_id, no email.
+        self._assert_machine_rejected({
+            "token_use": "access", "client_id": "m2m-agent-client-id",
+            "scope": "enceladus/agent.write", "sub": "m2m-client-sub",
+        })
+
+    def test_machine_operated_cognito_user_rejected_even_when_allowlisted(self):
+        # The observed ENC-ISS-501 attacker shape: a genuine human-pool ID
+        # token minted for a machine-operated user. Rejected on email domain
+        # even though the email is on the allowlist here.
+        self._assert_machine_rejected({
+            "auth_mode": "cognito", "sub": "c4b8e478-40e1-70ce-9f5d-caffd3e241df",
+            "email": "terminal-agent@enceladus.internal",
+            "token_use": "id", "aud": TEST_HUMAN_CLIENT_ID,
+        })
+
+    def test_id_token_from_non_human_app_client_rejected(self):
+        self._assert_machine_rejected({
+            "auth_mode": "cognito", "sub": "abc-123", "email": "io@jreese.net",
+            "token_use": "id", "aud": "some-other-app-client",
+        })
+
+    def test_legacy_claims_without_token_use_rejected(self):
+        self._assert_machine_rejected({
+            "auth_mode": "cognito", "sub": "abc-123", "email": "io@jreese.net",
+            "aud": TEST_HUMAN_CLIENT_ID,
+        })
+
+    def test_no_configured_human_client_fails_closed(self):
+        human_claims = dict(COGNITO_CLAIMS)
+        with mock.patch.dict(os.environ, {"ESCALATION_HUMAN_CLIENT_IDS": ""}), \
+             mock.patch.object(coordination_lambda, "COGNITO_CLIENT_ID", ""):
+            resp, ddb, invoke = self._decide(human_claims)
+        self.assertEqual(403, resp["statusCode"])
+        ddb.update_item.assert_not_called()
+
+    def test_human_id_token_accepted(self):
+        resp, ddb, invoke = self._decide(COGNITO_CLAIMS)
+        self.assertEqual(200, resp["statusCode"])
+        invoke.assert_called_once()
+
+    def test_aud_list_shape_accepted(self):
+        claims = dict(COGNITO_CLAIMS)
+        claims["aud"] = [TEST_HUMAN_CLIENT_ID]
+        resp, ddb, invoke = self._decide(claims)
+        self.assertEqual(200, resp["statusCode"])
 
 
 class TestRenderDiff(unittest.TestCase):

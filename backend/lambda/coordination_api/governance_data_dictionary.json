@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-07.14",
-  "updated_at": "2026-07-07T17:05:00Z",
-  "last_change_summary": "ENC-TSK-L93: documents-list include_content=false metadata-only projection for skill catalog (runtime_hint derived field).",
+  "version": "2026-07-08.01",
+  "updated_at": "2026-07-08T02:00:00Z",
+  "last_change_summary": "ENC-TSK-M12 / ENC-ISS-501: structural human-principal gate on escalation approve/deny (_is_human_cognito_principal: token_use=id + human app-client aud allowlist + machine email-domain rejection, fail-closed), layered in front of the ENC-TSK-L92 email allowlist.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7159,7 +7159,7 @@
       }
     },
     "coordination.escalations": {
-      "description": "ENC-FTR-121 Ph3 (ENC-TSK-J70, DOC-5B888FCA43B8 sections 5.7 + 6): io's escalation approval surface on coordination_api - the SOLE origin of override authorization in the platform. Every route verifies a genuine Cognito session server-side per call (_is_cognito_session); internal-key and managed-token credentials are structurally rejected with 403. ENC-TSK-L92 / ENC-ISS-501 (SEV-1, 2026-07-07): _is_cognito_session alone was found to be a fail-open BLOCKLIST (it excludes only auth_mode in {internal-key, managed-token} -- any OTHER or absent auth_mode passed), which let a non-human Cognito-authenticated identity self-approve escalations within seconds of filing with no human review. The approve/deny routes now ALSO require the decider's Cognito email claim to appear in a positive allowlist (_is_allowlisted_escalation_decider) sourced from a Console-edit-only S3 document that no Lambda role -- including this one -- has write access to; the allowlist check fails CLOSED on any fetch/parse error. No MCP action maps to approve or deny. Approve stamps approved_by {sub, email}, walks requested->approved under a ConditionExpression race guard, and drives applyEscalatedMutation (ENC-TSK-J69) in tracker_mutation via direct Lambda invoke (TRACKER_MUTATION_LAMBDA_NAME + X-Coordination-Internal-Key); the approval is durable even if the applier invoke fails (fail-soft: the escalation stays approved and the idempotent apply route can be re-driven - the agent never resubmits the cached mutation). Deny walks requested->denied, or requested->denied_with_guidance when a guidance_note is supplied; the note is stored on the item AND rides the denial event so watch polling (Ph4) delivers it to the agent.",
+      "description": "ENC-FTR-121 Ph3 (ENC-TSK-J70, DOC-5B888FCA43B8 sections 5.7 + 6): io's escalation approval surface on coordination_api - the SOLE origin of override authorization in the platform. Every route verifies a genuine Cognito session server-side per call (_is_cognito_session); internal-key and managed-token credentials are structurally rejected with 403. ENC-TSK-L92 / ENC-ISS-501 (SEV-1, 2026-07-07): _is_cognito_session alone was found to be a fail-open BLOCKLIST (it excludes only auth_mode in {internal-key, managed-token} -- any OTHER or absent auth_mode passed), which let a non-human Cognito-authenticated identity self-approve escalations within seconds of filing with no human review. The approve/deny routes now ALSO require the decider's Cognito email claim to appear in a positive allowlist (_is_allowlisted_escalation_decider) sourced from a Console-edit-only S3 document that no Lambda role -- including this one -- has write access to; the allowlist check fails CLOSED on any fetch/parse error. No MCP action maps to approve or deny. Approve stamps approved_by {sub, email}, walks requested->approved under a ConditionExpression race guard, and drives applyEscalatedMutation (ENC-TSK-J69) in tracker_mutation via direct Lambda invoke (TRACKER_MUTATION_LAMBDA_NAME + X-Coordination-Internal-Key); the approval is durable even if the applier invoke fails (fail-soft: the escalation stays approved and the idempotent apply route can be re-driven - the agent never resubmits the cached mutation). Deny walks requested->denied, or requested->denied_with_guidance when a guidance_note is supplied; the note is stored on the item AND rides the denial event so watch polling (Ph4) delivers it to the agent. ENC-TSK-M12 / ENC-ISS-501 (2026-07-08): the email allowlist authorizes WHICH identities may decide but not WHAT KIND of token may decide -- coordination_api's _verify_token deliberately accepts Cognito ACCESS tokens (token_use=access, client_id match) for the general API surface, and machine-operated Cognito users in the human pool (e.g. terminal-agent@enceladus.internal, mintable via coordination auth.cognito_session) carry genuine ID tokens, so an allowlisted-by-mistake machine identity would have reopened approve/deny. The decision routes now ALSO require _is_human_cognito_principal (fail-closed): token_use must be exactly 'id' (rejects access/client_credentials/M2M grants and the token-use-less internal-key/managed-token modes), the token's aud must be on the human app-client allowlist (ESCALATION_HUMAN_CLIENT_IDS, default COGNITO_CLIENT_ID), bare client_id-without-aud shapes are rejected, and the email claim must exist and not fall under a machine principal domain (ESCALATION_MACHINE_EMAIL_DOMAINS, default enceladus.internal). This gate runs BEFORE the allowlist check and rejects machine principals with 403 regardless of allowlist contents. Prod (main branch) enforces the identical claim checks in the standalone escalation_decision_authorizer (ENC-TSK-L95) in front of the routes.",
       "fields": {
         "GET /api/v1/coordination/escalations": {
           "type": "route",
@@ -7167,11 +7167,11 @@
         },
         "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve": {
           "type": "route",
-          "definition": "Non-delegable approve: requested->approved + approved_by + event, then drives the applier. Returns applied:true|false with apply_result or apply_error+retry. ENC-TSK-L92: gated by _is_cognito_session AND _is_allowlisted_escalation_decider (both must pass); an allowlist-miss returns 403 before any DynamoDB write."
+          "definition": "Non-delegable approve: requested->approved + approved_by + event, then drives the applier. Returns applied:true|false with apply_result or apply_error+retry. ENC-TSK-L92: gated by _is_cognito_session AND _is_allowlisted_escalation_decider (both must pass); an allowlist-miss returns 403 before any DynamoDB write. ENC-TSK-M12: additionally gated by _is_human_cognito_principal (token_use=id + human app-client aud + non-machine email domain, fail-closed) BEFORE the allowlist check; machine token shapes 403 with a distinct 'structurally rejected' error."
         },
         "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny": {
           "type": "route",
-          "definition": "Non-delegable deny: requested->denied (or denied_with_guidance when body.guidance_note is non-empty). Denied escalations are never applied. ENC-TSK-L92: same dual gate as approve."
+          "definition": "Non-delegable deny: requested->denied (or denied_with_guidance when body.guidance_note is non-empty). Denied escalations are never applied. ENC-TSK-L92: same dual gate as approve. ENC-TSK-M12: same triple gate as approve."
         },
         "ESCALATION_APPROVER_ALLOWLIST_BUCKET": {
           "type": "string",
@@ -7184,6 +7184,14 @@
         "GET /api/v1/coordination/escalations/watch": {
           "type": "route",
           "definition": "ENC-TSK-J71 (Ph4, section 5.4 + 5.9): session-scoped cursor polling - the listening AGENT's side of the loop (read scope; agent credentials are the intended callers; approval stays Cognito-only). Query params: session_id (required, ENC-SES-*), since (opaque cursor), project_id (default enceladus). Returns every section-11.2 lifecycle event newer than the cursor across all escalations the session originated (guidance_note rides denied_with_guidance events), plus next_cursor and session_touched. CURSOR SEMANTICS: base64url(JSON {escalation_id: events_consumed}) counting against the append-only events array - event timestamps are second-granular and FSM edges (applying->applied) land inside one second, so a timestamp cursor would drop same-second events; the count cursor is lossless, exactly-once, and stable on empty polls. Malformed/absent cursors replay from the start (events are facts; replay is safe). Every poll refreshes the session's last_activity_at heartbeat. POLLING GUIDANCE (section 5.8): 15-30s interval, exponential backoff after two idle hours; transport is polling ONLY (no WebSocket/SSE by design)."
+        },
+        "ESCALATION_HUMAN_CLIENT_IDS": {
+          "type": "string",
+          "definition": "ENC-TSK-M12 / ENC-ISS-501. Optional env var: comma-separated Cognito app-client ids whose ID tokens may represent a human escalation decider. Defaults to COGNITO_CLIENT_ID (the interactive PWA client) when unset. Read per-call by _escalation_human_client_ids(); an empty resolved set fails CLOSED (every decision denied). Tokens minted by any other app client (e.g. the ENC-FTR-074 agent M2M client) are rejected 403 on the decision routes regardless of their other claims."
+        },
+        "ESCALATION_MACHINE_EMAIL_DOMAINS": {
+          "type": "string",
+          "definition": "ENC-TSK-M12 / ENC-ISS-501. Optional env var: comma-separated email domains marking machine-operated Cognito principals (default 'enceladus.internal'). An otherwise-valid human-shaped ID token whose email falls under one of these domains is rejected 403 on the decision routes even if that email appears on the approver allowlist -- the allowlist must never be the only barrier between a machine principal and an escalation approval (the ENC-ISS-501 attacker identity terminal-agent@enceladus.internal is exactly this class)."
         }
       },
       "pwa_surface": "Escalations item in the PWA hamburger menu -> /escalations page: pending feed newest-first (target id/title, mutation type, requesting session, justification, fresh diff, prominent drift warning that still permits informed approve/deny), Approve / Deny / Deny-with-Guidance actions, terminal escalations in a collapsed History section. Ships via the comp-enceladus-pwa gamma pipeline.",
@@ -7798,6 +7806,11 @@
   },
   "change_summary": "ENC-TSK-L93: documents-list metadata-only projection via include_content=false (skill catalog fields + runtime_hint).",
   "change_log": [
+    {
+      "version": "2026-07-08.01",
+      "date": "2026-07-08",
+      "summary": "ENC-TSK-M12 / ENC-ISS-501 (SEV-1 residual): structural human-principal enforcement on escalation approve/deny. New _is_human_cognito_principal predicate in coordination_api (token_use must be 'id'; aud must be on the ESCALATION_HUMAN_CLIENT_IDS human app-client allowlist, default COGNITO_CLIENT_ID; bare client_id-without-aud shapes rejected; email required and must not fall under ESCALATION_MACHINE_EMAIL_DOMAINS, default enceladus.internal; fail-closed on absent claims) runs BEFORE the ENC-TSK-L92 email allowlist on _handle_escalation_decision. Closes the gap where _verify_token's deliberate acceptance of access tokens plus machine-operated human-pool Cognito users (terminal-agent@enceladus.internal via auth.cognito_session) left the email allowlist as the sole barrier against machine self-approval. Main-branch counterpart lands the identical checks in escalation_decision_authorizer (ENC-TSK-L95 surface). New fields coordination.escalations.ESCALATION_HUMAN_CLIENT_IDS + ESCALATION_MACHINE_EMAIL_DOMAINS."
+    },
     {
       "version": "2026-07-07.14",
       "date": "2026-07-07",
