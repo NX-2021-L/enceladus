@@ -14,6 +14,7 @@ import { useTieredSearch } from '../search/useTieredSearch'
 import { getCacheEngine } from '../sync/cacheEngine'
 import { useCacheEngineState } from '../sync/CacheEngineProvider'
 import { documentHref } from './recordLink'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import type { SearchResultHit } from '../types/search'
 import './docs.css'
 
@@ -34,6 +35,7 @@ const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
  * are plain per-render computations; the compiler owns memoization.
  */
 export function DocsRoute() {
+  useDocumentTitle('Docs')
   const [query, setQuery] = useState('')
   const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>({ tokens: [] })
   const [sort, setSort] = useState<FeedSort>('tier')

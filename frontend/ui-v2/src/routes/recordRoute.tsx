@@ -4,6 +4,7 @@ import { createRoute, type AnyRoute } from '@tanstack/react-router'
 import { queryClient } from '../api/queryClient'
 import { RecordDetailBreadcrumbs } from '../components/RecordDetailBreadcrumbs'
 import { SkeletonCard } from '../components/SkeletonCard'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { getPrimitive } from '../primitives/registry'
 import { useRecordRealtimeSync } from '../realtime/useRecordRealtimeSync'
 import type { RecordShapeMap, RecordType } from '../types/records'
@@ -36,6 +37,11 @@ export function createRecordRoute<K extends TrackerRecordType>(config: {
     const { project, id } = route.useParams() as { project: string; id: string }
     const { data } = useSuspenseQuery(queryOptionsFor(project, id))
     useRecordRealtimeSync(type, project, id)
+    // ENC-TSK-M25: title derives from the resolved record (never the route
+    // param alone), so it updates again once the async fetch settles — this
+    // component only renders past the Suspense boundary below, i.e. after
+    // `data` is available.
+    useDocumentTitle(`${id}: ${data.title}`)
     const Primitive = getPrimitive(type)
     return (
       <>
@@ -77,6 +83,7 @@ export function createDocumentRecordRoute(config: {
   function RecordComponent() {
     const { id } = route.useParams() as { id: string }
     const { data } = useSuspenseQuery(queryOptionsFor(id))
+    useDocumentTitle(`${id}: ${data.title}`)
     const Primitive = getPrimitive('document')
     return (
       <>

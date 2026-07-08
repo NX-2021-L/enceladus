@@ -6,6 +6,7 @@ import { recordQueryOptions } from '../api/queryOptions'
 import { documentHref, recordHrefForType } from './recordLink'
 import { RecordId } from '../components/RecordId'
 import { RecordCard } from '../components/RecordCard'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import {
   DASHBOARD_RECORD_TYPES,
   DASHBOARD_TYPE_LABEL,
@@ -93,6 +94,7 @@ interface EntryCardRow {
 }
 
 export function HomeRoute() {
+  useDocumentTitle('Home')
   // Dashboard-wide facets (record_type / status counts) — a limit:1 request
   // is enough since the backend computes facets over the whole filtered set
   // before slicing to `limit` (backend/lambda/feed_query/corpus.py).

@@ -1,8 +1,10 @@
 import { useRouterState } from '@tanstack/react-router'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 /** Scaffold page for cockpit nav targets filled in by L30–L34. */
 export function PlaceholderRoute({ title }: { title: string }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname })
+  useDocumentTitle(title)
 
   return (
     <div className="ev2-placeholder">

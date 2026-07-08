@@ -5,6 +5,7 @@ import { Cards } from '../design-system'
 import { fetchGovernanceDocs, governanceDocKeys } from '../api/documents'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { documentHref } from './recordLink'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import type { Document } from '../types/records'
 import './governance.css'
 
@@ -14,6 +15,7 @@ import './governance.css'
  * read time (governance-file + project-reference keywords).
  */
 export function GovernanceRoute() {
+  useDocumentTitle('Governance')
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const [projectId, setProjectId] = useState('enceladus')
 

@@ -5,6 +5,7 @@ import { Container, Header, Table } from '../design-system'
 import type { TableColumnDefinition } from '../../../design-system-2/v2/components/Table/Table'
 import { skillLibraryQueryOptions, type SkillListItem } from '../api/skillLibrary'
 import { documentHref } from './recordLink'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import './skillLibrary.css'
 
 /**
@@ -90,6 +91,7 @@ export function sortSkillLibraryRows(rows: SkillListItem[], sort: SortState): Sk
  * src/api/skillLibrary.ts for the AC-4 rationale.
  */
 export function SkillLibraryRoute() {
+  useDocumentTitle('Skill Library')
   const {
     data: items = [],
     isPending,

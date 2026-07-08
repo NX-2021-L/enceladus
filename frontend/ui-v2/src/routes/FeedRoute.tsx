@@ -6,6 +6,7 @@ import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/
 import { SearchTierBadge } from '../components/SearchTierBadge'
 import { StatusChip } from '../components/StatusChip'
 import { RecordCard } from '../components/RecordCard'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useRealtimeFeed } from '../realtime/RealtimeFeedProvider'
 import { applyPropertyFilter } from '../search/applyPropertyFilter'
 import { FeedPropertyFilter } from '../search/FeedPropertyFilter'
@@ -56,6 +57,7 @@ const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
 ]
 
 export function FeedRoute() {
+  useDocumentTitle('Feed')
   const feedSearch = useSearch({ from: '/feed' })
   const navigate = useNavigate({ from: '/feed' })
   const { q, f, op, sort, scroll } = feedSearch
