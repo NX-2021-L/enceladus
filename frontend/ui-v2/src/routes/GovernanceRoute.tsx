@@ -61,11 +61,11 @@ export function GovernanceRoute() {
   return (
     <div className="governance-route">
       <header className="governance-route__header">
-        <p className="governance-route__eyebrow">Governance · Live docstore</p>
+        <p className="governance-route__eyebrow">GOVERNANCE · LIVE</p>
         <h1 className="governance-route__title">Governance documents</h1>
         <p className="governance-route__subtitle">
-          agents.md, lifecycle-primer, dictionary, and project reference files — fetched from the
-          governed docstore on each load (ENC-ISS-121 / B67 AC-20).
+          agents.md, lifecycle-primer, dictionary, and project reference files, fetched live on
+          each load.
         </p>
       </header>
 

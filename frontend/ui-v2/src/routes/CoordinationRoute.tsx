@@ -207,12 +207,10 @@ export function CoordinationRoute() {
   return (
     <div className="coordination-route">
       <header className="coordination-route__header">
-        <p className="coordination-route__eyebrow">B67 PWA2.0 · Coordination</p>
+        <p className="coordination-route__eyebrow">COORDINATION · LIVE</p>
         <h1 className="coordination-route__title">Coordination monitor</h1>
         <p className="coordination-route__subtitle">
-          CRQ (coordination-request) documents and session / agent-type / lesson / escalation
-          records, split by record type. Served by comp-coordination-api's dedicated list
-          routes -- distinct from the tracker/documents/OpenSearch corpus.
+          Sessions, agent types, lessons, and escalations across active coordination requests.
         </p>
       </header>
 
