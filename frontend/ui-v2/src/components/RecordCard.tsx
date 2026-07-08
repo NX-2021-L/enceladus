@@ -25,11 +25,22 @@ export interface RecordCardProps {
   status?: string
   priority?: string
   href?: string
-  variant?: 'compact' | 'standard' | 'selectable'
+  variant?: 'compact' | 'standard' | 'selectable' | 'feed'
   selected?: boolean
   onSelect?: () => void
   /** Extra accessory rendered in the header (e.g. a tier badge). */
   trailing?: ReactNode
+  /**
+   * ENC-TSK-M35 -- dense feed-row extras (Enceladus-v4-Feed-Review.md §3/§4).
+   * Only consumed by `variant="feed"`.
+   */
+  projectLabel?: string
+  /** Pre-formatted relative time ("37m ago"), PAR-01. Omitted when unknown. */
+  timestamp?: string
+  /** 3px left-accent color, e.g. from `feedRowAccent()` (PAR-06, §4.5/§5.4). */
+  accentColor?: string
+  /** Priority/CCI/PR/deploy Badge strip rendered after the StatusChip (PAR-02/03/04/05). */
+  badges?: ReactNode
 }
 
 export function RecordCard({
@@ -45,29 +56,52 @@ export function RecordCard({
   selected = false,
   onSelect,
   trailing,
+  projectLabel,
+  timestamp,
+  accentColor,
+  badges,
 }: RecordCardProps) {
   const className = `ev2-rc ev2-rc--${variant}${selected ? ' ev2-rc--selected' : ''}`
+  const style = variant === 'feed' && accentColor ? { borderLeftColor: accentColor } : undefined
 
-  const body = (
-    <>
-      <div className="ev2-rc__header">
-        {kindLabel ? <span className="ev2-rc__kind">{kindLabel}</span> : null}
-        <RecordId id={recordId} />
-        {trailing}
-      </div>
-      {title ? <h4 className="ev2-rc__title">{title}</h4> : null}
-      {description ? <p className="ev2-rc__desc">{description}</p> : null}
-      {status ? (
-        <div className="ev2-rc__footer">
-          <StatusChip status={status} priority={priority} recordType={recordType} />
+  const body =
+    variant === 'feed' ? (
+      <>
+        <div className="ev2-rc__feed-top">
+          <span className="ev2-rc__feed-ids">
+            <RecordId id={recordId} />
+            {projectLabel ? <span className="ev2-rc__feed-project">{projectLabel}</span> : null}
+          </span>
+          {timestamp ? <span className="ev2-rc__feed-time">{timestamp}</span> : null}
         </div>
-      ) : null}
-    </>
-  )
+        {title ? <div className="ev2-rc__feed-title">{title}</div> : null}
+        {status || badges ? (
+          <div className="ev2-rc__feed-chips">
+            {status ? <StatusChip status={status} priority={priority} recordType={recordType} /> : null}
+            {badges}
+          </div>
+        ) : null}
+      </>
+    ) : (
+      <>
+        <div className="ev2-rc__header">
+          {kindLabel ? <span className="ev2-rc__kind">{kindLabel}</span> : null}
+          <RecordId id={recordId} />
+          {trailing}
+        </div>
+        {title ? <h4 className="ev2-rc__title">{title}</h4> : null}
+        {description ? <p className="ev2-rc__desc">{description}</p> : null}
+        {status ? (
+          <div className="ev2-rc__footer">
+            <StatusChip status={status} priority={priority} recordType={recordType} />
+          </div>
+        ) : null}
+      </>
+    )
 
   if (variant === 'selectable') {
     return (
-      <button type="button" className={className} aria-pressed={selected} onClick={onSelect}>
+      <button type="button" className={className} style={style} aria-pressed={selected} onClick={onSelect}>
         {body}
       </button>
     )
@@ -75,11 +109,33 @@ export function RecordCard({
 
   if (href) {
     return (
-      <Link to={href} className={className} onClick={onSelect}>
+      <Link to={href} className={className} style={style} onClick={onSelect}>
         {body}
       </Link>
     )
   }
 
-  return <article className={className}>{body}</article>
+  // ENC-TSK-M35: a "feed" row with no href (wide master-detail viewport,
+  // FTR-128 AC-18) still needs to be clickable to drive the reading pane —
+  // render as a button rather than an inert <article> whenever a caller
+  // supplies onSelect without a navigable href.
+  if (onSelect) {
+    return (
+      <button
+        type="button"
+        className={className}
+        style={style}
+        aria-pressed={variant === 'feed' ? selected : undefined}
+        onClick={onSelect}
+      >
+        {body}
+      </button>
+    )
+  }
+
+  return (
+    <article className={className} style={style}>
+      {body}
+    </article>
+  )
 }

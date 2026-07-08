@@ -13,6 +13,7 @@ function toHit(row: LocalSearchRecord): SearchResultHit {
     status: row.status,
     priority: row.priority,
     checkoutState: row.checkoutState,
+    updatedAt: row.updatedAt,
     tier: 'local',
   }
 }

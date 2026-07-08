@@ -71,5 +71,8 @@ export function tier1ToLocalSearchRecord(record: Tier1Record): LocalSearchRecord
     priority: record.priority,
     checkoutState:
       typeof record.attrs?.checkout_state === 'string' ? record.attrs.checkout_state : undefined,
+    // ENC-TSK-M35 (PAR-01): Tier1Record already carries updatedAt -- restore
+    // it to the search/filter layer alongside priority/checkout_state.
+    updatedAt: record.updatedAt ?? undefined,
   }
 }
