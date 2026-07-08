@@ -15,6 +15,7 @@ const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Projects', href: '/projects' },
   { type: 'link' as const, text: 'Feed', href: '/feed' },
   { type: 'link' as const, text: 'Docs', href: '/docs' },
+  { type: 'link' as const, text: 'Skill Library', href: '/skills' },
   { type: 'link' as const, text: 'Governance', href: '/governance' },
   { type: 'link' as const, text: 'Changelog', href: '/changelog' },
   { type: 'link' as const, text: 'Coordination', href: '/coordination' },

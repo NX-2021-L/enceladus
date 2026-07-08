@@ -1,0 +1,26 @@
+.ev2-skill-library {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: calc(var(--space-16) * 56);
+}
+
+.ev2-skill-library__title-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-family: var(--font-heading);
+  font-size: var(--text-sm);
+}
+
+.ev2-skill-library__title-link:hover {
+  color: var(--accent-hover);
+}
+
+.ev2-skill-library__error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--status-blocked);
+}

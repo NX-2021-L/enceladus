@@ -13,6 +13,7 @@ import { DocsRoute } from './DocsRoute'
 import { GovernanceRoute } from './GovernanceRoute'
 import { ChangelogRoute } from './ChangelogRoute'
 import { CoordinationRoute } from './CoordinationRoute'
+import { SkillLibraryRoute } from './SkillLibraryRoute'
 import { createSessionDetailRoute } from './SessionDetailRoute'
 import { createAgentDetailRoute } from './AgentDetailRoute'
 import { parseFeedSearch } from '../search/feedSearchParams'
@@ -110,6 +111,11 @@ const coordinationRoute = createRoute({
   path: '/coordination',
   component: CoordinationRoute,
 })
+const skillLibraryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/skills',
+  component: SkillLibraryRoute,
+})
 const sessionRoute = createSessionDetailRoute(() => rootRoute)
 const agentDetailRoute = createAgentDetailRoute({ getParentRoute: () => rootRoute })
 
@@ -138,6 +144,7 @@ const routeTree = rootRoute.addChildren([
   governanceRoute,
   changelogRoute,
   coordinationRoute,
+  skillLibraryRoute,
   sessionRoute,
   agentDetailRoute,
   ...placeholderRoutes,
