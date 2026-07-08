@@ -211,10 +211,19 @@ describe('card grid mobile collapse (ENC-ISS-516 / defect B)', () => {
       ['routes/feed.css', '.feed-route__search'],
       ['routes/docs.css', '.docs-route__search'],
     ] as const) {
-      const css = readSrc(path)
+      // Comments stripped -- ENC-TSK-M38's own doc comments below mention
+      // "min-width:0" in prose, which would otherwise false-positive here.
+      const css = stripCssComments(readSrc(path))
       const baseRuleMatch = css.match(new RegExp(`(?<!@media[^{]*\\{[^}]*)${cls.replace('.', '\\.')}\\s*\\{([^}]*)\\}`))
       expect(baseRuleMatch, `expected a base (non-media) rule for ${cls} in ${path}`).not.toBeNull()
-      expect(baseRuleMatch?.[1] ?? '').not.toMatch(/min-width/)
+      // ENC-TSK-M38 added an explicit `min-width: 0` shrink floor to this same
+      // base rule (see the "search input + toolbar overflow floor" suite
+      // below) -- that's the fix, not a regression of the original bug. What
+      // must never come back is a NON-ZERO unconditional min-width forcing a
+      // wide box at every viewport.
+      const base = baseRuleMatch?.[1] ?? ''
+      const nonZeroMinWidth = /min-width:\s*(?!(?:0(?:px|rem|em)?|var\(--space-0\))\s*;)\S/
+      expect(base).not.toMatch(nonZeroMinWidth)
 
       const desktopGated = new RegExp(
         `@media \\(min-width: 48\\.0625rem\\) \\{[\\s\\S]*?${cls.replace('.', '\\.')}\\s*\\{[^}]*min-width`,
@@ -267,5 +276,63 @@ describe('record detail hub sticky action bar (ENC-TSK-M23)', () => {
   it('reserves bottom padding on mobile so the fixed bar never occludes content', () => {
     const rootMatch = hubCss.match(/\.ev2-rdh\s*\{([^}]*)\}/)
     expect(rootMatch?.[1] ?? '').toMatch(/padding-bottom:/)
+  })
+})
+
+/**
+ * ENC-TSK-M38 -- the "Search records or saved name…" input (FeedRoute) and
+ * its Docs-route twin sat inside a `flex: 1` toolbar item with no explicit
+ * `min-width`. `.ev2-al__content` (AppLayout.jsx) already floors its own
+ * cross-axis auto-minimum with `min-width: 0`, but that guarantee stops at
+ * the first descendant that doesn't repeat it -- a flex item's automatic
+ * minimum size defaults to its content's min-content width, not 0, unless
+ * the item (or a shrink-blocking ancestor) says so explicitly. The nested
+ * Autosuggest -> Input -> <input> chain sets `min-width: 0` only on the
+ * innermost field, which is fragile: any future sibling (an icon, an
+ * inline suggestion chip) breaks the guarantee again. This suite pins the
+ * floor at every level of the chain -- the route root, the toolbar, and the
+ * search box itself -- for both routes, plus a root-level sweep across the
+ * remaining flex-column route surfaces (ENC-TSK-M38 AC-2: route sweep).
+ */
+describe('search input + toolbar overflow floor (ENC-TSK-M38)', () => {
+  it.each([
+    ['routes/feed.css', '.feed-route', '.feed-route__toolbar', '.feed-route__search'],
+    ['routes/docs.css', '.docs-route', '.docs-route__toolbar', '.docs-route__search'],
+  ] as const)('%s floors the route root, toolbar, and search box to min-width: 0', (path, rootCls, toolbarCls, searchCls) => {
+    const css = stripCssComments(readSrc(path))
+    for (const cls of [rootCls, toolbarCls, searchCls]) {
+      const escaped = cls.replace('.', '\\.')
+      const ruleMatch = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))
+      expect(ruleMatch, `expected a base rule for ${cls} in ${path}`).not.toBeNull()
+      expect(ruleMatch?.[1] ?? '').toMatch(/min-width:\s*(var\(--space-0\)|0)/)
+    }
+  })
+
+  it('the search box base rule keeps its min-width:0 floor BEFORE the desktop min-width opt-in', () => {
+    // Regression guard: a later, higher-specificity or later-source-order
+    // rule re-introducing an unconditional min-width would silently undo
+    // the floor above at exactly the narrow widths this task targets.
+    for (const [path, cls] of [
+      ['routes/feed.css', '.feed-route__search'],
+      ['routes/docs.css', '.docs-route__search'],
+    ] as const) {
+      const css = stripCssComments(readSrc(path))
+      const floorIdx = css.search(new RegExp(`${cls.replace('.', '\\.')}\\s*\\{[^}]*min-width:\\s*(var\\(--space-0\\)|0)`))
+      const desktopGateIdx = css.indexOf('@media (min-width: 48.0625rem)')
+      expect(floorIdx).toBeGreaterThan(-1)
+      expect(desktopGateIdx).toBeGreaterThan(-1)
+      expect(floorIdx).toBeLessThan(desktopGateIdx)
+    }
+  })
+
+  it.each([
+    ['routes/coordination.css', '.coordination-route'],
+    ['routes/governance.css', '.governance-route'],
+    ['routes/skillLibrary.css', '.ev2-skill-library'],
+  ] as const)('route sweep: %s floors %s to min-width: 0', (path, rootCls) => {
+    const css = stripCssComments(readSrc(path))
+    const ruleMatch = css.match(new RegExp(`${rootCls.replace('.', '\\.')}\\s*\\{([^}]*)\\}`))
+    expect(ruleMatch, `expected a base rule for ${rootCls} in ${path}`).not.toBeNull()
+    expect(ruleMatch?.[1] ?? '').toMatch(/min-width:\s*(var\(--space-0\)|0)/)
   })
 })
