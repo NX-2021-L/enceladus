@@ -105,6 +105,69 @@ def _load_escalation_approver_allowlist() -> Set[str]:
         return set()
 
 
+# ENC-TSK-M12 / ENC-ISS-501: structural human-principal enforcement.
+# The email allowlist authorizes WHICH identities may decide; this predicate
+# enforces WHAT KIND of token may decide at all. Machine-operated Cognito
+# users in the human pool (e.g. terminal-agent@enceladus.internal, mintable
+# via coordination auth.cognito_session) carry genuine ID tokens that pass
+# JWKS verification, and access-token/M2M shapes must never qualify either --
+# the allowlist must not be the only barrier between a machine principal and
+# an escalation approval. Fail-closed on every absent or unrecognized claim.
+def _escalation_human_client_ids() -> Set[str]:
+    """App clients whose ID tokens may represent a human escalation decider.
+
+    ESCALATION_HUMAN_CLIENT_IDS (comma-separated) when set; otherwise the
+    interactive PWA client (COGNITO_CLIENT_ID). Read per-call so tests and
+    live config changes take effect without module reload.
+    """
+    raw = (
+        os.environ.get("ESCALATION_HUMAN_CLIENT_IDS", "")
+        or os.environ.get("COGNITO_CLIENT_ID", "")
+    )
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _escalation_machine_email_domains() -> Set[str]:
+    """Email domains that mark a machine-operated Cognito principal."""
+    raw = os.environ.get("ESCALATION_MACHINE_EMAIL_DOMAINS", "enceladus.internal")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def _is_human_cognito_principal(claims: Dict[str, Any]) -> bool:
+    """True only for an interactive human Cognito ID-token principal.
+
+    Rejects (fail-closed, in order):
+      - anything but a Cognito ID token (token_use != "id"): access tokens,
+        client_credentials/M2M grants, internal-key mode (no token_use);
+      - bare machine-client shapes (client_id claim without an aud claim);
+      - ID tokens minted for an app client outside the human-client allowlist
+        (e.g. the agent M2M client) or when no allowlist is configured;
+      - identities whose email is absent or under a machine principal domain
+        (e.g. *@enceladus.internal).
+    """
+    claims = claims or {}
+    if str(claims.get("token_use") or "").strip().lower() != "id":
+        return False
+    if claims.get("client_id") and not claims.get("aud"):
+        return False
+    aud = claims.get("aud")
+    if isinstance(aud, (list, tuple, set)):
+        aud_values = {str(a or "").strip() for a in aud}
+    else:
+        aud_values = {str(aud or "").strip()}
+    aud_values.discard("")
+    allowed_clients = _escalation_human_client_ids()
+    if not allowed_clients or not (aud_values & allowed_clients):
+        return False
+    email = str(claims.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return False
+    domain = email.rsplit("@", 1)[1]
+    if domain in _escalation_machine_email_domains():
+        return False
+    return True
+
+
 def _deny() -> Dict[str, Any]:
     return {"isAuthorized": False}
 
@@ -120,6 +183,21 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     claims, error = _authenticate(event)
     if error is not None:
         logger.warning("escalation authorizer: authentication failed (requestId=%s)", request_id)
+        return _deny()
+
+    # ENC-TSK-M12 / ENC-ISS-501: structural principal-type gate. Only an
+    # interactive human Cognito ID token (token_use=id, human app client,
+    # non-machine email domain) may reach the allowlist check at all --
+    # access tokens, client_credentials/M2M grants, and machine-operated
+    # Cognito users (e.g. terminal-agent@enceladus.internal) are denied
+    # here regardless of allowlist contents.
+    if not _is_human_cognito_principal(claims):
+        logger.warning(
+            "escalation authorizer: non-human principal rejected "
+            "(requestId=%s, token_use=%r, aud=%r, client_id=%r, email=%r)",
+            request_id, (claims or {}).get("token_use"), (claims or {}).get("aud"),
+            (claims or {}).get("client_id"), (claims or {}).get("email"),
+        )
         return _deny()
 
     # internal-key / any non-Cognito auth mode carries no email claim and is
