@@ -3,10 +3,19 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Container, Header, Table } from '../design-system'
 import type { TableColumnDefinition } from '../../../design-system-2/v2/components/Table/Table'
-import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { skillLibraryQueryOptions, type SkillListItem } from '../api/skillLibrary'
 import { documentHref } from './recordLink'
 import './skillLibrary.css'
+
+/**
+ * The skill catalog is scoped to the `enceladus` project (ENC-TSK-L93/L94):
+ * the source projection endpoint, docstore skill records, and this task's
+ * ACs are all enceladus-specific. Deliberately NOT derived from
+ * `projects[0]` (project registry order is not guaranteed to put enceladus
+ * first — verified live during gamma validation, where it resolved to a
+ * different project and silently returned zero rows).
+ */
+const SKILL_LIBRARY_PROJECT_ID = 'enceladus'
 
 function formatUpdatedAt(value: string): string {
   const date = new Date(value)
@@ -81,16 +90,13 @@ export function sortSkillLibraryRows(rows: SkillListItem[], sort: SortState): Sk
  * src/api/skillLibrary.ts for the AC-4 rationale.
  */
 export function SkillLibraryRoute() {
-  const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
-  const projectId = projects[0]?.project_id ?? 'enceladus'
-
   const {
     data: items = [],
     isPending,
     isError,
     error,
     refetch,
-  } = useQuery(skillLibraryQueryOptions(projectId))
+  } = useQuery(skillLibraryQueryOptions(SKILL_LIBRARY_PROJECT_ID))
 
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT)
   const sortedRows = sortSkillLibraryRows(items, sort)
