@@ -34,6 +34,7 @@ import {
 } from '../api/projects'
 import { SessionExpiredError } from '../api/client'
 import { StatusChip } from '../components/StatusChip'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 function formatUpdatedAt(value?: string): string {
   if (!value) return '—'
@@ -86,6 +87,7 @@ function validateAll(form: CreateProjectFormState): FormErrors {
 }
 
 export function ProjectsRoute() {
+  useDocumentTitle('Projects')
   const { data: projects = [], isPending, isError } = useQuery(projectRegistryQueryOptions)
   const queryClient = useQueryClient()
 

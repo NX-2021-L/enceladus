@@ -4,7 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0A0A0F" />
-    <title>Enceladus · Governance Cockpit</title>
+    <!-- Static fallback only — every route sets its own document.title via
+         useDocumentTitle (ENC-TSK-M25) before first paint is visible to the
+         user. No "Enceladus" branding token per AC-1: titles are a
+         browser-tab-search/history navigation aid, not an SEO surface. -->
+    <title>Cockpit</title>
   </head>
   <body>
     <div id="root"></div>

@@ -4,6 +4,7 @@ import { Link } from '@tanstack/react-router'
 import { changelogHistoryQueryOptions, type ChangelogEntry } from '../api/changelog'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { Container, Header, Table } from '../design-system'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import type { TableColumnDefinition } from '../../../design-system-2/v2/components/Table/Table'
 
 /**
@@ -103,6 +104,7 @@ export function sortChangelogRows(rows: ChangelogRow[], sort: SortState): Change
  * the leftmost column linking to the owning project's page.
  */
 export function ChangelogRoute() {
+  useDocumentTitle('Changelog')
   const { data: projects = [], isPending: projectsPending } = useQuery(projectRegistryQueryOptions)
   const projectIds = projects.map((p) => p.project_id)
   const projectNameById = new Map(projects.map((p) => [p.project_id, p.name ?? p.prefix ?? p.project_id]))

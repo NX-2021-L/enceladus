@@ -5,6 +5,7 @@ import { queryClient } from '../api/queryClient'
 import { sessionQueryOptions } from '../api/sessions'
 import { RecordDetailBreadcrumbs } from '../components/RecordDetailBreadcrumbs'
 import { SkeletonCard } from '../components/SkeletonCard'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { SessionPrimitive } from '../primitives/SessionPrimitive'
 
 /**
@@ -42,6 +43,10 @@ import { SessionPrimitive } from '../primitives/SessionPrimitive'
 function SessionRecordComponent({ getParams }: { getParams: () => { id: string } }) {
   const { id } = getParams()
   const { data } = useSuspenseQuery(sessionQueryOptions(id))
+  // ENC-TSK-M25: sessions have no dedicated "title" field — agent_type_id is
+  // the record's content identity, matching what SessionPrimitive/PrimitiveCard
+  // already render as the card title.
+  useDocumentTitle(`${id}: ${data.agent_type_id || 'Session'}`)
   return (
     <>
       <RecordDetailBreadcrumbs recordId={id} />

@@ -15,6 +15,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Cards, PropertyFilter, Tabs } from '../design-system'
 import { StatusChip } from '../components/StatusChip'
 import { RecordCard } from '../components/RecordCard'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import {
   fetchAgentSessions,
@@ -50,6 +51,7 @@ const agentTypesQueryOptions = {
 }
 
 export function CoordinationRoute() {
+  useDocumentTitle('Coordination')
   const [activeTabId, setActiveTabId] = useState('sessions')
   const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>(EMPTY_FILTER)
 

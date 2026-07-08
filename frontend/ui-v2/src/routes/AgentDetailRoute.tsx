@@ -9,6 +9,7 @@ import {
 import type { AgentSession, AgentSessionStatus } from '../api/agentSessions'
 import { KeyValuePairs, StatusIndicator, Table } from '../design-system'
 import { SkeletonCard } from '../components/SkeletonCard'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 /**
  * Agent detail page (ENC-TSK-L36). Lists the live, currently-claimed,
@@ -49,6 +50,9 @@ export function createAgentDetailRoute(config: {
     )
     const { data: agentTypes } = useSuspenseQuery(agentTypesQueryOptions('active'))
     const agentType = agentTypes.find((t) => t.agent_type_id === agentTypeId)
+    // ENC-TSK-M25: agent types have no free-text "title" — surface is the
+    // closest content descriptor after the id itself.
+    useDocumentTitle(`${agentTypeId}: ${agentType?.surface ?? 'Agent'} sessions`)
 
     return (
       <div className="ev2-agent-detail">
