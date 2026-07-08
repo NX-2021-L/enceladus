@@ -77,6 +77,7 @@ function_name_map:
   doc_prep: devops-doc-prep
   document_api: devops-document-api
   env_drift_auditor: devops-env-drift-auditor
+  escalation_decision_authorizer: escalation-decision-authorizer
   feed_publisher: devops-feed-publisher
   feed_query: devops-feed-query-api
   github_integration: devops-github-integration
