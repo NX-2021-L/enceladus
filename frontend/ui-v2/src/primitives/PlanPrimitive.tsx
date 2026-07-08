@@ -2,41 +2,60 @@ import { Map as MapIcon } from 'lucide-react'
 import type { Plan } from '../types/records'
 import { ContextNodeBadges } from '../components/ContextNodeBadges'
 import { PlanGraphExplorer } from '../components/PlanGraphExplorer'
-import { TypedRelationshipSection } from '../components/TypedRelationshipSection'
-import { MetaRow, Metric, PrimitiveCard, Prose } from '../components/PrimitiveCard'
+import { MetaRow, Metric, Prose } from '../components/PrimitiveCard'
+import { NeighborsTab, RecordDetailHub, WorklogTab } from '../components/RecordDetailHub'
 
 export function PlanPrimitive({ record }: { record: Plan }) {
+  const vitals = [
+    { label: 'Priority', value: record.priority },
+    { label: 'Project', value: record.project_id },
+    { label: 'Category', value: record.category ?? 'Uncategorized' },
+    ...(record.transition_type ? [{ label: 'Transition type', value: record.transition_type }] : []),
+    ...(record.checked_out_by
+      ? [{ label: 'Checkout', value: `${record.checked_out_by} (${record.checkout_state ?? 'checked_out'})` }]
+      : []),
+  ]
+
   return (
-    <PrimitiveCard
+    <RecordDetailHub
       recordId={record.plan_id}
       kindLabel="Plan"
       title={record.title}
       status={record.status}
-    >
-      <Prose>{record.description}</Prose>
-      <MetaRow label="Priority">{record.priority}</MetaRow>
-      <MetaRow label="Category">{record.category ?? 'Uncategorized'}</MetaRow>
-      <MetaRow label="Objectives">
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-          <MapIcon size={14} strokeWidth={1.5} color="var(--accent)" />
-          <Metric>{record.objectives_set?.length ?? 0}</Metric>
-        </span>
-      </MetaRow>
-      <MetaRow label="Attached docs">
-        <Metric>{record.attached_documents?.length ?? 0}</Metric>
-      </MetaRow>
-      <PlanGraphExplorer
-        projectId={record.project_id}
-        planId={record.plan_id}
-        objectiveIds={record.objectives_set ?? []}
-      />
-      <ContextNodeBadges contextNode={record.context_node} />
-      {record.typed_relationships?.length ? (
-        <TypedRelationshipSection
+      priority={record.priority}
+      vitals={vitals}
+      overview={
+        <>
+          <Prose>{record.description}</Prose>
+          <MetaRow label="Objectives">
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+              <MapIcon size={14} strokeWidth={1.5} color="var(--accent)" />
+              <Metric>{record.objectives_set?.length ?? 0}</Metric>
+            </span>
+          </MetaRow>
+          <MetaRow label="Attached docs">
+            <Metric>{record.attached_documents?.length ?? 0}</Metric>
+          </MetaRow>
+          <PlanGraphExplorer
+            projectId={record.project_id}
+            planId={record.plan_id}
+            objectiveIds={record.objectives_set ?? []}
+          />
+          <ContextNodeBadges contextNode={record.context_node} />
+        </>
+      }
+      neighbors={
+        <NeighborsTab
           projectId={record.project_id}
-          edges={record.typed_relationships}
+          groups={[
+            { label: 'Objectives', ids: record.objectives_set, type: 'task' },
+            { label: 'Attached documents', ids: record.attached_documents, type: 'document' },
+            { label: 'Related tasks', ids: record.related_task_ids, type: 'task' },
+          ]}
+          typedEdges={record.typed_relationships}
         />
-      ) : null}
-    </PrimitiveCard>
+      }
+      worklog={<WorklogTab history={record.history} />}
+    />
   )
 }
