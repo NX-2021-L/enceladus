@@ -3993,6 +3993,22 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}"
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker${EnvironmentSuffix}/index/*"
+              # ENC-ISS-509: gamma's tracker table is a physically separate, one-time-seeded
+              # DynamoDB table (devops-project-tracker-gamma) that is never continuously synced
+              # from the canonical governed table, so recently-created records 404 on gamma's
+              # PWA detail route. Read-only least-privilege GetItem fallback onto the canonical
+              # (un-suffixed) table lets tracker_mutation._get_record_full_with_gamma_fallback
+              # resolve a gamma-table miss for GET-detail only. Omitted entirely on prod (IsGamma
+              # false) since prod's own tracker-table statement above already covers that ARN.
+              - !If
+                - IsGamma
+                - Sid: TrackerTableCanonicalReadFallback
+                  Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                  Resource:
+                    - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/devops-project-tracker"
+                - !Ref AWS::NoValue
               - Sid: RelationshipsTableAccess
                 Effect: Allow
                 Action:

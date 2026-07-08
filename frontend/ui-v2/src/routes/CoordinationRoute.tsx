@@ -14,6 +14,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Cards, PropertyFilter, Tabs } from '../design-system'
 import { StatusChip } from '../components/StatusChip'
+import { RecordCard } from '../components/RecordCard'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import {
   fetchAgentSessions,
@@ -81,20 +82,18 @@ export function CoordinationRoute() {
       label: 'Sessions',
       count: sessions.length,
       content: (
-        <Cards<AgentSession>
-          items={sessions}
-          trackBy="session_id"
-          columns={2}
-          cardDefinition={{
-            header: (row) => row.session_id,
-            sections: [
-              { id: 'agent_type', header: 'Agent type', content: (row) => row.agent_type_id },
-              { id: 'status', header: 'Status', content: (row) => <StatusChip status={row.status} /> },
-              { id: 'runtime', header: 'Runtime', content: (row) => row.runtime || '—' },
-              { id: 'claimed_at', header: 'Claimed at', content: (row) => row.claimed_at || '—' },
-            ],
-          }}
-        />
+        <div className="ev2-rc-grid ev2-rc-grid--2col">
+          {sessions.map((row) => (
+            <RecordCard
+              key={row.session_id}
+              recordId={row.session_id}
+              kindLabel={row.agent_type_id}
+              description={row.runtime ? `Runtime: ${row.runtime}` : undefined}
+              status={row.status}
+              variant="standard"
+            />
+          ))}
+        </div>
       ),
     },
     {

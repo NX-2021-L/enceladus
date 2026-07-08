@@ -5,6 +5,7 @@ import { Autosuggest, ButtonDropdown, Cards, ColumnLayout } from '../design-syst
 import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
 import { SearchTierBadge } from '../components/SearchTierBadge'
 import { StatusChip } from '../components/StatusChip'
+import { RecordCard } from '../components/RecordCard'
 import { useRealtimeFeed } from '../realtime/RealtimeFeedProvider'
 import { applyPropertyFilter } from '../search/applyPropertyFilter'
 import { FeedPropertyFilter } from '../search/FeedPropertyFilter'
@@ -297,7 +298,30 @@ export function FeedRoute() {
         </div>
       </ColumnLayout>
     ) : (
-      <Cards items={visibleHits} trackBy="recordId" columns={1} cardDefinition={cardDefinition} />
+      <div className="ev2-rc-grid">
+        {visibleHits.map((hit) => {
+          const project =
+            hit.projectId || resolveProjectFromRecordId(hit.recordId, projects) || 'enceladus'
+          const href =
+            hit.recordType === 'document'
+              ? documentHref(hit.recordId)
+              : recordHrefForType(project, hit.recordType, hit.recordId)
+          return (
+            <RecordCard
+              key={hit.recordId}
+              recordId={hit.recordId}
+              recordType={hit.recordType}
+              kindLabel={hit.recordType}
+              title={hit.title}
+              status={hit.status}
+              href={href}
+              variant="compact"
+              trailing={<SearchTierBadge tier={hit.tier} />}
+              onSelect={() => persistFeedReturnSearch(feedSearch)}
+            />
+          )
+        })}
+      </div>
     )
 
   return (
