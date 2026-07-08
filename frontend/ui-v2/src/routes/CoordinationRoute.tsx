@@ -12,6 +12,7 @@
  */
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useSearch } from '@tanstack/react-router'
 import { Cards, PropertyFilter, Tabs } from '../design-system'
 import { StatusChip } from '../components/StatusChip'
 import { RecordCard } from '../components/RecordCard'
@@ -52,7 +53,10 @@ const agentTypesQueryOptions = {
 
 export function CoordinationRoute() {
   useDocumentTitle('Coordination')
-  const [activeTabId, setActiveTabId] = useState('sessions')
+  // ENC-TSK-M19: Home's "Requires io" queue deep-links here with
+  // ?tab=escalations; any other/missing value falls back to the default.
+  const { tab: initialTab } = useSearch({ from: '/coordination' })
+  const [activeTabId, setActiveTabId] = useState(initialTab || 'sessions')
   const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>(EMPTY_FILTER)
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
