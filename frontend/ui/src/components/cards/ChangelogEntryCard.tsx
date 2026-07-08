@@ -16,7 +16,7 @@ export function ChangelogEntryCard({ entry }: { entry: ChangelogEntry }) {
   const badgeStyle = CHANGE_TYPE_STYLES[entry.change_type] ?? CHANGE_TYPE_STYLES.patch
 
   return (
-    <div className="bg-slate-800 rounded-lg px-4 py-3">
+    <div className="bg-slate-800 rounded-lg px-4 py-3 border border-[color:var(--border-subtle)]">
       {/* Header row */}
       <div className="flex items-start justify-between gap-2 mb-1">
         <div className="flex items-center gap-2 flex-wrap">

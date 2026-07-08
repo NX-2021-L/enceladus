@@ -107,7 +107,7 @@ export function Header() {
     <header className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-700/50 px-4 py-3 flex items-center justify-between">
       <h1 className="text-lg font-semibold text-slate-100">{title}</h1>
       <div className="flex items-center gap-3">
-        <span className="text-xs text-slate-500 font-mono">{version ? `v${version}` : '—'}</span>
+        {version && <span className="text-xs text-slate-500 font-mono">v{version}</span>}
 
         <div className="relative" ref={menuRef}>
           <button

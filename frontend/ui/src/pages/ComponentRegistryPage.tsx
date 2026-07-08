@@ -1252,7 +1252,10 @@ export function ComponentRegistryPage() {
       ) : isError ? (
         <ErrorState />
       ) : filteredByProject.length === 0 ? (
-        <EmptyState message="No components found" />
+        <EmptyState
+          message="No components found"
+          action={{ label: 'Clear filters', onClick: () => setFilters(DEFAULT_FILTERS) }}
+        />
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {filteredByProject.map((c) => (

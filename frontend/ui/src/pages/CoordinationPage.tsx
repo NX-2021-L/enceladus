@@ -29,7 +29,7 @@ interface CoordinationListItem {
 }
 
 export function CoordinationPage() {
-  const { filters, toggleArrayFilter, setFilter } = useFilterState<CoordinationFilters>({})
+  const { filters, toggleArrayFilter, setFilter, clearFilters } = useFilterState<CoordinationFilters>({})
   const { items, generatedAt, isPending, isError } = useCoordinationList(filters, { polling: true })
   const { projects } = useProjects()
 
@@ -111,7 +111,10 @@ export function CoordinationPage() {
           <ScrollSentinel sentinelRef={sentinelRef} hasMore={hasMore} />
         </>
       ) : (
-        <EmptyState message="No coordination requests match your filters" />
+        <EmptyState
+          message="No coordination requests match your filters"
+          action={{ label: 'Clear filters', onClick: clearFilters }}
+        />
       )}
     </div>
   )
