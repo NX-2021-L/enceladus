@@ -19,11 +19,13 @@
  *    per-type list requests for a single dashboard tile.
  *
  * Paused v3-prod GitHub Environment approvals and stale-lock/backfill flags
- * have NO PWA-reachable data source today: GitHub Actions Environment
- * protection state and worktree/session-lock bookkeeping (ENC-ISS-071) are
- * not exposed by any Enceladus HTTP API. HomeRoute renders those two queue
- * rows as static gap notices (see routes/homeQueue.ts::GAP_QUEUE_ROWS)
- * instead of fabricating a fetch or a backend endpoint.
+ * (ENC-TSK-M27 / ENC-FTR-130): now live, via the two read-only routes added
+ * to coordination_api --
+ *   GET /api/v1/coordination/queue/paused-approvals
+ *   GET /api/v1/coordination/queue/stale-locks
+ * Both are Cognito-session-gated, same as the escalations feed. See
+ * backend/lambda/coordination_api/lambda_function.py::
+ * _handle_queue_paused_approvals / _handle_queue_stale_locks.
  */
 
 import { API_BASE } from './client'
@@ -71,4 +73,61 @@ export async function fetchAwaitingCheckoutCount(
   )
   const records = body.records ?? []
   return records.filter((r) => r.checkout_state !== 'checked_out').length
+}
+
+/** ENC-TSK-M27 AC1: a GitHub Actions run paused on the v3-prod Environment's
+ * required-reviewer gate. */
+export interface PausedApprovalRun {
+  id: number | string
+  run_url?: string
+  requesting_workflow?: string
+  environments?: string[]
+  head_sha?: string
+  created_at?: string
+}
+
+interface PausedApprovalsResponse {
+  success: boolean
+  runs: PausedApprovalRun[]
+  count: number
+  note?: string
+}
+
+/** Paused v3-prod Environment approval runs, live from GitHub Actions via the
+ * coordination_api GitHub App installation-token path (ENC-FTR-021 reuse). */
+export async function fetchPausedApprovals(
+  init?: { signal?: AbortSignal },
+): Promise<PausedApprovalRun[]> {
+  const body = await getJson<PausedApprovalsResponse>(
+    `${API_BASE}/coordination/queue/paused-approvals`,
+    init,
+  )
+  return body.runs ?? []
+}
+
+/** ENC-TSK-M27 AC1: a checkout lock held past the stale-checkout threshold. */
+export interface StaleLockEntry {
+  record_id?: string
+  holder_session?: string
+  held_since?: string
+  age_minutes?: number
+}
+
+interface StaleLocksResponse {
+  success: boolean
+  locks: StaleLockEntry[]
+  count: number
+  threshold_minutes?: number
+}
+
+/** Stale checkout-lock entries, live from the same projects-table scan the
+ * scheduled stale_checkout_monitor Lambda already runs. */
+export async function fetchStaleLocks(
+  init?: { signal?: AbortSignal },
+): Promise<StaleLockEntry[]> {
+  const body = await getJson<StaleLocksResponse>(
+    `${API_BASE}/coordination/queue/stale-locks`,
+    init,
+  )
+  return body.locks ?? []
 }

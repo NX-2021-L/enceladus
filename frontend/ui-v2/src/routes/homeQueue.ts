@@ -5,6 +5,7 @@
  */
 
 import type { EscalationRecord } from '../api/coordination'
+import type { PausedApprovalRun, StaleLockEntry } from '../api/homeQueue'
 
 export interface QueueRow {
   id: string
@@ -41,25 +42,36 @@ export function pendingEscalationRows(escalations: EscalationRecord[]): QueueRow
     })
 }
 
-/** Static rows documenting queue slices with no PWA-reachable data source
- * today (see api/homeQueue.ts module docstring). Kept as data, not inline
- * JSX, so the "what's real vs. a gap" list is reviewable/testable on its
- * own. */
-export const GAP_QUEUE_ROWS: QueueRow[] = [
-  {
-    id: 'gap-paused-prod',
-    kindLabel: 'Paused prod runs',
-    title: 'Paused v3-prod Environment approvals',
-    description:
-      'No PWA-reachable data source yet -- GitHub Actions Environment protection state isn’t exposed by any Enceladus HTTP API. Check the workflow run’s Environment approval gate directly in GitHub Actions.',
-    gap: true,
-  },
-  {
-    id: 'gap-stale-lock',
-    kindLabel: 'Stale locks',
-    title: 'Stale-lock / backfill flags',
-    description:
-      'No PWA-reachable data source yet -- worktree/session lock bookkeeping (ENC-ISS-071) and retirement-sweep backfills aren’t exposed by any Enceladus HTTP API today.',
-    gap: true,
-  },
-]
+/** ENC-TSK-M27: GitHub Actions runs paused on the v3-prod Environment's
+ * required-reviewer gate, one row per run. Links straight to the GitHub run
+ * so io can approve/reject there -- the PWA surfaces the queue, GitHub
+ * remains the (only) approval action surface. */
+export function pausedApprovalRows(runs: PausedApprovalRun[]): QueueRow[] {
+  return runs.map((run) => ({
+    id: `paused-approval-${run.id}`,
+    kindLabel: 'Paused prod run',
+    title: run.requesting_workflow
+      ? `${run.requesting_workflow} awaiting v3-prod approval`
+      : `Run ${run.id} awaiting v3-prod approval`,
+    description: run.head_sha ? `Commit ${run.head_sha.slice(0, 7)}` : undefined,
+    href: run.run_url,
+  }))
+}
+
+/** ENC-TSK-M27: checkout locks held past the stale-checkout threshold, one
+ * row per lock. Not directly actionable in the PWA (no new mutation path
+ * per AC3) -- surfaces the record + holder + age so io knows what to chase
+ * down via the tracker or a terminal session. */
+export function staleLockRows(locks: StaleLockEntry[]): QueueRow[] {
+  return locks.map((lock) => ({
+    id: `stale-lock-${lock.record_id}`,
+    kindLabel: 'Stale lock',
+    title: lock.record_id ? `${lock.record_id} checkout is stale` : 'Stale checkout lock',
+    description: [
+      lock.holder_session ? `Held by ${lock.holder_session}` : undefined,
+      typeof lock.age_minutes === 'number' ? `${lock.age_minutes}m` : undefined,
+    ]
+      .filter(Boolean)
+      .join(' — '),
+  }))
+}
