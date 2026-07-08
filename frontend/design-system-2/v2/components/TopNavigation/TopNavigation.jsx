@@ -5,6 +5,7 @@ const ev2TnCss = `
 .ev2-tn__mark{width:24px;height:24px;flex:0 0 auto}
 img.ev2-tn__mark{object-fit:contain}
 .ev2-tn__title{font-family:var(--font-heading,'Space Grotesk',sans-serif);font-weight:700;font-size:15px;letter-spacing:.12em;color:var(--enc-seafoam,#C8DDD9)}
+.ev2-tn__version{font-family:var(--font-mono,monospace);font-size:10.5px;color:var(--enc-dust,#6B8A94);border:1px solid rgba(61,155,168,.2);border-radius:4px;padding:1px 6px;flex:0 0 auto}
 .ev2-tn__spacer{flex:1}
 .ev2-tn__util{display:flex;align-items:center;gap:4px}
 .ev2-tn__btn{display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:6px;background:none;border:none;color:var(--enc-starlight,#EEF2F7);font-size:13px;cursor:pointer;transition:background var(--dur-fast,150ms) var(--ease-orbit,cubic-bezier(.4,0,.2,1));font-family:inherit}
@@ -29,6 +30,9 @@ export function TopNavigation({ identity = {}, utilities = [] }) {
           )}
         <span className="ev2-tn__title">{identity.title || 'ENCELADUS'}</span>
       </a>
+      {identity.version
+        ? <span className="ev2-tn__version" title="Build version">{identity.version}</span>
+        : null}
       <div className="ev2-tn__spacer"></div>
       <div className="ev2-tn__util">
         {utilities.map((u, i) => {

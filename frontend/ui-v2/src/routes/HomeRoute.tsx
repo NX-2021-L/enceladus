@@ -36,6 +36,11 @@ import type {
   Task,
 } from '../types/records'
 import type { FeedCorpusItem } from '../sync/types'
+// ENC-TSK-M37: `enceladus-moon-hero.jpg` (168KB, 1400x966) rather than the
+// unoptimized `enceladus-moon.jpg` (3.1MB, an exact copy of
+// `source-enceladus-moon.jpg`) -- masked to 13% opacity, fine photographic
+// detail buys nothing here, and this is a mobile-first PWA.
+import enceladusMoonUrl from '../../../design-system-2/assets/enceladus-moon-hero.jpg'
 import './home.css'
 
 /**
@@ -339,12 +344,21 @@ export function HomeRoute() {
 
   return (
     <div className="home-route">
-      <Header
-        variant="h1"
-        description="Requires io leads — escalations and other human-only unblocks come first; most-recent activity recedes below."
-      >
-        Home
-      </Header>
+      <div className="home-route__hero">
+        <div
+          className="home-route__hero-image"
+          style={{ backgroundImage: `url(${enceladusMoonUrl})` }}
+          aria-hidden="true"
+        />
+        <div className="home-route__hero-content">
+          <Header
+            variant="h1"
+            description="Requires io leads — escalations and other human-only unblocks come first; most-recent activity recedes below."
+          >
+            Home
+          </Header>
+        </div>
+      </div>
 
       <section className="home-route__queue" aria-label="Requires io">
         <div className="home-route__section-label home-route__section-label--alert">

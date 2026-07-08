@@ -15,3 +15,10 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
+
+/**
+ * ENC-TSK-M37 — build-injected version string (package.json version + short
+ * git SHA), stamped via `define` in vite.config.ts. Rendered in the top-bar
+ * version tag on every screen (spec SS4).
+ */
+declare const __APP_VERSION__: string

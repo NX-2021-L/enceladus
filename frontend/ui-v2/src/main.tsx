@@ -10,6 +10,7 @@ import { RealtimeFeedProvider } from './realtime/RealtimeFeedProvider'
 import { CacheEngineProvider } from './sync/CacheEngineProvider'
 import { AuthGate } from './auth/AuthGate'
 import { useOfflineStore } from './store/offlineStore'
+import { setUpdateSW } from './offline/swUpdate'
 import './styles.css'
 
 const rootEl = document.getElementById('root')
@@ -18,7 +19,10 @@ if (!rootEl) throw new Error('Root element #root not found')
 void queryClient.prefetchQuery(projectRegistryQueryOptions)
 
 if ('serviceWorker' in navigator) {
-  registerSW({
+  // ENC-TSK-M37: capture registerSW's return value so the "App refresh"
+  // control can force skipWaiting + reload (offline/swUpdate.ts) instead of
+  // only ever showing the dismiss-only "update available" banner.
+  const updateSW = registerSW({
     immediate: true,
     onNeedRefresh() {
       useOfflineStore.getState().setSwUpdateReady(true)
@@ -27,6 +31,7 @@ if ('serviceWorker' in navigator) {
       /* precache warm — no auto reload (registerType: prompt) */
     },
   })
+  setUpdateSW(updateSW)
 }
 
 createRoot(rootEl).render(

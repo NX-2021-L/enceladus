@@ -71,7 +71,7 @@ export function TypedRelationshipSection({
                 <li key={`${relType}-${edge.target_id}`} style={{ marginBottom: 'var(--space-1)' }}>
                   <Link
                     to={recordHrefForType(projectId, targetType, edge.target_id)}
-                    style={{ color: 'var(--fg-body)', textDecoration: 'none' }}
+                    style={{ color: 'var(--accent-hover)', textDecoration: 'none' }}
                   >
                     {edge.target_id}
                   </Link>

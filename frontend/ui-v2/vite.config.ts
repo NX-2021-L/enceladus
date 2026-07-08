@@ -1,12 +1,33 @@
 import { defineConfig, type Plugin } from 'vite'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { execSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import { APP_SHELL_NETWORK_TIMEOUT_SECONDS } from './src/offline/workboxStrategies'
 
 const uiRoot = path.dirname(fileURLToPath(import.meta.url))
+
+/**
+ * ENC-TSK-M37 — build-injected version string for the top-bar version tag
+ * (spec SS4: "the version string appears in the top bar version tag on
+ * every screen... never omit"). Derived from package.json + the short git
+ * SHA at build time so it's meaningful in both local dev and CI without
+ * requiring any new deploy-workflow secrets/vars (git history is already
+ * checked out by the deploy job). Falls back to the bare package version if
+ * git isn't available (e.g. a source tarball build).
+ */
+function resolveAppVersion(): string {
+  const pkgVersion = JSON.parse(readFileSync(path.join(uiRoot, 'package.json'), 'utf-8')).version as string
+  try {
+    const sha = execSync('git rev-parse --short HEAD', { cwd: uiRoot }).toString().trim()
+    return `v${pkgVersion}+${sha}`
+  } catch {
+    return `v${pkgVersion}`
+  }
+}
 
 /** design-system-2 JSX uses React.Fragment without importing React. */
 function designSystemReactInject(): Plugin {
@@ -31,6 +52,9 @@ function designSystemReactInject(): Plugin {
 // active, manual memoization (useMemo / useCallback / React.memo) is redundant
 // and MUST NOT appear in component files.
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(resolveAppVersion()),
+  },
   // design-system-2 JSX components live outside this package root.
   server: {
     fs: {
