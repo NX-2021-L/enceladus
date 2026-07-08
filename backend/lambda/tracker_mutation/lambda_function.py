@@ -1874,6 +1874,41 @@ def _get_record_full(project_id: str, record_type: str, record_id: str) -> Optio
     return _deser_item(item)
 
 
+# ENC-ISS-509: gamma runs its own physically-separate tracker table
+# (devops-project-tracker-gamma per EnvironmentSuffix, infrastructure/cloudformation/
+# 02-compute.yaml TrackerMutationFunction). It is seeded once and not continuously
+# synced from the canonical governed table, so recently-created records (e.g. ones
+# minted via the prod MCP connector moments ago) 404 on gamma's PWA detail route even
+# though tracker.get resolves them fine against the canonical table. This is a
+# read-only, GET-detail-only fallback: on a gamma-table miss, do a single GetItem
+# against the canonical table so the detail page can render. Never used for writes
+# or list/search — those keep gamma's isolated data plane untouched.
+_CANONICAL_TRACKER_TABLE = "devops-project-tracker"
+
+
+def _get_record_full_with_gamma_fallback(project_id: str, record_type: str, record_id: str) -> Optional[Dict]:
+    """As _get_record_full, but on gamma a local miss falls back to a read-only
+    GetItem against the canonical (prod) tracker table. No-op on prod (DYNAMODB_TABLE
+    already equals _CANONICAL_TRACKER_TABLE there, so the fallback branch is skipped)."""
+    item = _get_record_full(project_id, record_type, record_id)
+    if item is not None:
+        return item
+    if DYNAMODB_TABLE == _CANONICAL_TRACKER_TABLE:
+        return None
+    try:
+        ddb = _get_ddb()
+        key = _build_key(project_id, record_type, record_id)
+        resp = ddb.get_item(TableName=_CANONICAL_TRACKER_TABLE, Key=key, ConsistentRead=True)
+        fallback_item = resp.get("Item")
+    except ClientError as exc:
+        logger.warning("[ISS-509] gamma canonical-table fallback read failed for %s: %s", record_id, exc)
+        return None
+    if fallback_item is None:
+        return None
+    logger.info("[ISS-509] gamma miss on %s; served from canonical table fallback", record_id)
+    return _deser_item(fallback_item)
+
+
 def _get_record_raw(project_id: str, record_type: str, record_id: str) -> Optional[Dict]:
     """GetItem with ConsistentRead. Returns raw DynamoDB item or None."""
     ddb = _get_ddb()
@@ -2751,7 +2786,7 @@ def _arc_walk_after_advance(project_id: str, record_id: str, item_data: Dict,
 def _handle_get_record(project_id: str, record_type: str, record_id: str) -> Dict:
     """GET /{project}/{type}/{id} — return full deserialized record."""
     try:
-        item = _get_record_full(project_id, record_type, record_id)
+        item = _get_record_full_with_gamma_fallback(project_id, record_type, record_id)
     except Exception as exc:
         logger.error("get_item failed: %s", exc)
         return _error(500, "Database read failed.")
