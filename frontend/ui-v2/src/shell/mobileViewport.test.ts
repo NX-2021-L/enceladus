@@ -223,3 +223,49 @@ describe('card grid mobile collapse (ENC-ISS-516 / defect B)', () => {
     }
   })
 })
+
+/**
+ * ENC-TSK-M23 (FND-03, cutover-blocking) -- Record Details mobile hub.
+ * Same static-CSS-assertion approach as the suites above: jsdom has no real
+ * cascade, so this reads the shipped recordDetailHub.css and RecordDetailHub
+ * component source directly.
+ */
+describe('record detail hub sticky action bar (ENC-TSK-M23)', () => {
+  const hubCss = stripCssComments(readSrc('components/recordDetailHub.css'))
+  const hubSrc = readSrc('components/RecordDetailHub.tsx')
+
+  it('ships a mobile-base sticky bottom action bar pinned to the viewport', () => {
+    const stickyMatch = hubCss.match(/\.ev2-rdh__actionbar--sticky\s*\{([^}]*)\}/)
+    expect(stickyMatch, 'expected a .ev2-rdh__actionbar--sticky rule').not.toBeNull()
+    const stickyRule = stickyMatch?.[1] ?? ''
+    expect(stickyRule).toMatch(/position:\s*fixed/)
+    expect(stickyRule).toMatch(/bottom:\s*0/)
+  })
+
+  it('folds the action bar inline and hides the fixed bar at the desktop breakpoint', () => {
+    const desktopBlock = extractBlock(hubCss, /@media \(min-width: 64rem\) \{/)
+    expect(desktopBlock.length).toBeGreaterThan(0)
+    expect(desktopBlock).toMatch(/\.ev2-rdh__actionbar--inline\s*\{[^}]*display:\s*flex/)
+    expect(desktopBlock).toMatch(/\.ev2-rdh__actionbar--sticky\s*\{[^}]*display:\s*none/)
+  })
+
+  it('renders the sticky bar as a real toolbar with a Copy ID action', () => {
+    expect(hubSrc).toMatch(/ev2-rdh__actionbar--sticky/)
+    expect(hubSrc).toMatch(/role="toolbar"/)
+    expect(hubSrc).toMatch(/Copy ID/)
+  })
+
+  it('keeps the hub and its vitals grid capped to their container width (no horizontal scroll)', () => {
+    const rootMatch = hubCss.match(/\.ev2-rdh\s*\{([^}]*)\}/)
+    expect(rootMatch?.[1] ?? '').toMatch(/max-width:\s*100%/)
+    const vitalsMatch = hubCss.match(/\.ev2-rdh__vitals\s*\{([^}]*)\}/)
+    expect(vitalsMatch?.[1] ?? '').toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/)
+    const bodyMatch = hubCss.match(/\.ev2-rdh__body\s*\{([^}]*)\}/)
+    expect(bodyMatch?.[1] ?? '').toMatch(/max-width:\s*100%/)
+  })
+
+  it('reserves bottom padding on mobile so the fixed bar never occludes content', () => {
+    const rootMatch = hubCss.match(/\.ev2-rdh\s*\{([^}]*)\}/)
+    expect(rootMatch?.[1] ?? '').toMatch(/padding-bottom:/)
+  })
+})
