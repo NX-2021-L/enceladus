@@ -1,15 +1,20 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Autosuggest, ButtonDropdown, Cards, ColumnLayout } from '../design-system'
+import { Autosuggest, ButtonDropdown } from '../design-system'
 import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
-import { SearchTierBadge } from '../components/SearchTierBadge'
-import { StatusChip } from '../components/StatusChip'
+import { Badge } from '../components/Badge'
 import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { formatRelativeTime } from '../format/relativeTime'
 import { useRealtimeFeed } from '../realtime/RealtimeFeedProvider'
 import { applyPropertyFilter } from '../search/applyPropertyFilter'
 import { FeedPropertyFilter } from '../search/FeedPropertyFilter'
+import {
+  feedRowAccent,
+  priorityBadgeColor,
+  sessionStateBadge,
+} from '../search/feedRowPresentation'
 import {
   parseFilterQuery,
   persistFeedReturnSearch,
@@ -247,45 +252,52 @@ export function FeedRoute() {
     })
   }
 
-  const cardDefinition = {
-    header: (hit: SearchResultHit) => (
-      <FeedCardTitle hit={hit} projects={projects} mobile={!isWide} feedSearch={feedSearch} />
-    ),
-    sections: [
-      {
-        id: 'status',
-        header: 'Status',
-        content: (hit: SearchResultHit) => (hit.status ? <StatusChip status={hit.status} /> : '—'),
-      },
-      {
-        id: 'tier',
-        header: 'Tier',
-        content: (hit: SearchResultHit) => <SearchTierBadge tier={hit.tier} />,
-      },
-      {
-        id: 'project',
-        header: 'Project',
-        content: (hit: SearchResultHit) => hit.projectId,
-      },
-    ],
+  // ENC-TSK-M35: one dense feed-row rendering for every viewport (Feed.dc.html
+  // §pixel-contract, Enceladus-v4-Feed-Review.md §3 PAR-08) — v4 previously
+  // forked mobile (RecordCard grid) from desktop (Cloudscape Cards), and the
+  // desktop fork showed only STATUS/TIER/PROJECT with no priority/CCI/accent.
+  // Narrow viewports link straight to the full record page; wide viewports
+  // select in place (no navigation) so the row list and reading pane stay in
+  // sync (FTR-128 AC-18).
+  const renderFeedRow = (hit: SearchResultHit) => {
+    const project =
+      hit.projectId || resolveProjectFromRecordId(hit.recordId, projects) || 'enceladus'
+    const href =
+      hit.recordType === 'document'
+        ? documentHref(hit.recordId)
+        : recordHrefForType(project, hit.recordType, hit.recordId)
+    const cci = sessionStateBadge(hit.checkoutState)
+
+    return (
+      <RecordCard
+        key={hit.recordId}
+        recordId={hit.recordId}
+        recordType={hit.recordType}
+        title={hit.title}
+        status={hit.status}
+        priority={hit.priority}
+        variant="feed"
+        projectLabel={project}
+        timestamp={formatRelativeTime(hit.updatedAt) ?? undefined}
+        accentColor={feedRowAccent(hit)}
+        badges={
+          <>
+            {hit.priority ? <Badge color={priorityBadgeColor(hit.priority)}>{hit.priority}</Badge> : null}
+            {cci ? <Badge color={cci.color}>{cci.label}</Badge> : null}
+          </>
+        }
+        {...(isWide
+          ? { selected: selectedHit?.recordId === hit.recordId, onSelect: () => selectHit(hit) }
+          : { href, onSelect: () => persistFeedReturnSearch(feedSearch) })}
+      />
+    )
   }
 
   const resultsBody =
     isWide && filteredHits.length > 0 ? (
-      <ColumnLayout columns={2} borders="vertical">
+      <div className="feed-route__split">
         <div className="feed-route__list-scroll" ref={listRef}>
-          <Cards
-            items={visibleHits}
-            trackBy="recordId"
-            columns={1}
-            selectionType="single"
-            selectedItems={selectedHit ? [selectedHit] : []}
-            onSelectionChange={(event) => {
-              const next = event.detail.selectedItems[0]
-              if (next) selectHit(next)
-            }}
-            cardDefinition={cardDefinition}
-          />
+          {visibleHits.map(renderFeedRow)}
           {visibleCount < filteredHits.length && (
             <p className="feed-route__scroll-hint">Scroll for more results…</p>
           )}
@@ -298,32 +310,9 @@ export function FeedRoute() {
           />
           <FeedReadingPane hit={selectedHit} />
         </div>
-      </ColumnLayout>
-    ) : (
-      <div className="ev2-rc-grid">
-        {visibleHits.map((hit) => {
-          const project =
-            hit.projectId || resolveProjectFromRecordId(hit.recordId, projects) || 'enceladus'
-          const href =
-            hit.recordType === 'document'
-              ? documentHref(hit.recordId)
-              : recordHrefForType(project, hit.recordType, hit.recordId)
-          return (
-            <RecordCard
-              key={hit.recordId}
-              recordId={hit.recordId}
-              recordType={hit.recordType}
-              kindLabel={hit.recordType}
-              title={hit.title}
-              status={hit.status}
-              href={href}
-              variant="compact"
-              trailing={<SearchTierBadge tier={hit.tier} />}
-              onSelect={() => persistFeedReturnSearch(feedSearch)}
-            />
-          )
-        })}
       </div>
+    ) : (
+      <div className="ev2-rc-grid">{visibleHits.map(renderFeedRow)}</div>
     )
 
   return (
@@ -440,37 +429,4 @@ export function FeedRoute() {
       {filteredHits.length > 0 ? resultsBody : null}
     </div>
   )
-}
-
-function FeedCardTitle({
-  hit,
-  projects,
-  mobile,
-  feedSearch,
-}: {
-  hit: SearchResultHit
-  projects: Array<{ project_id: string; prefix: string }>
-  mobile: boolean
-  feedSearch: FeedRouteSearch
-}) {
-  const project =
-    hit.projectId || resolveProjectFromRecordId(hit.recordId, projects) || 'enceladus'
-  const href =
-    hit.recordType === 'document'
-      ? documentHref(hit.recordId)
-      : recordHrefForType(project, hit.recordType, hit.recordId)
-
-  if (mobile) {
-    return (
-      <Link
-        to={href}
-        className="feed-route__card-link"
-        onClick={() => persistFeedReturnSearch(feedSearch)}
-      >
-        {hit.recordId}
-      </Link>
-    )
-  }
-
-  return <span className="feed-route__card-id">{hit.recordId}</span>
 }

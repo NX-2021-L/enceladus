@@ -102,6 +102,62 @@ button.ev2-rc:focus-visible {
   }
 }
 
+/* ENC-TSK-M35 · dense feed row (Enceladus-v4-Feed-Review.md §3/§4, PAR-01→08).
+ * ~72px tall: ids+time / single-line title / chip strip. 3px severity accent
+ * on the left, set inline per-row via `accentColor` (feedRowAccent()). */
+.ev2-rc--feed {
+  padding: 13px 16px;
+  margin: 0 0 var(--space-2);
+  border-left: 3px solid var(--enc-teal);
+}
+
+.ev2-rc__feed-top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: 4px;
+}
+
+.ev2-rc__feed-ids {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.ev2-rc__feed-project {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--enc-dust);
+}
+
+.ev2-rc__feed-time {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--enc-dust);
+}
+
+.ev2-rc__feed-title {
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-snug);
+  color: var(--fg);
+  margin-bottom: var(--space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ev2-rc__feed-chips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
 .ev2-rc-grid {
   display: grid;
   /* minmax(0, 1fr) rather than a bare 1fr: a plain `1fr` track resolves to

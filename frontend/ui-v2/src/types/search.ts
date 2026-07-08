@@ -55,6 +55,14 @@ export interface SearchResultHit {
   priority?: string
   /** ENC-FTR-130 Band-B: tracker checkout_state (e.g. 'checked_out'), when known. */
   checkoutState?: string
+  /**
+   * ENC-TSK-M35 (PAR-01): ISO timestamp of the record's last update, when
+   * known. Already cached on Tier1Record but was dropped before reaching the
+   * search/filter layer -- the same class of gap FTR-130 Band-B fixed for
+   * priority/checkout_state. Best-effort only (cold-start realtime-events
+   * corpus has no timestamp source); never fabricated when absent.
+   */
+  updatedAt?: string
   tier: SearchTier
   fusion?: HybridGraphsearchResponse['per_node_fusion'] extends Record<string, infer V>
     ? V
@@ -72,6 +80,8 @@ export interface LocalSearchRecord {
   priority?: string
   /** ENC-FTR-130 Band-B: tracker checkout_state (e.g. 'checked_out'), when known. */
   checkoutState?: string
+  /** ENC-TSK-M35 (PAR-01): ISO timestamp of the record's last update, when known. */
+  updatedAt?: string
 }
 
 export interface TieredSearchSnapshot {
