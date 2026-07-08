@@ -126,21 +126,21 @@
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-PLN-068: environment: v3-prod \u2014 grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
+      "notes": "ENC-PLN-068: environment: v3-prod — grant EventBridge Scheduler ops to CloudFormationDeployRole for Rhythm Cycle"
     },
     "iam-cfn-deploy-role-gamma-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-TSK-J64: environment: v3-prod \u2014 despite the name it patches the SHARED CFN deploy role object"
+      "notes": "ENC-TSK-J64: environment: v3-prod — despite the name it patches the SHARED CFN deploy role object"
     },
     "iam-cfn-deploy-role-cloudwatch-dashboard-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-TSK-K59: environment: v3-prod \u2014 despite the gamma-scoped grant, it patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-gamma-patch.yml)"
+      "notes": "ENC-TSK-K59: environment: v3-prod — despite the gamma-scoped grant, it patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-gamma-patch.yml)"
     },
     "iam-cfn-deploy-role-appconfig-patch.yml": {
       "class": "prod-mutating",
@@ -161,7 +161,7 @@
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-TSK-L39 / DOC-359655466119: environment v3-prod \u2014 EC2+PassRole for enceladus-opensearch-node-gamma CFN stack"
+      "notes": "ENC-TSK-L39 / DOC-359655466119: environment v3-prod — EC2+PassRole for enceladus-opensearch-node-gamma CFN stack"
     },
     "iam-cloudformation-unblock.yml": {
       "class": "prod-mutating",
@@ -214,7 +214,7 @@
     },
     "sync-architecture-doc.yml": {
       "class": "inert",
-      "notes": "docstore document write via internal key; no runtime-infrastructure mutation \u2014 flagged for awareness, out of the v3-prod runtime invariant's scope"
+      "notes": "docstore document write via internal key; no runtime-infrastructure mutation — flagged for awareness, out of the v3-prod runtime invariant's scope"
     },
     "sync-main-to-v4main.yml": {
       "class": "inert",
@@ -225,7 +225,7 @@
       "gated_jobs": [
         "deploy"
       ],
-      "notes": "ENC-TSK-J64: environment: v3-prod \u2014 the DPL submit is the irrevocable prod trigger (orchestrator deploys the queued request with no further gate)"
+      "notes": "ENC-TSK-J64: environment: v3-prod — the DPL submit is the irrevocable prod trigger (orchestrator deploys the queued request with no further gate)"
     },
     "ui-gamma-deploy.yml": {
       "class": "already-gated",
@@ -247,6 +247,10 @@
         "wire-notification"
       ],
       "notes": "ENC-TSK-J65: environment chosen from environment_suffix input (-gamma -> v4-gamma, '' -> v3-prod). Caught by the guard's own first fail-closed run."
+    },
+    "opensearch-failover-drill.yml": {
+      "class": "gamma-only",
+      "notes": "ENC-TSK-M13 (L46 AC-2 carrier): workflow_dispatch OpenSearch failover drill. guard-gamma-only refuses non-v4/** refs; SSM systemctl stop/start of the gamma-only opensearch-node instance via BackendDeployRole (no v3-prod resources exist; node is gamma-only, DOC-499FA089EC30)"
     }
   }
 }
