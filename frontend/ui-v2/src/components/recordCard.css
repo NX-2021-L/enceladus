@@ -104,12 +104,16 @@ button.ev2-rc:focus-visible {
 
 .ev2-rc-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  /* minmax(0, 1fr) rather than a bare 1fr: a plain `1fr` track resolves to
+     minmax(auto, 1fr), so a card with non-shrinkable intrinsic content can
+     still force the grid (and its ancestors) wider than the viewport. The
+     explicit 0 basis removes that overflow loophole at any breakpoint. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
 }
 
 @media (min-width: 48.0625rem) {
   .ev2-rc-grid--2col {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 }

@@ -62,16 +62,29 @@
     display: flex;
   }
 
-  /* AppLayout already toggles `.ev2-al__nav--collapsed` off/on with the
-     `navigationOpen` prop (base rule: display:none when collapsed, any
-     viewport). On mobile the "Menu" toggle repurposes that same open state
-     as a full-screen drawer for the long-tail sidebar items, instead of the
-     desktop persistent-rail flex column. */
-  .ev2-shell .ev2-al__nav:not(.ev2-al__nav--collapsed) {
+  /* ENC-TSK-M26 fix: the previous rule keyed drawer visibility off
+     `.ev2-al__nav:not(.ev2-al__nav--collapsed)`. AppLayout's own base rule
+     (`.ev2-al__nav--collapsed{display:none}`) only ever HIDES the nav; the
+     un-collapsed state has no explicit `display` of its own, so opening the
+     drawer silently depended on default flex-item display resolving
+     correctly through every ancestor. AppShell already computes an explicit
+     open/closed shell state (`.ev2-shell--nav-open`, from the same
+     `sidebarOpen` store value) but no CSS ever consumed it. Mobile-first and
+     unambiguous: nav is display:none by default at this breakpoint
+     regardless of the collapsed class, and is shown as a full-screen drawer
+     only when the shell is explicitly in the open state. */
+  .ev2-shell .ev2-al__nav {
+    display: none;
+  }
+
+  .ev2-shell--nav-open .ev2-al__nav {
+    display: flex;
+    flex-direction: column;
     position: fixed;
     inset: var(--space-0) var(--space-0) var(--space-0) var(--space-0);
     top: calc(var(--v2-control-height) + var(--space-6));
     z-index: 4;
+    width: min(100%, calc(var(--space-16) * 14));
     max-width: min(100%, calc(var(--space-16) * 14));
     box-shadow: var(--shadow-lg);
     background: var(--enc-surface-alt);

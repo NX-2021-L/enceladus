@@ -46,7 +46,14 @@
 
 .docs-route__search {
   flex: 1;
-  min-width: calc(var(--space-16) * 12);
+}
+
+/* ENC-TSK-M26 fix: same unconditional 768px min-width bug as feed.css --
+   only opt into the wider minimum once there's room for it. */
+@media (min-width: 48.0625rem) {
+  .docs-route__search {
+    min-width: calc(var(--space-16) * 12);
+  }
 }
 
 .docs-route__sort {
@@ -106,6 +113,6 @@
 
 @media (max-width: 48rem) {
   .docs-route .ev2-cards__grid {
-    grid-template-columns: 1fr !important;
+    grid-template-columns: minmax(0, 1fr) !important;
   }
 }
