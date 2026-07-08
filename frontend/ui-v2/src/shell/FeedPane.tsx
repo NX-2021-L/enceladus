@@ -31,7 +31,7 @@ function phaseLabel(phase: string): string {
   }
 }
 
-export function FeedPane() {
+export function FeedPane({ onClose }: { onClose?: () => void }) {
   const filters = useUiStore((s) => s.filters)
   const toggleFilterType = useUiStore((s) => s.toggleFilterType)
 
@@ -39,12 +39,6 @@ export function FeedPane() {
   const reconnectAttempt = useFeedConnectionStore((s) => s.reconnectAttempt)
   const p50LatencyMs = useFeedConnectionStore((s) => s.p50LatencyMs)
   const p99LatencyMs = useFeedConnectionStore((s) => s.p99LatencyMs)
-  const keystrokeP50 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p50Ms)
-  const keystrokeP95 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p95Ms)
-  const localP50 = useFeedConnectionStore((s) => s.requestFirstPageLocal.p50Ms)
-  const localP95 = useFeedConnectionStore((s) => s.requestFirstPageLocal.p95Ms)
-  const serverP50 = useFeedConnectionStore((s) => s.requestFirstPageServer.p50Ms)
-  const serverP95 = useFeedConnectionStore((s) => s.requestFirstPageServer.p95Ms)
   const errorMessage = useFeedConnectionStore((s) => s.errorMessage)
 
   const { events, isHydrating, isSnapshotError, refetchSnapshot, manualReconnect, mergeBufferedEvents } =
@@ -80,19 +74,26 @@ export function FeedPane() {
       }}
     >
       <div>
-        <h4
-          style={{
-            fontFamily: 'var(--font-heading)',
-            fontSize: 'var(--text-xs)',
-            fontWeight: 'var(--fw-bold)',
-            textTransform: 'uppercase',
-            letterSpacing: '0.09em',
-            color: 'var(--accent)',
-            margin: '0 0 var(--space-2)',
-          }}
-        >
-          Feed
-        </h4>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
+          <h4
+            style={{
+              fontFamily: 'var(--font-heading)',
+              fontSize: 'var(--text-xs)',
+              fontWeight: 'var(--fw-bold)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.09em',
+              color: 'var(--accent)',
+              margin: 0,
+            }}
+          >
+            Feed
+          </h4>
+          {onClose && (
+            <Button variant="link" ariaLabel="Close feed rail" onClick={onClose}>
+              Close
+            </Button>
+          )}
+        </div>
         <p
           style={{
             margin: 0,
@@ -110,30 +111,11 @@ export function FeedPane() {
             {p99LatencyMs !== null ? ` · P99 ${Math.round(p99LatencyMs)}ms` : ''}
           </p>
         )}
-        {(keystrokeP50 !== null || localP50 !== null || serverP50 !== null) && (
-          <p style={{ margin: 'var(--space-1) 0 0', fontSize: 'var(--text-xs)', color: 'var(--fg-muted)' }}>
-            {keystrokeP50 !== null && (
-              <>
-                Key→suggest P50 {Math.round(keystrokeP50)}ms
-                {keystrokeP95 !== null ? ` · P95 ${Math.round(keystrokeP95)}ms` : ''}
-              </>
-            )}
-            {localP50 !== null && (
-              <>
-                {keystrokeP50 !== null ? ' · ' : ''}
-                Req→page local P50 {Math.round(localP50)}ms
-                {localP95 !== null ? ` · P95 ${Math.round(localP95)}ms` : ''}
-              </>
-            )}
-            {serverP50 !== null && (
-              <>
-                {' · '}
-                Req→page server P50 {Math.round(serverP50)}ms
-                {serverP95 !== null ? ` · P95 ${Math.round(serverP95)}ms` : ''}
-              </>
-            )}
-          </p>
-        )}
+        {/* ENC-ISS-513 / FND-01: the keystroke/request-page p50/p95 search
+            telemetry used to be duplicated here AND on the /feed page
+            itself. That block now lives once, on FeedRoute (behind a
+            disclosure), since that's the surface actually running the
+            search this rail just mirrors. */}
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>

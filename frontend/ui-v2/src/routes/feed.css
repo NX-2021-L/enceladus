@@ -85,6 +85,28 @@
   color: var(--fg-muted);
 }
 
+.feed-route__telemetry > summary {
+  cursor: pointer;
+  color: var(--accent);
+  list-style: none;
+}
+
+.feed-route__telemetry > summary::-webkit-details-marker {
+  display: none;
+}
+
+.feed-route__telemetry > summary::before {
+  content: '▸ ';
+}
+
+.feed-route__telemetry[open] > summary::before {
+  content: '▾ ';
+}
+
+.feed-route__telemetry > div {
+  margin-top: var(--space-1);
+}
+
 .feed-property-filter {
   display: flex;
   flex-direction: column;

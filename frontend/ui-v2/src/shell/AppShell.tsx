@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useNavigate, useRouterState } from '@tanstack/react-router'
 import { AppLayout, Button, SideNavigation, TopNavigation } from '../design-system'
 import { performLogout } from '../auth/logout'
@@ -85,6 +85,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const setSidebarOpen = useUiStore((s) => s.setSidebarOpen)
   const toggleSidebar = useUiStore((s) => s.toggleSidebar)
   const openCommandPalette = useUiStore((s) => s.openCommandPalette)
+  const toolsOpen = useUiStore((s) => s.feedRailOpen)
+  const toggleFeedRail = useUiStore((s) => s.toggleFeedRail)
+  const setFeedRailOpen = useUiStore((s) => s.setFeedRailOpen)
 
   useEffect(() => {
     const desktop = window.matchMedia('(min-width: 48.0625rem)')
@@ -93,15 +96,6 @@ export function AppShell({ children }: { children: ReactNode }) {
     desktop.addEventListener('change', syncSidebar)
     return () => desktop.removeEventListener('change', syncSidebar)
   }, [setSidebarOpen])
-
-  const [toolsOpen, setToolsOpen] = useState(false)
-  useEffect(() => {
-    const desktop = window.matchMedia('(min-width: 48.0625rem)')
-    const syncTools = () => setToolsOpen(desktop.matches)
-    syncTools()
-    desktop.addEventListener('change', syncTools)
-    return () => desktop.removeEventListener('change', syncTools)
-  }, [])
 
   // Band-B polish (ENC-ISS-51x): Escape must dismiss the mobile nav drawer,
   // matching the scrim tap-to-close affordance. Only listens while the
@@ -150,12 +144,15 @@ export function AppShell({ children }: { children: ReactNode }) {
             utilities={[
               { text: 'Menu', onClick: toggleSidebar },
               { text: 'Search', onClick: openCommandPalette },
+              { text: toolsOpen ? 'Hide feed' : 'Feed', onClick: toggleFeedRail },
             ]}
           />
         }
         navigation={
+          // No `header` here (ENC-ISS-513 / FND-01): the wordmark already
+          // lives once, in TopNavigation. A second "ENCELADUS" brand mark on
+          // the drawer was pure duplication.
           <SideNavigation
-            header={{ text: 'ENCELADUS', href: '/' }}
             items={SIDEBAR_ITEMS}
             activeHref={activeHref}
             onFollow={followNav}
@@ -173,7 +170,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             />
           </div>
         }
-        tools={<FeedPane />}
+        tools={<FeedPane onClose={() => setFeedRailOpen(false)} />}
         toolsOpen={toolsOpen}
       />
       <CommandPalette />
