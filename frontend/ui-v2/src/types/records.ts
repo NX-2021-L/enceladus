@@ -53,12 +53,27 @@ export interface AcceptanceCriterion {
 
 /**
  * Governed lifecycle metadata shared by every checked-out-able tracker
- * record (ENC-TSK-M23 / FND-03).
+ * record (ENC-TSK-M23 / FND-03). Extended for ENC-TSK-M33 (v3 action
+ * parity): checkout/session fields drive the state-aware primary action
+ * (Check In vs advance/revert), `github_issue_url` drives the GitHub link
+ * button, and `components` feeds the chip row.
  */
 export interface GovernedLifecycleMeta {
   transition_type?: string
   checkout_state?: string
   checked_out_by?: string | null
+  checked_in_by?: string | null
+  checked_in_at?: string | null
+  /** True while an agent (or a borrowed Cognito user_initiated write) holds
+   *  this record's checkout lock -- the authoritative "checked out" signal. */
+  active_agent_session?: boolean
+  active_agent_session_id?: string | null
+  /** ENC-TSK-L47 If-Match revision counter -- required for safe concurrent writes. */
+  sync_version?: number
+  /** Populated once the record is linked to a GitHub PR/issue/commit. */
+  github_issue_url?: string | null
+  commit_sha?: string | null
+  components?: string[]
 }
 
 export interface Task extends GovernedLifecycleMeta {
@@ -82,6 +97,13 @@ export interface Task extends GovernedLifecycleMeta {
   context_node?: ContextNodeMeta
   subtask_ids?: string[]
   acceptance_criteria?: AcceptanceCriterion[]
+  commit_approval_id?: string | null
+  commit_complete_id?: string | null
+}
+
+export interface IssueEvidence {
+  description: string
+  steps_to_duplicate?: string[]
 }
 
 export interface Issue extends GovernedLifecycleMeta {
@@ -92,7 +114,9 @@ export interface Issue extends GovernedLifecycleMeta {
   status: 'open' | 'in-progress' | 'closed'
   priority: 'P0' | 'P1' | 'P2' | 'P3'
   severity: 'low' | 'medium' | 'high' | 'critical'
+  category?: string | null
   hypothesis: string | null
+  evidence?: IssueEvidence[]
   related_task_ids: string[]
   history: HistoryEntry[]
   updated_at: string | null
@@ -107,6 +131,9 @@ export interface Feature extends GovernedLifecycleMeta {
   title: string
   description: string
   status: 'planned' | 'in-progress' | 'completed' | 'production' | 'deprecated'
+  category?: string | null
+  user_story?: string | null
+  acceptance_criteria?: AcceptanceCriterion[]
   owners: string[]
   success_metrics: string[]
   related_task_ids: string[]

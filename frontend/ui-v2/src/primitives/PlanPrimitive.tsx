@@ -1,11 +1,14 @@
 import { Map as MapIcon } from 'lucide-react'
 import type { Plan } from '../types/records'
 import { ContextNodeBadges } from '../components/ContextNodeBadges'
+import { ActiveSessionChip, CategoryChip, CheckoutChip, ComponentChips, PriorityChip } from '../components/ChipRow'
 import { PlanGraphExplorer } from '../components/PlanGraphExplorer'
-import { MetaRow, Metric, Prose } from '../components/PrimitiveCard'
+import { MetaRow, Metric, Prose, SectionHeading } from '../components/PrimitiveCard'
 import { NeighborsTab, RecordDetailHub, WorklogTab } from '../components/RecordDetailHub'
+import { isCheckedOut } from '../utils/transitionArcs'
 
 export function PlanPrimitive({ record }: { record: Plan }) {
+  const checkedOut = isCheckedOut(record)
   const vitals = [
     { label: 'Priority', value: record.priority },
     { label: 'Project', value: record.project_id },
@@ -24,8 +27,31 @@ export function PlanPrimitive({ record }: { record: Plan }) {
       status={record.status}
       priority={record.priority}
       vitals={vitals}
+      chips={
+        <>
+          <PriorityChip priority={record.priority} />
+          <CategoryChip category={record.category} />
+          <ComponentChips components={record.components} />
+          <ActiveSessionChip active={record.active_agent_session} sessionId={record.active_agent_session_id} />
+          <CheckoutChip
+            checkedOut={checkedOut}
+            checkedOutBy={record.checked_out_by}
+            checkedInBy={record.checked_in_by}
+          />
+        </>
+      }
+      mutation={{
+        projectId: record.project_id,
+        recordType: 'plan',
+        recordId: record.plan_id,
+        status: record.status,
+        checkedOut,
+        syncVersion: record.sync_version,
+      }}
+      actions={record.github_issue_url ? [{ label: 'GitHub ↗', href: record.github_issue_url }] : []}
       overview={
         <>
+          <SectionHeading>Description</SectionHeading>
           <Prose projectId={record.project_id}>{record.description}</Prose>
           <MetaRow label="Objectives">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>

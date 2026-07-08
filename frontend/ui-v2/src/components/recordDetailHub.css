@@ -154,6 +154,98 @@
   border-style: dashed;
 }
 
+/* ENC-TSK-M33 -- Check In uses the amber/warning token (matches the gold
+   CHECKED OUT chip -- releasing the lock is the meaningful action while
+   checked out, per DOC-B6B52E3BB9BB §7's direct v3 capture). */
+.ev2-rdh__action--checkin {
+  border-color: var(--v2-status-warning, #C9A15C);
+  color: var(--v2-status-warning, #C9A15C);
+}
+
+.ev2-rdh__action--checkin:hover {
+  background: var(--v2-status-warning, #C9A15C);
+  color: var(--bg-surface);
+}
+
+.ev2-rdh__action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ev2-rdh__action:disabled:hover {
+  background: transparent;
+  color: var(--accent);
+}
+
+.ev2-rdh__action-feedback {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--enc-teal, var(--accent));
+}
+
+.ev2-rdh__action-feedback.is-error {
+  color: var(--enc-crimson, var(--danger));
+  white-space: pre-wrap;
+}
+
+.ev2-rdh__note-textarea {
+  width: 100%;
+  min-height: 7rem;
+  resize: vertical;
+  box-sizing: border-box;
+  background: var(--bg-void, var(--enc-void));
+  color: var(--fg);
+  border: var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+}
+
+.ev2-rdh__note-textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ev2-rdh__modal-hint {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.ev2-rdh__modal-cancel {
+  flex: 0 0 auto;
+  min-width: 5rem;
+  border-color: var(--fg-muted);
+  color: var(--fg-muted);
+}
+
+.ev2-rdh__modal-submit {
+  flex: 0 0 auto;
+  min-width: 6rem;
+}
+
+.ev2-rdh__modal-submit--danger {
+  border-color: var(--enc-crimson, var(--danger));
+  color: var(--enc-crimson, var(--danger));
+}
+
+.ev2-rdh__modal-submit--danger:hover:not(:disabled) {
+  background: var(--enc-crimson, var(--danger));
+  color: var(--bg-surface);
+}
+
+.ev2-rdh__evidence-steps {
+  margin: var(--space-2) 0 0;
+  padding-left: 1.25rem;
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+
+.ev2-rdh__evidence-steps li {
+  margin-bottom: var(--space-1);
+}
+
 .ev2-rdh__neighbors {
   display: flex;
   flex-direction: column;
@@ -248,21 +340,17 @@
   padding-top: var(--space-3);
 }
 
+/* ENC-TSK-M33 -- a plain ●/○ accept-state circle glyph (DOC-B6B52E3BB9BB
+   §7: "checklist with ○ accept-state circles"), not a bordered text pill. */
 .ev2-rdh__evidence-badge {
   flex: 0 0 auto;
   height: fit-content;
-  font-family: var(--font-heading);
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-label);
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--fg-muted);
+  line-height: 1;
+  font-size: var(--text-lg, 1.1em);
   color: var(--fg-muted);
 }
 
 .ev2-rdh__evidence-badge.is-accepted {
-  border-color: var(--status-open);
   color: var(--status-open);
 }
 

@@ -108,6 +108,27 @@ export function MetaRow({ label, children }: { label: string; children: ReactNod
   )
 }
 
+/** Labeled body-section heading (ENC-TSK-M33 / DOC-B6B52E3BB9BB §7 -- USER
+ *  STORY / DESCRIPTION / EVIDENCE are distinct labeled sections in v3, not
+ *  unlabeled prose). Dust, uppercase, mono-spaced label above the block. */
+export function SectionHeading({ children }: { children: ReactNode }) {
+  return (
+    <h4
+      style={{
+        fontFamily: 'var(--font-heading)',
+        fontSize: 'var(--text-xs)',
+        fontWeight: 'var(--fw-bold)',
+        textTransform: 'uppercase',
+        letterSpacing: 'var(--tracking-label)',
+        color: 'var(--fg-muted)',
+        margin: '0 0 var(--space-2)',
+      }}
+    >
+      {children}
+    </h4>
+  )
+}
+
 /** Body prose -- record description/observation text, rendered through the
  *  shared MarkdownContent component (ENC-TSK-M32) rather than a raw <p>, so
  *  descriptions get real markdown, inline ENC-*\/DOC-* ID auto-linking, and

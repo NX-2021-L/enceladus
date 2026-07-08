@@ -150,6 +150,22 @@ export async function patchTrackerRecord(
   return sendMutationRequest(url, 'PATCH', body, headers)
 }
 
+/**
+ * Checkout release/acquire (ENC-TSK-M33 -- "Check In" primary action). Same
+ * transport conventions as sendMutationRequest, but hits the `/checkout`
+ * sub-resource with no body, matching the legacy PWA's `setCheckout`
+ * (frontend/ui/src/api/mutations.ts): POST acquires, DELETE releases.
+ */
+export async function setCheckout(
+  projectId: string,
+  recordType: 'task' | 'issue' | 'feature' | 'plan',
+  recordId: string,
+  checkedOut: boolean,
+): Promise<MutationResult> {
+  const url = `${API_BASE}/tracker/${encodeURIComponent(projectId)}/${recordType}/${encodeURIComponent(recordId)}/checkout`
+  return sendMutationRequest(url, checkedOut ? 'POST' : 'DELETE', {}, {})
+}
+
 export async function replayQueuedMutation(entry: QueuedMutation): Promise<boolean> {
   try {
     await sendMutationRequest(entry.url, entry.method, entry.body, entry.headers)
@@ -180,6 +196,25 @@ export async function submitNote(
   return patchTrackerRecord(projectId, recordType, recordId, { action: 'note', note }, { ifMatchRevision })
 }
 
+/**
+ * Worklog append (ENC-TSK-M33 -- the "Note" primary-action button). Unlike
+ * `submitNote` ('note' action -- queued as a pending update for the next
+ * agent session to process, per the legacy PWA's queued-note flow), 'worklog'
+ * writes an immediate `history[]` entry the WORKLOG tab renders right away --
+ * matching the AC's "Note button appends a worklog entry" requirement and
+ * v3's identical "Submit + Close" note-then-status two-step (LifecycleActions
+ * .tsx `noteAction = closeImmediately ? 'worklog' : 'note'`).
+ */
+export async function submitWorklog(
+  projectId: string,
+  recordType: 'task' | 'issue' | 'feature' | 'plan',
+  recordId: string,
+  note: string,
+  ifMatchRevision?: number,
+): Promise<MutationResult> {
+  return patchTrackerRecord(projectId, recordType, recordId, { action: 'worklog', note }, { ifMatchRevision })
+}
+
 export async function setField(
   projectId: string,
   recordType: 'task' | 'issue' | 'feature' | 'plan' | 'lesson',
@@ -187,12 +222,16 @@ export async function setField(
   field: string,
   value: string,
   ifMatchRevision?: number,
+  /** ENC-ISS-092 user-initiated bypass ({user_initiated:true, user_note}) or
+   *  a backward revert ({revert_reason}) -- forwarded verbatim as
+   *  `transition_evidence` in the PATCH body. */
+  transitionEvidence?: Record<string, unknown>,
 ): Promise<MutationResult> {
   return patchTrackerRecord(
     projectId,
     recordType,
     recordId,
-    { field, value },
+    { field, value, ...(transitionEvidence ? { transition_evidence: transitionEvidence } : {}) },
     { ifMatchRevision },
   )
 }
