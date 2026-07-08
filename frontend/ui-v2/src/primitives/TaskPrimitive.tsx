@@ -24,7 +24,7 @@ export function TaskPrimitive({ record }: { record: Task }) {
       vitals={vitals}
       overview={
         <>
-          <Prose>{record.description}</Prose>
+          <Prose projectId={record.project_id}>{record.description}</Prose>
           <MetaRow label="Assigned">{record.assigned_to ?? 'Unassigned'}</MetaRow>
           <MetaRow label="Checklist">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
@@ -49,8 +49,8 @@ export function TaskPrimitive({ record }: { record: Task }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} />}
-      evidence={<EvidenceTab criteria={record.acceptance_criteria} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
+      evidence={<EvidenceTab criteria={record.acceptance_criteria} projectId={record.project_id} />}
     />
   )
 }

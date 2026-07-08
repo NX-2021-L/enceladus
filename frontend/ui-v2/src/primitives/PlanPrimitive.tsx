@@ -26,7 +26,7 @@ export function PlanPrimitive({ record }: { record: Plan }) {
       vitals={vitals}
       overview={
         <>
-          <Prose>{record.description}</Prose>
+          <Prose projectId={record.project_id}>{record.description}</Prose>
           <MetaRow label="Objectives">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
               <MapIcon size={14} strokeWidth={1.5} color="var(--accent)" />
@@ -55,7 +55,7 @@ export function PlanPrimitive({ record }: { record: Plan }) {
           typedEdges={record.typed_relationships}
         />
       }
-      worklog={<WorklogTab history={record.history} />}
+      worklog={<WorklogTab history={record.history} projectId={record.project_id} />}
     />
   )
 }

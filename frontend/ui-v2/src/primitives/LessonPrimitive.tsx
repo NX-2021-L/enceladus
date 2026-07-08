@@ -41,7 +41,7 @@ export function LessonPrimitive({ record }: { record: Lesson }) {
           >
             <Lightbulb size={16} strokeWidth={1.5} />
           </div>
-          <Prose>{record.observation}</Prose>
+          <Prose projectId={record.project_id}>{record.observation}</Prose>
           <blockquote
             style={{
               borderLeft: '4px solid var(--knowledge)',
