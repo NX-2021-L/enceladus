@@ -29,6 +29,16 @@ function compareToken(actual: string, operator: string, expected: string): boole
       return a >= e
     case '<=':
       return a <= e
+    case 'in':
+      // ENC-FTR-130 Band-B: comma-separated OR-membership (e.g. priority
+      // "in" "p0,p1"), mirroring the backend's comma-list query convention
+      // (backend/lambda/feed_query/corpus.py) so Home's counts-strip links
+      // can express "P0 or P1" as a single filter token.
+      return expected
+        .split(',')
+        .map((v) => v.trim().toLowerCase())
+        .filter(Boolean)
+        .includes(a)
     default:
       return a.includes(e)
   }

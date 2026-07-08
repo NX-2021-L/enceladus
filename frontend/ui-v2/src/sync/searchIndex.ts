@@ -65,5 +65,11 @@ export function tier1ToLocalSearchRecord(record: Tier1Record): LocalSearchRecord
     projectId: record.projectId,
     title: record.title,
     status: record.status,
+    // ENC-FTR-130 Band-B: Tier1Record already carries priority (and a raw
+    // attrs bag with checkout_state) -- this mapping was dropping both on
+    // the floor before they ever reached the search/filter layer.
+    priority: record.priority,
+    checkoutState:
+      typeof record.attrs?.checkout_state === 'string' ? record.attrs.checkout_state : undefined,
   }
 }

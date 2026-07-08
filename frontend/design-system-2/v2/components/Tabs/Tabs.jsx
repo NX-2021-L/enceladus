@@ -1,7 +1,7 @@
 // Enceladus v2 · Tabs — Cloudscape Tabs, deep re-brand.
 const ev2TabsCss = `
-.ev2-tabs{font-family:var(--font-body,'Inter',sans-serif)}
-.ev2-tabs__bar{display:flex;gap:2px;border-bottom:1px solid var(--v2-divider,rgba(61,155,168,.12));overflow-x:auto}
+.ev2-tabs{font-family:var(--font-body,'Inter',sans-serif);max-width:100%}
+.ev2-tabs__bar{display:flex;gap:2px;border-bottom:1px solid var(--v2-divider,rgba(61,155,168,.12));overflow-x:auto;max-width:100%}
 .ev2-tab{appearance:none;border:none;background:none;padding:9px 16px;font-family:var(--font-heading,'Space Grotesk',sans-serif);font-weight:500;font-size:14px;color:var(--enc-dust,#6B8A94);cursor:pointer;position:relative;white-space:nowrap;transition:color var(--dur-fast,150ms) var(--ease-orbit,cubic-bezier(.4,0,.2,1))}
 .ev2-tab:hover:not(.ev2-tab--active):not(:disabled){color:var(--enc-teal-light,#7AC8D4)}
 .ev2-tab--active{color:var(--enc-seafoam,#C8DDD9)}

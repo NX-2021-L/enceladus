@@ -51,6 +51,10 @@ export interface SearchResultHit {
   projectId: string
   title: string
   status?: string
+  /** ENC-FTR-130 Band-B: task/issue priority (e.g. 'P0'), when known. */
+  priority?: string
+  /** ENC-FTR-130 Band-B: tracker checkout_state (e.g. 'checked_out'), when known. */
+  checkoutState?: string
   tier: SearchTier
   fusion?: HybridGraphsearchResponse['per_node_fusion'] extends Record<string, infer V>
     ? V
@@ -64,6 +68,10 @@ export interface LocalSearchRecord {
   projectId: string
   title: string
   status?: string
+  /** ENC-FTR-130 Band-B: task/issue priority (e.g. 'P0'), when known. */
+  priority?: string
+  /** ENC-FTR-130 Band-B: tracker checkout_state (e.g. 'checked_out'), when known. */
+  checkoutState?: string
 }
 
 export interface TieredSearchSnapshot {

@@ -7,6 +7,13 @@ const GOVERNANCE_FILTER_PROPERTIES = [
   { key: 'project_id', operators: ['=', '!=', ':'] },
   { key: 'record_id', operators: ['=', '!=', ':'] },
   { key: 'title', operators: ['=', '!=', ':'] },
+  // ENC-FTR-130 Band-B: wired so Home's counts-strip deep links (status +
+  // priority + checkout_state) actually filter Feed instead of landing on
+  // an unfiltered/zero result set. 'in' matches a comma-separated value
+  // list (e.g. priority in "p0,p1"), mirroring the backend's own
+  // comma-list query convention (backend/lambda/feed_query/corpus.py).
+  { key: 'priority', operators: ['=', '!=', 'in'] },
+  { key: 'checkout_state', operators: ['=', '!=', 'in'] },
 ] as const
 
 export type FilteringProperty = {
@@ -26,6 +33,8 @@ export function buildAttributeRegistry(corpus: LocalSearchRecord[]): FilteringPr
     observe(keys, 'project_id', row.projectId)
     observe(keys, 'record_id', row.recordId)
     observe(keys, 'title', row.title)
+    if (row.priority) observe(keys, 'priority', row.priority)
+    if (row.checkoutState) observe(keys, 'checkout_state', row.checkoutState)
   }
 
   return [...keys.entries()].map(([key, operators]) => ({
@@ -56,6 +65,10 @@ export function fieldValueForProperty(
       return hit.recordId
     case 'title':
       return hit.title
+    case 'priority':
+      return hit.priority
+    case 'checkout_state':
+      return hit.checkoutState
     default:
       return undefined
   }

@@ -26,6 +26,31 @@ describe('searchLocalKeyword', () => {
     expect(hits[0]?.recordId).toBe('ENC-ISS-058')
     expect(hits[0]?.tier).toBe('local')
   })
+
+  it('ENC-FTR-130 Band-B: returns the full corpus (not []) when the query is blank, so property-filter-only navigation (e.g. Home counts-strip deep links with no `q`) has something to filter', () => {
+    const hits = searchLocalKeyword(CORPUS, '')
+    expect(hits).toHaveLength(CORPUS.length)
+    expect(hits.map((h) => h.recordId).sort()).toEqual(CORPUS.map((r) => r.recordId).sort())
+  })
+
+  it('carries priority and checkoutState through to the hit shape', () => {
+    const withPriority: LocalSearchRecord[] = [
+      ...CORPUS,
+      {
+        recordId: 'ENC-TSK-M40',
+        recordType: 'task',
+        projectId: 'enceladus',
+        title: 'Open P0 task',
+        status: 'open',
+        priority: 'P0',
+        checkoutState: 'checked_out',
+      },
+    ]
+    const hits = searchLocalKeyword(withPriority, '')
+    const hit = hits.find((h) => h.recordId === 'ENC-TSK-M40')
+    expect(hit?.priority).toBe('P0')
+    expect(hit?.checkoutState).toBe('checked_out')
+  })
 })
 
 describe('mergeSearchResults', () => {

@@ -57,6 +57,19 @@
   color: var(--enc-teal-light);
 }
 
+/* Band-B fix (ENC-ISS-51x): this default MUST come before the mobile
+ * media query below. `.ev2-shell__nav-scrim` has equal specificity in both
+ * places, so whichever rule sits LATER in source order wins the cascade at
+ * any viewport -- including inside the media query's own matched range. The
+ * previous version declared this same `display: none` rule *after* the
+ * media block, which unconditionally beat the mobile `display: block`
+ * override at every width and left the scrim permanently 0x0 (rendered but
+ * never tappable, since a display:none box has no hit-testable box at all).
+ */
+.ev2-shell__nav-scrim {
+  display: none;
+}
+
 @media (max-width: 48rem) {
   .ev2-shell__bottom-nav {
     display: flex;
@@ -108,10 +121,6 @@
     border: none;
     padding: 0;
   }
-}
-
-.ev2-shell__nav-scrim {
-  display: none;
 }
 
 @media (min-width: 48.0625rem) {

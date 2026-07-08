@@ -23,12 +23,20 @@ export function buildSearchCorpus(
     if (!recordType) continue
     const projectId =
       resolveProjectFromRecordId(event.recordId, projects) ?? 'enceladus'
+    // ENC-FTR-130 Band-B: `record` (full body) is only present on per-record
+    // subscription events (ENC-TSK-L29) -- best-effort only. The warm cache
+    // path (sync/searchIndex.ts::tier1ToLocalSearchRecord) is the reliable
+    // source for priority/checkout_state; this just avoids a cold-start gap.
+    const fullRecord = event.record
     byId.set(event.recordId, {
       recordId: event.recordId,
       recordType,
       projectId,
       title: event.summary,
       status: event.action,
+      priority: typeof fullRecord?.priority === 'string' ? fullRecord.priority : undefined,
+      checkoutState:
+        typeof fullRecord?.checkout_state === 'string' ? fullRecord.checkout_state : undefined,
     })
   }
 

@@ -42,10 +42,30 @@ function stripCssComments(css: string): string {
   return css.replace(/\/\*[\s\S]*?\*\//g, '')
 }
 
+/** Extract the body of an `@media (...) { ... }` block (or any `{`-opened
+ * rule) by counting braces from the header match, rather than relying on a
+ * regex guess at what text follows the closing brace. Robust to whatever
+ * rules get added/reordered around the block (see ENC-ISS-51x: an earlier
+ * version of this test depended on `.ev2-shell__nav-scrim` being the very
+ * next selector after the media block, which broke the moment that rule's
+ * position was fixed as part of the Band-B drawer-dismiss repair). */
+function extractBlock(css: string, headerPattern: RegExp): string {
+  const match = css.match(headerPattern)
+  if (!match || match.index === undefined) return ''
+  const start = match.index + match[0].length
+  let depth = 1
+  let i = start
+  while (i < css.length && depth > 0) {
+    if (css[i] === '{') depth++
+    else if (css[i] === '}') depth--
+    i++
+  }
+  return css.slice(start, i - 1)
+}
+
 describe('mobile nav drawer (ENC-ISS-515 / defect A)', () => {
   const shellCss = stripCssComments(readSrc('shell/shell.css'))
-  const mobileBlockMatch = shellCss.match(/@media \(max-width: 48rem\) \{([\s\S]*?)\n\}\n\n\.ev2-shell__nav-scrim/)
-  const mobileBlock = mobileBlockMatch?.[1] ?? ''
+  const mobileBlock = extractBlock(shellCss, /@media \(max-width: 48rem\) \{/)
 
   it('has a mobile breakpoint block for the shell nav', () => {
     expect(mobileBlock.length).toBeGreaterThan(0)
@@ -71,6 +91,94 @@ describe('mobile nav drawer (ENC-ISS-515 / defect A)', () => {
     expect(appShell).toMatch(/ev2-shell--nav-open/)
     expect(appShell).toMatch(/ev2-shell__nav-scrim/)
     expect(appShell).toMatch(/toggleSidebar/)
+  })
+})
+
+/**
+ * Band-B polish (ENC-ISS-51x, io live-probe 2026-07-08 @ ~500px): the drawer
+ * opened (ENC-TSK-M26 above), but dismiss was dead. `.ev2-shell__nav-scrim`
+ * existed in the DOM with a real onClick handler, yet rendered at 0x0 --
+ * untappable -- because an unconditional `.ev2-shell__nav-scrim{display:
+ * none}` rule shipped *after* the mobile-scoped override in shell.css. Equal
+ * specificity + later source position means that rule always won the
+ * cascade, at any viewport. Escape wasn't wired at all. Fixed by moving the
+ * default-hidden rule before the media query, and adding a document-level
+ * Escape listener scoped to the open state.
+ */
+describe('drawer dismiss (ENC-ISS-51x / Band-B defect 1: scrim tap + Escape)', () => {
+  const shellCss = stripCssComments(readSrc('shell/shell.css'))
+  const mobileBlock = extractBlock(shellCss, /@media \(max-width: 48rem\) \{/)
+  const appShell = readSrc('shell/AppShell.tsx')
+
+  it('the mobile override gives the scrim real fixed-position geometry, not display:none', () => {
+    const scrimRuleMatch = mobileBlock.match(/\.ev2-shell__nav-scrim\s*\{([^}]*)\}/)
+    expect(scrimRuleMatch, 'expected a .ev2-shell__nav-scrim rule inside the mobile block').not.toBeNull()
+    const scrimRule = scrimRuleMatch?.[1] ?? ''
+    expect(scrimRule).toMatch(/display:\s*block/)
+    expect(scrimRule).toMatch(/position:\s*fixed/)
+    expect(scrimRule).toMatch(/inset:/)
+  })
+
+  it('the default-hidden scrim rule sits BEFORE the mobile media query, not after', () => {
+    // A same-specificity `.ev2-shell__nav-scrim` rule declared AFTER the
+    // mobile block would win the cascade at every viewport and re-zero the
+    // scrim (the exact regression this suite guards against). The only safe
+    // place for the unconditional `display: none` default is before it.
+    const mediaIdx = shellCss.indexOf('@media (max-width: 48rem)')
+    expect(mediaIdx).toBeGreaterThan(-1)
+    const before = shellCss.slice(0, mediaIdx)
+    const after = shellCss.slice(mediaIdx + '@media (max-width: 48rem) {'.length + mobileBlock.length)
+
+    expect(before).toMatch(/\.ev2-shell__nav-scrim\s*\{\s*display:\s*none;?\s*\}/)
+
+    // Strip out any subsequent @media blocks (nested selectors reusing the
+    // same class name inside a *different* scoped context are fine) before
+    // checking for a stray bare redeclaration.
+    let rest = after
+    let mediaMatch: RegExpMatchArray | null
+    while ((mediaMatch = rest.match(/@media[^{]*\{/))) {
+      const idx = mediaMatch.index ?? 0
+      const blockBody = extractBlock(rest, /@media[^{]*\{/)
+      rest = rest.slice(0, idx) + rest.slice(idx + mediaMatch[0].length + blockBody.length + 1)
+    }
+    expect(rest).not.toMatch(/\.ev2-shell__nav-scrim/)
+  })
+
+  it('the scrim button keeps a real click-to-close handler', () => {
+    const scrimBlockMatch = appShell.match(/className="ev2-shell__nav-scrim"[\s\S]{0,200}/)
+    expect(scrimBlockMatch).not.toBeNull()
+    expect(scrimBlockMatch?.[0] ?? '').toMatch(/onClick=\{[^}]*setSidebarOpen\(false\)[^}]*\}/)
+  })
+
+  it('Escape closes the drawer via a document-level keydown listener scoped to the open state', () => {
+    expect(appShell).toMatch(/addEventListener\(\s*['"]keydown['"]/)
+    const effectMatch = appShell.match(/useEffect\(\(\) => \{[\s\S]*?Escape[\s\S]*?\}, \[[^\]]*\]\)/)
+    expect(effectMatch, 'expected a useEffect wiring an Escape keydown handler').not.toBeNull()
+    const effectBody = effectMatch?.[0] ?? ''
+    expect(effectBody).toMatch(/navigationOpen/)
+    expect(effectBody).toMatch(/setSidebarOpen\(false\)/)
+    expect(effectBody).toMatch(/removeEventListener\(\s*['"]keydown['"]/)
+  })
+})
+
+/**
+ * Band-B polish (ENC-ISS-51x, defect 3): `.ev2-tabs__bar` (shared
+ * design-system-2 Tabs, used by Home's "Recent activity" section among
+ * other routes) already declared `overflow-x: auto`, but neither it nor its
+ * `.ev2-tabs` wrapper capped their own width -- the human probe measured the
+ * bar at 519px against a 452px viewport. Made explicit and contained with
+ * `max-width: 100%` on both, so the horizontal scroll stays local to the tab
+ * strip instead of bleeding the page.
+ */
+describe('tabs bar overflow containment (ENC-ISS-51x / Band-B defect 3)', () => {
+  const tabsSrc = readSrc('../../design-system-2/v2/components/Tabs/Tabs.jsx')
+
+  it('caps both the tabs wrapper and the scrollable bar to their container width', () => {
+    const wrapperRuleMatch = tabsSrc.match(/\.ev2-tabs\{([^}]*)\}/)
+    const barRuleMatch = tabsSrc.match(/\.ev2-tabs__bar\{([^}]*)\}/)
+    expect(wrapperRuleMatch?.[1] ?? '').toMatch(/max-width:\s*100%/)
+    expect(barRuleMatch?.[1] ?? '').toMatch(/max-width:\s*100%/)
+    expect(barRuleMatch?.[1] ?? '').toMatch(/overflow-x:\s*auto/)
   })
 })
 
