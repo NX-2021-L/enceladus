@@ -19,7 +19,7 @@ import {
 import type { ChangelogFilters } from '../types/filters'
 
 export function ChangelogListPage() {
-  const { filters, toggleArrayFilter, setFilter } = useFilterState<ChangelogFilters & { changeTypeArr?: string[] }>({})
+  const { filters, toggleArrayFilter, setFilter, clearFilters } = useFilterState<ChangelogFilters & { changeTypeArr?: string[] }>({})
   const { projects } = useProjects()
 
   const changelogFilters: ChangelogFilters = {
@@ -111,7 +111,10 @@ export function ChangelogListPage() {
               <ScrollSentinel sentinelRef={sentinelRef} hasMore={hasMore} />
             </>
           ) : (
-            <EmptyState message="No releases match your filters" />
+            <EmptyState
+              message="No releases match your filters"
+              action={{ label: 'Clear filters', onClick: clearFilters }}
+            />
           )}
         </div>
       )}

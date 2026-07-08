@@ -32,7 +32,7 @@ import type { FeedFilters } from '../types/filters'
 
 export function FeedPage() {
   const [searchParams] = useSearchParams()
-  const { filters, toggleArrayFilter, setFilter } = useFilterState<FeedFilters>({})
+  const { filters, toggleArrayFilter, setFilter, clearFilters } = useFilterState<FeedFilters>({})
   const { items, generatedAt, isPending, isError } = useFeed(filters, { polling: true })
   const { projects } = useProjects()
   const { visible, sentinelRef, hasMore, total } = useInfiniteList(items, 20, 100)
@@ -183,7 +183,10 @@ export function FeedPage() {
           <ScrollSentinel sentinelRef={sentinelRef} hasMore={hasMore} />
         </>
       ) : (
-        <EmptyState message="No items match your filters" />
+        <EmptyState
+          message="No items match your filters"
+          action={{ label: 'Clear filters', onClick: clearFilters }}
+        />
       )}
     </div>
   )

@@ -48,9 +48,13 @@ function DiffBlock({ diff }: { diff: EscalationDiff }) {
     <div className="text-sm space-y-1" data-testid="escalation-diff">
       <div className="flex items-center gap-2 font-mono">
         <span className="text-slate-400">{diff.field}:</span>
-        <span className="text-rose-300 line-through">{String(diff.current ?? '—')}</span>
+        <span className="text-rose-300 line-through">
+          {diff.current === null || diff.current === undefined ? 'not set' : String(diff.current)}
+        </span>
         <span className="text-slate-500">→</span>
-        <span className="text-emerald-300">{String(diff.requested ?? '—')}</span>
+        <span className="text-emerald-300">
+          {diff.requested === null || diff.requested === undefined ? 'not set' : String(diff.requested)}
+        </span>
       </div>
       {diff.field_values &&
         Object.entries(diff.field_values).map(([field, delta]) => (
@@ -67,7 +71,7 @@ function DiffBlock({ diff }: { diff: EscalationDiff }) {
         <p className="text-xs text-slate-500">
           Live target: status={diff.target_snapshot.status} · arc=
           {diff.target_snapshot.transition_type} · sync_version=
-          {String(diff.target_snapshot.sync_version ?? '—')}
+          {diff.target_snapshot.sync_version ?? 'unknown'}
         </p>
       )}
     </div>

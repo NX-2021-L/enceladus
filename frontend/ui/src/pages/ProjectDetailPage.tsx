@@ -216,10 +216,13 @@ export function ProjectDetailPage() {
                 className={`flex-1 py-2.5 text-sm font-medium text-center border-b-2 transition-colors min-h-[44px] ${
                   activeTab === key
                     ? 'border-blue-400 text-blue-400'
-                    : 'border-transparent text-slate-500 hover:text-slate-300'
+                    : count === 0
+                      ? 'border-transparent text-slate-600 hover:text-slate-400'
+                      : 'border-transparent text-slate-500 hover:text-slate-300'
                 }`}
               >
-                {label} <span className="text-xs">({count})</span>
+                {label}
+                {count > 0 && <span className="text-xs"> ({count})</span>}
               </button>
             ))}
           </div>

@@ -43,11 +43,13 @@ export function ProjectChangelogPage() {
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 {loadingVersion ? (
-                  <span className="text-lg font-bold text-slate-400">—</span>
-                ) : (
+                  <span className="inline-block h-5 w-16 rounded bg-slate-700/60 animate-pulse" />
+                ) : currentVersion?.version ?? latestEntry?.version ? (
                   <span className="text-lg font-bold text-slate-100">
-                    v{currentVersion?.version ?? latestEntry?.version ?? '—'}
+                    v{currentVersion?.version ?? latestEntry?.version}
                   </span>
+                ) : (
+                  <span className="text-sm text-slate-500">No version yet</span>
                 )}
                 {latestChangeType && (
                   <span
