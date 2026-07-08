@@ -292,6 +292,14 @@ Resources:
           # ADE Component C: Cursor webhook HMAC verification secret (POST /api/v1/cursor/webhook)
           CURSOR_WEBHOOK_SECRET: !Ref CursorWebhookSecret
           COMPONENTS_TABLE: !Sub "component-registry${EnvironmentSuffix}"
+          # ENC-TSK-M27 (ENC-FTR-130): io-queue paused-approvals reuses the same
+          # GitHub App installation-token path already wired into DeployDecideFunction
+          # (below) -- these were NOT previously set on this function; the GET
+          # /api/v1/coordination/queue/paused-approvals route degrades to an empty
+          # list with a note until these are live (verified 2026-07-08 gamma deploy).
+          GITHUB_APP_ID: !Ref GitHubAppId
+          GITHUB_INSTALLATION_ID: !Ref GitHubInstallationId
+          GITHUB_PRIVATE_KEY_SECRET: devops/github-app/private-key
           # ENC-TSK-L08 / ISS-070: Auth dashboard oauth-clients list scans
           # governance-policies; without this env var the code default
           # ("governance-policies") misses the gamma suffix and IAM denies Scan.
