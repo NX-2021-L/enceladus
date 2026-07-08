@@ -11,6 +11,7 @@ import type {
   TypedRelationshipEdge,
 } from '../types/records'
 import { TypedRelationshipSection } from './TypedRelationshipSection'
+import { MarkdownContent } from './MarkdownContent'
 import './recordDetailHub.css'
 
 export interface HubVital {
@@ -48,6 +49,7 @@ export function RecordDetailHub({
   recordType,
   vitals = [],
   overview,
+  content,
   neighbors,
   worklog,
   evidence,
@@ -61,6 +63,9 @@ export function RecordDetailHub({
   recordType?: string
   vitals?: HubVital[]
   overview: ReactNode
+  /** Optional "Content" tab (Docs.dc.html) — full document body, rendered
+   *  between Overview and Neighbors. ENC-TSK-M34. */
+  content?: ReactNode
   neighbors?: ReactNode
   worklog?: ReactNode
   evidence?: ReactNode
@@ -83,6 +88,7 @@ export function RecordDetailHub({
 
   const tabs = [
     { id: 'overview', label: 'Overview', content: overview },
+    ...(content !== undefined ? [{ id: 'content', label: 'Content', content }] : []),
     ...(neighbors ? [{ id: 'neighbors', label: 'Neighbors', content: neighbors }] : []),
     ...(worklog ? [{ id: 'worklog', label: 'Worklog', content: worklog }] : []),
     ...(evidence ? [{ id: 'evidence', label: 'Evidence', content: evidence }] : []),
@@ -231,8 +237,17 @@ export function NeighborsTab({
   )
 }
 
-/** Worklog tab body: the record's history[], most recent first. */
-export function WorklogTab({ history }: { history: HistoryEntry[] | undefined }) {
+/** Worklog tab body: the record's history[], most recent first. Entries
+ *  render through MarkdownContent (ENC-TSK-M32) -- worklog descriptions
+ *  routinely carry inline record IDs (PR merges, backport notes) that
+ *  should link like anywhere else. */
+export function WorklogTab({
+  history,
+  projectId,
+}: {
+  history: HistoryEntry[] | undefined
+  projectId?: string
+}) {
   if (!history?.length) return null
   return (
     <ul className="ev2-rdh__worklog-list">
@@ -242,15 +257,24 @@ export function WorklogTab({ history }: { history: HistoryEntry[] | undefined })
             <span className="ev2-rdh__worklog-ts">{h.timestamp}</span>
             <StatusChip status={h.status} />
           </div>
-          <p className="ev2-rdh__worklog-desc">{h.description}</p>
+          <MarkdownContent text={h.description} projectId={projectId} className="ev2-rdh__worklog-desc" />
         </li>
       ))}
     </ul>
   )
 }
 
-/** Evidence tab body: acceptance-criteria stamps (governed AC evidence). */
-export function EvidenceTab({ criteria }: { criteria: AcceptanceCriterion[] | undefined }) {
+/** Evidence tab body: acceptance-criteria stamps (governed AC evidence),
+ *  rendered through MarkdownContent (ENC-TSK-M32) so evidence text -- which
+ *  often embeds record IDs, hashes, or run URLs -- wraps instead of
+ *  overflowing and links inline IDs like everywhere else. */
+export function EvidenceTab({
+  criteria,
+  projectId,
+}: {
+  criteria: AcceptanceCriterion[] | undefined
+  projectId?: string
+}) {
   if (!criteria?.length) return null
   return (
     <ul className="ev2-rdh__evidence-list">
@@ -260,8 +284,10 @@ export function EvidenceTab({ criteria }: { criteria: AcceptanceCriterion[] | un
             {c.evidence_acceptance ? 'Accepted' : 'Pending'}
           </span>
           <div className="ev2-rdh__evidence-body">
-            <p className="ev2-rdh__evidence-desc">{c.description}</p>
-            {c.evidence ? <p className="ev2-rdh__evidence-proof">{c.evidence}</p> : null}
+            <MarkdownContent text={c.description} projectId={projectId} className="ev2-rdh__evidence-desc" />
+            {c.evidence ? (
+              <MarkdownContent text={c.evidence} projectId={projectId} className="ev2-rdh__evidence-proof" />
+            ) : null}
           </div>
         </li>
       ))}

@@ -3,6 +3,11 @@
   flex-direction: column;
   gap: var(--space-5);
   max-width: calc(var(--space-16) * 56);
+  /* ENC-TSK-M38: floor this flex item's cross-axis auto-minimum so a
+     long unbreakable descendant (a token, hash, or native form control)
+     can never bubble a wider intrinsic min-content up through
+     .ev2-al__content and force horizontal scroll at narrow viewports. */
+  min-width: var(--space-0);
 }
 
 .feed-route__header {
@@ -42,10 +47,22 @@
   flex-wrap: wrap;
   align-items: flex-start;
   gap: var(--space-3);
+  /* ENC-TSK-M38: same auto-minimum floor as .feed-route -- the toolbar is
+     itself a flex item of the column above it. */
+  min-width: var(--space-0);
 }
 
 .feed-route__search {
   flex: 1;
+  /* ENC-TSK-M38 (ENC-ISS-51x residual): flex:1 alone does not give this
+     item a shrink floor -- its automatic minimum size is its content's
+     min-content width unless min-width:0 overrides it. The nested
+     Autosuggest/Input chain sets min-width:0 on the innermost <input>,
+     but that alone is fragile across future content additions (icons,
+     inline suggestions); floor the outer flex item explicitly so the
+     "Search records or saved name…" box can always shrink to fit ≤606px
+     viewports instead of forcing this row (and the page) wider. */
+  min-width: var(--space-0);
 }
 
 /* ENC-TSK-M26 fix: this min-width (768px) was unconditional, so at mobile

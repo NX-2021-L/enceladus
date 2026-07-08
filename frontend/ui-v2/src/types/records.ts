@@ -175,6 +175,13 @@ export interface Document {
   updated_at: string
   version: number
   document_subtype?: string
+  /** Full raw markdown body. Present when fetched with include_content=true
+   *  (the default for a single-document GET) — ENC-TSK-M34. */
+  content?: string
+  content_hash?: string
+  size_bytes?: number
+  compliance_score?: number
+  compliance_warnings?: string[]
 }
 
 export interface RecordShapeMap {

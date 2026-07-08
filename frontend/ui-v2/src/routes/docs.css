@@ -3,6 +3,10 @@
   flex-direction: column;
   gap: var(--space-5);
   max-width: calc(var(--space-16) * 56);
+  /* ENC-TSK-M38: see feed.css -- floors this flex item's auto-minimum so
+     no descendant can bubble a wider intrinsic min-content up through
+     .ev2-al__content and force horizontal scroll at narrow viewports. */
+  min-width: var(--space-0);
 }
 
 .docs-route__header {
@@ -42,10 +46,16 @@
   flex-wrap: wrap;
   align-items: flex-start;
   gap: var(--space-3);
+  /* ENC-TSK-M38: toolbar is itself a flex item of the column above it. */
+  min-width: var(--space-0);
 }
 
 .docs-route__search {
   flex: 1;
+  /* ENC-TSK-M38: see feed.css .feed-route__search -- explicit shrink
+     floor for the search box flex item, independent of the nested
+     Autosuggest/Input chain's own min-width:0. */
+  min-width: var(--space-0);
 }
 
 /* ENC-TSK-M26 fix: same unconditional 768px min-width bug as feed.css --
