@@ -2654,6 +2654,27 @@ Resources:
       RouteKey: "POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply"
       Target: !Sub integrations/${TrackerMutationIntegration}
 
+  # ENC-TSK-M27 (ENC-FTR-130): io-queue completeness — paused v3-prod Environment
+  # approvals + stale-checkout locks. Read-only, Cognito-gated inside the
+  # handlers (same posture as the Escalations feed above). Gamma-only for now,
+  # matching this task's scope; a v3-prod promotion of this surface would need
+  # its own io-gated follow-up, same as escalations' DOC-B716E8FB10B6 note.
+  RouteQueuePausedApprovals:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/queue/paused-approvals"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
+  RouteQueueStaleLocks:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: IsGamma
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/coordination/queue/stale-locks"
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
 Outputs:
   ApiEndpoint:
     Value: !GetAtt HttpApi.ApiEndpoint
