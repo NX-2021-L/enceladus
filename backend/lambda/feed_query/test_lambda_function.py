@@ -364,6 +364,100 @@ def test_max_full_refresh_caps_configured():
 
 
 # ---------------------------------------------------------------------------
+# Per-project fan-out + per-project caps (ENC-TSK-M36 / feed data-truth)
+#
+# Confirmed live against gamma: /api/v1/feed/tasks.json and /api/v1/feed/corpus
+# both took ~20s on a cache miss because _query_all_records / (the former
+# _query_corpus_tracker_records copy) queried every active project's
+# project-type-index SEQUENTIALLY. Separately, the per-type caps used to
+# apply to the merged cross-project pool, so a project with many lessons
+# recently updated could crowd another project's lessons out of the snapshot
+# entirely even though that project's lessons were never actually missing
+# from DynamoDB. _fan_out_by_project fixes the latency (concurrent per-
+# project fetch); capping inside _query_all_records's per-project loop fixes
+# the fairness -- these tests lock in both behaviors without touching
+# DynamoDB (project fetch itself is monkeypatched).
+# ---------------------------------------------------------------------------
+
+
+def _fake_project_records(pid: str, lesson_count: int) -> tuple:
+    """Build a one-project (tasks, issues, features, lessons, plans) tuple
+    with `lesson_count` lessons, each with a distinct recent updated_at so
+    _cap_by_updated_at's ordering is deterministic."""
+    lessons = [
+        {
+            "lesson_id": f"{pid}-LSN-{i:03d}",
+            "project_id": pid,
+            "updated_at": f"2026-07-0{(i % 8) + 1}T00:00:00Z",
+        }
+        for i in range(lesson_count)
+    ]
+    return ([], [], [], lessons, [])
+
+
+def test_fan_out_by_project_queries_every_project_and_preserves_order(monkeypatch):
+    projects = [{"project_id": "enceladus"}, {"project_id": "cfg"}, {"project_id": "fly"}]
+    calls: list[str] = []
+
+    def fake_query(pid, _cutoff):
+        calls.append(pid)
+        return _fake_project_records(pid, lesson_count=1)
+
+    monkeypatch.setattr(feed_query, "_query_project_tracker_records", fake_query)
+    cutoff = feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    results = feed_query._fan_out_by_project(projects, cutoff)
+
+    # Every project was queried exactly once...
+    assert sorted(calls) == ["cfg", "enceladus", "fly"]
+    # ...and results come back in the SAME order as the input project list,
+    # regardless of thread completion order.
+    assert [pid for pid, _ in results] == ["enceladus", "cfg", "fly"]
+
+
+def test_fan_out_by_project_empty_list_short_circuits(monkeypatch):
+    called = False
+
+    def fake_query(_pid, _cutoff):
+        nonlocal called
+        called = True
+        return ([], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_query_project_tracker_records", fake_query)
+    cutoff = feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    assert feed_query._fan_out_by_project([], cutoff) == []
+    assert called is False
+
+
+def test_query_all_records_caps_are_per_project_not_global(monkeypatch):
+    # A busier project ("enceladus") has 15 lessons (over the cap of 10); a
+    # quieter project ("cfg") has 2. Before ENC-TSK-M36, the cap applied to
+    # the MERGED 17-lesson pool, so with a global cap of 10 the two "cfg"
+    # lessons could be entirely dropped if enceladus's lessons all sorted
+    # more recent. Capping per project must keep BOTH projects represented.
+    monkeypatch.setattr(
+        feed_query,
+        "_get_active_projects",
+        lambda: [{"project_id": "enceladus"}, {"project_id": "cfg"}],
+    )
+
+    def fake_query(pid, _cutoff):
+        if pid == "enceladus":
+            return _fake_project_records(pid, lesson_count=15)
+        return _fake_project_records(pid, lesson_count=2)
+
+    monkeypatch.setattr(feed_query, "_query_project_tracker_records", fake_query)
+
+    _tasks, _issues, _features, all_lessons, _plans = feed_query._query_all_records()
+
+    lesson_ids = {l["lesson_id"] for l in all_lessons}
+    # enceladus capped down to 10 (its own cap, not zeroed out by cfg)...
+    assert sum(1 for lid in lesson_ids if lid.startswith("enceladus-")) == 10
+    # ...and cfg's 2 lessons survive too -- global capping would have let
+    # enceladus's 15 crowd them out entirely.
+    assert sum(1 for lid in lesson_ids if lid.startswith("cfg-")) == 2
+
+
+# ---------------------------------------------------------------------------
 # VALID_RECORD_TYPES whitelist (ENC-TSK-C40 / ENC-ISS-177)
 #
 # Before the fix, VALID_RECORD_TYPES = {"task", "issue", "feature"} silently

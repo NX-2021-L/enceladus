@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-08.03",
-  "updated_at": "2026-07-08T05:10:00Z",
-  "last_change_summary": "ENC-TSK-M27 (ENC-FTR-130): io-queue completeness. Two new read-only, Cognito-gated GET routes on coordination_api close the two M19 Home \"Data gap\" placeholder rows -- GET /api/v1/coordination/queue/paused-approvals (GitHub Actions runs blocked on the v3-prod Environment's required-reviewer gate; reuses the existing ENC-FTR-021 GitHub App installation-token path via new _get_github_installation_token/_github_queue_api_get helpers, no new secret minted) and GET /api/v1/coordination/queue/stale-locks (Scan of the projects table for checkout_state=checked_out task records past STALE_CHECKOUT_THRESHOLD_MINUTES, mirroring backend/lambda/stale_checkout_monitor's detection core so the PWA agrees with the scheduled monitor's signal). Both handlers add no mutation path. New least-privilege GitHubAppSecretRead IAM statement (secretsmanager:GetSecretValue/DescribeSecret scoped to devops/github-app/*) on CoordinationApiRole (infrastructure/cloudformation/02-compute.yaml, covers gamma + prod via EnvironmentSuffix); no new DynamoDB IAM needed (TrackerTableAccess/ProjectsTableRead already grant Scan). New gamma-only APIGW routes RouteQueuePausedApprovals + RouteQueueStaleLocks (infrastructure/cloudformation/03-api.yaml, Condition: IsGamma, same posture as the Escalations feed). frontend/ui-v2 Home route now fetches both live and replaces routes/homeQueue.ts::GAP_QUEUE_ROWS with pausedApprovalRows/staleLockRows mapping functions.",
+  "version": "2026-07-08.04",
+  "updated_at": "2026-07-08T08:55:00Z",
+  "last_change_summary": "ENC-TSK-M36 (feed data-truth): backend/lambda/feed_query/lambda_function.py -- confirmed live against gamma that GET /api/v1/feed/tasks.json and GET /api/v1/feed/corpus both took ~20s on a cache miss because _query_all_records / _query_corpus_tracker_records queried every active project's project-type-index SEQUENTIALLY (one paginated DynamoDB Query per project, no concurrency). Factored the per-project fetch out to _query_project_tracker_records and fan it out concurrently via _fan_out_by_project (ThreadPoolExecutor, bounded _MAX_PROJECT_FANOUT_WORKERS=8); both callers now run the same per-project queries in parallel instead of serially. Separately, the per-type snapshot caps (MAX_ISSUES/FEATURES/LESSONS/PLANS_FULL_REFRESH=10, ENC-TSK-C34) used to apply to the merged cross-project pool -- since project-type-index is shared by every governed project in this table, a global cap meant one recently-active project's issue/feature/lesson/plan records could crowd another project's entirely out of the tasks.json snapshot, even though /feed/corpus (uncapped) proves the data was never actually missing from DynamoDB. _query_all_records now applies these caps PER PROJECT before merging so every active project keeps a fair slice regardless of what other tenants are doing; worst-case payload grows to N-active-projects x 140 minimal-projection rows, comfortably inside the 6 MB Lambda response limit. Read-only: no schema change, no new endpoint, no write path touched. Companion frontend fix (ui-v2, no backend dependency): CacheEngineProvider's one-shot corpus-seed call now retries (2 attempts, 1s/3s backoff) instead of permanently stranding isWarm=false on a single transient failure, and Home's \"Awaiting checkout\" tile now scopes its Feed destination link to the same project_id its count was computed against (routes/HomeRoute.tsx::openTasksSearchFor), fixing a count/filter project-scope mismatch.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7841,6 +7841,11 @@
   },
   "change_summary": "ENC-TSK-L93: documents-list metadata-only projection via include_content=false (skill catalog fields + runtime_hint).",
   "change_log": [
+    {
+      "version": "2026-07-08.04",
+      "date": "2026-07-08",
+      "summary": "ENC-TSK-M36 (feed data-truth): feed_query per-project fan-out parallelized (ThreadPoolExecutor, was sequential -- confirmed ~20s cold-cache latency live on gamma) and per-type snapshot caps (issues/features/lessons/plans) moved from a global cross-project pool to per-project, so one active project's records can no longer crowd another's out of the tasks.json snapshot. Read-only, no schema/endpoint change. See last_change_summary for full detail."
+    },
     {
       "version": "2026-07-08.03",
       "date": "2026-07-08",
