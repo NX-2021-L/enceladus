@@ -163,22 +163,20 @@
   text-decoration: underline;
 }
 
-.feed-route__card-link {
-  color: inherit;
-  text-decoration: none;
-}
-
-.feed-route__card-link:hover {
-  color: var(--accent-hover);
-}
-
-.feed-route__card-id {
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--accent);
+/* ENC-TSK-M35: master-detail split (FTR-128 AC-18). Cloudscape's
+ * `ColumnLayout` only offers equal-width columns; Feed.dc.html's
+ * `.feed-pane`/`.record-pane` ratio is asymmetric (narrower dense list,
+ * wider reading pane), so this is a dedicated flex wrapper rather than a
+ * ColumnLayout instance. */
+.feed-route__split {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
 }
 
 .feed-route__list-scroll {
+  flex: 1 1 380px;
+  max-width: 460px;
   max-height: calc(var(--space-16) * 28);
   overflow-y: auto;
   padding-right: var(--space-2);
@@ -188,6 +186,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  flex: 1.5 1 0;
   min-width: var(--space-0);
 }
 
@@ -197,31 +196,6 @@
   font-size: var(--text-xs);
   color: var(--fg-muted);
   text-align: center;
-}
-
-.feed-route__detail-link {
-  color: var(--accent-hover);
-  text-decoration: none;
-  font-family: var(--font-heading);
-  font-size: var(--text-sm);
-}
-
-.feed-route__detail-link:hover {
-  color: var(--enc-teal-light);
-}
-
-.feed-reading-pane__meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-
-.feed-reading-pane__project {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--fg-muted);
 }
 
 .feed-recent-nav {
@@ -242,10 +216,4 @@
 .feed-recent-nav .ev2-pag__btn:not([aria-label='Previous page']):not([aria-label='Next page']),
 .feed-recent-nav .ev2-pag__ellipsis {
   display: none;
-}
-
-@media (max-width: 48rem) {
-  .feed-route .ev2-cards__grid {
-    grid-template-columns: minmax(0, 1fr) !important;
-  }
 }

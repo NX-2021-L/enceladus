@@ -29,6 +29,7 @@ Environment variables:
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
 import json
 import logging
@@ -399,10 +400,18 @@ MAX_HISTORY_ENTRIES = 10
 # Lambda 6 MB sync response limit. With history entries populated per-record
 # (ENC-TSK-C01), the pre-cap response exceeded that limit and produced the
 # opaque {"message":"Internal Server Error"} that broke PWA plan + lesson
-# rendering. These caps hold the total to at most 140 records: 100 tasks +
-# 10 each of issues/features/lessons/plans. The frontend already caps the
-# visible feed list at 100 items (FeedPage.tsx useInfiniteList(items, 20, 100))
-# so these backend caps align with the existing UI contract.
+# rendering. The rows this cap applies to are the minimal 5-field snapshot
+# projection (_handle_snapshot._rows), not full record bodies, so headroom
+# under the 6 MB limit is large.
+#
+# ENC-TSK-M36: these caps are applied PER ACTIVE PROJECT (see
+# _query_all_records), not globally across every project sharing this table
+# -- a global cap meant one recently-active project could crowd out another
+# project's entire issue/feature/lesson/plan representation in the snapshot.
+# Worst case with N active projects is now N x (100 + 10*4) rows; at ~150
+# bytes/row that's comfortably inside the 6 MB limit even for a few dozen
+# projects, and the frontend already caps the visible feed list at 50 items
+# post-fetch (frontend/ui-v2/src/api/feeds.ts::fetchFeedSnapshot).
 MAX_TASKS_FULL_REFRESH = 100
 MAX_ISSUES_FULL_REFRESH = 10
 MAX_FEATURES_FULL_REFRESH = 10
@@ -1164,8 +1173,99 @@ _TRANSFORM = {
 }
 
 
-def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+# ENC-TSK-M36: bound how many active projects are fanned out to concurrently.
+# A plain constant rather than "len(projects)" unbounded, so an unexpectedly
+# large projects table can't spawn hundreds of simultaneous DynamoDB queries
+# from a single Lambda invocation.
+_MAX_PROJECT_FANOUT_WORKERS = 8
+
+
+def _query_project_tracker_records(
+    pid: str, cutoff: dt.datetime
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Query every tracker record for ONE project via project-type-index.
+
+    Factored out of what were two near-identical copies of this loop
+    (_query_all_records / _query_corpus_tracker_records, ENC-TSK-L23) so the
+    per-project fetch happens in exactly one place. Called concurrently, one
+    call per active project (ENC-TSK-M36) -- previously each caller ran this
+    same paginated query SEQUENTIALLY across every active project, which is
+    the confirmed root cause of the ~20s feed/tasks.json and feed/corpus
+    cold-cache latency (ENC-TSK-M36): N projects x paginated GSI query, one
+    at a time, no concurrency.
+    """
     ddb = _get_ddb()
+    tasks: List[Dict[str, Any]] = []
+    issues: List[Dict[str, Any]] = []
+    features: List[Dict[str, Any]] = []
+    lessons: List[Dict[str, Any]] = []
+    plans: List[Dict[str, Any]] = []
+
+    paginator = ddb.get_paginator("query")
+    try:
+        for page in paginator.paginate(
+            TableName=DYNAMODB_TABLE,
+            IndexName="project-type-index",
+            KeyConditionExpression="project_id = :pid",
+            ExpressionAttributeValues={":pid": {"S": pid}},
+        ):
+            for raw_item in page.get("Items", []):
+                record_type = _ddb_str(raw_item, "record_type")
+                if record_type not in _TRANSFORM:
+                    continue
+                # Per-record isolation: a single malformed record must not
+                # take down the entire feed response (ENC-TSK-C31).
+                try:
+                    if _is_stale_closed(raw_item, cutoff):
+                        continue
+                    transformed = _TRANSFORM[record_type](raw_item, pid)
+                except Exception as rec_exc:  # noqa: BLE001
+                    logger.error(
+                        "feed_query: skipping record_type=%s item_id=%s project=%s: %s",
+                        record_type,
+                        _ddb_str(raw_item, "item_id") or "?",
+                        pid,
+                        rec_exc,
+                    )
+                    continue
+                if record_type == "task":
+                    tasks.append(transformed)
+                elif record_type == "issue":
+                    issues.append(transformed)
+                elif record_type == "feature":
+                    features.append(transformed)
+                elif record_type == "lesson":
+                    lessons.append(transformed)
+                elif record_type == "plan":
+                    plans.append(transformed)
+    except (BotoCoreError, ClientError) as exc:
+        logger.error("DynamoDB query failed for project %s: %s", pid, exc)
+
+    return tasks, issues, features, lessons, plans
+
+
+def _fan_out_by_project(
+    projects: List[Dict[str, str]], cutoff: dt.datetime
+) -> List[Tuple[str, Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]]]:
+    """Run `_query_project_tracker_records` for every project concurrently.
+
+    Returns `[(project_id, (tasks, issues, features, lessons, plans)), ...]`
+    in the SAME project order as the input list (order is restored after the
+    executor map so both callers stay deterministic) -- a raised per-project
+    exception is already caught and logged inside `_query_project_tracker_records`
+    itself, so this never needs to handle executor-side failures specially.
+    """
+    if not projects:
+        return []
+    max_workers = min(_MAX_PROJECT_FANOUT_WORKERS, len(projects))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = list(
+            pool.map(lambda proj: _query_project_tracker_records(proj["project_id"], cutoff), projects)
+        )
+    return [(proj["project_id"], result) for proj, result in zip(projects, results)]
+
+
+def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     projects = _get_active_projects()
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
 
@@ -1175,58 +1275,23 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
     all_lessons: List[Dict[str, Any]] = []
     all_plans: List[Dict[str, Any]] = []
 
-    for proj in projects:
-        pid = proj["project_id"]
-        paginator = ddb.get_paginator("query")
-        try:
-            for page in paginator.paginate(
-                TableName=DYNAMODB_TABLE,
-                IndexName="project-type-index",
-                KeyConditionExpression="project_id = :pid",
-                ExpressionAttributeValues={":pid": {"S": pid}},
-            ):
-                for raw_item in page.get("Items", []):
-                    record_type = _ddb_str(raw_item, "record_type")
-                    if record_type not in _TRANSFORM:
-                        continue
-                    # Per-record isolation: a single malformed record must not
-                    # take down the entire feed response (ENC-TSK-C31).
-                    try:
-                        if _is_stale_closed(raw_item, cutoff):
-                            continue
-                        transformed = _TRANSFORM[record_type](raw_item, pid)
-                    except Exception as rec_exc:  # noqa: BLE001
-                        logger.error(
-                            "feed_query: skipping record_type=%s item_id=%s project=%s: %s",
-                            record_type,
-                            _ddb_str(raw_item, "item_id") or "?",
-                            pid,
-                            rec_exc,
-                        )
-                        continue
-                    if record_type == "task":
-                        all_tasks.append(transformed)
-                    elif record_type == "issue":
-                        all_issues.append(transformed)
-                    elif record_type == "feature":
-                        all_features.append(transformed)
-                    elif record_type == "lesson":
-                        all_lessons.append(transformed)
-                    elif record_type == "plan":
-                        all_plans.append(transformed)
-        except (BotoCoreError, ClientError) as exc:
-            logger.error("DynamoDB query failed for project %s: %s", pid, exc)
-            continue
-
-    # Per-type caps (ENC-TSK-C34): keep only the most-recently-updated
-    # N records of each type so the total sync response stays under the
-    # Lambda 6 MB limit. Apply the cap BEFORE the deterministic id sort
-    # so the truncation window is chosen by recency, not alphabetically.
-    all_tasks = _cap_by_updated_at(all_tasks, MAX_TASKS_FULL_REFRESH)
-    all_issues = _cap_by_updated_at(all_issues, MAX_ISSUES_FULL_REFRESH)
-    all_features = _cap_by_updated_at(all_features, MAX_FEATURES_FULL_REFRESH)
-    all_lessons = _cap_by_updated_at(all_lessons, MAX_LESSONS_FULL_REFRESH)
-    all_plans = _cap_by_updated_at(all_plans, MAX_PLANS_FULL_REFRESH)
+    # ENC-TSK-M36 (feed data-truth): the per-type caps below used to apply
+    # to the GLOBAL cross-project pool (all projects' lessons merged, THEN
+    # capped to 10 total). tasks.json/project-type-index is shared by every
+    # governed project in this table (enceladus, plus several others) -- a
+    # global cap meant any project's issue/feature/lesson/plan representation
+    # in the cold-start snapshot could be crowded out entirely by a more
+    # recently active sibling project, even though that project's own data
+    # was never actually missing from DynamoDB (confirmed via /feed/corpus,
+    # which has no caps and returns the full per-project set). Capping PER
+    # PROJECT before merging guarantees every active project keeps its own
+    # fair slice of the snapshot regardless of what other tenants are doing.
+    for _pid, (tasks, issues, features, lessons, plans) in _fan_out_by_project(projects, cutoff):
+        all_tasks.extend(_cap_by_updated_at(tasks, MAX_TASKS_FULL_REFRESH))
+        all_issues.extend(_cap_by_updated_at(issues, MAX_ISSUES_FULL_REFRESH))
+        all_features.extend(_cap_by_updated_at(features, MAX_FEATURES_FULL_REFRESH))
+        all_lessons.extend(_cap_by_updated_at(lessons, MAX_LESSONS_FULL_REFRESH))
+        all_plans.extend(_cap_by_updated_at(plans, MAX_PLANS_FULL_REFRESH))
 
     all_tasks.sort(key=lambda x: x.get("task_id", ""))
     all_issues.sort(key=lambda x: x.get("issue_id", ""))
@@ -1244,8 +1309,14 @@ def _query_corpus_tracker_records() -> Tuple[
     List[Dict[str, Any]],
     List[Dict[str, Any]],
 ]:
-    """Load the full tracker corpus without per-type refresh caps (ENC-TSK-L23)."""
-    ddb = _get_ddb()
+    """Load the full tracker corpus without per-type refresh caps (ENC-TSK-L23).
+
+    ENC-TSK-M36: shares `_query_project_tracker_records` / `_fan_out_by_project`
+    with `_query_all_records` -- this used to be its own near-identical copy of
+    the per-project query loop, run sequentially. Same concurrency fix applies
+    here since this is the function `seedCacheFromCorpus` (warm IndexedDB
+    cache) and the Home dashboard's count tiles ultimately depend on.
+    """
     projects = _get_active_projects()
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
 
@@ -1255,46 +1326,12 @@ def _query_corpus_tracker_records() -> Tuple[
     all_lessons: List[Dict[str, Any]] = []
     all_plans: List[Dict[str, Any]] = []
 
-    for proj in projects:
-        pid = proj["project_id"]
-        paginator = ddb.get_paginator("query")
-        try:
-            for page in paginator.paginate(
-                TableName=DYNAMODB_TABLE,
-                IndexName="project-type-index",
-                KeyConditionExpression="project_id = :pid",
-                ExpressionAttributeValues={":pid": {"S": pid}},
-            ):
-                for raw_item in page.get("Items", []):
-                    record_type = _ddb_str(raw_item, "record_type")
-                    if record_type not in _TRANSFORM:
-                        continue
-                    try:
-                        if _is_stale_closed(raw_item, cutoff):
-                            continue
-                        transformed = _TRANSFORM[record_type](raw_item, pid)
-                    except Exception as rec_exc:  # noqa: BLE001
-                        logger.error(
-                            "feed_query corpus: skipping record_type=%s item_id=%s project=%s: %s",
-                            record_type,
-                            _ddb_str(raw_item, "item_id") or "?",
-                            pid,
-                            rec_exc,
-                        )
-                        continue
-                    if record_type == "task":
-                        all_tasks.append(transformed)
-                    elif record_type == "issue":
-                        all_issues.append(transformed)
-                    elif record_type == "feature":
-                        all_features.append(transformed)
-                    elif record_type == "lesson":
-                        all_lessons.append(transformed)
-                    elif record_type == "plan":
-                        all_plans.append(transformed)
-        except (BotoCoreError, ClientError) as exc:
-            logger.error("Corpus tracker query failed for project %s: %s", pid, exc)
-            continue
+    for _pid, (tasks, issues, features, lessons, plans) in _fan_out_by_project(projects, cutoff):
+        all_tasks.extend(tasks)
+        all_issues.extend(issues)
+        all_features.extend(features)
+        all_lessons.extend(lessons)
+        all_plans.extend(plans)
 
     return all_tasks, all_issues, all_features, all_lessons, all_plans
 

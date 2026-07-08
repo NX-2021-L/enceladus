@@ -126,16 +126,26 @@ const OPEN_SEARCH: FeedRouteSearch = {
     operation: 'and',
   }),
 }
-const OPEN_TASKS_SEARCH: FeedRouteSearch = {
-  ...FEED_SEARCH_DEFAULTS,
-  f: serializeFilterQuery({
-    tokens: [
-      { propertyKey: 'status', operator: '=', value: 'open' },
-      { propertyKey: 'record_type', operator: '=', value: 'task' },
-      { propertyKey: 'checkout_state', operator: '!=', value: 'checked_out' },
-    ],
-    operation: 'and',
-  }),
+// ENC-TSK-M36 (feed data-truth, AC-3): `fetchAwaitingCheckoutCount` measures
+// a SINGLE project (api/homeQueue.ts — GET /api/v1/tracker/{projectId}...),
+// but this token set used to omit project_id entirely, so the tile's link
+// opened an UNSCOPED, cross-project Feed view — any other project's
+// awaiting-checkout tasks counted toward the number shown there even though
+// the tile itself never counted them. Scoping the destination filter to the
+// same project the count came from is what makes the two numbers agree.
+export function openTasksSearchFor(projectId: string): FeedRouteSearch {
+  return {
+    ...FEED_SEARCH_DEFAULTS,
+    f: serializeFilterQuery({
+      tokens: [
+        { propertyKey: 'status', operator: '=', value: 'open' },
+        { propertyKey: 'record_type', operator: '=', value: 'task' },
+        { propertyKey: 'checkout_state', operator: '!=', value: 'checked_out' },
+        { propertyKey: 'project_id', operator: '=', value: projectId },
+      ],
+      operation: 'and',
+    }),
+  }
 }
 
 function QueueCard({ row }: { row: QueueRow }) {
@@ -375,7 +385,7 @@ export function HomeRoute() {
           </span>
           <span className="home-route__count-label">Open P0/P1</span>
         </Link>
-        <Link to="/feed" search={OPEN_TASKS_SEARCH} className="home-route__count-tile">
+        <Link to="/feed" search={openTasksSearchFor(projectId)} className="home-route__count-tile">
           <span className="home-route__count-value">
             {awaitingCheckoutQuery.isLoading ? '…' : (awaitingCheckoutQuery.data ?? 0)}
           </span>

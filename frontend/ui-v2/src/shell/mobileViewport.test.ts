@@ -185,10 +185,15 @@ describe('tabs bar overflow containment (ENC-ISS-51x / Band-B defect 3)', () => 
 describe('card grid mobile collapse (ENC-ISS-516 / defect B)', () => {
   const gridOverridePattern = /@media \(max-width: 48rem\)[\s\S]*?\.ev2-cards__grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*!important/
 
+  // ENC-TSK-M35: Feed dropped Cloudscape `<Cards>` entirely (dense single
+  // column RecordCard variant="feed" rows now, per Feed.dc.html/
+  // Enceladus-v4-Feed-Review.md §3-4), so routes/feed.css no longer renders
+  // an `.ev2-cards__grid` element at all -- the defect-B regression this
+  // suite guards against is structurally impossible there now. Mobile-first
+  // single-column is covered instead by the `.ev2-rc-grid` assertion below.
   it.each([
     ['routes/home.css', '.home-route'],
     ['routes/projects.css', '.projects-route'],
-    ['routes/feed.css', '.feed-route'],
     ['routes/governance.css', '.governance-route'],
     ['routes/docs.css', '.docs-route'],
   ])('%s scopes a single-column mobile override to %s .ev2-cards__grid', (path, routeClass) => {
