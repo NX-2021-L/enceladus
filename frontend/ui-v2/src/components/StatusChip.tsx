@@ -1,6 +1,11 @@
 /**
- * Status chip. Colors come exclusively from the design-system status tokens —
- * no hard-coded hex. Unknown statuses fall back to the muted/dust foreground.
+ * Status chip. Cloudscape StatusIndicator semantics (dot + label), re-branded
+ * onto Enceladus DS tokens exclusively — no hard-coded hex. Unknown statuses
+ * fall back to the muted/dust foreground.
+ *
+ * Governed escalation (FND-05):
+ *  - priority P0, or status "blocked"  -> crimson + glow
+ *  - lesson records (recordType="lesson") -> lavender, regardless of status
  */
 
 const STATUS_TOKEN: Record<string, string> = {
@@ -19,10 +24,34 @@ const STATUS_TOKEN: Record<string, string> = {
   deprecated: 'var(--status-closed)',
   active: 'var(--status-open)',
   archived: 'var(--status-closed)',
+  p0: 'var(--status-p0)',
+  lesson: 'var(--status-lesson)',
 }
 
-export function StatusChip({ status }: { status: string }) {
-  const color = STATUS_TOKEN[status.toLowerCase()] ?? 'var(--fg-muted)'
+const GLOW_TOKEN: Record<string, string> = {
+  p0: 'var(--glow-crimson)',
+  blocked: 'var(--glow-crimson)',
+  lesson: 'var(--glow-lavender)',
+}
+
+export function StatusChip({
+  status,
+  priority,
+  recordType,
+}: {
+  status: string
+  /** Optional governed priority (e.g. "P0"). P0 escalates to crimson+glow. */
+  priority?: string
+  /** Optional governed record kind. "lesson" escalates to lavender. */
+  recordType?: string
+}) {
+  const isP0 = priority?.toLowerCase() === 'p0'
+  const isLesson = recordType?.toLowerCase() === 'lesson'
+  const key = isLesson ? 'lesson' : isP0 ? 'p0' : status.toLowerCase()
+
+  const color = STATUS_TOKEN[key] ?? STATUS_TOKEN[status.toLowerCase()] ?? 'var(--fg-muted)'
+  const glow = GLOW_TOKEN[key]
+
   return (
     <span
       style={{
@@ -39,6 +68,7 @@ export function StatusChip({ status }: { status: string }) {
         borderRadius: 'var(--radius-sm)',
         padding: '2px var(--space-2)',
         background: 'transparent',
+        boxShadow: glow ?? 'none',
       }}
     >
       <span
@@ -48,7 +78,7 @@ export function StatusChip({ status }: { status: string }) {
           height: 6,
           borderRadius: '50%',
           background: color,
-          boxShadow: '0 0 6px currentColor',
+          boxShadow: glow ?? '0 0 6px currentColor',
         }}
       />
       {status}

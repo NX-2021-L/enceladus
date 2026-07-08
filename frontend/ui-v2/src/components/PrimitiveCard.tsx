@@ -12,12 +12,16 @@ export function PrimitiveCard({
   kindLabel,
   title,
   status,
+  priority,
+  recordType,
   children,
 }: {
   recordId: string
   kindLabel: string
   title: string
   status?: string
+  priority?: string
+  recordType?: string
   children: ReactNode
 }) {
   return (
@@ -53,7 +57,7 @@ export function PrimitiveCard({
           {kindLabel}
         </span>
         <RecordId id={recordId} />
-        {status ? <StatusChip status={status} /> : null}
+        {status ? <StatusChip status={status} priority={priority} recordType={recordType} /> : null}
       </header>
 
       <h3
