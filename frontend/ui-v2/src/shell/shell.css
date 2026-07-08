@@ -62,17 +62,19 @@
     display: flex;
   }
 
-  .ev2-shell .ev2-al__nav:not(.ev2-shell__nav-drawer--open) {
-    display: none;
-  }
-
-  .ev2-shell .ev2-al__nav.ev2-shell__nav-drawer--open {
+  /* AppLayout already toggles `.ev2-al__nav--collapsed` off/on with the
+     `navigationOpen` prop (base rule: display:none when collapsed, any
+     viewport). On mobile the "Menu" toggle repurposes that same open state
+     as a full-screen drawer for the long-tail sidebar items, instead of the
+     desktop persistent-rail flex column. */
+  .ev2-shell .ev2-al__nav:not(.ev2-al__nav--collapsed) {
     position: fixed;
     inset: var(--space-0) var(--space-0) var(--space-0) var(--space-0);
     top: calc(var(--v2-control-height) + var(--space-6));
     z-index: 4;
     max-width: min(100%, calc(var(--space-16) * 14));
     box-shadow: var(--shadow-lg);
+    background: var(--enc-surface-alt);
   }
 
   .ev2-shell .ev2-al__tools {
@@ -82,6 +84,21 @@
   .ev2-shell .ev2-al__content {
     padding-bottom: calc(var(--space-12) + env(safe-area-inset-bottom, var(--space-0)));
   }
+
+  .ev2-shell__nav-scrim {
+    display: block;
+    position: fixed;
+    inset: var(--space-0);
+    top: calc(var(--v2-control-height) + var(--space-6));
+    z-index: 3;
+    background: rgba(10, 10, 15, 0.6);
+    border: none;
+    padding: 0;
+  }
+}
+
+.ev2-shell__nav-scrim {
+  display: none;
 }
 
 @media (min-width: 48.0625rem) {

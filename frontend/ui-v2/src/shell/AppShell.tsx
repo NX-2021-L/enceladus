@@ -121,6 +121,14 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className={shellClass}>
+      {navigationOpen ? (
+        <button
+          type="button"
+          className="ev2-shell__nav-scrim"
+          aria-label="Close menu"
+          onClick={() => setSidebarOpen(false)}
+        />
+      ) : null}
       <AppLayout
         topNavigation={
           <TopNavigation
