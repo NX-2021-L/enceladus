@@ -5,6 +5,34 @@
  * `@media (min-width: 48.0625rem)`, matching the breakpoint already used by
  * components/recordCard.css and shell/AppShell.tsx. */
 
+/* Hero -- faint masked moon image behind the Home heading only (ENC-TSK-M37,
+ * per Home.dc.html sec 9.1: "Faint moon image, opacity .13, masked to
+ * transparent behind hero only"). Contained within its own box (not bled
+ * into the shell's own padding, which is owned by a different file/layout
+ * layer) so this stays a token/chrome addition, not a layout rewrite. */
+.home-route__hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  margin: 0 0 var(--space-6);
+}
+
+.home-route__hero-image {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: 60% 30%;
+  opacity: 0.13;
+  -webkit-mask-image: linear-gradient(to bottom, #000, transparent);
+  mask-image: linear-gradient(to bottom, #000, transparent);
+  pointer-events: none;
+}
+
+.home-route__hero-content {
+  position: relative;
+  padding-top: var(--space-3);
+}
+
 .home-route__section-label {
   display: flex;
   align-items: baseline;

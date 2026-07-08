@@ -1,15 +1,19 @@
 import type { ReactNode } from 'react'
 import { useEffect } from 'react'
+import { RefreshCw } from 'lucide-react'
 import { useNavigate, useRouterState } from '@tanstack/react-router'
 import { AppLayout, Button, SideNavigation, TopNavigation } from '../design-system'
 import { performLogout } from '../auth/logout'
 import { useUiStore } from '../store/uiStore'
+import { refreshApp } from '../offline/swUpdate'
 import { CommandPalette } from './CommandPalette'
 import { FeedPane } from './FeedPane'
 import { ConflictMergeModal, MutationErrorFlashbar, OfflinePendingFlashbar } from '../components/OfflineLayer'
+import enceladusMarkUrl from '../../../design-system-2/assets/logos/enceladus-mark.svg'
 import './shell.css'
 
 const LOGOUT_HREF = '__logout__'
+const REFRESH_APP_HREF = '__refresh_app__'
 
 const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Projects', href: '/projects' },
@@ -24,6 +28,13 @@ const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Access tokens', href: '/access-tokens' },
   { type: 'link' as const, text: 'Terminal sessions', href: '/terminal-sessions' },
   { type: 'divider' as const },
+  {
+    type: 'link' as const,
+    text: 'App refresh',
+    href: REFRESH_APP_HREF,
+    icon: <RefreshCw size={16} strokeWidth={1.7} />,
+    spin: true,
+  },
   { type: 'link' as const, text: 'Log out', href: LOGOUT_HREF },
 ]
 
@@ -37,7 +48,11 @@ const MOBILE_NAV = [
 function resolveActiveHref(pathname: string): string {
   if (pathname === '/') return '/'
   const match = SIDEBAR_ITEMS.find(
-    (item) => item.type === 'link' && item.href !== LOGOUT_HREF && pathname.startsWith(item.href ?? ''),
+    (item) =>
+      item.type === 'link' &&
+      item.href !== LOGOUT_HREF &&
+      item.href !== REFRESH_APP_HREF &&
+      pathname.startsWith(item.href ?? ''),
   )
   return match?.href ?? pathname
 }
@@ -117,6 +132,14 @@ export function AppShell({ children }: { children: ReactNode }) {
       performLogout()
       return
     }
+    if (href === REFRESH_APP_HREF) {
+      // ENC-TSK-M37 -- force-activates the waiting service worker
+      // (skipWaiting) and reloads, replacing the old dismiss-only "App
+      // update available" banner that never actually called skipWaiting
+      // and left probes running against a stale precached shell.
+      void refreshApp()
+      return
+    }
     if (href) {
       navigate({ to: href })
       if (!window.matchMedia('(min-width: 48.0625rem)').matches) {
@@ -140,7 +163,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <AppLayout
         topNavigation={
           <TopNavigation
-            identity={{ title: 'ENCELADUS', href: '/' }}
+            identity={{ title: 'ENCELADUS', href: '/', iconSrc: enceladusMarkUrl, version: __APP_VERSION__ }}
             utilities={[
               { text: 'Menu', onClick: toggleSidebar },
               { text: 'Search', onClick: openCommandPalette },

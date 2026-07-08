@@ -55,3 +55,14 @@ a {
     background-color var(--dur-base) var(--ease-orbit),
     border-color var(--dur-base) var(--ease-orbit);
 }
+
+/* ENC-TSK-M37 (global accent reconcile) — a keyboard-focused control with no
+ * explicit `:focus-visible` rule falls back to the browser's native focus
+ * ring, which is blue in every major engine. Individual components may
+ * still set a more specific `:focus-visible` outline (e.g.
+ * .home-route__count-tile, .ev2-rdh__action); this is the app-wide floor so
+ * nothing is ever left on the unbranded default. */
+:focus-visible {
+  outline: 2px solid var(--enc-teal);
+  outline-offset: 2px;
+}

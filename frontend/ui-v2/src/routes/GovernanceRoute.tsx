@@ -1,13 +1,17 @@
-import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Cards } from '../design-system'
 import { fetchGovernanceDocs, governanceDocKeys } from '../api/documents'
-import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import { documentHref } from './recordLink'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import type { Document } from '../types/records'
 import './governance.css'
+
+/** The governed tracker is single-project today (ENC-TSK-M37): the project
+ *  picker this route used to carry was pure redundancy -- a select with one
+ *  real choice is not a control, it's decoration. Governance docs are
+ *  fetched for the one governed project directly. */
+const GOVERNANCE_PROJECT_ID = 'enceladus'
 
 /**
  * ENC-TSK-K26 / ENC-ISS-121 — Live governance docs from the docstore API.
@@ -16,10 +20,8 @@ import './governance.css'
  */
 export function GovernanceRoute() {
   useDocumentTitle('Governance')
-  const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
-  const [projectId, setProjectId] = useState('enceladus')
 
-  const normalized = projectId.trim().toLowerCase()
+  const normalized = GOVERNANCE_PROJECT_ID
   const { data, isPending, isError, error } = useQuery({
     queryKey: governanceDocKeys.primaryReference(normalized),
     queryFn: () => fetchGovernanceDocs(normalized),
@@ -70,24 +72,6 @@ export function GovernanceRoute() {
       </header>
 
       <div className="governance-route__toolbar">
-        <label className="governance-route__project">
-          Project context
-          <select
-            value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-            aria-label="Project for governance docs"
-          >
-            {projects.length > 0 ? (
-              projects.map((p) => (
-                <option key={p.project_id} value={p.project_id}>
-                  {p.project_id}
-                </option>
-              ))
-            ) : (
-              <option value="enceladus">enceladus</option>
-            )}
-          </select>
-        </label>
         <p className="governance-route__meta">
           {isPending ? 'Loading…' : `${docs.length} document${docs.length === 1 ? '' : 's'}`}
         </p>
