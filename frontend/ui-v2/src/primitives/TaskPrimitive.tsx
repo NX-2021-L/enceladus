@@ -11,6 +11,7 @@ export function TaskPrimitive({ record }: { record: Task }) {
       kindLabel="Task"
       title={record.title}
       status={record.status}
+      priority={record.priority}
     >
       <Prose>{record.description}</Prose>
       <MetaRow label="Priority">{record.priority}</MetaRow>
