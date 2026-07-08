@@ -1479,6 +1479,13 @@ Resources:
       Timeout: 900
       Architectures:
         - !If [IsGamma, arm64, x86_64]
+      # ENC-TSK-M11 / B66 AC-0 / ENC-TSK-K45 AC-0: active X-Ray tracing. This
+      # resource is stack-owned (CREATE_COMPLETE via enceladus-compute-gamma,
+      # not CFN-IMPORTed), so a normal change-set diffs and applies this
+      # property directly -- unlike the ENC-ISS-497 IMPORTed-resource gap that
+      # affects CheckoutServiceFunction (K44/K45/K66) and EnceladusMcpCodeGammaFunction.
+      TracingConfig:
+        Mode: Active
       Role: !GetAtt McpStreamingGatewayRole.Arn
       Layers:
         - !Ref SharedLayerArn
