@@ -17,6 +17,14 @@ import './markdownContent.css'
  *    styled mono text, never a dead link), and
  *  - guaranteeing long unbroken tokens (hashes, URLs) wrap instead of
  *    forcing horizontal scroll on narrow detail pages (ISS-501).
+ *
+ * ENC-TSK-M34 shipped an interim plaintext-only `MarkdownContent` at this
+ * exact path/export first (safe pre-wrap text behind a TODO, wired into
+ * DocumentPrimitive's Content tab) while this shared renderer was still in
+ * flight on a concurrent lane. This is that upgrade, landed in place at the
+ * same path -- `content` is accepted as an alias for `text` so the existing
+ * call site upgrades to real interpreted markdown + ID-linking without any
+ * changes on its end; new callers should prefer `text`.
  */
 
 type TrackerType = 'task' | 'issue' | 'feature' | 'plan' | 'lesson'
@@ -236,21 +244,26 @@ function headingTag(level: number): 'h3' | 'h4' | 'h5' {
 
 export function MarkdownContent({
   text,
+  content,
   projectId,
   className,
 }: {
   /** Raw markdown source -- a record description, evidence string, worklog
    *  entry, or document body. Renders nothing for empty/whitespace-only
    *  input. */
-  text: string | null | undefined
+  text?: string | null
+  /** Alias for `text` (ENC-TSK-M34 interim call-site compatibility -- see
+   *  file-level doc comment). Prefer `text` in new callers. */
+  content?: string | null
   /** Owning record's project -- resolves bare ENC-TSK/ISS/FTR/PLN/LSN
    *  tokens found inline to a same-project detail route. DOC-* tokens never
    *  need this (document routes are project-agnostic). */
   projectId?: string
   className?: string
 }) {
-  if (!text || !text.trim()) return null
-  const blocks = parseBlocks(text)
+  const source = text ?? content
+  if (!source || !source.trim()) return null
+  const blocks = parseBlocks(source)
 
   return (
     <div className={`ev2-md${className ? ` ${className}` : ''}`}>

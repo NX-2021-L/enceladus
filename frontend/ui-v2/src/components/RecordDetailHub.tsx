@@ -49,6 +49,7 @@ export function RecordDetailHub({
   recordType,
   vitals = [],
   overview,
+  content,
   neighbors,
   worklog,
   evidence,
@@ -62,6 +63,9 @@ export function RecordDetailHub({
   recordType?: string
   vitals?: HubVital[]
   overview: ReactNode
+  /** Optional "Content" tab (Docs.dc.html) — full document body, rendered
+   *  between Overview and Neighbors. ENC-TSK-M34. */
+  content?: ReactNode
   neighbors?: ReactNode
   worklog?: ReactNode
   evidence?: ReactNode
@@ -84,6 +88,7 @@ export function RecordDetailHub({
 
   const tabs = [
     { id: 'overview', label: 'Overview', content: overview },
+    ...(content !== undefined ? [{ id: 'content', label: 'Content', content }] : []),
     ...(neighbors ? [{ id: 'neighbors', label: 'Neighbors', content: neighbors }] : []),
     ...(worklog ? [{ id: 'worklog', label: 'Worklog', content: worklog }] : []),
     ...(evidence ? [{ id: 'evidence', label: 'Evidence', content: evidence }] : []),
