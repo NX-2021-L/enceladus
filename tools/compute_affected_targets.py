@@ -46,6 +46,22 @@ CROSS_CUTTING_PATTERNS = [
 
 LAMBDA_DIR_RE = re.compile(r"^backend/lambda/([^/]+)/")
 
+# ENC-ISS-519: discriminator for GitHub Deployment records that actually came
+# from THIS workflow's own Lambda code-deploy (see the "Create GitHub
+# Deployment" step in _deploy.yml). The CFN stack-deploy workflows
+# (cloudformation-api-stack-deploy.yml, cloudformation-compute-stack-deploy.yml)
+# declare `environment: v4-gamma` on their `apply` job, which makes GitHub
+# Actions itself auto-create a Deployment + success status for that same
+# environment/sha -- racing ahead of _deploy.yml's own deployment record for
+# the identical commit. Those GitHub-managed deployments default `task` to
+# "deploy" and carry no marker. Treating ANY success status on ANY deployment
+# for the environment as "already deployed" let the CFN race masquerade as a
+# real Lambda deploy: base_sha == head_sha, 0 Lambda updates, green run,
+# nothing shipped (reproduced live, run 28919007760 / PR #958). A deployment
+# record is only trustworthy evidence of a real Lambda deploy if it carries
+# this exact task.
+LAMBDA_CODE_DEPLOY_TASK = "lambda-artifacts"
+
 
 def _run(cmd: List[str]) -> Optional[str]:
     try:
@@ -74,6 +90,17 @@ def resolve_last_deployed_sha(environment: str, repo: str) -> Optional[str]:
     for dep in deployments:
         dep_id = dep.get("id")
         if dep_id is None:
+            continue
+        # ENC-ISS-519 (candidates 2+3): a deployment record is only usable as
+        # "last deployed sha" evidence if it is THIS workflow's own Lambda
+        # code-deploy. Any other deployment for the same environment/sha
+        # (e.g. a CFN stack-apply's auto-created Deployment) is skipped
+        # entirely -- it is never used to short-circuit base_sha == head_sha,
+        # and never returned as a base sha. This both discriminates the
+        # record (candidate 2) and hardens the same-sha short-circuit
+        # (candidate 3): fail-open by falling through to the next matching
+        # deployment, or to full_scope=True if none match.
+        if dep.get("task") != LAMBDA_CODE_DEPLOY_TASK:
             continue
         statuses_out = _run([
             "gh", "api", f"/repos/{repo}/deployments/{dep_id}/statuses?per_page=10",
