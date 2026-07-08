@@ -7,6 +7,7 @@ const ev2TabsCss = `
 .ev2-tab--active{color:var(--enc-seafoam,#C8DDD9)}
 .ev2-tab--active::after{content:'';position:absolute;left:8px;right:8px;bottom:-1px;height:2px;background:var(--enc-teal,#3D9BA8);border-radius:1px}
 .ev2-tab:disabled{opacity:.4;cursor:not-allowed}
+.ev2-tab--zero:not(.ev2-tab--active){opacity:.55}
 .ev2-tab__count{margin-left:6px;font-family:var(--font-mono,monospace);font-size:11px;color:var(--enc-dust,#6B8A94)}
 .ev2-tabs__panel{padding:16px 4px;font-size:14px;line-height:1.6;color:var(--enc-starlight,#EEF2F7)}
 `;
@@ -22,9 +23,9 @@ export function Tabs({ tabs = [], activeTabId, onChange }) {
       <div className="ev2-tabs__bar" role="tablist">
         {tabs.map((t) => (
           <button key={t.id} role="tab" aria-selected={t.id === active} disabled={t.disabled}
-            className={`ev2-tab${t.id === active ? ' ev2-tab--active' : ''}`} onClick={() => select(t.id)}>
+            className={`ev2-tab${t.id === active ? ' ev2-tab--active' : ''}${t.count === 0 ? ' ev2-tab--zero' : ''}`} onClick={() => select(t.id)}>
             {t.label}
-            {t.count != null && <span className="ev2-tab__count">{t.count}</span>}
+            {typeof t.count === 'number' && t.count > 0 && <span className="ev2-tab__count">{t.count}</span>}
           </button>
         ))}
       </div>

@@ -423,7 +423,18 @@ export function FeedRoute() {
         <p className="feed-route__empty">Loading feed snapshot…</p>
       )}
       {!isHydrating && filteredHits.length === 0 && (
-        <p className="feed-route__empty">No results — adjust search or filters.</p>
+        <p className="feed-route__empty">
+          No results — adjust search or filters.
+          {(q || f) && (
+            <button
+              type="button"
+              className="feed-route__empty-action"
+              onClick={() => patchFeedSearch({ q: '', f: '' })}
+            >
+              Clear filters
+            </button>
+          )}
+        </p>
       )}
 
       {filteredHits.length > 0 ? resultsBody : null}

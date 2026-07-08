@@ -94,6 +94,19 @@
   color: var(--fg-muted);
 }
 
+.docs-route__empty-action {
+  appearance: none;
+  border: none;
+  background: none;
+  margin-left: var(--space-2, 8px);
+  padding: 0;
+  font: inherit;
+  font-weight: 500;
+  color: var(--accent, #3d9ba8);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 .docs-route__card-link {
   color: var(--accent);
   text-decoration: none;
