@@ -7,7 +7,7 @@ const ev2AlCss = `
 .ev2-al__nav--collapsed{display:none}
 .ev2-al__main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .ev2-al__crumbs{flex:0 0 auto;padding:12px 24px 0}
-.ev2-al__content{flex:1;overflow-y:auto;padding:16px 24px 24px;display:flex;flex-direction:column;gap:18px}
+.ev2-al__content{flex:1;min-width:0;overflow-y:auto;padding:16px 24px 24px;display:flex;flex-direction:column;gap:18px}
 .ev2-al__tools{flex:0 0 auto;overflow-y:auto}
 .ev2-al__tools--collapsed{display:none}
 .ev2-al__split{flex:0 0 auto}

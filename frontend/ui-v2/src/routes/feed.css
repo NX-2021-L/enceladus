@@ -46,7 +46,18 @@
 
 .feed-route__search {
   flex: 1;
-  min-width: calc(var(--space-16) * 12);
+}
+
+/* ENC-TSK-M26 fix: this min-width (768px) was unconditional, so at mobile
+   widths a single toolbar item alone exceeded the viewport and forced
+   .ev2-al__content to scroll horizontally regardless of flex-wrap on the
+   toolbar (wrap only helps once there's more than one item competing for
+   space -- it can't shrink a single item below its own min-width). Only
+   opt into the wider minimum once there's room for it. */
+@media (min-width: 48.0625rem) {
+  .feed-route__search {
+    min-width: calc(var(--space-16) * 12);
+  }
 }
 
 .feed-route__sort {
@@ -183,6 +194,6 @@
 
 @media (max-width: 48rem) {
   .feed-route .ev2-cards__grid {
-    grid-template-columns: 1fr !important;
+    grid-template-columns: minmax(0, 1fr) !important;
   }
 }

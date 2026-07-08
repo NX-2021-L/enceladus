@@ -158,3 +158,13 @@
 .home-route__recent {
   margin-top: var(--space-6);
 }
+
+/* ENC-TSK-M26 hardening: same defensive override as feed/governance/docs/
+ * projects for any design-system-2 <Cards> grid rendered on this route (the
+ * "Recent documents" tab). Cards renders its columns as an inline style, so
+ * a plain class rule needs !important to win. */
+@media (max-width: 48rem) {
+  .home-route .ev2-cards__grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}

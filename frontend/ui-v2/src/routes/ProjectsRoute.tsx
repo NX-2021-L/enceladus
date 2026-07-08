@@ -35,6 +35,7 @@ import {
 import { SessionExpiredError } from '../api/client'
 import { StatusChip } from '../components/StatusChip'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import './projects.css'
 
 function formatUpdatedAt(value?: string): string {
   if (!value) return '—'
