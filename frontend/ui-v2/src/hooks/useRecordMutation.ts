@@ -4,8 +4,10 @@ import {
   closeRecord,
   mergeConflictFields,
   readSyncVersion,
+  setCheckout,
   setField,
   submitNote,
+  submitWorklog,
   type MutationResult,
   type RevisionConflictError,
   isRevisionConflictError,
@@ -21,11 +23,14 @@ interface MutationVars {
   projectId: string
   recordType: RecordType
   recordId: string
-  action: 'close' | 'note' | 'set_field'
+  action: 'close' | 'note' | 'set_field' | 'worklog' | 'checkout' | 'release'
   note?: string
   field?: string
   value?: string
   syncVersion?: number
+  /** ENC-TSK-M33 -- forwarded to `setField` as `transition_evidence` for
+   *  state-aware advance (user_initiated) / revert (revert_reason) writes. */
+  transitionEvidence?: Record<string, unknown>
 }
 
 export interface ConflictMergeState {
@@ -136,6 +141,15 @@ export function useRecordMutation() {
       if (vars.action === 'note') {
         return submitNote(vars.projectId, vars.recordType, vars.recordId, vars.note ?? '', revision)
       }
+      if (vars.action === 'worklog') {
+        return submitWorklog(vars.projectId, vars.recordType, vars.recordId, vars.note ?? '', revision)
+      }
+      if (vars.action === 'checkout') {
+        return setCheckout(vars.projectId, vars.recordType, vars.recordId, true)
+      }
+      if (vars.action === 'release') {
+        return setCheckout(vars.projectId, vars.recordType, vars.recordId, false)
+      }
       return setField(
         vars.projectId,
         vars.recordType,
@@ -143,6 +157,7 @@ export function useRecordMutation() {
         vars.field!,
         vars.value!,
         revision,
+        vars.transitionEvidence,
       )
     },
 
@@ -216,7 +231,14 @@ export function useRecordMutation() {
       void qc.invalidateQueries({
         queryKey: recordKeys.detail(vars.recordType, vars.projectId, vars.recordId),
       })
-      if (vars.action === 'close' || vars.action === 'set_field') {
+      if (
+        vars.action === 'close' ||
+        vars.action === 'set_field' ||
+        vars.action === 'checkout' ||
+        vars.action === 'release'
+      ) {
+        // Checkout/release changes the feed card's session + checkout chips
+        // (ENC-TSK-M33 chip-row parity) even though it isn't a status write.
         void qc.invalidateQueries({ queryKey: feedCorpusKeys.all })
       }
     },

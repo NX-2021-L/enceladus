@@ -285,6 +285,60 @@ describe('record detail hub sticky action bar (ENC-TSK-M23)', () => {
 })
 
 /**
+ * ENC-TSK-M33 (v3 action parity, HARD cutover gate) -- the state-aware
+ * primary action bar built into RecordDetailHub. Same static-source-read
+ * approach as the M23 suite above (jsdom has no real cascade/layout, so this
+ * can't click-and-observe): asserts the wiring for Check In / advance /
+ * revert / Note actually exists and stays contained to the action bar's own
+ * width (no new horizontal-scroll source).
+ */
+describe('record detail hub state-aware action bar (ENC-TSK-M33)', () => {
+  const hubCss = stripCssComments(readSrc('components/recordDetailHub.css'))
+  const hubSrc = readSrc('components/RecordDetailHub.tsx')
+
+  it('computes the primary action(s) from the record transition arc + checkout state, not a static control', () => {
+    expect(hubSrc).toMatch(/computePrimaryActions/)
+    expect(hubSrc).toMatch(/useRecordMutation/)
+  })
+
+  it('renders a Check In control for checked-out records', () => {
+    expect(hubSrc).toMatch(/Check In/)
+    expect(hubSrc).toMatch(/ev2-rdh__action--checkin/)
+  })
+
+  it('renders the Note button, appending a worklog entry through the governed mutation hook', () => {
+    expect(hubSrc).toMatch(/✏ Note/)
+    expect(hubSrc).toMatch(/action:\s*'worklog'/)
+  })
+
+  it('disables (rather than fakes) a transition it cannot compute, with an explanatory reason', () => {
+    expect(hubSrc).toMatch(/disabledReason/)
+    expect(hubSrc).toMatch(/title=\{pa\.disabledReason\}/)
+  })
+
+  it('forward writes use the ENC-ISS-092 user_initiated evidence shape; backward writes use revert_reason', () => {
+    expect(hubSrc).toMatch(/user_initiated:\s*true/)
+    expect(hubSrc).toMatch(/revert_reason:\s*transitionNote/)
+  })
+
+  it('every new action button reuses the existing .ev2-rdh__action sizing/width rules (no bespoke width source)', () => {
+    // Check In / disabled / transition / Note buttons all render className
+    // "ev2-rdh__action ..." (never a bare custom class), so they inherit the
+    // same flex/min-width contract already covered by the M23 suite above
+    // instead of introducing a new overflow source.
+    const actionButtonClassUses = hubSrc.match(/className="ev2-rdh__action[^"]*"/g) ?? []
+    expect(actionButtonClassUses.length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('the note/transition modal textarea is width-bound, not a fixed px width that could force scroll', () => {
+    const textareaMatch = hubCss.match(/\.ev2-rdh__note-textarea\s*\{([^}]*)\}/)
+    expect(textareaMatch, 'expected a .ev2-rdh__note-textarea rule').not.toBeNull()
+    expect(textareaMatch?.[1] ?? '').toMatch(/width:\s*100%/)
+    expect(textareaMatch?.[1] ?? '').toMatch(/box-sizing:\s*border-box/)
+  })
+})
+
+/**
  * ENC-TSK-M38 -- the "Search records or saved name…" input (FeedRoute) and
  * its Docs-route twin sat inside a `flex: 1` toolbar item with no explicit
  * `min-width`. `.ev2-al__content` (AppLayout.jsx) already floors its own

@@ -1,0 +1,26 @@
+/* ENC-TSK-M33 -- chip row parity (DOC-B6B52E3BB9BB §7). Deliberately mirrors
+   StatusChip's visual language (bordered pill + optional glow dot) so the
+   status chip and these sit flush in the same row. */
+
+.ev2-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-heading);
+  font-size: var(--text-xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  padding: 2px var(--space-2);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.ev2-chip__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
