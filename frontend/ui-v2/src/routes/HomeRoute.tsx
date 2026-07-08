@@ -5,7 +5,7 @@ import { feedCorpusByTypeQueryOptions, feedCorpusQueryOptions } from '../api/fee
 import { recordQueryOptions } from '../api/queryOptions'
 import { documentHref, recordHrefForType } from './recordLink'
 import { RecordId } from '../components/RecordId'
-import { StatusChip } from '../components/StatusChip'
+import { RecordCard } from '../components/RecordCard'
 import {
   DASHBOARD_RECORD_TYPES,
   DASHBOARD_TYPE_LABEL,
@@ -153,49 +153,6 @@ export function HomeRoute() {
   const statusPie = facetToPieData(facetsQuery.data?.facets?.status)
   const totalRecords = facetsQuery.data?.total_matches ?? 0
 
-  const entryCardDefinition = {
-    header: (row: EntryCardRow) =>
-      row.recordId ? (
-        <Link to={row.href} style={{ textDecoration: 'none', color: 'var(--fg-display)' }}>
-          {row.label}
-        </Link>
-      ) : (
-        <span style={{ color: 'var(--fg-muted)' }}>{row.label}</span>
-      ),
-    sections: [
-      {
-        id: 'id',
-        header: 'Most recent',
-        content: (row: EntryCardRow) =>
-          row.recordId ? (
-            <span
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--space-2)',
-                flexWrap: 'wrap',
-              }}
-            >
-              <RecordId id={row.recordId} />
-              {row.status ? <StatusChip status={row.status} /> : null}
-            </span>
-          ) : (
-            '—'
-          ),
-      },
-      {
-        id: 'title',
-        header: 'Title',
-        content: (row: EntryCardRow) => row.title || '—',
-      },
-      {
-        id: 'description',
-        header: 'Description',
-        content: (row: EntryCardRow) => row.description || '—',
-      },
-    ],
-  }
-
   const recentDocDefinition = {
     header: (doc: FeedCorpusItem) => (
       <Link to={documentHref(doc.record_id)} style={{ textDecoration: 'none', color: 'var(--fg-display)' }}>
@@ -241,7 +198,21 @@ export function HomeRoute() {
           <Box variant="strong" margin="0 0 var(--space-2)">
             Entry cards — most recent per type
           </Box>
-          <Cards items={entryCards} trackBy="type" columns={2} cardDefinition={entryCardDefinition} />
+          <div className="ev2-rc-grid ev2-rc-grid--2col">
+            {entryCards.map((row) => (
+              <RecordCard
+                key={row.type}
+                recordId={row.recordId || row.label}
+                recordType={row.type}
+                kindLabel={row.label}
+                title={row.title}
+                description={row.description}
+                status={row.status}
+                href={row.href || undefined}
+                variant="standard"
+              />
+            ))}
+          </div>
         </div>
 
         <div>
