@@ -190,7 +190,8 @@ PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 # comment-only touch gives the affected-set diff a real change to catch so the
 # already-merged code actually ships. See flagged follow-up: fix the detector's
 # base_sha resolution to not trust deployment records from sibling CFN-only
-# workflows for the same environment name.
+# workflows for the same environment name. (Re-push to refresh PR Commit Gate
+# payload after a body-only edit added the CCI token.)
 # ENC-TSK-M27: io-queue read surfaces. GITHUB_* envs are the existing ENC-FTR-021
 # GitHub App credential path (already provisioned on this function -- see
 # infrastructure/cloudformation/02-compute.yaml CoordinationApiFunction -- and
