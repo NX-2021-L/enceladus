@@ -452,6 +452,42 @@ def retire_session(session_id: str) -> Dict[str, Any]:
     return updated
 
 
+def touch_session_activity(session_id: str) -> bool:
+    """Refresh a live session's ``last_activity_at`` heartbeat (ENC-TSK-J71).
+
+    DOC-5B888FCA43B8 §5.9 / ENC-ISS-441: a listening agent polling
+    ``escalation.watch`` performs only reads and would otherwise be idle-retired
+    mid-wait. Each watch poll calls this to advance the heartbeat the idle
+    sweep measures against (see ``_idle_reference``). Best-effort by contract:
+    a missing or already-retired session returns False rather than failing the
+    poll — the watch response reports ``session_touched`` so the caller can
+    notice its session died. The 10-minute unclaim TTL is unaffected (that
+    path reads ``created_at`` on allocated sessions only).
+    """
+    if not session_id:
+        return False
+
+    ddb = _get_ddb()
+    try:
+        ddb.update_item(
+            TableName=AGENT_SESSIONS_TABLE,
+            Key={"session_id": _serialize(session_id)},
+            UpdateExpression="SET last_activity_at = :now",
+            ConditionExpression="attribute_exists(session_id) AND (#st = :allocated OR #st = :claimed)",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":now": _serialize(dt.datetime.now(dt.timezone.utc).strftime(_TS_FORMAT)),
+                ":allocated": _serialize("allocated"),
+                ":claimed": _serialize("claimed"),
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Session Claim ID (SCI) tokens — ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122)
 # ---------------------------------------------------------------------------
@@ -589,13 +625,20 @@ def revoke_sci_for_session(
 # ---------------------------------------------------------------------------
 
 def _idle_reference(item: Mapping[str, Any]) -> str:
-    """Return the timestamp marking a session's last lifecycle transition.
+    """Return the timestamp marking a session's most recent activity.
 
-    For a claimed session that is ``claimed_at``; for an allocated (never-claimed) session
-    it is ``created_at``. There is no separate heartbeat attribute, so the most recent
-    lifecycle event stands in as the clock against which idleness is measured.
+    ENC-TSK-J71 (DOC-5B888FCA43B8 §5.9): ``last_activity_at`` — the heartbeat
+    advanced by every ``escalation.watch`` poll — takes precedence when present,
+    so a listening agent waiting on io's approval is not idle-retired. Sessions
+    that never polled fall back to the last lifecycle transition: ``claimed_at``
+    for claimed sessions, else ``created_at``.
     """
-    return str(item.get("claimed_at") or item.get("created_at") or "")
+    return str(
+        item.get("last_activity_at")
+        or item.get("claimed_at")
+        or item.get("created_at")
+        or ""
+    )
 
 
 def sweep_idle_sessions(
