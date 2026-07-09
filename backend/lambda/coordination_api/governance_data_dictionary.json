@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-08.2",
-  "updated_at": "2026-07-08T23:55:00Z",
-  "last_change_summary": "ENC-TSK-M44 (ENC-ISS-441 reopened, DOC-B716E8FB10B6 COE): backport FTR-122 Session Claim ID (SCI) from v4/main onto main. main-ref v3-prod Lambda deploys rebuild the whole per-env Lambda set and had silently reverted SCI (v4-first, never on main) at 2026-07-08T22:25:44Z, reopening ISS-441 fail-open. New entity coordination.session_claim_id (mint on agent.claim / revoke on agent.retire, ports ENC-TSK-J92). Adds the Ph3 enforcement gate (ports ENC-TSK-J93) to coordination.session_claim_id.fields: checkout_service._validate_sci_gate and tracker_mutation._validate_sci_gate/_sci_gate_for_request reject agent-origin (ENC-SES-*) mutations lacking a valid, unrevoked, unexpired SCI bound to the acting session (403 SCI_REQUIRED, fail-closed for unknown sessions/tokens); sessions created before SCI_ENFORCEMENT_EPOCH=2026-07-02T12:00:00Z are grandfathered. Also ports the enceladus-mcp-code 'sci' passthrough (ENC-TSK-K10) on tracker.set/tracker.log. ENC-TSK-J94 (retirement-sweep SCI revocation) and ENC-FTR-121 escalations were NOT backported by M44 (out of scope / tracked separately) -- see the M44 PR report.",
+  "version": "2026-07-09.1",
+  "updated_at": "2026-07-09T02:00:00Z",
+  "last_change_summary": "ENC-TSK-M45 (FTR-121 registry entry, DOC-B716E8FB10B6 COE, M44 sibling): backport the ENC-FTR-121 Escalations request/applier/watch/notify surface from v4/main onto main. The 2026-07-08T22:25:44Z main-ref v3-prod Lambda deploy had reverted the escalation.request/get/list surface (ENC-TSK-J68), the applyEscalatedMutation applier (ENC-TSK-J69), coordination_api's approve/deny/feed handlers (ENC-TSK-J70 backend portion only -- PWA/CFN already landed via ENC-TSK-J82/J80), the agent-side escalation.watch cursor poll (ENC-TSK-J71, with the ENC-TSK-J89 base-relative-path fix folded in), and the SNS [ESCALATION] notify hook (ENC-TSK-J72), leaving execute() unable to resolve action 'escalation.request'. Extraction was surgical by function/hunk, NOT by commit: v4/main's J68/J69/J71 commits are git-history-entangled with the unrelated ENC-TSK-I07 supersession primitive and ENC-TSK-I08/I09 dedup-review surfaces (neither present on main), and J70/J71's coordination_api hunks are similarly entangled with the unrelated ENC-TSK-J46/FTR-096 lesson-candidate curation surface (also not on main) -- those were excluded by isolating function-boundary content within each 3-way-merge conflict block rather than accepting the whole hunk. New entities: tracker.escalation (the escalation item type + FSM + mutation-handler registry + applier + waiver semantics, tracker_mutation), mcp_server.escalation_actions (escalation.request/get/list/watch code-mode actions), coordination.escalations (coordination_api's feed/approve/deny/watch routes -- the base ENC-TSK-J70 in-Lambda _is_cognito_session check only; the additional ENC-TSK-L92/M12 allowlist + human-principal gates remain exclusively in the standalone escalation_decision_authorizer Lambda per that entity's existing prod-vs-gamma split, unchanged by this task). CFN routes/env (ENC-TSK-J80) and the PWA Escalations page (ENC-TSK-J82) were already on main prior to this task and are unmodified here.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5922,6 +5922,260 @@
           "definition": "Detail key on the 403 SCI_REQUIRED error envelope: one of unknown_session, missing_sci, unknown_sci, wrong_token_type, revoked_sci, expired_sci, session_mismatch."
         }
       }
+    },
+    "tracker.escalation": {
+      "description": "ENC-FTR-121 (DOC-5B888FCA43B8): Escalations \u2014 Human-Gated Mutation Override Surface. An escalation is an agent-proposed, io-approved request to apply a mutation the normal lifecycle rules disallow (deploy arc change after checkout; direct state transition override including path-illegal and post-closure transitions). Items live in the existing tracker table (no new table/GSI) as a dedicated item type OUTSIDE _RECORD_TYPES: the generic record CRUD, checkout, and tracker.set surfaces cannot touch them, and escalations are not themselves escalatable. The gate moves; it does not weaken: approval is Cognito-human-only (no MCP action, SCI token, or internal key maps to approve/deny), and exactly one privileged code path (applyEscalatedMutation, Ph2/ENC-TSK-J69) may apply an approved mutation. Phase 1 (ENC-TSK-J68) ships the entity plus the request/get/list surface.",
+      "fields": {
+        "escalation_id": {
+          "type": "string",
+          "constraints": {
+            "format": "{PREFIX}-ESC-{SEQ}",
+            "immutable": true
+          },
+          "definition": "Server-minted escalation ID (e.g. ENC-ESC-001).",
+          "usage_guidance": "Minted by tracker_mutation's atomic-counter ID authority via the 'escalation' entry in _TRACKER_TYPE_SUFFIX. ID Boundary Rule holds without exception: no client predicts, computes, or scans for the next ID."
+        },
+        "target_record_id": {
+          "type": "string",
+          "constraints": {
+            "required": true,
+            "immutable": true
+          },
+          "definition": "The tracker record the requested mutation targets.",
+          "usage_guidance": "Must be an existing task (TSK), issue (ISS), or feature (FTR) record. Validated for existence at request time with a consistent read."
+        },
+        "mutation_type": {
+          "type": "enum",
+          "enum": [
+            "deploy_arc_change",
+            "direct_state_override"
+          ],
+          "constraints": {
+            "required": true,
+            "immutable": true
+          },
+          "definition": "Registry-resolved mutation handler key (\u00a75.3 of DOC-5B888FCA43B8).",
+          "usage_guidance": "deploy_arc_change: payload carries new_deploy_arc_type (dictionary-legal transition type; target must be a task); the active checkout survives application. direct_state_override: payload carries target_status plus optional field_values; status legality IS validated per record type, path legality deliberately is NOT \u2014 the path is what io approval overrides. Adding a mutation type is a registry entry plus handler, not an architectural change."
+        },
+        "payload": {
+          "type": "object",
+          "constraints": {
+            "required": true
+          },
+          "definition": "Mutation-type-specific payload, validated by the handler's validate_payload at request time.",
+          "usage_guidance": "Stored as a JSON document on the item; malformed payloads fail fast at request time and never reach io's queue."
+        },
+        "justification": {
+          "type": "string",
+          "constraints": {
+            "required": true,
+            "min_length": 1
+          },
+          "definition": "Required free-text rationale from the requesting agent, shown to io on the PWA approval card."
+        },
+        "expected_version": {
+          "type": "string",
+          "constraints": {
+            "required": false
+          },
+          "definition": "Optional target-record version or content hash captured at request time.",
+          "usage_guidance": "When supplied and the target has drifted by approval time, the PWA shows a drift warning; io may still approve (informed consent) or deny."
+        },
+        "requested_by": {
+          "type": "object",
+          "constraints": {
+            "required": true
+          },
+          "definition": "Requesting agent identity: {session_id (ENC-SES-*, required), agent_type_id (ENC-AGT-*), sci_present (bool)}.",
+          "usage_guidance": "session_id is required (server-minted ENC-SES id; ENC-FTR-117). SCI-bearing sessions stamp sci_present=true once ENC-ISS-441 ships."
+        },
+        "status": {
+          "type": "enum",
+          "enum": [
+            "requested",
+            "approved",
+            "denied",
+            "denied_with_guidance",
+            "applying",
+            "applied",
+            "failed"
+          ],
+          "definition": "Escalation FSM state (\u00a75.2). Enforced normally \u2014 escalations are not escalatable.",
+          "usage_guidance": "requested\u2192{approved, denied, denied_with_guidance}; approved\u2192applying; applying\u2192{applied, failed}. denied, denied_with_guidance, applied, and failed are terminal. A failed application never silently retries into the target record: the corrective request is a NEW escalation (exactly-once semantics)."
+        },
+        "events": {
+          "type": "array",
+          "item_type": "object",
+          "definition": "Append-only event log (\u00a711.2). Each entry: {event_type, at (iso8601), actor (session_id | cognito_sub | system), detail?, guidance_note? (denied_with_guidance only)}.",
+          "usage_guidance": "APPEND_ONLY. One event per FSM transition. The escalation.watch cursor poll (Ph4/ENC-TSK-J71) streams these."
+        },
+        "guidance_note": {
+          "type": "string",
+          "constraints": {
+            "required": false
+          },
+          "definition": "io's free-text course-correction note on deny-with-guidance; travels back to the agent in the event stream."
+        },
+        "approved_by": {
+          "type": "object",
+          "constraints": {
+            "required": false
+          },
+          "definition": "Cognito sub + email of the approving human. Null until approval.",
+          "usage_guidance": "Written only by the Cognito-gated approval route (Ph3/ENC-TSK-J70). Structurally unwritable by agent credentials."
+        },
+        "applied_at": {
+          "type": "string",
+          "constraints": {
+            "format": "iso8601",
+            "required": false
+          },
+          "definition": "Set exactly once when applyEscalatedMutation completes. Null until then.",
+          "usage_guidance": "Presence is the idempotency guard: a concurrent or repeated applier invocation observing applied_at no-ops (\u00a75.5)."
+        },
+        "result": {
+          "type": "object",
+          "constraints": {
+            "required": false
+          },
+          "definition": "Applier outcome object (success detail or captured error on failed). Null until terminal."
+        },
+        "created_at": {
+          "type": "string",
+          "constraints": {
+            "format": "iso8601",
+            "immutable": true
+          },
+          "definition": "Server-stamped at request time."
+        },
+        "updated_at": {
+          "type": "string",
+          "constraints": {
+            "format": "iso8601"
+          },
+          "definition": "Server-stamped on every mutation."
+        },
+        "escalation_provenance": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "writable_by": [
+            "server"
+          ],
+          "definition": "ENC-TSK-J69: append-only list of escalation IDs applied to a TARGET record (stamped on the target, not the escalation, inside the applier's atomic write together with the [ESCALATION-APPLIED] worklog entry carrying requesting session, approving human, before/after states, and waived fields). Artifact-Genesis: every override leaves an artifact."
+        }
+      },
+      "dynamodb_key_schema": {
+        "pk": "project_id",
+        "sk_pattern": "escalation#{escalation_id}",
+        "table": "existing tracker table (deliberate Channel B decision \u2014 no new table, GSI, or CloudFormation diff; DOC-B716E8FB10B6)",
+        "record_id_format": "{PREFIX}-ESC-{SEQ}",
+        "delete_method": "None. Terminal escalations remain browsable for audit; every override leaves an artifact."
+      },
+      "mutation_rules": {
+        "escalation_id": "IMMUTABLE (server-minted)",
+        "target_record_id": "IMMUTABLE after create",
+        "mutation_type": "IMMUTABLE after create",
+        "payload": "IMMUTABLE after create \u2014 the cached mutation is what io approves; the agent never resubmits after approval",
+        "status": "Escalation FSM transitions only (\u00a75.2); enforced normally with no bypass",
+        "events": "APPEND_ONLY (list_append only)",
+        "approved_by": "Written only by the Cognito human approval route",
+        "applied_at": "Written exactly once by applyEscalatedMutation"
+      },
+      "required_fields": [
+        "target_record_id",
+        "mutation_type",
+        "payload",
+        "justification",
+        "requested_by"
+      ],
+      "waiver_semantics": {
+        "escalation_waived_sentinel": {
+          "shape": {
+            "escalation_waived": true,
+            "escalation_id": "ENC-ESC-NNN",
+            "waived_at": "iso8601"
+          },
+          "definition": "Section 5.6: when direct_state_override lands a record in a state whose invariant fields are unsupplied, each such field is written with this sentinel rather than left null. Downstream consumers read 'known-absent by human decision', semantically distinct from 'never reached' or 'data loss'. LIVE as of ENC-TSK-J69: written by _apply_direct_state_override. Null-handling audit finding (2026-07-02): the deploy/closed evidence validators in tracker_mutation validate REQUEST transition_evidence, not stored record state, so sentinel-bearing records do not break them; the sentinel is a dict, making accidental string ops fail loudly and grep-ably rather than silently."
+        },
+        "escalated_closure": {
+          "type": "boolean",
+          "definition": "Set true on any record closed via direct_state_override so ENC-FTR-118 empirical-runtime metrics and close-quality reporting can filter override closures out of organic-completion datasets. LIVE as of ENC-TSK-J69 (written by _apply_direct_state_override; task closures also increment closed_count so DESIGNS-edge and subtask gates keep organic parity)."
+        }
+      },
+      "applier": {
+        "function": "applyEscalatedMutation (_handle_escalation_apply, tracker_mutation)",
+        "route": "POST /{projectId}/escalation/{escalationId}/apply (rides the registered {recordType}/{recordId}/{sub} route shape; tracker:write scope)",
+        "definition": "ENC-TSK-J69 (Ph2): the SINGLE privileged code path that may write transitions the normal FSM forbids (Tenet 2). Sequence per section 5.5: approved+applied_at-null guard (repeat/concurrent invocation no-ops); conditional approved->applying transition is the concurrency gate (ConditionExpression status=approved AND attribute_not_exists(applied_at)); fresh consistent target read; registry handler apply executes exactly ONE atomic UpdateItem on the target (provenance worklog + escalation_provenance append ride the same write, so a handler exception leaves the target untouched); applying->applied stamps applied_at + result; on failure applying->failed captures the error in result and a corrective request is a NEW escalation. Reachability: application requires status=approved, which only the Cognito-human approval route (Ph3/ENC-TSK-J70) can write - no MCP action, SCI token, or internal key maps to approve. Normal validators in _handle_update_field are untouched and carry no bypass flags. Emits record.escalation.applied to the enceladus.tracker audit event bus.",
+        "handler_applies": {
+          "deploy_arc_change": "rewrites transition_type (and checkout_transition_type when present, which recomputes arc-derived gate expectations) in place; checkout fields untouched so an active checkout survives.",
+          "direct_state_override": "writes target_status regardless of path legality; supplied field_values written verbatim; unsupplied required-for-state fields (from the transition-matrix gate contracts: committed->commit_sha, deploy-success->arc evidence key, closed->arc closed-evidence key, issue closed->evidence) get the escalation_waived sentinel; closures set escalated_closure=true and increment closed_count for tasks (organic-gate parity)."
+        }
+      },
+      "notifications": {
+        "definition": "ENC-TSK-J72 (Ph5, section 5.8): tracker_mutation publishes an SNS notification with subject prefix [ESCALATION] on requested (after the durable item write) and on the terminal applied/failed transitions (closure telemetry). Topic: ESCALATION_ALERTS_TOPIC_ARN env, defaulting via CFN to the existing devops-feed-alerts{EnvironmentSuffix} topic (reuse - zero new infrastructure). FAILURE-ISOLATED by contract: an SNS error or unset ARN is logged and swallowed; notification can never fail the escalation write or the applier. Payload: escalation_id, target_record_id, mutation_type, requesting session, justification/result excerpt. Cost: tens of emails/month inside the SNS email free tier - combined feature incremental cost under one dollar per month. RESIDUAL (Ph8): the topic has no email subscription yet; io must subscribe + confirm to actually receive mail. IAM: PublishEscalationAlerts Sid on TrackerMutationRole (gamma via the compute stack; prod via Ph7a backport)."
+      }
+    },
+    "mcp_server.escalation_actions": {
+      "description": "ENC-FTR-121 Ph1 (ENC-TSK-J68): code-mode MCP surface for escalations, registered behind ENABLE_ESCALATION_PRIMITIVE (default ON; the request/read surface is inert unless called and carries no privileged write path). escalation.request is an execute action (requires governance_hash) resolving to POST /{project}/escalation on tracker_mutation; escalation.get and escalation.list are search actions resolving to GET /{project}/escalation[/{id}] with status / target_record_id / session_id / page_size filters. approve/deny deliberately have NO MCP action \u2014 override authorization exists only behind the Cognito human path (\u00a76 non-delegable approval). escalation.watch (cursor event polling) ships in Ph4 (ENC-TSK-J71). DEPLOY NOTE (ENC-TSK-J11 class): the MCP server deploys out-of-band from the Gen2 backend Lambda matrix; the live mcp.jreese.net route map exposes these actions only after its own deploy, though the backend HTTP routes are live with the compute deploy.",
+      "fields": {
+        "escalation.request": {
+          "type": "execute_action",
+          "definition": "Propose a human-gated mutation override. Envelope (\u00a711.1): target_record_id, mutation_type, payload, justification (all required); expected_version, requested_by optional (session_id falls back to write_source.provider)."
+        },
+        "escalation.get": {
+          "type": "search_action",
+          "definition": "Return the full escalation item by escalation_id (project_id required)."
+        },
+        "escalation.list": {
+          "type": "search_action",
+          "definition": "List escalations filterable by status, target_record_id, session_id; page_size 1-200 (default 50), newest first. ENC-TSK-J69: the MCP server calls GET /{project}/escalation/list (pseudo-id alias riding the registered {recordType}/{recordId} API Gateway route) because explicit gamma-style route tables register no bare {recordType} collection path; 'list' can never collide with a server-minted ENC-ESC-* id."
+        },
+        "escalation.watch": {
+          "type": "coordination_action",
+          "definition": "ENC-TSK-J71: coordination(action=escalation.watch, arguments={session_id, since?, project_id?}) -> GET /api/v1/coordination/escalations/watch. Pass the returned next_cursor back as since. Registered behind ENABLE_ESCALATION_PRIMITIVE. ENC-TSK-J89 (2026-07-02.07): MCP handler fixed to call the coordination API with a base-relative path (/escalations/watch); the prior absolute path double-prefixed COORDINATION_API_BASE and 404d on gamma and prod."
+        }
+      }
+    },
+    "coordination.escalations": {
+      "description": "ENC-FTR-121 Ph3 (ENC-TSK-J70, DOC-5B888FCA43B8 sections 5.7 + 6): io's escalation approval surface on coordination_api - the SOLE origin of override authorization in the platform. Every route verifies a genuine Cognito session server-side per call (_is_cognito_session); internal-key and managed-token credentials are structurally rejected with 403. ENC-TSK-L92 / ENC-ISS-501 (SEV-1, 2026-07-07): _is_cognito_session alone was found to be a fail-open BLOCKLIST (it excludes only auth_mode in {internal-key, managed-token} -- any OTHER or absent auth_mode passed), which let a non-human Cognito-authenticated identity self-approve escalations within seconds of filing with no human review. The approve/deny routes now ALSO require the decider's Cognito email claim to appear in a positive allowlist (_is_allowlisted_escalation_decider) sourced from a Console-edit-only S3 document that no Lambda role -- including this one -- has write access to; the allowlist check fails CLOSED on any fetch/parse error. No MCP action maps to approve or deny. Approve stamps approved_by {sub, email}, walks requested->approved under a ConditionExpression race guard, and drives applyEscalatedMutation (ENC-TSK-J69) in tracker_mutation via direct Lambda invoke (TRACKER_MUTATION_LAMBDA_NAME + X-Coordination-Internal-Key); the approval is durable even if the applier invoke fails (fail-soft: the escalation stays approved and the idempotent apply route can be re-driven - the agent never resubmits the cached mutation). Deny walks requested->denied, or requested->denied_with_guidance when a guidance_note is supplied; the note is stored on the item AND rides the denial event so watch polling (Ph4) delivers it to the agent. ENC-TSK-M12 / ENC-ISS-501 (2026-07-08): the email allowlist authorizes WHICH identities may decide but not WHAT KIND of token may decide -- coordination_api's _verify_token deliberately accepts Cognito ACCESS tokens (token_use=access, client_id match) for the general API surface, and machine-operated Cognito users in the human pool (e.g. terminal-agent@enceladus.internal, mintable via coordination auth.cognito_session) carry genuine ID tokens, so an allowlisted-by-mistake machine identity would have reopened approve/deny. The decision routes now ALSO require _is_human_cognito_principal (fail-closed): token_use must be exactly 'id' (rejects access/client_credentials/M2M grants and the token-use-less internal-key/managed-token modes), the token's aud must be on the human app-client allowlist (ESCALATION_HUMAN_CLIENT_IDS, default COGNITO_CLIENT_ID), bare client_id-without-aud shapes are rejected, and the email claim must exist and not fall under a machine principal domain (ESCALATION_MACHINE_EMAIL_DOMAINS, default enceladus.internal). This gate runs BEFORE the allowlist check and rejects machine principals with 403 regardless of allowlist contents. Prod (main branch) enforces the identical claim checks in the standalone escalation_decision_authorizer (ENC-TSK-L95) in front of the routes.",
+      "fields": {
+        "GET /api/v1/coordination/escalations": {
+          "type": "route",
+          "definition": "io approval queue feed. Query params: project_id (default enceladus), status. Pending (requested) escalations carry a fresh section-5.7 render_diff computed from the LIVE target record at render time - never the cached request - including a drift object {expected_version, current_sync_version, current_updated_at, detected} when expected_version was supplied. Terminal escalations return in a separate array for the collapsed audit section. Cognito-only."
+        },
+        "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/approve": {
+          "type": "route",
+          "definition": "Non-delegable approve: requested->approved + approved_by + event, then drives the applier. Returns applied:true|false with apply_result or apply_error+retry. ENC-TSK-L92: gated by _is_cognito_session AND _is_allowlisted_escalation_decider (both must pass); an allowlist-miss returns 403 before any DynamoDB write. ENC-TSK-M12: additionally gated by _is_human_cognito_principal (token_use=id + human app-client aud + non-machine email domain, fail-closed) BEFORE the allowlist check; machine token shapes 403 with a distinct 'structurally rejected' error."
+        },
+        "POST /api/v1/coordination/escalations/{projectId}/{escalationId}/deny": {
+          "type": "route",
+          "definition": "Non-delegable deny: requested->denied (or denied_with_guidance when body.guidance_note is non-empty). Denied escalations are never applied. ENC-TSK-L92: same dual gate as approve. ENC-TSK-M12: same triple gate as approve."
+        },
+        "ESCALATION_APPROVER_ALLOWLIST_BUCKET": {
+          "type": "string",
+          "definition": "ENC-TSK-L92 / ENC-ISS-501 / ENC-ISS-505. Env var (default 'enceladus-356364570033-us-west-2-an'). S3 bucket holding the escalation-approver allowlist document. ENC-ISS-505 (SEV-1): originally 'jreese-net', which is served publicly on the open web via CloudFront (multiple distributions) -- the allowlist was readable by anyone at https://jreese.net/security/escalation-approvers.md with no auth. Relocated to this bucket, which has no CloudFront origin and full S3 Public Access Block enabled."
+        },
+        "ESCALATION_APPROVER_ALLOWLIST_KEY": {
+          "type": "string",
+          "definition": "ENC-TSK-L92 / ENC-ISS-501. Env var (default 'security/escalation-approvers.md'). S3 key of the allowlist document. coordination_api's Lambda role is granted s3:GetObject ONLY on this exact key (EscalationApproverAllowlistRead statement, infrastructure/cloudformation/02-compute.yaml) -- no role in the account, including this Lambda's own, has PutObject/DeleteObject on it. The document is a markdown file with a fenced yaml block of `- email: \"...\"` list entries, parsed without a yaml dependency by _load_escalation_approver_allowlist (60s in-memory cache). Edits require an AWS Console-authenticated human; there is deliberately no programmatic write path."
+        },
+        "GET /api/v1/coordination/escalations/watch": {
+          "type": "route",
+          "definition": "ENC-TSK-J71 (Ph4, section 5.4 + 5.9): session-scoped cursor polling - the listening AGENT's side of the loop (read scope; agent credentials are the intended callers; approval stays Cognito-only). Query params: session_id (required, ENC-SES-*), since (opaque cursor), project_id (default enceladus). Returns every section-11.2 lifecycle event newer than the cursor across all escalations the session originated (guidance_note rides denied_with_guidance events), plus next_cursor and session_touched. CURSOR SEMANTICS: base64url(JSON {escalation_id: events_consumed}) counting against the append-only events array - event timestamps are second-granular and FSM edges (applying->applied) land inside one second, so a timestamp cursor would drop same-second events; the count cursor is lossless, exactly-once, and stable on empty polls. Malformed/absent cursors replay from the start (events are facts; replay is safe). Every poll refreshes the session's last_activity_at heartbeat. POLLING GUIDANCE (section 5.8): 15-30s interval, exponential backoff after two idle hours; transport is polling ONLY (no WebSocket/SSE by design)."
+        },
+        "ESCALATION_HUMAN_CLIENT_IDS": {
+          "type": "string",
+          "definition": "ENC-TSK-M12 / ENC-ISS-501. Optional env var: comma-separated Cognito app-client ids whose ID tokens may represent a human escalation decider. Defaults to COGNITO_CLIENT_ID (the interactive PWA client) when unset. Read per-call by _escalation_human_client_ids(); an empty resolved set fails CLOSED (every decision denied). Tokens minted by any other app client (e.g. the ENC-FTR-074 agent M2M client) are rejected 403 on the decision routes regardless of their other claims."
+        },
+        "ESCALATION_MACHINE_EMAIL_DOMAINS": {
+          "type": "string",
+          "definition": "ENC-TSK-M12 / ENC-ISS-501. Optional env var: comma-separated email domains marking machine-operated Cognito principals (default 'enceladus.internal'). An otherwise-valid human-shaped ID token whose email falls under one of these domains is rejected 403 on the decision routes even if that email appears on the approver allowlist -- the allowlist must never be the only barrier between a machine principal and an escalation approval (the ENC-ISS-501 attacker identity terminal-agent@enceladus.internal is exactly this class)."
+        }
+      },
+      "pwa_surface": "Escalations item in the PWA hamburger menu -> /escalations page: pending feed newest-first (target id/title, mutation type, requesting session, justification, fresh diff, prominent drift warning that still permits informed approve/deny), Approve / Deny / Deny-with-Guidance actions, terminal escalations in a collapsed History section. Ships via the comp-enceladus-pwa gamma pipeline.",
+      "apigw_routes": "03-api.yaml (Condition: IsGamma, prod promotion io-gated per DOC-B716E8FB10B6): RouteEscalationsFeed, RouteEscalationsApprove, RouteEscalationsDeny -> CoordinationApiIntegration; RouteTrackerEscalationApply (POST /api/v1/tracker/{projectId}/{recordType}/{recordId}/apply) -> TrackerMutationIntegration as the HTTP lane to the idempotent applier."
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -5977,6 +6231,11 @@
       "version": "2026-07-08.2",
       "date": "2026-07-08",
       "summary": "ENC-TSK-M44 (ENC-ISS-441 reopened, DOC-B716E8FB10B6 COE): backport FTR-122 Session Claim ID (SCI) from v4/main onto main. main-ref v3-prod Lambda deploys rebuild the whole per-env Lambda set and had silently reverted SCI (v4-first, never on main) at 2026-07-08T22:25:44Z, reopening ISS-441 fail-open. New entity coordination.session_claim_id (mint on agent.claim / revoke on agent.retire, ports ENC-TSK-J92). Adds the Ph3 enforcement gate (ports ENC-TSK-J93) to coordination.session_claim_id.fields: checkout_service._validate_sci_gate and tracker_mutation._validate_sci_gate/_sci_gate_for_request reject agent-origin (ENC-SES-*) mutations lacking a valid, unrevoked, unexpired SCI bound to the acting session (403 SCI_REQUIRED, fail-closed for unknown sessions/tokens); sessions created before SCI_ENFORCEMENT_EPOCH=2026-07-02T12:00:00Z are grandfathered. Also ports the enceladus-mcp-code 'sci' passthrough (ENC-TSK-K10) on tracker.set/tracker.log. ENC-TSK-J94 (retirement-sweep SCI revocation) and ENC-FTR-121 escalations were NOT backported by M44 (out of scope / tracked separately) -- see the M44 PR report."
+    },
+    {
+      "version": "2026-07-09.1",
+      "date": "2026-07-09",
+      "summary": "ENC-TSK-M45 (FTR-121 registry entry, DOC-B716E8FB10B6 COE, M44 sibling): backport the ENC-FTR-121 Escalations request/applier/watch/notify surface from v4/main onto main. The 2026-07-08T22:25:44Z main-ref v3-prod Lambda deploy had reverted the escalation.request/get/list surface (ENC-TSK-J68), the applyEscalatedMutation applier (ENC-TSK-J69), coordination_api's approve/deny/feed handlers (ENC-TSK-J70 backend portion only -- PWA/CFN already landed via ENC-TSK-J82/J80), the agent-side escalation.watch cursor poll (ENC-TSK-J71, with the ENC-TSK-J89 base-relative-path fix folded in), and the SNS [ESCALATION] notify hook (ENC-TSK-J72), leaving execute() unable to resolve action 'escalation.request'. Extraction was surgical by function/hunk, NOT by commit: v4/main's J68/J69/J71 commits are git-history-entangled with the unrelated ENC-TSK-I07 supersession primitive and ENC-TSK-I08/I09 dedup-review surfaces (neither present on main), and J70/J71's coordination_api hunks are similarly entangled with the unrelated ENC-TSK-J46/FTR-096 lesson-candidate curation surface (also not on main) -- those were excluded by isolating function-boundary content within each 3-way-merge conflict block rather than accepting the whole hunk. New entities: tracker.escalation (the escalation item type + FSM + mutation-handler registry + applier + waiver semantics, tracker_mutation), mcp_server.escalation_actions (escalation.request/get/list/watch code-mode actions), coordination.escalations (coordination_api's feed/approve/deny/watch routes -- the base ENC-TSK-J70 in-Lambda _is_cognito_session check only; the additional ENC-TSK-L92/M12 allowlist + human-principal gates remain exclusively in the standalone escalation_decision_authorizer Lambda per that entity's existing prod-vs-gamma split, unchanged by this task). CFN routes/env (ENC-TSK-J80) and the PWA Escalations page (ENC-TSK-J82) were already on main prior to this task and are unmodified here."
     }
   ]
 }
