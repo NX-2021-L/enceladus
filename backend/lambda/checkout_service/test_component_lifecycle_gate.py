@@ -54,8 +54,22 @@ def _make_task(components, transition_type="github_pr_deploy"):
 
 
 def _ddb_lifecycle_side_effect(component_lifecycle_map):
-    """Return a ddb.get_item side_effect answering with lifecycle + required_transition_type."""
+    """Return a ddb.get_item side_effect answering with lifecycle + required_transition_type.
+
+    Also answers AGENT_SESSIONS_TABLE lookups for the ENC-ISS-441 / ENC-TSK-J93 SCI gate
+    (backported by ENC-TSK-M44): "ENC-SES-001" resolves as a pre-Ph3 grandfathered
+    session (created_at before SCI_ENFORCEMENT_EPOCH), so these component-lifecycle
+    tests — unrelated to SCI — pass the gate without needing a minted SCI token.
+    """
     def _side(TableName, Key):
+        if "session_id" in Key:
+            return {
+                "Item": {
+                    "session_id": Key["session_id"],
+                    "created_at": {"S": "2026-06-01T00:00:00Z"},
+                    "status": {"S": "claimed"},
+                }
+            }
         cid = Key["component_id"]["S"]
         ls = component_lifecycle_map.get(cid)
         if ls is None:

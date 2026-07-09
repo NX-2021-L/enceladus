@@ -13649,7 +13649,29 @@ def _handle_agent_session_claim(event: Dict[str, Any], claims: Dict[str, Any]) -
     except (BotoCoreError, ClientError) as exc:
         logger.exception("[ERROR] claim_session failed: %s", exc)
         return _error(500, "DynamoDB error during session claim")
-    return _response(200, {"session": item})
+    # ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122), backported to main by ENC-TSK-M44: a
+    # successful claim mints the session's SCI. A claim without an SCI would wedge the
+    # session at the Ph3 enforcement gate, so a mint failure is a hard error — the caller
+    # should retire this session and register anew.
+    try:
+        sci = _agent_alloc.mint_sci(item)
+    except (ValueError, BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] mint_sci failed after claim of %s: %s", session_id, exc)
+        return _error(
+            500,
+            "Session claimed but SCI mint failed — retire this session (agent.retire) "
+            "and register a new one",
+        )
+    item["sci_token_id"] = sci["token_id"]
+    return _response(
+        200,
+        {
+            "session": item,
+            "sci": sci["token_id"],
+            "sci_issued_at": sci["issued_at"],
+            "sci_ttl_seconds": _agent_alloc.SCI_TTL_SECONDS,
+        },
+    )
 
 
 def _handle_agent_session_list(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -13684,7 +13706,21 @@ def _handle_agent_session_retire(
     except (BotoCoreError, ClientError) as exc:
         logger.exception("[ERROR] retire_session failed: %s", exc)
         return _error(500, "DynamoDB error during session retire")
-    return _response(200, {"session": item})
+    # ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122), backported to main by ENC-TSK-M44:
+    # retirement revokes the session's SCI. The retire itself is already durable
+    # (append-only flip above); a revocation failure is surfaced but non-fatal.
+    payload: Dict[str, Any] = {"session": item}
+    try:
+        revoked = _agent_alloc.revoke_sci_for_session(session_id, reason="explicit_retire")
+    except (ValueError, BotoCoreError, ClientError) as exc:
+        logger.exception("[ERROR] SCI revocation failed on retire of %s: %s", session_id, exc)
+        payload["sci_revoked"] = False
+        payload["sci_revocation_error"] = "SCI revocation failed"
+    else:
+        payload["sci_revoked"] = bool(revoked)
+        if revoked:
+            payload["sci_token_id"] = revoked.get("token_id") or revoked.get("pk")
+    return _response(200, payload)
 
 
 def _handle_agent_session_idle_sweep(event: Dict[str, Any]) -> Dict[str, Any]:

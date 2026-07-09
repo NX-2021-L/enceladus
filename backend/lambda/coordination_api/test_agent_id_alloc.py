@@ -507,5 +507,114 @@ class IdleSweepTest(unittest.TestCase):
                 alloc.sweep_idle_sessions(idle_threshold_seconds=bad, now=self._future)
 
 
+@mock_aws
+class SciTokenTest(unittest.TestCase):
+    """ENC-ISS-441 / ENC-TSK-J92: Session Claim ID mint-on-claim + revoke-on-retire."""
+
+    def setUp(self):
+        self.ddb = boto3.client("dynamodb", region_name="us-west-2")
+        for table, key in (
+            (config.AGENT_SESSIONS_TABLE, "session_id"),
+            (config.AGENT_TYPES_TABLE, "agent_type_id"),
+            (config.CHECKOUT_TOKENS_TABLE, "pk"),
+        ):
+            self.ddb.create_table(
+                TableName=table,
+                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
+                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
+        patcher = mock.patch.object(alloc, "_get_ddb", return_value=self.ddb)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _claimed_session(self):
+        minted = alloc.mint_session_id(agent_type_id="ENC-AGT-001", runtime="test")
+        return alloc.claim_session(minted["session_id"])
+
+    def _token_count(self):
+        return self.ddb.scan(TableName=config.CHECKOUT_TOKENS_TABLE)["Count"]
+
+    def _get_token(self, token_id):
+        resp = self.ddb.get_item(
+            TableName=config.CHECKOUT_TOKENS_TABLE, Key={"pk": {"S": token_id}}
+        )
+        return resp.get("Item")
+
+    # -- mint-on-claim --------------------------------------------------------
+    def test_mint_sci_shape_and_binding(self):
+        import time as _time
+
+        session = self._claimed_session()
+        sci = alloc.mint_sci(session)
+        self.assertRegex(sci["token_id"], r"^SCI-[0-9a-f]{32}$")
+        self.assertEqual(sci["token_type"], "SCI")
+        self.assertEqual(sci["session_id"], session["session_id"])
+        self.assertEqual(sci["agent_type_id"], "ENC-AGT-001")
+        self.assertFalse(sci["revoked"])
+        self.assertAlmostEqual(
+            sci["ttl"], int(_time.time()) + alloc.SCI_TTL_SECONDS, delta=60
+        )
+        item = self._get_token(sci["token_id"])
+        self.assertIsNotNone(item)
+        self.assertEqual(item["token_type"]["S"], "SCI")
+        self.assertEqual(item["session_id"]["S"], session["session_id"])
+        self.assertFalse(item["revoked"]["BOOL"])
+        # session stamped with the token id (post-mint attribute, mint shape untouched)
+        stamped = alloc.get_session(session["session_id"])
+        self.assertEqual(stamped["sci_token_id"], sci["token_id"])
+
+    def test_mint_sci_requires_session_id(self):
+        with self.assertRaises(ValueError):
+            alloc.mint_sci({})
+
+    def test_mint_sci_rejects_unclaimed_session(self):
+        from botocore.exceptions import ClientError as _CE
+
+        minted = alloc.mint_session_id(agent_type_id="ENC-AGT-001", runtime="test")
+        with self.assertRaises(_CE):
+            alloc.mint_sci(minted)  # session-stamp condition requires status=claimed
+
+    def test_failed_claim_mints_nothing(self):
+        session = self._claimed_session()
+        with self.assertRaises(ValueError):
+            alloc.claim_session(session["session_id"])  # double-claim rejected
+        self.assertEqual(self._token_count(), 0)  # no orphan tokens
+
+    # -- revoke-on-retire ------------------------------------------------------
+    def test_revoke_sci_for_session(self):
+        session = self._claimed_session()
+        sci = alloc.mint_sci(session)
+        revoked = alloc.revoke_sci_for_session(
+            session["session_id"], reason="explicit_retire"
+        )
+        self.assertTrue(revoked["revoked"])
+        self.assertEqual(revoked["revocation_reason"], "explicit_retire")
+        self.assertTrue(revoked["revoked_at"])
+        item = self._get_token(sci["token_id"])
+        self.assertTrue(item["revoked"]["BOOL"])
+
+    def test_revoke_is_idempotent_and_preserves_first_reason(self):
+        session = self._claimed_session()
+        alloc.mint_sci(session)
+        alloc.revoke_sci_for_session(session["session_id"], reason="explicit_retire")
+        second = alloc.revoke_sci_for_session(
+            session["session_id"], reason="idle_ttl_exceeded"
+        )
+        self.assertTrue(second["revoked"])
+        self.assertTrue(second.get("already_revoked"))
+        stamped = alloc.get_session(session["session_id"])
+        item = self._get_token(stamped["sci_token_id"])
+        self.assertEqual(item["revocation_reason"]["S"], "explicit_retire")
+
+    def test_revoke_without_token_returns_none(self):
+        session = self._claimed_session()
+        self.assertIsNone(alloc.revoke_sci_for_session(session["session_id"]))
+
+    def test_revoke_missing_session_raises(self):
+        with self.assertRaises(ValueError):
+            alloc.revoke_sci_for_session("ENC-SES-404")
+
+
 if __name__ == "__main__":
     unittest.main()

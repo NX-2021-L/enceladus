@@ -47,6 +47,7 @@ __all__ = [
     "CALLBACK_EVENT_SOURCE",
     "CALLBACK_SQS_QUEUE_URL",
     "CALLBACK_TOKEN_TTL_SECONDS",
+    "CHECKOUT_TOKENS_TABLE",
     "CLAUDE_API_MAX_TOKENS_DEFAULT",
     "CLAUDE_API_MAX_TOKENS_MAX",
     "CLAUDE_API_MAX_TOKENS_MIN",
@@ -179,6 +180,11 @@ DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 # names. The allocator (agent_id_alloc.py) is dormant until the agent.* surface (I38).
 AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
 AGENT_TYPES_TABLE = os.environ.get("AGENT_TYPES_TABLE", "agent-types")
+# ENC-ISS-441 / ENC-TSK-J92 (ENC-FTR-122), backported to main by ENC-TSK-M44: Session Claim
+# ID (SCI) tokens live in the SAME DynamoDB table the checkout service uses for CAI/CCI
+# (pk = token id, token_type discriminator). Env-suffixed so gamma coordination_api writes
+# the -gamma twin.
+CHECKOUT_TOKENS_TABLE = os.environ.get("CHECKOUT_TOKENS_TABLE", "enceladus-checkout-tokens")
 # ENC-TSK-I71 / ENC-FTR-117 AC#8: scheduled idle-sweep backstop for abandoned agent
 # sessions. A session left in a live status (allocated/claimed) past the threshold is
 # reaped to 'retired' via an append-only status flip — NOT native DynamoDB TTL, which
