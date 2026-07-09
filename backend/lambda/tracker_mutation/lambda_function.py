@@ -29,6 +29,8 @@ Environment variables:
   COGNITO_USER_POOL_ID    us-east-1_b2D0V3E1k
   COGNITO_CLIENT_ID       6q607dk3liirhtecgps7hifmlk
   COORDINATION_INTERNAL_API_KEY  (service auth key)
+  CHECKOUT_TOKENS_TABLE   default: enceladus-checkout-tokens (SCI gate, ENC-ISS-441)
+  AGENT_SESSIONS_TABLE    default: agent-sessions (SCI gate, ENC-ISS-441)
 """
 
 from __future__ import annotations
@@ -147,6 +149,12 @@ GITHUB_INTEGRATION_API_BASE = os.environ.get("GITHUB_INTEGRATION_API_BASE", "")
 CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "https://jreese.net")
 # ENC-FTR-037: checkout service gate key — only checkout_service Lambda may change task status
 CHECKOUT_SERVICE_KEY = os.environ.get("CHECKOUT_SERVICE_KEY", "")
+# ENC-ISS-441 / ENC-TSK-J93: SCI enforcement gate stores. SCI tokens (minted
+# by coordination_api agent.claim, ENC-TSK-J92) live in the checkout-tokens
+# table; the grandfather-epoch check and last_activity_at touch read the
+# agent-sessions store (ENC-FTR-117 / ENC-TSK-I37).
+CHECKOUT_TOKENS_TABLE = os.environ.get("CHECKOUT_TOKENS_TABLE", "enceladus-checkout-tokens")
+AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
 MAX_NOTE_LENGTH = 2000
 # ENC-FTR-052: Governed Lesson Primitive — feature flag
 # ENC-TSK-H08 (F63): AppConfig is the source of truth (env_fallback preserves legacy/local behavior)
@@ -588,6 +596,226 @@ def _is_conditional_check_failed(exc: Exception) -> bool:
     if not isinstance(exc, ClientError):
         return False
     return exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
+
+
+# ---------------------------------------------------------------------------
+# SCI enforcement gate (ENC-ISS-441 Phase 3 / ENC-TSK-J93)
+#
+# Agent-origin mutations — requests presenting a minted ENC-SES-NNN id as
+# write_source.provider — must carry a valid Session Claim ID (`sci` in the
+# request body). SCI tokens are minted by coordination_api agent.claim
+# (ENC-TSK-J92) into CHECKOUT_TOKENS_TABLE. Non-agent identities (github,
+# system:arc-walker, Cognito subs/usernames, coordination_dispatch, ...) are
+# out of gate scope and pass through unchanged, as do requests bearing
+# X-Checkout-Service-Key: the checkout_service runs the same gate at its own
+# edge (ENC-FTR-037 chain) and does not forward `sci` downstream.
+# ---------------------------------------------------------------------------
+
+# ENC-ISS-441 Ph3 ship date; sessions created before this instant are
+# grandfathered and mutate without an SCI. Deliberately a module-level
+# constant, NOT an env var — out-of-band env vars get stripped by full-env
+# deploys (PLN-047 / ENC-LSN-053 Sev1 class).
+SCI_ENFORCEMENT_EPOCH = "2026-07-02T12:00:00Z"
+
+# J92 token shape: pk = "SCI-{uuid4_hex}"
+_SCI_TOKEN_RE = re.compile(r"^SCI-[0-9a-f]{32}$")
+# I37 minted session ids: ENC-SES-NNN (base-36, uppercase)
+_AGENT_SESSION_ID_RE = re.compile(r"^ENC-SES-[0-9A-Z]+$")
+
+_SCI_REMEDIATION = (
+    "Obtain a Session Claim ID via coordination agent.claim (register->claim "
+    "handshake, ENC-FTR-117 / ENC-ISS-441) and pass it as 'sci' on this request."
+)
+
+
+def _sci_error(failure_mode: str, message: str) -> Dict:
+    """Build the 403 rejection envelope for an SCI gate failure (ENC-ISS-441)."""
+    logger.warning("[ERROR] SCI gate rejection (%s): %s", failure_mode, message)
+    return _error(
+        403,
+        f"{message} {_SCI_REMEDIATION}",
+        code="SCI_REQUIRED",
+        sci_failure_mode=failure_mode,
+        remediation=_SCI_REMEDIATION,
+    )
+
+
+def _lookup_sci(sci_id: str) -> Optional[Dict]:
+    """Look up the full SCI token item (J92 shape) from the checkout-tokens table."""
+    try:
+        resp = _get_ddb().get_item(
+            TableName=CHECKOUT_TOKENS_TABLE,
+            Key={"pk": {"S": sci_id}},
+        )
+    except Exception as exc:
+        logger.warning("SCI token lookup failed for %s: %s", sci_id, exc)
+        return None
+    item = resp.get("Item")
+    if not item:
+        return None
+    ttl_raw = item.get("ttl", {}).get("N")
+    try:
+        ttl_val = int(float(ttl_raw)) if ttl_raw is not None else 0
+    except (TypeError, ValueError):
+        ttl_val = 0
+    return {
+        "token_id": item.get("pk", {}).get("S", ""),
+        "token_type": item.get("token_type", {}).get("S", ""),
+        "session_id": item.get("session_id", {}).get("S", ""),
+        "revoked": bool(item.get("revoked", {}).get("BOOL", False)),
+        "ttl": ttl_val,
+    }
+
+
+def _get_agent_session(session_id: str) -> Optional[Dict]:
+    """Fetch an agent-session record (ENC-FTR-117 store; key session_id)."""
+    try:
+        resp = _get_ddb().get_item(
+            TableName=AGENT_SESSIONS_TABLE,
+            Key={"session_id": {"S": session_id}},
+        )
+    except Exception as exc:
+        logger.warning("Agent-session lookup failed for %s: %s", session_id, exc)
+        return None
+    item = resp.get("Item")
+    if not item:
+        return None
+    return {
+        "session_id": item.get("session_id", {}).get("S", ""),
+        "created_at": item.get("created_at", {}).get("S", ""),
+        "status": item.get("status", {}).get("S", ""),
+    }
+
+
+def _touch_session_activity(session_id: str) -> None:
+    """Refresh the session's last_activity_at heartbeat (J83 pattern).
+
+    Conditional on the session still being live (allocated/claimed); a retired
+    or vanished session is a silent no-op — the touch must NEVER fail the
+    mutation it rides on (ENC-ISS-441 / ENC-TSK-J93).
+    """
+    try:
+        _get_ddb().update_item(
+            TableName=AGENT_SESSIONS_TABLE,
+            Key={"session_id": {"S": session_id}},
+            UpdateExpression="SET last_activity_at = :now",
+            ConditionExpression=(
+                "attribute_exists(session_id) AND (#st = :allocated OR #st = :claimed)"
+            ),
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":now": {"S": _now_z()},
+                ":allocated": {"S": "allocated"},
+                ":claimed": {"S": "claimed"},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — touch is best-effort by contract
+        if _is_conditional_check_failed(exc):
+            logger.info(
+                "[INFO] last_activity_at touch skipped for %s (session not live)",
+                session_id,
+            )
+        else:
+            logger.warning(
+                "[ERROR] last_activity_at touch failed for %s (continuing): %s",
+                session_id, exc,
+            )
+
+
+def _validate_sci_gate(session_id: str, sci: Any) -> Optional[Dict]:
+    """SCI enforcement gate (ENC-ISS-441 Phase 3 / ENC-TSK-J93).
+
+    Callers invoke this only when ``session_id`` matches _AGENT_SESSION_ID_RE.
+    Returns None when the mutation may proceed (grandfathered session or valid
+    SCI, in which case last_activity_at is touched), else the 403 rejection
+    response naming the specific failure mode.
+    """
+    # Step 1: the session must exist — a fabricated ENC-SES id must not bypass
+    # the gate (fail closed).
+    session = _get_agent_session(session_id)
+    if session is None:
+        return _sci_error(
+            "unknown_session",
+            f"Agent session '{session_id}' is not a registered session; "
+            "mutation rejected (fail-closed).",
+        )
+
+    # Step 2: grandfather epoch gate — sessions created before the Phase 3
+    # ship instant pass without an SCI (skip token validation entirely).
+    # created_at uses the shared "%Y-%m-%dT%H:%M:%SZ" format, so lexicographic
+    # comparison is a correct chronological compare (see agent_id_alloc).
+    created_at = str(session.get("created_at") or "").strip()
+    if created_at and created_at < SCI_ENFORCEMENT_EPOCH:
+        return None
+
+    # Step 3: token validation.
+    sci_id = str(sci or "").strip()
+    if not sci_id:
+        return _sci_error(
+            "missing_sci",
+            f"Agent session '{session_id}' presented no Session Claim ID (sci); "
+            "agent-origin mutations require a valid SCI.",
+        )
+    if not _SCI_TOKEN_RE.match(sci_id):
+        return _sci_error(
+            "unknown_sci",
+            f"'{sci_id}' is not a valid Session Claim ID "
+            "(expected format SCI-{32 hex chars}).",
+        )
+    token = _lookup_sci(sci_id)
+    if token is None:
+        return _sci_error(
+            "unknown_sci",
+            f"Session Claim ID '{sci_id}' is not recognized.",
+        )
+    if token.get("token_type") != "SCI":
+        return _sci_error(
+            "wrong_token_type",
+            f"Token '{sci_id}' has token_type '{token.get('token_type')}'; "
+            "only SCI tokens authorize agent-origin mutations.",
+        )
+    if token.get("revoked"):
+        return _sci_error(
+            "revoked_sci",
+            f"Session Claim ID '{sci_id}' has been revoked.",
+        )
+    # DynamoDB native TTL deletion may lag, so also enforce expiry here.
+    if int(token.get("ttl") or 0) <= int(time.time()):
+        return _sci_error(
+            "expired_sci",
+            f"Session Claim ID '{sci_id}' has expired.",
+        )
+    if token.get("session_id") != session_id:
+        return _sci_error(
+            "session_mismatch",
+            f"Session Claim ID '{sci_id}' is bound to session "
+            f"'{token.get('session_id')}', not '{session_id}'.",
+        )
+
+    # Valid SCI — refresh the session heartbeat (never fails the mutation).
+    _touch_session_activity(session_id)
+    return None
+
+
+def _sci_gate_for_request(body: Dict, event: Optional[Dict]) -> Optional[Dict]:
+    """Run the SCI gate for a mutation request when it is agent-origin.
+
+    Agent-origin means write_source.provider is a minted ENC-SES id. Everything
+    else — internal-key writes under legacy providers (github, user, ...),
+    Cognito writes (provider defaults to claims.sub), EventBridge/system writes
+    (system:arc-walker) — is out of gate scope and passes through unchanged.
+    Requests bearing X-Checkout-Service-Key are exempt: checkout_service runs
+    the identical gate at its own edge and the ENC-FTR-037 chain does not
+    forward `sci` (same trust model / rollout semantics as the FTR-037 status
+    gate, including permissive mode while CHECKOUT_SERVICE_KEY is unset).
+    """
+    ws = _normalize_write_source(body)
+    session_id = str(ws.get("provider", "")).strip()
+    if not _AGENT_SESSION_ID_RE.match(session_id):
+        return None
+    if _is_checkout_service_request(event):
+        return None
+    return _validate_sci_gate(session_id, body.get("sci"))
 
 
 # ---------------------------------------------------------------------------
@@ -1580,8 +1808,21 @@ def _handle_pending_updates(query_params: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def _handle_create_record(project_id: str, record_type: str, body: Dict) -> Dict:
+def _handle_create_record(
+    project_id: str,
+    record_type: str,
+    body: Dict,
+    event: Optional[Dict] = None,
+) -> Dict:
     """POST /{project}/{type} — create a new tracker record."""
+    # ENC-ISS-441 / ENC-TSK-J93: SCI enforcement gate — agent-origin record
+    # creation (write_source.provider is a minted ENC-SES id) requires a valid
+    # Session Claim ID before any validation or minting occurs. Non-agent
+    # providers (github, system:arc-walker, Cognito subs, ...) pass unchanged.
+    _sci_err = _sci_gate_for_request(body, event)
+    if _sci_err:
+        return _sci_err
+
     title = body.get("title", "").strip()
     if not title:
         return _tracker_create_validation_error(
@@ -2870,6 +3111,15 @@ def _handle_update_field(
 
     _normalize_write_source(body)
 
+    # ENC-ISS-441 / ENC-TSK-J93: SCI enforcement gate. Agent-origin field
+    # updates (write_source.provider is a minted ENC-SES id) must present a
+    # valid Session Claim ID BEFORE any state mutation below (user-initiated
+    # advance, checkout/release branch, generic field write). Checkout-service
+    # requests are exempt — the identical gate already ran at that edge.
+    _sci_err = _sci_gate_for_request(body, event)
+    if _sci_err:
+        return _sci_err
+
     field = body.get("field", "").strip()
     value = body.get("value", "")
     if not field:
@@ -3923,12 +4173,26 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
         return _error(500, "Database write failed. Please try again.")
 
 
-def _handle_log(project_id: str, record_type: str, record_id: str, body: Dict) -> Dict:
+def _handle_log(
+    project_id: str,
+    record_type: str,
+    record_id: str,
+    body: Dict,
+    event: Optional[Dict] = None,
+) -> Dict:
     """POST /{project}/{type}/{id}/log — append worklog entry to history."""
     description = body.get("description", "").strip()
     if not description:
         return _error(400, "Field 'description' is required.")
     _normalize_write_source(body)
+
+    # ENC-ISS-441 / ENC-TSK-J93: SCI enforcement gate — agent-origin worklog
+    # appends (write_source.provider is a minted ENC-SES id) require a valid
+    # Session Claim ID. Checkout-service /log forwarding is exempt (gate runs
+    # at that edge); non-agent providers pass through unchanged.
+    _sci_err = _sci_gate_for_request(body, event)
+    if _sci_err:
+        return _sci_err
 
     ddb = _get_ddb()
     key = _build_key(project_id, record_type, record_id)
@@ -4114,18 +4378,32 @@ def _handle_lesson_extend(project_id: str, record_id: str, body: Dict) -> Dict:
     })
 
 
-def _handle_checkout(project_id: str, record_type: str, record_id: str, body: Dict) -> Dict:
+def _handle_checkout(
+    project_id: str,
+    record_type: str,
+    record_id: str,
+    body: Dict,
+    event: Optional[Dict] = None,
+) -> Dict:
     """POST /{project}/{type}/{id}/checkout — session checkout."""
     body["field"] = "active_agent_session"
     body["value"] = True
-    return _handle_update_field(project_id, record_type, record_id, body)
+    # ENC-TSK-J93: pass event through so the SCI gate can honor the
+    # X-Checkout-Service-Key exemption on the ENC-FTR-037 checkout chain.
+    return _handle_update_field(project_id, record_type, record_id, body, event=event)
 
 
-def _handle_release(project_id: str, record_type: str, record_id: str, body: Dict) -> Dict:
+def _handle_release(
+    project_id: str,
+    record_type: str,
+    record_id: str,
+    body: Dict,
+    event: Optional[Dict] = None,
+) -> Dict:
     """DELETE /{project}/{type}/{id}/checkout — session release."""
     body["field"] = "active_agent_session"
     body["value"] = False
-    return _handle_update_field(project_id, record_type, record_id, body)
+    return _handle_update_field(project_id, record_type, record_id, body, event=event)
 
 
 def _handle_acceptance_evidence(project_id: str, record_type: str, record_id: str, body: Dict) -> Dict:
@@ -4880,13 +5158,13 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         _normalize_write_source(body, claims)
 
         if sub == "log" and method == "POST":
-            return _handle_log(project_id, record_type, record_id, body)
+            return _handle_log(project_id, record_type, record_id, body, event=event)
         elif sub == "extend" and method == "POST" and record_type == "lesson":
             return _handle_lesson_extend(project_id, record_id, body)
         elif sub == "checkout" and method == "POST":
-            return _handle_checkout(project_id, record_type, record_id, body)
+            return _handle_checkout(project_id, record_type, record_id, body, event=event)
         elif sub == "checkout" and method == "DELETE":
-            return _handle_release(project_id, record_type, record_id, body)
+            return _handle_release(project_id, record_type, record_id, body, event=event)
         elif sub == "acceptance-evidence" and method == "POST":
             return _handle_acceptance_evidence(project_id, record_type, record_id, body)
         else:
@@ -4942,7 +5220,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             except (ValueError, TypeError):
                 return _error(400, "Invalid JSON body.")
             _normalize_write_source(body, claims)
-            return _handle_create_record(project_id, record_type, body)
+            return _handle_create_record(project_id, record_type, body, event=event)
         else:
             return _error(405, f"Method {method} not allowed. Use POST to create.")
 

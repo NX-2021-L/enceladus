@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-08.1",
-  "updated_at": "2026-07-08T02:10:00Z",
-  "last_change_summary": "ENC-TSK-M12 / ENC-ISS-501: structural human-principal gate added to escalation-decision-authorizer (_is_human_cognito_principal: token_use=id + ESCALATION_HUMAN_CLIENT_IDS aud allowlist + ESCALATION_MACHINE_EMAIL_DOMAINS rejection, fail-closed) in front of the email allowlist.",
+  "version": "2026-07-08.2",
+  "updated_at": "2026-07-08T23:55:00Z",
+  "last_change_summary": "ENC-TSK-M44 (ENC-ISS-441 reopened, DOC-B716E8FB10B6 COE): backport FTR-122 Session Claim ID (SCI) from v4/main onto main. main-ref v3-prod Lambda deploys rebuild the whole per-env Lambda set and had silently reverted SCI (v4-first, never on main) at 2026-07-08T22:25:44Z, reopening ISS-441 fail-open. New entity coordination.session_claim_id (mint on agent.claim / revoke on agent.retire, ports ENC-TSK-J92). Adds the Ph3 enforcement gate (ports ENC-TSK-J93) to coordination.session_claim_id.fields: checkout_service._validate_sci_gate and tracker_mutation._validate_sci_gate/_sci_gate_for_request reject agent-origin (ENC-SES-*) mutations lacking a valid, unrevoked, unexpired SCI bound to the acting session (403 SCI_REQUIRED, fail-closed for unknown sessions/tokens); sessions created before SCI_ENFORCEMENT_EPOCH=2026-07-02T12:00:00Z are grandfathered. Also ports the enceladus-mcp-code 'sci' passthrough (ENC-TSK-K10) on tracker.set/tracker.log. ENC-TSK-J94 (retirement-sweep SCI revocation) and ENC-FTR-121 escalations were NOT backported by M44 (out of scope / tracked separately) -- see the M44 PR report.",
   "owners": [
     "enceladus-platform"
   ],
@@ -5877,6 +5877,51 @@
           "isolation_note": "ENC-TSK-I40 AC-2 isolation deliverable. V4 drift-risk surface."
         }
       }
+    },
+    "coordination.session_claim_id": {
+      "description": "ENC-ISS-441 / ENC-TSK-J92+J93 (ENC-FTR-122), backported to main by ENC-TSK-M44: Session Claim ID (SCI) is a server-minted bearer token proving a session completed the ENC-FTR-117 register->claim handshake, and the enforcement gate that requires it on every agent-origin governed mutation. Minted EXCLUSIVELY by coordination agent.claim on the allocated->claimed flip (agent_id_alloc.mint_sci); format SCI-{uuid4_hex} (regex ^SCI-[0-9a-f]{32}$), stored in the checkout-tokens table (CHECKOUT_TOKENS_TABLE, env-suffixed; pk = token id, token_type=SCI discriminator -- coexists with CAI/CCI records) with a 24h native-TTL expiry (SCI_TTL_SECONDS=86400); TTL deletion fails CLOSED at the enforcement gate. The claimed session item is stamped with sci_token_id (post-mint attribute; SESSION_NODE_PROPERTIES mint shape unchanged) so revocation is a direct lookup, never a scan. Revoked (revoked=true, revoked_at, revocation_reason; first-revocation metadata immutable) by agent.retire (reason=explicit_retire); non-fatal on revocation failure. Enforcement (checkout_service._validate_sci_gate, tracker_mutation._validate_sci_gate / _sci_gate_for_request): a request whose acting identity (checkout_service's resolved provider; tracker_mutation's normalized write_source.provider) matches ^ENC-SES-[0-9A-Z]+$ must present a valid 'sci' -- unknown session (fail-closed), missing/unknown/wrong-token-type/revoked/expired sci, or session-id mismatch each return 403 SCI_REQUIRED with a distinct sci_failure_mode and remediation pointing to coordination agent.claim. Sessions with created_at before SCI_ENFORCEMENT_EPOCH=2026-07-02T12:00:00Z (module constant, not an env var -- avoids the PLN-047/ENC-LSN-053 out-of-band-env-var-stripping class) are grandfathered and skip token validation. tracker_mutation exempts ENC-FTR-037 X-Checkout-Service-Key requests (checkout_service already ran the identical gate at its own edge). A valid pass touches the session's last_activity_at heartbeat (best-effort, never fails the mutation). enceladus-mcp-code (ENC-TSK-K10) passes an optional 'sci' argument through verbatim on tracker.set / tracker.log (no MCP-layer validation; backend-only enforcement). NOT backported by M44: the ENC-TSK-J94 retirement-sweep SCI revocation (10-min unclaim TTL / 2h idle TTL reapers) -- SCI still mints and enforces without it, but a session abandoned pre-retire keeps a live, unrevoked SCI until its 24h TTL.",
+      "fields": {
+        "token_id": {
+          "type": "string",
+          "definition": "SCI-{uuid4_hex} (pk in the checkout-tokens table). Returned to the caller as 'sci' in the agent.claim response envelope alongside sci_issued_at and sci_ttl_seconds."
+        },
+        "token_type": {
+          "type": "string",
+          "definition": "Fixed 'SCI' discriminator -- coexists with CAI/CCI records in the same checkout-tokens table."
+        },
+        "session_id": {
+          "type": "string",
+          "definition": "Bound ENC-SES-NNN. The enforcement gate matches this against the presented acting-identity provider."
+        },
+        "agent_type_id": {
+          "type": "string",
+          "definition": "Bound ENC-AGT-NNN lineage captured at claim time."
+        },
+        "issued_at": {
+          "type": "string",
+          "definition": "ISO 8601 UTC mint timestamp."
+        },
+        "ttl": {
+          "type": "integer",
+          "definition": "Unix epoch expiry = issued_at + 86400s. DynamoDB native TTL deletes the record at expiry; an absent token is invalid at the enforcement gate (fails closed)."
+        },
+        "revoked": {
+          "type": "boolean",
+          "definition": "False at mint. Set true (with revoked_at + revocation_reason) by agent.retire; idempotent -- first revocation metadata is never overwritten."
+        },
+        "sci_token_id": {
+          "type": "string",
+          "definition": "Post-mint attribute stamped onto the agent-sessions item (same pattern as last_activity_at); makes revocation a direct lookup, never a scan."
+        },
+        "SCI_ENFORCEMENT_EPOCH": {
+          "type": "string",
+          "definition": "Module-level constant (checkout_service and tracker_mutation), fixed at '2026-07-02T12:00:00Z' -- NOT an env var, to avoid the PLN-047/ENC-LSN-053 out-of-band-env-var-stripping Sev1 class. Sessions created before this instant are grandfathered through the gate without an SCI."
+        },
+        "sci_failure_mode": {
+          "type": "string",
+          "definition": "Detail key on the 403 SCI_REQUIRED error envelope: one of unknown_session, missing_sci, unknown_sci, wrong_token_type, revoked_sci, expired_sci, session_mismatch."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-G06 (linked ENC-TSK-B62 / ENC-TSK-C72): graph_sync now normalizes document DELETE identity from document_id/item_id fallbacks and purges orphan placeholder nodes after MODIFY/REMOVE and archived typed-relationship removal. tools/backfill_graph.py replays the canonical tracker+documents projection contract with optional wipe-existing for parity rebuilds.",
@@ -5927,6 +5972,11 @@
       "version": "2026-06-28.02",
       "date": "2026-06-28",
       "summary": "ENC-TSK-I71 / ENC-FTR-117 AC#8: add coordination.agent_session_idle_sweep entity (scheduled EventBridge backstop reaping abandoned allocated/claimed sessions to 'retired' via append-only flip \u2014 NOT native DynamoDB TTL; AGENT_SESSIONS_IDLE_SWEEP_ENABLED + AGENT_SESSIONS_IDLE_THRESHOLD_SECONDS config). Version bump required by governance-dictionary-guard for coordination_api lambda_function.py/config.py edits."
+    },
+    {
+      "version": "2026-07-08.2",
+      "date": "2026-07-08",
+      "summary": "ENC-TSK-M44 (ENC-ISS-441 reopened, DOC-B716E8FB10B6 COE): backport FTR-122 Session Claim ID (SCI) from v4/main onto main. main-ref v3-prod Lambda deploys rebuild the whole per-env Lambda set and had silently reverted SCI (v4-first, never on main) at 2026-07-08T22:25:44Z, reopening ISS-441 fail-open. New entity coordination.session_claim_id (mint on agent.claim / revoke on agent.retire, ports ENC-TSK-J92). Adds the Ph3 enforcement gate (ports ENC-TSK-J93) to coordination.session_claim_id.fields: checkout_service._validate_sci_gate and tracker_mutation._validate_sci_gate/_sci_gate_for_request reject agent-origin (ENC-SES-*) mutations lacking a valid, unrevoked, unexpired SCI bound to the acting session (403 SCI_REQUIRED, fail-closed for unknown sessions/tokens); sessions created before SCI_ENFORCEMENT_EPOCH=2026-07-02T12:00:00Z are grandfathered. Also ports the enceladus-mcp-code 'sci' passthrough (ENC-TSK-K10) on tracker.set/tracker.log. ENC-TSK-J94 (retirement-sweep SCI revocation) and ENC-FTR-121 escalations were NOT backported by M44 (out of scope / tracked separately) -- see the M44 PR report."
     }
   ]
 }

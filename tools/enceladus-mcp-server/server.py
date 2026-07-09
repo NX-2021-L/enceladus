@@ -5035,6 +5035,14 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Agent identity checking out the task (e.g., 'claude_agent_sdk').",
                     },
+                    "sci": {
+                        "type": "string",
+                        "description": (
+                            "Session Claim ID issued by coordination agent.claim (ENC-ISS-441). "
+                            "Required by the backend for agent sessions claimed after the SCI "
+                            "enforcement epoch; strip-and-forwarded, never validated here."
+                        ),
+                    },
                     "governance_hash": {
                         "type": "string",
                         "description": "Current governance hash for write authorization.",
@@ -5101,6 +5109,14 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Provider advancing the task (must match checkout owner).",
                     },
+                    "sci": {
+                        "type": "string",
+                        "description": (
+                            "Session Claim ID issued by coordination agent.claim (ENC-ISS-441). "
+                            "Required by the backend for agent sessions claimed after the SCI "
+                            "enforcement epoch; strip-and-forwarded, never validated here."
+                        ),
+                    },
                     "governance_hash": {
                         "type": "string",
                         "description": "Current governance hash for write authorization.",
@@ -5138,6 +5154,14 @@ async def list_tools() -> list[Tool]:
                     "provider": {
                         "type": "string",
                         "description": "Provider appending the worklog (must match checkout owner).",
+                    },
+                    "sci": {
+                        "type": "string",
+                        "description": (
+                            "Session Claim ID issued by coordination agent.claim (ENC-ISS-441). "
+                            "Required by the backend for agent sessions claimed after the SCI "
+                            "enforcement epoch; strip-and-forwarded, never validated here."
+                        ),
                     },
                     "governance_hash": {
                         "type": "string",
@@ -5831,6 +5855,11 @@ async def _tracker_set(args: dict) -> list[TextContent]:
         payload["coordination"] = args["coordination"]
     if args.get("transition_evidence"):
         payload["transition_evidence"] = args["transition_evidence"]
+    # ENC-ISS-441: strip-and-forward the Session Claim ID; never validated here.
+    # Only set when non-empty (grandfathered sessions omit it).
+    sci = (args.get("sci") or "").strip()
+    if sci:
+        payload["sci"] = sci
 
     resp = _tracker_api_request("PATCH", f"/{project_id}/{record_type}/{rid}", payload=payload)
     return _result_text(resp)
@@ -5874,6 +5903,11 @@ async def _tracker_log(args: dict) -> list[TextContent]:
         payload["dispatch_id"] = args["dispatch_id"]
     if args.get("provider"):
         payload["provider"] = args["provider"]
+    # ENC-ISS-441: strip-and-forward the Session Claim ID; never validated here.
+    # Only set when non-empty (grandfathered sessions omit it).
+    sci = (args.get("sci") or "").strip()
+    if sci:
+        payload["sci"] = sci
 
     resp = _tracker_api_request("POST", f"/{project_id}/{record_type}/{rid}/log", payload=payload)
     return _result_text(resp)
@@ -5888,6 +5922,8 @@ async def _tracker_log(args: dict) -> list[TextContent]:
 # into the downstream POST body; every other field declared in tracker_mutation's
 # governance schema forwards automatically, and tracker_mutation remains the single
 # source of truth for which fields are valid per record_type.
+# ENC-ISS-441: the optional Session Claim ID ("sci") also rides this passthrough —
+# it is forwarded verbatim when the caller supplies it and never validated here.
 _TRACKER_CREATE_BODY_DENYLIST = frozenset({
     "project_id",
     "record_type",
@@ -9180,7 +9216,13 @@ async def _agent_register(args: dict) -> list[TextContent]:
 
 
 async def _agent_claim(args: dict) -> list[TextContent]:
-    """Claim a pre-minted ENC-SES-NNN (allocated → claimed, agent.claim)."""
+    """Claim a pre-minted ENC-SES-NNN (allocated → claimed, agent.claim).
+
+    ENC-ISS-441: the backend claim envelope now includes top-level
+    "sci", "sci_issued_at", and "sci_ttl_seconds". The response body is
+    returned unchanged (raw passthrough), so those fields flow to the
+    caller automatically — do not reshape this response.
+    """
     payload: Dict[str, Any] = {"session_id": args["session_id"]}
     if args.get("expected_agent_type_id"):
         payload["expected_agent_type_id"] = args["expected_agent_type_id"]
@@ -9344,6 +9386,12 @@ async def _checkout_task(args: dict) -> list[TextContent]:
     }
     if args.get("coordination_request_id"):
         payload["coordination_request_id"] = args["coordination_request_id"]
+    # ENC-ISS-441: strip-and-forward the Session Claim ID; never validated here.
+    # Only set when non-empty so requests stay byte-identical for grandfathered
+    # sessions that don't pass it.
+    sci = (args.get("sci") or "").strip()
+    if sci:
+        payload["sci"] = sci
 
     resp = _checkout_api_request("POST", f"/{project_id}/{record_type}/{rid}/checkout", payload=payload)
     if isinstance(resp, dict) and resp.get("success"):
@@ -9409,6 +9457,11 @@ async def _advance_task_status(args: dict) -> list[TextContent]:
         payload["coordination_request_id"] = args["coordination_request_id"]
     if args.get("live_validation_evidence"):
         payload["live_validation_evidence"] = args["live_validation_evidence"]
+    # ENC-ISS-441: strip-and-forward the Session Claim ID; never validated here.
+    # Only set when non-empty (grandfathered sessions omit it).
+    sci = (args.get("sci") or "").strip()
+    if sci:
+        payload["sci"] = sci
 
     resp = _checkout_api_request("POST", f"/{project_id}/{record_type}/{rid}/advance", payload=payload)
     if (
@@ -9455,6 +9508,11 @@ async def _append_worklog(args: dict) -> list[TextContent]:
         payload["provider"] = args["provider"]
     if args.get("coordination_request_id"):
         payload["coordination_request_id"] = args["coordination_request_id"]
+    # ENC-ISS-441: strip-and-forward the Session Claim ID; never validated here.
+    # Only set when non-empty (grandfathered sessions omit it).
+    sci = (args.get("sci") or "").strip()
+    if sci:
+        payload["sci"] = sci
 
     resp = _checkout_api_request("POST", f"/{project_id}/{record_type}/{rid}/log", payload=payload)
     return _result_text(resp)
@@ -9635,6 +9693,11 @@ async def _plan_checkout(args: dict) -> list[TextContent]:
     }
     if args.get("coordination_request_id"):
         payload["coordination_request_id"] = args["coordination_request_id"]
+    # ENC-ISS-441: strip-and-forward the Session Claim ID; never validated here.
+    # Only set when non-empty (grandfathered sessions omit it).
+    sci = (args.get("sci") or "").strip()
+    if sci:
+        payload["sci"] = sci
 
     resp = _checkout_api_request("POST", f"/{project_id}/plan/{rid}/checkout", payload=payload)
     return _result_text(resp)
@@ -9669,6 +9732,11 @@ async def _plan_advance(args: dict) -> list[TextContent]:
     }
     if args.get("transition_evidence"):
         payload["transition_evidence"] = args["transition_evidence"]
+    # ENC-ISS-441: strip-and-forward the Session Claim ID; never validated here.
+    # Only set when non-empty (grandfathered sessions omit it).
+    sci = (args.get("sci") or "").strip()
+    if sci:
+        payload["sci"] = sci
 
     resp = _checkout_api_request("POST", f"/{project_id}/plan/{rid}/advance", payload=payload)
     return _result_text(resp)

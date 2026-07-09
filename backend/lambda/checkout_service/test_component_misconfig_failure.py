@@ -125,12 +125,25 @@ class CheckoutHandlerCOMPONENT_MISCONFIGUREDTests(unittest.TestCase):
                 "components": ["comp-checkout-service"],
             },
         )
+        def _get_item_side_effect(TableName, Key):
+            # ENC-ISS-441 / ENC-TSK-J93 SCI gate (backported by ENC-TSK-M44): answer the
+            # AGENT_SESSIONS_TABLE lookup as a pre-Ph3 grandfathered session so this
+            # COMPONENT_MISCONFIGURED regression test — unrelated to SCI — passes the
+            # gate without needing a minted SCI token.
+            if "session_id" in Key:
+                return {
+                    "Item": {
+                        "session_id": Key["session_id"],
+                        "created_at": {"S": "2026-06-01T00:00:00Z"},
+                        "status": {"S": "claimed"},
+                    }
+                }
+            return _registry_item(component_id="comp-checkout-service", required_value=None)
+
         with patch.object(
             checkout_service._ddb,
             "get_item",
-            return_value=_registry_item(
-                component_id="comp-checkout-service", required_value=None
-            ),
+            side_effect=_get_item_side_effect,
         ):
             response = checkout_service._handle_checkout(
                 "enceladus",
