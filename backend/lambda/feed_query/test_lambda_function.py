@@ -665,3 +665,179 @@ def test_ddb_history_mixed_good_and_bad_entries():
     assert len(result) == 2
     assert result[0]["description"] == "good entry 1"
     assert result[1]["description"] == "good entry 2"
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-M39: OpenSearch-tier fast path + DDB circuit-breaker fallback
+#
+# feed_query is not VPC-attached to the OpenSearch domain, so the fast path
+# invokes graph_query_api (action='feed_selection', already VPC-attached) as
+# a selection proxy, then hydrates the returned record keys with the same
+# bounded BatchGetItem helper the incremental/delta path already uses. Any
+# failure (missing config, invoke error, non-ok response) must fall back to
+# the existing DDB fan-out rather than raising or returning nothing.
+# ---------------------------------------------------------------------------
+
+
+class _FakePayload:
+    def __init__(self, payload: dict):
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self._body
+
+
+class _FakeGraphQueryLambdaClient:
+    def __init__(self, response=None, exc=None):
+        self._response = response
+        self._exc = exc
+        self.calls: list[dict] = []
+
+    def invoke(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._exc is not None:
+            raise self._exc
+        return self._response
+
+
+def test_query_all_records_via_opensearch_disabled_when_function_unset(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "")
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result is None
+
+
+def test_query_all_records_via_opensearch_returns_none_on_invoke_error(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    fake_client = _FakeGraphQueryLambdaClient(exc=feed_query.ClientError({"Error": {}}, "Invoke"))
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result is None
+    assert len(fake_client.calls) == 1
+
+
+def test_query_all_records_via_opensearch_returns_none_when_not_ok(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    fake_client = _FakeGraphQueryLambdaClient(
+        response={"Payload": _FakePayload({"ok": False, "error": "opensearch_not_configured"})}
+    )
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result is None
+
+
+def test_query_all_records_via_opensearch_returns_none_on_function_error(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    fake_client = _FakeGraphQueryLambdaClient(
+        response={"Payload": _FakePayload({"ok": True, "selection": {}}), "FunctionError": "Unhandled"}
+    )
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result is None
+
+
+def test_query_all_records_via_opensearch_no_active_projects_short_circuits(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    fake_client = _FakeGraphQueryLambdaClient()
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+    assert result == ([], [], [], [], [])
+    assert fake_client.calls == []  # never invokes with an empty project list
+
+
+def test_query_all_records_via_opensearch_hydrates_selected_keys(monkeypatch):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
+    selection = {
+        "enceladus#task": ["ENC-TSK-001", "ENC-TSK-002"],
+        "enceladus#issue": ["ENC-ISS-010"],
+    }
+    fake_client = _FakeGraphQueryLambdaClient(
+        response={"Payload": _FakePayload({"ok": True, "selection": selection})}
+    )
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: fake_client)
+
+    captured = {}
+
+    def fake_hydrate(changed_keys, _cutoff):
+        captured["keys"] = changed_keys
+        return (["task-row"], ["issue-row"], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_hydrate_records_via_batch_get", fake_hydrate)
+
+    result = feed_query._query_all_records_via_opensearch(
+        [{"project_id": "enceladus"}], feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    )
+
+    assert result == (["task-row"], ["issue-row"], [], [], [])
+    # Invoke payload carries the per-type caps + active project IDs.
+    invoke_payload = json.loads(fake_client.calls[0]["Payload"])
+    assert invoke_payload["action"] == "feed_selection"
+    assert invoke_payload["project_ids"] == ["enceladus"]
+    assert invoke_payload["caps"]["task"] == feed_query.MAX_TASKS_FULL_REFRESH
+    # Selected bare IDs are reconstructed into (project_id, record_id) DDB keys.
+    assert {"project_id": {"S": "enceladus"}, "record_id": {"S": "task#ENC-TSK-001"}} in captured["keys"]
+    assert {"project_id": {"S": "enceladus"}, "record_id": {"S": "task#ENC-TSK-002"}} in captured["keys"]
+    assert {"project_id": {"S": "enceladus"}, "record_id": {"S": "issue#ENC-ISS-010"}} in captured["keys"]
+
+
+def test_query_all_records_uses_opensearch_result_when_available(monkeypatch):
+    monkeypatch.setattr(feed_query, "_get_active_projects", lambda: [{"project_id": "enceladus"}])
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records_via_opensearch",
+        lambda _projects, _cutoff: (["t"], ["i"], ["f"], ["l"], ["p"]),
+    )
+
+    def _boom(*_a, **_k):
+        raise AssertionError("DDB fallback must not run when the OpenSearch tier succeeds")
+
+    monkeypatch.setattr(feed_query, "_query_all_records_via_ddb", _boom)
+
+    result = feed_query._query_all_records()
+    assert result == (["t"], ["i"], ["f"], ["l"], ["p"])
+    assert feed_query._last_feed_query_source == "opensearch"
+
+
+def test_query_all_records_falls_back_to_ddb_when_opensearch_returns_none(monkeypatch):
+    monkeypatch.setattr(feed_query, "_get_active_projects", lambda: [{"project_id": "enceladus"}])
+    monkeypatch.setattr(feed_query, "_query_all_records_via_opensearch", lambda _p, _c: None)
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records_via_ddb",
+        lambda _p, _c: (["t"], [], [], [], []),
+    )
+
+    result = feed_query._query_all_records()
+    assert result == (["t"], [], [], [], [])
+    assert feed_query._last_feed_query_source == "ddb_fanout"
+
+
+def test_query_all_records_falls_back_to_ddb_when_opensearch_raises(monkeypatch):
+    monkeypatch.setattr(feed_query, "_get_active_projects", lambda: [{"project_id": "enceladus"}])
+
+    def _raise(_p, _c):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(feed_query, "_query_all_records_via_opensearch", _raise)
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records_via_ddb",
+        lambda _p, _c: ([], [], [], [], []),
+    )
+
+    result = feed_query._query_all_records()
+    assert result == ([], [], [], [], [])
+    assert feed_query._last_feed_query_source == "ddb_fanout"

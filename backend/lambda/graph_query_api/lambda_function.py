@@ -1721,6 +1721,26 @@ def _handle_refresh_projection(event: Dict) -> Dict[str, Any]:
     return {"ok": all(r.get("refreshed") for r in results), "results": results}
 
 
+def _handle_feed_selection(event: Dict) -> Dict[str, Any]:
+    """ENC-TSK-M39 out-of-band OpenSearch feed-selection entrypoint.
+
+    Invoked directly by feed_query_lambda (event carries
+    action='feed_selection') to get the top-N most-recently-updated record IDs
+    per (project_id, record_type) from the records_read OpenSearch alias --
+    feed_query is not VPC-attached, so it proxies through this already
+    VPC-attached function rather than reaching OpenSearch itself. NOT exposed
+    on the public API Gateway route; no Neo4j driver involved.
+    """
+    project_ids = event.get("project_ids") or []
+    caps = event.get("caps") or {}
+    if not isinstance(project_ids, list) or not project_ids or not isinstance(caps, dict) or not caps:
+        return {"ok": False, "error": "project_ids (non-empty list) and caps (non-empty dict) are required"}
+    selection, error = opensearch_keyword.feed_selection_msearch(project_ids, caps)
+    if error:
+        return {"ok": False, "error": error}
+    return {"ok": True, "selection": selection}
+
+
 def _handle_refresh_flow_weight(event: Dict) -> Dict[str, Any]:
     """ENC-FTR-108 Ph2 (ENC-TSK-J02) out-of-band flow_weight refresh entrypoint.
     Mirrors _handle_refresh_projection's contract: invoked by an EventBridge
@@ -3623,6 +3643,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # never falls through to the FTR-101 projection-refresh handler.
     if isinstance(event, dict) and event.get("action") == "refresh_flow_weight":
         return _handle_refresh_flow_weight(event)
+
+    # ENC-TSK-M39: feed_query's OpenSearch-tier selection proxy. Checked before
+    # the generic aws.events/Scheduled-Event fallback below (same reasoning as
+    # refresh_flow_weight above) so an explicit action='feed_selection' invoke
+    # never falls through to the FTR-101 projection-refresh handler. No Neo4j
+    # driver or auth involved -- this is a direct Lambda-to-Lambda invoke, not
+    # an API Gateway route.
+    if isinstance(event, dict) and event.get("action") == "feed_selection":
+        return _handle_feed_selection(event)
 
     # ENC-TSK-K43 (B66 Ph5): out-of-band Fiedler lambda-2 GraphHealth metric
     # publish. Checked before the generic aws.events/Scheduled-Event fallback

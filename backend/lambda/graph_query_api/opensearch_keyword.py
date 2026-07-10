@@ -227,6 +227,79 @@ def hybrid_keyword_ranks(
     return ranked, facets, None
 
 
+def feed_selection_msearch(
+    project_ids: List[str], caps: Dict[str, int]
+) -> Tuple[Dict[str, List[str]], Optional[str]]:
+    """Top-N most-recently-updated record IDs per (project_id, record_type).
+
+    ENC-TSK-M39: the selection-tier query behind feed_query's OpenSearch fast
+    path. feed_query is not VPC-attached, so it invokes graph_query_api
+    (action='feed_selection') as a proxy rather than querying OpenSearch
+    directly; this is the query builder + response parser that call uses.
+
+    One ``_msearch`` round trip covers every (project_id, record_type) pair --
+    each header/query line requests only ``_id`` sorted by updated_at desc,
+    capped at caps[record_type]. Returns ({"{project_id}#{record_type}":
+    [bare_id, ...]}, error_message); error_message is set (dict empty) on any
+    failure so the caller can fall back to its DDB fan-out.
+    """
+    if not project_ids or not caps or not opensearch_configured():
+        return {}, "opensearch_not_configured" if not opensearch_configured() else "no_input"
+
+    pairs = [(pid, rtype) for pid in project_ids for rtype in caps]
+    lines: List[str] = []
+    for pid, rtype in pairs:
+        lines.append(json.dumps({"index": READ_ALIAS}))
+        lines.append(json.dumps({
+            "size": max(1, int(caps[rtype])),
+            "_source": False,
+            "sort": [{"updated_at": "desc"}],
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"project_id": pid}},
+                        {"term": {"record_type": rtype}},
+                    ]
+                }
+            },
+        }))
+    body = "\n".join(lines) + "\n"
+
+    try:
+        status, resp = opensearch_request("POST", "/_msearch", body.encode("utf-8"))
+    except Exception as exc:
+        logger.warning("[WARNING] OpenSearch feed_selection msearch failed: %s", exc)
+        return {}, str(exc)
+
+    if status >= 400 or resp.get("error"):
+        message = str(resp.get("error") or status)
+        logger.warning("[WARNING] OpenSearch feed_selection msearch HTTP %s: %s", status, message)
+        return {}, message
+
+    responses = resp.get("responses") or []
+    if len(responses) != len(pairs):
+        return {}, f"msearch response count mismatch: expected {len(pairs)} got {len(responses)}"
+
+    selection: Dict[str, List[str]] = {}
+    for (pid, rtype), sub_resp in zip(pairs, responses):
+        if sub_resp.get("error"):
+            logger.warning(
+                "[WARNING] OpenSearch feed_selection sub-query failed project=%s type=%s: %s",
+                pid, rtype, sub_resp.get("error"),
+            )
+            continue
+        hits = (sub_resp.get("hits") or {}).get("hits") or []
+        bare_ids: List[str] = []
+        for hit in hits:
+            doc_id = str(hit.get("_id") or "")
+            if doc_id.count("#") >= 2:
+                bare_ids.append(doc_id.split("#", 2)[2])
+        if bare_ids:
+            selection[f"{pid}#{rtype}"] = bare_ids
+
+    return selection, None
+
+
 def fetch_feed_corpus_facets(
     *,
     project_id: str,

@@ -25,6 +25,10 @@ Environment variables:
     DYNAMODB_REGION           default: us-west-2
     PROJECTS_TABLE            default: projects
     DOCUMENTS_TABLE           default: documents
+    GRAPH_QUERY_API_FUNCTION  default: "" (unset disables the OpenSearch tier,
+                              ENC-TSK-M39 -- full refresh falls back to the DDB
+                              fan-out unconditionally, e.g. on v3-prod where
+                              graph_query_api has no OpenSearch/VPC access)
 """
 
 from __future__ import annotations
@@ -79,6 +83,11 @@ DOCUMENTS_TABLE = os.environ.get("DOCUMENTS_TABLE", "documents")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 FEED_PUBLISHER_FUNCTION = os.environ.get("FEED_PUBLISHER_FUNCTION", "devops-feed-publisher")
+# ENC-TSK-M39: graph_query_api is already VPC-attached with OpenSearch access;
+# feed_query invokes it as a selection-tier proxy instead of joining the VPC
+# itself. Empty/unset means the OpenSearch tier is unavailable (e.g. v3-prod).
+GRAPH_QUERY_API_FUNCTION = os.environ.get("GRAPH_QUERY_API_FUNCTION", "")
+OPENSEARCH_TIER_INVOKE_TIMEOUT_S = 5
 CORS_ORIGIN = "https://jreese.net"
 FEED_CACHE_CONTROL = "max-age=0, s-maxage=300, must-revalidate"
 INCREMENTAL_LOOKBACK_SECONDS = 10
@@ -1284,10 +1293,130 @@ def _fan_out_by_project(
     return [(proj["project_id"], result) for proj, result in zip(projects, results)]
 
 
+_FEED_RECORD_TYPE_CAPS = {
+    "task": MAX_TASKS_FULL_REFRESH,
+    "issue": MAX_ISSUES_FULL_REFRESH,
+    "feature": MAX_FEATURES_FULL_REFRESH,
+    "lesson": MAX_LESSONS_FULL_REFRESH,
+    "plan": MAX_PLANS_FULL_REFRESH,
+}
+
+_graph_query_lambda_client = None
+
+# Set right before _query_all_records() returns; read immediately afterward by
+# the two callers (ENC-TSK-M39, live AC verification). Safe as module state --
+# a single Lambda execution environment processes one invocation at a time.
+_last_feed_query_source = "ddb_fanout"
+
+
+def _get_graph_query_lambda_client():
+    global _graph_query_lambda_client
+    if _graph_query_lambda_client is None:
+        _graph_query_lambda_client = boto3.client(
+            "lambda",
+            region_name=DYNAMODB_REGION,
+            # ENC-TSK-M39: bound the circuit-breaker's worst case. Without an
+            # explicit read_timeout this would inherit botocore's 60s default,
+            # which would make an OpenSearch-tier hang far slower than just
+            # falling straight back to the DDB fan-out this replaces.
+            config=Config(connect_timeout=2, read_timeout=OPENSEARCH_TIER_INVOKE_TIMEOUT_S, retries={"max_attempts": 1}),
+        )
+    return _graph_query_lambda_client
+
+
+def _query_all_records_via_opensearch(
+    projects: List[Dict[str, str]], cutoff: dt.datetime
+) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]]:
+    """OpenSearch-tier fast path for the full feed refresh (ENC-TSK-M39).
+
+    feed_query is not VPC-attached and the OpenSearch domain is only reachable
+    from inside the VPC graph_query_api already runs in -- rather than adding a
+    new VPC attachment to this Lambda, this invokes graph_query_api (action=
+    "feed_selection") as a selection-tier proxy: it asks the records_read
+    OpenSearch alias (CDC-fresh, ENC-TSK-L41-L44) for the top-N most-recently-
+    updated record keys per (project, record_type), then hydrates full record
+    bodies with a bounded DynamoDB BatchGetItem via the same helper the
+    incremental/delta path already uses -- replacing N sequential/concurrent
+    paginated GSI Query calls (one per project, unbounded result size) with a
+    single OpenSearch selection round-trip plus a handful of BatchGetItem
+    calls bounded by the existing per-type caps.
+
+    Returns None on ANY failure (invoke error, timeout, malformed response, or
+    an explicit ok=False) so the caller falls back to the DDB fan-out -- this
+    IS the circuit breaker; there is no retry or trip-state, matching the only
+    other fallback pattern in this codebase (graph_query_api's OpenSearch ->
+    Neo4j keyword-rank fallback).
+    """
+    if not GRAPH_QUERY_API_FUNCTION:
+        return None
+
+    project_ids = [p["project_id"] for p in projects if p.get("project_id")]
+    if not project_ids:
+        return [], [], [], [], []
+
+    payload = {
+        "action": "feed_selection",
+        "project_ids": project_ids,
+        "caps": _FEED_RECORD_TYPE_CAPS,
+    }
+    try:
+        response = _get_graph_query_lambda_client().invoke(
+            FunctionName=GRAPH_QUERY_API_FUNCTION,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        result = json.loads(response["Payload"].read())
+    except (BotoCoreError, ClientError, ValueError, KeyError) as exc:
+        logger.warning(
+            "feed_query: OpenSearch-tier selection invoke failed, falling back to DDB fan-out: %s", exc
+        )
+        return None
+
+    if response.get("FunctionError") or not isinstance(result, dict) or not result.get("ok"):
+        logger.warning(
+            "feed_query: OpenSearch-tier selection returned an error, falling back to DDB fan-out: %s", result
+        )
+        return None
+
+    selection = result.get("selection") or {}
+    changed_keys: List[Dict[str, Dict[str, str]]] = []
+    for pid in project_ids:
+        for rtype in _FEED_RECORD_TYPE_CAPS:
+            for bare_id in selection.get(f"{pid}#{rtype}", []) or []:
+                changed_keys.append({
+                    "project_id": {"S": pid},
+                    "record_id": {"S": f"{rtype}#{bare_id}"},
+                })
+
+    if not changed_keys:
+        return [], [], [], [], []
+
+    tasks, issues, features, lessons, plans, _closed_ids = _hydrate_records_via_batch_get(changed_keys, cutoff)
+    return tasks, issues, features, lessons, plans
+
+
 def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    global _last_feed_query_source
     projects = _get_active_projects()
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
 
+    try:
+        opensearch_result = _query_all_records_via_opensearch(projects, cutoff)
+    except Exception as exc:  # noqa: BLE001 — never let the fast path take the feed down
+        logger.warning("feed_query: OpenSearch-tier path raised unexpectedly, falling back to DDB fan-out: %s", exc)
+        opensearch_result = None
+
+    if opensearch_result is not None:
+        _last_feed_query_source = "opensearch"
+        return opensearch_result
+
+    _last_feed_query_source = "ddb_fanout"
+    return _query_all_records_via_ddb(projects, cutoff)
+
+
+def _query_all_records_via_ddb(
+    projects: List[Dict[str, str]], cutoff: dt.datetime
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     all_tasks: List[Dict[str, Any]] = []
     all_issues: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
@@ -1479,57 +1608,29 @@ def _attach_typed_relationships(
             record["typed_relationships"] = edges
 
 
-def _query_incremental(
-    since_iso: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
-    """Query records updated since *since_iso* using the type-updated-index GSI.
+def _hydrate_records_via_batch_get(
+    changed_keys: List[Dict[str, Dict[str, str]]], cutoff: dt.datetime
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[str],
+]:
+    """BatchGetItem + ``_TRANSFORM`` hydration for a list of (project_id, record_id) keys.
 
-    Strategy (ENC-TSK-605):
-      1. For each record_type (task, issue, feature), query the GSI with
-         ``updated_at > :since`` to collect (project_id, record_id) keys.
-      2. BatchGetItem on the main table for full attributes.
-      3. Transform via ``_TRANSFORM`` — records filtered by ``_is_stale_closed``
-         are captured in *closed_ids* so the client can evict them.
-
-    Returns (tasks, issues, features, closed_ids).
+    Factored out of ``_query_incremental`` (ENC-TSK-M39) so the OpenSearch-tier
+    selection path can reuse the exact same bounded-fetch/transform/sort logic
+    instead of re-deriving it -- the two callers differ only in how they arrive
+    at ``changed_keys`` (a GSI query here, an OpenSearch msearch selection for
+    the full-refresh path). Returns (tasks, issues, features, lessons, plans,
+    closed_ids), sorted the same way both callers already expect.
     """
-    ddb = _get_ddb()
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
-
-    # Step 1: Collect keys of recently changed records from the GSI.
-    # Table keys (project_id, record_id) are always projected into any GSI.
-    changed_keys: List[Dict[str, Dict[str, str]]] = []
-    key_to_type: Dict[str, str] = {}  # "project_id#record_id" -> record_type
-
-    for rtype in ("task", "issue", "feature", "lesson", "plan"):
-        try:
-            paginator = ddb.get_paginator("query")
-            for page in paginator.paginate(
-                TableName=DYNAMODB_TABLE,
-                IndexName="type-updated-index",
-                KeyConditionExpression="record_type = :rt AND updated_at > :since",
-                ExpressionAttributeValues={
-                    ":rt": {"S": rtype},
-                    ":since": {"S": since_iso},
-                },
-                ProjectionExpression="project_id, record_id, record_type",
-            ):
-                for item in page.get("Items", []):
-                    pid = _ddb_str(item, "project_id")
-                    rid = _ddb_str(item, "record_id")
-                    if pid and rid:
-                        changed_keys.append({
-                            "project_id": {"S": pid},
-                            "record_id": {"S": rid},
-                        })
-                        key_to_type[f"{pid}#{rid}"] = rtype
-        except (BotoCoreError, ClientError) as exc:
-            logger.error("Incremental GSI query failed for %s: %s", rtype, exc)
-
     if not changed_keys:
         return [], [], [], [], [], []
 
-    # Step 2: BatchGetItem for full records (max 100 per request).
+    ddb = _get_ddb()
     all_tasks: List[Dict[str, Any]] = []
     all_issues: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
@@ -1580,7 +1681,7 @@ def _query_incremental(
                     transformed = _TRANSFORM[record_type](raw_item, pid)
                 except Exception as rec_exc:  # noqa: BLE001
                     logger.error(
-                        "feed_query incremental: skipping record_type=%s item_id=%s project=%s: %s",
+                        "feed_query hydrate: skipping record_type=%s item_id=%s project=%s: %s",
                         record_type,
                         item_id or "?",
                         pid,
@@ -1608,6 +1709,58 @@ def _query_incremental(
     all_plans.sort(key=lambda x: x.get("plan_id", ""))
 
     return all_tasks, all_issues, all_features, all_lessons, all_plans, closed_ids
+
+
+def _query_incremental(
+    since_iso: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+    """Query records updated since *since_iso* using the type-updated-index GSI.
+
+    Strategy (ENC-TSK-605):
+      1. For each record_type (task, issue, feature), query the GSI with
+         ``updated_at > :since`` to collect (project_id, record_id) keys.
+      2. BatchGetItem on the main table for full attributes.
+      3. Transform via ``_TRANSFORM`` — records filtered by ``_is_stale_closed``
+         are captured in *closed_ids* so the client can evict them.
+
+    Returns (tasks, issues, features, closed_ids).
+    """
+    ddb = _get_ddb()
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
+
+    # Step 1: Collect keys of recently changed records from the GSI.
+    # Table keys (project_id, record_id) are always projected into any GSI.
+    changed_keys: List[Dict[str, Dict[str, str]]] = []
+
+    for rtype in ("task", "issue", "feature", "lesson", "plan"):
+        try:
+            paginator = ddb.get_paginator("query")
+            for page in paginator.paginate(
+                TableName=DYNAMODB_TABLE,
+                IndexName="type-updated-index",
+                KeyConditionExpression="record_type = :rt AND updated_at > :since",
+                ExpressionAttributeValues={
+                    ":rt": {"S": rtype},
+                    ":since": {"S": since_iso},
+                },
+                ProjectionExpression="project_id, record_id, record_type",
+            ):
+                for item in page.get("Items", []):
+                    pid = _ddb_str(item, "project_id")
+                    rid = _ddb_str(item, "record_id")
+                    if pid and rid:
+                        changed_keys.append({
+                            "project_id": {"S": pid},
+                            "record_id": {"S": rid},
+                        })
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("Incremental GSI query failed for %s: %s", rtype, exc)
+
+    if not changed_keys:
+        return [], [], [], [], [], []
+
+    # Step 2: BatchGetItem + transform (shared with the OpenSearch-tier path).
+    return _hydrate_records_via_batch_get(changed_keys, cutoff)
 
 
 # ---------------------------------------------------------------------------
@@ -1702,7 +1855,7 @@ def _handle_snapshot() -> Dict[str, Any]:
         + _rows(plans, "plan_id", "plan")
     )
 
-    body = {"generated_at": _now_z(), "tasks": rows}
+    body = {"generated_at": _now_z(), "tasks": rows, "feed_source": _last_feed_query_source}
     return {
         "statusCode": 200,
         "headers": {
@@ -2027,6 +2180,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "lessons": lessons,
                 "plans": plans,
                 "subscription": subscription_meta,
+                "feed_source": _last_feed_query_source,
             },
         )
     except Exception as outer_exc:  # noqa: BLE001

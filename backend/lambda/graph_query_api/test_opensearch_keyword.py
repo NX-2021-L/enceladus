@@ -69,6 +69,90 @@ class TestHybridKeywordRanks(unittest.TestCase):
         self.assertIn("connection refused", err or "")
 
 
+class TestFeedSelectionMsearch(unittest.TestCase):
+    """ENC-TSK-M39: feed_query's OpenSearch-tier selection proxy query."""
+
+    def test_returns_ids_per_project_and_type(self):
+        msearch_resp = {
+            "responses": [
+                {"hits": {"hits": [
+                    {"_id": "enceladus#task#ENC-TSK-001"},
+                    {"_id": "enceladus#task#ENC-TSK-002"},
+                ]}},
+                {"hits": {"hits": [{"_id": "enceladus#issue#ENC-ISS-010"}]}},
+            ]
+        }
+        with mock.patch.object(okw, "opensearch_configured", return_value=True), mock.patch.object(
+            okw, "opensearch_request", return_value=(200, msearch_resp)
+        ):
+            selection, err = okw.feed_selection_msearch(
+                ["enceladus"], {"task": 100, "issue": 10}
+            )
+        self.assertIsNone(err)
+        self.assertEqual(selection["enceladus#task"], ["ENC-TSK-001", "ENC-TSK-002"])
+        self.assertEqual(selection["enceladus#issue"], ["ENC-ISS-010"])
+
+    def test_builds_one_msearch_line_pair_per_project_type_pair(self):
+        msearch_resp = {"responses": [{"hits": {"hits": []}}, {"hits": {"hits": []}}, {"hits": {"hits": []}}, {"hits": {"hits": []}}]}
+        captured = {}
+
+        def fake_request(method, path, body):
+            captured["method"] = method
+            captured["path"] = path
+            captured["body"] = body
+            return 200, msearch_resp
+
+        with mock.patch.object(okw, "opensearch_configured", return_value=True), mock.patch.object(
+            okw, "opensearch_request", side_effect=fake_request
+        ):
+            okw.feed_selection_msearch(["enceladus", "other-proj"], {"task": 5, "issue": 3})
+
+        self.assertEqual(captured["path"], "/_msearch")
+        lines = captured["body"].decode("utf-8").strip().split("\n")
+        # 2 projects x 2 record types x (1 header + 1 query) = 8 lines
+        self.assertEqual(len(lines), 8)
+        header = json.loads(lines[0])
+        self.assertEqual(header, {"index": okw.READ_ALIAS})
+        query = json.loads(lines[1])
+        self.assertEqual(query["size"], 5)
+        self.assertEqual(query["sort"], [{"updated_at": "desc"}])
+
+    def test_returns_error_on_transport_failure(self):
+        with mock.patch.object(okw, "opensearch_configured", return_value=True), mock.patch.object(
+            okw, "opensearch_request", side_effect=RuntimeError("timeout")
+        ):
+            selection, err = okw.feed_selection_msearch(["enceladus"], {"task": 10})
+        self.assertEqual(selection, {})
+        self.assertIn("timeout", err or "")
+
+    def test_returns_error_when_not_configured(self):
+        with mock.patch.object(okw, "opensearch_configured", return_value=False):
+            selection, err = okw.feed_selection_msearch(["enceladus"], {"task": 10})
+        self.assertEqual(selection, {})
+        self.assertEqual(err, "opensearch_not_configured")
+
+    def test_empty_input_short_circuits(self):
+        with mock.patch.object(okw, "opensearch_configured", return_value=True):
+            selection, err = okw.feed_selection_msearch([], {"task": 10})
+        self.assertEqual(selection, {})
+        self.assertEqual(err, "no_input")
+
+    def test_skips_pair_with_sub_query_error_but_keeps_others(self):
+        msearch_resp = {
+            "responses": [
+                {"error": {"type": "search_phase_execution_exception"}},
+                {"hits": {"hits": [{"_id": "enceladus#issue#ENC-ISS-010"}]}},
+            ]
+        }
+        with mock.patch.object(okw, "opensearch_configured", return_value=True), mock.patch.object(
+            okw, "opensearch_request", return_value=(200, msearch_resp)
+        ):
+            selection, err = okw.feed_selection_msearch(["enceladus"], {"task": 100, "issue": 10})
+        self.assertIsNone(err)
+        self.assertNotIn("enceladus#task", selection)
+        self.assertEqual(selection["enceladus#issue"], ["ENC-ISS-010"])
+
+
 class TestFeedCorpusFacetFallback(unittest.TestCase):
     def test_parses_feed_corpus_facets(self):
         payload = {

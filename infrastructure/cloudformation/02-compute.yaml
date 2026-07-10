@@ -818,6 +818,12 @@ Resources:
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           FEED_PUBLISHER_FUNCTION: !Sub "devops-feed-publisher${EnvironmentSuffix}"
+          # ENC-TSK-M39: OpenSearch-tier selection proxy. feed_query is not
+          # VPC-attached; graph_query_api already is (records_read alias), so
+          # this invokes it instead of joining the VPC itself. Gamma-only --
+          # on v3-prod graph_query_api has no OpenSearch access either, and
+          # DOC-499FA089EC30 freezes all PLN-006 work to gamma anyway.
+          GRAPH_QUERY_API_FUNCTION: !If [IsGamma, !Sub "devops-graph-query-api${EnvironmentSuffix}", !Ref "AWS::NoValue"]
           DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
           APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
@@ -4544,6 +4550,16 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-feed-publisher${EnvironmentSuffix}:*"
+              # ENC-TSK-M39: invoke permission for the OpenSearch-tier selection
+              # proxy (GRAPH_QUERY_API_FUNCTION above). Granted in both envs --
+              # harmless on v3-prod, where graph_query_api has no OpenSearch
+              # access and the circuit breaker falls back to the DDB fan-out.
+              - Sid: InvokeGraphQueryApiForFeedSelection
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}:*"
         # ENC-ISS-313 / ENC-TSK-G95 (H02): restore DynamoDB read dropped by ENC-TSK-G43.
         - PolicyName: devops-feed-query-dynamodb-read
           PolicyDocument:
