@@ -95,7 +95,15 @@ def opensearch_request(method: str, path: str, body: Optional[Any] = None) -> Tu
         raise RuntimeError("OPENSEARCH_ENDPOINT is not configured")
     url = f"{OPENSEARCH_ENDPOINT}{path}"
     data = None
-    if body is not None:
+    if isinstance(body, bytes):
+        # ENC-TSK-M39: msearch's ndjson bodies are pre-built by the caller
+        # (a single json.dumps per header/query line, joined with newlines) --
+        # re-serializing here would double-encode and raise "Object of type
+        # bytes is not JSON serializable".
+        data = body
+    elif isinstance(body, str):
+        data = body.encode("utf-8")
+    elif body is not None:
         data = json.dumps(body).encode("utf-8")
     username, password = _get_credentials()
     req = urllib.request.Request(url, data=data, method=method)

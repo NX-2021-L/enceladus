@@ -13,6 +13,56 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import opensearch_keyword as okw  # noqa: E402
 
 
+class TestOpensearchRequestBodyEncoding(unittest.TestCase):
+    """ENC-TSK-M39 regression: opensearch_request must not re-serialize a
+    pre-encoded body. A real (unmocked) exercise of opensearch_request itself
+    -- mocking opensearch_request away (as the rest of this file does) would
+    never have caught the double-encoding bug this guards against."""
+
+    class _FakeResp:
+        def __init__(self, body: bytes):
+            self._body = body
+            self.status = 200
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def test_bytes_body_passed_through_unmodified(self):
+        captured = {}
+
+        def fake_urlopen(req, context=None, timeout=None):
+            captured["data"] = req.data
+            return self._FakeResp(b"{}")
+
+        ndjson_body = b'{"index": "records_read"}\n{"size": 5}\n'
+        with mock.patch.object(okw, "OPENSEARCH_ENDPOINT", "https://os.example"), mock.patch.object(
+            okw, "_get_credentials", return_value=("user", "pass")
+        ), mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            okw.opensearch_request("POST", "/_msearch", ndjson_body)
+
+        self.assertEqual(captured["data"], ndjson_body)
+
+    def test_dict_body_still_json_encoded(self):
+        captured = {}
+
+        def fake_urlopen(req, context=None, timeout=None):
+            captured["data"] = req.data
+            return self._FakeResp(b"{}")
+
+        with mock.patch.object(okw, "OPENSEARCH_ENDPOINT", "https://os.example"), mock.patch.object(
+            okw, "_get_credentials", return_value=("user", "pass")
+        ), mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            okw.opensearch_request("POST", "/_search", {"size": 5})
+
+        self.assertEqual(json.loads(captured["data"]), {"size": 5})
+
+
 class TestRecordIdFromHit(unittest.TestCase):
     def test_parses_stable_doc_id(self):
         hit = {"_id": "enceladus#task#ENC-TSK-001", "_source": {}}
