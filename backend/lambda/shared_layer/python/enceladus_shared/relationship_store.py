@@ -6,6 +6,7 @@ fall back to the tracker table for keys not yet present in the new store.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import os
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -194,6 +195,43 @@ def query_relationship_raw_items(
     return list(merged.values()), primary_cursor
 
 
+# ENC-TSK-M49: bounded to <=12 per the coord-lead architect decision (smaller
+# than ENC-TSK-M36/M48's 24 -- this fan-out runs on top of, not instead of,
+# feed_query's own already-concurrent OpenSearch-tier hydration, so a lower
+# cap keeps combined thread/connection pressure reasonable).
+_MAX_RELATIONSHIP_FANOUT_WORKERS = 12
+
+
+def _fetch_project_relationship_items(
+    ddb,
+    tracker_table: str,
+    rel_table: Optional[str],
+    pid: str,
+    rel_prefix: str,
+    ser_s: Callable[[str], PutItem],
+) -> List[Dict[str, Any]]:
+    """Fetch + merge one project's relationship rows across the table set."""
+    merged: Dict[str, Dict[str, Any]] = {}
+    tables = [rel_table, tracker_table] if rel_table else [tracker_table]
+    for table in tables:
+        if not table:
+            continue
+        paginator = ddb.get_paginator("query")
+        for page in paginator.paginate(
+            TableName=table,
+            KeyConditionExpression="project_id = :pid AND begins_with(record_id, :rel_prefix)",
+            ExpressionAttributeValues={
+                ":pid": ser_s(pid),
+                ":rel_prefix": ser_s(rel_prefix),
+            },
+        ):
+            for raw in page.get("Items", []):
+                sk = raw.get("record_id", {}).get("S", "")
+                if sk.startswith("rel#") and sk not in merged:
+                    merged[sk] = raw
+    return list(merged.values())
+
+
 def iter_project_relationship_items(
     ddb,
     tracker_table: str,
@@ -202,27 +240,32 @@ def iter_project_relationship_items(
     ser_s: Callable[[str], PutItem],
     rel_prefix: str = "rel#",
 ) -> Iterable[Dict[str, Any]]:
-    """Yield all relationship raw items for projects (feed/extensions path)."""
+    """Yield all relationship raw items for projects (feed/extensions path).
+
+    ENC-TSK-M49: per-project fetches fan out concurrently (bounded
+    ThreadPoolExecutor, same pattern as ENC-TSK-M36/M48) instead of one
+    project at a time sequentially -- with ~20-25 active projects sharing
+    this table, the prior sequential loop was the dominant residual latency
+    in feed_query's OpenSearch-tier full refresh after ENC-TSK-M48. Items
+    are yielded in the SAME order as `project_ids` regardless of which
+    project's fetch completes first, preserving the exact output contract
+    every existing caller (feed_query, tracker_mutation) already depends on.
+    """
+    pids = [pid for pid in project_ids if pid]
+    if not pids:
+        return
+
     rel_table = relationships_table_name()
-    for pid in project_ids:
-        if not pid:
-            continue
-        merged: Dict[str, Dict[str, Any]] = {}
-        tables = [rel_table, tracker_table] if rel_table else [tracker_table]
-        for table in tables:
-            if not table:
-                continue
-            paginator = ddb.get_paginator("query")
-            for page in paginator.paginate(
-                TableName=table,
-                KeyConditionExpression="project_id = :pid AND begins_with(record_id, :rel_prefix)",
-                ExpressionAttributeValues={
-                    ":pid": ser_s(pid),
-                    ":rel_prefix": ser_s(rel_prefix),
-                },
-            ):
-                for raw in page.get("Items", []):
-                    sk = raw.get("record_id", {}).get("S", "")
-                    if sk.startswith("rel#") and sk not in merged:
-                        merged[sk] = raw
-        yield from merged.values()
+    max_workers = min(_MAX_RELATIONSHIP_FANOUT_WORKERS, len(pids))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        per_project_items = list(
+            pool.map(
+                lambda pid: _fetch_project_relationship_items(
+                    ddb, tracker_table, rel_table, pid, rel_prefix, ser_s
+                ),
+                pids,
+            )
+        )
+
+    for items in per_project_items:
+        yield from items
