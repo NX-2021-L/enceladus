@@ -2,3 +2,14 @@
 # the published enceladus-shared:10 Lambda layer. Vendor into the function zip
 # until the layer is bumped (see governance_data_dictionary enceladus_shared.record_extensions).
 backend/lambda/shared_layer/python/enceladus_shared/record_extensions.py
+# ENC-TSK-M49: relationship_store's iter_project_relationship_items was
+# parallelized here but enceladus-shared:10 is frozen (deploy.sh is a
+# tombstone, no layer-publish mechanism exists in CI) -- vendor flat, same
+# reasoning as record_extensions.py above. record_extensions.py imports this
+# as a bare top-level module (try/except fallback to the layer's
+# package-qualified copy for non-vendored contexts, e.g. test_layer.py).
+# tracker_mutation's OWN direct enceladus_shared.appconfig_flags /
+# enceladus_shared.version_seq / enceladus_shared.relationship_store (write
+# helpers) imports are UNAFFECTED -- this only adds a new bare top-level
+# module name, it does not shadow the enceladus_shared package.
+backend/lambda/shared_layer/python/enceladus_shared/relationship_store.py

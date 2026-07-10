@@ -31,9 +31,12 @@ from enceladus_shared.record_extensions import (
     compute_structural_importance,
 )
 from enceladus_shared.relationship_store import (
+    _fetch_project_relationship_items,
     build_create_transact_puts,
+    iter_project_relationship_items,
     write_target_tables,
 )
+from enceladus_shared.record_extensions import query_typed_relationships_for_projects
 
 
 class AuthTests(unittest.TestCase):
@@ -263,6 +266,179 @@ class RelationshipStoreTests(unittest.TestCase):
             tables,
             {"enceladus-relationships-gamma", "devops-project-tracker-gamma"},
         )
+
+
+def _rel_item(project_id: str, sk: str) -> dict:
+    return {"project_id": {"S": project_id}, "record_id": {"S": sk}}
+
+
+class _FakeRelationshipPaginator:
+    def __init__(self, items_by_table_and_project):
+        self._items_by_table_and_project = items_by_table_and_project
+
+    def paginate(self, **kwargs):
+        table = kwargs["TableName"]
+        pid = kwargs["ExpressionAttributeValues"][":pid"]["S"]
+        items = self._items_by_table_and_project.get((table, pid), [])
+        yield {"Items": items}
+
+
+class _FakeRelationshipDdb:
+    """Records every query call so tests can assert per-project isolation."""
+
+    def __init__(self, items_by_table_and_project):
+        self._items_by_table_and_project = items_by_table_and_project
+        self.calls: list = []
+
+    def get_paginator(self, name):
+        assert name == "query"
+        return _FakeRelationshipPaginator(self._items_by_table_and_project)
+
+
+class IterProjectRelationshipItemsTests(unittest.TestCase):
+    """ENC-TSK-M49: parallel fan-out must match the prior sequential contract exactly."""
+
+    def _fixture_ddb(self):
+        # Two tables (relationships + tracker) x three projects, with one
+        # duplicate key across tables (rel_table must win, matching the
+        # pre-M49 first-seen-wins merge) and one project with no rows at all.
+        return _FakeRelationshipDdb(
+            {
+                ("enceladus-relationships-gamma", "enceladus"): [
+                    _rel_item("enceladus", "rel#A#relates-to#B"),
+                    _rel_item("enceladus", "rel#A#blocks#C"),
+                ],
+                ("devops-project-tracker-gamma", "enceladus"): [
+                    # Duplicate of the first row above -- rel_table copy must win.
+                    _rel_item("enceladus", "rel#A#relates-to#B"),
+                    _rel_item("enceladus", "rel#B#related-to#A"),
+                ],
+                ("enceladus-relationships-gamma", "cfg"): [
+                    _rel_item("cfg", "rel#X#relates-to#Y"),
+                ],
+                ("devops-project-tracker-gamma", "cfg"): [],
+                ("enceladus-relationships-gamma", "empty-proj"): [],
+                ("devops-project-tracker-gamma", "empty-proj"): [],
+            }
+        )
+
+    def test_parity_with_sequential_reference_implementation(self):
+        project_ids = ["enceladus", "cfg", "empty-proj"]
+        ser_s = lambda value: {"S": value}  # noqa: E731
+
+        with patch.dict(os.environ, {"RELATIONSHIPS_TABLE": "enceladus-relationships-gamma"}, clear=False):
+            parallel_result = list(
+                iter_project_relationship_items(
+                    self._fixture_ddb(), "devops-project-tracker-gamma", project_ids, ser_s=ser_s
+                )
+            )
+
+            # Reference: call the single-project fetch helper directly, in
+            # order, exactly as the pre-M49 sequential loop did.
+            sequential_result = []
+            rel_table = "enceladus-relationships-gamma"
+            for pid in project_ids:
+                sequential_result.extend(
+                    _fetch_project_relationship_items(
+                        self._fixture_ddb(), "devops-project-tracker-gamma", rel_table, pid, "rel#", ser_s
+                    )
+                )
+
+        self.assertEqual(parallel_result, sequential_result)
+        # rel_table's copy of the duplicate key must win (first-seen-wins,
+        # tables=[rel_table, tracker_table]).
+        enceladus_sks = {r["record_id"]["S"] for r in parallel_result if r["project_id"]["S"] == "enceladus"}
+        self.assertEqual(enceladus_sks, {"rel#A#relates-to#B", "rel#A#blocks#C", "rel#B#related-to#A"})
+
+    def test_preserves_original_project_ids_order(self):
+        ser_s = lambda value: {"S": value}  # noqa: E731
+        # Reversed vs. the fixture's natural table layout -- output order
+        # must follow THIS list, not fetch-completion order.
+        project_ids = ["empty-proj", "cfg", "enceladus"]
+
+        with patch.dict(os.environ, {"RELATIONSHIPS_TABLE": "enceladus-relationships-gamma"}, clear=False):
+            result = list(
+                iter_project_relationship_items(
+                    self._fixture_ddb(), "devops-project-tracker-gamma", project_ids, ser_s=ser_s
+                )
+            )
+
+        # cfg's single row must appear before any of enceladus's three rows.
+        cfg_index = next(i for i, r in enumerate(result) if r["project_id"]["S"] == "cfg")
+        enceladus_indices = [i for i, r in enumerate(result) if r["project_id"]["S"] == "enceladus"]
+        self.assertTrue(all(cfg_index < i for i in enceladus_indices))
+
+    def test_empty_project_ids_short_circuits_without_calling_ddb(self):
+        ddb = self._fixture_ddb()
+        result = list(iter_project_relationship_items(ddb, "devops-project-tracker-gamma", [], ser_s=lambda v: {"S": v}))
+        self.assertEqual(result, [])
+
+    def test_falsy_project_ids_are_skipped(self):
+        ser_s = lambda value: {"S": value}  # noqa: E731
+        with patch.dict(os.environ, {"RELATIONSHIPS_TABLE": "enceladus-relationships-gamma"}, clear=False):
+            result = list(
+                iter_project_relationship_items(
+                    self._fixture_ddb(), "devops-project-tracker-gamma", ["", None, "cfg"], ser_s=ser_s
+                )
+            )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["project_id"]["S"], "cfg")
+
+
+class QueryTypedRelationshipsForProjectsTests(unittest.TestCase):
+    """ENC-TSK-M49: record_extensions' bare-import-with-fallback still resolves
+    iter_project_relationship_items correctly when only the real
+    enceladus_shared package (no flat vendored copy) is on sys.path -- the
+    exact shared_layer/test_layer.py situation."""
+
+    def test_builds_edges_by_source_via_package_qualified_fallback(self):
+        ddb = _FakeRelationshipDdb(
+            {
+                ("devops-project-tracker-gamma", "enceladus"): [
+                    _rel_item("enceladus", "rel#ENC-TSK-1#relates-to#ENC-TSK-2"),
+                ],
+            }
+        )
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RELATIONSHIPS_TABLE", None)
+            edges = query_typed_relationships_for_projects(
+                ddb,
+                "devops-project-tracker-gamma",
+                ["enceladus"],
+                ddb_str=lambda item, key: item.get(key, {}).get("S", ""),
+                ddb_float=lambda item, key: 0.0,
+            )
+        self.assertIn("ENC-TSK-1", edges)
+        self.assertEqual(edges["ENC-TSK-1"][0]["relationship_type"], "relates-to")
+        self.assertEqual(edges["ENC-TSK-1"][0]["target_id"], "ENC-TSK-2")
+
+    def test_prefers_bare_vendored_module_when_present(self):
+        """Simulates the real deployed feed_query/tracker_mutation zip, where
+        .build_extras vendors relationship_store.py flat at the zip root
+        (a bare top-level module, not inside an enceladus_shared/ package)."""
+        import types
+
+        sentinel_calls = []
+
+        def fake_iter(ddb, table_name, project_ids, *, ser_s, rel_prefix="rel#"):
+            sentinel_calls.append(list(project_ids))
+            yield _rel_item("enceladus", "rel#ENC-TSK-9#relates-to#ENC-TSK-8")
+
+        fake_module = types.ModuleType("relationship_store")
+        fake_module.iter_project_relationship_items = fake_iter
+
+        with patch.dict(sys.modules, {"relationship_store": fake_module}):
+            edges = query_typed_relationships_for_projects(
+                _FakeRelationshipDdb({}),
+                "devops-project-tracker-gamma",
+                ["enceladus"],
+                ddb_str=lambda item, key: item.get(key, {}).get("S", ""),
+                ddb_float=lambda item, key: 0.0,
+            )
+
+        # The bare vendored module's fake was used, not the real package copy.
+        self.assertEqual(sentinel_calls, [["enceladus"]])
+        self.assertIn("ENC-TSK-9", edges)
 
 
 if __name__ == "__main__":

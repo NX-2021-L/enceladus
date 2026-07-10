@@ -137,7 +137,18 @@ def query_typed_relationships_for_projects(
     ddb_float: Callable[[Dict[str, Any], str], float],
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Query all outgoing typed edges for the given projects."""
-    from enceladus_shared.relationship_store import iter_project_relationship_items
+    try:
+        # ENC-TSK-M49: feed_query/tracker_mutation vendor a flat top-level
+        # relationship_store.py (via .build_extras) to pick up the
+        # parallelized iter_project_relationship_items without waiting on a
+        # republish of the frozen enceladus-shared:10 Lambda layer -- see
+        # relationship_store.py's own docstring and ENC-TSK-M49's worklog.
+        # Falls back to the package-qualified import (resolved via the
+        # layer) for any environment that doesn't vendor the flat copy,
+        # e.g. shared_layer/test_layer.py's PYTHONPATH=python test context.
+        from relationship_store import iter_project_relationship_items
+    except ImportError:
+        from enceladus_shared.relationship_store import iter_project_relationship_items
 
     edges_by_source: Dict[str, List[Dict[str, Any]]] = {}
     for raw in iter_project_relationship_items(
