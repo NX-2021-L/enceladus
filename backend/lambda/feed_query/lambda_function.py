@@ -1608,6 +1608,89 @@ def _attach_typed_relationships(
             record["typed_relationships"] = edges
 
 
+# ENC-TSK-M48: batches fan out concurrently (see _hydrate_records_via_batch_get)
+# with the same reasoning/sizing as _MAX_PROJECT_FANOUT_WORKERS (ENC-TSK-M36) --
+# each BatchGetItem call is I/O-bound, and the shared DDB client's
+# max_pool_connections=32 (also M36) already has headroom for this.
+_MAX_BATCH_GET_WORKERS = 24
+
+
+def _fetch_and_transform_batch(
+    batch: List[Dict[str, Dict[str, str]]], cutoff: dt.datetime
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[str],
+]:
+    """BatchGetItem + ``_TRANSFORM`` for a single <=100-key chunk."""
+    ddb = _get_ddb()
+    tasks: List[Dict[str, Any]] = []
+    issues: List[Dict[str, Any]] = []
+    features: List[Dict[str, Any]] = []
+    lessons: List[Dict[str, Any]] = []
+    plans: List[Dict[str, Any]] = []
+    closed_ids: List[str] = []
+
+    try:
+        resp = ddb.batch_get_item(
+            RequestItems={DYNAMODB_TABLE: {"Keys": batch, "ConsistentRead": False}}
+        )
+        items_to_process = resp.get("Responses", {}).get(DYNAMODB_TABLE, [])
+
+        # One retry for unprocessed keys (DynamoDB throughput back-off).
+        unprocessed = (
+            resp.get("UnprocessedKeys", {}).get(DYNAMODB_TABLE, {}).get("Keys", [])
+        )
+        if unprocessed:
+            resp2 = ddb.batch_get_item(
+                RequestItems={DYNAMODB_TABLE: {"Keys": unprocessed, "ConsistentRead": False}}
+            )
+            items_to_process.extend(resp2.get("Responses", {}).get(DYNAMODB_TABLE, []))
+
+        for raw_item in items_to_process:
+            record_type = _ddb_str(raw_item, "record_type")
+            pid = _ddb_str(raw_item, "project_id")
+            if record_type not in _TRANSFORM:
+                continue
+
+            item_id = _ddb_str(raw_item, "item_id")
+            # Per-record isolation: a single malformed record must not
+            # take down the entire delta response (ENC-TSK-C31).
+            try:
+                if _is_stale_closed(raw_item, cutoff):
+                    if item_id:
+                        closed_ids.append(item_id)
+                    continue
+                transformed = _TRANSFORM[record_type](raw_item, pid)
+            except Exception as rec_exc:  # noqa: BLE001
+                logger.error(
+                    "feed_query hydrate: skipping record_type=%s item_id=%s project=%s: %s",
+                    record_type,
+                    item_id or "?",
+                    pid,
+                    rec_exc,
+                )
+                continue
+            if record_type == "task":
+                tasks.append(transformed)
+            elif record_type == "issue":
+                issues.append(transformed)
+            elif record_type == "feature":
+                features.append(transformed)
+            elif record_type == "lesson":
+                lessons.append(transformed)
+            elif record_type == "plan":
+                plans.append(transformed)
+
+    except (BotoCoreError, ClientError) as exc:
+        logger.error("BatchGetItem failed: %s", exc)
+
+    return tasks, issues, features, lessons, plans, closed_ids
+
+
 def _hydrate_records_via_batch_get(
     changed_keys: List[Dict[str, Dict[str, str]]], cutoff: dt.datetime
 ) -> Tuple[
@@ -1626,81 +1709,36 @@ def _hydrate_records_via_batch_get(
     at ``changed_keys`` (a GSI query here, an OpenSearch msearch selection for
     the full-refresh path). Returns (tasks, issues, features, lessons, plans,
     closed_ids), sorted the same way both callers already expect.
+
+    ENC-TSK-M48: chunks fan out concurrently instead of one BatchGetItem call
+    at a time -- fine for the incremental path's small per-poll delta, but the
+    OpenSearch-tier full-refresh path can hand this thousands of keys across
+    20+ active projects, and sequential chunking was the actual live-latency
+    bottleneck (graph_query_api's own selection round trip is already fast).
     """
     if not changed_keys:
         return [], [], [], [], [], []
 
-    ddb = _get_ddb()
+    batches = [changed_keys[i : i + 100] for i in range(0, len(changed_keys), 100)]
+    max_workers = min(_MAX_BATCH_GET_WORKERS, len(batches))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        batch_results = list(
+            pool.map(lambda batch: _fetch_and_transform_batch(batch, cutoff), batches)
+        )
+
     all_tasks: List[Dict[str, Any]] = []
     all_issues: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
     all_lessons: List[Dict[str, Any]] = []
     all_plans: List[Dict[str, Any]] = []
     closed_ids: List[str] = []
-
-    for batch_start in range(0, len(changed_keys), 100):
-        batch = changed_keys[batch_start : batch_start + 100]
-        try:
-            resp = ddb.batch_get_item(
-                RequestItems={
-                    DYNAMODB_TABLE: {"Keys": batch, "ConsistentRead": False}
-                }
-            )
-            items_to_process = resp.get("Responses", {}).get(DYNAMODB_TABLE, [])
-
-            # One retry for unprocessed keys (DynamoDB throughput back-off).
-            unprocessed = (
-                resp.get("UnprocessedKeys", {})
-                .get(DYNAMODB_TABLE, {})
-                .get("Keys", [])
-            )
-            if unprocessed:
-                resp2 = ddb.batch_get_item(
-                    RequestItems={
-                        DYNAMODB_TABLE: {"Keys": unprocessed, "ConsistentRead": False}
-                    }
-                )
-                items_to_process.extend(
-                    resp2.get("Responses", {}).get(DYNAMODB_TABLE, [])
-                )
-
-            for raw_item in items_to_process:
-                record_type = _ddb_str(raw_item, "record_type")
-                pid = _ddb_str(raw_item, "project_id")
-                if record_type not in _TRANSFORM:
-                    continue
-
-                item_id = _ddb_str(raw_item, "item_id")
-                # Per-record isolation: a single malformed record must not
-                # take down the entire delta response (ENC-TSK-C31).
-                try:
-                    if _is_stale_closed(raw_item, cutoff):
-                        if item_id:
-                            closed_ids.append(item_id)
-                        continue
-                    transformed = _TRANSFORM[record_type](raw_item, pid)
-                except Exception as rec_exc:  # noqa: BLE001
-                    logger.error(
-                        "feed_query hydrate: skipping record_type=%s item_id=%s project=%s: %s",
-                        record_type,
-                        item_id or "?",
-                        pid,
-                        rec_exc,
-                    )
-                    continue
-                if record_type == "task":
-                    all_tasks.append(transformed)
-                elif record_type == "issue":
-                    all_issues.append(transformed)
-                elif record_type == "feature":
-                    all_features.append(transformed)
-                elif record_type == "lesson":
-                    all_lessons.append(transformed)
-                elif record_type == "plan":
-                    all_plans.append(transformed)
-
-        except (BotoCoreError, ClientError) as exc:
-            logger.error("BatchGetItem failed: %s", exc)
+    for tasks, issues, features, lessons, plans, batch_closed_ids in batch_results:
+        all_tasks.extend(tasks)
+        all_issues.extend(issues)
+        all_features.extend(features)
+        all_lessons.extend(lessons)
+        all_plans.extend(plans)
+        closed_ids.extend(batch_closed_ids)
 
     all_tasks.sort(key=lambda x: x.get("task_id", ""))
     all_issues.sort(key=lambda x: x.get("issue_id", ""))
