@@ -746,6 +746,61 @@ def test_query_all_records_via_opensearch_returns_none_on_function_error(monkeyp
     assert result is None
 
 
+# ---------------------------------------------------------------------------
+# ENC-TSK-M48: _hydrate_records_via_batch_get fans out concurrently
+#
+# Live gamma verification of M39/M47 showed feed_source=opensearch but ~4s
+# p95, not <500ms -- CloudWatch confirmed graph_query_api's own selection
+# round trip was already fast, isolating the bottleneck to feed_query's own
+# sequential BatchGetItem chunking across the (often 20+ active project)
+# candidate set the OpenSearch tier can return. These tests lock in that the
+# fix fans batches out via a thread pool (matching ENC-TSK-M36's DDB fan-out
+# concurrency fix) rather than one call at a time.
+# ---------------------------------------------------------------------------
+
+
+def test_hydrate_records_via_batch_get_empty_short_circuits(monkeypatch):
+    called = False
+
+    def fake_fetch(_batch, _cutoff):
+        nonlocal called
+        called = True
+        return ([], [], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_fetch_and_transform_batch", fake_fetch)
+    cutoff = feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+    assert feed_query._hydrate_records_via_batch_get([], cutoff) == ([], [], [], [], [], [])
+    assert called is False
+
+
+def test_hydrate_records_via_batch_get_chunks_concurrently_and_merges(monkeypatch):
+    # 250 keys -> 3 chunks of <=100 -- forces _hydrate_records_via_batch_get
+    # to fan out more than one batch.
+    changed_keys = [
+        {"project_id": {"S": "enceladus"}, "record_id": {"S": f"task#T-{i}"}}
+        for i in range(250)
+    ]
+    seen_batch_sizes = []
+
+    def fake_fetch(batch, _cutoff):
+        seen_batch_sizes.append(len(batch))
+        # One distinct task per batch so we can confirm every batch's
+        # results made it into the merged output.
+        rid = batch[0]["record_id"]["S"]
+        return ([{"task_id": rid}], [], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_fetch_and_transform_batch", fake_fetch)
+    cutoff = feed_query.dt.datetime.now(feed_query.dt.timezone.utc)
+
+    tasks, issues, features, lessons, plans, closed_ids = feed_query._hydrate_records_via_batch_get(
+        changed_keys, cutoff
+    )
+
+    assert sorted(seen_batch_sizes) == [50, 100, 100]
+    assert len(tasks) == 3
+    assert issues == [] and features == [] and lessons == [] and plans == [] and closed_ids == []
+
+
 def test_query_all_records_via_opensearch_no_active_projects_short_circuits(monkeypatch):
     monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "devops-graph-query-api-gamma")
     fake_client = _FakeGraphQueryLambdaClient()
