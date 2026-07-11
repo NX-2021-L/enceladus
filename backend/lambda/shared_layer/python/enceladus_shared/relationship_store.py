@@ -22,76 +22,6 @@ def dual_write_enabled() -> bool:
     return relationships_table_name() is not None
 
 
-def relationships_authoritative() -> bool:
-    """ENC-TSK-M55 component 1: when true, the relationships table is a verified
-    superset of the tracker table's rel# rows and the legacy fallback pass in
-    iter_project_relationship_items is skipped. Set per environment via CFN
-    (gamma verified 2026-07-11; prod unverified, stays false)."""
-    raw = os.environ.get("RELATIONSHIPS_TABLE_AUTHORITATIVE", "").strip().lower()
-    return raw in ("1", "true", "yes")
-
-
-def range_bounding_disabled() -> bool:
-    """ENC-TSK-M55 component 2 kill switch (rollback lever short of git revert)."""
-    raw = os.environ.get("FEED_EDGE_RANGE_BOUND_DISABLED", "").strip().lower()
-    return raw in ("1", "true", "yes")
-
-
-# Sorts after every ASCII suffix of a rel#{source_id}# key, so the upper bound
-# of a BETWEEN range includes all of that source's edges.
-_RANGE_UPPER_SENTINEL = "￿"
-
-
-def build_page_sk_ranges(
-    source_ids: Iterable[str],
-    *,
-    rel_prefix: str = "rel#",
-    max_ranges: Optional[int] = None,
-) -> List[Tuple[str, str]]:
-    """ENC-TSK-M55 component 2: sort-key BETWEEN bounds covering every edge of
-    the given source records.
-
-    Groups the page's source IDs by record-type prefix (the ID up to its last
-    hyphen), then coalesces adjacent groups down to max_ranges. Every source's
-    rel#{source_id}#... keys fall inside the returned bounds by construction;
-    recency-consistency of the ID scheme only affects how narrow the spans are.
-    max_ranges defaults to FEED_EDGE_RANGE_MAX_CLUSTERS (1): at current edge
-    volume (~385 rows total, 2026-07-11) sequential Query round-trips dominate
-    scanned bytes, so one range per project minimizes total calls.
-    """
-    ids = sorted({str(s) for s in source_ids if s})
-    if not ids:
-        return []
-    if max_ranges is None:
-        try:
-            max_ranges = int(os.environ.get("FEED_EDGE_RANGE_MAX_CLUSTERS", "1"))
-        except ValueError:
-            max_ranges = 1
-    max_ranges = max(1, max_ranges)
-
-    groups: List[List[str]] = []
-    current_key: Optional[str] = None
-    for rid in ids:
-        key = rid.rsplit("-", 1)[0] if "-" in rid else rid
-        if key != current_key:
-            groups.append([rid, rid])
-            current_key = key
-        else:
-            groups[-1][1] = rid
-
-    if len(groups) > max_ranges:
-        chunk = -(-len(groups) // max_ranges)  # ceil division
-        groups = [
-            [groups[i][0], groups[min(i + chunk - 1, len(groups) - 1)][1]]
-            for i in range(0, len(groups), chunk)
-        ]
-
-    return [
-        (f"{rel_prefix}{lo}#", f"{rel_prefix}{hi}#{_RANGE_UPPER_SENTINEL}")
-        for lo, hi in groups
-    ]
-
-
 def write_target_tables(tracker_table: str) -> List[str]:
     rel_table = relationships_table_name()
     if rel_table and rel_table != tracker_table:
@@ -271,64 +201,28 @@ def iter_project_relationship_items(
     *,
     ser_s: Callable[[str], PutItem],
     rel_prefix: str = "rel#",
-    sk_ranges_by_project: Optional[Dict[str, List[Tuple[str, str]]]] = None,
-    stats: Optional[Dict[str, int]] = None,
 ) -> Iterable[Dict[str, Any]]:
-    """Yield all relationship raw items for projects (feed/extensions path).
-
-    ENC-TSK-M55: when sk_ranges_by_project supplies BETWEEN bounds for a
-    project (from build_page_sk_ranges), each range replaces the full-history
-    begins_with scan; projects without ranges keep the legacy scan. When the
-    relationships table is authoritative (verified per environment), the
-    tracker-table fallback pass is skipped entirely. `stats`, if given, is
-    incremented in place: query_count / items_seen / scanned_count.
-    """
+    """Yield all relationship raw items for projects (feed/extensions path)."""
     rel_table = relationships_table_name()
-    skip_legacy_pass = rel_table is not None and relationships_authoritative()
     for pid in project_ids:
         if not pid:
             continue
         merged: Dict[str, Dict[str, Any]] = {}
-        if skip_legacy_pass:
-            tables = [rel_table]
-        else:
-            tables = [rel_table, tracker_table] if rel_table else [tracker_table]
-        ranges = (sk_ranges_by_project or {}).get(pid) or None
+        tables = [rel_table, tracker_table] if rel_table else [tracker_table]
         for table in tables:
             if not table:
                 continue
-            if ranges:
-                key_variants = [
-                    (
-                        "project_id = :pid AND record_id BETWEEN :lo AND :hi",
-                        {":pid": ser_s(pid), ":lo": ser_s(lo), ":hi": ser_s(hi)},
-                    )
-                    for lo, hi in ranges
-                ]
-            else:
-                key_variants = [
-                    (
-                        "project_id = :pid AND begins_with(record_id, :rel_prefix)",
-                        {":pid": ser_s(pid), ":rel_prefix": ser_s(rel_prefix)},
-                    )
-                ]
             paginator = ddb.get_paginator("query")
-            for key_condition, attr_values in key_variants:
-                for page in paginator.paginate(
-                    TableName=table,
-                    KeyConditionExpression=key_condition,
-                    ExpressionAttributeValues=attr_values,
-                ):
-                    if stats is not None:
-                        stats["query_count"] = stats.get("query_count", 0) + 1
-                        stats["items_seen"] = stats.get("items_seen", 0) + len(
-                            page.get("Items", [])
-                        )
-                        stats["scanned_count"] = stats.get("scanned_count", 0) + int(
-                            page.get("ScannedCount", 0) or 0
-                        )
-                    for raw in page.get("Items", []):
-                        sk = raw.get("record_id", {}).get("S", "")
-                        if sk.startswith("rel#") and sk not in merged:
-                            merged[sk] = raw
+            for page in paginator.paginate(
+                TableName=table,
+                KeyConditionExpression="project_id = :pid AND begins_with(record_id, :rel_prefix)",
+                ExpressionAttributeValues={
+                    ":pid": ser_s(pid),
+                    ":rel_prefix": ser_s(rel_prefix),
+                },
+            ):
+                for raw in page.get("Items", []):
+                    sk = raw.get("record_id", {}).get("S", "")
+                    if sk.startswith("rel#") and sk not in merged:
+                        merged[sk] = raw
         yield from merged.values()

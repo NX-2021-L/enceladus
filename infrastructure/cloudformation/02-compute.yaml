@@ -406,9 +406,6 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           RELATIONSHIPS_TABLE: !Sub "enceladus-relationships${EnvironmentSuffix}"
-          # ENC-TSK-M55: gamma live-verified 2026-07-11 (tracker rel# keys are a
-          # strict subset of the relationships table); prod unverified, stays false.
-          RELATIONSHIPS_TABLE_AUTHORITATIVE: !If [IsGamma, "true", "false"]
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "45"
@@ -818,9 +815,6 @@ Resources:
           COGNITO_CLIENT_ID: !Ref CognitoClientId
           DYNAMODB_TABLE: !Sub "devops-project-tracker${EnvironmentSuffix}"
           RELATIONSHIPS_TABLE: !Sub "enceladus-relationships${EnvironmentSuffix}"
-          # ENC-TSK-M55: gamma live-verified 2026-07-11 (tracker rel# keys are a
-          # strict subset of the relationships table); prod unverified, stays false.
-          RELATIONSHIPS_TABLE_AUTHORITATIVE: !If [IsGamma, "true", "false"]
           DYNAMODB_REGION: !Ref AWS::Region
           PROJECTS_TABLE: !Sub "projects${EnvironmentSuffix}"
           FEED_PUBLISHER_FUNCTION: !Sub "devops-feed-publisher${EnvironmentSuffix}"

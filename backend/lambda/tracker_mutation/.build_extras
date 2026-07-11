@@ -2,7 +2,3 @@
 # the published enceladus-shared:10 Lambda layer. Vendor into the function zip
 # until the layer is bumped (see governance_data_dictionary enceladus_shared.record_extensions).
 backend/lambda/shared_layer/python/enceladus_shared/record_extensions.py
-# ENC-TSK-M55: relationship_store gained range-bounded queries + authoritative-
-# table gating; the published layer (enceladus-shared:10) predates these, so the
-# flat copy vendored here must win (record_extensions imports it bare-first).
-backend/lambda/shared_layer/python/enceladus_shared/relationship_store.py
