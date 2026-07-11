@@ -699,6 +699,65 @@ Resources:
               StringEquals:
                 aws:RequestedRegion: us-west-2
 
+  # ENC-TSK-M56 — 06-appsync-events.yaml (gamma FeedEventsApi, ApiId
+  # yri2ycadyfhjtm5cdmu3pxm4iq) had zero appsync:* grants; first CFN deploy
+  # attempt failed on appsync:GetApi AccessDenied (clean UPDATE_ROLLBACK_COMPLETE).
+  # Same failure class as EventBridgeSchedulerOpsPolicy/OpenSearchNatGatewayPolicy
+  # above: inline CloudFormationDeployPolicy quota exhausted (10,089/10,240 bytes
+  # minified, verified live), so this must be a managed policy, not inline. A prior
+  # ad-hoc `aws iam create-policy` patch workflow (iam-cfn-deploy-role-appsync-
+  # events-patch.yml, PR #983) also failed with the identical AccessDenied on
+  # iam:CreatePolicy -- CloudFormationDeployRole (assumed via AWS_BACKEND_ROLE_TO_ASSUME)
+  # has never been able to create managed policies itself, same as every prior
+  # grant in this failure class (OpenSearchNatGatewayPolicy, UiCdnDeployPolicy,
+  # secretsmanager) -- all were applied out-of-band by io and only codified here
+  # afterward. That workflow is retired in this same change. Scoped to the single
+  # ApiId and its ApiKey/ChannelNamespace sub-resources -- the exact three
+  # AWS::AppSync resource types 06-appsync-events.yaml manages -- not appsync:*.
+  AppSyncEventsOpsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: enceladus-cfn-deploy-appsync-events-ops
+      Roles:
+        - !Ref CloudFormationDeployRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AppSyncEventsApiManage
+            Effect: Allow
+            Action:
+              - appsync:GetApi
+              - appsync:CreateApi
+              - appsync:UpdateApi
+              - appsync:DeleteApi
+              - appsync:TagResource
+              - appsync:UntagResource
+              - appsync:ListTagsForResource
+            Resource:
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/yri2ycadyfhjtm5cdmu3pxm4iq"
+          - Sid: AppSyncEventsApiKeyManage
+            Effect: Allow
+            Action:
+              - appsync:GetApiKey
+              - appsync:ListApiKeys
+              - appsync:CreateApiKey
+              - appsync:UpdateApiKey
+              - appsync:DeleteApiKey
+            Resource:
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/yri2ycadyfhjtm5cdmu3pxm4iq/apikeys/*"
+          - Sid: AppSyncEventsChannelNamespaceManage
+            Effect: Allow
+            Action:
+              - appsync:GetChannelNamespace
+              - appsync:ListChannelNamespaces
+              - appsync:CreateChannelNamespace
+              - appsync:UpdateChannelNamespace
+              - appsync:DeleteChannelNamespace
+            Resource:
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/yri2ycadyfhjtm5cdmu3pxm4iq/channelNamespace/*"
+
   # ENC-TSK-L55 codify: enceladus-ui-cdn-deploy was created out-of-band
   # (v4 UI CDN bootstrap, K54/ENC-TSK-K65 lineage) and attached to
   # CloudFormationDeployRole without ever being represented in this stack.
