@@ -135,9 +135,39 @@ def query_typed_relationships_for_projects(
     *,
     ddb_str: Callable[[Dict[str, Any], str], str],
     ddb_float: Callable[[Dict[str, Any], str], float],
+    source_ids_by_project: Optional[Dict[str, List[str]]] = None,
+    stats: Optional[Dict[str, int]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Query all outgoing typed edges for the given projects."""
-    from enceladus_shared.relationship_store import iter_project_relationship_items
+    """Query all outgoing typed edges for the given projects.
+
+    ENC-TSK-M55: source_ids_by_project, when provided, range-bounds each
+    project's Query to the sort-key span of the page's actual source records
+    (see relationship_store.build_page_sk_ranges). Callers that omit it keep
+    the full-history behavior unchanged.
+    """
+    # ENC-TSK-M55: bare import first — the vendored flat copy in the function
+    # zip must win over the stale published-layer package copy (.build_extras
+    # pattern, see PLN-006 catalog durable facts).
+    try:
+        from relationship_store import (  # type: ignore
+            build_page_sk_ranges,
+            iter_project_relationship_items,
+            range_bounding_disabled,
+        )
+    except ImportError:
+        from enceladus_shared.relationship_store import (
+            build_page_sk_ranges,
+            iter_project_relationship_items,
+            range_bounding_disabled,
+        )
+
+    sk_ranges_by_project: Optional[Dict[str, List[Any]]] = None
+    if source_ids_by_project and not range_bounding_disabled():
+        sk_ranges_by_project = {
+            pid: build_page_sk_ranges(ids)
+            for pid, ids in source_ids_by_project.items()
+            if ids
+        }
 
     edges_by_source: Dict[str, List[Dict[str, Any]]] = {}
     for raw in iter_project_relationship_items(
@@ -145,6 +175,8 @@ def query_typed_relationships_for_projects(
         table_name,
         project_ids,
         ser_s=lambda value: {"S": value},
+        sk_ranges_by_project=sk_ranges_by_project,
+        stats=stats,
     ):
         sk = ddb_str(raw, "record_id")
         if not sk or not sk.startswith("rel#"):
@@ -177,7 +209,10 @@ def query_edges_for_record(
     ddb_float: Callable[[Dict[str, Any], str], float],
 ) -> List[Dict[str, Any]]:
     """Query outgoing typed edges for a single source record."""
-    from enceladus_shared.relationship_store import query_relationship_raw_items
+    try:
+        from relationship_store import query_relationship_raw_items  # type: ignore
+    except ImportError:
+        from enceladus_shared.relationship_store import query_relationship_raw_items
 
     prefix = f"rel#{source_id}#"
     raw_items, _ = query_relationship_raw_items(
