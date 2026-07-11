@@ -2150,12 +2150,39 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     query_typed_relationships_for_projects,
                 )
 
+                # ENC-TSK-M55: range-bound each project's edge Query to the
+                # sort-key span of the records actually in this capped page.
+                source_ids_by_project: Dict[str, List[str]] = {}
+                for coll, id_key in (
+                    (tasks, "task_id"),
+                    (issues, "issue_id"),
+                    (features, "feature_id"),
+                    (lessons, "lesson_id"),
+                    (plans, "plan_id"),
+                ):
+                    for r in coll:
+                        pid = r.get("project_id")
+                        rid = r.get(id_key)
+                        if pid and rid:
+                            source_ids_by_project.setdefault(pid, []).append(str(rid))
+
+                edge_attach_stats: Dict[str, int] = {}
                 edges_by_source = query_typed_relationships_for_projects(
                     _get_ddb(),
                     DYNAMODB_TABLE,
                     project_ids,
                     ddb_str=_ddb_str,
                     ddb_float=_ddb_float,
+                    source_ids_by_project=source_ids_by_project,
+                    stats=edge_attach_stats,
+                )
+                # ENC-TSK-M55 AC-3 evidence: DynamoDB read volume per full refresh.
+                logger.info(
+                    "edge_attach_stats projects=%d query_count=%d items_seen=%d scanned_count=%d",
+                    len(project_ids),
+                    edge_attach_stats.get("query_count", 0),
+                    edge_attach_stats.get("items_seen", 0),
+                    edge_attach_stats.get("scanned_count", 0),
                 )
                 attach_record_extensions(tasks, "task_id", "task", edges_by_source)
                 attach_record_extensions(issues, "issue_id", "issue", edges_by_source)
