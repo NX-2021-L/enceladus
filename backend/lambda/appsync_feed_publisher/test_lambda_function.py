@@ -39,7 +39,19 @@ def _stream_record(
     approx_secs: float | None = 1_700_000_000.0,
 ) -> dict:
     def _typed(image: dict | None) -> dict:
-        return {k: {"S": str(v)} for k, v in (image or {}).items()}
+        out = {}
+        for k, v in (image or {}).items():
+            if isinstance(v, bool):
+                out[k] = {"BOOL": v}
+            elif isinstance(v, (int, float)):
+                out[k] = {"N": str(v)}
+            elif isinstance(v, dict):
+                out[k] = {"M": _typed(v)}
+            elif isinstance(v, list):
+                out[k] = {"L": [_typed({"_": x})["_"] for x in v]}
+            else:
+                out[k] = {"S": str(v)}
+        return out
 
     ddb: dict = {"SequenceNumber": seq}
     if approx_secs is not None:
@@ -455,3 +467,97 @@ def test_publish_to_appsync_without_full_body_is_unchanged():
 
     for body in sent_bodies.values():
         assert "record" not in body
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-M69: Decimal-safe JSON serialization
+#
+# DynamoDB Stream Number (N) attributes deserialize to Decimal
+# (boto3.dynamodb.types.TypeDeserializer); json.dumps has no native Decimal
+# support. Covers both the lightweight payload and the /records/{recordId}
+# full_body payload (ENC-TSK-L29) since full_body can carry Decimal at any
+# depth (top-level and nested inside M/L attributes).
+# ---------------------------------------------------------------------------
+
+
+def test_json_default_converts_integral_decimal_to_int():
+    from decimal import Decimal
+
+    assert mod._json_default(Decimal("3")) == 3
+    assert isinstance(mod._json_default(Decimal("3")), int)
+
+
+def test_json_default_converts_non_integral_decimal_to_float():
+    from decimal import Decimal
+
+    assert mod._json_default(Decimal("4.5")) == 4.5
+    assert isinstance(mod._json_default(Decimal("4.5")), float)
+
+
+def test_json_default_reraises_typeerror_for_unsupported_types():
+    class _Unserializable:
+        pass
+
+    try:
+        mod._json_default(_Unserializable())
+        assert False, "expected TypeError"
+    except TypeError:
+        pass
+
+
+def test_build_full_record_body_deserializes_number_attribute_as_decimal():
+    from decimal import Decimal
+
+    rec = _stream_record(
+        event_name="INSERT",
+        new_image={
+            "record_id": "task#ENC-TSK-M69T",
+            "item_id": "ENC-TSK-M69T",
+            "sync_version": 3,
+        },
+    )
+    full_body = mod.build_full_record_body(rec)
+    assert isinstance(full_body["sync_version"], Decimal)
+
+
+def test_publish_to_appsync_serializes_decimal_in_full_body_top_level_and_nested():
+    rec = _stream_record(
+        event_name="INSERT",
+        new_image={
+            "record_id": "task#ENC-TSK-M69T",
+            "item_id": "ENC-TSK-M69T",
+            "record_type": "task",
+            "project_id": "enceladus",
+            "sync_version": 7,
+            "checkout_count": 2.5,
+            "ontology": {"earned_points": 45, "max_points": 70},
+        },
+    )
+    payload = mod.build_event_payload(rec, 0)
+    full_body = mod.build_full_record_body(rec)
+    assert payload is not None and full_body is not None
+
+    sent_bodies = {}
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        body = json.loads(req.data.decode("utf-8"))
+        sent_bodies[body["channel"]] = json.loads(body["events"][0])
+        return _FakeResponse(200)
+
+    with patch.object(mod.urllib.request, "urlopen", side_effect=_fake_urlopen):
+        mod.publish_to_appsync(payload, full_body)  # must not raise
+
+    record = sent_bodies["/records/ENC-TSK-M69T"]["record"]
+    # Integral Decimal -> int (record ids/counts/versions must not drift to float)
+    assert record["sync_version"] == 7
+    assert isinstance(record["sync_version"], int)
+    # Non-integral Decimal -> float
+    assert record["checkout_count"] == 2.5
+    assert isinstance(record["checkout_count"], float)
+    # Nested Decimal (inside an M-typed sub-map) also serializes cleanly
+    assert record["ontology"]["earned_points"] == 45
+    assert isinstance(record["ontology"]["earned_points"], int)
+
+    # AC-23: lightweight channels are unaffected and still exclude "record"
+    assert "record" not in sent_bodies["/feed/updates"]
+    assert "record" not in sent_bodies["/projects/enceladus"]
