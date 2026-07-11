@@ -132,3 +132,4 @@ jobs:
             --role-name "enceladus-cloudformation-deploy-github-role" \
             --query "AttachedPolicies[?PolicyName=='enceladus-cfn-deploy-appsync-events-ops']" \
             --output table
+# CCI-d88c82ba53034b27bae8ed7b00be78c1
