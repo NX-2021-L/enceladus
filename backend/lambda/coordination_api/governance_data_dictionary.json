@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-11.2",
-  "updated_at": "2026-07-11T01:40:00Z",
-  "last_change_summary": "ENC-TSK-M55: enceladus_shared.relationship_store gains read-volume reduction for the feed edge-attach path -- RELATIONSHIPS_TABLE_AUTHORITATIVE env flag (CFN, gamma=true) skips the legacy tracker-table fallback pass in iter_project_relationship_items; new build_page_sk_ranges emits sort-key BETWEEN bounds from the capped feed page's source IDs (FEED_EDGE_RANGE_MAX_CLUSTERS, default 1 range/project; FEED_EDGE_RANGE_BOUND_DISABLED kill switch); feed_query passes source_ids_by_project + logs edge_attach_stats (query_count/items_seen/scanned_count). Also revives the gamma attach path, dead since the layer/vendoring gap (relationship_store missing from enceladus-shared:10).",
+  "version": "2026-07-11.3",
+  "updated_at": "2026-07-11T01:50:00Z",
+  "last_change_summary": "ENC-TSK-M55 REVERT (AC-5 rollback discipline): PR #986 reverted. Live gamma p95 regressed 4.63s -> 5.99s (mean 4.14s -> 5.77s, 22-request probes) because the change also revived the feed edge-attach path, dead since the enceladus-shared:10 layer/vendoring gap -- reviving it re-adds 14 sequential DDB Queries + O(records x edges) context_node compute per full refresh on the 256MB Lambda. relationship_store reverts to pre-M55 shape (RELATIONSHIPS_TABLE_AUTHORITATIVE / build_page_sk_ranges / range_bounding_disabled removed from code; the gamma CFN env var is removed in the same commit). The edge-attach restoration question (functionality vs latency) is handed to io -- see ENC-TSK-M55 worklog HANDOFF.",
   "owners": [
     "enceladus-platform"
   ],
@@ -4721,7 +4721,7 @@
       }
     },
     "enceladus_shared.relationship_store": {
-      "description": "Shared Python module (backend/lambda/shared_layer/python/enceladus_shared/relationship_store.py) for B65 Ph4 typed-relationship table extraction (ENC-TSK-L13). When RELATIONSHIPS_TABLE is set, writes dual-put forward+inverse pairs to enceladus-relationships and devops-project-tracker; reads merge the relationships table first with legacy tracker fallback on SK conflicts. ENC-TSK-M55: when RELATIONSHIPS_TABLE_AUTHORITATIVE is true (per-environment CFN flag; gamma live-verified 2026-07-11) the fallback pass is skipped on the feed/extensions read path, and per-project Queries may be range-bounded to the feed page's source-ID span.",
+      "description": "Shared Python module (backend/lambda/shared_layer/python/enceladus_shared/relationship_store.py) for B65 Ph4 typed-relationship table extraction (ENC-TSK-L13). When RELATIONSHIPS_TABLE is set, writes dual-put forward+inverse pairs to enceladus-relationships and devops-project-tracker; reads merge the relationships table first with legacy tracker fallback on SK conflicts. NOTE (ENC-TSK-M55, reverted): the M55 read-volume additions were reverted per AC-5; the feed/extensions attach path remains DEAD at runtime (record_extensions package-qualified import misses the layer, which lacks relationship_store) until io decides the latency-vs-functionality tradeoff.",
       "fields": {
         "write_target_tables": {
           "type": "function",
@@ -4733,19 +4733,7 @@
         },
         "iter_project_relationship_items": {
           "type": "function",
-          "definition": "Feed/extensions rel# read; relationships table keys win over tracker duplicates. ENC-TSK-M55: optional sk_ranges_by_project applies BETWEEN bounds per project instead of the full-history begins_with scan; optional stats dict accumulates query_count/items_seen/scanned_count; skips the tracker fallback pass when relationships_authoritative()."
-        },
-        "relationships_authoritative": {
-          "type": "function",
-          "definition": "True when env RELATIONSHIPS_TABLE_AUTHORITATIVE is 1/true/yes -- the relationships table is a verified superset of tracker rel# rows and the legacy fallback pass is skipped (ENC-TSK-M55 component 1)."
-        },
-        "build_page_sk_ranges": {
-          "type": "function",
-          "definition": "Builds rel# sort-key BETWEEN bounds covering every edge of the given source IDs, grouped by record-type prefix and coalesced to FEED_EDGE_RANGE_MAX_CLUSTERS ranges (default 1) (ENC-TSK-M55 component 2)."
-        },
-        "range_bounding_disabled": {
-          "type": "function",
-          "definition": "True when env FEED_EDGE_RANGE_BOUND_DISABLED is 1/true/yes -- reverts the feed edge-attach path to full-history begins_with scans without a code rollback (ENC-TSK-M55 kill switch)."
+          "definition": "Full-project rel# scan for feed/extensions; relationships table keys win over tracker duplicates. (M55 range-bounding reverted per AC-5.)"
         }
       }
     },
@@ -7901,7 +7889,7 @@
       "telemetry_eligible": false
     }
   },
-  "change_summary": "ENC-TSK-M55: enceladus_shared.relationship_store gains read-volume reduction for the feed edge-attach path -- RELATIONSHIPS_TABLE_AUTHORITATIVE env flag (CFN, gamma=true) skips the legacy tracker-table fallback pass in iter_project_relationship_items; new build_page_sk_ranges emits sort-key BETWEEN bounds from the capped feed page's source IDs (FEED_EDGE_RANGE_MAX_CLUSTERS, default 1 range/project; FEED_EDGE_RANGE_BOUND_DISABLED kill switch); feed_query passes source_ids_by_project + logs edge_attach_stats (query_count/items_seen/scanned_count). Also revives the gamma attach path, dead since the layer/vendoring gap (relationship_store missing from enceladus-shared:10).",
+  "change_summary": "ENC-TSK-M55 REVERT (AC-5 rollback discipline): PR #986 reverted. Live gamma p95 regressed 4.63s -> 5.99s (mean 4.14s -> 5.77s, 22-request probes) because the change also revived the feed edge-attach path, dead since the enceladus-shared:10 layer/vendoring gap -- reviving it re-adds 14 sequential DDB Queries + O(records x edges) context_node compute per full refresh on the 256MB Lambda. relationship_store reverts to pre-M55 shape (RELATIONSHIPS_TABLE_AUTHORITATIVE / build_page_sk_ranges / range_bounding_disabled removed from code; the gamma CFN env var is removed in the same commit). The edge-attach restoration question (functionality vs latency) is handed to io -- see ENC-TSK-M55 worklog HANDOFF.",
   "change_log": [
     {
       "version": "2026-07-08.05",
@@ -8252,6 +8240,11 @@
       "version": "2026-07-11.2",
       "date": "2026-07-11",
       "summary": "ENC-TSK-M55: enceladus_shared.relationship_store gains read-volume reduction for the feed edge-attach path -- RELATIONSHIPS_TABLE_AUTHORITATIVE env flag (CFN, gamma=true) skips the legacy tracker-table fallback pass in iter_project_relationship_items; new build_page_sk_ranges emits sort-key BETWEEN bounds from the capped feed page's source IDs (FEED_EDGE_RANGE_MAX_CLUSTERS, default 1 range/project; FEED_EDGE_RANGE_BOUND_DISABLED kill switch); feed_query passes source_ids_by_project + logs edge_attach_stats (query_count/items_seen/scanned_count). Also revives the gamma attach path, dead since the layer/vendoring gap (relationship_store missing from enceladus-shared:10)."
+    },
+    {
+      "version": "2026-07-11.3",
+      "date": "2026-07-11",
+      "summary": "ENC-TSK-M55 REVERT (AC-5 rollback discipline): PR #986 reverted. Live gamma p95 regressed 4.63s -> 5.99s (mean 4.14s -> 5.77s, 22-request probes) because the change also revived the feed edge-attach path, dead since the enceladus-shared:10 layer/vendoring gap -- reviving it re-adds 14 sequential DDB Queries + O(records x edges) context_node compute per full refresh on the 256MB Lambda. relationship_store reverts to pre-M55 shape (RELATIONSHIPS_TABLE_AUTHORITATIVE / build_page_sk_ranges / range_bounding_disabled removed from code; the gamma CFN env var is removed in the same commit). The edge-attach restoration question (functionality vs latency) is handed to io -- see ENC-TSK-M55 worklog HANDOFF."
     }
   ]
 }
