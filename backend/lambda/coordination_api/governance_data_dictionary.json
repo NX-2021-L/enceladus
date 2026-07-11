@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-11.01",
-  "updated_at": "2026-07-11T01:25:00Z",
-  "last_change_summary": "ENC-TSK-M59 / ENC-ISS-526: document_api _get_content read-through fallback + lazy env-prefix provision. The env-prefixed computed S3 key (S3_PREFIX/{project_id}/{document_id}.md) remains authoritative; when it is absent and the record's stored s3_key/s3_bucket name a different location (gamma documents-gamma rows cloned from prod carry the unprefixed prod s3_key with no body under gamma/agent-documents/), the Lambda falls back to a read-only fetch of the stored location and lazily copies the body into the computed key so the env prefix self-provisions on first read. Fallback swallows AccessDenied (deploy-order-safe ahead of the IAM grant); no-op on prod where S3EnvPrefix is empty. New IAM statement S3DocumentsSourceReadFallback (02-compute.yaml) grants read-only s3:GetObject on the unprefixed agent-documents/* path. Applies to single GET include_content and the PATCH append read (which previously risked clobbering a prod-cloned body with only the appended text on gamma). New docstore.document.s3_key field entry documents the contract.",
+  "version": "2026-07-11.2",
+  "updated_at": "2026-07-11T01:40:00Z",
+  "last_change_summary": "ENC-TSK-M55: enceladus_shared.relationship_store gains read-volume reduction for the feed edge-attach path -- RELATIONSHIPS_TABLE_AUTHORITATIVE env flag (CFN, gamma=true) skips the legacy tracker-table fallback pass in iter_project_relationship_items; new build_page_sk_ranges emits sort-key BETWEEN bounds from the capped feed page's source IDs (FEED_EDGE_RANGE_MAX_CLUSTERS, default 1 range/project; FEED_EDGE_RANGE_BOUND_DISABLED kill switch); feed_query passes source_ids_by_project + logs edge_attach_stats (query_count/items_seen/scanned_count). Also revives the gamma attach path, dead since the layer/vendoring gap (relationship_store missing from enceladus-shared:10).",
   "owners": [
     "enceladus-platform"
   ],
@@ -4721,7 +4721,7 @@
       }
     },
     "enceladus_shared.relationship_store": {
-      "description": "Shared Python module (backend/lambda/shared_layer/python/enceladus_shared/relationship_store.py) for B65 Ph4 typed-relationship table extraction (ENC-TSK-L13). When RELATIONSHIPS_TABLE is set, writes dual-put forward+inverse pairs to enceladus-relationships and devops-project-tracker; reads merge the relationships table first with legacy tracker fallback on SK conflicts.",
+      "description": "Shared Python module (backend/lambda/shared_layer/python/enceladus_shared/relationship_store.py) for B65 Ph4 typed-relationship table extraction (ENC-TSK-L13). When RELATIONSHIPS_TABLE is set, writes dual-put forward+inverse pairs to enceladus-relationships and devops-project-tracker; reads merge the relationships table first with legacy tracker fallback on SK conflicts. ENC-TSK-M55: when RELATIONSHIPS_TABLE_AUTHORITATIVE is true (per-environment CFN flag; gamma live-verified 2026-07-11) the fallback pass is skipped on the feed/extensions read path, and per-project Queries may be range-bounded to the feed page's source-ID span.",
       "fields": {
         "write_target_tables": {
           "type": "function",
@@ -4733,7 +4733,19 @@
         },
         "iter_project_relationship_items": {
           "type": "function",
-          "definition": "Full-project rel# scan for feed/extensions; relationships table keys win over tracker duplicates."
+          "definition": "Feed/extensions rel# read; relationships table keys win over tracker duplicates. ENC-TSK-M55: optional sk_ranges_by_project applies BETWEEN bounds per project instead of the full-history begins_with scan; optional stats dict accumulates query_count/items_seen/scanned_count; skips the tracker fallback pass when relationships_authoritative()."
+        },
+        "relationships_authoritative": {
+          "type": "function",
+          "definition": "True when env RELATIONSHIPS_TABLE_AUTHORITATIVE is 1/true/yes -- the relationships table is a verified superset of tracker rel# rows and the legacy fallback pass is skipped (ENC-TSK-M55 component 1)."
+        },
+        "build_page_sk_ranges": {
+          "type": "function",
+          "definition": "Builds rel# sort-key BETWEEN bounds covering every edge of the given source IDs, grouped by record-type prefix and coalesced to FEED_EDGE_RANGE_MAX_CLUSTERS ranges (default 1) (ENC-TSK-M55 component 2)."
+        },
+        "range_bounding_disabled": {
+          "type": "function",
+          "definition": "True when env FEED_EDGE_RANGE_BOUND_DISABLED is 1/true/yes -- reverts the feed edge-attach path to full-history begins_with scans without a code rollback (ENC-TSK-M55 kill switch)."
         }
       }
     },
@@ -7889,7 +7901,7 @@
       "telemetry_eligible": false
     }
   },
-  "change_summary": "ENC-TSK-M48: parallelize feed_query's OpenSearch-tier BatchGetItem hydration (_hydrate_records_via_batch_get now fans batches out via ThreadPoolExecutor, matching ENC-TSK-M36 sizing) to bring live gamma p95 under the 500ms bar. Internal concurrency fix only -- no schema, field, or endpoint change; feed_query.opensearch_tier entity unchanged.",
+  "change_summary": "ENC-TSK-M55: enceladus_shared.relationship_store gains read-volume reduction for the feed edge-attach path -- RELATIONSHIPS_TABLE_AUTHORITATIVE env flag (CFN, gamma=true) skips the legacy tracker-table fallback pass in iter_project_relationship_items; new build_page_sk_ranges emits sort-key BETWEEN bounds from the capped feed page's source IDs (FEED_EDGE_RANGE_MAX_CLUSTERS, default 1 range/project; FEED_EDGE_RANGE_BOUND_DISABLED kill switch); feed_query passes source_ids_by_project + logs edge_attach_stats (query_count/items_seen/scanned_count). Also revives the gamma attach path, dead since the layer/vendoring gap (relationship_store missing from enceladus-shared:10).",
   "change_log": [
     {
       "version": "2026-07-08.05",
@@ -8235,6 +8247,11 @@
       "version": "2026-07-10.02",
       "date": "2026-07-10",
       "summary": "ENC-TSK-M48: parallelize feed_query's OpenSearch-tier BatchGetItem hydration (_hydrate_records_via_batch_get now fans batches out via ThreadPoolExecutor, matching ENC-TSK-M36 sizing) to bring live gamma p95 under the 500ms bar. Internal concurrency fix only -- no schema, field, or endpoint change; feed_query.opensearch_tier entity unchanged."
+    },
+    {
+      "version": "2026-07-11.2",
+      "date": "2026-07-11",
+      "summary": "ENC-TSK-M55: enceladus_shared.relationship_store gains read-volume reduction for the feed edge-attach path -- RELATIONSHIPS_TABLE_AUTHORITATIVE env flag (CFN, gamma=true) skips the legacy tracker-table fallback pass in iter_project_relationship_items; new build_page_sk_ranges emits sort-key BETWEEN bounds from the capped feed page's source IDs (FEED_EDGE_RANGE_MAX_CLUSTERS, default 1 range/project; FEED_EDGE_RANGE_BOUND_DISABLED kill switch); feed_query passes source_ids_by_project + logs edge_attach_stats (query_count/items_seen/scanned_count). Also revives the gamma attach path, dead since the layer/vendoring gap (relationship_store missing from enceladus-shared:10)."
     }
   ]
 }
