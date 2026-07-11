@@ -999,19 +999,71 @@ def _upload_content(project_id: str, document_id: str, content: str) -> Tuple[st
     return key, content_hash, size_bytes
 
 
-def _get_content(project_id: str, document_id: str) -> Optional[str]:
-    """Download .md content from S3. Returns content string or None."""
+def _get_content(
+    project_id: str,
+    document_id: str,
+    stored_s3_key: Optional[str] = None,
+    stored_s3_bucket: Optional[str] = None,
+) -> Optional[str]:
+    """Download .md content from S3. Returns content string or None.
+
+    ENC-TSK-M59 / ENC-ISS-526: the env-prefixed computed key is authoritative,
+    but gamma's documents table carries rows cloned from prod whose s3_key
+    points at the unprefixed prod path and whose bodies were never provisioned
+    into the gamma prefix. When the computed key is absent and the record's
+    stored s3_key names a different location, fall back to a read-only fetch
+    of the stored location, then lazily copy the body to the computed key so
+    the env prefix self-provisions. The fallback swallows AccessDenied so the
+    Lambda stays safe to deploy ahead of the IAM read grant.
+    """
     s3 = _get_s3()
     key = _s3_key(project_id, document_id)
     try:
         resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
         return resp["Body"].read().decode("utf-8")
     except s3.exceptions.NoSuchKey:
+        pass
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "NoSuchKey":
+            raise
+
+    fallback_key = str(stored_s3_key or "").strip()
+    fallback_bucket = str(stored_s3_bucket or "").strip() or S3_BUCKET
+    if not fallback_key or (fallback_bucket == S3_BUCKET and fallback_key == key):
+        return None
+    try:
+        resp = s3.get_object(Bucket=fallback_bucket, Key=fallback_key)
+        content = resp["Body"].read().decode("utf-8")
+    except s3.exceptions.NoSuchKey:
         return None
     except ClientError as exc:
-        if exc.response["Error"]["Code"] == "NoSuchKey":
+        if exc.response["Error"]["Code"] in ("NoSuchKey", "AccessDenied", "403"):
+            logger.warning(
+                "stored-s3_key fallback read failed for %s (s3://%s/%s): %s",
+                document_id, fallback_bucket, fallback_key,
+                exc.response["Error"]["Code"],
+            )
             return None
         raise
+
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=content.encode("utf-8"),
+            ContentType="text/markdown; charset=utf-8",
+            CacheControl="max-age=0, s-maxage=300, must-revalidate",
+        )
+        logger.info(
+            "lazily provisioned %s into s3://%s/%s from s3://%s/%s",
+            document_id, S3_BUCKET, key, fallback_bucket, fallback_key,
+        )
+    except Exception as exc:
+        logger.warning(
+            "lazy provision of %s to s3://%s/%s failed: %s",
+            document_id, S3_BUCKET, key, exc,
+        )
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -2154,7 +2206,12 @@ def _get_single(document_id: str, qs: Dict) -> Dict:
     include_content = qs.get("include_content", "true").lower() == "true"
 
     if include_content:
-        content = _get_content(doc.get("project_id", ""), document_id)
+        content = _get_content(
+            doc.get("project_id", ""),
+            document_id,
+            stored_s3_key=doc.get("s3_key"),
+            stored_s3_bucket=doc.get("s3_bucket"),
+        )
         if content is not None:
             doc["content"] = content
 
@@ -2907,7 +2964,12 @@ def _handle_patch(event: Dict, claims: Dict, document_id: str) -> Dict:
         # Non-handoff/wave: format-agnostic general append (no validation)
 
         try:
-            existing_content = _get_content(project_id, document_id)
+            existing_content = _get_content(
+                project_id,
+                document_id,
+                stored_s3_key=existing.get("s3_key", {}).get("S"),
+                stored_s3_bucket=existing.get("s3_bucket", {}).get("S"),
+            )
             if existing_content is None:
                 existing_content = ""
             new_content = existing_content + "\n\n" + str(append_text)
