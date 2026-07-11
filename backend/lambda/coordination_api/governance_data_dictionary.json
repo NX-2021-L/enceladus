@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-11.4",
-  "updated_at": "2026-07-11T18:30:00Z",
-  "last_change_summary": "ENC-TSK-M69: appsync_feed_publisher's publish_to_appsync crashed on every invocation with TypeError: Object of type Decimal is not JSON serializable (DynamoDB Stream Number attributes deserialize to Decimal via boto3.dynamodb.types.TypeDeserializer). Added a single _json_default() hook applied to all three json.dumps call sites in the module (lightweight payload, /records/{recordId} full_body per ENC-TSK-L29, and the outer publish body) -- covers Decimal at any depth, not just the lightweight 7-field payload. Integral Decimal -> int (record IDs/counts/versions must not drift to float); non-integral -> float. No entity/field schema change, just a serialization-layer fix; bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-11.5",
+  "updated_at": "2026-07-11T19:05:00Z",
+  "last_change_summary": "ENC-TSK-M65: Added entity.composition declarations to the governance data dictionary for the two composite tracker entities, tracker.plan and tracker.feature. tracker.plan.composition documents that plan objectives (task/issue/feature -- never lesson) attach exclusively via the objectives_set array field, governed by plan.add_objective/plan.remove_objective/plan.reorder_objectives/plan.replace_objectives, with 1:N (practically N:M) cardinality, and clarifies that tracker.task.parent (task-to-task only) is not the plan composition mechanism. tracker.feature.composition documents that features compose tasks via the bidirectional related_task_ids <-> related_feature_ids cross-reference pair (ENC-TSK-L07 mirrored PATCH), N:M cardinality. No behavioral/API change, dictionary-only addition.",
   "owners": [
     "enceladus-platform"
   ],
@@ -678,6 +678,30 @@
           "definition": "DOC-* document IDs that declare this record in their related_items.",
           "usage_guidance": "Server-written only. ENC-TSK-L07 (B65 AC-5/AC-7): document_api's PUT/PATCH related_items handler atomically mirrors the document's own ID here (contains-check conditional append) whenever the document names this record in related_items. Not intended for direct tracker_set writes -- edit related_items on the document instead.",
           "inverse_of": "docstore.document.related_items"
+        }
+      }
+    },
+    "tracker.feature.composition": {
+      "description": "ENC-TSK-M65: Composition declarations for tracker.feature as a composite entity. Documents how features aggregate implementing task records.",
+      "fields": {
+        "child_record_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "enum": [
+            "task"
+          ],
+          "definition": "Record type a feature composes: tasks. (Issues cross-reference via related_issue_ids but that is a peer traceability link, not a composition/child relationship.)"
+        },
+        "attachment_mechanism": {
+          "type": "string",
+          "definition": "Composition is via bidirectional cross-reference arrays, not a governed execute-action set like plan.objectives_set: tracker.feature.related_task_ids <-> tracker.task.related_feature_ids. Per ENC-TSK-L07 (B63 AC-7 / B65 AC-5/AC-7), tracker_mutation's PATCH reverse-edge write atomically mirrors a newly-added ID on one side onto the inverse field on the target record in the same request, keeping both sides in sync. Set via tracker_set(field='related_task_ids'|'related_feature_ids', ...); accepts a list or JSON-stringified list (ENC-ISS-059 coercion).",
+          "usage_guidance": "tracker_set(field='related_task_ids', value=['ENC-TSK-NNN', ...]) on the feature, or the inverse on the task -- either write mirrors to both records."
+        },
+        "cardinality": {
+          "type": "string",
+          "definition": "Many-to-many (N:M). A task may be related to multiple features and a feature may relate to multiple tasks; there is no exclusive-ownership constraint."
         }
       }
     },
@@ -4862,6 +4886,36 @@
         }
       }
     },
+    "tracker.plan.composition": {
+      "description": "ENC-TSK-M65: Composition declarations for tracker.plan as a composite entity. Documents how plan records own/attach child objective records, distinct from the plan-contains graph relationship edges (see tracker.plan.relationship_types) which describe the resulting graph projection. This entity describes the governed attachment mechanism at the mutation-API level.",
+      "fields": {
+        "child_record_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "enum": [
+            "task",
+            "issue",
+            "feature"
+          ],
+          "definition": "Record types a plan may compose via objectives_set. Lessons are explicitly excluded -- objectives_set never holds lesson IDs. See tracker.plan.objectives_set."
+        },
+        "attachment_mechanism": {
+          "type": "string",
+          "definition": "Composition is via the objectives_set array field on the plan record (tracker.plan.objectives_set), not via a parent-pointer on the child. Append-only once the plan leaves 'drafted'/'incomplete' unless mutated through the governed plan.* execute actions: plan.add_objective (append one), plan.remove_objective (remove one, blocked if child is closed/completed/archived), plan.reorder_objectives (permutation only, no membership change), plan.replace_objectives (bulk replace, drafted status only). Direct tracker_set of objectives_set bypasses these guards and is discouraged; the governed actions enforce the append-only and terminal-status invariants at the API layer, with append-only additionally enforced at the DynamoDB level.",
+          "usage_guidance": "Prefer plan.add_objective / plan.remove_objective / plan.reorder_objectives / plan.replace_objectives over raw tracker_set(field='objectives_set') so guard conditions run."
+        },
+        "cardinality": {
+          "type": "string",
+          "definition": "One plan to many objective records (1:N). An objective record (task/issue/feature) may appear in more than one plan's objectives_set -- there is no reverse uniqueness constraint enforced by the tracker API, so composition is logically N:M in practice even though each plan's own set behaves as an ordered array of member IDs."
+        },
+        "note_task_parent_is_not_plan_composition": {
+          "type": "string",
+          "definition": "tracker.task.parent is a same-record-type pointer (task -> task only, per plan-derived task hierarchy convention, ENC-FTR-040) and is NOT how a plan composes its objectives. Plan-to-task composition happens exclusively via objectives_set; task.parent only expresses task-to-task phase/step nesting within a plan capture, and is not enforced by the tracker API."
+        }
+      }
+    },
     "feed_query.status_normalization": {
       "description": "Feed query Lambda status normalization whitelists controlling which lifecycle states are preserved in the live feed API response. Previously collapsed many task states to open. Now preserves all governed lifecycle states including coding_complete, committed, pushed, pr, merged_main, deploy_init, deploy_success, coding_updates. Feature states now include production and deprecated. Lesson records added with draft/active/graduated/deprecated statuses (ENC-TSK-A55).",
       "fields": {
@@ -8250,6 +8304,11 @@
       "version": "2026-07-11.4",
       "date": "2026-07-11",
       "summary": "ENC-TSK-M69: appsync_feed_publisher's publish_to_appsync crashed on every invocation with TypeError: Object of type Decimal is not JSON serializable (DynamoDB Stream Number attributes deserialize to Decimal via boto3.dynamodb.types.TypeDeserializer). Added a single _json_default() hook applied to all three json.dumps call sites in the module (lightweight payload, /records/{recordId} full_body per ENC-TSK-L29, and the outer publish body) -- covers Decimal at any depth, not just the lightweight 7-field payload. Integral Decimal -> int (record IDs/counts/versions must not drift to float); non-integral -> float. No entity/field schema change, just a serialization-layer fix; bumping per the lambda_function.py touch guard."
+    },
+    {
+      "version": "2026-07-11.5",
+      "date": "2026-07-11",
+      "summary": "ENC-TSK-M65: Added entity.composition declarations to the governance data dictionary for the two composite tracker entities, tracker.plan and tracker.feature. tracker.plan.composition documents that plan objectives (task/issue/feature -- never lesson) attach exclusively via the objectives_set array field, governed by plan.add_objective/plan.remove_objective/plan.reorder_objectives/plan.replace_objectives, with 1:N (practically N:M) cardinality, and clarifies that tracker.task.parent (task-to-task only) is not the plan composition mechanism. tracker.feature.composition documents that features compose tasks via the bidirectional related_task_ids <-> related_feature_ids cross-reference pair (ENC-TSK-L07 mirrored PATCH), N:M cardinality. No behavioral/API change, dictionary-only addition."
     }
   ]
 }
