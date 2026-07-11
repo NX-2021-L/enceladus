@@ -67,6 +67,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
@@ -376,6 +377,23 @@ def build_full_record_body(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _json_default(obj: Any) -> Any:
+    """json.dumps default= hook, applied to EVERY dumps call in this module.
+
+    DynamoDB Stream Number (N) attributes deserialize to Decimal
+    (boto3.dynamodb.types.TypeDeserializer) — json.dumps has no native
+    Decimal support. Covers both the lightweight payload and the
+    /records/{recordId} full_body payload (ENC-TSK-L29), since full_body is
+    a full deserialized NewImage and Decimal can appear at any depth.
+
+    Integral Decimals become int, not float — record IDs, counts, and
+    versions must round-trip exactly, not drift into float representation.
+    """
+    if isinstance(obj, Decimal):
+        return int(obj) if obj == obj.to_integral_value() else float(obj)
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
 def _endpoint_url() -> str:
     """Normalize APPSYNC_EVENTS_HTTP_ENDPOINT to a full /event POST URL."""
     ep = APPSYNC_EVENTS_HTTP_ENDPOINT
@@ -427,9 +445,9 @@ def publish_to_appsync(payload: Dict[str, Any], full_body: Optional[Dict[str, An
         raise RuntimeError("APPSYNC_EVENTS_HTTP_ENDPOINT is not configured")
 
     host = url.split("://", 1)[-1].split("/", 1)[0]
-    event_json = json.dumps(payload, separators=(",", ":"))
+    event_json = json.dumps(payload, separators=(",", ":"), default=_json_default)
     detail_event_json = (
-        json.dumps({**payload, "record": full_body}, separators=(",", ":"))
+        json.dumps({**payload, "record": full_body}, separators=(",", ":"), default=_json_default)
         if full_body is not None
         else event_json
     )
@@ -440,7 +458,7 @@ def publish_to_appsync(payload: Dict[str, Any], full_body: Optional[Dict[str, An
             "channel": channel,
             "events": [detail_event_json if is_record_channel else event_json],
         }
-        body = json.dumps(body_obj, separators=(",", ":")).encode("utf-8")
+        body = json.dumps(body_obj, separators=(",", ":"), default=_json_default).encode("utf-8")
 
         headers = {"Content-Type": "application/json", "host": host}
         if APPSYNC_EVENTS_API_KEY:
