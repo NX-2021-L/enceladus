@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-11.3",
-  "updated_at": "2026-07-11T01:50:00Z",
-  "last_change_summary": "ENC-TSK-M55 REVERT (AC-5 rollback discipline): PR #986 reverted. Live gamma p95 regressed 4.63s -> 5.99s (mean 4.14s -> 5.77s, 22-request probes) because the change also revived the feed edge-attach path, dead since the enceladus-shared:10 layer/vendoring gap -- reviving it re-adds 14 sequential DDB Queries + O(records x edges) context_node compute per full refresh on the 256MB Lambda. relationship_store reverts to pre-M55 shape (RELATIONSHIPS_TABLE_AUTHORITATIVE / build_page_sk_ranges / range_bounding_disabled removed from code; the gamma CFN env var is removed in the same commit). The edge-attach restoration question (functionality vs latency) is handed to io -- see ENC-TSK-M55 worklog HANDOFF.",
+  "version": "2026-07-11.4",
+  "updated_at": "2026-07-11T18:30:00Z",
+  "last_change_summary": "ENC-TSK-M69: appsync_feed_publisher's publish_to_appsync crashed on every invocation with TypeError: Object of type Decimal is not JSON serializable (DynamoDB Stream Number attributes deserialize to Decimal via boto3.dynamodb.types.TypeDeserializer). Added a single _json_default() hook applied to all three json.dumps call sites in the module (lightweight payload, /records/{recordId} full_body per ENC-TSK-L29, and the outer publish body) -- covers Decimal at any depth, not just the lightweight 7-field payload. Integral Decimal -> int (record IDs/counts/versions must not drift to float); non-integral -> float. No entity/field schema change, just a serialization-layer fix; bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7889,7 +7889,7 @@
       "telemetry_eligible": false
     }
   },
-  "change_summary": "ENC-TSK-M55 REVERT (AC-5 rollback discipline): PR #986 reverted. Live gamma p95 regressed 4.63s -> 5.99s (mean 4.14s -> 5.77s, 22-request probes) because the change also revived the feed edge-attach path, dead since the enceladus-shared:10 layer/vendoring gap -- reviving it re-adds 14 sequential DDB Queries + O(records x edges) context_node compute per full refresh on the 256MB Lambda. relationship_store reverts to pre-M55 shape (RELATIONSHIPS_TABLE_AUTHORITATIVE / build_page_sk_ranges / range_bounding_disabled removed from code; the gamma CFN env var is removed in the same commit). The edge-attach restoration question (functionality vs latency) is handed to io -- see ENC-TSK-M55 worklog HANDOFF.",
+  "change_summary": "ENC-TSK-M69: appsync_feed_publisher's publish_to_appsync crashed on every invocation with TypeError: Object of type Decimal is not JSON serializable (DynamoDB Stream Number attributes deserialize to Decimal via boto3.dynamodb.types.TypeDeserializer). Added a single _json_default() hook applied to all three json.dumps call sites in the module (lightweight payload, /records/{recordId} full_body per ENC-TSK-L29, and the outer publish body) -- covers Decimal at any depth, not just the lightweight 7-field payload. Integral Decimal -> int (record IDs/counts/versions must not drift to float); non-integral -> float. No entity/field schema change, just a serialization-layer fix; bumping per the lambda_function.py touch guard.",
   "change_log": [
     {
       "version": "2026-07-08.05",
@@ -8245,6 +8245,11 @@
       "version": "2026-07-11.3",
       "date": "2026-07-11",
       "summary": "ENC-TSK-M55 REVERT (AC-5 rollback discipline): PR #986 reverted. Live gamma p95 regressed 4.63s -> 5.99s (mean 4.14s -> 5.77s, 22-request probes) because the change also revived the feed edge-attach path, dead since the enceladus-shared:10 layer/vendoring gap -- reviving it re-adds 14 sequential DDB Queries + O(records x edges) context_node compute per full refresh on the 256MB Lambda. relationship_store reverts to pre-M55 shape (RELATIONSHIPS_TABLE_AUTHORITATIVE / build_page_sk_ranges / range_bounding_disabled removed from code; the gamma CFN env var is removed in the same commit). The edge-attach restoration question (functionality vs latency) is handed to io -- see ENC-TSK-M55 worklog HANDOFF."
+    },
+    {
+      "version": "2026-07-11.4",
+      "date": "2026-07-11",
+      "summary": "ENC-TSK-M69: appsync_feed_publisher's publish_to_appsync crashed on every invocation with TypeError: Object of type Decimal is not JSON serializable (DynamoDB Stream Number attributes deserialize to Decimal via boto3.dynamodb.types.TypeDeserializer). Added a single _json_default() hook applied to all three json.dumps call sites in the module (lightweight payload, /records/{recordId} full_body per ENC-TSK-L29, and the outer publish body) -- covers Decimal at any depth, not just the lightweight 7-field payload. Integral Decimal -> int (record IDs/counts/versions must not drift to float); non-integral -> float. No entity/field schema change, just a serialization-layer fix; bumping per the lambda_function.py touch guard."
     }
   ]
 }
