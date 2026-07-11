@@ -40,6 +40,19 @@ Parameters:
     Type: String
     Default: arn:aws:lambda:us-west-2:356364570033:layer:enceladus-shared:10
     Description: Shared enceladus_shared layer ARN (mirrors 02-compute.yaml pin).
+  ApiKeyExpiresEpoch:
+    Type: Number
+    Description: >
+      Unix epoch seconds (rounded to the nearest hour by AppSync) for
+      FeedEventsApiKey's expiration. MUST be supplied at deploy time by the
+      deploying workflow (computed as "now + up to 365 days", AppSync's hard
+      per-key maximum) — an AWS::AppSync::ApiKey with no Expires property
+      silently defaults to a 7-DAY expiration, which is what caused
+      ENC-TSK-M56 (gamma realtime layer returning 401 UnauthorizedException
+      on every connection_init, ~9 days after the key was first provisioned
+      with no explicit Expires). The deploy workflow recomputes and re-passes
+      this on every run so each deploy also re-extends the key, giving this
+      value a rolling-renewal side effect rather than a fixed cliff.
 
 Conditions:
   IsProduction: !Equals [!Ref Environment, "production"]
@@ -82,6 +95,12 @@ Resources:
     Properties:
       ApiId: !GetAtt FeedEventsApi.ApiId
       Description: !Sub "enceladus feed events API key${EnvironmentSuffix}"
+      # ENC-TSK-M56: explicit Expires — without it AppSync defaults to 7 days,
+      # which silently expired the key that gates the entire realtime layer.
+      # UpdateApiKey (what this maps to) is an in-place update, not a
+      # replacement, so the ApiKeyId — and every deployed client's copy of it
+      # — stays stable across renewals.
+      Expires: !Ref ApiKeyExpiresEpoch
 
   # ---------------------------------------------------------------------------
   # Channel namespaces — wildcard subscription support per namespace.
