@@ -18,14 +18,12 @@ import { StatusChip } from '../components/StatusChip'
 import { RecordCard } from '../components/RecordCard'
 import { VirtualList } from '../components/VirtualList'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { projectRegistryQueryOptions } from '../api/projectRegistry'
 import {
   fetchAgentSessions,
   fetchAgentTypes,
   fetchCoordinationRequests,
   fetchEscalations,
   fetchLessons,
-  type AgentSession,
   type AgentType,
   type CoordinationRequest,
   type EscalationRecord,
@@ -36,6 +34,15 @@ import { applyTokens } from './applyCoordinationFilter'
 import './coordination.css'
 
 const EMPTY_FILTER: PropertyFilterQuery = { tokens: [], operation: 'and' }
+
+// ENC-ISS-527 / ENC-TSK-M60: the coordination monitor is the enceladus
+// governance cockpit's own view, so it is pinned to the enceladus project.
+// Do NOT derive this from `projects[0]` -- the project-registry order is not
+// guaranteed to put enceladus first (on gamma it resolves to 'agentharmony'),
+// which silently made fetchLessons/fetchEscalations query the wrong project and
+// rendered the Lessons/Escalations sub-tabs empty. Same fix already applied in
+// GovernanceRoute.tsx and SkillLibraryRoute.tsx.
+const COORDINATION_PROJECT_ID = 'enceladus'
 
 const coordinationRequestsQueryOptions = {
   queryKey: ['coordination', 'monitor'] as const,
@@ -60,18 +67,15 @@ export function CoordinationRoute() {
   const [activeTabId, setActiveTabId] = useState(initialTab || 'sessions')
   const [filterQuery, setFilterQuery] = useState<PropertyFilterQuery>(EMPTY_FILTER)
 
-  const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
-  const projectId = projects[0]?.project_id ?? 'enceladus'
-
   const sessionsQuery = useQuery(agentSessionsQueryOptions)
   const agentTypesQuery = useQuery(agentTypesQueryOptions)
   const lessonsQuery = useQuery({
-    queryKey: ['coordination', 'lessons', projectId] as const,
-    queryFn: ({ signal }) => fetchLessons(projectId, { signal }),
+    queryKey: ['coordination', 'lessons', COORDINATION_PROJECT_ID] as const,
+    queryFn: ({ signal }) => fetchLessons(COORDINATION_PROJECT_ID, { signal }),
   })
   const escalationsQuery = useQuery({
-    queryKey: ['coordination', 'escalations', projectId] as const,
-    queryFn: ({ signal }) => fetchEscalations(projectId, { signal }),
+    queryKey: ['coordination', 'escalations', COORDINATION_PROJECT_ID] as const,
+    queryFn: ({ signal }) => fetchEscalations(COORDINATION_PROJECT_ID, { signal }),
   })
   const crqQuery = useQuery(coordinationRequestsQueryOptions)
 
