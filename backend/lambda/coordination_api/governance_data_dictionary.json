@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-11.7",
-  "updated_at": "2026-07-11T19:25:00Z",
-  "last_change_summary": "ENC-TSK-M66 follow-up: corrected the documented tracker.creation_rules route to GET /api/v1/coordination/tracker/creation_rules (public /api/v1/tracker/* is CloudFront-routed to the tracker query API, not coordination_api).",
+  "version": "2026-07-11.8",
+  "updated_at": "2026-07-11T19:45:00Z",
+  "last_change_summary": "ENC-ISS-531: appsync_feed_publisher now logs the AppSync response body on non-2xx publish errors, classifies permanent 4xx rejections (400/403/404, excluding 429) as poison records -- skipped with a PoisonRecordSkipped CloudWatch metric instead of retried forever -- and the DynamoDB Stream EventSourceMapping gained MaximumRetryAttempts=5, BisectBatchOnFunctionError, and an on-failure SQS DLQ destination as a generic backstop. No entity/field schema change, just serialization/retry-handling; bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7968,7 +7968,7 @@
       }
     }
   },
-  "change_summary": "ENC-TSK-M69: appsync_feed_publisher's publish_to_appsync crashed on every invocation with TypeError: Object of type Decimal is not JSON serializable (DynamoDB Stream Number attributes deserialize to Decimal via boto3.dynamodb.types.TypeDeserializer). Added a single _json_default() hook applied to all three json.dumps call sites in the module (lightweight payload, /records/{recordId} full_body per ENC-TSK-L29, and the outer publish body) -- covers Decimal at any depth, not just the lightweight 7-field payload. Integral Decimal -> int (record IDs/counts/versions must not drift to float); non-integral -> float. No entity/field schema change, just a serialization-layer fix; bumping per the lambda_function.py touch guard.",
+  "change_summary": "ENC-ISS-531: appsync_feed_publisher now logs the AppSync response body on non-2xx publish errors, classifies permanent 4xx rejections (400/403/404, excluding 429) as poison records -- skipped with a PoisonRecordSkipped CloudWatch metric instead of retried forever -- and the DynamoDB Stream EventSourceMapping gained MaximumRetryAttempts=5, BisectBatchOnFunctionError, and an on-failure SQS DLQ destination as a generic backstop. No entity/field schema change, just serialization/retry-handling; bumping per the lambda_function.py touch guard.",
   "change_log": [
     {
       "version": "2026-07-08.05",
@@ -8344,6 +8344,11 @@
       "version": "2026-07-11.7",
       "date": "2026-07-11",
       "summary": "ENC-TSK-M66 route fix: the creation_rules route registered in PR #995 at /api/v1/tracker/creation_rules was unreachable through CloudFront (that prefix routes to the tracker query API). Route moved under the coordination prefix: GET /api/v1/coordination/tracker/creation_rules, matching the MCP server's _coordination_api_request URL construction; bare /api/v1/tracker form retained for direct API Gateway callers. Dictionary entity description updated to match."
+    },
+    {
+      "version": "2026-07-11.8",
+      "date": "2026-07-11",
+      "summary": "ENC-ISS-531: appsync_feed_publisher now logs the AppSync response body on non-2xx publish errors, classifies permanent 4xx rejections (400/403/404, excluding 429) as poison records -- skipped with a PoisonRecordSkipped CloudWatch metric instead of retried forever -- and the DynamoDB Stream EventSourceMapping gained MaximumRetryAttempts=5, BisectBatchOnFunctionError, and an on-failure SQS DLQ destination as a generic backstop. No entity/field schema change, just serialization/retry-handling; bumping per the lambda_function.py touch guard."
     }
   ]
 }
