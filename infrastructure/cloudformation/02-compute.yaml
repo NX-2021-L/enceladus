@@ -4380,6 +4380,18 @@ Resources:
                   - s3:GetObject
                   - s3:DeleteObject
                 Resource: !Sub "arn:aws:s3:::jreese-net/${S3EnvPrefix}agent-documents/*"
+              # ENC-TSK-M59 / ENC-ISS-526: gamma's documents table carries rows cloned
+              # from prod whose s3_key names the UNPREFIXED prod path; the bodies were
+              # never provisioned into ${S3EnvPrefix}agent-documents/. Read-only access
+              # to the unprefixed path lets _get_content serve those bodies and lazily
+              # copy them into the env prefix (writes stay env-scoped via
+              # S3DocumentsObjectAccess). No-op for prod, where S3EnvPrefix is empty
+              # and this duplicates the statement above.
+              - Sid: S3DocumentsSourceReadFallback
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: "arn:aws:s3:::jreese-net/agent-documents/*"
               # ENC-TSK-I70 / ENC-TSK-I62: env-prefix-aware so the gamma stack can read its
               # own gamma/governance/live + gamma/mobile/v1/reference objects. Was hardcoded to
               # the unprefixed prod paths, so the gamma governance sync 500'd on s3:GetObject
