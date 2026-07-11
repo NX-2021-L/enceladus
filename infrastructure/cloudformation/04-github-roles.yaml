@@ -737,6 +737,13 @@ Resources:
               - appsync:ListTagsForResource
             Resource:
               - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/yri2ycadyfhjtm5cdmu3pxm4iq"
+          # NOTE: AppSync Events sub-resources (ApiKey, ChannelNamespace) use a
+          # "/v1/apis/{id}/..." ARN path -- DIFFERENT from the un-prefixed
+          # "apis/{id}" form the Api resource itself uses (confirmed live:
+          # v1 of this policy used the un-prefixed form for these two
+          # statements too and appsync:UpdateApiKey AccessDenied'd with AWS's
+          # own error message reporting the true ARN as
+          # "arn:aws:appsync:us-west-2:356364570033:/v1/apis/.../apikeys/...").
           - Sid: AppSyncEventsApiKeyManage
             Effect: Allow
             Action:
@@ -746,7 +753,7 @@ Resources:
               - appsync:UpdateApiKey
               - appsync:DeleteApiKey
             Resource:
-              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/yri2ycadyfhjtm5cdmu3pxm4iq/apikeys/*"
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:/v1/apis/yri2ycadyfhjtm5cdmu3pxm4iq/apikeys/*"
           - Sid: AppSyncEventsChannelNamespaceManage
             Effect: Allow
             Action:
@@ -756,7 +763,7 @@ Resources:
               - appsync:UpdateChannelNamespace
               - appsync:DeleteChannelNamespace
             Resource:
-              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:apis/yri2ycadyfhjtm5cdmu3pxm4iq/channelNamespace/*"
+              - !Sub "arn:aws:appsync:us-west-2:${AWS::AccountId}:/v1/apis/yri2ycadyfhjtm5cdmu3pxm4iq/channelNamespace/*"
 
   # ENC-TSK-L55 codify: enceladus-ui-cdn-deploy was created out-of-band
   # (v4 UI CDN bootstrap, K54/ENC-TSK-K65 lineage) and attached to
