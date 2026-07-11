@@ -265,6 +265,18 @@ Resources:
       RouteKey: POST /api/v1/coordination/components
       Target: !Sub integrations/${CoordinationApiIntegration}
 
+  # ENC-TSK-M66: tracker.creation_rules -- type-keyed pre-creation contract
+  # surface (dictionary-derived; no record_id). Handler lives in
+  # coordination_api lambda_function.py (_handle_tracker_creation_rules);
+  # the MCP server passthrough calls COORDINATION_API_BASE
+  # + /tracker/creation_rules, which needs this explicit HTTP API route.
+  RouteTrackerCreationRules:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/v1/coordination/tracker/creation_rules
+      Target: !Sub integrations/${CoordinationApiIntegration}
+
   # ENC-TSK-L34 (B67 PWA2.0 Coordination monitor page): these two GET routes were
   # implemented server-side by ENC-TSK-I38/J43 (_handle_agent_session_list /
   # _handle_agent_type_list in coordination_api/lambda_function.py, backed by
