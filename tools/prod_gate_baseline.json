@@ -128,6 +128,13 @@
       ],
       "notes": "ENC-TSK-J64: environment: v3-prod \u2014 despite the name it patches the SHARED CFN deploy role object"
     },
+    "iam-cfn-deploy-role-appsync-events-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-M56: environment: v3-prod -- patches the SHARED CFN deploy role object (same pattern as iam-cfn-deploy-role-gamma-patch.yml); grants appsync:* scoped to the specific gamma FeedEventsApi ApiId via a customer-managed policy (create-or-new-version + attach), not inline put-role-policy, since this role's inline aggregate is already at/near the 10,240-byte cap. Forward-ported from v4/main (PR #983) for workflow_dispatch discoverability."
+    },
     "iam-cfn-deploy-role-nat-gateway-patch.yml": {
       "class": "prod-mutating",
       "gated_jobs": [
