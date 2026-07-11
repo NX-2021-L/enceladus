@@ -469,10 +469,71 @@ def publish_to_appsync(payload: Dict[str, Any], full_body: Optional[Dict[str, An
             headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=APPSYNC_EVENTS_TIMEOUT) as resp:
-            status = getattr(resp, "status", resp.getcode())
-            if status >= 300:
-                raise RuntimeError(f"AppSync publish to {channel} returned HTTP {status}")
+        try:
+            with urllib.request.urlopen(req, timeout=APPSYNC_EVENTS_TIMEOUT) as resp:
+                status = getattr(resp, "status", resp.getcode())
+                if status >= 300:
+                    raise RuntimeError(f"AppSync publish to {channel} returned HTTP {status}")
+        except urllib.error.HTTPError as exc:
+            # ENC-ISS-531: the bare "HTTP Error 400" exception message hides
+            # AppSync's actual rejection reason. Read+log the response body
+            # (once, here, before it's consumed) so poison records are
+            # diagnosable without a synthetic-invoke workaround.
+            try:
+                resp_body = exc.read().decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001 — body read is best-effort
+                resp_body = "<unreadable>"
+            logger.error(
+                "appsync_feed_publisher: AppSync rejected publish to %s: HTTP %d %s body=%s",
+                channel,
+                exc.code,
+                exc.reason,
+                resp_body[:1000],
+            )
+            raise
+
+
+# ---------------------------------------------------------------------------
+# ENC-ISS-531: permanent-error classification + poison-record metric.
+#
+# BatchSize=1 + indefinite DynamoDB Streams retry means a record that can
+# NEVER succeed (e.g. AppSync permanently rejects its shape) blocks every
+# subsequent record in its shard forever unless something stops retrying it.
+# ---------------------------------------------------------------------------
+
+_cloudwatch = boto3.client("cloudwatch")
+
+POISON_METRIC_NAMESPACE = "Enceladus/AppSyncFeedPublisher"
+
+# 429 (rate limit) is deliberately excluded -- that's transient and should
+# keep retrying. 400/403/404 mean the exact payload will never be accepted.
+_PERMANENT_HTTP_STATUSES = frozenset({400, 403, 404})
+
+
+def _is_permanent_publish_error(exc: BaseException) -> bool:
+    """True if retrying this exact record will never succeed."""
+    return isinstance(exc, urllib.error.HTTPError) and exc.code in _PERMANENT_HTTP_STATUSES
+
+
+def _emit_poison_metric(seq: str, http_status: int) -> None:
+    try:
+        _cloudwatch.put_metric_data(
+            Namespace=POISON_METRIC_NAMESPACE,
+            MetricData=[
+                {
+                    "MetricName": "PoisonRecordSkipped",
+                    "Value": 1,
+                    "Unit": "Count",
+                    "Dimensions": [{"Name": "HttpStatus", "Value": str(http_status)}],
+                }
+            ],
+        )
+    except Exception:  # noqa: BLE001 — metrics emission must never break the skip path
+        logger.warning(
+            "appsync_feed_publisher: failed to emit PoisonRecordSkipped metric for seq=%s",
+            seq,
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +577,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     failed_sequence_numbers: List[str] = []
     published = 0
     skipped = 0
+    poisoned = 0
 
     for batch_counter, record in enumerate(records):
         seq = (record.get("dynamodb", {}) or {}).get("SequenceNumber") or record.get("eventID")
@@ -550,13 +612,28 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 exc,
                 exc_info=True,
             )
+            if _is_permanent_publish_error(exc):
+                # ENC-ISS-531: retrying this exact payload will never
+                # succeed. Skip (do NOT report as a batch failure) so
+                # DynamoDB Streams advances past it instead of blocking the
+                # shard forever; surface it via a metric instead of silence.
+                poisoned += 1
+                _emit_poison_metric(seq, exc.code)
+                logger.error(
+                    "appsync_feed_publisher: POISON record seq=%s permanently rejected "
+                    "(HTTP %d) -- skipping, will NOT retry",
+                    seq,
+                    exc.code,
+                )
+                continue
             if seq:
                 failed_sequence_numbers.append(seq)
 
     logger.info(
-        "appsync_feed_publisher: complete published=%d skipped=%d failed=%d",
+        "appsync_feed_publisher: complete published=%d skipped=%d poisoned=%d failed=%d",
         published,
         skipped,
+        poisoned,
         len(failed_sequence_numbers),
     )
     return _batch_failure_response(failed_sequence_numbers)

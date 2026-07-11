@@ -8,10 +8,12 @@ and the ReportBatchItemFailures partial-batch contract.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import sys
-from unittest.mock import patch
+import urllib.error
+from unittest.mock import MagicMock, patch
 
 # Set env BEFORE importing so module-level config resolves for DRY_RUN unit runs.
 os.environ.setdefault("APPSYNC_EVENTS_HTTP_ENDPOINT", "example.appsync-api.us-west-2.amazonaws.com")
@@ -561,3 +563,109 @@ def test_publish_to_appsync_serializes_decimal_in_full_body_top_level_and_nested
     # AC-23: lightweight channels are unaffected and still exclude "record"
     assert "record" not in sent_bodies["/feed/updates"]
     assert "record" not in sent_bodies["/projects/enceladus"]
+
+
+# ---------------------------------------------------------------------------
+# ENC-ISS-531: permanent-error classification, poison-record skip + metric,
+# and response-body logging. BatchSize=1 + indefinite DynamoDB Streams retry
+# means a record AppSync will NEVER accept must be skipped, not retried
+# forever (which silently blocks its whole shard).
+# ---------------------------------------------------------------------------
+
+
+def _http_error(code, body=b"Bad Request detail"):
+    return urllib.error.HTTPError(
+        url="https://example.appsync-api.us-west-2.amazonaws.com/event",
+        code=code,
+        msg="Bad Request",
+        hdrs=None,
+        fp=io.BytesIO(body),
+    )
+
+
+def test_is_permanent_publish_error_classifies_4xx_except_429():
+    assert mod._is_permanent_publish_error(_http_error(400)) is True
+    assert mod._is_permanent_publish_error(_http_error(403)) is True
+    assert mod._is_permanent_publish_error(_http_error(404)) is True
+    # 429 is transient (rate limit) -- must keep retrying, not poison-skip
+    assert mod._is_permanent_publish_error(_http_error(429)) is False
+    assert mod._is_permanent_publish_error(_http_error(500)) is False
+    assert mod._is_permanent_publish_error(RuntimeError("boom")) is False
+
+
+def test_publish_to_appsync_logs_response_body_and_reraises_on_http_error():
+    rec = _stream_record(
+        event_name="INSERT",
+        new_image={"record_id": "task#ENC-TSK-P1", "item_id": "ENC-TSK-P1", "project_id": "enceladus"},
+    )
+    payload = mod.build_event_payload(rec, 0)
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise _http_error(400, body=b'{"errors":[{"message":"invalid channel"}]}')
+
+    with patch.object(mod.urllib.request, "urlopen", side_effect=_fake_urlopen), patch.object(
+        mod.logger, "error"
+    ) as mock_log_error:
+        try:
+            mod.publish_to_appsync(payload)
+            assert False, "expected HTTPError to propagate"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+
+    # The response body must have been read and logged, not just the bare
+    # "HTTP Error 400" exception string.
+    logged = " ".join(str(c) for c in mock_log_error.call_args.args)
+    assert "invalid channel" in logged
+
+
+def test_handler_skips_poison_record_and_emits_metric_without_retrying():
+    event = {
+        "Records": [
+            _stream_record(
+                event_name="INSERT",
+                new_image={"record_id": "task#ENC-TSK-P2", "item_id": "ENC-TSK-P2", "project_id": "enceladus"},
+                seq="poison-seq",
+            ),
+        ]
+    }
+    fake_cloudwatch = MagicMock()
+    with patch.object(mod, "DRY_RUN", False), patch.object(
+        mod, "publish_to_appsync", side_effect=_http_error(400)
+    ), patch.object(mod, "_cloudwatch", fake_cloudwatch):
+        result = mod.handler(event, None)
+
+    # NOT reported as a batch failure -- DynamoDB Streams must advance past
+    # a record that can never succeed, not retry it forever.
+    assert result == {}
+    fake_cloudwatch.put_metric_data.assert_called_once()
+    call_kwargs = fake_cloudwatch.put_metric_data.call_args.kwargs
+    assert call_kwargs["Namespace"] == mod.POISON_METRIC_NAMESPACE
+    assert call_kwargs["MetricData"][0]["MetricName"] == "PoisonRecordSkipped"
+
+
+def test_handler_still_retries_transient_5xx_without_emitting_metric():
+    event = {
+        "Records": [
+            _stream_record(
+                event_name="INSERT",
+                new_image={"record_id": "task#ENC-TSK-P3", "item_id": "ENC-TSK-P3", "project_id": "enceladus"},
+                seq="transient-seq",
+            ),
+        ]
+    }
+    fake_cloudwatch = MagicMock()
+    with patch.object(mod, "DRY_RUN", False), patch.object(
+        mod, "publish_to_appsync", side_effect=_http_error(503)
+    ), patch.object(mod, "_cloudwatch", fake_cloudwatch):
+        result = mod.handler(event, None)
+
+    # Unchanged existing behavior: transient errors ARE retried.
+    assert result == {"batchItemFailures": [{"itemIdentifier": "transient-seq"}]}
+    fake_cloudwatch.put_metric_data.assert_not_called()
+
+
+def test_emit_poison_metric_failure_does_not_raise():
+    fake_cloudwatch = MagicMock()
+    fake_cloudwatch.put_metric_data.side_effect = RuntimeError("cloudwatch unavailable")
+    with patch.object(mod, "_cloudwatch", fake_cloudwatch):
+        mod._emit_poison_metric("seq-x", 400)  # must not raise

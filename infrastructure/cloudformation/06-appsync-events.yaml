@@ -199,6 +199,28 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/devops-appsync-feed-publisher${EnvironmentSuffix}*"
+        # ENC-ISS-531: PutMetricData has no resource-level restriction in IAM
+        # (must be "*"); this is the ONLY action this policy grants.
+        - PolicyName: PoisonRecordMetric
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EmitPoisonRecordMetric
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+        # ENC-ISS-531: EventSourceMapping DestinationConfig.OnFailure delivery
+        # to the DLQ is performed using this function's own execution role.
+        - PolicyName: PoisonRecordDlq
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SendToPoisonRecordDlq
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt AppSyncFeedPublisherDlq.Arn
 
   # ---------------------------------------------------------------------------
   # Publisher Lambda (Gen2 gamma: arm64/python3.12). ZipFile placeholder ONLY —
@@ -237,6 +259,26 @@ Resources:
           Value: pwa-realtime
 
   # ---------------------------------------------------------------------------
+  # ENC-ISS-531: on-failure destination for the stream EventSourceMapping.
+  # Generic backstop for failure modes the code doesn't explicitly classify
+  # as permanent (in-code poison-skip in lambda_function.py handles the known
+  # 4xx case directly and never reaches this queue) -- e.g. a bug that always
+  # throws for some record shape, or an outage that outlasts the retry budget.
+  # 14-day retention (SQS max) gives ample time to notice + drain manually.
+  # ---------------------------------------------------------------------------
+  AppSyncFeedPublisherDlq:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: !Sub "devops-appsync-feed-publisher-dlq${EnvironmentSuffix}"
+      MessageRetentionPeriod: 1209600 # 14 days (SQS max)
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: pwa-realtime
+
+  # ---------------------------------------------------------------------------
   # DynamoDB Stream -> Lambda EventSourceMapping.
   # BatchSize=1 + MaximumBatchingWindowInSeconds=0 for lowest-latency fan-out.
   # ReportBatchItemFailures + LATEST starting position.
@@ -246,6 +288,13 @@ Resources:
   # exports its stream ARN as <DataStackName>-TrackerStreamArn, so we import it
   # here rather than touching the live/imported table (see GovernanceAudit /
   # Convergence stream triggers in 02-compute.yaml for the same pattern).
+  #
+  # ENC-ISS-531: MaximumRetryAttempts (bounded, was unset = infinite retry) +
+  # BisectBatchOnFunctionError (a no-op at BatchSize=1 today, but forward-
+  # compatible if BatchSize ever grows) + DestinationConfig.OnFailure so a
+  # record neither published nor classified as permanently-poison by the code
+  # still gets isolated after the retry budget instead of blocking its shard
+  # forever with zero visibility.
   # ---------------------------------------------------------------------------
   AppSyncFeedTrackerStreamTrigger:
     Type: AWS::Lambda::EventSourceMapping
@@ -256,6 +305,11 @@ Resources:
       FunctionName: !Ref AppSyncFeedPublisherFunction
       BatchSize: 1
       MaximumBatchingWindowInSeconds: 0
+      MaximumRetryAttempts: 5
+      BisectBatchOnFunctionError: true
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt AppSyncFeedPublisherDlq.Arn
       StartingPosition: LATEST
       FunctionResponseTypes:
         - ReportBatchItemFailures
