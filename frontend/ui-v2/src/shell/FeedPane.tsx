@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react'
+import { useRef } from 'react'
 import { Button, Flashbar } from '../design-system'
 import { useUiStore } from '../store/uiStore'
 import { useFeedConnectionStore } from '../store/feedConnectionStore'
@@ -46,10 +46,7 @@ export function FeedPane({ onClose }: { onClose?: () => void }) {
   const bufferedCount = useFeedBufferStore((s) => s.bufferedEvents.length)
   const scrollRef = useRef<HTMLElement>(null)
 
-  const visibleEvents = useMemo(
-    () => filterFeedEvents(events, filters.recordTypes),
-    [events, filters.recordTypes],
-  )
+  const visibleEvents = filterFeedEvents(events, filters.recordTypes)
 
   const showNewActivities = () => {
     mergeBufferedEvents()
