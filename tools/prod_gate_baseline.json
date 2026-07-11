@@ -50,6 +50,13 @@
       ],
       "notes": "v4/main-only file; gamma-only by construction (guard-gamma-only job refuses non-gamma, v3-prod FROZEN per DOC-499FA089EC30); ENC-TSK-J63 plan/apply split with apply environment: v4-gamma"
     },
+    "cloudformation-appsync-events-stack-deploy.yml": {
+      "class": "already-gated",
+      "gated_jobs": [
+        "apply"
+      ],
+      "notes": "ENC-TSK-M56: new workflow, gamma-only by construction (guard-gamma-only job refuses non-gamma, v3-prod FROZEN per DOC-499FA089EC30); plan/apply split mirroring cloudformation-agent-auth-stack-deploy.yml, apply environment: v4-gamma. Adds a monthly schedule trigger for API-key rolling renewal (schedule events have no branch ref, pinned gamma via github.event_name == 'schedule' in ENVIRONMENT_SUFFIX)."
+    },
     "cloudformation-opensearch-node-stack-deploy.yml": {
       "class": "already-gated",
       "gated_jobs": [
