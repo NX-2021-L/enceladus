@@ -27,6 +27,7 @@ def build_action_registries(flags: ActionFeatureFlags) -> Tuple[
         "tracker.list": {"tool": "tracker_list"},
         "tracker.pending_updates": {"tool": "tracker_pending_updates"},
         "tracker.validation_rules": {"tool": "tracker_validation_rules"},
+        "tracker.creation_rules": {"tool": "tracker_creation_rules"},
         "documents.search": {"tool": "documents_search"},
         "documents.get": {"tool": "documents_get"},
         "documents.list": {"tool": "documents_list"},

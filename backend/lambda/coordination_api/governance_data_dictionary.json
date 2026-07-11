@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-11.5",
-  "updated_at": "2026-07-11T19:05:00Z",
-  "last_change_summary": "ENC-TSK-M65: Added entity.composition declarations to the governance data dictionary for the two composite tracker entities, tracker.plan and tracker.feature. tracker.plan.composition documents that plan objectives (task/issue/feature -- never lesson) attach exclusively via the objectives_set array field, governed by plan.add_objective/plan.remove_objective/plan.reorder_objectives/plan.replace_objectives, with 1:N (practically N:M) cardinality, and clarifies that tracker.task.parent (task-to-task only) is not the plan composition mechanism. tracker.feature.composition documents that features compose tasks via the bidirectional related_task_ids <-> related_feature_ids cross-reference pair (ENC-TSK-L07 mirrored PATCH), N:M cardinality. No behavioral/API change, dictionary-only addition.",
+  "version": "2026-07-11.6",
+  "updated_at": "2026-07-11T19:20:00Z",
+  "last_change_summary": "ENC-TSK-M66: Added mcp_server.tracker_creation_rules describing the new tracker.creation_rules search action (dictionary-derived pre-creation contract surface, no record_id).",
   "owners": [
     "enceladus-platform"
   ],
@@ -7941,6 +7941,31 @@
       "owner": "search",
       "source": "ENC-TSK-M39",
       "telemetry_eligible": false
+    },
+    "mcp_server.tracker_creation_rules": {
+      "description": "ENC-TSK-M66: MCP search action tracker.creation_rules (tool tracker_creation_rules, route GET /api/v1/tracker/creation_rules on coordination_api). Type-keyed pre-creation contract surface -- given record_type (+ optional parent_type), returns required fields, valid initial status, and attachment contract with NO record_id. Response is derived entirely from this governance dictionary at request time: required fields are the universal 'title' base field plus any entities['tracker.<type>'].fields entries whose constraints.min_items or constraints.min_length require a non-empty value; valid initial status is entities['tracker.<type>'].status.enum[0]; attachment contract reads entities['tracker.<type>.composition'] (what the type composes) and, when parent_type is supplied, entities['tracker.<parent_type>.composition'] (whether record_type is in that parent's child_record_types, per ENC-TSK-M65's plan/feature composition entries).",
+      "fields": {
+        "search_action": {
+          "type": "search_action",
+          "definition": "search(action='tracker.creation_rules', arguments={record_type, parent_type?})."
+        },
+        "arguments": {
+          "type": "object",
+          "definition": "record_type (required, e.g. task/feature/plan/issue); parent_type (optional, validates attachment as a child of that parent type)."
+        },
+        "response_shape": {
+          "type": "object",
+          "definition": "record_type, parent_type, valid_initial_status, status_enum, required_fields, required_field_detail (per-field derivation reason + constraints), attachment_contract (composes / as_child_of.valid / allowed_child_record_types / attachment_mechanism / cardinality)."
+        },
+        "derivation_source": {
+          "type": "rule",
+          "definition": "No hardcoded per-type contract table. Scans entities['tracker.<type>'].fields for constraints.min_items>=1 or constraints.min_length>=1; the sole non-dictionary-derived fact is the universal 'title' field, named explicitly in code (_CREATION_RULES_UNIVERSAL_REQUIRED_FIELDS) rather than folded into a silent per-type table."
+        },
+        "contract_parity": {
+          "type": "rule",
+          "definition": "required_fields/valid_initial_status match tracker_mutation lambda_function.py _handle_create_record and _DEFAULT_STATUS for task (title, acceptance_criteria; open), feature (title, user_story, acceptance_criteria; planned), and plan (title only; drafted) -- see test_creation_rules.py contract test."
+        }
+      }
     }
   },
   "change_summary": "ENC-TSK-M69: appsync_feed_publisher's publish_to_appsync crashed on every invocation with TypeError: Object of type Decimal is not JSON serializable (DynamoDB Stream Number attributes deserialize to Decimal via boto3.dynamodb.types.TypeDeserializer). Added a single _json_default() hook applied to all three json.dumps call sites in the module (lightweight payload, /records/{recordId} full_body per ENC-TSK-L29, and the outer publish body) -- covers Decimal at any depth, not just the lightweight 7-field payload. Integral Decimal -> int (record IDs/counts/versions must not drift to float); non-integral -> float. No entity/field schema change, just a serialization-layer fix; bumping per the lambda_function.py touch guard.",
@@ -8309,6 +8334,11 @@
       "version": "2026-07-11.5",
       "date": "2026-07-11",
       "summary": "ENC-TSK-M65: Added entity.composition declarations to the governance data dictionary for the two composite tracker entities, tracker.plan and tracker.feature. tracker.plan.composition documents that plan objectives (task/issue/feature -- never lesson) attach exclusively via the objectives_set array field, governed by plan.add_objective/plan.remove_objective/plan.reorder_objectives/plan.replace_objectives, with 1:N (practically N:M) cardinality, and clarifies that tracker.task.parent (task-to-task only) is not the plan composition mechanism. tracker.feature.composition documents that features compose tasks via the bidirectional related_task_ids <-> related_feature_ids cross-reference pair (ENC-TSK-L07 mirrored PATCH), N:M cardinality. No behavioral/API change, dictionary-only addition."
+    },
+    {
+      "version": "2026-07-11.6",
+      "date": "2026-07-11",
+      "summary": "ENC-TSK-M66: Registered the tracker.creation_rules search action (tool tracker_creation_rules; coordination_api route GET /api/v1/tracker/creation_rules; MCP server thin passthrough in tools/enceladus-mcp-server/server.py). Given record_type (+ optional parent_type), returns required fields, valid initial status, and attachment contract derived from entities['tracker.<type>'] and entities['tracker.<type>.composition'] (the ENC-TSK-M65 composition sections for plan/feature) -- no record_id, no hardcoded contract table."
     }
   ]
 }

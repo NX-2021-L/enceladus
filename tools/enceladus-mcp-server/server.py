@@ -3599,6 +3599,33 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="tracker_creation_rules",
+            description=(
+                "ENC-TSK-M66: Type-keyed pre-creation contract surface. Returns required "
+                "fields, the valid initial status, and the attachment contract for a tracker "
+                "record_type — no record_id required, derived entirely from the governance "
+                "data dictionary (including entity.composition sections)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "record_type": {
+                        "type": "string",
+                        "description": "Tracker record type, e.g. task, feature, plan, issue.",
+                    },
+                    "parent_type": {
+                        "type": "string",
+                        "description": (
+                            "Optional parent record type to also validate/describe the "
+                            "attachment contract for record_type as a child of parent_type "
+                            "(e.g. record_type=task, parent_type=plan)."
+                        ),
+                    },
+                },
+                "required": ["record_type"],
+            },
+        ),
+        Tool(
             name="tracker_list",
             description="Returns tracker records for a project, filterable by type and status. Paginated (default 25).",
             inputSchema={
@@ -5921,6 +5948,23 @@ async def _tracker_validation_rules(args: dict) -> list[TextContent]:
             result["dictionary"] = dict_resp
 
     return _result_text(result)
+
+
+async def _tracker_creation_rules(args: dict) -> list[TextContent]:
+    """ENC-TSK-M66: type-keyed pre-creation contract surface. No record_id —
+    thin passthrough to coordination_api's dictionary-derived
+    GET /api/v1/tracker/creation_rules (all derivation logic lives there so
+    the PR-deployed Lambda path, not this out-of-band server, owns the
+    contract facts)."""
+    record_type = args["record_type"]
+    parent_type = args.get("parent_type")
+
+    query: Dict[str, Any] = {"record_type": record_type}
+    if parent_type:
+        query["parent_type"] = parent_type
+
+    resp = _coordination_api_request("GET", "/tracker/creation_rules", query=query)
+    return _result_text(resp)
 
 
 async def _tracker_list(args: dict) -> list[TextContent]:
@@ -9772,6 +9816,7 @@ _TOOL_HANDLERS = {
     "projects_get": _projects_get,
     "tracker_get": _tracker_get,
     "tracker_validation_rules": _tracker_validation_rules,
+    "tracker_creation_rules": _tracker_creation_rules,
     "tracker_list": _tracker_list,
     "tracker_pending_updates": _tracker_pending_updates,
     "tracker_set": _tracker_set,
