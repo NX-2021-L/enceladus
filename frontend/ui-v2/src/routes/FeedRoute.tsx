@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Autosuggest, ButtonDropdown } from '../design-system'
 import { projectRegistryQueryOptions, resolveProjectFromRecordId } from '../api/projectRegistry'
 import { Badge } from '../components/Badge'
@@ -74,70 +74,61 @@ export function FeedRoute() {
   const [recentItems, setRecentItems] = useState<RecentlyViewedEntry[]>([])
   const listRef = useRef<HTMLDivElement>(null)
 
-  const filterQuery = useMemo(() => parseFilterQuery(f, op), [f, op])
+  const filterQuery = parseFilterQuery(f, op)
 
-  const patchFeedSearch = useCallback(
-    (patch: Partial<FeedRouteSearch>, replace = true) => {
-      navigate({
-        search: (prev) => {
-          const next = { ...prev, ...patch }
-          persistFeedReturnSearch(next)
-          return next
-        },
-        replace,
-      })
-    },
-    [navigate],
-  )
+  // AC-16: React Compiler owns memoization -- no manual useCallback.
+  const patchFeedSearch = (patch: Partial<FeedRouteSearch>, replace = true) => {
+    navigate({
+      search: (prev) => {
+        const next = { ...prev, ...patch }
+        persistFeedReturnSearch(next)
+        return next
+      },
+      replace,
+    })
+  }
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
   const { events, isHydrating } = useRealtimeFeed()
   const { isWarm } = useCacheEngineState()
-  const corpus = useMemo(() => {
+  const corpus = (() => {
     const fromEvents = buildSearchCorpus(events, projects)
     if (!isWarm) return fromEvents
     const byId = new Map(getCacheEngine().searchIndex.all().map((row) => [row.recordId, row]))
     for (const row of fromEvents) byId.set(row.recordId, row)
     return [...byId.values()]
-  }, [events, projects, isWarm])
+  })()
   // ENC-TSK-L32: feed search is reciprocally scoped to exclude document
   // records — the Docs page (DocsRoute) owns document-scoped search.
-  const feedCorpus = useMemo(() => excludeRecordType(corpus, 'document'), [corpus])
+  const feedCorpus = excludeRecordType(corpus, 'document')
   const projectId = projects[0]?.project_id ?? 'enceladus'
 
   const tiered = useTieredSearch({ projectId, query: q }, feedCorpus)
-  const filteredHits = useMemo(
-    () => excludeRecordType(sortSearchHits(applyPropertyFilter(tiered.hits, filterQuery), sort), 'document'),
-    [tiered.hits, filterQuery, sort],
-  )
+  const filteredHits = excludeRecordType(sortSearchHits(applyPropertyFilter(tiered.hits, filterQuery), sort), 'document')
   const visibleHits = filteredHits.slice(0, visibleCount)
 
   const hybridEnabled = Boolean(q.trim())
   const requestKey = `${q}|${f}|${op}|${sort}`
   useRequestFirstPageTelemetry(requestKey, hybridEnabled, tiered.hybridPending)
 
-  const searchSuggestions = useMemo(() => {
-    if (isWarm) {
-      return excludeRecordType(getCacheEngine().searchIndex.suggest(q, 12), 'document')
+  const searchSuggestions = isWarm
+    ? excludeRecordType(getCacheEngine().searchIndex.suggest(q, 12), 'document').map((row) => ({
+        value: row.recordId,
+        description: row.title,
+        tag: row.recordType,
+      }))
+    : feedCorpus
+        .filter((row) => {
+          const needle = q.trim().toLowerCase()
+          if (!needle) return true
+          return row.recordId.toLowerCase().includes(needle) || row.title.toLowerCase().includes(needle)
+        })
+        .slice(0, 12)
         .map((row) => ({
           value: row.recordId,
           description: row.title,
           tag: row.recordType,
         }))
-    }
-    return feedCorpus
-      .filter((row) => {
-        const needle = q.trim().toLowerCase()
-        if (!needle) return true
-        return row.recordId.toLowerCase().includes(needle) || row.title.toLowerCase().includes(needle)
-      })
-      .slice(0, 12)
-      .map((row) => ({
-        value: row.recordId,
-        description: row.title,
-        tag: row.recordType,
-      }))
-  }, [feedCorpus, q, isWarm])
 
   const suggestionsKey = searchSuggestions.map((row) => row.value).join(',')
   const { markKeystroke } = useKeystrokeSuggestionTelemetry(suggestionsKey)

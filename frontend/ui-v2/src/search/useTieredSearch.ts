@@ -1,4 +1,3 @@
-import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { hybridSearchQueryOptions } from '../api/searchQueryOptions'
 import { searchLocalKeyword } from './localKeywordSearch'
@@ -15,10 +14,7 @@ export function useTieredSearch(
   params: HybridSearchParams,
   corpus: LocalSearchRecord[],
 ): TieredSearchSnapshot {
-  const localHits = useMemo(
-    () => searchLocalKeyword(corpus, params.query ?? ''),
-    [corpus, params.query],
-  )
+  const localHits = searchLocalKeyword(corpus, params.query ?? '')
 
   const hybridEnabled =
     Boolean(params.projectId) &&
@@ -29,10 +25,7 @@ export function useTieredSearch(
     enabled: hybridEnabled,
   })
 
-  const merged = useMemo(
-    () => mergeSearchResults(localHits, hybridQuery.data, params.projectId),
-    [localHits, hybridQuery.data, params.projectId],
-  )
+  const merged = mergeSearchResults(localHits, hybridQuery.data, params.projectId)
 
   return {
     hits: merged.hits,
