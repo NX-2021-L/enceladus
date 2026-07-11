@@ -17018,9 +17018,17 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     if method == "GET" and path == "/api/v1/governance/dictionary":
         return _handle_governance_dictionary(event)
 
-    # GET /api/v1/tracker/creation_rules (ENC-TSK-M66: type-keyed pre-creation
-    # contract surface, dictionary-derived, no record_id required)
-    if method == "GET" and path == "/api/v1/tracker/creation_rules":
+    # GET /api/v1/coordination/tracker/creation_rules (ENC-TSK-M66: type-keyed
+    # pre-creation contract surface, dictionary-derived, no record_id required).
+    # NOTE: the public /api/v1/tracker/* prefix is CloudFront-routed to the
+    # tracker query API, NOT this Lambda -- the reachable path is under the
+    # /api/v1/coordination prefix (COORDINATION_API_BASE + /tracker/creation_rules,
+    # matching how the MCP server's _coordination_api_request builds URLs).
+    # The bare /api/v1/tracker/... form is kept for direct API Gateway callers.
+    if method == "GET" and path in (
+        "/api/v1/coordination/tracker/creation_rules",
+        "/api/v1/tracker/creation_rules",
+    ):
         return _handle_tracker_creation_rules(event)
 
     # GET/PUT /api/v1/governance/{file_name...}  (ENC-FTR-040: GET added for MCP server)

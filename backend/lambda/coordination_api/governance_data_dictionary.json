@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-11.6",
-  "updated_at": "2026-07-11T19:20:00Z",
-  "last_change_summary": "ENC-TSK-M66: Added mcp_server.tracker_creation_rules describing the new tracker.creation_rules search action (dictionary-derived pre-creation contract surface, no record_id).",
+  "version": "2026-07-11.7",
+  "updated_at": "2026-07-11T19:25:00Z",
+  "last_change_summary": "ENC-TSK-M66 follow-up: corrected the documented tracker.creation_rules route to GET /api/v1/coordination/tracker/creation_rules (public /api/v1/tracker/* is CloudFront-routed to the tracker query API, not coordination_api).",
   "owners": [
     "enceladus-platform"
   ],
@@ -7943,7 +7943,7 @@
       "telemetry_eligible": false
     },
     "mcp_server.tracker_creation_rules": {
-      "description": "ENC-TSK-M66: MCP search action tracker.creation_rules (tool tracker_creation_rules, route GET /api/v1/tracker/creation_rules on coordination_api). Type-keyed pre-creation contract surface -- given record_type (+ optional parent_type), returns required fields, valid initial status, and attachment contract with NO record_id. Response is derived entirely from this governance dictionary at request time: required fields are the universal 'title' base field plus any entities['tracker.<type>'].fields entries whose constraints.min_items or constraints.min_length require a non-empty value; valid initial status is entities['tracker.<type>'].status.enum[0]; attachment contract reads entities['tracker.<type>.composition'] (what the type composes) and, when parent_type is supplied, entities['tracker.<parent_type>.composition'] (whether record_type is in that parent's child_record_types, per ENC-TSK-M65's plan/feature composition entries).",
+      "description": "ENC-TSK-M66: MCP search action tracker.creation_rules (tool tracker_creation_rules, route GET /api/v1/coordination/tracker/creation_rules on coordination_api (the /api/v1/tracker/* public prefix is CloudFront-routed to the tracker query API, so the reachable route lives under the coordination prefix)). Type-keyed pre-creation contract surface -- given record_type (+ optional parent_type), returns required fields, valid initial status, and attachment contract with NO record_id. Response is derived entirely from this governance dictionary at request time: required fields are the universal 'title' base field plus any entities['tracker.<type>'].fields entries whose constraints.min_items or constraints.min_length require a non-empty value; valid initial status is entities['tracker.<type>'].status.enum[0]; attachment contract reads entities['tracker.<type>.composition'] (what the type composes) and, when parent_type is supplied, entities['tracker.<parent_type>.composition'] (whether record_type is in that parent's child_record_types, per ENC-TSK-M65's plan/feature composition entries).",
       "fields": {
         "search_action": {
           "type": "search_action",
@@ -8339,6 +8339,11 @@
       "version": "2026-07-11.6",
       "date": "2026-07-11",
       "summary": "ENC-TSK-M66: Registered the tracker.creation_rules search action (tool tracker_creation_rules; coordination_api route GET /api/v1/tracker/creation_rules; MCP server thin passthrough in tools/enceladus-mcp-server/server.py). Given record_type (+ optional parent_type), returns required fields, valid initial status, and attachment contract derived from entities['tracker.<type>'] and entities['tracker.<type>.composition'] (the ENC-TSK-M65 composition sections for plan/feature) -- no record_id, no hardcoded contract table."
+    },
+    {
+      "version": "2026-07-11.7",
+      "date": "2026-07-11",
+      "summary": "ENC-TSK-M66 route fix: the creation_rules route registered in PR #995 at /api/v1/tracker/creation_rules was unreachable through CloudFront (that prefix routes to the tracker query API). Route moved under the coordination prefix: GET /api/v1/coordination/tracker/creation_rules, matching the MCP server's _coordination_api_request URL construction; bare /api/v1/tracker form retained for direct API Gateway callers. Dictionary entity description updated to match."
     }
   ]
 }
