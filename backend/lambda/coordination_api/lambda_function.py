@@ -588,6 +588,7 @@ _ENCELADUS_ALLOWED_RAW_TOOLS = {
     "tracker_list",
     "tracker_pending_updates",
     "tracker_validation_rules",
+    "tracker_creation_rules",
     "tracker_set",
     "tracker_log",
     "tracker_create",
@@ -14881,6 +14882,129 @@ def _handle_governance_dictionary(event: Dict[str, Any]) -> Dict[str, Any]:
     return _response(200, result)
 
 
+# ENC-TSK-M66: universal record fields predate the governed per-type field
+# dictionary and are enforced by tracker_mutation for every record type
+# regardless of entity.fields declarations (record has no title -> 400 in
+# _handle_create_record). This is the one contract fact NOT derivable from
+# an entities["tracker.<type>"].fields scan, so it is named explicitly here
+# rather than silently baked into a per-type table.
+_CREATION_RULES_UNIVERSAL_REQUIRED_FIELDS = ("title",)
+
+
+def _handle_tracker_creation_rules(event: Dict[str, Any]) -> Dict[str, Any]:
+    """GET /api/v1/tracker/creation_rules — type-keyed pre-creation contract surface (ENC-TSK-M66).
+
+    Derives the required-fields, valid-initial-status, and attachment contract
+    for a tracker record_type entirely from governance_data_dictionary.json
+    (entities["tracker.<type>"] and entities["tracker.<type>.composition"]),
+    with no record_id / no hardcoded per-type contract table. Required fields
+    beyond the universal 'title' are discovered by scanning each type's field
+    definitions for constraints that make the field non-optional at create
+    time (constraints.min_items >= 1 or constraints.min_length >= 1), which
+    matches the acceptance_criteria / user_story / evidence gates enforced in
+    tracker_mutation's _handle_create_record.
+    """
+    qs = event.get("queryStringParameters") or {}
+    record_type = str(qs.get("record_type") or "").strip().lower()
+    parent_type = str(qs.get("parent_type") or "").strip().lower() or None
+
+    if not record_type:
+        return _error(400, "Query parameter 'record_type' is required.", code="VALIDATION_ERROR")
+
+    dictionary, source_meta = _load_governance_dictionary()
+    entities = dictionary.get("entities")
+    if not isinstance(entities, dict):
+        return _error(500, "Governance dictionary payload missing 'entities' object.", code="INTERNAL_ERROR")
+
+    entity_key = f"tracker.{record_type}"
+    entity_def = entities.get(entity_key)
+    if not isinstance(entity_def, dict):
+        valid_types = sorted(
+            k.split(".", 1)[1]
+            for k in entities
+            if k.startswith("tracker.") and "." not in k.split(".", 1)[1]
+            and isinstance(entities[k], dict) and "fields" in entities[k]
+        )
+        return _error(
+            404,
+            f"Unknown tracker record_type '{record_type}'.",
+            code="NOT_FOUND",
+            valid_record_types=valid_types,
+        )
+
+    fields = entity_def.get("fields") if isinstance(entity_def.get("fields"), dict) else {}
+
+    status_def = fields.get("status") if isinstance(fields.get("status"), dict) else {}
+    status_enum = status_def.get("enum") if isinstance(status_def.get("enum"), list) else []
+    valid_initial_status = status_enum[0] if status_enum else None
+
+    required_fields = list(_CREATION_RULES_UNIVERSAL_REQUIRED_FIELDS)
+    required_field_detail: Dict[str, Any] = {
+        f: {"reason": "universal base record field (enforced for all record types)"}
+        for f in required_fields
+    }
+    for field_name, field_def in fields.items():
+        if not isinstance(field_def, dict):
+            continue
+        constraints = field_def.get("constraints")
+        if not isinstance(constraints, dict):
+            continue
+        min_items = constraints.get("min_items")
+        min_length = constraints.get("min_length")
+        if (isinstance(min_items, (int, float)) and min_items >= 1) or (
+            isinstance(min_length, (int, float)) and min_length >= 1
+        ):
+            required_fields.append(field_name)
+            required_field_detail[field_name] = {
+                "reason": f"governance dictionary {entity_key}.fields.{field_name}.constraints requires a non-empty value",
+                "constraints": constraints,
+            }
+
+    # Attachment contract: what THIS type composes (its own <type>.composition
+    # entry, e.g. plan/feature), and — when parent_type is supplied — how this
+    # type attaches under that parent (parent's <type>.composition entry).
+    attachment_contract: Dict[str, Any] = {}
+    own_composition = entities.get(f"{entity_key}.composition")
+    if isinstance(own_composition, dict):
+        attachment_contract["composes"] = own_composition.get("fields", own_composition)
+
+    if parent_type:
+        parent_key = f"tracker.{parent_type}.composition"
+        parent_composition = entities.get(parent_key)
+        if not isinstance(parent_composition, dict):
+            attachment_contract["as_child_of"] = {
+                "parent_type": parent_type,
+                "valid": False,
+                "reason": f"No composition contract found for parent_type '{parent_type}' ({parent_key} not in governance dictionary).",
+            }
+        else:
+            parent_fields = parent_composition.get("fields", {}) if isinstance(parent_composition.get("fields"), dict) else {}
+            child_types_def = parent_fields.get("child_record_types", {}) if isinstance(parent_fields.get("child_record_types"), dict) else {}
+            allowed_children = child_types_def.get("enum") if isinstance(child_types_def.get("enum"), list) else []
+            attachment_contract["as_child_of"] = {
+                "parent_type": parent_type,
+                "valid": record_type in allowed_children,
+                "allowed_child_record_types": allowed_children,
+                "attachment_mechanism": parent_fields.get("attachment_mechanism"),
+                "cardinality": parent_fields.get("cardinality"),
+            }
+
+    return _response(
+        200,
+        {
+            "source": source_meta,
+            "dictionary_version": dictionary.get("version"),
+            "record_type": record_type,
+            "parent_type": parent_type,
+            "valid_initial_status": valid_initial_status,
+            "status_enum": status_enum,
+            "required_fields": required_fields,
+            "required_field_detail": required_field_detail,
+            "attachment_contract": attachment_contract,
+        },
+    )
+
+
 def _trigger_governance_doc_sync_push(file_name: str, content_hash: str) -> None:
     """Fire-and-forget Lambda invocation to push-sync a governance file to the document store.
 
@@ -16893,6 +17017,11 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     # GET /api/v1/governance/dictionary
     if method == "GET" and path == "/api/v1/governance/dictionary":
         return _handle_governance_dictionary(event)
+
+    # GET /api/v1/tracker/creation_rules (ENC-TSK-M66: type-keyed pre-creation
+    # contract surface, dictionary-derived, no record_id required)
+    if method == "GET" and path == "/api/v1/tracker/creation_rules":
+        return _handle_tracker_creation_rules(event)
 
     # GET/PUT /api/v1/governance/{file_name...}  (ENC-FTR-040: GET added for MCP server)
     match_gov_file = re.fullmatch(r"/api/v1/governance/(.+)", path)
