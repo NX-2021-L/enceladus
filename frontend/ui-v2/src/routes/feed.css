@@ -73,7 +73,14 @@
    opt into the wider minimum once there's room for it. */
 @media (min-width: 48.0625rem) {
   .feed-route__search {
-    min-width: calc(var(--space-16) * 12);
+    /* ENC-ISS-528: cap the wider minimum at the container width. `min-width`
+       otherwise wins over the container, so the flat 768px floor (4rem*12)
+       exceeded the sidebar-narrowed content column at ~769-1070px viewports
+       and forced the search box (and page) into horizontal overflow, while the
+       FeedPropertyFilter below it — which has no min-width — stayed constrained.
+       min(..., 100%) keeps the 768px preference when there's room but lets the
+       box shrink to fit the column, matching the lower input's behavior. */
+    min-width: min(calc(var(--space-16) * 12), 100%);
   }
 }
 
