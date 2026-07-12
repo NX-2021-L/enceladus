@@ -669,3 +669,69 @@ def test_emit_poison_metric_failure_does_not_raise():
     fake_cloudwatch.put_metric_data.side_effect = RuntimeError("cloudwatch unavailable")
     with patch.object(mod, "_cloudwatch", fake_cloudwatch):
         mod._emit_poison_metric("seq-x", 400)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# ENC-ISS-532: internal sentinel-project rows (version_seq counter /
+# feed_tombstone, project_id="__feed__") must never construct a channel --
+# AppSync permanently rejects /projects/__feed__ (ENC-ISS-531/ENC-TSK-M71
+# poison-skips it, but filtering upstream avoids relying on that backstop
+# for a fully predictable, non-project record shape).
+# ---------------------------------------------------------------------------
+
+
+def test_is_real_project_id_rejects_dunder_sentinels_and_empty():
+    assert mod._is_real_project_id("__feed__") is False
+    assert mod._is_real_project_id("") is False
+    assert mod._is_real_project_id("enceladus") is True
+    assert mod._is_real_project_id("chosen-family") is True
+    # A leading/trailing single underscore is NOT the dunder-sentinel shape.
+    assert mod._is_real_project_id("_enceladus") is True
+
+
+def test_build_event_payload_returns_none_for_sentinel_project_id():
+    rec = _stream_record(
+        event_name="MODIFY",
+        new_image={
+            "project_id": "__feed__",
+            "record_id": "counter#version_seq",
+            "version_seq": 42,
+        },
+        keys={"project_id": "__feed__", "record_id": "counter#version_seq"},
+    )
+    assert mod.build_event_payload(rec, 0) is None
+
+
+def test_build_event_payload_unchanged_for_normal_record():
+    rec = _stream_record(
+        event_name="INSERT",
+        new_image={"record_id": "task#ENC-TSK-Z1", "item_id": "ENC-TSK-Z1", "project_id": "enceladus"},
+    )
+    payload = mod.build_event_payload(rec, 0)
+    assert payload is not None
+    assert payload["channels"] == ["/feed/updates", "/records/ENC-TSK-Z1", "/projects/enceladus"]
+
+
+def test_handler_filters_sentinel_project_row_without_publishing():
+    event = {
+        "Records": [
+            _stream_record(
+                event_name="MODIFY",
+                new_image={"project_id": "__feed__", "record_id": "counter#version_seq", "version_seq": 1},
+                keys={"project_id": "__feed__", "record_id": "counter#version_seq"},
+                seq="counter-seq",
+            ),
+        ]
+    }
+    fake_cloudwatch = MagicMock()
+    with patch.object(mod, "DRY_RUN", False), patch.object(
+        mod, "publish_to_appsync"
+    ) as mock_publish, patch.object(mod, "_cloudwatch", fake_cloudwatch):
+        result = mod.handler(event, None)
+
+    # Filtered upstream -- not a failure, not retried, and AppSync is never called.
+    assert result == {}
+    mock_publish.assert_not_called()
+    fake_cloudwatch.put_metric_data.assert_called_once()
+    call_kwargs = fake_cloudwatch.put_metric_data.call_args.kwargs
+    assert call_kwargs["MetricData"][0]["MetricName"] == "NonProjectRecordFiltered"

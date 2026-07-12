@@ -282,6 +282,17 @@ def build_summary(actor_id: str, action: str, record_type: str, record_id: str, 
     return base
 
 
+# ENC-ISS-532: dunder-wrapped values ("__feed__" today) are this codebase's
+# convention for internal system sentinels (enceladus_shared.version_seq's
+# FEED_TOMBSTONE_PROJECT / VERSION_SEQ_COUNTER_PROJECT) -- checking the shape
+# rather than a fixed deny-list also catches any future similarly-named
+# sentinel without a code change here.
+def _is_real_project_id(project_id: str) -> bool:
+    if not project_id:
+        return False
+    return not (project_id.startswith("__") and project_id.endswith("__"))
+
+
 def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[Dict[str, Any]]:
     """Build the lightweight AppSync event payload for one stream record.
 
@@ -321,6 +332,22 @@ def build_event_payload(record: Dict[str, Any], batch_counter: int) -> Optional[
     record_type = _first_nonempty(primary.get("record_type"), "record")
     project_id = _first_nonempty(primary.get("project_id"), keys.get("project_id")) or DEFAULT_PROJECT_ID
     title = _first_nonempty(primary.get("title"), primary.get("name"))
+
+    # ENC-ISS-532: internal bookkeeping rows (enceladus_shared.version_seq's
+    # counter#version_seq / feed_tombstone rows) carry the sentinel
+    # project_id "__feed__" -- these are not project-scoped data and were
+    # never meant to appear on ANY human-facing channel. Filter them
+    # upstream, before any channel is constructed, rather than relying on
+    # ENC-TSK-M71's reject-and-skip backstop for a fully predictable shape.
+    if not _is_real_project_id(project_id):
+        logger.warning(
+            "appsync_feed_publisher: filtering non-project record_id=%s project_id=%r "
+            "-- internal/meta row, no channel constructed",
+            record_id,
+            project_id,
+        )
+        _emit_filtered_metric(record_id)
+        return None
 
     action = derive_action(event_name, new_image, old_image)
     actor_type, actor_id = infer_actor(primary)
@@ -532,6 +559,20 @@ def _emit_poison_metric(seq: str, http_status: int) -> None:
         logger.warning(
             "appsync_feed_publisher: failed to emit PoisonRecordSkipped metric for seq=%s",
             seq,
+            exc_info=True,
+        )
+
+
+def _emit_filtered_metric(record_id: str) -> None:
+    try:
+        _cloudwatch.put_metric_data(
+            Namespace=POISON_METRIC_NAMESPACE,
+            MetricData=[{"MetricName": "NonProjectRecordFiltered", "Value": 1, "Unit": "Count"}],
+        )
+    except Exception:  # noqa: BLE001 — metrics emission must never break the filter path
+        logger.warning(
+            "appsync_feed_publisher: failed to emit NonProjectRecordFiltered metric for record_id=%s",
+            record_id,
             exc_info=True,
         )
 
