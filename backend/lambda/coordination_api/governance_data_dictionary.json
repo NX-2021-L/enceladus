@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-12.8",
-  "updated_at": "2026-07-12T13:35:00Z",
-  "last_change_summary": "ENC-TSK-N23: consolidation-arc rhythm tenants wired (PLN-078 W2a). memory_consolidation, handoff_consolidation_engine, and graph_health_metrics lambda_function.py each gain the heavy-beat completion-stanza contract from backend/lambda/rhythm_cycle/tenant_invoker.py: when the invoke payload carries result_key (rhythm tenant invocation), the handler writes a JSON stanza {tenant,status,completed_at,detail} to that S3 key after the run (statuses: completed/failed, plus skipped for HCE adaptive-trigger deferrals); scheduled EventBridge invokes are unaffected (no result_key -> no-op). Manifest populated in 11-appconfig-rhythm-tenants.yaml (3 enabled + recompute_governance reserved enabled=false, in-beat hook remains authoritative per ENC-TSK-N18 design). No entity/field schema change; bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-12.9",
+  "updated_at": "2026-07-12T13:48:00Z",
+  "last_change_summary": "ENC-TSK-N24: entropy/telemetry rhythm tenants wired (PLN-078 W2b), completing the heavy manifest at 9 tenants (5 enabled). corpus_entropy_engine and percolation_monitor lambda_function.py gain the heavy-beat completion-stanza contract from backend/lambda/rhythm_cycle/tenant_invoker.py (result_key-gated S3 stanza write {tenant,status,completed_at,detail}; CEE_HARD_DISABLED skips report status=skipped; scheduled EventBridge invokes unaffected). gdmp_remediation wired enabled=false (SAFETY: GDMP optimistic-concurrency PATCH defect + hard-disable in force); embedding_refresh + library_health_skillbuilder wired unfunded with empty function_name pending N09 budget gate. Also fixes the ENC-TSK-N18 template defect that blocked stack creation (top-level CFN Description 1181 chars > 1024 limit; docs moved to comments). No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7968,7 +7968,7 @@
       }
     }
   },
-  "change_summary": "ENC-TSK-N23: consolidation-arc rhythm tenants wired (PLN-078 W2a). memory_consolidation, handoff_consolidation_engine, and graph_health_metrics lambda_function.py each gain the heavy-beat completion-stanza contract from backend/lambda/rhythm_cycle/tenant_invoker.py: when the invoke payload carries result_key (rhythm tenant invocation), the handler writes a JSON stanza {tenant,status,completed_at,detail} to that S3 key after the run (statuses: completed/failed, plus skipped for HCE adaptive-trigger deferrals); scheduled EventBridge invokes are unaffected (no result_key -> no-op). Manifest populated in 11-appconfig-rhythm-tenants.yaml (3 enabled + recompute_governance reserved enabled=false, in-beat hook remains authoritative per ENC-TSK-N18 design). No entity/field schema change; bumping per the lambda_function.py touch guard.",
+  "change_summary": "ENC-TSK-N24: entropy/telemetry rhythm tenants wired (PLN-078 W2b), completing the heavy manifest at 9 tenants (5 enabled). corpus_entropy_engine and percolation_monitor lambda_function.py gain the heavy-beat completion-stanza contract from backend/lambda/rhythm_cycle/tenant_invoker.py (result_key-gated S3 stanza write {tenant,status,completed_at,detail}; CEE_HARD_DISABLED skips report status=skipped; scheduled EventBridge invokes unaffected). gdmp_remediation wired enabled=false (SAFETY: GDMP optimistic-concurrency PATCH defect + hard-disable in force); embedding_refresh + library_health_skillbuilder wired unfunded with empty function_name pending N09 budget gate. Also fixes the ENC-TSK-N18 template defect that blocked stack creation (top-level CFN Description 1181 chars > 1024 limit; docs moved to comments). No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "change_log": [
     {
       "version": "2026-07-12.4",
@@ -8394,6 +8394,11 @@
       "version": "2026-07-12.8",
       "date": "2026-07-12",
       "summary": "ENC-TSK-N23: consolidation-arc rhythm tenants wired (PLN-078 W2a). memory_consolidation, handoff_consolidation_engine, and graph_health_metrics lambda_function.py each gain the heavy-beat completion-stanza contract from backend/lambda/rhythm_cycle/tenant_invoker.py: when the invoke payload carries result_key (rhythm tenant invocation), the handler writes a JSON stanza {tenant,status,completed_at,detail} to that S3 key after the run (statuses: completed/failed, plus skipped for HCE adaptive-trigger deferrals); scheduled EventBridge invokes are unaffected (no result_key -> no-op). Manifest populated in 11-appconfig-rhythm-tenants.yaml (3 enabled + recompute_governance reserved enabled=false, in-beat hook remains authoritative per ENC-TSK-N18 design). No entity/field schema change; bumping per the lambda_function.py touch guard."
+    },
+    {
+      "version": "2026-07-12.9",
+      "date": "2026-07-12",
+      "summary": "ENC-TSK-N24: entropy/telemetry rhythm tenants wired (PLN-078 W2b), completing the heavy manifest at 9 tenants (5 enabled). corpus_entropy_engine and percolation_monitor lambda_function.py gain the heavy-beat completion-stanza contract from backend/lambda/rhythm_cycle/tenant_invoker.py (result_key-gated S3 stanza write {tenant,status,completed_at,detail}; CEE_HARD_DISABLED skips report status=skipped; scheduled EventBridge invokes unaffected). gdmp_remediation wired enabled=false (SAFETY: GDMP optimistic-concurrency PATCH defect + hard-disable in force); embedding_refresh + library_health_skillbuilder wired unfunded with empty function_name pending N09 budget gate. Also fixes the ENC-TSK-N18 template defect that blocked stack creation (top-level CFN Description 1181 chars > 1024 limit; docs moved to comments). No entity/field schema change; bumping per the lambda_function.py touch guard."
     }
   ]
 }

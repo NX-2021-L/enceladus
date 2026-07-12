@@ -417,3 +417,55 @@ def test_handler_returns_500_on_unexpected_exception(monkeypatch):
     assert result["statusCode"] == 500
     body = json.loads(result["body"])
     assert body["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-N24: heavy-beat completion-stanza contract (tenant_invoker.py)
+# ---------------------------------------------------------------------------
+
+
+def test_rhythm_stanza_no_result_key_is_noop():
+    from unittest import mock
+
+    with mock.patch("boto3.client") as client:
+        assert mod._write_rhythm_stanza({}, "completed", {}) is False
+        assert mod._write_rhythm_stanza(None, "completed", {}) is False
+        client.assert_not_called()
+
+
+def test_rhythm_stanza_result_key_writes_contract_stanza():
+    from unittest import mock
+
+    key = "gamma/rhythm-cycle/heavy_integrate/tenant-results/20260712-000000/corpus_entropy_engine.json"
+    with mock.patch("boto3.client") as client:
+        ok = mod._write_rhythm_stanza({"result_key": key}, "completed", {"counts": {"orphan": 1}})
+    assert ok is True
+    kwargs = client.return_value.put_object.call_args.kwargs
+    assert kwargs["Bucket"] == mod.RHYTHM_RESULTS_BUCKET
+    assert kwargs["Key"] == key
+    stanza = json.loads(kwargs["Body"].decode("utf-8"))
+    assert stanza["tenant"] == "corpus_entropy_engine"
+    assert stanza["status"] == "completed"
+    assert "completed_at" in stanza
+    assert stanza["detail"] == {"counts": {"orphan": 1}}
+
+
+def test_rhythm_stanza_hard_disabled_reports_skipped():
+    from unittest import mock
+
+    skipped = {
+        "statusCode": 200,
+        "body": json.dumps({"success": True, "skipped": True, "reason": "CEE_HARD_DISABLED"}),
+    }
+    with mock.patch.object(mod, "_run_scan", return_value=skipped):
+        with mock.patch.object(mod, "_write_rhythm_stanza") as stanza:
+            resp = mod.lambda_handler({"result_key": "k"}, None)
+    assert resp["statusCode"] == 200
+    assert stanza.call_args.args[1] == "skipped"
+
+
+def test_rhythm_stanza_write_failure_never_raises():
+    from unittest import mock
+
+    with mock.patch("boto3.client", side_effect=RuntimeError("boom")):
+        assert mod._write_rhythm_stanza({"result_key": "k"}, "completed", {}) is False

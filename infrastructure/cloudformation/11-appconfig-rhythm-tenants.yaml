@@ -1,30 +1,37 @@
 AWSTemplateFormatVersion: '2010-09-09'
+# ENC-TSK-N24: the original ENC-TSK-N18 top-level Description was 1181 chars,
+# over CloudFormation's 1024-char Description limit — CreateChangeSet rejected
+# the template with "Template format error: 'Description' length is greater
+# than 1024", which is why the enceladus-rhythm-tenants stack was never
+# created (N18's own deploy run failed earlier on missing params, masking
+# this). Long-form documentation lives in this comment block instead.
+#
+# Each key under `tenants` is one tenant record consumed by
+# backend/lambda/rhythm_cycle/tenant_invoker.py::get_manifest():
+#
+#   {
+#     "tenants": {
+#       "<name>": {
+#         "beat": "heavy_integrate" | "light_integrate",
+#         "enabled": false,               # kill switch; false = not invoked
+#         "function_name": "<lambda name>",
+#         "order": 10,                    # manifest ordering (ties -> name)
+#         "expected_output_contract": {}   # tenant-defined, opaque here
+#       }
+#     }
+#   }
+#
+# The `enabled` flag IS the addressable "rhythm.tenant.<name>.enabled" switch
+# from the BRD — AppConfig hosted config is a single JSON document rather
+# than flat key/value flags, so the flag is physically this nested boolean.
 Description: >
-  Enceladus Rhythm tenant manifest — ENC-TSK-N18 (DOC-44230223DD1C §4.1).
-  Adds a `rhythm-tenants` configuration profile under the EXISTING AppConfig
-  Application/Environment provisioned by 06-feature-flags.yaml, following the
-  precedent set by 09-appconfig-governance.yaml (additive, no other profile
-  touched). Each key under `tenants` is one tenant record consumed by
-  backend/lambda/rhythm_cycle/tenant_invoker.py::get_manifest():
-
-    {
-      "tenants": {
-        "<name>": {
-          "beat": "heavy_integrate" | "light_integrate",
-          "enabled": false,               # kill switch; false = not invoked
-          "function_name": "enceladus-tenant-<name>",
-          "order": 10,                    # manifest ordering (ties -> name)
-          "expected_output_contract": {}   # tenant-defined, opaque here
-        }
-      }
-    }
-
-  The `enabled` flag IS the addressable "rhythm.tenant.<name>.enabled" switch
-  from the BRD — AppConfig hosted config is a single JSON document rather
-  than flat key/value flags, so the flag is physically this nested boolean.
-
-  Ships with an EMPTY tenants object — zero enabled, invokable tenants by
-  default. No behavior change on gamma until ENC-TSK-N23/N24 populate it.
+  Enceladus Rhythm tenant manifest (ENC-TSK-N18/N23/N24, DOC-44230223DD1C
+  4.1). Adds a rhythm-tenants configuration profile under the EXISTING
+  AppConfig Application/Environment provisioned by 06-feature-flags.yaml,
+  following the 09-appconfig-governance.yaml precedent (additive, no other
+  profile touched). Tenant record shape, flag semantics, and per-tenant
+  rationale are documented in comments in this template and in
+  backend/lambda/rhythm_cycle/tenant_invoker.py.
 
 Parameters:
   EnvironmentSuffix:
@@ -99,13 +106,28 @@ Resources:
   # heavy window and bypass the contention deferral — remove the hook in the
   # same change that enables the tenant. The manifest entry reserves the
   # tenant slot and pins its expected-output contract now (ENC-TSK-N23 AC-1).
+  # ENC-TSK-N24 (PLN-078 W2b): entropy/telemetry tenants complete the heavy
+  # manifest. Real deployed Lambdas verified via `aws lambda list-functions`:
+  #   enceladus-corpus-entropy-engine-gamma, enceladus-percolation-monitor-
+  #   gamma, enceladus-corpus-entropy-gdmp-remediation-gamma.
+  #
+  # SAFETY — gdmp_remediation is enabled=FALSE and MUST STAY FALSE until the
+  # GDMP silent-data-loss defect (missing optimistic-concurrency on PATCH)
+  # clears: the mutation ramp is armed and CEE_GDMP_HARD_DISABLED is the
+  # sibling interlock. Do not flip this flag as part of routine onboarding.
+  #
+  # BUDGET — embedding_refresh and library_health_skillbuilder are wired
+  # unfunded (enabled=false, function_name="") pending the N09 budget gate
+  # (BRD section 5). Neither has a dedicated Lambda today;
+  # devops-titan-embedding-backfill is a BACKFILL utility, not a recurring
+  # refresh carrier, so it is deliberately NOT named as the function.
   RhythmTenantsInitialVersion:
     Type: AWS::AppConfig::HostedConfigurationVersion
     Properties:
       ApplicationId: !Ref AppConfigApplicationId
       ConfigurationProfileId: !Ref RhythmTenantsProfile
       ContentType: application/json
-      Description: "ENC-TSK-N23: consolidation-arc tenants (3 enabled; recompute_governance reserved, in-beat hook remains authoritative)"
+      Description: "ENC-TSK-N24: full heavy manifest (5 enabled; GDMP + embedding_refresh + library_health off per safety/budget gates)"
       Content: !Sub |
         {
           "tenants": {
@@ -155,6 +177,60 @@ Resources:
                 "min_metrics_per_window": 4,
                 "window_hours": 12
               }
+            },
+            "corpus_entropy_engine": {
+              "beat": "heavy_integrate",
+              "enabled": true,
+              "function_name": "enceladus-corpus-entropy-engine${EnvironmentSuffix}",
+              "order": 50,
+              "expected_output_contract": {
+                "artifact": "Enceladus/CEE entropy-category CloudWatch metrics + scan summary per window (orphan, stagnation, relational, retention, compliance_semantic)",
+                "categories_per_window": 5,
+                "window_hours": 12,
+                "mutation": "none - telemetry-only detector (ENC-TSK-K41); GDMP remediation is a separate gated tenant"
+              }
+            },
+            "percolation_monitor": {
+              "beat": "heavy_integrate",
+              "enabled": true,
+              "function_name": "enceladus-percolation-monitor${EnvironmentSuffix}",
+              "order": 60,
+              "expected_output_contract": {
+                "artifact": "percolation telemetry row (analytical_pc Molloy-Reed + empirical_pc Monte Carlo) in enceladus-percolation-telemetry + Enceladus/Percolation metrics",
+                "rows_per_window": 1,
+                "window_hours": 12
+              }
+            },
+            "gdmp_remediation": {
+              "beat": "heavy_integrate",
+              "enabled": false,
+              "function_name": "enceladus-corpus-entropy-gdmp-remediation${EnvironmentSuffix}",
+              "order": 70,
+              "expected_output_contract": {
+                "artifact": "GDMP Stage-1 remediation report per window when enabled",
+                "window_hours": 12,
+                "safety_gate": "DO NOT ENABLE: GDMP mutation ramp armed with missing optimistic-concurrency on PATCH (silent-data-loss defect); CEE_GDMP_HARD_DISABLED interlock in force; flag clears only with that defect fix"
+              }
+            },
+            "embedding_refresh": {
+              "beat": "heavy_integrate",
+              "enabled": false,
+              "function_name": "",
+              "order": 80,
+              "expected_output_contract": {
+                "note": "wired unfunded: no dedicated refresh lambda exists (devops-titan-embedding-backfill is a backfill utility, not a recurring refresh carrier); carrier + funding decided by N09 budget gate (BRD section 5)",
+                "budget_gate": "N09"
+              }
+            },
+            "library_health_skillbuilder": {
+              "beat": "heavy_integrate",
+              "enabled": false,
+              "function_name": "",
+              "order": 90,
+              "expected_output_contract": {
+                "note": "wired unfunded: no lambda exists; carrier + funding decided by N09 budget gate (BRD section 5)",
+                "budget_gate": "N09"
+              }
             }
           }
         }
@@ -178,7 +254,7 @@ Resources:
       ConfigurationProfileId: !Ref RhythmTenantsProfile
       ConfigurationVersion: !Ref RhythmTenantsInitialVersion
       DeploymentStrategyId: !Ref RhythmTenantsDeploymentStrategy
-      Description: "ENC-TSK-N23: activate consolidation-arc tenant manifest"
+      Description: "ENC-TSK-N24: activate full heavy tenant manifest"
 
 Outputs:
   RhythmTenantsProfileId:

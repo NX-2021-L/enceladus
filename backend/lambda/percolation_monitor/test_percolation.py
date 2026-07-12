@@ -154,5 +154,39 @@ class FetchGraphSpuriousAttractorRateTest(unittest.TestCase):
         self.assertAlmostEqual(rate, 0.6)
 
 
+class RhythmStanzaTests(unittest.TestCase):
+    """ENC-TSK-N24: heavy-beat completion-stanza contract (tenant_invoker.py)."""
+
+    def test_no_result_key_is_noop(self):
+        from unittest import mock
+
+        with mock.patch.object(pm.boto3, "client") as client:
+            self.assertFalse(pm._write_rhythm_stanza({}, "completed", {}))
+            client.assert_not_called()
+
+    def test_result_key_writes_contract_stanza(self):
+        import json
+        from unittest import mock
+
+        key = "gamma/rhythm-cycle/heavy_integrate/tenant-results/20260712-000000/percolation_monitor.json"
+        with mock.patch.object(pm.boto3, "client") as client:
+            ok = pm._write_rhythm_stanza({"result_key": key}, "completed", {"analytical_pc": 0.31})
+        self.assertTrue(ok)
+        kwargs = client.return_value.put_object.call_args.kwargs
+        self.assertEqual(kwargs["Bucket"], pm.RHYTHM_RESULTS_BUCKET)
+        self.assertEqual(kwargs["Key"], key)
+        stanza = json.loads(kwargs["Body"].decode("utf-8"))
+        self.assertEqual(stanza["tenant"], "percolation_monitor")
+        self.assertEqual(stanza["status"], "completed")
+        self.assertIn("completed_at", stanza)
+        self.assertEqual(stanza["detail"], {"analytical_pc": 0.31})
+
+    def test_stanza_write_failure_never_raises(self):
+        from unittest import mock
+
+        with mock.patch.object(pm.boto3, "client", side_effect=RuntimeError("boom")):
+            self.assertFalse(pm._write_rhythm_stanza({"result_key": "k"}, "failed", {}))
+
+
 if __name__ == "__main__":
     unittest.main()
