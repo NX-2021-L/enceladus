@@ -149,6 +149,29 @@ Parameters:
       ENC-PLN-068: gamma rhythm tier schedules; when true, legacy superseded
       gamma EventBridge rules are disabled (K91).
 
+  # ENC-TSK-N19 / ENC-PLN-078 W1b (BRD 4.2/4.5 layer 1): explicit opt-in to restore
+  # the seven absorbed legacy consolidation-arc EventBridge rules that RhythmActive
+  # silenced (C1). Defaults false so this PR is a no-op on deploy; flipping it true
+  # is a deliberate, separate follow-up decision.
+  RhythmAbsorbLegacy:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      ENC-TSK-N19: when true (and RhythmActive), re-enable the absorbed legacy
+      consolidation-arc schedules (RhythmAbsorbed condition). Default false.
+
+  # ENC-FTR-106 / ENC-TSK-N19 (C3): codifies the standing io-HOLD on the nightly
+  # Crick-Mitchison unlearning pass as IaC, independent of the Rhythm conditions.
+  # UNLEARNING_MUTATION_ENABLED env flag on UnlearningFunction is untouched (layer 2).
+  UnlearningEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      ENC-TSK-N19: gates devops-unlearning-nightly. Default false enforces the
+      io-HOLD (ENC-FTR-106) until io explicitly re-arms it.
+
   # ENC-TSK-L41 / B67 Search2.0: gamma OpenSearch CDC indexer (VPC-private node).
   OpenSearchHttpsEndpoint:
     Type: String
@@ -222,6 +245,15 @@ Conditions:
   RhythmActive: !And
     - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
     - !Equals [!Ref RhythmCycleEnabled, "true"]
+  # ENC-TSK-N19 / ENC-PLN-078 W1b: seven absorbed legacy consolidation-arc rules
+  # (BRD 4.2 map) re-enable only when RhythmActive AND the explicit opt-in flag
+  # is set. Default RhythmAbsorbLegacy=false keeps this deploy a no-op.
+  RhythmAbsorbed: !And
+    - !Condition RhythmActive
+    - !Equals [!Ref RhythmAbsorbLegacy, "true"]
+  # ENC-TSK-N19 (C3): independent of the Rhythm conditions -- codifies the
+  # standing io-HOLD on the unlearning nightly pass (ENC-FTR-106).
+  UnlearningEnabledCond: !Equals [!Ref UnlearningEnabled, "true"]
   # ENC-TSK-F63 AC-2: SnapStart enabled only when EnableSnapStart=true (arm64/py3.12 targets).
   # Replaces the old IsProduction-negation pattern (was: !If [IsProduction, NoValue, SnapStart]).
   SnapStartEnabled: !Equals [!Ref EnableSnapStart, "true"]
@@ -2359,7 +2391,7 @@ Resources:
     Properties:
       Name: !Sub "enceladus-graph-health-daily${EnvironmentSuffix}"
       ScheduleExpression: "cron(0 8 * * ? *)"
-      State: !If [RhythmActive, DISABLED, ENABLED]
+      State: !If [RhythmAbsorbed, DISABLED, ENABLED]
       Targets:
         - Arn: !GetAtt GraphHealthMetricsFunction.Arn
           Id: graph-health-daily
@@ -2438,7 +2470,9 @@ Resources:
       Name: !Sub "enceladus-percolation-nightly${EnvironmentSuffix}"
       Description: "ENC-FTR-085: nightly percolation-threshold measurement at 03:00 UTC."
       ScheduleExpression: "cron(0 3 * * ? *)"
-      State: ENABLED
+      # ENC-TSK-N19: absorbed into the RhythmAbsorbed BRD 4.2 gate set. No-op today
+      # (RhythmAbsorbLegacy default false) -- stays ENABLED.
+      State: !If [RhythmAbsorbed, DISABLED, ENABLED]
       Targets:
         - Arn: !GetAtt PercolationMonitorFunction.Arn
           Id: percolation-nightly
@@ -2530,7 +2564,9 @@ Resources:
       Name: !Sub "enceladus-corpus-entropy-nightly${EnvironmentSuffix}"
       Description: "Nightly Corpus Entropy Engine scan (ENC-TSK-K41 / B66 Ph5)"
       ScheduleExpression: "cron(0 5 * * ? *)"
-      State: ENABLED
+      # ENC-TSK-N19: absorbed into the RhythmAbsorbed BRD 4.2 gate set. No-op today
+      # (RhythmAbsorbLegacy default false) -- stays ENABLED.
+      State: !If [RhythmAbsorbed, DISABLED, ENABLED]
       Targets:
         - Arn: !GetAtt CorpusEntropyEngineFunction.Arn
           Id: corpus-entropy-nightly
@@ -2639,7 +2675,10 @@ Resources:
       Name: !Sub "enceladus-corpus-entropy-gdmp-nightly${EnvironmentSuffix}"
       Description: "Nightly GDMP Stage-1 auto-remediation pass (ENC-TSK-K42 / B66 Ph5)"
       ScheduleExpression: "cron(0 6 * * ? *)"
-      State: ENABLED
+      # ENC-TSK-N19: absorbed into the RhythmAbsorbed BRD 4.2 gate set. No-op today
+      # (RhythmAbsorbLegacy default false) -- stays ENABLED. Independent of, and
+      # layered under, the CEE_GDMP_HARD_DISABLED code-level kill switch (ENC-TSK-L91).
+      State: !If [RhythmAbsorbed, DISABLED, ENABLED]
       Targets:
         - Arn: !GetAtt CorpusEntropyGdmpRemediationFunction.Arn
           Id: corpus-entropy-gdmp-nightly
@@ -3335,7 +3374,7 @@ Resources:
       Name: !Sub "enceladus-memory-consolidation-nightly${EnvironmentSuffix}"
       Description: "Nightly handoff-to-lesson consolidation scan (ENC-FTR-096 Ph1)"
       ScheduleExpression: "cron(0 2 * * ? *)"
-      State: !If [RhythmActive, DISABLED, ENABLED]
+      State: !If [RhythmAbsorbed, DISABLED, ENABLED]
       Targets:
         - Arn: !GetAtt MemoryConsolidationFunction.Arn
           Id: memory-consolidation-nightly
@@ -3354,7 +3393,7 @@ Resources:
       Name: !Sub "enceladus-handoff-consolidation-engine-schedule${EnvironmentSuffix}"
       Description: "HCE scan-cluster-propose cycle (ENC-TSK-C08 / ENC-TSK-L15)"
       ScheduleExpression: !Ref HceScheduleExpression
-      State: !If [RhythmActive, DISABLED, ENABLED]
+      State: !If [RhythmAbsorbed, DISABLED, ENABLED]
       Targets:
         - Arn: !GetAtt HandoffConsolidationEngineFunction.Arn
           Id: handoff-consolidation-engine-target
@@ -3376,7 +3415,11 @@ Resources:
       Name: !Sub "devops-unlearning-nightly${EnvironmentSuffix}"
       Description: "Nightly Crick-Mitchison unlearning pass (ENC-FTR-106 / ENC-TSK-K03)"
       ScheduleExpression: "cron(0 4 * * ? *)"
-      State: ENABLED
+      # ENC-TSK-N19 (C3): independent of Rhythm; default UnlearningEnabled=false
+      # DISABLES this rule on deploy, codifying the standing io-HOLD (ENC-FTR-106)
+      # in IaC. UNLEARNING_MUTATION_ENABLED env flag on UnlearningFunction is a
+      # separate, untouched layer-2 guard.
+      State: !If [UnlearningEnabledCond, ENABLED, DISABLED]
       Targets:
         - Arn: !GetAtt UnlearningFunction.Arn
           Id: unlearning-nightly
@@ -7395,7 +7438,7 @@ Resources:
       Name: !Sub "devops-recompute-governance-backstop${EnvironmentSuffix}"
       Description: Hourly governance-version recompute backstop (ENC-TSK-I58 / ENC-ISS-421).
       ScheduleExpression: "rate(1 hour)"
-      State: !If [RhythmActive, DISABLED, ENABLED]
+      State: !If [RhythmAbsorbed, DISABLED, ENABLED]
       Targets:
         - Id: RecomputeGovernanceBackstopTarget
           Arn: !GetAtt RecomputeGovernanceFunction.Arn
