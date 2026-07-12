@@ -5643,19 +5643,27 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 "sync_version = sync_version + :one, "
                 "#history = list_append(#history, :entry)"
             )
+            # ENC-TSK-M92: stamp version_seq/feed_scope so this gamma-native PWA
+            # write re-surfaces in the feed-delta projection (version-seq-index
+            # GSI) — same idiom as _handle_log (M79) and the generic PATCH path.
+            # The vseq clause MUST stay inside SET, spliced BEFORE any ADD clause.
+            _vseq_expr, _vseq_vals = _version_seq_update_parts()
+            pwa_close_update_expr += _vseq_expr
             if record_type == "task" and closed_status == "closed":
                 pwa_close_update_expr += " ADD closed_count :one"
+            _pwa_close_vals = {
+                ":status": {"S": closed_status}, ":ts": {"S": now},
+                ":note": {"S": description}, ":one": {"N": "1"},
+                ":entry": {"L": [history_entry]},
+                ":expected": {"N": str(current_version)},
+            }
+            _pwa_close_vals.update(_vseq_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=pwa_close_update_expr,
                 ConditionExpression="sync_version = :expected",
                 ExpressionAttributeNames={"#status": "status", "#history": "history"},
-                ExpressionAttributeValues={
-                    ":status": {"S": closed_status}, ":ts": {"S": now},
-                    ":note": {"S": description}, ":one": {"N": "1"},
-                    ":entry": {"L": [history_entry]},
-                    ":expected": {"N": str(current_version)},
-                },
+                ExpressionAttributeValues=_pwa_close_vals,
             )
             return _response(200, {
                 "success": True, "action": "close", "record_id": record_id,
@@ -5680,22 +5688,28 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 "timestamp": {"S": now}, "status": {"S": "reopened"},
                 "description": {"S": description},
             }}
+            # ENC-TSK-M92: stamp version_seq/feed_scope so the reopen re-surfaces
+            # in the feed-delta projection (version-seq-index GSI).
+            _vseq_expr, _vseq_vals = _version_seq_update_parts()
+            _reopen_vals = {
+                ":new_status": {"S": default_status}, ":ts": {"S": now},
+                ":note": {"S": description}, ":one": {"N": "1"},
+                ":entry": {"L": [history_entry]},
+                ":expected": {"N": str(current_version)},
+                ":closed_val": {"S": closed_status},
+            }
+            _reopen_vals.update(_vseq_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=(
                     "SET #status = :new_status, updated_at = :ts, last_update_note = :note, "
                     "sync_version = sync_version + :one, "
                     "#history = list_append(#history, :entry)"
+                    + _vseq_expr
                 ),
                 ConditionExpression="sync_version = :expected AND #status = :closed_val",
                 ExpressionAttributeNames={"#status": "status", "#history": "history"},
-                ExpressionAttributeValues={
-                    ":new_status": {"S": default_status}, ":ts": {"S": now},
-                    ":note": {"S": description}, ":one": {"N": "1"},
-                    ":entry": {"L": [history_entry]},
-                    ":expected": {"N": str(current_version)},
-                    ":closed_val": {"S": closed_status},
-                },
+                ExpressionAttributeValues=_reopen_vals,
             )
             _emit_reopen_event(project_id, record_type, record_id, closed_status, default_status, now)
             return _response(200, {
@@ -5711,20 +5725,29 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
                 "timestamp": {"S": now}, "status": {"S": "worklog"},
                 "description": {"S": f"[USER] {note_text}"},
             }}
+            # ENC-TSK-M92: THE load-bearing fix. This is the branch io's L83 note
+            # traversed (the `[USER] ` prefix is produced only here) — it landed
+            # but never published because version_seq/feed_scope were not stamped,
+            # pinning /api/v1/feed/delta at 622. Stamp them so the append surfaces
+            # in the version-seq-index GSI, exactly as _handle_log/M79 does.
+            _vseq_expr, _vseq_vals = _version_seq_update_parts()
+            _worklog_vals = {
+                ":note": {"S": note_text}, ":ts": {"S": now},
+                ":one": {"N": "1"}, ":entry": {"L": [history_entry]},
+                ":expected": {"N": str(current_version)},
+            }
+            _worklog_vals.update(_vseq_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=(
                     "SET updated_at = :ts, last_update_note = :note, "
                     "sync_version = sync_version + :one, "
                     "#history = list_append(#history, :entry)"
+                    + _vseq_expr
                 ),
                 ConditionExpression="sync_version = :expected",
                 ExpressionAttributeNames={"#history": "history"},
-                ExpressionAttributeValues={
-                    ":note": {"S": note_text}, ":ts": {"S": now},
-                    ":one": {"N": "1"}, ":entry": {"L": [history_entry]},
-                    ":expected": {"N": str(current_version)},
-                },
+                ExpressionAttributeValues=_worklog_vals,
             )
             return _response(200, {
                 "success": True, "action": "worklog", "record_id": record_id,
@@ -5733,18 +5756,24 @@ def _handle_pwa_action(project_id: str, record_type: str, record_id: str, body: 
 
         else:  # note
             now = _now_z()
+            # ENC-TSK-M92: stamp version_seq/feed_scope so a PWA "note" write
+            # re-surfaces in the feed-delta projection (version-seq-index GSI).
+            _vseq_expr, _vseq_vals = _version_seq_update_parts()
+            _note_vals = {
+                ":note": {"S": note_text}, ":ts": {"S": now},
+                ":one": {"N": "1"}, ":expected": {"N": str(current_version)},
+            }
+            _note_vals.update(_vseq_vals)
             ddb.update_item(
                 TableName=DYNAMODB_TABLE, Key=key,
                 UpdateExpression=(
                     "SET #update = :note, updated_at = :ts, "
                     "sync_version = sync_version + :one"
+                    + _vseq_expr
                 ),
                 ConditionExpression="sync_version = :expected",
                 ExpressionAttributeNames={"#update": "update"},
-                ExpressionAttributeValues={
-                    ":note": {"S": note_text}, ":ts": {"S": now},
-                    ":one": {"N": "1"}, ":expected": {"N": str(current_version)},
-                },
+                ExpressionAttributeValues=_note_vals,
             )
             return _response(200, {
                 "success": True, "action": "note", "record_id": record_id,
