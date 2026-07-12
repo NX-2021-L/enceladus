@@ -180,5 +180,44 @@ class TestCandidateAssembly(unittest.TestCase):
         )
 
 
+class RhythmStanzaTests(unittest.TestCase):
+    """ENC-TSK-N23: heavy-beat completion-stanza contract (tenant_invoker.py)."""
+
+    def test_no_result_key_is_noop(self):
+        from unittest import mock
+
+        with mock.patch.object(hce.boto3, "client") as client:
+            self.assertFalse(hce._write_rhythm_stanza({}, "completed", {}))
+            client.assert_not_called()
+
+    def test_result_key_writes_contract_stanza(self):
+        import json
+        from unittest import mock
+
+        key = "gamma/rhythm-cycle/heavy_integrate/tenant-results/20260712-000000/handoff_consolidation_engine.json"
+        with mock.patch.object(hce.boto3, "client") as client:
+            ok = hce._write_rhythm_stanza({"result_key": key}, "skipped", {"reason": "adaptive"})
+        self.assertTrue(ok)
+        kwargs = client.return_value.put_object.call_args.kwargs
+        self.assertEqual(kwargs["Bucket"], hce.RHYTHM_RESULTS_BUCKET)
+        self.assertEqual(kwargs["Key"], key)
+        stanza = json.loads(kwargs["Body"].decode("utf-8"))
+        self.assertEqual(stanza["tenant"], "handoff_consolidation_engine")
+        self.assertEqual(stanza["status"], "skipped")
+        self.assertEqual(stanza["detail"], {"reason": "adaptive"})
+
+    def test_handler_reports_skip_as_explicit_stanza(self):
+        import json
+        from unittest import mock
+
+        skipped = {"statusCode": 200, "body": json.dumps({"skipped": True, "adaptive_trigger": "too few"})}
+        with mock.patch.object(hce, "_run_cycle", return_value=skipped):
+            with mock.patch.object(hce, "_write_rhythm_stanza") as stanza:
+                resp = hce.handler({"result_key": "k"}, None)
+        self.assertEqual(resp["statusCode"], 200)
+        args = stanza.call_args.args
+        self.assertEqual(args[1], "skipped")
+
+
 if __name__ == "__main__":
     unittest.main()

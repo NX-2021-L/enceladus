@@ -84,16 +84,79 @@ Resources:
         - Key: Component
           Value: rhythm-tenants
 
+  # ENC-TSK-N23 (PLN-078 W2a): consolidation-arc tenants wired under the heavy
+  # beat. Function names are the REAL deployed Lambdas (suffix-substituted per
+  # environment), verified against `aws lambda list-functions` on gamma:
+  #   enceladus-memory-consolidation-gamma, enceladus-handoff-consolidation-
+  #   engine-gamma, devops-recompute-governance-gamma,
+  #   enceladus-graph-health-metrics-gamma.
+  #
+  # recompute_governance is registered ENABLED=FALSE by design, not omission:
+  # ENC-TSK-N18 deliberately kept the governance recompute as the in-beat,
+  # contention-deferred hook (heavy_integrate._run_governance_recompute_hook,
+  # skipped while a governance_hash_recompute checkout is active). Flipping
+  # this flag true while that hook exists would double-run recompute every
+  # heavy window and bypass the contention deferral — remove the hook in the
+  # same change that enables the tenant. The manifest entry reserves the
+  # tenant slot and pins its expected-output contract now (ENC-TSK-N23 AC-1).
   RhythmTenantsInitialVersion:
     Type: AWS::AppConfig::HostedConfigurationVersion
     Properties:
       ApplicationId: !Ref AppConfigApplicationId
       ConfigurationProfileId: !Ref RhythmTenantsProfile
       ContentType: application/json
-      Description: "Initial version - empty manifest, zero enabled tenants (ENC-TSK-N18)"
-      Content: |
+      Description: "ENC-TSK-N23: consolidation-arc tenants (3 enabled; recompute_governance reserved, in-beat hook remains authoritative)"
+      Content: !Sub |
         {
-          "tenants": {}
+          "tenants": {
+            "memory_consolidation": {
+              "beat": "heavy_integrate",
+              "enabled": true,
+              "function_name": "enceladus-memory-consolidation${EnvironmentSuffix}",
+              "order": 10,
+              "expected_output_contract": {
+                "artifact": "lesson-candidate draft documents in docstore per window",
+                "min_per_window": 0,
+                "window_hours": 12,
+                "first_output_criterion": "FTR-096 Wave 2: >=1 organic lesson-candidate doc not named DOC-J46E2E*, or a documented threshold-tuning finding explaining why zero is correct"
+              }
+            },
+            "handoff_consolidation_engine": {
+              "beat": "heavy_integrate",
+              "enabled": true,
+              "function_name": "enceladus-handoff-consolidation-engine${EnvironmentSuffix}",
+              "order": 20,
+              "expected_output_contract": {
+                "artifact": "HCE lesson-candidate documents proposed via Document API per adaptive-trigger cycle",
+                "min_per_window": 0,
+                "window_hours": 12,
+                "adaptive_trigger": "trigger-skipped cycles report a status=skipped stanza, never silence"
+              }
+            },
+            "recompute_governance": {
+              "beat": "heavy_integrate",
+              "enabled": false,
+              "function_name": "devops-recompute-governance${EnvironmentSuffix}",
+              "order": 30,
+              "expected_output_contract": {
+                "artifact": "governance version recompute rows per night",
+                "window_hours": 12,
+                "execution_path": "in-beat hook heavy_integrate._run_governance_recompute_hook (contention-deferred) remains authoritative per ENC-TSK-N18 design; this entry reserves the tenant slot + contract",
+                "enable_precondition": "remove the in-beat hook in the same change that flips this flag, or recompute double-runs every heavy window"
+              }
+            },
+            "graph_health_metrics": {
+              "beat": "heavy_integrate",
+              "enabled": true,
+              "function_name": "enceladus-graph-health-metrics${EnvironmentSuffix}",
+              "order": 40,
+              "expected_output_contract": {
+                "artifact": "Enceladus/GraphHealth CloudWatch metrics (GraphEdgeDensity, OrphanNodeRatio, GraphNodeCount, FiedlerAlgebraicConnectivity) per window",
+                "min_metrics_per_window": 4,
+                "window_hours": 12
+              }
+            }
+          }
         }
 
   RhythmTenantsDeploymentStrategy:
@@ -115,7 +178,7 @@ Resources:
       ConfigurationProfileId: !Ref RhythmTenantsProfile
       ConfigurationVersion: !Ref RhythmTenantsInitialVersion
       DeploymentStrategyId: !Ref RhythmTenantsDeploymentStrategy
-      Description: "Initial activation - empty manifest, ENC-TSK-N18"
+      Description: "ENC-TSK-N23: activate consolidation-arc tenant manifest"
 
 Outputs:
   RhythmTenantsProfileId:

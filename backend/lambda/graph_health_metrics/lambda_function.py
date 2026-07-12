@@ -344,9 +344,65 @@ def _publish_dedup_signals(signals: Dict[str, Any]) -> Dict[str, float]:
     return metrics
 
 
+# --- ENC-TSK-N23: rhythm heavy-beat completion-stanza contract --------------
+# When invoked as a rhythm tenant (backend/lambda/rhythm_cycle/tenant_invoker
+# .py), the invoke payload carries ``result_key`` — the exact S3 key this
+# tenant must write its completion stanza to. Scheduled EventBridge invokes
+# carry no result_key and skip the write. Stanza shape mirrors
+# tenant_invoker.write_completion_stanza; a write failure is logged, never
+# raised — the beat's silent-tenant detection treats a missing stanza as
+# silence, which is the honest signal.
+
+RHYTHM_TENANT_NAME = "graph_health_metrics"
+RHYTHM_RESULTS_BUCKET = os.environ.get("RHYTHM_RESULTS_BUCKET", "jreese-net")
+
+
+def _write_rhythm_stanza(event: Any, status: str, detail: Dict[str, Any] = None) -> bool:
+    result_key = str((event or {}).get("result_key") or "").strip() if isinstance(event, dict) else ""
+    if not result_key:
+        return False
+    body = {
+        "tenant": RHYTHM_TENANT_NAME,
+        "status": status,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "detail": detail or {},
+    }
+    try:
+        boto3.client("s3").put_object(
+            Bucket=RHYTHM_RESULTS_BUCKET,
+            Key=result_key,
+            Body=json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+            ContentType="application/json",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — stanza failure must never break the run
+        logger.warning("[ERROR] rhythm stanza write failed key=%s: %s", result_key, exc)
+        return False
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Lambda entry point — compute and publish graph health metrics + the
-    ENC-TSK-I10 dedup-convergence signals (DOC-DF651F07D5C2 §10)."""
+    """Entry point: compute/publish graph health metrics, then honor the
+    rhythm completion-stanza contract when invoked as a heavy-beat tenant
+    (ENC-TSK-N23)."""
+    try:
+        resp = _run_metrics(event, context)
+    except Exception:
+        _write_rhythm_stanza(event, "failed", {})
+        raise
+    status = "completed" if resp.get("statusCode") == 200 else "failed"
+    try:
+        body = json.loads(resp.get("body") or "{}")
+    except (TypeError, ValueError):
+        body = {}
+    _write_rhythm_stanza(
+        event, status, {"statusCode": resp.get("statusCode"), "success": body.get("success")}
+    )
+    return resp
+
+
+def _run_metrics(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Compute and publish graph health metrics + the ENC-TSK-I10
+    dedup-convergence signals (DOC-DF651F07D5C2 §10)."""
     logger.info("[START] Graph health metrics computation (proxy path)")
 
     try:

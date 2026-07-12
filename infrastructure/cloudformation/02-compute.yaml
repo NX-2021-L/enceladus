@@ -1942,6 +1942,9 @@ Resources:
           DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
           S3_BUCKET: !Ref S3Bucket
           S3_PREFIX: !Sub "${S3EnvPrefix}agent-documents"
+          # ENC-TSK-N23: bucket for the rhythm heavy-beat completion stanza
+          # (tenant_invoker.py sends the full result_key in the invoke payload).
+          RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
           CONSOLIDATION_PROJECT_IDS: enceladus
           CONSOLIDATION_LOOKBACK_HOURS: "24"
           CONSOLIDATION_MIN_WAVES: "2"
@@ -1991,6 +1994,8 @@ Resources:
           DOCUMENTS_TABLE: !Sub "documents${EnvironmentSuffix}"
           DOCUMENT_API_LAMBDA_NAME: !Sub "devops-document-api${EnvironmentSuffix}"
           COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
+          # ENC-TSK-N23: bucket for the rhythm heavy-beat completion stanza.
+          RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
           ADAPTIVE_TRIGGER_MIN_HANDOFFS: !Ref HceAdaptiveMinHandoffs
           HCE_LOOKBACK_DAYS: "90"
           HCE_PROPOSER_ID: ENC-FTR-064
@@ -2369,6 +2374,8 @@ Resources:
           NEO4J_SECRET_NAME: !Sub "enceladus/neo4j/auradb-credentials${EnvironmentSuffix}"
           CLOUDWATCH_NAMESPACE: Enceladus/GraphHealth
           PROJECT_ID: enceladus
+          # ENC-TSK-N23: bucket for the rhythm heavy-beat completion stanza.
+          RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
           SECRETS_REGION: !Ref "AWS::Region"
           # ENC-TSK-K43: cross-Lambda invoke target for the real Fiedler lambda2
           # (FTR-088 CSR/Fiedler path, ISS-465-compliant).
@@ -6169,6 +6176,13 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                 Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}agent-documents/*"
+              # ENC-TSK-N23: rhythm heavy-beat tenant completion stanza
+              # (tenant_invoker.py contract) — write-only, tenant-results scoped.
+              - Sid: RhythmStanzaWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -6223,6 +6237,14 @@ Resources:
                   - lambda:InvokeFunction
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-document-api${EnvironmentSuffix}"
+              # ENC-TSK-N23: rhythm heavy-beat tenant completion stanza — the ONE
+              # sanctioned direct-S3 write for this engine (tenant_invoker.py
+              # contract; governed document writes still go via Document API).
+              - Sid: RhythmStanzaWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -6370,6 +6392,13 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-graph-query-api${EnvironmentSuffix}"
+              # ENC-TSK-N23: rhythm heavy-beat tenant completion stanza
+              # (tenant_invoker.py contract) — write-only, tenant-results scoped.
+              - Sid: RhythmStanzaWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -7636,16 +7665,24 @@ Resources:
                   - sns:Publish
                 Resource: !Ref RhythmBeatNotificationTopic
               # ENC-TSK-N18 / DOC-44230223DD1C §4.1: async (Event) invoke of tenant
-              # Lambdas resolved from the rhythm-tenants AppConfig manifest. Scoped
-              # to the enceladus-tenant-* naming convention tenants are required to
-              # use (ENC-TSK-N23/N24 wire real tenants under this prefix) — additive,
-              # no tenant exists yet so this grant is inert until flags flip.
+              # Lambdas resolved from the rhythm-tenants AppConfig manifest.
+              # ENC-TSK-N23: the real consolidation-arc tenants are pre-existing
+              # Lambdas that do NOT follow the enceladus-tenant-* convention, so
+              # the grant lists their function-name families explicitly (the
+              # kill-switch design requires a flag flip alone to be sufficient —
+              # no CFN change on enable). devops-recompute-governance is included
+              # so the reserved recompute_governance manifest entry can be
+              # enabled without an IAM edit once the in-beat hook is removed.
               - Sid: RhythmTenantInvoke
                 Effect: Allow
                 Action:
                   - lambda:InvokeFunction
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-tenant-*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-memory-consolidation*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-handoff-consolidation-engine*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-graph-health-metrics*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-recompute-governance*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
