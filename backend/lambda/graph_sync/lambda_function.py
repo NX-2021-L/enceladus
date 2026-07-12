@@ -418,6 +418,65 @@ NODE_PROPERTIES = [
     "item_id_provenance",
 ]
 
+# ENC-ISS-543: terminal lifecycle values that MUST project to Neo4j on close paths.
+# Matches tracker/checkout terminal sets (task->closed, feature->production/deprecated,
+# plan->complete, issue->closed, etc.).
+TERMINAL_STATUSES = frozenset({
+    "closed", "completed", "complete", "production", "deprecated", "archived",
+    "superseded",
+})
+
+
+def _is_terminal_status(value: Any) -> bool:
+    return str(value or "").strip().lower() in TERMINAL_STATUSES
+
+
+def _typed_string_field(image: Dict[str, Any], field: str) -> str:
+    """Read a DynamoDB stream String ('S') field directly from a typed image."""
+    typed = (image or {}).get(field) or {}
+    if isinstance(typed, dict) and "S" in typed:
+        return str(typed["S"]).strip()
+    return ""
+
+
+def _coalesce_status_for_projection(
+    record: Dict[str, Any],
+    old_record: Dict[str, Any],
+    new_image: Dict[str, Any],
+    old_image: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Ensure ``status`` is present for Neo4j MERGE on close / checkout-release paths.
+
+    ENC-ISS-543: close transitions are often followed within seconds by a
+    checkout-release MODIFY. Neo4j uses ``SET n += $props`` which never clears
+    stale properties — if ``status`` is absent from the deserialized projection
+    record, the node keeps the pre-close status (one write behind canonical).
+    Recover ``status`` from the typed NewImage first, then OldImage.
+    """
+    merged = dict(record)
+    status = str(merged.get("status") or "").strip()
+    if not status:
+        status = _typed_string_field(new_image, "status")
+    old_status = str(old_record.get("status") or _typed_string_field(old_image, "status") or "").strip()
+    if not status and _is_terminal_status(old_status):
+        # ENC-ISS-543 mechanism 3: checkout-release MODIFY immediately after close —
+        # OldImage already reflects the terminal status even when the deserialized
+        # NewImage omits ``status``.
+        status = old_status
+    if not status:
+        status = old_status
+    if status:
+        merged["status"] = status
+
+    new_status = str(merged.get("status") or "").strip()
+    if new_status and (_is_terminal_status(new_status) or new_status != old_status):
+        logger.info(
+            "[INFO] Status projection %s -> %s (record_id=%s)",
+            old_status or "<none>", new_status,
+            _bare_id(str(merged.get("record_id") or merged.get("item_id") or "")),
+        )
+    return merged
+
 
 PlaceholderRef = Tuple[str, str]
 
@@ -536,12 +595,20 @@ def _upsert_node(tx, record: Dict[str, Any]) -> None:
     props = {k: record.get(k) for k in NODE_PROPERTIES if record.get(k) is not None}
     props["record_id"] = record_id
 
+    # ENC-ISS-543: ``SET n += $props`` alone leaves stale ``status`` when a later
+    # checkout-release MODIFY omits the field from the deserialized dict. Always
+    # bind terminal / lifecycle status explicitly so close transitions MERGE.
+    status_val = props.get("status")
     cypher = (
         f"MERGE (n:{label} {{record_id: $record_id}}) "
         "SET n += $props "
         "SET n.is_placeholder = false"
     )
-    tx.run(cypher, record_id=record_id, props=props)
+    params: Dict[str, Any] = {"record_id": record_id, "props": props}
+    if status_val is not None and str(status_val).strip() != "":
+        cypher += " SET n.status = $status_val"
+        params["status_val"] = str(status_val).strip()
+    tx.run(cypher, **params)
 
 
 def _upsert_project_node(tx, project_id: str) -> None:
@@ -1546,10 +1613,12 @@ def _process_record(driver, stream_record: Dict) -> None:
         if not new_image:
             return
 
-        record = _normalize_record_for_graph(_deser_image(new_image))
-        record_type = record.get("record_type", "")
         old_image = dynamodb.get("OldImage", {})
         old_record = _normalize_record_for_graph(_deser_image(old_image)) if old_image else {}
+        record = _normalize_record_for_graph(_deser_image(new_image))
+        if event_name == "MODIFY":
+            record = _coalesce_status_for_projection(record, old_record, new_image, old_image)
+        record_type = record.get("record_type", "")
         stale_placeholder_refs = _collect_placeholder_target_refs(old_record) - _collect_placeholder_target_refs(record)
 
         # ENC-FTR-049: Handle typed relationship records
@@ -1768,6 +1837,15 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             logger.exception("[ERROR] Failed to process %s record identifier=%s", source, identifier)
             if identifier:
                 failed_identifiers.append(identifier)
+            else:
+                # ENC-ISS-543: a missing failure identifier silently drops the
+                # record (Lambda returns 200, source deletes it). Fail closed.
+                logger.error(
+                    "[ERROR] %s record failed but has no batchItemFailures identifier; "
+                    "raising to avoid silent graph drift",
+                    source,
+                )
+                raise
 
     logger.info("[INFO] Batch complete: processed=%d, errors=%d, total=%d", processed, errors, len(records))
 
