@@ -4,7 +4,6 @@ import {
   useContext,
   useEffect,
   useRef,
-  useState,
   type ReactNode,
 } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -26,16 +25,15 @@ import type { FeedRealtimeEvent } from '../types/feedEvents'
 import { getCacheEngine, tier1FromFeedEvent } from '../sync/cacheEngine'
 
 interface RealtimeFeedContextValue {
-  events: FeedRealtimeEvent[]
   isHydrating: boolean
   isSnapshotError: boolean
   refetchSnapshot: () => void
   manualReconnect: () => void
   /**
    * ENC-TSK-K24 (B67 AC-11): merges every buffered "new activity" into the
-   * visible list in one call — the only way a live-pushed event reaches
-   * `events`. Returns the number merged so the caller (FeedPane's banner)
-   * can decide whether to scroll to top.
+   * visible list in one call — the only way a live-pushed event reaches the
+   * REALTIME_FEED_QUERY_KEY cache (ENC-TSK-M73). Returns the number merged so
+   * the caller (FeedPane's banner) can decide whether to scroll to top.
    */
   mergeBufferedEvents: () => number
   /**
@@ -54,10 +52,31 @@ export function useRealtimeFeed(): RealtimeFeedContextValue {
   return ctx
 }
 
+/**
+ * ENC-TSK-M73 (B67 AC-13): the visible feed-event list lives SOLELY in the
+ * TanStack Query cache at REALTIME_FEED_QUERY_KEY — there is no parallel
+ * component useState copy. This hook subscribes consumers (FeedPane,
+ * FeedRoute, DocsRoute) to that single cache entry so they re-render when the
+ * provider mutates it via setQueryData (snapshot seed + banner-merge drain).
+ * The queryFn only ever returns the current cached value — every write comes
+ * exclusively from setQueryData inside the provider — and staleTime:Infinity
+ * means it is never refetched or clobbered.
+ */
+export function useRealtimeFeedEvents(): FeedRealtimeEvent[] {
+  const queryClient = useQueryClient()
+  const { data } = useQuery<FeedRealtimeEvent[]>({
+    queryKey: REALTIME_FEED_QUERY_KEY,
+    queryFn: () => queryClient.getQueryData<FeedRealtimeEvent[]>(REALTIME_FEED_QUERY_KEY) ?? [],
+    initialData: () => queryClient.getQueryData<FeedRealtimeEvent[]>(REALTIME_FEED_QUERY_KEY) ?? [],
+    staleTime: Infinity,
+    gcTime: Infinity,
+  })
+  return data
+}
+
 export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
   const clientRef = useRef<AppSyncRealtimeClient | null>(null)
-  const [events, setEvents] = useState<FeedRealtimeEvent[]>([])
 
   const setPhase = useFeedConnectionStore((s) => s.setPhase)
   const setReconnectAttempt = useFeedConnectionStore((s) => s.setReconnectAttempt)
@@ -77,7 +96,6 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
     const seeded = snapshotToFeedState(snapshotQuery.data)
     const merged = mergeFeedEvents(seeded, queryClient.getQueryData<FeedRealtimeEvent[]>(REALTIME_FEED_QUERY_KEY) ?? [])
     queryClient.setQueryData(REALTIME_FEED_QUERY_KEY, merged)
-    setEvents(merged)
   }, [snapshotQuery.data, queryClient])
 
   useEffect(() => {
@@ -178,7 +196,6 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
   ])
 
   const value: RealtimeFeedContextValue = {
-    events,
     isHydrating: snapshotQuery.isPending,
     isSnapshotError: snapshotQuery.isError,
     refetchSnapshot: () => {
@@ -192,12 +209,14 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
     mergeBufferedEvents: () => {
       const drained = useFeedBufferStore.getState().drainBuffer()
       if (drained.length === 0) return 0
+      // ENC-TSK-M73 (B67 AC-13): merge into the REALTIME_FEED_QUERY_KEY cache
+      // — the sole source of truth — instead of a parallel useState copy. The
+      // startTransition wrapping (B67 AC-15) and buffer-drain semantics
+      // (AC-11) are preserved exactly; only the write target changed.
       startTransition(() => {
-        setEvents((prev) => {
-          const merged = mergeFeedEvents(prev, drained)
-          queryClient.setQueryData(REALTIME_FEED_QUERY_KEY, merged)
-          return merged
-        })
+        const prev = queryClient.getQueryData<FeedRealtimeEvent[]>(REALTIME_FEED_QUERY_KEY) ?? []
+        const merged = mergeFeedEvents(prev, drained)
+        queryClient.setQueryData(REALTIME_FEED_QUERY_KEY, merged)
       })
       return drained.length
     },

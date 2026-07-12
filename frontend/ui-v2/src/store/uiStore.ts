@@ -8,6 +8,7 @@
 
 import { create } from 'zustand'
 import type { RecordType } from '../types/records'
+import type { RecentlyViewedEntry } from '../search/recentlyViewed'
 
 export interface ActiveFilters {
   /** Record types the feed pane is scoped to. Empty = show all. */
@@ -32,6 +33,15 @@ interface UiState {
   // Selected record (drives feed highlight / deep-link affordances)
   selectedRecordId: string | null
   selectRecord: (recordId: string | null) => void
+
+  // Recently-viewed record-reference nav state (ENC-TSK-M73 / B67 AC-13).
+  // This is UI navigation state, not server-state: the durable copy lives in
+  // localStorage via search/recentlyViewed.ts, and this is only its reactive
+  // in-memory holder — it replaces FeedRoute's former component-local
+  // useState<RecentlyViewedEntry[]>, keeping record-reference nav data in
+  // Zustand per the AC-13 ownership rule.
+  recentItems: RecentlyViewedEntry[]
+  setRecentItems: (items: RecentlyViewedEntry[]) => void
 
   // Command palette
   commandPaletteOpen: boolean
@@ -60,6 +70,9 @@ export const useUiStore = create<UiState>((set) => ({
 
   selectedRecordId: null,
   selectRecord: (recordId) => set({ selectedRecordId: recordId }),
+
+  recentItems: [],
+  setRecentItems: (items) => set({ recentItems: items }),
 
   commandPaletteOpen: false,
   commandQuery: '',

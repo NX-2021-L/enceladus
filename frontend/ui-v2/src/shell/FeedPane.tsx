@@ -3,7 +3,7 @@ import { Button, Flashbar } from '../design-system'
 import { useUiStore } from '../store/uiStore'
 import { useFeedConnectionStore } from '../store/feedConnectionStore'
 import { useFeedBufferStore } from '../store/feedBufferStore'
-import { useRealtimeFeed } from '../realtime/RealtimeFeedProvider'
+import { useRealtimeFeed, useRealtimeFeedEvents } from '../realtime/RealtimeFeedProvider'
 import { filterFeedEvents } from '../realtime/feedEventReducer'
 import type { RecordType } from '../types/records'
 
@@ -41,8 +41,9 @@ export function FeedPane({ onClose }: { onClose?: () => void }) {
   const p99LatencyMs = useFeedConnectionStore((s) => s.p99LatencyMs)
   const errorMessage = useFeedConnectionStore((s) => s.errorMessage)
 
-  const { events, isHydrating, isSnapshotError, refetchSnapshot, manualReconnect, mergeBufferedEvents } =
+  const { isHydrating, isSnapshotError, refetchSnapshot, manualReconnect, mergeBufferedEvents } =
     useRealtimeFeed()
+  const events = useRealtimeFeedEvents()
   const bufferedCount = useFeedBufferStore((s) => s.bufferedEvents.length)
   const scrollRef = useRef<HTMLElement>(null)
 
