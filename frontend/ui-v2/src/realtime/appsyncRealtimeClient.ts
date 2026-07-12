@@ -3,7 +3,8 @@ import type { FeedRealtimeEvent, GapTooLargeSignal } from '../types/feedEvents'
 
 export const GAP_CURSOR_THRESHOLD = 1_000_000_000 // ~1000 events at 1ms cursor spacing
 export const MAX_AUTO_RECONNECT_ATTEMPTS = 12
-export const HEARTBEAT_INTERVAL_MS = 30_000
+export const LIVENESS_CHECK_INTERVAL_MS = 15_000
+export const DEFAULT_CONNECTION_TIMEOUT_MS = 300_000
 export const BACKOFF_BASE_MS = 500
 export const BACKOFF_CAP_MS = 30_000
 
@@ -65,7 +66,9 @@ export class AppSyncRealtimeClient {
 
   private socket: WebSocket | null = null
   private subscriptionId: string | null = null
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private livenessTimer: ReturnType<typeof setInterval> | null = null
+  private lastServerFrameAt = 0
+  private connectionTimeoutMs = DEFAULT_CONNECTION_TIMEOUT_MS
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectAttempt = 0
   private disposed = false
@@ -97,10 +100,7 @@ export class AppSyncRealtimeClient {
   stop(): void {
     this.disposed = true
     this.clearTimers()
-    if (this.socket) {
-      this.socket.close()
-      this.socket = null
-    }
+    this.discardSocket()
   }
 
   /** User-initiated retry resets backoff and reconnects immediately. */
@@ -108,11 +108,22 @@ export class AppSyncRealtimeClient {
     if (this.disposed || !this.config.enabled) return
     this.reconnectAttempt = 0
     this.clearTimers()
-    if (this.socket) {
-      this.socket.close()
-      this.socket = null
-    }
+    this.discardSocket()
     this.connect()
+  }
+
+  /**
+   * ENC-TSK-M96: detach BEFORE closing. WebSocket.close() completes
+   * asynchronously, so a replaced socket's onclose used to fire after the new
+   * socket was already live — killing the fresh liveness timer and scheduling
+   * a competing reconnect. Nulling this.socket first lets the identity guards
+   * in the handlers ignore every event from a socket we've abandoned.
+   */
+  private discardSocket(): void {
+    const socket = this.socket
+    if (!socket) return
+    this.socket = null
+    socket.close()
   }
 
   getLastCursor(): number {
@@ -130,16 +141,15 @@ export class AppSyncRealtimeClient {
     const channel = `/records/${recordId}`
     const id = crypto.randomUUID()
     this.extraSubscriptions.set(id, { channel, onEvent })
-    this.sendSubscribeFrame(id, channel)
+    if (this.socket) this.sendSubscribeFrame(this.socket, id, channel)
     return () => {
       this.extraSubscriptions.delete(id)
       this.sendUnsubscribeFrame(id)
     }
   }
 
-  private sendSubscribeFrame(id: string, channel: string): void {
-    const socket = this.socket
-    if (!socket || socket.readyState !== WebSocket.OPEN) return
+  private sendSubscribeFrame(socket: WebSocket, id: string, channel: string): void {
+    if (socket.readyState !== WebSocket.OPEN) return
     socket.send(
       JSON.stringify({
         type: 'subscribe',
@@ -171,11 +181,12 @@ export class AppSyncRealtimeClient {
 
     const socket = this.socket
     socket.onopen = () => {
+      if (this.socket !== socket) return
       socket.send(JSON.stringify({ type: 'connection_init' }))
     }
 
     socket.onmessage = (message) => {
-      this.handleMessage(message.data)
+      this.handleMessage(socket, message.data)
     }
 
     socket.onerror = () => {
@@ -183,17 +194,28 @@ export class AppSyncRealtimeClient {
     }
 
     socket.onclose = () => {
-      this.clearHeartbeat()
+      // ENC-TSK-M96: a socket we already replaced closing late must not tear
+      // down the live connection's liveness timer or spawn a rival reconnect.
+      if (this.socket !== socket) return
+      this.clearLiveness()
       if (!this.disposed) {
         this.scheduleReconnect('socket closed')
       }
     }
   }
 
-  private handleMessage(raw: unknown): void {
+  private handleMessage(socket: WebSocket, raw: unknown): void {
+    if (this.socket !== socket) return
     if (typeof raw !== 'string') return
+    this.lastServerFrameAt = Date.now()
 
-    let frame: { type?: string; id?: string; event?: unknown; errors?: unknown }
+    let frame: {
+      type?: string
+      id?: string
+      event?: unknown
+      errors?: unknown
+      connectionTimeoutMs?: number
+    }
     try {
       frame = JSON.parse(raw) as { type?: string; id?: string; event?: unknown }
     } catch {
@@ -202,13 +224,16 @@ export class AppSyncRealtimeClient {
 
     if (frame.type === 'connection_ack') {
       this.reconnectAttempt = 0
-      this.subscribe()
+      if (typeof frame.connectionTimeoutMs === 'number' && frame.connectionTimeoutMs > 0) {
+        this.connectionTimeoutMs = frame.connectionTimeoutMs
+      }
+      this.subscribe(socket)
       // ENC-TSK-L29: re-establish any per-record watches after (re)connect —
       // AppSync subscriptions do not survive a socket replacement.
       for (const [id, sub] of this.extraSubscriptions) {
-        this.sendSubscribeFrame(id, sub.channel)
+        this.sendSubscribeFrame(socket, id, sub.channel)
       }
-      this.startHeartbeat()
+      this.startLiveness()
       this.onEvent({ type: 'connected' })
       return
     }
@@ -218,7 +243,14 @@ export class AppSyncRealtimeClient {
     }
 
     if (frame.type === 'error') {
-      this.onEvent({ type: 'disconnected', reason: JSON.stringify(frame.errors ?? frame) })
+      // ENC-TSK-M96: an id-less error is AppSync rejecting a single operation
+      // (the W9-A UnsupportedOperation class) — the connection and any
+      // established subscriptions remain live, so downgrading the transport
+      // here is a false alarm. Only an error naming our primary subscription
+      // means the feed is actually dead.
+      if (frame.id && frame.id === this.subscriptionId) {
+        this.onEvent({ type: 'disconnected', reason: JSON.stringify(frame.errors ?? frame) })
+      }
       return
     }
 
@@ -285,9 +317,12 @@ export class AppSyncRealtimeClient {
     }
   }
 
-  private subscribe(): void {
-    const socket = this.socket
-    if (!socket || socket.readyState !== WebSocket.OPEN) return
+  // ENC-TSK-M96: subscribe on the socket whose connection_ack we are handling,
+  // not on whatever this.socket points at. During reconnect churn those could
+  // differ, and sending to a still-CONNECTING replacement silently dropped the
+  // subscribe — leaving an acked socket that receives keepalives but no data.
+  private subscribe(socket: WebSocket): void {
+    if (socket.readyState !== WebSocket.OPEN) return
 
     this.subscriptionId = crypto.randomUUID()
     socket.send(
@@ -304,13 +339,25 @@ export class AppSyncRealtimeClient {
     )
   }
 
-  private startHeartbeat(): void {
-    this.clearHeartbeat()
-    this.heartbeatTimer = setInterval(() => {
-      if (this.socket?.readyState === WebSocket.OPEN) {
-        this.socket.send(JSON.stringify({ type: 'ka' }))
+  /**
+   * ENC-TSK-M96: the AppSync Events realtime protocol has NO client→server
+   * keepalive — the old 30s `{"type":"ka"}` heartbeat was rejected with an
+   * UnsupportedOperation error frame on every beat (the exact 129-byte frames
+   * W9-A captured). Liveness is the server's job: it must deliver `ka` within
+   * connectionTimeoutMs (from connection_ack). We only watch for its silence
+   * and force a reconnect when the window is blown.
+   */
+  private startLiveness(): void {
+    this.clearLiveness()
+    this.lastServerFrameAt = Date.now()
+    this.livenessTimer = setInterval(() => {
+      const socket = this.socket
+      if (!socket || socket.readyState !== WebSocket.OPEN) return
+      if (Date.now() - this.lastServerFrameAt > this.connectionTimeoutMs) {
+        // onclose handles reconnect scheduling.
+        socket.close()
       }
-    }, HEARTBEAT_INTERVAL_MS)
+    }, LIVENESS_CHECK_INTERVAL_MS)
   }
 
   private scheduleReconnect(reason: string): void {
@@ -332,15 +379,15 @@ export class AppSyncRealtimeClient {
     this.reconnectTimer = setTimeout(() => this.connect(), delayMs)
   }
 
-  private clearHeartbeat(): void {
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer)
-      this.heartbeatTimer = null
+  private clearLiveness(): void {
+    if (this.livenessTimer) {
+      clearInterval(this.livenessTimer)
+      this.livenessTimer = null
     }
   }
 
   private clearTimers(): void {
-    this.clearHeartbeat()
+    this.clearLiveness()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null

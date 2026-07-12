@@ -4,6 +4,7 @@ import {
   BACKOFF_BASE_MS,
   BACKOFF_CAP_MS,
   GAP_CURSOR_THRESHOLD,
+  LIVENESS_CHECK_INTERVAL_MS,
   MAX_AUTO_RECONNECT_ATTEMPTS,
 } from './appsyncRealtimeClient'
 import type { AppSyncEventsConfig } from '../api/appsyncConfig'
@@ -161,6 +162,160 @@ describe('AppSyncRealtimeClient', () => {
     })
 
     expect(gap).toBe(true)
+    client.stop()
+  })
+})
+
+describe('AppSyncRealtimeClient — realtime channel protocol compliance (ENC-TSK-M96)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    MockWebSocket.instances = []
+  })
+
+  function newClient(onEvent: (type: string) => void = () => {}, lastCursor = 0) {
+    const client = new AppSyncRealtimeClient({
+      config,
+      lastCursor,
+      onEvent: (event) => onEvent(event.type),
+      webSocketFactory: (url, protocols) => new MockWebSocket(url, protocols) as unknown as WebSocket,
+    })
+    client.start()
+    const socket = MockWebSocket.instances.at(-1)!
+    socket.open()
+    socket.emit({ type: 'connection_ack', connectionTimeoutMs: 300_000 })
+    return { client, socket }
+  }
+
+  it('never sends a client ka frame — AppSync Events rejects it with UnsupportedOperation', () => {
+    vi.useFakeTimers()
+    const { client, socket } = newClient()
+
+    vi.advanceTimersByTime(10 * 60_000)
+    const kaFrames = socket.sent.map((raw) => JSON.parse(raw)).filter((f) => f.type === 'ka')
+    expect(kaFrames).toEqual([])
+    client.stop()
+  })
+
+  it('id-less error frames (operation-level rejections) do not downgrade the transport', () => {
+    const events: string[] = []
+    const { client, socket } = newClient((t) => events.push(t))
+
+    socket.emit({
+      type: 'error',
+      errors: [
+        {
+          errorType: 'UnsupportedOperation',
+          message: 'Operation not supported through the realtime channel',
+        },
+      ],
+    })
+    expect(events).not.toContain('disconnected')
+
+    // The subscription is still live: a subsequent data frame must deliver.
+    socket.emit({
+      type: 'data',
+      event: JSON.stringify({
+        eventId: 'evt-after-error',
+        recordId: 'ENC-TSK-1',
+        record_type: 'task',
+        action: 'updated',
+        actorType: 'agent',
+        actorId: 'ENC-SES-1',
+        summary: 'updated task',
+        cursor: 1_700_000_000_000,
+        channels: ['/feed/updates'],
+      }),
+    })
+    expect(events).toContain('feed_event')
+    client.stop()
+  })
+
+  it('an error naming the primary subscription id still disconnects', () => {
+    const events: string[] = []
+    const { client, socket } = newClient((t) => events.push(t))
+
+    const subscribeFrame = socket.sent
+      .map((raw) => JSON.parse(raw))
+      .find((f) => f.type === 'subscribe' && f.channel === '/feed/updates')
+    socket.emit({ type: 'error', id: subscribeFrame.id, errors: [{ errorType: 'Unauthorized' }] })
+    expect(events).toContain('disconnected')
+    client.stop()
+  })
+
+  it('forces a reconnect when the server blows the connectionTimeoutMs ka window', () => {
+    vi.useFakeTimers()
+    const events: string[] = []
+    const client = new AppSyncRealtimeClient({
+      config,
+      lastCursor: 0,
+      onEvent: (event) => events.push(event.type),
+      webSocketFactory: (url, protocols) => new MockWebSocket(url, protocols) as unknown as WebSocket,
+    })
+    client.start()
+    const socket = MockWebSocket.instances[0]
+    socket.open()
+    socket.emit({ type: 'connection_ack', connectionTimeoutMs: 1_000 })
+
+    vi.advanceTimersByTime(LIVENESS_CHECK_INTERVAL_MS + 1_000)
+    expect(socket.readyState).toBe(3)
+    expect(events).toContain('reconnecting')
+    client.stop()
+  })
+
+  it('keeps the server-silence watchdog fed by incoming ka frames', () => {
+    vi.useFakeTimers()
+    const events: string[] = []
+    const client = new AppSyncRealtimeClient({
+      config,
+      lastCursor: 0,
+      onEvent: (event) => events.push(event.type),
+      webSocketFactory: (url, protocols) => new MockWebSocket(url, protocols) as unknown as WebSocket,
+    })
+    client.start()
+    const socket = MockWebSocket.instances[0]
+    socket.open()
+    socket.emit({ type: 'connection_ack', connectionTimeoutMs: 60_000 })
+
+    for (let i = 0; i < 8; i++) {
+      vi.advanceTimersByTime(30_000)
+      socket.emit({ type: 'ka' })
+    }
+    expect(socket.readyState).toBe(MockWebSocket.OPEN)
+    expect(events).not.toContain('reconnecting')
+    client.stop()
+  })
+
+  it("a replaced socket's late close does not tear down the live connection (manualRetry)", () => {
+    const events: string[] = []
+    const { client, socket: first } = newClient((t) => events.push(t))
+    expect(events).toEqual(['connected'])
+
+    // manualRetry discards the first socket (its close fires synchronously in
+    // the mock — the worst-case ordering) and dials a second one.
+    client.manualRetry()
+    const second = MockWebSocket.instances.at(-1)!
+    expect(second).not.toBe(first)
+    second.open()
+    second.emit({ type: 'connection_ack', connectionTimeoutMs: 300_000 })
+
+    // The abandoned socket's close must not have scheduled a rival reconnect.
+    expect(events).toEqual(['connected', 'connected'])
+    const subscribed = second.sent
+      .map((raw) => JSON.parse(raw))
+      .some((f) => f.type === 'subscribe' && f.channel === '/feed/updates')
+    expect(subscribed).toBe(true)
+    client.stop()
+  })
+
+  it('ignores frames from a socket that has been replaced', () => {
+    const events: string[] = []
+    const { client, socket: first } = newClient((t) => events.push(t))
+
+    client.manualRetry()
+    // A zombie ack from the abandoned socket must not subscribe anything.
+    first.readyState = MockWebSocket.OPEN
+    first.emit({ type: 'connection_ack', connectionTimeoutMs: 300_000 })
+    expect(events.filter((t) => t === 'connected')).toHaveLength(1)
     client.stop()
   })
 })
