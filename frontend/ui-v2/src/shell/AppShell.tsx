@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useEffect } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { useNavigate, useRouterState } from '@tanstack/react-router'
-import { AppLayout, Button, SideNavigation, TopNavigation } from '../design-system'
+import { AppLayout, SideNavigation, TopNavigation } from '../design-system'
 import { performLogout } from '../auth/logout'
 import { useUiStore } from '../store/uiStore'
 import { refreshApp } from '../offline/swUpdate'
@@ -38,13 +38,6 @@ const SIDEBAR_ITEMS = [
   { type: 'link' as const, text: 'Log out', href: LOGOUT_HREF },
 ]
 
-const MOBILE_NAV = [
-  { href: '/', label: 'Home' },
-  { href: '/projects', label: 'Projects' },
-  { href: '/feed', label: 'Feed' },
-  { href: '/docs', label: 'Docs' },
-]
-
 function resolveActiveHref(pathname: string): string {
   if (pathname === '/') return '/'
   const match = SIDEBAR_ITEMS.find(
@@ -57,39 +50,15 @@ function resolveActiveHref(pathname: string): string {
   return match?.href ?? pathname
 }
 
-function MobileBottomNav({
-  activeHref,
-  onNavigate,
-}: {
-  activeHref: string
-  onNavigate: (href: string) => void
-}) {
-  return (
-    <nav className="ev2-shell__bottom-nav" aria-label="Primary">
-      {MOBILE_NAV.map(({ href, label }) => {
-        const active = href === '/' ? activeHref === '/' : activeHref.startsWith(href)
-        return (
-          <div
-            key={href}
-            className={`ev2-shell__bottom-link${active ? ' ev2-shell__bottom-link--active' : ''}`}
-          >
-            <Button
-              variant={active ? 'primary' : 'normal'}
-              ariaLabel={label}
-              onClick={() => onNavigate(href)}
-            >
-              {label}
-            </Button>
-          </div>
-        )
-      })}
-    </nav>
-  )
-}
-
 /**
- * Cockpit shell on design-system-2 AppLayout: TopNavigation + SideNavigation tray +
- * Feed tools rail + mobile Button bottom bar.
+ * Cockpit shell on design-system-2 AppLayout: TopNavigation + SideNavigation
+ * tray + Feed tools rail.
+ *
+ * ENC-TSK-M75 (io UAT 2026-07-12): the mobile bottom nav bar
+ * (Home/Projects/Feed/Docs) was removed. Per io decision the TopNavigation
+ * "Menu" button + SideNavigation drawer is now the single primary navigation
+ * on ALL viewports, so the redundant bottom bar (which rendered inside the
+ * scroll flow on record detail pages) no longer exists.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
@@ -185,12 +154,6 @@ export function AppShell({ children }: { children: ReactNode }) {
         content={
           <div className="ev2-shell__content-wrap">
             <div className="ev2-shell__main">{children}</div>
-            <MobileBottomNav
-              activeHref={activeHref}
-              onNavigate={(href) => {
-                navigate({ to: href })
-              }}
-            />
           </div>
         }
         tools={<FeedPane onClose={() => setFeedRailOpen(false)} />}
