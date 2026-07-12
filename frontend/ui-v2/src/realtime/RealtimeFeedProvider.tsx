@@ -188,15 +188,26 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
     clientRef.current = client
     client.start()
 
+    // ENC-TSK-N04 (B67 AC-4): refocus/online re-kicks use livenessKick, NOT
+    // manualRetry — manualRetry resets the backoff counter, so under tab
+    // churn the counter restarted mid-outage (the W14-A "backoff reset
+    // anomaly": 0.32s attempt right after a long pause) and the 12-attempt
+    // manual-retry bar could never be reached. Only the user-clicked Retry
+    // (manualReconnect below) resets the counter.
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
-        client.manualRetry()
+        client.livenessKick()
       }
     }
+    const onOnline = () => {
+      client.livenessKick()
+    }
     document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('online', onOnline)
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('online', onOnline)
       client.stop()
       clientRef.current = null
     }

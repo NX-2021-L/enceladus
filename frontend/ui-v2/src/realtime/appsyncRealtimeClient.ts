@@ -7,6 +7,15 @@ export const LIVENESS_CHECK_INTERVAL_MS = 15_000
 export const DEFAULT_CONNECTION_TIMEOUT_MS = 300_000
 export const BACKOFF_BASE_MS = 500
 export const BACKOFF_CAP_MS = 30_000
+/**
+ * ENC-TSK-N04 (B67 AC-4/W14-A): documented SERVER keepalive cadence. The B67
+ * spec text said 30s, but AppSync Events delivers `ka` at ~60s in practice
+ * (W14-A: 60.0s median over 59 keepalives on gamma). Nothing client-side
+ * depends on this number — liveness is governed by connectionTimeoutMs from
+ * connection_ack (default 300s, 5× margin over a 60s cadence) — this constant
+ * exists so the observed cadence is recorded where the watchdog lives.
+ */
+export const OBSERVED_SERVER_KA_CADENCE_MS = 60_000
 
 export type RealtimeClientEvent =
   | { type: 'connected' }
@@ -107,6 +116,26 @@ export class AppSyncRealtimeClient {
   manualRetry(): void {
     if (this.disposed || !this.config.enabled) return
     this.reconnectAttempt = 0
+    this.clearTimers()
+    this.discardSocket()
+    this.connect()
+  }
+
+  /**
+   * ENC-TSK-N04 (B67 AC-4): visibility/online re-kick. Reconnects immediately
+   * like manualRetry but WITHOUT resetting the backoff counter — the counter
+   * must keep counting consecutive failures across kicks, or the manual-retry
+   * bar at MAX_AUTO_RECONNECT_ATTEMPTS is never reached under tab-switch churn
+   * (W14-A observed the counter restarting from attempt 1 mid-outage, which is
+   * also the "backoff reset anomaly": refocus fired manualRetry). No-op while
+   * a connection is open or an attempt is already in flight. Kicking from the
+   * halted terminal state is allowed — a failed kick re-emits
+   * manual_retry_required, so the Retry affordance persists.
+   */
+  livenessKick(): void {
+    if (this.disposed || !this.config.enabled) return
+    const state = this.socket?.readyState
+    if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return
     this.clearTimers()
     this.discardSocket()
     this.connect()
@@ -365,8 +394,13 @@ export class AppSyncRealtimeClient {
 
     this.reconnectAttempt += 1
     if (this.reconnectAttempt > MAX_AUTO_RECONNECT_ATTEMPTS) {
-      this.onEvent({ type: 'manual_retry_required' })
+      // ENC-TSK-N04 (B67 AC-4): 'disconnected' must precede
+      // 'manual_retry_required'. The provider maps these 1:1 onto connection
+      // phases, so the old order set phase 'manual_retry' and then immediately
+      // clobbered it with 'disconnected' — the Retry affordance never rendered
+      // and the halt was silent (W14-A: 94s+ with no recovery path but reload).
       this.onEvent({ type: 'disconnected', reason: `manual retry required (${reason})` })
+      this.onEvent({ type: 'manual_retry_required' })
       return
     }
 

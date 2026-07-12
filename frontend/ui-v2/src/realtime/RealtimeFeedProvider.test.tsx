@@ -40,6 +40,7 @@ vi.mock('./appsyncRealtimeClient', () => ({
     start() {}
     stop() {}
     manualRetry() {}
+    livenessKick() {}
     watchRecord() {
       return () => {}
     }

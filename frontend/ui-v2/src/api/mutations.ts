@@ -138,16 +138,39 @@ export async function patchTrackerRecord(
   }
 
   if (typeof navigator !== 'undefined' && !navigator.onLine && !options.skipOfflineQueue) {
-    await enqueueMutation({ url, method: 'PATCH', body, headers })
-    await useOfflineStore.getState().refreshPendingCount()
-    return {
-      success: true,
-      record_id: recordId,
-      updated_at: new Date().toISOString(),
-    }
+    return queuePatchForReplay(url, body, headers, recordId)
   }
 
-  return sendMutationRequest(url, 'PATCH', body, headers)
+  try {
+    return await sendMutationRequest(url, 'PATCH', body, headers)
+  } catch (error) {
+    // ENC-TSK-N04 (B67 AC-18): navigator.onLine is a liar — it can report
+    // true while every request fails at the network layer (lie-fi, DNS/proxy
+    // outage, request-level offline emulation; the W14-A probe hit exactly
+    // this: immediate "Failed to fetch" Flashbar, queue never engaged). A
+    // fetch() rejection is a TypeError by spec and never carries an HTTP
+    // status, so queueing here can't swallow a real 4xx/5xx/409/401 — those
+    // paths throw typed errors above and rethrow below.
+    if (error instanceof TypeError && !options.skipOfflineQueue) {
+      return queuePatchForReplay(url, body, headers, recordId)
+    }
+    throw error
+  }
+}
+
+async function queuePatchForReplay(
+  url: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string>,
+  recordId: string,
+): Promise<MutationResult> {
+  await enqueueMutation({ url, method: 'PATCH', body, headers })
+  await useOfflineStore.getState().refreshPendingCount()
+  return {
+    success: true,
+    record_id: recordId,
+    updated_at: new Date().toISOString(),
+  }
 }
 
 /**
