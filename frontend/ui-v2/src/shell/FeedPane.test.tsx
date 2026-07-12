@@ -14,7 +14,6 @@ const mergeBufferedEvents = vi.fn(() => 0)
 
 vi.mock('../realtime/RealtimeFeedProvider', () => ({
   useRealtimeFeed: () => ({
-    events: [] as FeedRealtimeEvent[],
     isHydrating: false,
     isSnapshotError: false,
     refetchSnapshot: () => {},
@@ -22,6 +21,9 @@ vi.mock('../realtime/RealtimeFeedProvider', () => ({
     mergeBufferedEvents,
     watchRecord: () => () => {},
   }),
+  // ENC-TSK-M73 (B67 AC-13): the visible list now comes from the
+  // REALTIME_FEED_QUERY_KEY cache via this hook, not from the context.
+  useRealtimeFeedEvents: () => [] as FeedRealtimeEvent[],
 }))
 
 describe('FeedPane — new-activities banner (ENC-TSK-K24 / B67 AC-11)', () => {

@@ -7,7 +7,7 @@ import { Badge } from '../components/Badge'
 import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { formatRelativeTime } from '../format/relativeTime'
-import { useRealtimeFeed } from '../realtime/RealtimeFeedProvider'
+import { useRealtimeFeed, useRealtimeFeedEvents } from '../realtime/RealtimeFeedProvider'
 import { applyPropertyFilter } from '../search/applyPropertyFilter'
 import { FeedPropertyFilter } from '../search/FeedPropertyFilter'
 import {
@@ -32,7 +32,6 @@ import {
   getRecentlyViewed,
   hitFromRecent,
   trackRecentlyViewed,
-  type RecentlyViewedEntry,
 } from '../search/recentlyViewed'
 import { buildSearchCorpus } from '../search/searchCorpus'
 import { excludeRecordType } from '../search/recordTypeScope'
@@ -45,6 +44,7 @@ import {
   useRequestFirstPageTelemetry,
 } from '../search/useSearchTelemetry'
 import { useFeedConnectionStore } from '../store/feedConnectionStore'
+import { useUiStore } from '../store/uiStore'
 import { documentHref, recordHrefForType } from '../routes/recordLink'
 import type { SearchResultHit } from '../types/search'
 import { FeedReadingPane } from './FeedReadingPane'
@@ -71,7 +71,8 @@ export function FeedRoute() {
   const [isWide, setIsWide] = useState(false)
   const [selectedHit, setSelectedHit] = useState<SearchResultHit | null>(null)
   const [visibleCount, setVisibleCount] = useState(LIST_CHUNK)
-  const [recentItems, setRecentItems] = useState<RecentlyViewedEntry[]>([])
+  const recentItems = useUiStore((s) => s.recentItems)
+  const setRecentItems = useUiStore((s) => s.setRecentItems)
   const listRef = useRef<HTMLDivElement>(null)
 
   const filterQuery = parseFilterQuery(f, op)
@@ -89,7 +90,8 @@ export function FeedRoute() {
   }
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
-  const { events, isHydrating } = useRealtimeFeed()
+  const { isHydrating } = useRealtimeFeed()
+  const events = useRealtimeFeedEvents()
   const { isWarm } = useCacheEngineState()
   const corpus = (() => {
     const fromEvents = buildSearchCorpus(events, projects)
@@ -180,7 +182,7 @@ export function FeedRoute() {
     setSelectedHit(first)
     trackRecentlyViewed(first)
     setRecentItems(getRecentlyViewed(first.recordType))
-  }, [isWide, filteredHits, selectedHit])
+  }, [isWide, filteredHits, selectedHit, setRecentItems])
 
   useEffect(() => {
     if (isWide) return
