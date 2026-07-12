@@ -18,7 +18,9 @@ name: Deploy UI (ui-v2 PWA)
 # it resolves the S3 bucket + CloudFront distribution id from the T1 stack's
 # CFN exports at runtime (never hardcoded), syncs dist/ with a cache-control
 # split (immutable hashed assets vs no-cache app shell), then invalidates the
-# app-shell paths. record_deploy writes a DPL telemetry record (ENC-ISS-451
+# app-shell paths and WAITS for invalidation completion before reporting success
+# (ENC-TSK-M88 — a green deploy is not evidence users receive the build until
+# CloudFront serves fresh index.html). record_deploy writes a DPL telemetry record (ENC-ISS-451
 # mechanism) after a successful deploy, and never blocks it.
 #
 # Escalated prereq (deploy role): this workflow assumes AWS_UI_DEPLOY_ROLE_TO_ASSUME
@@ -28,6 +30,9 @@ name: Deploy UI (ui-v2 PWA)
 #   s3:GetObject                                   (for --delete diffing)
 #   cloudfront:CreateInvalidation                  (on the ui-v2 distribution)
 #   cloudformation:DescribeStacks                  (to read the T1 stack exports)
+# Invalidation completion is gated on the VIEWER path (index.html contains the
+# deployed commit sha) rather than cloudfront:GetInvalidation — the deploy role
+# carries CreateInvalidation only (04-github-roles.yaml).
 # These are io-gated to add as an ATTACHED managed policy (the CFN deploy role's
 # inline quota is exhausted — J85 / PR #733 pattern) BEFORE the first deploy if
 # the fallback CFN role is used, or the s3 sync AccessDenies.
@@ -253,21 +258,52 @@ jobs:
           for f in index.html sw.js manifest.webmanifest; do
             if [ -f "${DIST_DIR}/${f}" ]; then
               aws s3 cp "${DIST_DIR}/${f}" "s3://${BUCKET}/${f}" \
-                --cache-control "no-cache" \
+                --cache-control "max-age=0,no-cache,no-store,must-revalidate" \
                 --metadata-directive REPLACE
             else
               echo "note: ${f} not present in build output — skipping no-cache re-put."
             fi
           done
 
-      - name: Invalidate CloudFront app-shell paths
+      - name: Invalidate CloudFront app-shell paths (viewer-path gate)
+        id: invalidate
         env:
           DIST: ${{ steps.resolve.outputs.distribution_id }}
+          STACK: ${{ steps.resolve.outputs.stack_name }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          aws cloudfront create-invalidation \
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
             --distribution-id "${DIST}" \
-            --paths /index.html /sw.js /manifest.webmanifest
+            --paths "/index.html" "/sw.js" "/manifest.webmanifest" \
+            --query 'Invalidation.Id' \
+            --output text)
+          echo "invalidation_id=${INVALIDATION_ID}" >> "${GITHUB_OUTPUT}"
+
+          DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK}" --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='UiDistributionDomainName'].OutputValue" \
+            --output text)
+          if [ -z "${DOMAIN}" ] || [ "${DOMAIN}" = "None" ]; then
+            echo "::error::UI CDN stack '${STACK}' is missing UiDistributionDomainName — cannot gate on viewer path."
+            exit 1
+          fi
+
+          SHA_SHORT="${COMMIT_SHA:0:7}"
+          MAX_ATTEMPTS=60
+          SLEEP_SEC=10
+          echo "Created invalidation ${INVALIDATION_ID}; gating on viewer https://${DOMAIN}/index.html containing ${SHA_SHORT} (ENC-TSK-M88)."
+          for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
+            INDEX_BODY=$(curl -sS "https://${DOMAIN}/index.html" || true)
+            if echo "${INDEX_BODY}" | grep -q "${SHA_SHORT}"; then
+              echo "Viewer path gate PASS: index.html contains ${SHA_SHORT} after ${attempt} attempt(s)."
+              exit 0
+            fi
+            echo "Attempt ${attempt}/${MAX_ATTEMPTS}: viewer still stale; sleeping ${SLEEP_SEC}s..."
+            sleep "${SLEEP_SEC}"
+          done
+          echo "::error::Viewer path gate FAIL: https://${DOMAIN}/index.html did not contain ${SHA_SHORT} within $((MAX_ATTEMPTS * SLEEP_SEC))s after invalidation ${INVALIDATION_ID}."
+          exit 1
 
       # Post-deploy smoke test against the live distribution. Proves three
       # things end-to-end: (1) the app shell serves 200 text/html from the S3
@@ -279,6 +315,8 @@ jobs:
       - name: Validate live distribution (shell + /api routing)
         env:
           STACK: ${{ steps.resolve.outputs.stack_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          INVALIDATION_ID: ${{ steps.invalidate.outputs.invalidation_id }}
         run: |
           set -euo pipefail
           DOMAIN=$(aws cloudformation describe-stacks \
@@ -290,9 +328,7 @@ jobs:
             exit 1
           fi
           echo "LIVE_UI_URL=https://${DOMAIN}/"
-
-          # Give the invalidation a moment to propagate before curling.
-          sleep 20
+          echo "Invalidation gate passed: ${INVALIDATION_ID}"
 
           # Capture each result defensively so a curl failure surfaces as a
           # 000 code under set -e rather than aborting the step early.
@@ -307,6 +343,20 @@ jobs:
           health_ok="WARN"; [ "${HEALTH}" = "200" ] && health_ok="PASS"
           proj_ok="FAIL";  [ "${PROJ}" = "401" ] && proj_ok="PASS"
 
+          # ENC-TSK-M88: prove the viewer path serves the build we just shipped.
+          SHA_SHORT="${COMMIT_SHA:0:7}"
+          INDEX_HEADERS=$(curl -sSI "https://${DOMAIN}/index.html" || true)
+          INDEX_CACHE=$(echo "${INDEX_HEADERS}" | awk -F': ' 'tolower($1)=="cache-control"{print $2; exit}')
+          INDEX_BODY=$(curl -sS "https://${DOMAIN}/index.html" || true)
+          version_ok="FAIL"
+          if echo "${INDEX_BODY}" | grep -q "${SHA_SHORT}"; then
+            version_ok="PASS"
+          fi
+          cache_ok="FAIL"
+          case "${INDEX_CACHE}" in
+            *no-cache*|*max-age=0*) cache_ok="PASS" ;;
+          esac
+
           {
             echo "## UI live-distribution validation — ${STACK}"
             echo ""
@@ -315,6 +365,8 @@ jobs:
             echo "| Check | Endpoint | Result | Expected | Status |"
             echo "| --- | --- | --- | --- | --- |"
             echo "| Shell | \`/\` | \`${SHELL_CODE} ${SHELL_CT}\` | 200 + text/html | ${shell_ok} |"
+            echo "| Viewer build | \`/index.html\` body | contains \`${SHA_SHORT}\` | deployed commit | ${version_ok} |"
+            echo "| App-shell cache | \`/index.html\` | \`${INDEX_CACHE:-(missing)}\` | no-cache / max-age=0 | ${cache_ok} |"
             echo "| Health | \`/api/v1/health\` | \`${HEALTH}\` | 200 | ${health_ok} |"
             echo "| API routing/auth | \`/api/v1/projects\` | \`${PROJ}\` | 401 (auth enforced) | ${proj_ok} |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -333,6 +385,14 @@ jobs:
           fi
           if [ "${proj_ok}" != "PASS" ]; then
             echo "::error::/api/v1/projects returned '${PROJ}', expected 401. A 200 means Cognito auth is not enforced; a 404/000 means the /api/* behavior is not routing to the API-Gateway origin."
+            fatal=1
+          fi
+          if [ "${version_ok}" != "PASS" ]; then
+            echo "::error::Viewer path /index.html did not contain deployed sha prefix '${SHA_SHORT}' — CloudFront may still be serving a stale app shell."
+            fatal=1
+          fi
+          if [ "${cache_ok}" != "PASS" ]; then
+            echo "::error::Viewer path /index.html Cache-Control '${INDEX_CACHE:-(missing)}' is not no-cache/max-age=0."
             fatal=1
           fi
           if [ "${health_ok}" != "PASS" ]; then
