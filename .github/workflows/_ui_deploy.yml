@@ -8,7 +8,8 @@ name: Deploy UI (ui-v2 PWA)
 #
 # Branch-based env routing, mirroring cloudformation-ui-cdn-stack-deploy.yml
 # and _deploy.yml:
-#   push to v4/**  -> environment v4-gamma (ungated) — gamma auto-ships.
+#   push to v4/main -> build + deploy v4-gamma (ungated) — the ONLY gamma publish lane.
+#   push to other v4/** -> build ONLY (ENC-TSK-M89 — no feature-branch gamma races).
 #   push to main   -> environment v3-prod (io required-reviewer) — the deploy
 #                     PAUSES as a reviewable, rejectable request instead of
 #                     flipping prod directly (the ENC-FTR-120 invariant).
@@ -58,14 +59,15 @@ permissions:
   id-token: write
 
 concurrency:
-  group: ui-deploy-${{ github.ref_name }}
+  # v4/main merges serialize on one gamma lane (last completed wins).
+  group: ui-deploy-${{ github.ref_name == 'v4/main' && 'v4-gamma' || github.ref_name }}
   cancel-in-progress: false
 
 env:
   AWS_REGION: us-west-2
   # Env-conditional suffix — mirrors cloudformation-ui-cdn-stack-deploy.yml.
-  # v4/** -> "-gamma" (stack enceladus-ui-cdn-gamma), main -> "" (prod).
-  ENVIRONMENT_SUFFIX: ${{ startsWith(github.ref, 'refs/heads/v4/') && '-gamma' || '' }}
+  # v4/main -> "-gamma" (stack enceladus-ui-cdn-gamma), main -> "" (prod).
+  ENVIRONMENT_SUFFIX: ${{ github.ref_name == 'v4/main' && '-gamma' || '' }}
   UI_CDN_STACK_BASE: enceladus-ui-cdn
 
 jobs:
@@ -132,16 +134,40 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # PUBLISH SKIPPED — feature-branch v4/** pushes build but never mutate gamma
+  # (ENC-TSK-M89). Surfaces intentional skip in the Actions UI / summary.
+  # ---------------------------------------------------------------------------
+  publish_skipped:
+    name: Publish skipped (not v4/main)
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/v4/') && github.ref_name != 'v4/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log build-only branch policy
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          echo "::notice::ENC-TSK-M89 build-only — branch '${REF_NAME}' does not publish to gamma. Merge to v4/main to deploy."
+          {
+            echo "## UI publish skipped — ${REF_NAME}"
+            echo ""
+            echo "This workflow built \`frontend/ui-v2\` but **did not deploy** because only \`v4/main\` pushes publish to gamma."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
   # DEPLOY — environment-scoped, AWS-mutating. The ONLY gated job.
   # ENC-FTR-120: v3-prod carries a required-reviewer rule (io); v4-gamma none.
-  # A main-branch run therefore pauses here as a rejectable request.
+  # ENC-TSK-M89: gamma publish is v4/main-only; main retains the io-gated prod lane.
   # ---------------------------------------------------------------------------
   deploy:
-    name: Deploy ui-v2 -> ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+    name: Deploy ui-v2 -> ${{ github.ref_name == 'v4/main' && 'v4-gamma' || 'v3-prod' }}
     needs: build
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && (github.ref_name == 'v4/main' || github.ref_name == 'main'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+    environment: ${{ github.ref_name == 'v4/main' && 'v4-gamma' || 'v3-prod' }}
     outputs:
       bucket: ${{ steps.resolve.outputs.bucket }}
       distribution_id: ${{ steps.resolve.outputs.distribution_id }}
@@ -426,7 +452,7 @@ jobs:
   record_deploy:
     name: Record deploy -> DPL (ENC-ISS-451)
     needs: [build, deploy]
-    if: always() && needs.deploy.result == 'success'
+    if: always() && needs.deploy.result == 'success' && github.event_name == 'push' && github.ref_name == 'v4/main'
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 5
@@ -467,8 +493,8 @@ jobs:
           GOVERNANCE_HASH: ${{ steps.govhash.outputs.governance_hash }}
           PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
           COMMIT_SHA: ${{ github.sha }}
-          # v4/** -> v4-gamma, main -> v3-prod (same expression as the deploy job).
-          ENVIRONMENT: ${{ startsWith(github.ref, 'refs/heads/v4/') && 'v4-gamma' || 'v3-prod' }}
+          # v4/main -> v4-gamma only (ENC-TSK-M89 — feature branches never record).
+          ENVIRONMENT: v4-gamma
           MERGED_AT: ${{ github.event.head_commit.timestamp }}
           DISTRIBUTION_ID: ${{ needs.deploy.outputs.distribution_id }}
           BUCKET: ${{ needs.deploy.outputs.bucket }}
