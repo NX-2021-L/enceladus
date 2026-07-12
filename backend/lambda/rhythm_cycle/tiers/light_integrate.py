@@ -1,4 +1,9 @@
-"""Light Integrate — delta-only consolidation (ENC-TSK-K88)."""
+"""Light Integrate — delta-only consolidation + tenant orchestration
+(ENC-TSK-K88, ENC-TSK-N18).
+
+Scope execution routes through the same tenant_invoker mechanism as
+Heavy Integrate — see DOC-44230223DD1C §4.1.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +14,14 @@ from typing import Any, Dict, List
 import boto3
 from boto3.dynamodb.conditions import Attr
 
+import tenant_invoker
 from artifact_store import read_latest, write_artifact
 from config import PROJECTS_TABLE
 
 logger = logging.getLogger(__name__)
 _ddb = boto3.resource("dynamodb")
+
+BEAT_TYPE = "light_integrate"
 
 
 def _changed_since(iso_ts: str) -> List[str]:
@@ -36,17 +44,21 @@ def _changed_since(iso_ts: str) -> List[str]:
 
 
 def run_light_integrate() -> Dict[str, Any]:
-    prior = read_latest("light_integrate") or {}
+    prior = read_latest(BEAT_TYPE) or {}
     since = str(prior.get("beat_at") or "")
     changed = _changed_since(since)
+    beat_ts = datetime.now(timezone.utc)
+
+    tenant_orchestration = tenant_invoker.run_tenant_orchestration(BEAT_TYPE, beat_ts)
 
     report = {
-        "beat_type": "light_integrate",
+        "beat_type": BEAT_TYPE,
         "changed_record_ids": changed,
         "delta_count": len(changed),
         "actions": ["fsrs_decay_tick", "incremental_doc_summary", "changed_graph_touch"],
+        "tenant_orchestration": tenant_orchestration,
         "embedding_refresh": False,
     }
-    keys = write_artifact("light_integrate", report, datetime.now(timezone.utc))
+    keys = write_artifact(BEAT_TYPE, report, beat_ts)
     report.update(keys)
     return report
