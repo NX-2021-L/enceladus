@@ -91,8 +91,11 @@ class TrackerUrlShapeTests(unittest.TestCase):
         import tiers.decide as decide
 
         with mock.patch.object(decide, "TRACKER_API_BASE", "https://x/api/v1/tracker"):
-            leaves = decide._open_leaf_tasks()
-        self.assertEqual(leaves, [])
+            backlog = decide._open_leaf_tasks()
+        self.assertEqual(backlog["leaves"], [])
+        self.assertEqual(backlog["page_count"], 1)
+        self.assertIsNone(backlog["cursor_terminus"])
+        self.assertFalse(backlog["truncated"])
         url, params = get_json.call_args[0]
         self.assertEqual(url, "https://x/api/v1/tracker/records")
         self.assertEqual(params["project_id"], decide.PROJECT_ID)
@@ -106,6 +109,99 @@ class TrackerUrlShapeTests(unittest.TestCase):
         url = post_json.call_args[0][0]
         self.assertEqual(url, "https://x/api/v1/coordination/dispatch-plan/dry-run")
         self.assertNotIn("/api/v1/api/v1", url)
+
+
+class DecideCursorPaginationTests(unittest.TestCase):
+    """ENC-TSK-N20 / BRD DOC-44230223DD1C §4.4 (C4): cursor-exhausted
+    paginated backlog read replacing the single-page + orphan-flag heuristic
+    (ENC-ISS-542)."""
+
+    def test_pagination_exhaustion_accumulates_across_pages(self):
+        import tiers.decide as decide
+
+        responses = [
+            {"records": [{"item_id": "ENC-TSK-A1"}, {"item_id": "ENC-TSK-A2"}], "next_cursor": "cur-1"},
+            {"records": [{"item_id": "ENC-TSK-A3"}], "next_cursor": "cur-2"},
+            {"records": [{"item_id": "ENC-TSK-A4"}]},  # no next_cursor -> natural exhaustion
+        ]
+        with mock.patch.object(decide, "TRACKER_API_BASE", "https://x/api/v1/tracker"), mock.patch.object(
+            decide, "get_json", side_effect=responses
+        ) as get_json:
+            backlog = decide._open_leaf_tasks()
+
+        self.assertEqual(len(backlog["leaves"]), 4)
+        self.assertEqual(backlog["page_count"], 3)
+        self.assertIsNone(backlog["cursor_terminus"])
+        self.assertFalse(backlog["truncated"])
+        # Second and third calls must forward the cursor from the prior response.
+        self.assertEqual(get_json.call_args_list[1][0][1]["next_cursor"], "cur-1")
+        self.assertEqual(get_json.call_args_list[2][0][1]["next_cursor"], "cur-2")
+        # First call must not carry a next_cursor param at all.
+        self.assertNotIn("next_cursor", get_json.call_args_list[0][0][1])
+
+    def test_leaf_filter_is_explicit_parent_absence_not_orphan_flag(self):
+        import tiers.decide as decide
+
+        records = [
+            {"item_id": "ENC-TSK-B1"},  # no parent key at all -> leaf
+            {"item_id": "ENC-TSK-B2", "parent": ""},  # empty parent -> leaf
+            {"item_id": "ENC-TSK-B3", "parent": "ENC-TSK-PARENT"},  # has parent -> not a leaf
+            {"item_id": "ENC-TSK-B4", "orphan": False},  # orphan flag false but no parent -> leaf
+            {"item_id": "ENC-TSK-B5", "orphan": True, "parent": "ENC-TSK-PARENT2"},  # orphan flag true but has parent -> not a leaf
+        ]
+        with mock.patch.object(decide, "TRACKER_API_BASE", "https://x/api/v1/tracker"), mock.patch.object(
+            decide, "get_json", return_value={"records": records}
+        ):
+            backlog = decide._open_leaf_tasks()
+
+        leaf_ids = {r["item_id"] for r in backlog["leaves"]}
+        self.assertEqual(leaf_ids, {"ENC-TSK-B1", "ENC-TSK-B2", "ENC-TSK-B4"})
+
+    def test_max_pages_guard_truncates_and_marks_artifact(self):
+        import tiers.decide as decide
+
+        def _always_more(url, params):
+            # Every page reports a record and a next_cursor that never empties,
+            # simulating a pathological/never-terminating tracker response.
+            return {"records": [{"item_id": "ENC-TSK-C1"}], "next_cursor": "cur-forever"}
+
+        with mock.patch.object(decide, "TRACKER_API_BASE", "https://x/api/v1/tracker"), mock.patch.object(
+            decide, "get_json", side_effect=_always_more
+        ) as get_json:
+            backlog = decide._open_leaf_tasks()
+
+        self.assertEqual(get_json.call_count, decide._MAX_PAGES)
+        self.assertEqual(backlog["page_count"], decide._MAX_PAGES)
+        self.assertTrue(backlog["truncated"])
+        self.assertEqual(backlog["cursor_terminus"], "cur-forever")
+        # Never loops unbounded — accumulates exactly one leaf per page.
+        self.assertEqual(len(backlog["leaves"]), decide._MAX_PAGES)
+
+    @mock.patch("tiers.decide._dispatch_plan_dry_run", return_value={"dispatches": []})
+    @mock.patch("tiers.decide.write_artifact")
+    @mock.patch("tiers.decide.read_latest", return_value={})
+    @mock.patch("tiers.decide.publish_lyapunov")
+    @mock.patch("tiers.decide._notify_beat")
+    def test_run_decide_artifact_records_pagination_fields(
+        self, _notify, _publish, read_latest, write_artifact, _dispatch
+    ):
+        import tiers.decide as decide
+
+        write_artifact.return_value = {"timestamped_key": "k", "latest_key": "l", "bytes": "1"}
+        read_latest.return_value = {}
+        backlog = {
+            "leaves": [{"item_id": "ENC-TSK-D1"}],
+            "page_count": 2,
+            "cursor_terminus": None,
+            "truncated": False,
+        }
+        with mock.patch.object(decide, "_open_leaf_tasks", return_value=backlog):
+            artifact = decide.run_decide()
+
+        self.assertEqual(artifact["backlog_open_leaves"], 1)
+        self.assertEqual(artifact["backlog_page_count"], 2)
+        self.assertIsNone(artifact["backlog_cursor_terminus"])
+        self.assertFalse(artifact["backlog_pagination_truncated"])
 
 
 if __name__ == "__main__":

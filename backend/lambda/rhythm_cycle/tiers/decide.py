@@ -24,16 +24,69 @@ from metrics import publish_lyapunov
 logger = logging.getLogger(__name__)
 _sns = boto3.client("sns")
 
+# ENC-TSK-N20 / BRD DOC-44230223DD1C §4.4 (C4): defensive cap on pagination
+# depth. Never loop unbounded against the tracker API; if this is hit the
+# read is marked truncated in the decide artifact rather than silently
+# returning a partial count as if it were complete.
+_MAX_PAGES = 50
 
-def _open_leaf_tasks() -> List[Dict[str, Any]]:
+
+def _open_leaf_tasks() -> Dict[str, Any]:
+    """Cursor-exhausted paginated read of the open task backlog.
+
+    ENC-TSK-N20 / BRD §4.4 (C4): the prior implementation (ENC-ISS-542) issued
+    a single page_size=100 request with no cursor follow-through and filtered
+    leaves using the legacy `orphan` flag heuristic — silently truncating the
+    backlog on any project with more than 100 open tasks, and undercounting
+    whenever the orphan flag lagged reality. This version pages until the
+    tracker API's cursor (`next_cursor`) is exhausted, or the `_MAX_PAGES`
+    guard above is hit, and defines a leaf as a record with no `parent` field
+    set at all (explicit parent-absence) rather than the orphan flag.
+
+    Returns a dict: {leaves, page_count, cursor_terminus, truncated}.
+    cursor_terminus is the final outstanding next_cursor value if pagination
+    was cut short by the max_pages guard, else None (natural exhaustion) —
+    this is what makes the metric's completeness auditable from the decide
+    artifact (BRD §4.4).
+    """
     if not TRACKER_API_BASE:
-        return []
+        return {"leaves": [], "page_count": 0, "cursor_terminus": None, "truncated": False}
+
     # ENC-TSK-N28: gamma tracker API serves /records?project_id=... (the
     # /{project_id}/records path shape 404s).
     url = f"{TRACKER_API_BASE}/records"
-    data = get_json(url, {"project_id": PROJECT_ID, "status": "open", "record_type": "task", "page_size": 100})
-    records = data.get("records") or []
-    return [r for r in records if not r.get("parent") and r.get("orphan")]
+    leaves: List[Dict[str, Any]] = []
+    cursor = ""
+    page_count = 0
+    truncated = False
+
+    for _ in range(_MAX_PAGES):
+        params: Dict[str, Any] = {
+            "project_id": PROJECT_ID,
+            "status": "open",
+            "record_type": "task",
+            "page_size": 100,
+        }
+        if cursor:
+            params["next_cursor"] = cursor
+        data = get_json(url, params)
+        page_count += 1
+        records = data.get("records") or []
+        leaves.extend(r for r in records if not r.get("parent"))
+        cursor = data.get("next_cursor") or ""
+        if not cursor:
+            break
+    else:
+        # Loop ran out of iterations without the cursor naturally emptying —
+        # more pages remain beyond the defensive cap.
+        truncated = bool(cursor)
+
+    return {
+        "leaves": leaves,
+        "page_count": page_count,
+        "cursor_terminus": cursor or None,
+        "truncated": truncated,
+    }
 
 
 def _dispatch_plan_dry_run(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -90,7 +143,8 @@ def run_decide() -> Dict[str, Any]:
     prior_decide = read_latest("decide") or {}
     prior_leaves = int(prior_decide.get("backlog_open_leaves") or 0)
 
-    leaves = _open_leaf_tasks()
+    backlog = _open_leaf_tasks()
+    leaves = backlog["leaves"]
     leaf_count = len(leaves)
     delta = leaf_count - prior_leaves
     grooming = bool(os.environ.get("RHYTHM_GROOMING_EVENT", "").lower() in ("1", "true", "yes"))
@@ -126,6 +180,12 @@ def run_decide() -> Dict[str, Any]:
         "escalation_ids": escalated,
         "backlog_open_leaves": leaf_count,
         "backlog_open_leaves_delta": delta,
+        # ENC-TSK-N20 / BRD §4.4: page count + cursor terminus make the
+        # completeness of the Lyapunov read auditable from the artifact
+        # itself, rather than assumed.
+        "backlog_page_count": backlog["page_count"],
+        "backlog_cursor_terminus": backlog["cursor_terminus"],
+        "backlog_pagination_truncated": backlog["truncated"],
         "grooming": grooming,
     }
     keys = write_artifact("decide", artifact, datetime.now(timezone.utc))
