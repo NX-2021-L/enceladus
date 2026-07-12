@@ -573,8 +573,66 @@ def _log_io_gate() -> Dict[str, int]:
 # Handler
 # ---------------------------------------------------------------------------
 
+# --- ENC-TSK-N23: rhythm heavy-beat completion-stanza contract --------------
+# When invoked as a rhythm tenant (backend/lambda/rhythm_cycle/tenant_invoker
+# .py), the invoke payload carries ``result_key`` — the exact S3 key this
+# tenant must write its completion stanza to. Scheduled EventBridge invokes
+# carry no result_key and skip the write. Stanza shape mirrors
+# tenant_invoker.write_completion_stanza; a write failure is logged, never
+# raised — the beat's silent-tenant detection treats a missing stanza as
+# silence, which is the honest signal.
+
+RHYTHM_TENANT_NAME = "memory_consolidation"
+RHYTHM_RESULTS_BUCKET = os.environ.get("RHYTHM_RESULTS_BUCKET", "jreese-net")
+
+
+def _write_rhythm_stanza(event: Any, status: str, detail: Optional[Dict[str, Any]] = None) -> bool:
+    result_key = str((event or {}).get("result_key") or "").strip() if isinstance(event, dict) else ""
+    if not result_key:
+        return False
+    body = {
+        "tenant": RHYTHM_TENANT_NAME,
+        "status": status,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "detail": detail or {},
+    }
+    try:
+        import boto3  # lazy, mirrors module idiom — keeps module import AWS-free
+
+        boto3.client("s3", region_name=AWS_REGION).put_object(
+            Bucket=RHYTHM_RESULTS_BUCKET,
+            Key=result_key,
+            Body=json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+            ContentType="application/json",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — stanza failure must never break the run
+        logger.warning("[ERROR] rhythm stanza write failed key=%s: %s", result_key, exc)
+        return False
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Nightly consolidation entry point.
+    """Entry point: run the nightly consolidation, then honor the rhythm
+    completion-stanza contract when invoked as a heavy-beat tenant
+    (ENC-TSK-N23)."""
+    try:
+        result = _run_consolidation(event, context)
+    except Exception:
+        _write_rhythm_stanza(event, "failed", {})
+        raise
+    _write_rhythm_stanza(
+        event,
+        "completed",
+        {
+            k: result.get(k)
+            for k in ("handoffs_scanned", "clusters_found", "candidates_created", "candidates_existing")
+        },
+    )
+    return result
+
+
+def _run_consolidation(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Nightly consolidation core.
 
     Returns a structured summary and never raises on per-project failures so the
     invocation exits 0 (AC-1) with CloudWatch logs confirming the scan ran.
