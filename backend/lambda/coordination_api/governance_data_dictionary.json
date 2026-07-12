@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-12.3",
-  "updated_at": "2026-07-12T02:40:00Z",
-  "last_change_summary": "ENC-TSK-M79: tracker_mutation._handle_log() (POST /{project}/{type}/{id}/log worklog-append handler used by append_worklog/checkout-service) now splices _version_seq_update_parts() into its UpdateExpression, stamping version_seq/feed_scope identically to the generic single-field PATCH path (_handle_update_field). Previously a pure worklog append never touched version_seq/feed_scope, so the record never re-surfaced in the feed delta projection (version-seq-index GSI, ENC-TSK-L27) until some other field-level PATCH also landed. No new field/entity added to the tracker record shape (version_seq/feed_scope already exist per ENC-TSK-L27); bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-12.4",
+  "updated_at": "2026-07-12T06:10:00Z",
+  "last_change_summary": "ENC-TSK-M92 (P0): tracker_mutation._handle_pwa_action() — the PWA close/note/reopen/worklog button path (POST /{project}/{type}/{id}/action) — now splices _version_seq_update_parts() into all four mutating branches, stamping version_seq/feed_scope identically to _handle_log (M79) and the generic PATCH path. Previously NONE of these branches stamped version_seq/feed_scope, so a gamma-native human UI write (e.g. io's [USER] worklog note on ENC-TSK-L83, 2026-07-12T05:29:31Z) LANDED but never re-surfaced in the feed delta projection (version-seq-index GSI), pinning /api/v1/feed/delta latest_version_seq at 622. M79 fixed only the MCP/checkout worklog path (_handle_log); this closes the human-UI half. No new field/entity added to the tracker record shape (version_seq/feed_scope already exist per ENC-TSK-L27); bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -3578,7 +3578,7 @@
       }
     },
     "feed_query.delta": {
-      "description": "ENC-TSK-L27 (B67 WaveC / DOC-77D6C714867E §9C/§10.3): GET /api/v1/feed/delta?since=<version_seq> returns incremental corpus changes ordered by monotonic tracker.version_seq via the version-seq-index GSI (feed_scope=global). Response includes changed Tier-1 corpus items (with version_seq), delete tombstones, and latest_version_seq watermark for client gap-healing. Distinct from legacy GET /api/v1/feed?since=<ISO8601> incremental path. ENC-TSK-M79: tracker_mutation's write paths that stamp version_seq/feed_scope on every mutating UpdateExpression are _stamp_version_seq_on_create_item (record creation) and _version_seq_update_parts (spliced into both the generic single-field PATCH path, _handle_update_field, and the worklog-append path, _handle_log). Before M79, _handle_log's UpdateExpression omitted version_seq/feed_scope entirely, so a pure worklog append (no field PATCH) never re-surfaced the record in this delta projection — fixed by splicing _version_seq_update_parts() into _handle_log identically to the PATCH path's idiom.",
+      "description": "ENC-TSK-L27 (B67 WaveC / DOC-77D6C714867E §9C/§10.3): GET /api/v1/feed/delta?since=<version_seq> returns incremental corpus changes ordered by monotonic tracker.version_seq via the version-seq-index GSI (feed_scope=global). Response includes changed Tier-1 corpus items (with version_seq), delete tombstones, and latest_version_seq watermark for client gap-healing. Distinct from legacy GET /api/v1/feed?since=<ISO8601> incremental path. ENC-TSK-M79: tracker_mutation's write paths that stamp version_seq/feed_scope on every mutating UpdateExpression are _stamp_version_seq_on_create_item (record creation) and _version_seq_update_parts (spliced into both the generic single-field PATCH path, _handle_update_field, and the worklog-append path, _handle_log). Before M79, _handle_log's UpdateExpression omitted version_seq/feed_scope entirely, so a pure worklog append (no field PATCH) never re-surfaced the record in this delta projection — fixed by splicing _version_seq_update_parts() into _handle_log identically to the PATCH path's idiom. ENC-TSK-M92 (P0): the M79 fix covered only the MCP/checkout worklog path; the PWA close/note/reopen/worklog button routes through a SEPARATE handler, _handle_pwa_action, whose four mutating branches also omitted version_seq/feed_scope. So a gamma-native human UI write landed but never re-surfaced here (latest_version_seq pinned at 622 despite live writes). M92 splices _version_seq_update_parts() into all four _handle_pwa_action branches (close spliced inside SET, before its ADD closed_count clause). With M92, EVERY tracker write path that mutates a record stamps version_seq/feed_scope: create, generic PATCH, worklog-append (_handle_log), and PWA action (_handle_pwa_action).",
       "fields": {
         "since": {
           "type": "integer",
@@ -7970,6 +7970,11 @@
   },
   "change_summary": "ENC-TSK-M76: feed p95 closure II -- pushed the GET /api/v1/feed page cap UPSTREAM into the selection/hydration tier. graph_query_api feed_selection gained an optional page_size+before mode (per-(project,type) msearch fetches page_size+1 hits WITH updated_at + an updated_at<=before range bound); feed_query merges globally, keeps only the strictly-after-cursor page window, and hydrates ONLY <=page_size+1 keys via BatchGet instead of the whole ~919-record corpus. No record/entity schema change (internal query logic + the same 5-list/next_cursor response contract); bumping per the lambda_function.py touch guard.",
   "change_log": [
+    {
+      "version": "2026-07-12.4",
+      "date": "2026-07-12",
+      "summary": "ENC-TSK-M92 (P0): tracker_mutation._handle_pwa_action() now stamps version_seq/feed_scope via _version_seq_update_parts() in all four mutating branches (close/note/reopen/worklog), mirroring _handle_log (M79) and the generic PATCH path. Closes the realtime-publish gap M79 could not: the PWA close/note/reopen/worklog button routes through _handle_pwa_action, NOT _handle_log, so a gamma-native human UI write (io's [USER] worklog note on ENC-TSK-L83, 05:29:31Z) landed but never entered the feed delta projection (version-seq-index GSI), pinning /api/v1/feed/delta at 622. The close branch splices the vseq clause inside SET, before its ADD closed_count clause. Repo-file edit only, no new entity/field added to the tracker record shape."
+    },
     {
       "version": "2026-07-12.3",
       "date": "2026-07-12",
