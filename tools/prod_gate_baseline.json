@@ -247,6 +247,13 @@
         "execute"
       ],
       "notes": "ENC-TSK-M98 / ENC-ISS-538 canonical->gamma tracker mirror. Mutates ONLY -gamma DynamoDB tables (in-tool direction lock: source hard-coded to devops-project-tracker read-only, every write target must end -gamma). dry_run job is read-only; execute job requires typed confirm phrase OVERWRITE-GAMMA AND environment: gamma-mirror (io one-time setup: add required_reviewers to gamma-mirror before first execute, ENC-TSK-N01)."
+    },
+    "iam-cfn-deploy-role-appconfig-patch.yml": {
+      "class": "prod-mutating",
+      "gated_jobs": [
+        "patch-role"
+      ],
+      "notes": "ENC-TSK-L83: environment: v3-prod — grants appconfig profile/hosted-version/deployment ops on application fhhcl7m to the SHARED CFN deploy role (rhythm-tenants + appconfig-governance stack unblock)"
     }
   }
 }
