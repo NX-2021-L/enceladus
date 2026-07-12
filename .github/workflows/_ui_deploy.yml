@@ -30,6 +30,9 @@ name: Deploy UI (ui-v2 PWA)
 #   s3:GetObject                                   (for --delete diffing)
 #   cloudfront:CreateInvalidation                  (on the ui-v2 distribution)
 #   cloudformation:DescribeStacks                  (to read the T1 stack exports)
+# Invalidation completion is gated on the VIEWER path (index.html contains the
+# deployed commit sha) rather than cloudfront:GetInvalidation — the deploy role
+# carries CreateInvalidation only (04-github-roles.yaml).
 # These are io-gated to add as an ATTACHED managed policy (the CFN deploy role's
 # inline quota is exhausted — J85 / PR #733 pattern) BEFORE the first deploy if
 # the fallback CFN role is used, or the s3 sync AccessDenies.
@@ -262,10 +265,12 @@ jobs:
             fi
           done
 
-      - name: Invalidate CloudFront app-shell paths (await completion)
+      - name: Invalidate CloudFront app-shell paths (viewer-path gate)
         id: invalidate
         env:
           DIST: ${{ steps.resolve.outputs.distribution_id }}
+          STACK: ${{ steps.resolve.outputs.stack_name }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           INVALIDATION_ID=$(aws cloudfront create-invalidation \
@@ -274,11 +279,31 @@ jobs:
             --query 'Invalidation.Id' \
             --output text)
           echo "invalidation_id=${INVALIDATION_ID}" >> "${GITHUB_OUTPUT}"
-          echo "Created CloudFront invalidation ${INVALIDATION_ID}; awaiting completion (ENC-TSK-M88 gate)."
-          aws cloudfront wait invalidation-completed \
-            --distribution-id "${DIST}" \
-            --id "${INVALIDATION_ID}"
-          echo "CloudFront invalidation ${INVALIDATION_ID} completed."
+
+          DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK}" --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='UiDistributionDomainName'].OutputValue" \
+            --output text)
+          if [ -z "${DOMAIN}" ] || [ "${DOMAIN}" = "None" ]; then
+            echo "::error::UI CDN stack '${STACK}' is missing UiDistributionDomainName — cannot gate on viewer path."
+            exit 1
+          fi
+
+          SHA_SHORT="${COMMIT_SHA:0:7}"
+          MAX_ATTEMPTS=60
+          SLEEP_SEC=10
+          echo "Created invalidation ${INVALIDATION_ID}; gating on viewer https://${DOMAIN}/index.html containing ${SHA_SHORT} (ENC-TSK-M88)."
+          for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
+            INDEX_BODY=$(curl -sS "https://${DOMAIN}/index.html" || true)
+            if echo "${INDEX_BODY}" | grep -q "${SHA_SHORT}"; then
+              echo "Viewer path gate PASS: index.html contains ${SHA_SHORT} after ${attempt} attempt(s)."
+              exit 0
+            fi
+            echo "Attempt ${attempt}/${MAX_ATTEMPTS}: viewer still stale; sleeping ${SLEEP_SEC}s..."
+            sleep "${SLEEP_SEC}"
+          done
+          echo "::error::Viewer path gate FAIL: https://${DOMAIN}/index.html did not contain ${SHA_SHORT} within $((MAX_ATTEMPTS * SLEEP_SEC))s after invalidation ${INVALIDATION_ID}."
+          exit 1
 
       # Post-deploy smoke test against the live distribution. Proves three
       # things end-to-end: (1) the app shell serves 200 text/html from the S3
