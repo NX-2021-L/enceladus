@@ -235,17 +235,15 @@ Resources:
           }
         }
 
-  RhythmTenantsDeploymentStrategy:
-    Type: AWS::AppConfig::DeploymentStrategy
-    Properties:
-      Name: !Sub "enceladus-rhythm-tenants-immediate${EnvironmentSuffix}"
-      Description: Immediate activation, no bake time - matches feature-flags/governance precedent.
-      ReplicateTo: NONE
-      DeploymentDurationInMinutes: 0
-      FinalBakeTimeInMinutes: 0
-      GrowthFactor: 100
-      GrowthType: LINEAR
-
+  # ENC-TSK-N30: the custom RhythmTenantsDeploymentStrategy resource is
+  # replaced by AWS's predefined "AppConfig.AllAtOnce" strategy (immediate
+  # activation, no bake — identical semantics to the removed resource:
+  # duration 0, bake 0, growth 100). Creating a custom strategy required the
+  # account-scoped appconfig:CreateDeploymentStrategy grant the CFN deploy
+  # role lacks (N24 bootstrap run 29195465126 403'd on it); referencing the
+  # predefined strategy removes that grant class permanently. Predefined
+  # strategy IDs are valid values for AWS::AppConfig::Deployment
+  # DeploymentStrategyId, mirroring StartDeployment semantics.
   RhythmTenantsInitialDeployment:
     Type: AWS::AppConfig::Deployment
     Properties:
@@ -253,8 +251,8 @@ Resources:
       EnvironmentId: !Ref AppConfigEnvironmentId
       ConfigurationProfileId: !Ref RhythmTenantsProfile
       ConfigurationVersion: !Ref RhythmTenantsInitialVersion
-      DeploymentStrategyId: !Ref RhythmTenantsDeploymentStrategy
-      Description: "ENC-TSK-N24: activate full heavy tenant manifest"
+      DeploymentStrategyId: "AppConfig.AllAtOnce"
+      Description: "ENC-TSK-N30: activate full heavy tenant manifest (predefined AllAtOnce strategy)"
 
 Outputs:
   RhythmTenantsProfileId:
