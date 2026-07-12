@@ -7789,14 +7789,28 @@ Resources:
         RoleArn: !GetAtt RhythmSchedulerRole.Arn
         Input: '{"tier":"coherence"}'
 
+  # ENC-TSK-N27 (N10 AC-2): backlog_open_leaves_delta is the per-Decide-beat
+  # Lyapunov delta already emitted by metrics.publish_lyapunov() (decide.py).
+  # "Non-decreasing" means delta >= 0 (the backlog failed to shrink that beat,
+  # including a flat/zero-delta beat -- not just strict growth). We alarm on
+  # the raw per-beat metric with ComparisonOperator=GreaterThanOrEqualToThreshold
+  # (Threshold=0) rather than metric-math DIFF(), since decide.py already
+  # computes the delta itself -- this is "the closest achievable with standard
+  # alarm math" for a pre-differenced metric. Statistic=Maximum + Period=10800
+  # (matches the 3h decide cadence, see RhythmDecideSchedule cron) +
+  # EvaluationPeriods=3 means: alarm if delta >= 0 held for 3 consecutive
+  # decide beats in a row (a genuine 9h stall/growth in convergence).
+  # Originally added under ENC-TSK-K93 with ComparisonOperator=GreaterThanThreshold
+  # (delta > 0 only), which misses the flat/delta==0 pathology case; corrected here.
   RhythmPathologyAlarm:
     Type: AWS::CloudWatch::Alarm
     Condition: RhythmActive
     Properties:
       AlarmName: !Sub "enceladus-rhythm-pathology${EnvironmentSuffix}"
       AlarmDescription: >-
-        ENC-TSK-K93: three consecutive non-decreasing Decide beats on
-        backlog_open_leaves_delta (Lyapunov pathology).
+        ENC-TSK-N27/K93: three consecutive non-decreasing Decide beats on
+        backlog_open_leaves_delta (Lyapunov pathology). Non-decreasing means
+        delta >= 0 (no convergence progress that beat).
       Namespace: Enceladus/Rhythm
       MetricName: backlog_open_leaves_delta
       Dimensions:
@@ -7810,7 +7824,7 @@ Resources:
       Period: 10800
       EvaluationPeriods: 3
       Threshold: 0
-      ComparisonOperator: GreaterThanThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions:
         - !Ref RhythmBeatNotificationTopic
