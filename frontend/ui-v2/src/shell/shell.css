@@ -24,38 +24,10 @@
   min-height: 0;
 }
 
-.ev2-shell__bottom-nav {
-  display: none;
-  flex-shrink: 0;
-  align-items: stretch;
-  justify-content: space-around;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-2) calc(var(--space-2) + env(safe-area-inset-bottom, var(--space-0)));
-  background: var(--enc-surface);
-  border-top: var(--border-subtle);
-  backdrop-filter: blur(var(--space-3));
-}
-
-.ev2-shell__bottom-link {
-  flex: 1;
-  min-width: var(--space-0);
-}
-
-.ev2-shell__bottom-link .ev2-btn {
-  width: 100%;
-  height: auto;
-  min-height: var(--v2-control-height);
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-1);
-  font-size: var(--text-xs);
-  line-height: var(--lh-snug);
-}
-
-.ev2-shell__bottom-link--active .ev2-btn {
-  background: rgba(61, 155, 168, 0.12);
-  color: var(--enc-teal-light);
-}
+/* ENC-TSK-M75: the mobile bottom nav bar (Home/Projects/Feed/Docs) was
+ * removed — the TopNavigation "Menu" drawer is the single primary nav on all
+ * viewports now, so its .ev2-shell__bottom-nav / __bottom-link rules are
+ * gone with it. */
 
 /* Band-B fix (ENC-ISS-51x): this default MUST come before the mobile
  * media query below. `.ev2-shell__nav-scrim` has equal specificity in both
@@ -71,10 +43,6 @@
 }
 
 @media (max-width: 48rem) {
-  .ev2-shell__bottom-nav {
-    display: flex;
-  }
-
   /* ENC-TSK-M26 fix: the previous rule keyed drawer visibility off
      `.ev2-al__nav:not(.ev2-al__nav--collapsed)`. AppLayout's own base rule
      (`.ev2-al__nav--collapsed{display:none}`) only ever HIDES the nav; the
@@ -107,8 +75,12 @@
     display: none;
   }
 
+  /* ENC-TSK-M75: with the bottom nav bar removed, mobile content only needs
+   * a modest bottom breathing gap plus the device safe-area inset (record
+   * detail pages reserve their own extra clearance for the sticky action bar
+   * via .ev2-rdh padding-bottom). */
   .ev2-shell .ev2-al__content {
-    padding-bottom: calc(var(--space-12) + env(safe-area-inset-bottom, var(--space-0)));
+    padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom, var(--space-0)));
   }
 
   .ev2-shell__nav-scrim {

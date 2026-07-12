@@ -111,7 +111,12 @@
   bottom: 0;
   z-index: 20;
   padding: var(--space-3) var(--space-4);
-  background: var(--bg-elevated);
+  /* ENC-TSK-M75: was var(--bg-elevated) — an UNDEFINED token, so the bar
+   * rendered with no background (transparent) and page text (the DESCRIPTION
+   * heading) bled through and garbled the buttons on scroll. Use the opaque
+   * elevated-panel surface token so the bar fully occludes content beneath
+   * it. Opaque design-system surface (#1C2333), no transparency. */
+  background: var(--enc-surface-alt);
   border-top: var(--border-subtle);
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.28);
   max-width: 100%;

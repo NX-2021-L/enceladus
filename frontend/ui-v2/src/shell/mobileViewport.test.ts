@@ -395,3 +395,54 @@ describe('search input + toolbar overflow floor (ENC-TSK-M38)', () => {
     expect(ruleMatch?.[1] ?? '').toMatch(/min-width:\s*(var\(--space-0\)|0)/)
   })
 })
+
+/**
+ * ENC-TSK-M75 (io UAT screenshot 2026-07-12, mobile record detail page) --
+ * three chrome/layout defects. Same static-source-assertion approach: jsdom
+ * has no cascade/layout, so these read the shipped stylesheets + component
+ * source and fail loudly if any fix is reverted.
+ */
+describe('PWA UI polish (ENC-TSK-M75)', () => {
+  const shellCss = stripCssComments(readSrc('shell/shell.css'))
+  const appShell = readSrc('shell/AppShell.tsx')
+  const hubCss = stripCssComments(readSrc('components/recordDetailHub.css'))
+  const topNav = readSrc('../../design-system-2/v2/components/TopNavigation/TopNavigation.jsx')
+
+  it('AC-1: the mobile bottom nav bar (Home/Projects/Feed/Docs) is fully removed', () => {
+    // No component, no MOBILE_NAV array, no render in AppShell...
+    expect(appShell).not.toMatch(/MobileBottomNav/)
+    expect(appShell).not.toMatch(/MOBILE_NAV/)
+    // ...and its stylesheet rules are gone too (the drawer is the sole nav).
+    expect(shellCss).not.toMatch(/\.ev2-shell__bottom-nav\s*\{/)
+    expect(shellCss).not.toMatch(/\.ev2-shell__bottom-link/)
+    // The drawer + Menu toggle remain the single nav surface.
+    expect(appShell).toMatch(/SideNavigation/)
+    expect(appShell).toMatch(/toggleSidebar/)
+  })
+
+  it('AC-2: the sticky action bar has an OPAQUE enc surface background (not the undefined --bg-elevated, no transparency)', () => {
+    const stickyMatch = hubCss.match(/\.ev2-rdh__actionbar--sticky\s*\{([^}]*)\}/)
+    expect(stickyMatch, 'expected a .ev2-rdh__actionbar--sticky rule').not.toBeNull()
+    const rule = stickyMatch?.[1] ?? ''
+    // background must be an opaque --enc-* surface token...
+    expect(rule).toMatch(/background:\s*var\(--enc-[a-z-]+\)/)
+    // ...never the undefined --bg-elevated token (renders transparent) or a
+    // literal transparent fill.
+    expect(rule).not.toMatch(/background:[^;]*--bg-elevated/)
+    expect(rule).not.toMatch(/background:\s*transparent/)
+    // still pinned + stacked above content, with content padding reserved.
+    expect(rule).toMatch(/position:\s*fixed/)
+    expect(rule).toMatch(/z-index:\s*\d+/)
+    expect(hubCss.match(/\.ev2-rdh\s*\{([^}]*)\}/)?.[1] ?? '').toMatch(/padding-bottom:/)
+  })
+
+  it('AC-3: TopNavigation condenses at <=430px so Search/Feed cannot overflow the right margin', () => {
+    // A narrow-viewport media query (30rem = 480px, covering 375 & 430)...
+    const mobileBlock = extractBlock(topNav, /@media\s*\(max-width:\s*30rem\)\s*\{/)
+    expect(mobileBlock.length, 'expected a <=30rem media block in TopNavigation').toBeGreaterThan(0)
+    // ...that drops the version pill and collapses the wordmark to its icon,
+    // freeing horizontal room for the Menu/Search/Feed utilities.
+    expect(mobileBlock).toMatch(/\.ev2-tn__version\{[^}]*display:\s*none/)
+    expect(mobileBlock).toMatch(/\.ev2-tn__title\{[^}]*display:\s*none/)
+  })
+})

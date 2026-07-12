@@ -12,6 +12,19 @@ img.ev2-tn__mark{object-fit:contain}
 .ev2-tn__btn:hover{background:rgba(61,155,168,.1);color:var(--enc-teal-light,#7AC8D4)}
 .ev2-tn__badge{font-family:var(--font-mono,monospace);font-size:11px;color:var(--enc-teal,#3D9BA8)}
 .ev2-tn__avatar{width:26px;height:26px;border-radius:50%;background:var(--enc-teal,#3D9BA8);color:var(--enc-void,#0A0A0F);display:flex;align-items:center;justify-content:center;font-family:var(--font-heading,'Space Grotesk',sans-serif);font-weight:700;font-size:12px}
+/* ENC-TSK-M75: at narrow mobile widths (<=430px) the brand + version badge +
+   Menu/Search/Feed utility buttons overflowed the right edge and clipped
+   "Feed" offscreen. Condense the chrome so everything stays inside the
+   viewport: drop the build-version pill, collapse the wordmark to its mark
+   icon only (the icon still links home), and tighten the header/utility
+   spacing. Verified at 375px and 430px. */
+@media (max-width:30rem){
+.ev2-tn{gap:8px;padding:0 12px}
+.ev2-tn__version{display:none}
+.ev2-tn__title{display:none}
+.ev2-tn__util{gap:2px}
+.ev2-tn__btn{padding:6px 8px;font-size:12px;gap:5px}
+}
 `;
 (function(){if(typeof document!=='undefined'&&!document.getElementById('ev2-tn-css')){const s=document.createElement('style');s.id='ev2-tn-css';s.textContent=ev2TnCss;document.head.appendChild(s);}})();
 
