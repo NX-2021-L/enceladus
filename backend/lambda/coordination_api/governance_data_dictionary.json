@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-12.5",
-  "updated_at": "2026-07-12T10:40:00Z",
-  "last_change_summary": "ENC-TSK-N03 / ENC-ISS-543: graph_sync close-transition projection fix -- _coalesce_status_for_projection() recovers typed status.S from NewImage with OldImage fallback on MODIFY, TERMINAL_STATUSES preserved on checkout-only MODIFY (checkout-release after close no longer regresses the node), explicit SET n.status on every node upsert (SET n += props never fixes an omitted key), and the handler now raises when a failed record lacks a batchItemFailures identifier. Repair tool tools/graph_status_drift_reconcile.py added. No entity/field schema change; bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-12.6",
+  "updated_at": "2026-07-12T12:45:00Z",
+  "last_change_summary": "ENC-TSK-N26: pre-cutover baseline capture tooling added to backend/lambda/rhythm_cycle/ -- new baseline.py module + a 'baseline_capture' entry in lambda_function.py's TIER_HANDLERS (standalone on-demand event mode, not part of the scheduled harmonic beat chain -- no TIER_ORDER/TIER_PREDECESSOR entry, no schedule resource). Writes one Sense-adjacent artifact covering percolation telemetry export, a fixed-query retrieval-quality run, a lesson citation-rate proxy, and corpus invariants, each independently degrading to an honest 'unavailable + reason' rather than failing the run. No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -8379,6 +8379,11 @@
       "version": "2026-07-12.5",
       "date": "2026-07-12",
       "summary": "ENC-TSK-N03 / ENC-ISS-543: graph_sync close-transition projection fix -- _coalesce_status_for_projection() recovers typed status.S from NewImage with OldImage fallback on MODIFY, TERMINAL_STATUSES preserved on checkout-only MODIFY (checkout-release after close no longer regresses the node), explicit SET n.status on every node upsert (SET n += props never fixes an omitted key), and the handler now raises when a failed record lacks a batchItemFailures identifier. Repair tool tools/graph_status_drift_reconcile.py added. No entity/field schema change; bumping per the lambda_function.py touch guard."
+    },
+    {
+      "version": "2026-07-12.6",
+      "date": "2026-07-12",
+      "summary": "ENC-TSK-N26: pre-cutover baseline capture tooling added to backend/lambda/rhythm_cycle/ -- new baseline.py module + a 'baseline_capture' entry in lambda_function.py's TIER_HANDLERS (standalone on-demand event mode, not part of the scheduled harmonic beat chain -- no TIER_ORDER/TIER_PREDECESSOR entry, no schedule resource). Writes one Sense-adjacent artifact covering percolation telemetry export, a fixed-query retrieval-quality run, a lesson citation-rate proxy, and corpus invariants, each independently degrading to an honest 'unavailable + reason' rather than failing the run. No entity/field schema change; bumping per the lambda_function.py touch guard."
     }
   ]
 }
