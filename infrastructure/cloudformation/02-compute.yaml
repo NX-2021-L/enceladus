@@ -7490,6 +7490,13 @@ Resources:
       Role: !GetAtt RhythmCycleRole.Arn
       Layers:
         - !Ref SharedLayerArn
+        # ENC-TSK-N18 / DOC-44230223DD1C §4.1: AppConfig extension layer, for
+        # tenant_invoker's rhythm-tenants manifest resolution (arch-conditional,
+        # same pattern as every other AppConfig-reading function below).
+        - !If
+          - HasAppConfigLayer
+          - !If [IsGamma, !Ref AppConfigExtensionLayerArnArm64, !Ref AppConfigExtensionLayerArnX86]
+          - !Ref AWS::NoValue
       Environment:
         Variables:
           PROJECT_ID: enceladus
@@ -7504,6 +7511,12 @@ Resources:
           COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           PRE_APPROVED_DISPATCH_SCOPES: '["ENC-PLN-068","ENC-TSK-K"]'
           RHYTHM_SNS_TOPIC_ARN: !Ref RhythmBeatNotificationTopic
+          # ENC-TSK-N18: tenant_invoker AppConfig wiring. Configuration profile
+          # is additive/separate from feature-flags (see 10-appconfig-rhythm-
+          # tenants.yaml) — ships with zero enabled tenants.
+          APPCONFIG_APPLICATION: !If [HasAppConfigLayer, !Ref AppConfigApplicationId, !Ref "AWS::NoValue"]
+          APPCONFIG_ENVIRONMENT: !If [HasAppConfigLayer, !Ref AppConfigEnvironmentId, !Ref "AWS::NoValue"]
+          RHYTHM_TENANTS_APPCONFIG_CONFIGURATION: rhythm-tenants
       Tags:
         - Key: Project
           Value: enceladus
@@ -7565,6 +7578,28 @@ Resources:
                 Action:
                   - sns:Publish
                 Resource: !Ref RhythmBeatNotificationTopic
+              # ENC-TSK-N18 / DOC-44230223DD1C §4.1: async (Event) invoke of tenant
+              # Lambdas resolved from the rhythm-tenants AppConfig manifest. Scoped
+              # to the enceladus-tenant-* naming convention tenants are required to
+              # use (ENC-TSK-N23/N24 wire real tenants under this prefix) — additive,
+              # no tenant exists yet so this grant is inert until flags flip.
+              - Sid: RhythmTenantInvoke
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-tenant-*"
+        - PolicyName: AppConfigAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AppConfigRead
+                Effect: Allow
+                Action:
+                  - appconfig:GetConfiguration
+                  - appconfig:GetLatestConfiguration
+                  - appconfig:StartConfigurationSession
+                Resource: "*"
 
   RhythmBeatNotificationTopic:
     Type: AWS::SNS::Topic

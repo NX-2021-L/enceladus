@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enceladus Rhythm tenant manifest — ENC-TSK-N18 (DOC-44230223DD1C §4.1).
+  Adds a `rhythm-tenants` configuration profile under the EXISTING AppConfig
+  Application/Environment provisioned by 06-feature-flags.yaml, following the
+  precedent set by 09-appconfig-governance.yaml (additive, no other profile
+  touched). Each key under `tenants` is one tenant record consumed by
+  backend/lambda/rhythm_cycle/tenant_invoker.py::get_manifest():
+
+    {
+      "tenants": {
+        "<name>": {
+          "beat": "heavy_integrate" | "light_integrate",
+          "enabled": false,               # kill switch; false = not invoked
+          "function_name": "enceladus-tenant-<name>",
+          "order": 10,                    # manifest ordering (ties -> name)
+          "expected_output_contract": {}   # tenant-defined, opaque here
+        }
+      }
+    }
+
+  The `enabled` flag IS the addressable "rhythm.tenant.<name>.enabled" switch
+  from the BRD — AppConfig hosted config is a single JSON document rather
+  than flat key/value flags, so the flag is physically this nested boolean.
+
+  Ships with an EMPTY tenants object — zero enabled, invokable tenants by
+  default. No behavior change on gamma until ENC-TSK-N23/N24 populate it.
+
+Parameters:
+  EnvironmentSuffix:
+    Type: String
+    Default: ""
+    AllowedValues: ["", "-gamma"]
+  AppConfigApplicationId:
+    Type: String
+    Description: >-
+      AppConfig Application ID from the 06-feature-flags stack Outputs
+      (ApplicationId). Pass via --parameter-overrides.
+  AppConfigEnvironmentId:
+    Type: String
+    Description: >-
+      AppConfig Environment ID from the 06-feature-flags stack Outputs
+      (EnvironmentId). Pass via --parameter-overrides.
+
+Resources:
+  RhythmTenantsProfile:
+    Type: AWS::AppConfig::ConfigurationProfile
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      Name: rhythm-tenants
+      LocationUri: hosted
+      Description: >-
+        Ordered tenant manifest for the rhythm_cycle Heavy/Light Integrate
+        beats (ENC-TSK-N18). One record per tenant; `enabled` is the kill
+        switch. Wiring real tenants is ENC-TSK-N23/N24.
+      Validators:
+        - Type: JSON_SCHEMA
+          Content: |
+            {
+              "$schema": "https://json-schema.org/draft/2019-09/schema",
+              "type": "object",
+              "properties": {
+                "tenants": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                      "beat": { "type": "string", "enum": ["heavy_integrate", "light_integrate"] },
+                      "enabled": { "type": "boolean" },
+                      "function_name": { "type": "string" },
+                      "order": { "type": "number" },
+                      "expected_output_contract": { "type": "object" }
+                    },
+                    "required": ["beat", "enabled", "function_name"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+      Tags:
+        - Key: Project
+          Value: enceladus
+        - Key: Component
+          Value: rhythm-tenants
+
+  RhythmTenantsInitialVersion:
+    Type: AWS::AppConfig::HostedConfigurationVersion
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      ConfigurationProfileId: !Ref RhythmTenantsProfile
+      ContentType: application/json
+      Description: "Initial version - empty manifest, zero enabled tenants (ENC-TSK-N18)"
+      Content: |
+        {
+          "tenants": {}
+        }
+
+  RhythmTenantsDeploymentStrategy:
+    Type: AWS::AppConfig::DeploymentStrategy
+    Properties:
+      Name: !Sub "enceladus-rhythm-tenants-immediate${EnvironmentSuffix}"
+      Description: Immediate activation, no bake time - matches feature-flags/governance precedent.
+      ReplicateTo: NONE
+      DeploymentDurationInMinutes: 0
+      FinalBakeTimeInMinutes: 0
+      GrowthFactor: 100
+      GrowthType: LINEAR
+
+  RhythmTenantsInitialDeployment:
+    Type: AWS::AppConfig::Deployment
+    Properties:
+      ApplicationId: !Ref AppConfigApplicationId
+      EnvironmentId: !Ref AppConfigEnvironmentId
+      ConfigurationProfileId: !Ref RhythmTenantsProfile
+      ConfigurationVersion: !Ref RhythmTenantsInitialVersion
+      DeploymentStrategyId: !Ref RhythmTenantsDeploymentStrategy
+      Description: "Initial activation - empty manifest, ENC-TSK-N18"
+
+Outputs:
+  RhythmTenantsProfileId:
+    Value: !Ref RhythmTenantsProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-RhythmTenantsProfileId"
