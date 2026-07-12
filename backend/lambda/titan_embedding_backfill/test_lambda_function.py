@@ -346,3 +346,233 @@ def test_handler_skips_records_with_matching_hash(monkeypatch):
     assert result["skipped"] == 1
     assert result["processed"] == 0
     client.invoke_model.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-N32: rhythm heavy-beat tenant-mode contract (embedding_refresh
+# tenant onto the bounded titan-backfill carrier).
+# ---------------------------------------------------------------------------
+
+
+def test_is_tenant_invoke_detects_result_key():
+    import lambda_function  # noqa: E402
+
+    assert lambda_function._is_tenant_invoke({"result_key": "some/key.json"}) is True
+    assert lambda_function._is_tenant_invoke({"limit": 10}) is False
+    assert lambda_function._is_tenant_invoke({}) is False
+    assert lambda_function._is_tenant_invoke("not-a-dict") is False
+
+
+def test_write_rhythm_stanza_writes_expected_body(monkeypatch):
+    import lambda_function  # noqa: E402
+    import boto3
+
+    put_calls = []
+
+    class _FakeS3:
+        def put_object(self, **kwargs):
+            put_calls.append(kwargs)
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeS3())
+
+    ok = lambda_function._write_rhythm_stanza(
+        {"result_key": "rhythm-cycle/heavy_integrate/tenant-results/x/embedding_refresh.json"},
+        "completed",
+        {"processed": 3, "skipped": 1, "errors": 0, "missing_node": 0},
+    )
+    assert ok is True
+    assert len(put_calls) == 1
+    assert put_calls[0]["Key"] == "rhythm-cycle/heavy_integrate/tenant-results/x/embedding_refresh.json"
+    body = json.loads(put_calls[0]["Body"])
+    assert body["tenant"] == "embedding_refresh"
+    assert body["status"] == "completed"
+    assert body["detail"] == {"processed": 3, "skipped": 1, "errors": 0, "missing_node": 0}
+    assert "completed_at" in body
+
+
+def test_write_rhythm_stanza_noop_without_result_key():
+    import lambda_function  # noqa: E402
+
+    assert lambda_function._write_rhythm_stanza({}, "completed") is False
+
+
+def test_write_rhythm_stanza_swallows_s3_failure(monkeypatch):
+    import lambda_function  # noqa: E402
+    import boto3
+
+    class _BoomS3:
+        def put_object(self, **kwargs):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: _BoomS3())
+
+    # Must not raise — a stanza-write failure is logged, never surfaced.
+    ok = lambda_function._write_rhythm_stanza({"result_key": "x.json"}, "completed")
+    assert ok is False
+
+
+def test_handler_tenant_mode_writes_completion_stanza(monkeypatch):
+    import embedding  # noqa: E402
+    import lambda_function  # noqa: E402
+    import boto3
+
+    def _stub_iter(allowed_labels=None):
+        yield "ENC-TSK-B91", "Task", {
+            "record_id": "task#ENC-TSK-B91",
+            "record_type": "task",
+            "title": "Stubbed task",
+            "intent": "unit test",
+            "project_id": "enceladus",
+        }
+
+    monkeypatch.setattr(lambda_function, "_iter_corpus", _stub_iter)
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response([0.2] * 256)
+    monkeypatch.setattr(embedding, "_bedrock_runtime", client)
+
+    driver = _FakeDriver(returned_count=1)
+    monkeypatch.setattr(lambda_function, "_get_neo4j_driver", lambda: driver)
+
+    put_calls = []
+
+    class _FakeS3:
+        def put_object(self, **kwargs):
+            put_calls.append(kwargs)
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeS3())
+
+    event = {
+        "beat_id": "heavy_integrate-2026-07-12T00:00:00+00:00",
+        "beat_type": "heavy_integrate",
+        "beat_at": "2026-07-12T00:00:00+00:00",
+        "predecessor_artifact_key": None,
+        "expected_output_contract": {},
+        "session_identity": "ENC-SES-TEST",
+        "result_key": "rhythm-cycle/heavy_integrate/tenant-results/20260712-000000/embedding_refresh.json",
+    }
+
+    result = lambda_function.lambda_handler(event, None)
+
+    assert result["processed"] == 1
+    assert len(put_calls) == 1
+    assert put_calls[0]["Key"] == event["result_key"]
+    body = json.loads(put_calls[0]["Body"])
+    assert body["status"] == "completed"
+    assert body["tenant"] == "embedding_refresh"
+    assert body["detail"]["processed"] == 1
+    assert body["detail"]["errors"] == 0
+
+
+def test_handler_tenant_mode_writes_failed_stanza_on_exception(monkeypatch):
+    import lambda_function  # noqa: E402
+    import boto3
+
+    def _trap(*_args, **_kwargs):
+        raise RuntimeError("simulated scan failure")
+
+    monkeypatch.setattr(lambda_function, "_iter_corpus", _trap)
+
+    put_calls = []
+
+    class _FakeS3:
+        def put_object(self, **kwargs):
+            put_calls.append(kwargs)
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeS3())
+
+    event = {
+        "beat_type": "heavy_integrate",
+        "result_key": "rhythm-cycle/x/embedding_refresh.json",
+        "dry_run": True,  # keep this isolated to the exception/stanza path (no Neo4j driver)
+    }
+
+    with pytest.raises(RuntimeError):
+        lambda_function.lambda_handler(event, None)
+
+    assert len(put_calls) == 1
+    body = json.loads(put_calls[0]["Body"])
+    assert body["status"] == "failed"
+    assert body["tenant"] == "embedding_refresh"
+
+
+def test_tenant_mode_applies_default_cap_when_no_explicit_limit(monkeypatch):
+    import embedding  # noqa: E402
+    import lambda_function  # noqa: E402
+
+    monkeypatch.setattr(lambda_function, "EMBEDDING_REFRESH_MAX_PER_RUN", 1)
+
+    def _stub_iter(allowed_labels=None):
+        for i in range(3):
+            yield f"ENC-TSK-B9{i}", "Task", {
+                "record_id": f"task#ENC-TSK-B9{i}",
+                "record_type": "task",
+                "title": f"Stubbed task {i}",
+                "intent": "unit test",
+                "project_id": "enceladus",
+            }
+
+    monkeypatch.setattr(lambda_function, "_iter_corpus", _stub_iter)
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response([0.2] * 256)
+    monkeypatch.setattr(embedding, "_bedrock_runtime", client)
+
+    # dry_run=True keeps this isolated to cap behavior (no Neo4j needed).
+    result = lambda_function._run_backfill({"dry_run": True}, tenant_mode=True)
+    assert result["processed"] == 1
+
+
+def test_one_shot_mode_ignores_cap_when_tenant_mode_false(monkeypatch):
+    import embedding  # noqa: E402
+    import lambda_function  # noqa: E402
+
+    monkeypatch.setattr(lambda_function, "EMBEDDING_REFRESH_MAX_PER_RUN", 1)
+
+    def _stub_iter(allowed_labels=None):
+        for i in range(3):
+            yield f"ENC-TSK-B9{i}", "Task", {
+                "record_id": f"task#ENC-TSK-B9{i}",
+                "record_type": "task",
+                "title": f"Stubbed task {i}",
+                "intent": "unit test",
+                "project_id": "enceladus",
+            }
+
+    monkeypatch.setattr(lambda_function, "_iter_corpus", _stub_iter)
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response([0.2] * 256)
+    monkeypatch.setattr(embedding, "_bedrock_runtime", client)
+
+    # tenant_mode=False (one-shot path): the tenant-mode-only cap must not
+    # apply even though EMBEDDING_REFRESH_MAX_PER_RUN is patched to 1.
+    result = lambda_function._run_backfill({"dry_run": True}, tenant_mode=False)
+    assert result["processed"] == 3
+
+
+def test_explicit_limit_wins_over_tenant_mode_cap(monkeypatch):
+    import embedding  # noqa: E402
+    import lambda_function  # noqa: E402
+
+    monkeypatch.setattr(lambda_function, "EMBEDDING_REFRESH_MAX_PER_RUN", 1)
+
+    def _stub_iter(allowed_labels=None):
+        for i in range(3):
+            yield f"ENC-TSK-B9{i}", "Task", {
+                "record_id": f"task#ENC-TSK-B9{i}",
+                "record_type": "task",
+                "title": f"Stubbed task {i}",
+                "intent": "unit test",
+                "project_id": "enceladus",
+            }
+
+    monkeypatch.setattr(lambda_function, "_iter_corpus", _stub_iter)
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response([0.2] * 256)
+    monkeypatch.setattr(embedding, "_bedrock_runtime", client)
+
+    # Explicit event.limit=2 wins over the (patched, smaller) default cap.
+    result = lambda_function._run_backfill({"dry_run": True, "limit": 2}, tenant_mode=True)
+    assert result["processed"] == 2

@@ -116,18 +116,25 @@ Resources:
   # clears: the mutation ramp is armed and CEE_GDMP_HARD_DISABLED is the
   # sibling interlock. Do not flip this flag as part of routine onboarding.
   #
-  # BUDGET — embedding_refresh and library_health_skillbuilder are wired
-  # unfunded (enabled=false, function_name="") pending the N09 budget gate
-  # (BRD section 5). Neither has a dedicated Lambda today;
-  # devops-titan-embedding-backfill is a BACKFILL utility, not a recurring
-  # refresh carrier, so it is deliberately NOT named as the function.
+  # ENC-TSK-N32 (PLN-078 W4a, N09 activation): embedding_refresh is now wired
+  # and enabled. devops-titan-embedding-backfill already does bounded
+  # incremental refresh — skip_existing hash-gates the Titan call per record
+  # (backend/lambda/titan_embedding_backfill/lambda_function.py), so a
+  # per-heavy-window invocation re-embeds ONLY changed records and is
+  # budget-safe. The Lambda also now honors the rhythm tenant-invoke
+  # contract (completion stanza + EMBEDDING_REFRESH_MAX_PER_RUN cap) in
+  # tenant-mode, mirroring the ENC-TSK-N23/N24 pattern.
+  #
+  # library_health_skillbuilder is REMOVED (ENC-TSK-N33): it was never a
+  # lambda tenant (no dedicated function, no funded plan) and does not
+  # belong in this single-writer manifest.
   RhythmTenantsInitialVersion:
     Type: AWS::AppConfig::HostedConfigurationVersion
     Properties:
       ApplicationId: !Ref AppConfigApplicationId
       ConfigurationProfileId: !Ref RhythmTenantsProfile
       ContentType: application/json
-      Description: "ENC-TSK-N24: full heavy manifest (5 enabled; GDMP + embedding_refresh + library_health off per safety/budget gates)"
+      Description: "ENC-TSK-N32: 6 enabled (adds embedding_refresh; GDMP off per safety gate; library_health_skillbuilder removed)"
       Content: !Sub |
         {
           "tenants": {
@@ -214,22 +221,12 @@ Resources:
             },
             "embedding_refresh": {
               "beat": "heavy_integrate",
-              "enabled": false,
-              "function_name": "",
+              "enabled": true,
+              "function_name": "devops-titan-embedding-backfill${EnvironmentSuffix}",
               "order": 80,
               "expected_output_contract": {
-                "note": "wired unfunded: no dedicated refresh lambda exists (devops-titan-embedding-backfill is a backfill utility, not a recurring refresh carrier); carrier + funding decided by N09 budget gate (BRD section 5)",
-                "budget_gate": "N09"
-              }
-            },
-            "library_health_skillbuilder": {
-              "beat": "heavy_integrate",
-              "enabled": false,
-              "function_name": "",
-              "order": 90,
-              "expected_output_contract": {
-                "note": "wired unfunded: no lambda exists; carrier + funding decided by N09 budget gate (BRD section 5)",
-                "budget_gate": "N09"
+                "note": "per-heavy-window incremental refresh: re-embeds only records whose embedding_text_hash changed; hard-capped by EMBEDDING_REFRESH_MAX_PER_RUN",
+                "window_hours": 12
               }
             }
           }
