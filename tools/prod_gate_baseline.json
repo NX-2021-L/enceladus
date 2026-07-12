@@ -126,7 +126,7 @@
       "gated_jobs": [
         "patch-role"
       ],
-      "notes": "ENC-TSK-J64: environment: v3-prod \u2014 despite the name it patches the SHARED CFN deploy role object"
+      "notes": "ENC-TSK-J64: environment: v3-prod — despite the name it patches the SHARED CFN deploy role object"
     },
     "iam-cfn-deploy-role-nat-gateway-patch.yml": {
       "class": "prod-mutating",
@@ -207,7 +207,7 @@
     },
     "sync-architecture-doc.yml": {
       "class": "inert",
-      "notes": "docstore document write via internal key; no runtime-infrastructure mutation \u2014 flagged for awareness, out of the v3-prod runtime invariant's scope"
+      "notes": "docstore document write via internal key; no runtime-infrastructure mutation — flagged for awareness, out of the v3-prod runtime invariant's scope"
     },
     "sync-main-to-v4main.yml": {
       "class": "inert",
@@ -218,7 +218,7 @@
       "gated_jobs": [
         "deploy"
       ],
-      "notes": "ENC-TSK-J64: environment: v3-prod \u2014 the DPL submit is the irrevocable prod trigger (orchestrator deploys the queued request with no further gate)"
+      "notes": "ENC-TSK-J64: environment: v3-prod — the DPL submit is the irrevocable prod trigger (orchestrator deploys the queued request with no further gate)"
     },
     "ui-gamma-deploy.yml": {
       "class": "already-gated",
@@ -240,6 +240,13 @@
         "wire-notification"
       ],
       "notes": "ENC-TSK-J65: environment chosen from environment_suffix input (-gamma -> v4-gamma, '' -> v3-prod). Caught by the guard's own first fail-closed run."
+    },
+    "gamma-tracker-mirror.yml": {
+      "class": "gamma-only",
+      "gated_jobs": [
+        "execute"
+      ],
+      "notes": "ENC-TSK-M98 / ENC-ISS-538 canonical->gamma tracker mirror. Mutates ONLY -gamma DynamoDB tables (in-tool direction lock: source hard-coded to devops-project-tracker read-only, every write target must end -gamma). dry_run job is read-only; execute job requires typed confirm phrase OVERWRITE-GAMMA AND environment: gamma-mirror (io one-time setup: add required_reviewers to gamma-mirror before first execute, ENC-TSK-N01)."
     }
   }
 }

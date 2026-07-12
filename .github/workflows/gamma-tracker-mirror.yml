@@ -1,0 +1,147 @@
+name: Gamma Tracker Mirror (canonical -> gamma, io-gated)
+
+# ENC-TSK-M98 / ENC-ISS-538 — the codified canonical→gamma tracker mirror.
+# Gamma's tracker is a DISPOSABLE MIRROR (io direction 2026-07-12): every run
+# overwrites gamma from canonical, deletes gamma-native extras (pre-delete
+# snapshot first), and wipes enceladus-id-counters-gamma +
+# enceladus-id-idempotency-gamma so the ID service cold-seeds next-mint from
+# the freshly mirrored canonical high-water (the ISS-538 self-heal).
+#
+# Fail-closed posture (cfn-resource-import.yml lineage):
+#   1. dry_run job ALWAYS runs: scan + diff manifest artifact, zero writes.
+#   2. execute runs ONLY when execute=true AND confirm phrase typed verbatim.
+#   3. execute is bound to the `gamma-mirror` GitHub Environment.
+#      >>> io ONE-TIME SETUP (before first execute — ENC-TSK-N01): add a
+#      >>> required_reviewers protection rule to the gamma-mirror environment.
+#      >>> GitHub auto-creates referenced environments UNPROTECTED; until the
+#      >>> rule is added, the typed confirm phrase is the only human gate.
+#   4. The tool itself carries a direction lock: source hard-coded to
+#      devops-project-tracker, every write target must end in -gamma.
+#
+# IAM: the assumed role needs dynamodb:Scan on devops-project-tracker (read),
+# Scan/BatchWriteItem/DescribeTable on devops-project-tracker-gamma,
+# enceladus-id-counters-gamma, enceladus-id-idempotency-gamma (write), and
+# s3:PutObject on the snapshot prefix if snapshot_s3_uri is supplied. If the
+# CFN role lacks these data-plane grants, the run fails closed at phase 1 —
+# grant via an iam patch workflow before ENC-TSK-N01.
+#
+# First execute is io-supervised under ENC-TSK-N01. Agents: never run
+# --execute from a terminal; this workflow is the only sanctioned path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "false = dry run only (manifest artifact). true = ARM the mirror (still requires confirm phrase + gamma-mirror Environment approval)."
+        type: boolean
+        default: false
+        required: true
+      confirm:
+        description: "Type OVERWRITE-GAMMA (verbatim) to allow the execute job to run."
+        type: string
+        required: false
+        default: ""
+      snapshot_s3_uri:
+        description: "Optional s3://bucket/prefix for the pre-delete snapshot (also always uploaded as a run artifact)."
+        type: string
+        required: false
+        default: ""
+      throttle_ms:
+        description: "Sleep between write batches in ms (stream/CDC burst control, ENC-TSK-M99 decision)."
+        type: string
+        required: false
+        default: "0"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: gamma-tracker-mirror
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+
+jobs:
+  dry_run:
+    name: "Dry run: diff manifest (no writes)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install boto3
+        run: python3 -m pip install --quiet boto3
+
+      - name: Unit self-check (fail-closed)
+        run: python3 tools/test_gamma_tracker_mirror.py
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Scan + diff (dry run, zero writes)
+        run: |
+          set -euo pipefail
+          python3 tools/gamma-tracker-mirror.py --manifest-out gamma-mirror-manifest.json
+          python3 - <<'EOF'
+          import json
+          c = json.load(open("gamma-mirror-manifest.json"))["counts"]
+          print(f"::notice::mirror dry-run: canonical={c['canonical_items']} gamma={c['gamma_items_before']} adds={c['adds']} changed={c['changed']} deletes={c['deletes']} (gamma-native {c['gamma_native_deletes']})")
+          EOF
+
+      - name: Upload diff manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: gamma-mirror-manifest-dryrun
+          path: gamma-mirror-manifest.json
+          retention-days: 90
+
+  execute:
+    name: "EXECUTE mirror (io-gated)"
+    needs: dry_run
+    if: ${{ inputs.execute == true && inputs.confirm == 'OVERWRITE-GAMMA' }}
+    runs-on: ubuntu-latest
+    environment: gamma-mirror
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install boto3
+        run: python3 -m pip install --quiet boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CLOUDFORMATION_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Execute mirror (fresh scan; direction-locked)
+        run: |
+          set -euo pipefail
+          EXTRA=""
+          if [ -n "${{ inputs.snapshot_s3_uri }}" ]; then
+            EXTRA="--snapshot-s3-uri ${{ inputs.snapshot_s3_uri }}"
+          fi
+          python3 tools/gamma-tracker-mirror.py --execute \
+            --manifest-out gamma-mirror-manifest.json \
+            --snapshot-dir mirror-snapshot \
+            --throttle-ms "${{ inputs.throttle_ms }}" \
+            $EXTRA
+
+      - name: Upload manifest + pre-delete snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gamma-mirror-execute-evidence
+          path: |
+            gamma-mirror-manifest.json
+            mirror-snapshot/
+          retention-days: 90

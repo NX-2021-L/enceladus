@@ -76,6 +76,13 @@ jobs:
           python3 -m pip install --quiet pyyaml
           python3 tools/test_synthetic_strip_proof.py
 
+      # ENC-TSK-M98 / ENC-ISS-538: gamma tracker mirror guardrails — diff
+      # computation, direction-lock refusal, counter-reset step (stdlib-only).
+      - name: Gamma tracker mirror tests (ENC-TSK-M98)
+        run: |
+          set -euo pipefail
+          python3 tools/test_gamma_tracker_mirror.py
+
       # ENC-TSK-J65 / ENC-FTR-120: no agent-reachable git operation may mutate
       # v3-prod without the environment reviewer gate. Fail-closed: unclassified
       # workflows and ungated prod-mutating jobs fail CI here.
