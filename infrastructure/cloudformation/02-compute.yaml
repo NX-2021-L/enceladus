@@ -248,8 +248,15 @@ Conditions:
   # ENC-TSK-N19 / ENC-PLN-078 W1b: seven absorbed legacy consolidation-arc rules
   # (BRD 4.2 map) re-enable only when RhythmActive AND the explicit opt-in flag
   # is set. Default RhythmAbsorbLegacy=false keeps this deploy a no-op.
+  # NOTE: inlines RhythmActive's own two sub-expressions rather than referencing
+  # it via !Condition -- tools/cfn_env_resolver.py's YAML loader maps every !Tag
+  # generically to Fn::Tag (only !Ref is special-cased), so !Condition would be
+  # mis-tagged Fn::Condition and rejected by the env-parity gate's evaluator,
+  # which only recognizes the bare Condition key. Inlining keeps this PR scoped
+  # to 02-compute.yaml only (no shared-tool change) and is semantically identical.
   RhythmAbsorbed: !And
-    - !Condition RhythmActive
+    - !Not [!Equals [!Ref EnvironmentSuffix, ""]]
+    - !Equals [!Ref RhythmCycleEnabled, "true"]
     - !Equals [!Ref RhythmAbsorbLegacy, "true"]
   # ENC-TSK-N19 (C3): independent of the Rhythm conditions -- codifies the
   # standing io-HOLD on the unlearning nightly pass (ENC-FTR-106).
