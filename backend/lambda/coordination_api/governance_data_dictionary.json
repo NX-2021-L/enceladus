@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-11.9",
-  "updated_at": "2026-07-12T00:50:00Z",
-  "last_change_summary": "ENC-ISS-532: appsync_feed_publisher's build_event_payload now filters internal sentinel-project rows (dunder-wrapped project_id like \"__feed__\", used by enceladus_shared.version_seq counter/tombstone rows) before constructing any channel -- returns None (no /feed/updates, /records/{id}, or /projects/{id} publish attempt), logging + emitting a NonProjectRecordFiltered metric. No entity/field schema change; bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-12.1",
+  "updated_at": "2026-07-12T01:20:00Z",
+  "last_change_summary": "ENC-TSK-M74: GET /api/v1/feed bare full-refresh now applies a server-side page cap (MAX_FEED_PAGE_RECORDS=75 records total across tasks/issues/features/lessons/plans, most-recently-updated first) and returns a top-level next_cursor (string|null, opaque base64, byte-compatible with the /api/v1/feed/corpus cursor contract) for continuation. Collapses the feed p95 driver (was ~919 uncapped records). Per-record output byte-identical; delta/corpus/snapshot paths unchanged. No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -8354,6 +8354,11 @@
       "version": "2026-07-11.9",
       "date": "2026-07-12",
       "summary": "ENC-ISS-532: appsync_feed_publisher's build_event_payload now filters internal sentinel-project rows (dunder-wrapped project_id like \"__feed__\", used by enceladus_shared.version_seq counter/tombstone rows) before constructing any channel -- returns None (no /feed/updates, /records/{id}, or /projects/{id} publish attempt), logging + emitting a NonProjectRecordFiltered metric. No entity/field schema change; bumping per the lambda_function.py touch guard."
+    },
+    {
+      "version": "2026-07-12.1",
+      "date": "2026-07-12",
+      "summary": "ENC-TSK-M74: GET /api/v1/feed bare full-refresh now applies a server-side page cap (MAX_FEED_PAGE_RECORDS=75 records total across tasks/issues/features/lessons/plans, most-recently-updated first) and returns a top-level next_cursor (string|null, opaque base64, byte-compatible with the /api/v1/feed/corpus cursor contract) for continuation. Collapses the feed p95 driver (was ~919 uncapped records). Per-record output byte-identical; delta/corpus/snapshot paths unchanged. No entity/field schema change; bumping per the lambda_function.py touch guard."
     }
   ]
 }

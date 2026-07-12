@@ -50,6 +50,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 import corpus as feed_corpus
 import delta as feed_delta
+import feed_page
 
 try:
     import jwt
@@ -435,6 +436,16 @@ MAX_ISSUES_FULL_REFRESH = 10
 MAX_FEATURES_FULL_REFRESH = 10
 MAX_LESSONS_FULL_REFRESH = 10
 MAX_PLANS_FULL_REFRESH = 10
+
+# ENC-TSK-M74: global cap on the bare GET /api/v1/feed full-refresh page. The
+# per-type caps above are applied PER ACTIVE PROJECT, so the merged page still
+# grew to ~919 records across projects -- the measured dominant term in feed p95
+# (hydration + multi-MB serialization on a 256MB Lambda). This caps the merged
+# page to the N most-recently-updated records TOTAL and returns a continuation
+# cursor (feed_page.apply_page_cap) reusing the corpus next_cursor contract. No
+# consumer reads 919 records in a feed view; full corpus stays available via the
+# already-paginated /api/v1/feed/corpus SWR path.
+MAX_FEED_PAGE_RECORDS = 75
 
 
 def _cap_by_updated_at(records: List[Dict[str, Any]], cap: int) -> List[Dict[str, Any]]:
@@ -2134,12 +2145,35 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # exception class + message instead of escaping the handler and letting
     # Lambda runtime return the opaque {"message":"Internal Server Error"}
     # that made the live 500 impossible to diagnose from the client side.
+    # ENC-TSK-M74: continuation cursor for the server-side page cap. Validate
+    # up front so a malformed cursor 400s before any query work, matching the
+    # /feed/corpus contract (opaque base64; same encode/decode as corpus.py).
+    feed_cursor = str(qs.get("cursor") or "").strip()
+    if feed_cursor and feed_corpus.decode_cursor(feed_cursor) is None:
+        return _error(400, "Invalid cursor")
+
     try:
         try:
             tasks, issues, features, lessons, plans = _query_all_records()
         except Exception as exc:
             logger.error("feed query failed: %s", exc)
             return _error(500, "Failed to query feed data. Please try again.")
+
+        # --- ENC-TSK-M74 server-side page cap + continuation cursor ---
+        # Cap the merged page to MAX_FEED_PAGE_RECORDS most-recently-updated
+        # records BEFORE the (edge attach + serialization) tail so those costs
+        # only ever process the capped window -- this collapses the feed p95
+        # term. next_cursor is computed on the pre-scope window so continuation
+        # is stable regardless of any subscription scope applied below.
+        tasks, issues, features, lessons, plans, feed_next_cursor = feed_page.apply_page_cap(
+            tasks,
+            issues,
+            features,
+            lessons,
+            plans,
+            cursor=feed_cursor or None,
+            cap=MAX_FEED_PAGE_RECORDS,
+        )
 
         # --- Attach typed relationship edges + context node scores (ENC-TSK-A57/K26) ---
         try:
@@ -2219,6 +2253,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "plans": plans,
                 "subscription": subscription_meta,
                 "feed_source": _last_feed_query_source,
+                "next_cursor": feed_next_cursor,
             },
         )
     except Exception as outer_exc:  # noqa: BLE001

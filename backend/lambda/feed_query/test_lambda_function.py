@@ -62,6 +62,92 @@ def test_invalid_since_returns_400(monkeypatch):
     assert "since" in payload["error"]
 
 
+# --- ENC-TSK-M74: server-side page cap + continuation cursor on bare /api/v1/feed ---
+
+def _feed_full_event(cursor: str | None = None) -> dict:
+    qs: dict = {}
+    if cursor is not None:
+        qs["cursor"] = cursor
+    return {
+        "requestContext": {"http": {"method": "GET"}},
+        "rawPath": "/api/v1/feed",
+        "headers": {"Cookie": "enceladus_id_token=test-token"},
+        "queryStringParameters": qs,
+    }
+
+
+def _many_tasks(n: int) -> list:
+    # Descending timestamps so ordering is unambiguous.
+    return [
+        {
+            "task_id": f"ENC-TSK-{i:03d}",
+            "project_id": "enceladus",
+            "updated_at": f"2026-07-10T{(59 - (i % 60)):02d}:00:00Z",
+            "title": f"t{i}",
+        }
+        for i in range(n)
+    ]
+
+
+def test_full_refresh_caps_page_and_returns_next_cursor(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    monkeypatch.setattr(feed_query, "MAX_FEED_PAGE_RECORDS", 75)
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records",
+        lambda: (_many_tasks(120), [], [], [], []),
+    )
+
+    resp = feed_query.lambda_handler(_feed_full_event(), None)
+    assert resp["statusCode"] == 200
+    payload = json.loads(resp["body"])
+    total = sum(len(payload[k]) for k in ("tasks", "issues", "features", "lessons", "plans"))
+    assert total == 75
+    assert payload["next_cursor"]  # non-null when more remain
+    assert "feed_source" in payload
+
+    # Page 2 continues after the cursor with no overlap and drains the tail.
+    resp2 = feed_query.lambda_handler(_feed_full_event(cursor=payload["next_cursor"]), None)
+    payload2 = json.loads(resp2["body"])
+    total2 = sum(len(payload2[k]) for k in ("tasks", "issues", "features", "lessons", "plans"))
+    assert total2 == 45
+    assert payload2["next_cursor"] is None
+    page1_ids = {t["task_id"] for t in payload["tasks"]}
+    page2_ids = {t["task_id"] for t in payload2["tasks"]}
+    assert not (page1_ids & page2_ids)
+    assert len(page1_ids | page2_ids) == 120
+
+
+def test_full_refresh_below_cap_null_cursor(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    monkeypatch.setattr(
+        feed_query,
+        "_query_all_records",
+        lambda: (_many_tasks(10), [], [], [], []),
+    )
+    resp = feed_query.lambda_handler(_feed_full_event(), None)
+    payload = json.loads(resp["body"])
+    assert len(payload["tasks"]) == 10
+    assert payload["next_cursor"] is None
+
+
+def test_full_refresh_invalid_cursor_returns_400(monkeypatch):
+    monkeypatch.setattr(feed_query, "_verify_token", lambda _token: {"sub": "u-1"})
+    called = {"n": 0}
+
+    def _boom():
+        called["n"] += 1
+        return ([], [], [], [], [])
+
+    monkeypatch.setattr(feed_query, "_query_all_records", _boom)
+    resp = feed_query.lambda_handler(_feed_full_event(cursor="!!!bad!!!"), None)
+    assert resp["statusCode"] == 400
+    payload = json.loads(resp["body"])
+    assert "cursor" in payload["error"].lower()
+    # 400s before any query work.
+    assert called["n"] == 0
+
+
 def _corpus_get_event(**params: str) -> dict:
     return {
         "requestContext": {"http": {"method": "GET"}},
