@@ -189,6 +189,67 @@ class DecideEscalationIdentityTests(unittest.TestCase):
         self.assertNotIn("sci", body)
 
 
+class DecideEscalationSchemaTests(unittest.TestCase):
+    """ENC-TSK-N29 / BRD §4.3: tracker_mutation._handle_escalation_request
+    (the real POST /{project}/escalation handler) fails-closed 400 on any
+    body that isn't {payload: dict, justification: str, target_record_id,
+    mutation_type, requested_by...}. The prior body sent a bare 'summary'
+    string and no 'payload' at all — every beat-originated escalation was
+    rejected before reaching io's queue. These assertions mirror the
+    handler's own validation order (tracker_mutation/lambda_function.py
+    _handle_escalation_request + _validate_deploy_arc_change_payload) without
+    importing that lambda directly.
+    """
+
+    # Mirrors backend/lambda/tracker_mutation/transition_type_matrix.py
+    # STRICTNESS_RANK keys (VALID_TRANSITION_TYPES) as of ENC-TSK-N29.
+    _VALID_TRANSITION_TYPES = {
+        "github_pr_deploy",
+        "lambda_deploy",
+        "web_deploy",
+        "code_only",
+        "no_code",
+    }
+
+    @mock.patch("tiers.decide.post_json", return_value={"escalation_id": "ENC-ESC-3"})
+    @mock.patch("tiers.decide.resolve_identity")
+    def test_escalation_body_matches_handler_schema(self, resolve_identity, post_json):
+        import tiers.decide as decide
+
+        resolve_identity.return_value = {
+            "session_id": "ENC-SES-099",
+            "agent_type_id": "ENC-AGT-00C",
+            "sci": "SCI-abc123",
+            "degraded": False,
+        }
+        decide._create_escalation("ENC-TSK-X99", "proposal needs io review")
+
+        _, body = post_json.call_args[0]
+
+        # _handle_escalation_request: target_record_id + mutation_type required.
+        self.assertEqual(body["target_record_id"], "ENC-TSK-X99")
+        self.assertIn(body["mutation_type"], {"deploy_arc_change", "direct_state_override"})
+
+        # payload must be a non-empty dict (bare 'summary' string is rejected).
+        self.assertIsInstance(body.get("payload"), dict)
+        self.assertTrue(body["payload"])
+
+        # justification must be a non-empty string.
+        self.assertIsInstance(body.get("justification"), str)
+        self.assertTrue(body["justification"].strip())
+
+        # mutation_type='deploy_arc_change' additionally requires
+        # payload.new_deploy_arc_type in VALID_TRANSITION_TYPES.
+        if body["mutation_type"] == "deploy_arc_change":
+            new_arc = body["payload"].get("new_deploy_arc_type")
+            self.assertIn(new_arc, self._VALID_TRANSITION_TYPES)
+
+        # N21 identity/sci fields must survive the schema realignment.
+        self.assertEqual(body["requested_by"]["session_id"], "ENC-SES-099")
+        self.assertTrue(body["requested_by"]["sci_present"])
+        self.assertEqual(body["sci"], "SCI-abc123")
+
+
 class DecideCursorPaginationTests(unittest.TestCase):
     """ENC-TSK-N20 / BRD DOC-44230223DD1C §4.4 (C4): cursor-exhausted
     paginated backlog read replacing the single-page + orphan-flag heuristic

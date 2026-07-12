@@ -110,6 +110,16 @@ def _in_preapproved_scope(record_id: str, scopes: List[str]) -> bool:
     return False
 
 
+# ENC-TSK-N29: the mutation_type='deploy_arc_change' handler
+# (tracker_mutation._validate_deploy_arc_change_payload) requires
+# payload.new_deploy_arc_type to be a member of VALID_TRANSITION_TYPES. The
+# decide beat's dispatch proposals carry no specific target arc, so
+# out-of-scope escalations default to the strictest common transition type —
+# these escalations exist precisely because io review is required before
+# dispatch proceeds.
+_ESCALATION_DEFAULT_ARC_TYPE = "github_pr_deploy"
+
+
 def _create_escalation(target_record_id: str, summary: str) -> Dict[str, Any]:
     # TODO(ENC-TSK-N28 follow-up): escalation route shape unverified on gamma APIGW.
     # tracker_mutation's _RE_ESCALATION accepts /{project}/escalation (optional
@@ -131,10 +141,18 @@ def _create_escalation(target_record_id: str, summary: str) -> Dict[str, Any]:
     # pseudo-identity string, preserving prior behavior rather than raising.
     identity = resolve_identity()
     session_id = str(identity.get("session_id") or "") or "rhythm-decide-beat"
+    # ENC-TSK-N29 / BRD §4.3: tracker_mutation._handle_escalation_request
+    # requires a non-empty 'payload' dict and a non-empty 'justification'
+    # string — the prior bare 'summary' field satisfied neither and every
+    # beat-originated escalation POST failed 400 before reaching io's queue.
     body: Dict[str, Any] = {
-        "mutation_type": "deploy_arc_change",
         "target_record_id": target_record_id,
-        "summary": summary,
+        "mutation_type": "deploy_arc_change",
+        "payload": {
+            "new_deploy_arc_type": _ESCALATION_DEFAULT_ARC_TYPE,
+            "proposal_summary": summary,
+        },
+        "justification": summary,
         "requested_by_session": session_id,
         "requested_by": {
             "session_id": session_id,
