@@ -5898,21 +5898,31 @@ def _handle_log(
         "description": _ser_s(description),
     }}
 
+    update_expr = (
+        "SET updated_at = :now, last_update_note = :note, "
+        "write_source = :wsrc, "
+        "sync_version = if_not_exists(sync_version, :zero) + :one, "
+        "history = list_append(if_not_exists(history, :empty), :hentry)"
+    )
+    attr_values = {
+        ":now": _ser_s(now), ":note": _ser_s(description),
+        ":wsrc": _build_write_source(body),
+        ":zero": {"N": "0"}, ":one": {"N": "1"},
+        ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
+    }
+
+    # ENC-TSK-M79: a pure worklog append must also stamp version_seq/feed_scope
+    # so the record re-surfaces in the feed delta projection (version-seq-index
+    # GSI) — mirrors the generic single-field PATCH path's idiom exactly.
+    vseq_expr, vseq_vals = _version_seq_update_parts()
+    update_expr += vseq_expr
+    attr_values.update(vseq_vals)
+
     try:
         ddb.update_item(
             TableName=DYNAMODB_TABLE, Key=key,
-            UpdateExpression=(
-                "SET updated_at = :now, last_update_note = :note, "
-                "write_source = :wsrc, "
-                "sync_version = if_not_exists(sync_version, :zero) + :one, "
-                "history = list_append(if_not_exists(history, :empty), :hentry)"
-            ),
-            ExpressionAttributeValues={
-                ":now": _ser_s(now), ":note": _ser_s(description),
-                ":wsrc": _build_write_source(body),
-                ":zero": {"N": "0"}, ":one": {"N": "1"},
-                ":hentry": {"L": [history_entry]}, ":empty": {"L": []},
-            },
+            UpdateExpression=update_expr,
+            ExpressionAttributeValues=attr_values,
         )
     except Exception as exc:
         logger.error("update_item (log) failed: %s", exc)
