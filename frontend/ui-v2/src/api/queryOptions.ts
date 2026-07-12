@@ -35,11 +35,24 @@ export const recordKeys = {
     ['record', type, projectId, id] as const,
 }
 
+/**
+ * ENC-TSK-M51 (B67 AC-8 part 2 / AC-14): record-detail reads are stale on
+ * arrival, so a route loader's `ensureQueryData` always runs the queryFn (a
+ * real per-record GET) on mount instead of being satisfied by a feed/corpus-
+ * primed cache entry that is younger than the 2-minute global default
+ * (src/api/queryClient.ts). While the page stays open the live
+ * `/records/{recordId}` subscription (useRecordRealtimeSync) keeps the same
+ * cache entry current via setQueryData — an idle mounted query is not refetched
+ * merely because it is stale, so this forces network on load without churning.
+ */
+const DETAIL_STALE_TIME = 0
+
 export const taskQueryOptions = (projectId: string, recordId: string) =>
   queryOptions({
     queryKey: recordKeys.detail('task', projectId, recordId),
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Task>('task', projectId, recordId, { signal }),
+    staleTime: DETAIL_STALE_TIME,
   })
 
 export const issueQueryOptions = (projectId: string, recordId: string) =>
@@ -47,6 +60,7 @@ export const issueQueryOptions = (projectId: string, recordId: string) =>
     queryKey: recordKeys.detail('issue', projectId, recordId),
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Issue>('issue', projectId, recordId, { signal }),
+    staleTime: DETAIL_STALE_TIME,
   })
 
 export const featureQueryOptions = (projectId: string, recordId: string) =>
@@ -54,6 +68,7 @@ export const featureQueryOptions = (projectId: string, recordId: string) =>
     queryKey: recordKeys.detail('feature', projectId, recordId),
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Feature>('feature', projectId, recordId, { signal }),
+    staleTime: DETAIL_STALE_TIME,
   })
 
 export const planQueryOptions = (projectId: string, recordId: string) =>
@@ -61,6 +76,7 @@ export const planQueryOptions = (projectId: string, recordId: string) =>
     queryKey: recordKeys.detail('plan', projectId, recordId),
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Plan>('plan', projectId, recordId, { signal }),
+    staleTime: DETAIL_STALE_TIME,
   })
 
 export const lessonQueryOptions = (projectId: string, recordId: string) =>
@@ -68,12 +84,14 @@ export const lessonQueryOptions = (projectId: string, recordId: string) =>
     queryKey: recordKeys.detail('lesson', projectId, recordId),
     queryFn: ({ signal }) =>
       readThroughTrackerRecord<Lesson>('lesson', projectId, recordId, { signal }),
+    staleTime: DETAIL_STALE_TIME,
   })
 
 export const documentQueryOptions = (recordId: string, projectId = 'global') =>
   queryOptions({
     queryKey: recordKeys.detail('document', projectId, recordId),
     queryFn: ({ signal }) => readThroughDocumentRecord<Document>(recordId, { signal }),
+    staleTime: DETAIL_STALE_TIME,
   })
 
 /**
