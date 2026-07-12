@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-11.8",
-  "updated_at": "2026-07-11T19:45:00Z",
-  "last_change_summary": "ENC-ISS-531: appsync_feed_publisher now logs the AppSync response body on non-2xx publish errors, classifies permanent 4xx rejections (400/403/404, excluding 429) as poison records -- skipped with a PoisonRecordSkipped CloudWatch metric instead of retried forever -- and the DynamoDB Stream EventSourceMapping gained MaximumRetryAttempts=5, BisectBatchOnFunctionError, and an on-failure SQS DLQ destination as a generic backstop. No entity/field schema change, just serialization/retry-handling; bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-11.9",
+  "updated_at": "2026-07-12T00:50:00Z",
+  "last_change_summary": "ENC-ISS-532: appsync_feed_publisher's build_event_payload now filters internal sentinel-project rows (dunder-wrapped project_id like \"__feed__\", used by enceladus_shared.version_seq counter/tombstone rows) before constructing any channel -- returns None (no /feed/updates, /records/{id}, or /projects/{id} publish attempt), logging + emitting a NonProjectRecordFiltered metric. No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7968,7 +7968,7 @@
       }
     }
   },
-  "change_summary": "ENC-ISS-531: appsync_feed_publisher now logs the AppSync response body on non-2xx publish errors, classifies permanent 4xx rejections (400/403/404, excluding 429) as poison records -- skipped with a PoisonRecordSkipped CloudWatch metric instead of retried forever -- and the DynamoDB Stream EventSourceMapping gained MaximumRetryAttempts=5, BisectBatchOnFunctionError, and an on-failure SQS DLQ destination as a generic backstop. No entity/field schema change, just serialization/retry-handling; bumping per the lambda_function.py touch guard.",
+  "change_summary": "ENC-ISS-532: appsync_feed_publisher's build_event_payload now filters internal sentinel-project rows (dunder-wrapped project_id like \"__feed__\", used by enceladus_shared.version_seq counter/tombstone rows) before constructing any channel -- returns None (no /feed/updates, /records/{id}, or /projects/{id} publish attempt), logging + emitting a NonProjectRecordFiltered metric. No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "change_log": [
     {
       "version": "2026-07-08.05",
@@ -8349,6 +8349,11 @@
       "version": "2026-07-11.8",
       "date": "2026-07-11",
       "summary": "ENC-ISS-531: appsync_feed_publisher now logs the AppSync response body on non-2xx publish errors, classifies permanent 4xx rejections (400/403/404, excluding 429) as poison records -- skipped with a PoisonRecordSkipped CloudWatch metric instead of retried forever -- and the DynamoDB Stream EventSourceMapping gained MaximumRetryAttempts=5, BisectBatchOnFunctionError, and an on-failure SQS DLQ destination as a generic backstop. No entity/field schema change, just serialization/retry-handling; bumping per the lambda_function.py touch guard."
+    },
+    {
+      "version": "2026-07-11.9",
+      "date": "2026-07-12",
+      "summary": "ENC-ISS-532: appsync_feed_publisher's build_event_payload now filters internal sentinel-project rows (dunder-wrapped project_id like \"__feed__\", used by enceladus_shared.version_seq counter/tombstone rows) before constructing any channel -- returns None (no /feed/updates, /records/{id}, or /projects/{id} publish attempt), logging + emitting a NonProjectRecordFiltered metric. No entity/field schema change; bumping per the lambda_function.py touch guard."
     }
   ]
 }
