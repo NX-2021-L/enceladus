@@ -68,20 +68,38 @@ class RetrievalQualityTests(unittest.TestCase):
         self.assertEqual(result["status"], "unavailable")
         self.assertEqual(result["query_count"], 0)
 
+    def test_query_url_shape_matches_n28_live_probed_endpoint(self):
+        # ENC-TSK-N28 (#1016) live-probed gamma and confirmed /records?project_id=
+        # returns 200; /{project}/records 404s. This module must use that shape.
+        with mock.patch.object(baseline, "TRACKER_API_BASE", "https://x/api/v1/tracker"):
+            with mock.patch.object(baseline, "get_json", return_value={"success": True, "records": []}) as get_json:
+                baseline._tracker_list("task")
+
+        url, params = get_json.call_args[0]
+        self.assertEqual(url, "https://x/api/v1/tracker/records")
+        self.assertEqual(params["project_id"], baseline.PROJECT_ID)
+        self.assertEqual(params["record_type"], "task")
+
     def test_runs_fixed_query_set_and_records_latency(self):
-        def fake_get_json(url, params=None):
-            if params is None:
-                # record_id lookup
-                return {"success": True, "record": {"item_id": "ENC-TSK-N26"}}
-            return {"success": True, "records": [{"item_id": "ENC-TSK-N08", "title": "baseline capture tooling", "description": ""}]}
+        fixture_records = [
+            {"item_id": "ENC-TSK-N26", "title": "baseline capture tooling", "description": ""},
+            {"item_id": "ENC-TSK-N08", "title": "baseline capture parent", "description": "percolation and cutover work"},
+        ]
 
         with mock.patch.object(baseline, "TRACKER_API_BASE", "https://example.invalid/api/v1/tracker"):
-            with mock.patch.object(baseline, "get_json", side_effect=fake_get_json):
+            with mock.patch.object(baseline, "get_json", return_value={"success": True, "records": fixture_records}):
                 result = baseline.capture_retrieval_quality()
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["query_count"], len(baseline.FIXED_QUERY_SET))
         self.assertTrue(all("latency_ms" in q for q in result["queries"]))
+        # The ENC-TSK-N26 record_id query should match by exact id.
+        id_query = next(q for q in result["queries"] if q["kind"] == "record_id" and q["query"] == "ENC-TSK-N26")
+        self.assertTrue(id_query["found"])
+        self.assertIn("ENC-TSK-N26", id_query["result_ids"])
+        # The "percolation" topic query should match via substring on description.
+        topic_query = next(q for q in result["queries"] if q["kind"] == "topic" and q["query"] == "percolation")
+        self.assertTrue(topic_query["found"])
 
     def test_query_error_is_captured_per_query(self):
         with mock.patch.object(baseline, "TRACKER_API_BASE", "https://example.invalid/api/v1/tracker"):

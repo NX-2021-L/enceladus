@@ -46,18 +46,19 @@ permission boundary):
 
 See README.md "Baseline capture (on-demand)" for the full runbook note.
 
-Design note on the tracker HTTP read shape: the dispatch brief for this task
-suggested building tracker list URLs as ``{TRACKER_API_BASE}/records?project_id=``.
-That literal ``/records`` path does not exist anywhere in
-backend/lambda/tracker_mutation/lambda_function.py's route table (checked
-against _RE_PROJECT / _RE_RECORD / _RE_TYPE_COLLECTION on origin/v4/main) --
-neither that shape nor the ``/{project}/records`` shape it was warned against
-would resolve. This module instead uses the two routes that do exist and are
-already exercised elsewhere in this Lambda's own codebase:
-``{TRACKER_API_BASE}/{project}?type=..&page_size=..`` (_RE_PROJECT, the same
-shape backend/lambda/corpus_entropy_engine/lambda_function.py uses) for list
-queries, and ``{TRACKER_API_BASE}/{project}/{type}/{id}`` (_RE_RECORD) for
-single-record lookups.
+Design note on the tracker HTTP read shape: this module uses
+``{TRACKER_API_BASE}/records`` with ``project_id`` (and ``record_type``,
+``status``, ``page_size``) as query params -- the shape ENC-TSK-N28 (#1016,
+merged into v4/main just ahead of this branch) live-probed against gamma and
+confirmed returns 200; the ``/{project}/records`` shape 404s there. An
+earlier draft of this module used a path-based ``{TRACKER_API_BASE}/{project}``
+shape inferred from reading tracker_mutation's route regexes statically --
+that inference turned out to not match gamma's actual live routing (per
+N28's probe), so it was replaced with the live-confirmed shape before this
+PR was opened. There is no confirmed single-record GET-by-id endpoint, so
+record-id queries in the retrieval-quality fixed-query run also go through
+this same ``/records`` list-and-filter path rather than guessing at an
+unverified single-record route.
 """
 
 from __future__ import annotations
@@ -67,7 +68,6 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List
-from urllib.parse import quote
 
 import boto3
 
@@ -98,13 +98,13 @@ FIXED_QUERY_SET: List[Dict[str, str]] = [
     {"kind": "topic", "record_type": "task", "value": "cutover"},
 ]
 
-# Tracker record types scanned for the corpus-invariants N estimate and the
-# lesson citation rate. Matches tracker_mutation's _RE_RECORD / _RE_TYPE_COLLECTION
-# allowed type vocabulary (task|issue|feature|lesson|plan|generation) minus
-# "generation" (not a first-class governed record in practice here).
+# Tracker record types scanned for the corpus-invariants N estimate, the
+# lesson citation rate, and the retrieval-quality run. task|issue|feature|
+# plan|lesson mirrors the vocabulary used elsewhere in this Lambda
+# (tiers/sense.py, tiers/decide.py).
 _RECORD_TYPES_FOR_CENSUS = ("task", "issue", "feature", "plan", "lesson")
 
-_LIST_PAGE_SIZE = 200  # tracker_mutation's documented max page_size
+_LIST_PAGE_SIZE = 200  # generous cap; tracker reads elsewhere in this Lambda use 1-100
 
 
 def _decimalize_clean(value: Any) -> Any:
@@ -119,16 +119,15 @@ def _decimalize_clean(value: Any) -> Any:
     return value
 
 
-def _tracker_get_record(record_type: str, record_id: str) -> Dict[str, Any]:
-    """GET /{project}/{type}/{id} -- verified route (tracker_mutation _RE_RECORD)."""
-    url = f"{TRACKER_API_BASE}/{PROJECT_ID}/{record_type}/{quote(record_id)}"
-    return get_json(url)
-
-
 def _tracker_list(record_type: str, page_size: int = _LIST_PAGE_SIZE) -> Dict[str, Any]:
-    """GET /{project}?type=X&page_size=Y -- verified route (tracker_mutation _RE_PROJECT)."""
-    url = f"{TRACKER_API_BASE}/{PROJECT_ID}"
-    return get_json(url, {"type": record_type, "page_size": page_size})
+    """GET /records?project_id=&record_type=&page_size= -- the shape ENC-TSK-N28
+    (#1016) live-probed against gamma and confirmed at 200 (see module
+    docstring). Used for both list-filter queries and record-id lookups
+    (client-side filtered from the returned page) since no single-record
+    GET-by-id route has been confirmed live.
+    """
+    url = f"{TRACKER_API_BASE}/records"
+    return get_json(url, {"project_id": PROJECT_ID, "record_type": record_type, "page_size": page_size})
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +175,11 @@ def capture_percolation_export() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _run_one_query(q: Dict[str, str]) -> Dict[str, Any]:
+    """Both query kinds go through the same confirmed-live /records list
+    endpoint: 'record_id' filters the returned page for an exact id match,
+    'topic' does a substring match over title/description. Neither kind
+    guesses at an unverified single-record GET route.
+    """
     entry: Dict[str, Any] = {
         "kind": q["kind"],
         "query": q["value"],
@@ -183,24 +187,25 @@ def _run_one_query(q: Dict[str, str]) -> Dict[str, Any]:
     }
     started = time.perf_counter()
     try:
+        body = _tracker_list(q.get("record_type", ""))
+        records = body.get("records") or []
+        entry["candidates_scanned"] = len(records)
         if q["kind"] == "record_id":
-            body = _tracker_get_record(q["record_type"], q["value"])
-            record = body.get("record") or {}
-            found = bool(body.get("success")) and bool(record)
-            entry["found"] = found
-            entry["result_ids"] = [record.get("item_id") or record.get("record_id")] if found else []
+            target = q["value"].strip().upper()
+            matches = [
+                r.get("item_id") or r.get("record_id")
+                for r in records
+                if str(r.get("item_id") or r.get("record_id") or "").upper() == target
+            ]
         else:  # topic
-            body = _tracker_list(q.get("record_type", ""))
-            records = body.get("records") or []
             needle = q["value"].lower()
             matches = [
                 r.get("item_id") or r.get("record_id")
                 for r in records
                 if needle in f"{r.get('title', '')} {r.get('description', '')}".lower()
             ]
-            entry["candidates_scanned"] = len(records)
-            entry["result_ids"] = [m for m in matches if m][:10]
-            entry["found"] = bool(entry["result_ids"])
+        entry["result_ids"] = [m for m in matches if m][:10]
+        entry["found"] = bool(entry["result_ids"])
     except Exception as exc:
         entry["found"] = False
         entry["result_ids"] = []
@@ -224,8 +229,9 @@ def capture_retrieval_quality() -> Dict[str, Any]:
     return {
         "status": "ok",
         "query_surface": (
-            f"{TRACKER_API_BASE}/{{project}} (list, ?type=&page_size=) and "
-            f"{TRACKER_API_BASE}/{{project}}/{{type}}/{{id}} (get) -- tracker_mutation HTTP API"
+            f"{TRACKER_API_BASE}/records?project_id=&record_type=&page_size= "
+            "-- tracker HTTP API (both record-id and topic queries list-and-filter "
+            "this same confirmed-live endpoint; ENC-TSK-N28 #1016)"
         ),
         "query_count": len(results),
         "hit_count": hit_count,
