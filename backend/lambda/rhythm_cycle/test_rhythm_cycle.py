@@ -71,5 +71,42 @@ class SenseConstraintTests(unittest.TestCase):
         self.assertEqual(snap["open_task_delta"], 2)
 
 
+class TrackerUrlShapeTests(unittest.TestCase):
+    """ENC-TSK-N28: tracker reads must use /records?project_id=, and the
+    dispatch-plan URL must not double the /api/v1 prefix."""
+
+    @mock.patch("tiers.sense.get_json", return_value={"total": 7})
+    def test_sense_open_task_count_url_shape(self, get_json):
+        import tiers.sense as sense
+
+        with mock.patch.object(sense, "TRACKER_API_BASE", "https://x/api/v1/tracker"):
+            count = sense._open_task_count()
+        self.assertEqual(count, 7)
+        url, params = get_json.call_args[0]
+        self.assertEqual(url, "https://x/api/v1/tracker/records")
+        self.assertEqual(params["project_id"], sense.PROJECT_ID)
+
+    @mock.patch("tiers.decide.get_json", return_value={"records": []})
+    def test_decide_open_leaf_tasks_url_shape(self, get_json):
+        import tiers.decide as decide
+
+        with mock.patch.object(decide, "TRACKER_API_BASE", "https://x/api/v1/tracker"):
+            leaves = decide._open_leaf_tasks()
+        self.assertEqual(leaves, [])
+        url, params = get_json.call_args[0]
+        self.assertEqual(url, "https://x/api/v1/tracker/records")
+        self.assertEqual(params["project_id"], decide.PROJECT_ID)
+
+    @mock.patch("tiers.decide.post_json", return_value={"dispatches": []})
+    def test_decide_dispatch_plan_no_double_prefix(self, post_json):
+        import tiers.decide as decide
+
+        with mock.patch.object(decide, "COORDINATION_API_BASE", "https://x/api/v1"):
+            decide._dispatch_plan_dry_run({"beat_type": "sense"})
+        url = post_json.call_args[0][0]
+        self.assertEqual(url, "https://x/api/v1/coordination/dispatch-plan/dry-run")
+        self.assertNotIn("/api/v1/api/v1", url)
+
+
 if __name__ == "__main__":
     unittest.main()

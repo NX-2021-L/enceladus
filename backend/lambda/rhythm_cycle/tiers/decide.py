@@ -28,8 +28,10 @@ _sns = boto3.client("sns")
 def _open_leaf_tasks() -> List[Dict[str, Any]]:
     if not TRACKER_API_BASE:
         return []
-    url = f"{TRACKER_API_BASE}/{PROJECT_ID}/records"
-    data = get_json(url, {"status": "open", "record_type": "task", "page_size": 100})
+    # ENC-TSK-N28: gamma tracker API serves /records?project_id=... (the
+    # /{project_id}/records path shape 404s).
+    url = f"{TRACKER_API_BASE}/records"
+    data = get_json(url, {"project_id": PROJECT_ID, "status": "open", "record_type": "task", "page_size": 100})
     records = data.get("records") or []
     return [r for r in records if not r.get("parent") and r.get("orphan")]
 
@@ -37,7 +39,8 @@ def _open_leaf_tasks() -> List[Dict[str, Any]]:
 def _dispatch_plan_dry_run(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not COORDINATION_API_BASE:
         return {"dry_run": True, "dispatches": [], "reason": "coordination_api_unconfigured"}
-    url = f"{COORDINATION_API_BASE}/api/v1/coordination/dispatch-plan/dry-run"
+    # ENC-TSK-N28: COORDINATION_API_BASE already ends in /api/v1 — do not re-prefix.
+    url = f"{COORDINATION_API_BASE}/coordination/dispatch-plan/dry-run"
     try:
         return post_json(url, {"project_id": PROJECT_ID, "sense_snapshot": snapshot})
     except Exception as exc:
@@ -54,6 +57,10 @@ def _in_preapproved_scope(record_id: str, scopes: List[str]) -> bool:
 
 
 def _create_escalation(target_record_id: str, summary: str) -> Dict[str, Any]:
+    # TODO(ENC-TSK-N28 follow-up): escalation route shape unverified on gamma APIGW.
+    # tracker_mutation's _RE_ESCALATION accepts /{project}/escalation (optional
+    # /api/v1/tracker prefix), but no explicit RouteKey exists in
+    # infrastructure/cloudformation — orchestrator ENC-SES-09B to confirm live shape.
     url = f"{TRACKER_API_BASE}/{PROJECT_ID}/escalation"
     return post_json(
         url,

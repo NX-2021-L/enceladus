@@ -69,8 +69,10 @@ def _checkout_census() -> List[Dict[str, Any]]:
 def _open_task_count() -> int:
     if not TRACKER_API_BASE:
         return 0
-    url = f"{TRACKER_API_BASE}/{PROJECT_ID}/records"
-    data = get_json(url, {"status": "open", "record_type": "task", "page_size": 1})
+    # ENC-TSK-N28: gamma tracker API serves /records?project_id=... (the
+    # /{project_id}/records path shape 404s).
+    url = f"{TRACKER_API_BASE}/records"
+    data = get_json(url, {"project_id": PROJECT_ID, "status": "open", "record_type": "task", "page_size": 1})
     return int(data.get("total") or data.get("count") or 0)
 
 
