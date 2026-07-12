@@ -307,5 +307,40 @@ class TestHandler(unittest.TestCase):
         self.assertIn("error", result["projects"][0])
 
 
+class RhythmStanzaTests(unittest.TestCase):
+    """ENC-TSK-N23: heavy-beat completion-stanza contract (tenant_invoker.py)."""
+
+    def test_no_result_key_is_noop(self):
+        from unittest import mock
+
+        with mock.patch("boto3.client") as client:
+            self.assertFalse(mod._write_rhythm_stanza({}, "completed", {}))
+            self.assertFalse(mod._write_rhythm_stanza(None, "completed", {}))
+            client.assert_not_called()
+
+    def test_result_key_writes_contract_stanza(self):
+        import json
+        from unittest import mock
+
+        key = "gamma/rhythm-cycle/heavy_integrate/tenant-results/20260712-000000/memory_consolidation.json"
+        with mock.patch("boto3.client") as client:
+            ok = mod._write_rhythm_stanza({"result_key": key}, "completed", {"candidates_created": 2})
+        self.assertTrue(ok)
+        kwargs = client.return_value.put_object.call_args.kwargs
+        self.assertEqual(kwargs["Bucket"], mod.RHYTHM_RESULTS_BUCKET)
+        self.assertEqual(kwargs["Key"], key)
+        stanza = json.loads(kwargs["Body"].decode("utf-8"))
+        self.assertEqual(stanza["tenant"], "memory_consolidation")
+        self.assertEqual(stanza["status"], "completed")
+        self.assertIn("completed_at", stanza)
+        self.assertEqual(stanza["detail"], {"candidates_created": 2})
+
+    def test_stanza_write_failure_never_raises(self):
+        from unittest import mock
+
+        with mock.patch("boto3.client", side_effect=RuntimeError("boom")):
+            self.assertFalse(mod._write_rhythm_stanza({"result_key": "k"}, "completed", {}))
+
+
 if __name__ == "__main__":
     unittest.main()
