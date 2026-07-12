@@ -17,6 +17,14 @@ COORDINATION_API_BASE = os.environ.get("COORDINATION_API_BASE", "").rstrip("/")
 GRAPH_QUERY_API_BASE = os.environ.get("GRAPH_QUERY_API_BASE", "").rstrip("/")
 INTERNAL_KEY = os.environ.get("COORDINATION_INTERNAL_API_KEY", "")
 
+# ENC-TSK-N21 / BRD DOC-44230223DD1C §4.3: agent_type_id for the rhythm's own
+# governed identity (identity.py). Default empty means identity minting is
+# skipped and beats gracefully degrade to their pre-N21 behavior (see
+# identity.resolve_identity) — this is expected until an ENC-AGT id is minted
+# and wired in here (or via the RHYTHM_AGENT_TYPE_ID Lambda env var).
+RHYTHM_AGENT_TYPE_ID = os.environ.get("RHYTHM_AGENT_TYPE_ID", "")
+RHYTHM_RUNTIME = os.environ.get("RHYTHM_RUNTIME", "lambda")
+
 CLOUDWATCH_NAMESPACE = os.environ.get("CLOUDWATCH_NAMESPACE", "Enceladus/Rhythm")
 SNS_TOPIC_ARN = os.environ.get("RHYTHM_SNS_TOPIC_ARN", "")
 

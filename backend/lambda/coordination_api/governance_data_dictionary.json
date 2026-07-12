@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-12.6",
-  "updated_at": "2026-07-12T12:45:00Z",
-  "last_change_summary": "ENC-TSK-N26: pre-cutover baseline capture tooling added to backend/lambda/rhythm_cycle/ -- new baseline.py module + a 'baseline_capture' entry in lambda_function.py's TIER_HANDLERS (standalone on-demand event mode, not part of the scheduled harmonic beat chain -- no TIER_ORDER/TIER_PREDECESSOR entry, no schedule resource). Writes one Sense-adjacent artifact covering percolation telemetry export, a fixed-query retrieval-quality run, a lesson citation-rate proxy, and corpus invariants, each independently degrading to an honest 'unavailable + reason' rather than failing the run. No entity/field schema change; bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-12.7",
+  "updated_at": "2026-07-12T13:30:00Z",
+  "last_change_summary": "ENC-TSK-N21 / BRD DOC-44230223DD1C §4.3: governed machine identity for the rhythm. New backend/lambda/rhythm_cycle/identity.py resolves-or-mints a real ENC-SES session + Session Claim ID (sci) for the rhythm Lambda itself via the same coordination-API surface (agent.register + agent.claim), caches it in the beat's own S3 artifact chain (tier=identity), and re-claims on sci TTL approach. lambda_function.py's run_beat() now attempts identity resolution on every beat (logs INFO on success, WARNING on degraded fallback) -- the touch guard applies here. tiers/decide.py's escalation writer replaces the hardcoded requested_by_session='rhythm-decide-beat' with the resolved identity (requested_by.session_id/agent_type_id/sci_present + top-level sci when present), falling back to the exact pre-N21 string when identity minting is degraded. tenant_invoker.py's session_identity payload field is now backed by the same resolved identity instead of its placeholder. New RHYTHM_AGENT_TYPE_ID env var (config.py, default empty = graceful degradation); wired to ENC-AGT-00C (minted via coordination agent.type.register, surface=eventbridge-scheduler, model=lambda-rhythm, cost_tier=standard) in infrastructure/cloudformation/02-compute.yaml. No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -8384,6 +8384,11 @@
       "version": "2026-07-12.6",
       "date": "2026-07-12",
       "summary": "ENC-TSK-N26: pre-cutover baseline capture tooling added to backend/lambda/rhythm_cycle/ -- new baseline.py module + a 'baseline_capture' entry in lambda_function.py's TIER_HANDLERS (standalone on-demand event mode, not part of the scheduled harmonic beat chain -- no TIER_ORDER/TIER_PREDECESSOR entry, no schedule resource). Writes one Sense-adjacent artifact covering percolation telemetry export, a fixed-query retrieval-quality run, a lesson citation-rate proxy, and corpus invariants, each independently degrading to an honest 'unavailable + reason' rather than failing the run. No entity/field schema change; bumping per the lambda_function.py touch guard."
+    },
+    {
+      "version": "2026-07-12.7",
+      "date": "2026-07-12",
+      "summary": "ENC-TSK-N21 / BRD DOC-44230223DD1C §4.3: governed machine identity for the rhythm. New backend/lambda/rhythm_cycle/identity.py resolves-or-mints a real ENC-SES session + Session Claim ID (sci) for the rhythm Lambda itself via the same coordination-API surface (agent.register + agent.claim), caches it in the beat's own S3 artifact chain (tier=identity), and re-claims on sci TTL approach. lambda_function.py's run_beat() now attempts identity resolution on every beat (logs INFO on success, WARNING on degraded fallback) -- the touch guard applies here. tiers/decide.py's escalation writer replaces the hardcoded requested_by_session='rhythm-decide-beat' with the resolved identity (requested_by.session_id/agent_type_id/sci_present + top-level sci when present), falling back to the exact pre-N21 string when identity minting is degraded. tenant_invoker.py's session_identity payload field is now backed by the same resolved identity instead of its placeholder. New RHYTHM_AGENT_TYPE_ID env var (config.py, default empty = graceful degradation); wired to ENC-AGT-00C (minted via coordination agent.type.register, surface=eventbridge-scheduler, model=lambda-rhythm, cost_tier=standard) in infrastructure/cloudformation/02-compute.yaml. No entity/field schema change; bumping per the lambda_function.py touch guard."
     }
   ]
 }

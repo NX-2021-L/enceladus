@@ -7561,6 +7561,13 @@ Resources:
           COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           PRE_APPROVED_DISPATCH_SCOPES: '["ENC-PLN-068","ENC-TSK-K"]'
           RHYTHM_SNS_TOPIC_ARN: !Ref RhythmBeatNotificationTopic
+          # ENC-TSK-N21 / BRD DOC-44230223DD1C §4.3: rhythm_cycle governed agent
+          # type, minted via coordination agent.type.register (surface=
+          # eventbridge-scheduler, model=lambda-rhythm, cost_tier=standard).
+          # Empty default in identity.py degrades gracefully (identity minting
+          # skipped, escalations fall back to pre-N21 behavior) if this is ever
+          # unset — see backend/lambda/rhythm_cycle/identity.py.
+          RHYTHM_AGENT_TYPE_ID: ENC-AGT-00C
           # ENC-TSK-N18: tenant_invoker AppConfig wiring. Configuration profile
           # is additive/separate from feature-flags (see 10-appconfig-rhythm-
           # tenants.yaml) — ships with zero enabled tenants.
