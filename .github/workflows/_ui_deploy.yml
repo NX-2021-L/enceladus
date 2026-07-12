@@ -226,12 +226,21 @@ jobs:
           echo "Resolved bucket=${BUCKET}  distribution=${DIST}"
 
       - name: Sync build to S3 (cache-control split)
+        id: sync
         env:
           BUCKET: ${{ steps.resolve.outputs.bucket }}
         run: |
           set -euo pipefail
           DIST_DIR=frontend/ui-v2/dist
           [ -d "${DIST_DIR}" ] || { echo "::error::${DIST_DIR} missing — build artifact not downloaded."; exit 1; }
+
+          EXPECTED_ENTRY=$(grep -oE '/assets/index-[^" ]+\.js' "${DIST_DIR}/index.html" | head -1 || true)
+          if [ -z "${EXPECTED_ENTRY}" ]; then
+            echo "::error::Could not parse content-hashed entry bundle from ${DIST_DIR}/index.html."
+            exit 1
+          fi
+          echo "expected_entry=${EXPECTED_ENTRY}" >> "${GITHUB_OUTPUT}"
+          echo "Expected viewer entry bundle: ${EXPECTED_ENTRY}"
 
           # 1. Full sync (mirrors the bucket, --delete removes stale objects).
           #    Default cache-control here is conservative; the app-shell files
@@ -270,7 +279,7 @@ jobs:
         env:
           DIST: ${{ steps.resolve.outputs.distribution_id }}
           STACK: ${{ steps.resolve.outputs.stack_name }}
-          COMMIT_SHA: ${{ github.sha }}
+          EXPECTED_ENTRY: ${{ steps.sync.outputs.expected_entry }}
         run: |
           set -euo pipefail
           INVALIDATION_ID=$(aws cloudfront create-invalidation \
@@ -289,20 +298,25 @@ jobs:
             exit 1
           fi
 
-          SHA_SHORT="${COMMIT_SHA:0:7}"
           MAX_ATTEMPTS=60
           SLEEP_SEC=10
-          echo "Created invalidation ${INVALIDATION_ID}; gating on viewer https://${DOMAIN}/index.html containing ${SHA_SHORT} (ENC-TSK-M88)."
+          echo "Created invalidation ${INVALIDATION_ID}; gating on viewer index.html referencing ${EXPECTED_ENTRY} (ENC-TSK-M88)."
           for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
             INDEX_BODY=$(curl -sS "https://${DOMAIN}/index.html" || true)
-            if echo "${INDEX_BODY}" | grep -q "${SHA_SHORT}"; then
-              echo "Viewer path gate PASS: index.html contains ${SHA_SHORT} after ${attempt} attempt(s)."
-              exit 0
+            VIEWER_ENTRY=$(echo "${INDEX_BODY}" | grep -oE '/assets/index-[^" ]+\.js' | head -1 || true)
+            if [ "${VIEWER_ENTRY}" = "${EXPECTED_ENTRY}" ]; then
+              ENTRY_CODE=$(curl -sS -o /dev/null -w '%{http_code}' "https://${DOMAIN}${EXPECTED_ENTRY}" || true)
+              if [ "${ENTRY_CODE}" = "200" ]; then
+                echo "Viewer path gate PASS: index.html references ${EXPECTED_ENTRY} (HTTP ${ENTRY_CODE}) after ${attempt} attempt(s)."
+                exit 0
+              fi
+              echo "Attempt ${attempt}/${MAX_ATTEMPTS}: index.html fresh but entry bundle returned ${ENTRY_CODE}; sleeping ${SLEEP_SEC}s..."
+            else
+              echo "Attempt ${attempt}/${MAX_ATTEMPTS}: viewer entry '${VIEWER_ENTRY:-(missing)}' != expected '${EXPECTED_ENTRY}'; sleeping ${SLEEP_SEC}s..."
             fi
-            echo "Attempt ${attempt}/${MAX_ATTEMPTS}: viewer still stale; sleeping ${SLEEP_SEC}s..."
             sleep "${SLEEP_SEC}"
           done
-          echo "::error::Viewer path gate FAIL: https://${DOMAIN}/index.html did not contain ${SHA_SHORT} within $((MAX_ATTEMPTS * SLEEP_SEC))s after invalidation ${INVALIDATION_ID}."
+          echo "::error::Viewer path gate FAIL: https://${DOMAIN}/index.html did not reference ${EXPECTED_ENTRY} within $((MAX_ATTEMPTS * SLEEP_SEC))s after invalidation ${INVALIDATION_ID}."
           exit 1
 
       # Post-deploy smoke test against the live distribution. Proves three
@@ -315,7 +329,7 @@ jobs:
       - name: Validate live distribution (shell + /api routing)
         env:
           STACK: ${{ steps.resolve.outputs.stack_name }}
-          COMMIT_SHA: ${{ github.sha }}
+          EXPECTED_ENTRY: ${{ steps.sync.outputs.expected_entry }}
           INVALIDATION_ID: ${{ steps.invalidate.outputs.invalidation_id }}
         run: |
           set -euo pipefail
@@ -344,12 +358,12 @@ jobs:
           proj_ok="FAIL";  [ "${PROJ}" = "401" ] && proj_ok="PASS"
 
           # ENC-TSK-M88: prove the viewer path serves the build we just shipped.
-          SHA_SHORT="${COMMIT_SHA:0:7}"
           INDEX_HEADERS=$(curl -sSI "https://${DOMAIN}/index.html" || true)
           INDEX_CACHE=$(echo "${INDEX_HEADERS}" | awk -F': ' 'tolower($1)=="cache-control"{print $2; exit}')
           INDEX_BODY=$(curl -sS "https://${DOMAIN}/index.html" || true)
+          VIEWER_ENTRY=$(echo "${INDEX_BODY}" | grep -oE '/assets/index-[^" ]+\.js' | head -1 || true)
           version_ok="FAIL"
-          if echo "${INDEX_BODY}" | grep -q "${SHA_SHORT}"; then
+          if [ "${VIEWER_ENTRY}" = "${EXPECTED_ENTRY}" ]; then
             version_ok="PASS"
           fi
           cache_ok="FAIL"
@@ -365,7 +379,7 @@ jobs:
             echo "| Check | Endpoint | Result | Expected | Status |"
             echo "| --- | --- | --- | --- | --- |"
             echo "| Shell | \`/\` | \`${SHELL_CODE} ${SHELL_CT}\` | 200 + text/html | ${shell_ok} |"
-            echo "| Viewer build | \`/index.html\` body | contains \`${SHA_SHORT}\` | deployed commit | ${version_ok} |"
+            echo "| Viewer build | \`/index.html\` entry | \`${VIEWER_ENTRY:-(missing)}\` | \`${EXPECTED_ENTRY}\` | ${version_ok} |"
             echo "| App-shell cache | \`/index.html\` | \`${INDEX_CACHE:-(missing)}\` | no-cache / max-age=0 | ${cache_ok} |"
             echo "| Health | \`/api/v1/health\` | \`${HEALTH}\` | 200 | ${health_ok} |"
             echo "| API routing/auth | \`/api/v1/projects\` | \`${PROJ}\` | 401 (auth enforced) | ${proj_ok} |"
@@ -388,7 +402,7 @@ jobs:
             fatal=1
           fi
           if [ "${version_ok}" != "PASS" ]; then
-            echo "::error::Viewer path /index.html did not contain deployed sha prefix '${SHA_SHORT}' — CloudFront may still be serving a stale app shell."
+            echo "::error::Viewer path /index.html entry '${VIEWER_ENTRY:-(missing)}' != expected '${EXPECTED_ENTRY}' — CloudFront may still be serving a stale app shell."
             fatal=1
           fi
           if [ "${cache_ok}" != "PASS" ]; then
