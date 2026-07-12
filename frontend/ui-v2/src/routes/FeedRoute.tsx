@@ -8,6 +8,7 @@ import { RecordCard } from '../components/RecordCard'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { formatRelativeTime } from '../format/relativeTime'
 import { useRealtimeFeed, useRealtimeFeedEvents } from '../realtime/RealtimeFeedProvider'
+import { feedTransportLabel } from '../realtime/transportStatus'
 import { applyPropertyFilter } from '../search/applyPropertyFilter'
 import { FeedPropertyFilter } from '../search/FeedPropertyFilter'
 import {
@@ -135,6 +136,7 @@ export function FeedRoute() {
   const suggestionsKey = searchSuggestions.map((row) => row.value).join(',')
   const { markKeystroke } = useKeystrokeSuggestionTelemetry(suggestionsKey)
 
+  const transportPhase = useFeedConnectionStore((s) => s.phase)
   const keystrokeP50 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p50Ms)
   const keystrokeP95 = useFeedConnectionStore((s) => s.keystrokeSuggestion.p95Ms)
   const localP50 = useFeedConnectionStore((s) => s.requestFirstPageLocal.p50Ms)
@@ -311,7 +313,11 @@ export function FeedRoute() {
   return (
     <div className="feed-route">
       <header className="feed-route__header">
-        <p className="feed-route__eyebrow">FEED · LIVE</p>
+        {/* ENC-TSK-M82 (AC-3): truthful transport label — `LIVE` only while the
+            WSS is actually connected (connection_ack + open socket ⇒ phase
+            'connected'); the S3 snapshot/delta fallback reads honestly as
+            SNAPSHOT instead of a hardcoded, always-on LIVE. */}
+        <p className="feed-route__eyebrow">FEED · {feedTransportLabel(transportPhase)}</p>
         <h1 className="feed-route__title">Results</h1>
         <p className="feed-route__subtitle">
           Search across every governed record type. Filters and scroll position are preserved on

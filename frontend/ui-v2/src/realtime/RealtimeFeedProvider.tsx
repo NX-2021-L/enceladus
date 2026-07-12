@@ -91,6 +91,21 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
     retry: 2,
   })
 
+  // ENC-TSK-M82: the realtime socket is a LONG-LIVED connection whose lifecycle
+  // must be independent of the snapshot query. `snapshotQuery` is a TanStack
+  // Query result object that gets a NEW identity on every state change
+  // (pending→success, the 60s staleTime refetch, refetchOnWindowFocus, retries,
+  // and every explicit gap_too_large refetch). It used to be a dependency of
+  // the connect effect below, so each of those churned the effect: cleanup ran
+  // `client.stop()` (disposed=true + socket.close()) and a fresh client was
+  // built — flapping the socket and, under focus/visibility churn, leaving
+  // windows with NO live socket at all. The gap-recovery refetch now reaches
+  // the query through this ref, so it never forces the connect effect to re-run.
+  const refetchSnapshotRef = useRef(snapshotQuery.refetch)
+  useEffect(() => {
+    refetchSnapshotRef.current = snapshotQuery.refetch
+  }, [snapshotQuery.refetch])
+
   useEffect(() => {
     if (!snapshotQuery.data) return
     const seeded = snapshotToFeedState(snapshotQuery.data)
@@ -157,7 +172,7 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
           break
         case 'gap_too_large':
           setErrorMessage(event.signal.reason)
-          void snapshotQuery.refetch()
+          void refetchSnapshotRef.current()
           break
         default:
           break
@@ -185,6 +200,11 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
       client.stop()
       clientRef.current = null
     }
+    // ENC-TSK-M82: deps are all stable for the provider's lifetime (queryClient
+    // + zustand selector fns), so this effect runs exactly ONCE per mount and
+    // tears down only on unmount. The socket is no longer coupled to the
+    // snapshot query — mounting the provider always initiates a single, stable
+    // connection attempt (guarded by RealtimeFeedProvider.bootstrap.test.tsx).
   }, [
     queryClient,
     recordLatency,
@@ -192,7 +212,6 @@ export function RealtimeFeedProvider({ children }: { children: ReactNode }) {
     setErrorMessage,
     setPhase,
     setReconnectAttempt,
-    snapshotQuery,
   ])
 
   const value: RealtimeFeedContextValue = {
