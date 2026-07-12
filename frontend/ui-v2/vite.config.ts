@@ -151,6 +151,13 @@ export default defineConfig({
             urlPattern: ({ url }) => url.pathname.startsWith('/api/v1/deploy/'),
             handler: 'NetworkOnly',
           },
+          // ENC-TSK-N04 (B67 AC-18): mutations are NetworkOnly with NO Workbox
+          // BackgroundSync. Offline queue+replay for tracker/document
+          // mutations is owned by the app layer (src/offline/mutationQueue.ts
+          // via patchTrackerRecord) — it is If-Match/revision-conflict aware
+          // and drives the UI pendingCount, none of which a blind SW replay
+          // can do. Keeping the SW-level queue alongside it would replay the
+          // same mutation twice once the app layer queues on network failure.
           ...(['PATCH', 'POST', 'DELETE'] as const).map((method) => ({
             urlPattern: ({ url }: { url: URL }) =>
               (url.pathname.startsWith('/api/v1/tracker/') ||
@@ -158,12 +165,6 @@ export default defineConfig({
               !url.pathname.includes('/graphsearch'),
             handler: 'NetworkOnly' as const,
             method,
-            options: {
-              backgroundSync: {
-                name: 'enceladus-mutation-queue',
-                options: { maxRetentionTime: 24 * 60 },
-              },
-            },
           })),
         ],
       },

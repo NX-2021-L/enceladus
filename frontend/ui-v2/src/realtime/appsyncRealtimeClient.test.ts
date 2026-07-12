@@ -131,6 +131,78 @@ describe('AppSyncRealtimeClient', () => {
     client.stop()
   })
 
+  // ENC-TSK-N04 (B67 AC-4): the provider maps events 1:1 onto phases, so
+  // manual_retry_required must be the LAST event of the terminal sequence —
+  // the old order emitted 'disconnected' after it, clobbering the
+  // manual_retry phase and hiding the Retry affordance (W14-A silent halt).
+  it('emits manual_retry_required as the final terminal event, after disconnected', () => {
+    vi.useFakeTimers()
+    const events: string[] = []
+    const client = new AppSyncRealtimeClient({
+      config,
+      lastCursor: 0,
+      onEvent: (event) => events.push(event.type),
+      webSocketFactory: (url, protocols) => new MockWebSocket(url, protocols) as unknown as WebSocket,
+    })
+
+    client.start()
+    for (let i = 0; i <= MAX_AUTO_RECONNECT_ATTEMPTS; i++) {
+      MockWebSocket.instances.at(-1)?.close()
+      vi.advanceTimersByTime(BACKOFF_CAP_MS)
+    }
+
+    expect(events.at(-1)).toBe('manual_retry_required')
+    expect(events.at(-2)).toBe('disconnected')
+    client.stop()
+  })
+
+  // ENC-TSK-N04 (B67 AC-4): visibility/online re-kicks must not reset the
+  // backoff counter — W14-A observed the sequence restarting from attempt 1
+  // mid-outage (refocus fired manualRetry), which also kept the 12-attempt
+  // Retry bar forever out of reach under tab churn.
+  it('livenessKick reconnects immediately without resetting the attempt counter', () => {
+    vi.useFakeTimers()
+    const attempts: number[] = []
+    const client = new AppSyncRealtimeClient({
+      config,
+      lastCursor: 0,
+      onEvent: (event) => {
+        if (event.type === 'reconnecting') attempts.push(event.attempt)
+      },
+      webSocketFactory: (url, protocols) => new MockWebSocket(url, protocols) as unknown as WebSocket,
+    })
+
+    client.start()
+    MockWebSocket.instances.at(-1)?.close() // attempt 1 scheduled
+    vi.advanceTimersByTime(BACKOFF_CAP_MS)
+    MockWebSocket.instances.at(-1)?.close() // attempt 2 scheduled
+
+    client.livenessKick() // immediate reconnect, counter preserved
+    MockWebSocket.instances.at(-1)?.close() // fails again -> attempt 3, not 1
+
+    expect(attempts).toEqual([1, 2, 3])
+
+    client.manualRetry() // user-clicked Retry DOES reset
+    MockWebSocket.instances.at(-1)?.close()
+    expect(attempts).toEqual([1, 2, 3, 1])
+    client.stop()
+  })
+
+  it('livenessKick is a no-op while the socket is open', () => {
+    const client = new AppSyncRealtimeClient({
+      config,
+      lastCursor: 0,
+      onEvent: () => {},
+      webSocketFactory: (url, protocols) => new MockWebSocket(url, protocols) as unknown as WebSocket,
+    })
+
+    client.start()
+    expect(MockWebSocket.instances).toHaveLength(1)
+    client.livenessKick() // mock sockets report OPEN
+    expect(MockWebSocket.instances).toHaveLength(1)
+    client.stop()
+  })
+
   it('emits gap_too_large when cursor jump exceeds threshold', () => {
     let gap = false
     const client = new AppSyncRealtimeClient({

@@ -14,8 +14,11 @@ export const WORKBOX_STRATEGY_MAP = [
   },
   { id: 'auth', handler: 'NetworkOnly', routes: '/api/v1/auth*, /callback, /mobile/v1/auth*' },
   {
+    // ENC-TSK-N04 (B67 AC-18): queue+replay for this route class is the
+    // app-layer mutationQueue (If-Match aware, UI pendingCount), NOT Workbox
+    // BackgroundSync — a SW-level queue on the same routes would double-replay.
     id: 'mutations',
-    handler: 'NetworkOnly+BackgroundSync',
+    handler: 'NetworkOnly+AppLayerQueue',
     routes: 'PATCH|POST|DELETE /api/v1/tracker/*, /api/v1/documents/*',
   },
 ] as const
