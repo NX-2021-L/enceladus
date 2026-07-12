@@ -1336,7 +1336,10 @@ def _get_graph_query_lambda_client():
 
 
 def _query_all_records_via_opensearch(
-    projects: List[Dict[str, str]], cutoff: dt.datetime
+    projects: List[Dict[str, str]],
+    cutoff: dt.datetime,
+    page_size: Optional[int] = None,
+    cursor: Optional[str] = None,
 ) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]]:
     """OpenSearch-tier fast path for the full feed refresh (ENC-TSK-M39).
 
@@ -1365,11 +1368,31 @@ def _query_all_records_via_opensearch(
     if not project_ids:
         return [], [], [], [], []
 
-    payload = {
+    # ENC-TSK-M76: upstream page-cap mode. When page_size is provided, ask the
+    # selection tier for page_size+1 candidates per (project,type) WITH their
+    # updated_at (plus an updated_at<=before cursor bound for deep pages),
+    # merge them into one global (updated_at DESC, record_key ASC) order --
+    # the exact ordering feed_page.apply_page_cap uses -- keep only the window
+    # strictly after the request cursor, and hydrate ONLY that <=page_size+1
+    # page instead of the whole corpus. Absent page_size this is the legacy
+    # ENC-TSK-M39 full-selection path, byte-identical.
+    page_mode = page_size is not None
+    cursor_sort: Optional[str] = None
+    cursor_key: Optional[str] = None
+    if page_mode and cursor:
+        decoded = feed_corpus.decode_cursor(cursor)
+        if decoded is not None:
+            cursor_sort, cursor_key = decoded
+
+    payload: Dict[str, Any] = {
         "action": "feed_selection",
         "project_ids": project_ids,
         "caps": _FEED_RECORD_TYPE_CAPS,
     }
+    if page_mode:
+        payload["page_size"] = int(page_size)
+        if cursor_sort:
+            payload["before"] = cursor_sort
     try:
         response = _get_graph_query_lambda_client().invoke(
             FunctionName=GRAPH_QUERY_API_FUNCTION,
@@ -1390,29 +1413,70 @@ def _query_all_records_via_opensearch(
         return None
 
     selection = result.get("selection") or {}
-    changed_keys: List[Dict[str, Dict[str, str]]] = []
+
+    if not page_mode:
+        changed_keys: List[Dict[str, Dict[str, str]]] = []
+        for pid in project_ids:
+            for rtype in _FEED_RECORD_TYPE_CAPS:
+                for bare_id in selection.get(f"{pid}#{rtype}", []) or []:
+                    changed_keys.append({
+                        "project_id": {"S": pid},
+                        "record_id": {"S": f"{rtype}#{bare_id}"},
+                    })
+        if not changed_keys:
+            return [], [], [], [], []
+        tasks, issues, features, lessons, plans, _closed_ids = _hydrate_records_via_batch_get(changed_keys, cutoff)
+        return tasks, issues, features, lessons, plans
+
+    # --- page-cap mode: global merge -> strict-after-cursor -> cap -> hydrate only the page ---
+    candidates: List[Tuple[str, str, Dict[str, Dict[str, str]]]] = []
     for pid in project_ids:
         for rtype in _FEED_RECORD_TYPE_CAPS:
-            for bare_id in selection.get(f"{pid}#{rtype}", []) or []:
-                changed_keys.append({
-                    "project_id": {"S": pid},
-                    "record_id": {"S": f"{rtype}#{bare_id}"},
-                })
+            for entry in selection.get(f"{pid}#{rtype}", []) or []:
+                if not isinstance(entry, dict):
+                    continue
+                bare_id = str(entry.get("id") or "")
+                if not bare_id:
+                    continue
+                updated_at = str(entry.get("updated_at") or "")
+                record_key = feed_corpus.tracker_record_key(pid, bare_id)
+                ddb_key = {"project_id": {"S": pid}, "record_id": {"S": f"{rtype}#{bare_id}"}}
+                candidates.append((updated_at, record_key, ddb_key))
 
-    if not changed_keys:
+    # Global order (updated_at DESC, record_key ASC) -- matches feed_page._flatten_ordered.
+    candidates.sort(key=lambda c: c[1])
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    if cursor_sort is not None and cursor_key is not None:
+        def _strictly_after(cand: Tuple[str, str, Dict[str, Dict[str, str]]]) -> bool:
+            updated_at, record_key, _ = cand
+            if updated_at != cursor_sort:
+                return updated_at < cursor_sort  # older == later in DESC order
+            return record_key > cursor_key       # same updated_at: larger key is later
+        candidates = [c for c in candidates if _strictly_after(c)]
+
+    page_keys = [c[2] for c in candidates[: int(page_size) + 1]]
+    logger.info(
+        "feed_query: opensearch upstream page-cap hydrating keys=%d (page_size=%s, candidates=%d)",
+        len(page_keys), page_size, len(candidates),
+    )
+    if not page_keys:
         return [], [], [], [], []
-
-    tasks, issues, features, lessons, plans, _closed_ids = _hydrate_records_via_batch_get(changed_keys, cutoff)
+    tasks, issues, features, lessons, plans, _closed_ids = _hydrate_records_via_batch_get(page_keys, cutoff)
     return tasks, issues, features, lessons, plans
 
 
-def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def _query_all_records(
+    cursor: Optional[str] = None, page_size: Optional[int] = None
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     global _last_feed_query_source
     projects = _get_active_projects()
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=CLOSED_ITEM_MAX_AGE_DAYS)
 
     try:
-        opensearch_result = _query_all_records_via_opensearch(projects, cutoff)
+        opensearch_result = _query_all_records_via_opensearch(
+            projects, cutoff, page_size=page_size, cursor=cursor
+        )
     except Exception as exc:  # noqa: BLE001 — never let the fast path take the feed down
         logger.warning("feed_query: OpenSearch-tier path raised unexpectedly, falling back to DDB fan-out: %s", exc)
         opensearch_result = None
@@ -1422,7 +1486,18 @@ def _query_all_records() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Li
         return opensearch_result
 
     _last_feed_query_source = "ddb_fanout"
-    return _query_all_records_via_ddb(projects, cutoff)
+    ddb_result = _query_all_records_via_ddb(projects, cutoff)
+    if page_size is not None:
+        # ENC-TSK-M76: cap the DDB fallback to the SAME page window so both
+        # sources return the identical <=page_size+1 set from _query_all_records
+        # (the handler's retained apply_page_cap then trims both to the final
+        # page identically). The DDB fan-out is still bounded upstream by its
+        # existing per-type/per-project caps.
+        t, i, f, l, p, _nc = feed_page.apply_page_cap(
+            *ddb_result, cursor=cursor, cap=int(page_size) + 1
+        )
+        return t, i, f, l, p
+    return ddb_result
 
 
 def _query_all_records_via_ddb(
@@ -2154,12 +2229,20 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     try:
         try:
-            tasks, issues, features, lessons, plans = _query_all_records()
+            # ENC-TSK-M76: push the page cap UPSTREAM into the selection tier --
+            # _query_all_records now hydrates only the page window (<=cap+1
+            # records after the cursor) instead of the whole ~919-record corpus.
+            # The retained apply_page_cap below stays the final cap + cursor +
+            # next_cursor authority (M74 safety net); because the returned window
+            # is already strictly-after-cursor, it re-caps to the identical page.
+            tasks, issues, features, lessons, plans = _query_all_records(
+                cursor=feed_cursor or None, page_size=MAX_FEED_PAGE_RECORDS
+            )
         except Exception as exc:
             logger.error("feed query failed: %s", exc)
             return _error(500, "Failed to query feed data. Please try again.")
 
-        # --- ENC-TSK-M74 server-side page cap + continuation cursor ---
+        # --- ENC-TSK-M74 server-side page cap + continuation cursor (retained safety net) ---
         # Cap the merged page to MAX_FEED_PAGE_RECORDS most-recently-updated
         # records BEFORE the (edge attach + serialization) tail so those costs
         # only ever process the capped window -- this collapses the feed p95

@@ -1735,7 +1735,20 @@ def _handle_feed_selection(event: Dict) -> Dict[str, Any]:
     caps = event.get("caps") or {}
     if not isinstance(project_ids, list) or not project_ids or not isinstance(caps, dict) or not caps:
         return {"ok": False, "error": "project_ids (non-empty list) and caps (non-empty dict) are required"}
-    selection, error = opensearch_keyword.feed_selection_msearch(project_ids, caps)
+    # ENC-TSK-M76: optional upstream page-cap mode. When feed_query passes
+    # page_size, each sub-query fetches page_size+1 hits WITH updated_at (and
+    # an optional updated_at<=before range bound for deep pages) so feed_query
+    # can hydrate ONLY the page instead of the whole corpus. Absent page_size
+    # this is byte-identical to the ENC-TSK-M39 legacy selection.
+    raw_page_size = event.get("page_size")
+    page_size: Optional[int] = None
+    if isinstance(raw_page_size, int) and raw_page_size > 0:
+        page_size = raw_page_size
+    before = event.get("before")
+    before = str(before) if before else None
+    selection, error = opensearch_keyword.feed_selection_msearch(
+        project_ids, caps, page_size=page_size, before=before
+    )
     if error:
         return {"ok": False, "error": error}
     return {"ok": True, "selection": selection}

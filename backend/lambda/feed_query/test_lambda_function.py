@@ -95,7 +95,7 @@ def test_full_refresh_caps_page_and_returns_next_cursor(monkeypatch):
     monkeypatch.setattr(
         feed_query,
         "_query_all_records",
-        lambda: (_many_tasks(120), [], [], [], []),
+        lambda cursor=None, page_size=None: (_many_tasks(120), [], [], [], []),
     )
 
     resp = feed_query.lambda_handler(_feed_full_event(), None)
@@ -123,7 +123,7 @@ def test_full_refresh_below_cap_null_cursor(monkeypatch):
     monkeypatch.setattr(
         feed_query,
         "_query_all_records",
-        lambda: (_many_tasks(10), [], [], [], []),
+        lambda cursor=None, page_size=None: (_many_tasks(10), [], [], [], []),
     )
     resp = feed_query.lambda_handler(_feed_full_event(), None)
     payload = json.loads(resp["body"])
@@ -939,7 +939,7 @@ def test_query_all_records_uses_opensearch_result_when_available(monkeypatch):
     monkeypatch.setattr(
         feed_query,
         "_query_all_records_via_opensearch",
-        lambda _projects, _cutoff: (["t"], ["i"], ["f"], ["l"], ["p"]),
+        lambda _projects, _cutoff, page_size=None, cursor=None: (["t"], ["i"], ["f"], ["l"], ["p"]),
     )
 
     def _boom(*_a, **_k):
@@ -954,7 +954,7 @@ def test_query_all_records_uses_opensearch_result_when_available(monkeypatch):
 
 def test_query_all_records_falls_back_to_ddb_when_opensearch_returns_none(monkeypatch):
     monkeypatch.setattr(feed_query, "_get_active_projects", lambda: [{"project_id": "enceladus"}])
-    monkeypatch.setattr(feed_query, "_query_all_records_via_opensearch", lambda _p, _c: None)
+    monkeypatch.setattr(feed_query, "_query_all_records_via_opensearch", lambda _p, _c, page_size=None, cursor=None: None)
     monkeypatch.setattr(
         feed_query,
         "_query_all_records_via_ddb",
@@ -969,7 +969,7 @@ def test_query_all_records_falls_back_to_ddb_when_opensearch_returns_none(monkey
 def test_query_all_records_falls_back_to_ddb_when_opensearch_raises(monkeypatch):
     monkeypatch.setattr(feed_query, "_get_active_projects", lambda: [{"project_id": "enceladus"}])
 
-    def _raise(_p, _c):
+    def _raise(_p, _c, page_size=None, cursor=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(feed_query, "_query_all_records_via_opensearch", _raise)
@@ -982,3 +982,113 @@ def test_query_all_records_falls_back_to_ddb_when_opensearch_raises(monkeypatch)
     result = feed_query._query_all_records()
     assert result == ([], [], [], [], [])
     assert feed_query._last_feed_query_source == "ddb_fanout"
+
+
+# ---------------------------------------------------------------------------
+# ENC-TSK-M76 — upstream page cap: the OpenSearch selection path must hydrate
+# ONLY the page window (<=page_size+1 keys after the cursor), not the corpus.
+# ---------------------------------------------------------------------------
+import datetime as _dt
+
+
+class _FakePayload:
+    def __init__(self, data):
+        self._d = json.dumps(data).encode("utf-8")
+
+    def read(self):
+        return self._d
+
+
+class _FakeLambdaClient:
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+
+    def invoke(self, **kw):
+        self.calls.append(json.loads(kw["Payload"].decode("utf-8")))
+        return {"Payload": _FakePayload(self._result)}
+
+
+_M76_SELECTION = {
+    "enceladus#task": [
+        {"id": "ENC-TSK-001", "updated_at": "2026-07-10T09:00:00Z"},
+        {"id": "ENC-TSK-002", "updated_at": "2026-07-10T05:00:00Z"},
+    ],
+    "enceladus#issue": [
+        {"id": "ENC-ISS-001", "updated_at": "2026-07-10T08:00:00Z"},
+        {"id": "ENC-ISS-002", "updated_at": "2026-07-10T02:00:00Z"},
+    ],
+    "enceladus#feature": [
+        {"id": "ENC-FTR-001", "updated_at": "2026-07-10T07:00:00Z"},
+    ],
+}
+# Global (updated_at desc) order: TSK-001(09) ISS-001(08) FTR-001(07) TSK-002(05) ISS-002(02)
+
+
+def _record_ids(keys):
+    return [k["record_id"]["S"] for k in keys]
+
+
+def _setup_opensearch(monkeypatch, selection=_M76_SELECTION):
+    monkeypatch.setattr(feed_query, "GRAPH_QUERY_API_FUNCTION", "fake-graph-fn")
+    client = _FakeLambdaClient({"ok": True, "selection": selection})
+    monkeypatch.setattr(feed_query, "_get_graph_query_lambda_client", lambda: client)
+    captured = {"keys": None}
+
+    def _fake_hydrate(keys, cutoff):
+        captured["keys"] = list(keys)
+        return [], [], [], [], [], []
+
+    monkeypatch.setattr(feed_query, "_hydrate_records_via_batch_get", _fake_hydrate)
+    return client, captured
+
+
+def test_m76_opensearch_hydrates_only_page_first_page(monkeypatch):
+    client, captured = _setup_opensearch(monkeypatch)
+    projects = [{"project_id": "enceladus"}]
+    cutoff = _dt.datetime(2020, 1, 1, tzinfo=_dt.timezone.utc)
+
+    feed_query._query_all_records_via_opensearch(projects, cutoff, page_size=3, cursor=None)
+
+    # 5 candidates, page_size=3 -> hydrate exactly page_size+1 = 4 keys (NOT all 5).
+    assert captured["keys"] is not None
+    assert len(captured["keys"]) == 4
+    assert _record_ids(captured["keys"]) == [
+        "task#ENC-TSK-001", "issue#ENC-ISS-001", "feature#ENC-FTR-001", "task#ENC-TSK-002",
+    ]
+    # page_size + before were threaded to the selection tier; no before on page 1.
+    assert client.calls[0]["page_size"] == 3
+    assert "before" not in client.calls[0]
+
+
+def test_m76_opensearch_cursor_strictly_after_no_dup_no_gap(monkeypatch):
+    client, captured = _setup_opensearch(monkeypatch)
+    projects = [{"project_id": "enceladus"}]
+    cutoff = _dt.datetime(2020, 1, 1, tzinfo=_dt.timezone.utc)
+
+    # Cursor at ISS-001 (2nd global item). The page after it must be exactly
+    # FTR-001, TSK-002, ISS-002 -- no ISS-001 (no dup), no skipped record (no gap).
+    cursor = feed_query.feed_corpus.encode_cursor(
+        "2026-07-10T08:00:00Z", feed_query.feed_corpus.tracker_record_key("enceladus", "ENC-ISS-001")
+    )
+    feed_query._query_all_records_via_opensearch(projects, cutoff, page_size=3, cursor=cursor)
+
+    assert _record_ids(captured["keys"]) == [
+        "feature#ENC-FTR-001", "task#ENC-TSK-002", "issue#ENC-ISS-002",
+    ]
+    # cursor's updated_at is threaded to the selection tier as the range bound.
+    assert client.calls[0]["before"] == "2026-07-10T08:00:00Z"
+
+
+def test_m76_hydration_scales_with_page_not_corpus(monkeypatch):
+    # A corpus-sized selection (200 candidates) must still hydrate only page+1.
+    big = {"enceladus#task": [
+        {"id": f"ENC-TSK-{i:03d}", "updated_at": f"2026-07-10T{(59 - (i % 60)):02d}:00:00Z"}
+        for i in range(200)
+    ]}
+    client, captured = _setup_opensearch(monkeypatch, selection=big)
+    projects = [{"project_id": "enceladus"}]
+    cutoff = _dt.datetime(2020, 1, 1, tzinfo=_dt.timezone.utc)
+
+    feed_query._query_all_records_via_opensearch(projects, cutoff, page_size=75, cursor=None)
+    assert len(captured["keys"]) == 76  # page_size + 1, NOT 200

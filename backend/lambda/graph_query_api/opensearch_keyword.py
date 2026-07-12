@@ -236,8 +236,11 @@ def hybrid_keyword_ranks(
 
 
 def feed_selection_msearch(
-    project_ids: List[str], caps: Dict[str, int]
-) -> Tuple[Dict[str, List[str]], Optional[str]]:
+    project_ids: List[str],
+    caps: Dict[str, int],
+    page_size: Optional[int] = None,
+    before: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Optional[str]]:
     """Top-N most-recently-updated record IDs per (project_id, record_type).
 
     ENC-TSK-M39: the selection-tier query behind feed_query's OpenSearch fast
@@ -246,31 +249,50 @@ def feed_selection_msearch(
     directly; this is the query builder + response parser that call uses.
 
     One ``_msearch`` round trip covers every (project_id, record_type) pair --
-    each header/query line requests only ``_id`` sorted by updated_at desc,
-    capped at caps[record_type]. Returns ({"{project_id}#{record_type}":
-    [bare_id, ...]}, error_message); error_message is set (dict empty) on any
-    failure so the caller can fall back to its DDB fan-out.
+    each header/query line requests ``_id`` sorted by updated_at desc.
+
+    Two modes:
+      * LEGACY (page_size is None) -- each sub-query is capped at
+        caps[record_type] and returns only ``_id``; the result is
+        ({"{project_id}#{record_type}": [bare_id, ...]}, error). Preserved
+        byte-for-byte for any caller not on the ENC-TSK-M76 upstream-cap path.
+      * PAGE-CAP (page_size given, ENC-TSK-M76) -- each sub-query fetches
+        ``page_size + 1`` hits WITH their ``updated_at`` (needed so feed_query
+        can merge every pair into one global (updated_at desc) order and cap
+        to exactly the page), and, when a ``before`` cursor bound is supplied,
+        adds ``range: updated_at <= before`` so deep-page selection stays
+        correct while still fetching only page_size+1 per pair. Result is
+        ({"{project_id}#{record_type}": [{"id": bare_id, "updated_at": ..}]}, error).
+        Fetching page_size+1 per (pair) guarantees the union contains the true
+        global top-(page_size+1) most-recent records after the cursor, since
+        the target page is at most page_size records.
+
+    error_message is set (dict empty) on any failure so the caller can fall
+    back to its DDB fan-out.
     """
     if not project_ids or not caps or not opensearch_configured():
         return {}, "opensearch_not_configured" if not opensearch_configured() else "no_input"
 
+    page_mode = page_size is not None
+    per_pair_size = max(1, int(page_size) + 1) if page_mode else None
+
     pairs = [(pid, rtype) for pid in project_ids for rtype in caps]
     lines: List[str] = []
     for pid, rtype in pairs:
-        lines.append(json.dumps({"index": READ_ALIAS}))
-        lines.append(json.dumps({
-            "size": max(1, int(caps[rtype])),
-            "_source": False,
+        query_filter: List[Dict[str, Any]] = [
+            {"term": {"project_id": pid}},
+            {"term": {"record_type": rtype}},
+        ]
+        if page_mode and before:
+            query_filter.append({"range": {"updated_at": {"lte": before}}})
+        header = {
+            "size": per_pair_size if page_mode else max(1, int(caps[rtype])),
+            "_source": ["updated_at"] if page_mode else False,
             "sort": [{"updated_at": "desc"}],
-            "query": {
-                "bool": {
-                    "filter": [
-                        {"term": {"project_id": pid}},
-                        {"term": {"record_type": rtype}},
-                    ]
-                }
-            },
-        }))
+            "query": {"bool": {"filter": query_filter}},
+        }
+        lines.append(json.dumps({"index": READ_ALIAS}))
+        lines.append(json.dumps(header))
     body = "\n".join(lines) + "\n"
 
     try:
@@ -288,7 +310,7 @@ def feed_selection_msearch(
     if len(responses) != len(pairs):
         return {}, f"msearch response count mismatch: expected {len(pairs)} got {len(responses)}"
 
-    selection: Dict[str, List[str]] = {}
+    selection: Dict[str, Any] = {}
     for (pid, rtype), sub_resp in zip(pairs, responses):
         if sub_resp.get("error"):
             logger.warning(
@@ -297,13 +319,25 @@ def feed_selection_msearch(
             )
             continue
         hits = (sub_resp.get("hits") or {}).get("hits") or []
-        bare_ids: List[str] = []
-        for hit in hits:
-            doc_id = str(hit.get("_id") or "")
-            if doc_id.count("#") >= 2:
-                bare_ids.append(doc_id.split("#", 2)[2])
-        if bare_ids:
-            selection[f"{pid}#{rtype}"] = bare_ids
+        if page_mode:
+            ranked: List[Dict[str, str]] = []
+            for hit in hits:
+                doc_id = str(hit.get("_id") or "")
+                if doc_id.count("#") < 2:
+                    continue
+                bare_id = doc_id.split("#", 2)[2]
+                updated_at = str((hit.get("_source") or {}).get("updated_at") or "")
+                ranked.append({"id": bare_id, "updated_at": updated_at})
+            if ranked:
+                selection[f"{pid}#{rtype}"] = ranked
+        else:
+            bare_ids: List[str] = []
+            for hit in hits:
+                doc_id = str(hit.get("_id") or "")
+                if doc_id.count("#") >= 2:
+                    bare_ids.append(doc_id.split("#", 2)[2])
+            if bare_ids:
+                selection[f"{pid}#{rtype}"] = bare_ids
 
     return selection, None
 
