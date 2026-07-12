@@ -47,6 +47,37 @@ class HandlerTests(unittest.TestCase):
         self.assertGreaterEqual(len(resp["legacy_jobs"]), 3)
 
 
+class RunBeatIdentityResolutionTests(unittest.TestCase):
+    """ENC-TSK-N21 / BRD §4.3: every beat attempts identity resolution (the
+    live-validation signal for this task), regardless of tier or outcome."""
+
+    @mock.patch("lambda_function.publish_beat_metrics")
+    @mock.patch("lambda_function.read_latest", return_value={"ok": True})
+    @mock.patch("lambda_function.TIER_HANDLERS", {"sense": lambda: {"bytes": 1}})
+    @mock.patch("lambda_function.resolve_identity")
+    def test_resolve_identity_called_and_logged_for_every_beat(
+        self, resolve_identity, _read_latest, _publish
+    ):
+        resolve_identity.return_value = {"session_id": "ENC-SES-099", "degraded": False}
+        with self.assertLogs(level="INFO") as logs:
+            lambda_function.run_beat("sense")
+        resolve_identity.assert_called_once()
+        self.assertTrue(any("identity resolved" in line for line in logs.output))
+
+    @mock.patch("lambda_function.publish_beat_metrics")
+    @mock.patch("lambda_function.read_latest", return_value={"ok": True})
+    @mock.patch("lambda_function.TIER_HANDLERS", {"sense": lambda: {"bytes": 1}})
+    @mock.patch("lambda_function.resolve_identity")
+    def test_degraded_identity_logs_warning_but_beat_still_runs(
+        self, resolve_identity, _read_latest, _publish
+    ):
+        resolve_identity.return_value = {"degraded": True, "reason": "RHYTHM_AGENT_TYPE_ID unset"}
+        with self.assertLogs(level="WARNING") as logs:
+            result = lambda_function.run_beat("sense")
+        self.assertTrue(any("degraded" in line for line in logs.output))
+        self.assertEqual(result["bytes"], 1)
+
+
 class LegacyInventoryTests(unittest.TestCase):
     def test_inventory_covers_embedding_jobs(self):
         tiers = {row["rhythm_tier"] for row in LEGACY_SCHEDULE_INVENTORY}
@@ -109,6 +140,53 @@ class TrackerUrlShapeTests(unittest.TestCase):
         url = post_json.call_args[0][0]
         self.assertEqual(url, "https://x/api/v1/coordination/dispatch-plan/dry-run")
         self.assertNotIn("/api/v1/api/v1", url)
+
+
+class DecideEscalationIdentityTests(unittest.TestCase):
+    """ENC-TSK-N21 / BRD §4.3: escalation writes must carry the rhythm's
+    resolved governed identity (session_id + sci) instead of the old
+    hardcoded requested_by_session="rhythm-decide-beat" pseudo-identity."""
+
+    @mock.patch("tiers.decide.post_json", return_value={"escalation_id": "ENC-ESC-1"})
+    @mock.patch("tiers.decide.resolve_identity")
+    def test_escalation_carries_minted_identity_and_sci(self, resolve_identity, post_json):
+        import tiers.decide as decide
+
+        resolve_identity.return_value = {
+            "session_id": "ENC-SES-099",
+            "agent_type_id": "ENC-AGT-00C",
+            "sci": "SCI-abc123",
+            "degraded": False,
+        }
+        decide._create_escalation("ENC-TSK-X99", "some proposal")
+
+        _, body = post_json.call_args[0]
+        self.assertEqual(body["requested_by_session"], "ENC-SES-099")
+        self.assertEqual(body["requested_by"]["session_id"], "ENC-SES-099")
+        self.assertEqual(body["requested_by"]["agent_type_id"], "ENC-AGT-00C")
+        self.assertTrue(body["requested_by"]["sci_present"])
+        self.assertEqual(body["sci"], "SCI-abc123")
+        self.assertNotEqual(body["requested_by_session"], "rhythm-decide-beat")
+
+    @mock.patch("tiers.decide.post_json", return_value={"escalation_id": "ENC-ESC-2"})
+    @mock.patch("tiers.decide.resolve_identity")
+    def test_escalation_falls_back_to_pre_n21_identity_when_degraded(self, resolve_identity, post_json):
+        import tiers.decide as decide
+
+        resolve_identity.return_value = {
+            "session_id": "",
+            "agent_type_id": "",
+            "sci": "",
+            "degraded": True,
+            "reason": "RHYTHM_AGENT_TYPE_ID unset",
+        }
+        decide._create_escalation("ENC-TSK-X99", "some proposal")
+
+        _, body = post_json.call_args[0]
+        self.assertEqual(body["requested_by_session"], "rhythm-decide-beat")
+        self.assertEqual(body["requested_by"]["session_id"], "rhythm-decide-beat")
+        self.assertFalse(body["requested_by"]["sci_present"])
+        self.assertNotIn("sci", body)
 
 
 class DecideCursorPaginationTests(unittest.TestCase):

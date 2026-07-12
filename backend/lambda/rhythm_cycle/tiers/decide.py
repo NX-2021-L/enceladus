@@ -19,6 +19,7 @@ from config import (
     pre_approved_scopes,
 )
 from http_client import get_json, post_json
+from identity import resolve_identity
 from metrics import publish_lyapunov
 
 logger = logging.getLogger(__name__)
@@ -115,15 +116,35 @@ def _create_escalation(target_record_id: str, summary: str) -> Dict[str, Any]:
     # /api/v1/tracker prefix), but no explicit RouteKey exists in
     # infrastructure/cloudformation — orchestrator ENC-SES-09B to confirm live shape.
     url = f"{TRACKER_API_BASE}/{PROJECT_ID}/escalation"
-    return post_json(
-        url,
-        {
-            "mutation_type": "deploy_arc_change",
-            "target_record_id": target_record_id,
-            "summary": summary,
-            "requested_by_session": "rhythm-decide-beat",
+
+    # ENC-TSK-N21 / BRD §4.3: the prior hardcoded requested_by_session=
+    # "rhythm-decide-beat" never resolved to a real governed session and could
+    # never carry a Session Claim ID (sci) — any beat-originated escalation
+    # would fail closed once the FTR-122 SCI gate tightens past its
+    # grandfather window. identity.resolve_identity() resolves-or-mints (and
+    # caches across beats) a real ENC-SES session + sci for the rhythm's own
+    # identity; tracker_mutation's escalation.request handler reads the
+    # session id from requested_by.session_id (falling back to
+    # write_source.provider) and records requested_by.sci_present. When
+    # identity resolution is degraded (RHYTHM_AGENT_TYPE_ID unset or the
+    # coordination API unreachable) this falls back to the exact pre-N21
+    # pseudo-identity string, preserving prior behavior rather than raising.
+    identity = resolve_identity()
+    session_id = str(identity.get("session_id") or "") or "rhythm-decide-beat"
+    body: Dict[str, Any] = {
+        "mutation_type": "deploy_arc_change",
+        "target_record_id": target_record_id,
+        "summary": summary,
+        "requested_by_session": session_id,
+        "requested_by": {
+            "session_id": session_id,
+            "agent_type_id": str(identity.get("agent_type_id") or ""),
+            "sci_present": bool(identity.get("sci")),
         },
-    )
+    }
+    if identity.get("sci"):
+        body["sci"] = identity["sci"]
+    return post_json(url, body)
 
 
 def _notify_beat(proposals: List[Dict[str, Any]], escalations: List[str]) -> None:

@@ -45,6 +45,7 @@ import boto3
 
 from artifact_store import read_latest
 from config import CLOUDWATCH_NAMESPACE, PROJECT_ID, S3_BUCKET, TIER_PREDECESSOR, artifact_prefix
+from identity import resolve_identity
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +68,22 @@ _CACHE_TTL: float = float(os.environ.get("AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_
 # (DOC-44230223DD1C §4.1: "two consecutive silent windows").
 STALL_THRESHOLD = 2
 
-# ENC-TSK-N21 will replace this with a real governed-identity mint; the
-# payload field is designed now so tenants can start reading it today.
+# ENC-TSK-N21: fallback used when governed-identity resolution is degraded
+# (RHYTHM_AGENT_TYPE_ID unset or the coordination API unreachable) — same
+# string the "session_identity" payload field carried before N21 landed.
 SESSION_IDENTITY_PLACEHOLDER = os.environ.get(
     "RHYTHM_TENANT_SESSION_IDENTITY", "rhythm-cycle-beat-unidentified"
 )
+
+
+def _session_identity() -> str:
+    """ENC-TSK-N21 / BRD §4.3: resolve the rhythm's governed ENC-SES identity
+    for the ``session_identity`` tenant-invoke payload field. Falls back to
+    SESSION_IDENTITY_PLACEHOLDER when identity resolution is degraded — never
+    raises, since one tenant's identity curiosity must never block a beat.
+    """
+    identity = resolve_identity()
+    return str(identity.get("session_id") or "") or SESSION_IDENTITY_PLACEHOLDER
 
 
 def _fetch_tenant_config() -> Dict[str, Any]:
@@ -174,6 +186,9 @@ def invoke_tenants(
     prefix = result_prefix_for(beat_type, beat_ts)
     beat_iso = beat_ts.astimezone(timezone.utc).isoformat()
     invoked: List[Dict[str, Any]] = []
+    # Resolved once per invoke_tenants call — every tenant in this beat shares
+    # the same governed identity (or the same degraded fallback).
+    session_identity = _session_identity()
 
     for tenant in manifest:
         result_key = f"{prefix}/{tenant.name}.json"
@@ -183,8 +198,9 @@ def invoke_tenants(
             "beat_at": beat_iso,
             "predecessor_artifact_key": predecessor_artifact_key,
             "expected_output_contract": tenant.expected_output_contract,
-            # ENC-TSK-N21 governed-identity field; placeholder until it lands.
-            "session_identity": SESSION_IDENTITY_PLACEHOLDER,
+            # ENC-TSK-N21 / BRD §4.3: governed rhythm identity (ENC-SES id, or
+            # SESSION_IDENTITY_PLACEHOLDER on degraded resolution).
+            "session_identity": session_identity,
             "result_key": result_key,
         }
         try:

@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict
 from artifact_store import read_latest
 from baseline import run_baseline_capture
 from config import TIER_PREDECESSOR
+from identity import resolve_identity
 from legacy_schedules import inventory_document
 from metrics import publish_beat_metrics
 from tiers.coherence import run_coherence
@@ -54,6 +55,23 @@ def run_beat(tier: str) -> Dict[str, Any]:
         pred_art = read_latest(predecessor)
         if pred_art is None:
             logger.warning("Predecessor artifact missing for tier=%s pred=%s", tier, predecessor)
+
+    # ENC-TSK-N21 / BRD §4.3: resolve-or-mint the rhythm's governed identity on
+    # every beat (cheap — cached in the "identity" S3 artifact tier and only
+    # re-mints/re-claims on cold cache or sci-TTL expiry). Never blocks the
+    # beat: identity.resolve_identity() degrades gracefully and logs its own
+    # WARNING on failure. Logged here (not just at escalation time) so every
+    # beat's CloudWatch log — not only decide's — shows an identity
+    # resolution attempt, which is this task's live-validation signal.
+    identity = resolve_identity()
+    if identity.get("degraded"):
+        logger.warning(
+            "rhythm identity resolution degraded for tier=%s: %s", tier, identity.get("reason")
+        )
+    else:
+        logger.info(
+            "rhythm identity resolved for tier=%s session_id=%s", tier, identity.get("session_id")
+        )
 
     started = time.perf_counter()
     result = TIER_HANDLERS[tier]()
