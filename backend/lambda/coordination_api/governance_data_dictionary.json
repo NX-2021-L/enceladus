@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-12.1",
-  "updated_at": "2026-07-12T01:20:00Z",
-  "last_change_summary": "ENC-TSK-M74: GET /api/v1/feed bare full-refresh now applies a server-side page cap (MAX_FEED_PAGE_RECORDS=75 records total across tasks/issues/features/lessons/plans, most-recently-updated first) and returns a top-level next_cursor (string|null, opaque base64, byte-compatible with the /api/v1/feed/corpus cursor contract) for continuation. Collapses the feed p95 driver (was ~919 uncapped records). Per-record output byte-identical; delta/corpus/snapshot paths unchanged. No entity/field schema change; bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-12.2",
+  "updated_at": "2026-07-12T02:30:00Z",
+  "last_change_summary": "ENC-TSK-M76: feed p95 closure II -- pushed the GET /api/v1/feed page cap UPSTREAM into the selection/hydration tier. graph_query_api feed_selection gained an optional page_size+before mode (per-(project,type) msearch fetches page_size+1 hits WITH updated_at + an updated_at<=before range bound); feed_query merges globally, keeps only the strictly-after-cursor page window, and hydrates ONLY <=page_size+1 keys via BatchGet instead of the whole ~919-record corpus. No record/entity schema change (internal query logic + the same 5-list/next_cursor response contract); bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7968,7 +7968,7 @@
       }
     }
   },
-  "change_summary": "ENC-ISS-532: appsync_feed_publisher's build_event_payload now filters internal sentinel-project rows (dunder-wrapped project_id like \"__feed__\", used by enceladus_shared.version_seq counter/tombstone rows) before constructing any channel -- returns None (no /feed/updates, /records/{id}, or /projects/{id} publish attempt), logging + emitting a NonProjectRecordFiltered metric. No entity/field schema change; bumping per the lambda_function.py touch guard.",
+  "change_summary": "ENC-TSK-M76: feed p95 closure II -- pushed the GET /api/v1/feed page cap UPSTREAM into the selection/hydration tier. graph_query_api feed_selection gained an optional page_size+before mode (per-(project,type) msearch fetches page_size+1 hits WITH updated_at + an updated_at<=before range bound); feed_query merges globally, keeps only the strictly-after-cursor page window, and hydrates ONLY <=page_size+1 keys via BatchGet instead of the whole ~919-record corpus. No record/entity schema change (internal query logic + the same 5-list/next_cursor response contract); bumping per the lambda_function.py touch guard.",
   "change_log": [
     {
       "version": "2026-07-08.05",
@@ -8359,6 +8359,11 @@
       "version": "2026-07-12.1",
       "date": "2026-07-12",
       "summary": "ENC-TSK-M74: GET /api/v1/feed bare full-refresh now applies a server-side page cap (MAX_FEED_PAGE_RECORDS=75 records total across tasks/issues/features/lessons/plans, most-recently-updated first) and returns a top-level next_cursor (string|null, opaque base64, byte-compatible with the /api/v1/feed/corpus cursor contract) for continuation. Collapses the feed p95 driver (was ~919 uncapped records). Per-record output byte-identical; delta/corpus/snapshot paths unchanged. No entity/field schema change; bumping per the lambda_function.py touch guard."
+    },
+    {
+      "version": "2026-07-12.2",
+      "date": "2026-07-12",
+      "summary": "ENC-TSK-M76: feed p95 closure II -- pushed the GET /api/v1/feed page cap UPSTREAM into the selection/hydration tier. graph_query_api feed_selection gained an optional page_size+before mode (per-(project,type) msearch fetches page_size+1 hits WITH updated_at + an updated_at<=before range bound); feed_query merges globally, keeps only the strictly-after-cursor page window, and hydrates ONLY <=page_size+1 keys via BatchGet instead of the whole ~919-record corpus. No record/entity schema change (internal query logic + the same 5-list/next_cursor response contract); bumping per the lambda_function.py touch guard."
     }
   ]
 }
