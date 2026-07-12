@@ -24,11 +24,14 @@ import {
   fetchCoordinationRequests,
   fetchEscalations,
   fetchLessons,
+  type AgentSession,
   type AgentType,
   type CoordinationRequest,
   type EscalationRecord,
   type LessonRecord,
 } from '../api/coordination'
+import { sessionHref } from '../api/sessions'
+import { formatSessionCardDescription } from '../format/agentTypeLabel'
 import type { PropertyFilterQuery } from '../../../design-system-2/v2/components/PropertyFilter/PropertyFilter.jsx'
 import { applyTokens } from './applyCoordinationFilter'
 import './coordination.css'
@@ -87,6 +90,10 @@ export function CoordinationRoute() {
   const escalations = applyTokens(escalationsQuery.data ?? [], filterQuery)
   const crqDocs = applyTokens(crqQuery.data ?? [], filterQuery)
 
+  const agentTypeById = new Map(
+    (agentTypesQuery.data ?? []).map((agentType) => [agentType.agent_type_id, agentType]),
+  )
+
   const tabs = [
     {
       id: 'sessions',
@@ -103,12 +110,19 @@ export function CoordinationRoute() {
             items={sessions}
             getKey={(row) => row.session_id}
             estimateSize={96}
-            renderItem={(row) => (
+            renderItem={(row: AgentSession) => (
               <RecordCard
                 recordId={row.session_id}
-                kindLabel={row.agent_type_id}
-                description={row.runtime ? `Runtime: ${row.runtime}` : undefined}
+                recordType="session"
+                kindLabel="Session"
+                title={row.session_id}
+                description={formatSessionCardDescription(
+                  row.agent_type_id,
+                  row.runtime,
+                  agentTypeById.get(row.agent_type_id),
+                )}
                 status={row.status}
+                href={sessionHref(row.session_id)}
                 variant="standard"
               />
             )}
