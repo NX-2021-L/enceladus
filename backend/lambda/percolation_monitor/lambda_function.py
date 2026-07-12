@@ -327,7 +327,65 @@ def _publish_cloudwatch(
 # Handler
 # ---------------------------------------------------------------------------
 
+# --- ENC-TSK-N24: rhythm heavy-beat completion-stanza contract --------------
+# When invoked as a rhythm tenant (backend/lambda/rhythm_cycle/tenant_invoker
+# .py), the invoke payload carries ``result_key`` — the exact S3 key this
+# tenant must write its completion stanza to. Scheduled EventBridge invokes
+# carry no result_key and skip the write. Stanza shape mirrors
+# tenant_invoker.write_completion_stanza; a write failure is logged, never
+# raised — the beat's silent-tenant detection treats a missing stanza as
+# silence, which is the honest signal.
+
+RHYTHM_TENANT_NAME = "percolation_monitor"
+RHYTHM_RESULTS_BUCKET = os.environ.get("RHYTHM_RESULTS_BUCKET", "jreese-net")
+
+
+def _write_rhythm_stanza(event: Any, status: str, detail: Optional[Dict[str, Any]] = None) -> bool:
+    result_key = str((event or {}).get("result_key") or "").strip() if isinstance(event, dict) else ""
+    if not result_key:
+        return False
+    body = {
+        "tenant": RHYTHM_TENANT_NAME,
+        "status": status,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "detail": detail or {},
+    }
+    try:
+        boto3.client("s3", region_name=REGION).put_object(
+            Bucket=RHYTHM_RESULTS_BUCKET,
+            Key=result_key,
+            Body=json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+            ContentType="application/json",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — stanza failure must never break the run
+        logger.warning("[ERROR] rhythm stanza write failed key=%s: %s", result_key, exc)
+        return False
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Entry point: run the percolation measurement, then honor the rhythm
+    completion-stanza contract when invoked as a heavy-beat tenant
+    (ENC-TSK-N24)."""
+    try:
+        resp = _run_percolation(event, context)
+    except Exception:
+        _write_rhythm_stanza(event, "failed", {})
+        raise
+    try:
+        body = json.loads(resp.get("body") or "{}")
+    except (TypeError, ValueError):
+        body = {}
+    status = "completed" if resp.get("statusCode") == 200 else "failed"
+    detail = {"statusCode": resp.get("statusCode")}
+    detail.update(
+        {k: body.get(k) for k in ("analytical_pc", "empirical_pc", "node_count", "edge_count") if k in body}
+    )
+    _write_rhythm_stanza(event, status, detail)
+    return resp
+
+
+def _run_percolation(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     logger.info("[START] Percolation monitor: project=%s table=%s", PROJECT_ID, PERCOLATION_TABLE)
     started = time.time()
 

@@ -2459,6 +2459,8 @@ Resources:
           COORDINATION_INTERNAL_API_KEY: !Ref CoordinationInternalApiKey
           COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           PERCOLATION_TABLE: !Sub "enceladus-percolation-telemetry${EnvironmentSuffix}"
+          # ENC-TSK-N24: bucket for the rhythm heavy-beat completion stanza.
+          RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
           CLOUDWATCH_NAMESPACE: Enceladus/Percolation
           PROJECT_ID: enceladus
           MC_TRIALS: "40"
@@ -2548,6 +2550,8 @@ Resources:
           COORDINATION_INTERNAL_API_KEY_PREVIOUS: !Ref CoordinationInternalApiKeyPrevious
           PROJECT_ID: enceladus
           CLOUDWATCH_NAMESPACE: Enceladus/CEE
+          # ENC-TSK-N24: bucket for the rhythm heavy-beat completion stanza.
+          RHYTHM_RESULTS_BUCKET: !Ref S3Bucket
           STAGNATION_THRESHOLD_DAYS: "14"
           COMPLIANCE_SCORE_THRESHOLD: "70"
           # ISS-465-style kill switch -- installed before the first scheduled
@@ -6454,6 +6458,13 @@ Resources:
                   - dynamodb:GetItem
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/enceladus-percolation-telemetry${EnvironmentSuffix}"
+              # ENC-TSK-N24: rhythm heavy-beat tenant completion stanza
+              # (tenant_invoker.py contract) — write-only, tenant-results scoped.
+              - Sid: RhythmStanzaWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -6472,8 +6483,10 @@ Resources:
   # ENC-TSK-K41 / B66 Ph5: Corpus Entropy Engine execution role (gamma-only).
   # Reads the tracker/document/graph corpus exclusively over HTTPS via the
   # governed tracker/document/graph_query_api endpoints (internal-key auth,
-  # no IAM grant needed for that path); writes ONLY CloudWatch metrics. No
-  # DynamoDB, S3, or Secrets Manager grants -- this Lambda is telemetry-only
+  # no IAM grant needed for that path); writes CloudWatch metrics plus — since
+  # ENC-TSK-N24 — the ONE sanctioned direct-S3 write: the rhythm heavy-beat
+  # completion stanza (tenant_invoker.py contract), tenant-results scoped.
+  # No DynamoDB or Secrets Manager grants -- this Lambda is telemetry-only
   # and never mutates the corpus (OGTM).
   CorpusEntropyEngineRole:
     Type: AWS::IAM::Role
@@ -6505,6 +6518,13 @@ Resources:
                 Action:
                   - cloudwatch:PutMetricData
                 Resource: "*"
+              # ENC-TSK-N24: rhythm heavy-beat tenant completion stanza
+              # (tenant_invoker.py contract) — write-only, tenant-results scoped.
+              - Sid: RhythmStanzaWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${S3Bucket}/${S3EnvPrefix}rhythm-cycle/*/tenant-results/*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -7683,6 +7703,14 @@ Resources:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-handoff-consolidation-engine*"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-graph-health-metrics*"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-recompute-governance*"
+                  # ENC-TSK-N24 entropy/telemetry tenant families. The GDMP
+                  # grant exists so a future sanctioned enable is a flag flip;
+                  # the safety gates remain the manifest enabled=false flag and
+                  # the Lambda's own CEE_GDMP_HARD_DISABLED interlock — an IAM
+                  # grant alone invokes nothing.
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-corpus-entropy-engine*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-percolation-monitor*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-corpus-entropy-gdmp-remediation*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
