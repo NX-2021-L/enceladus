@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-12.4",
-  "updated_at": "2026-07-12T06:10:00Z",
-  "last_change_summary": "ENC-TSK-M92 (P0): tracker_mutation._handle_pwa_action() — the PWA close/note/reopen/worklog button path (POST /{project}/{type}/{id}/action) — now splices _version_seq_update_parts() into all four mutating branches, stamping version_seq/feed_scope identically to _handle_log (M79) and the generic PATCH path. Previously NONE of these branches stamped version_seq/feed_scope, so a gamma-native human UI write (e.g. io's [USER] worklog note on ENC-TSK-L83, 2026-07-12T05:29:31Z) LANDED but never re-surfaced in the feed delta projection (version-seq-index GSI), pinning /api/v1/feed/delta latest_version_seq at 622. M79 fixed only the MCP/checkout worklog path (_handle_log); this closes the human-UI half. No new field/entity added to the tracker record shape (version_seq/feed_scope already exist per ENC-TSK-L27); bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-12.5",
+  "updated_at": "2026-07-12T10:40:00Z",
+  "last_change_summary": "ENC-TSK-N03 / ENC-ISS-543: graph_sync close-transition projection fix -- _coalesce_status_for_projection() recovers typed status.S from NewImage with OldImage fallback on MODIFY, TERMINAL_STATUSES preserved on checkout-only MODIFY (checkout-release after close no longer regresses the node), explicit SET n.status on every node upsert (SET n += props never fixes an omitted key), and the handler now raises when a failed record lacks a batchItemFailures identifier. Repair tool tools/graph_status_drift_reconcile.py added. No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -8374,6 +8374,11 @@
       "version": "2026-07-12.2",
       "date": "2026-07-12",
       "summary": "ENC-TSK-M76: feed p95 closure II -- pushed the GET /api/v1/feed page cap UPSTREAM into the selection/hydration tier. graph_query_api feed_selection gained an optional page_size+before mode (per-(project,type) msearch fetches page_size+1 hits WITH updated_at + an updated_at<=before range bound); feed_query merges globally, keeps only the strictly-after-cursor page window, and hydrates ONLY <=page_size+1 keys via BatchGet instead of the whole ~919-record corpus. No record/entity schema change (internal query logic + the same 5-list/next_cursor response contract); bumping per the lambda_function.py touch guard."
+    },
+    {
+      "version": "2026-07-12.5",
+      "date": "2026-07-12",
+      "summary": "ENC-TSK-N03 / ENC-ISS-543: graph_sync close-transition projection fix -- _coalesce_status_for_projection() recovers typed status.S from NewImage with OldImage fallback on MODIFY, TERMINAL_STATUSES preserved on checkout-only MODIFY (checkout-release after close no longer regresses the node), explicit SET n.status on every node upsert (SET n += props never fixes an omitted key), and the handler now raises when a failed record lacks a batchItemFailures identifier. Repair tool tools/graph_status_drift_reconcile.py added. No entity/field schema change; bumping per the lambda_function.py touch guard."
     }
   ]
 }
