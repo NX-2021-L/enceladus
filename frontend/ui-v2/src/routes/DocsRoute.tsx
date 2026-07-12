@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Autosuggest, Cards } from '../design-system'
 import { projectRegistryQueryOptions } from '../api/projectRegistry'
-import { useRealtimeFeed } from '../realtime/RealtimeFeedProvider'
+import { useRealtimeFeedEvents } from '../realtime/RealtimeFeedProvider'
 import { applyPropertyFilter, type PropertyFilterQuery } from '../search/applyPropertyFilter'
 import { FeedPropertyFilter } from '../search/FeedPropertyFilter'
 import { onlyRecordType } from '../search/recordTypeScope'
@@ -41,7 +41,7 @@ export function DocsRoute() {
   const [sort, setSort] = useState<FeedSort>('tier')
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
-  const { events } = useRealtimeFeed()
+  const events = useRealtimeFeedEvents()
   const { isWarm } = useCacheEngineState()
 
   const fromEvents = buildSearchCorpus(events, projects)

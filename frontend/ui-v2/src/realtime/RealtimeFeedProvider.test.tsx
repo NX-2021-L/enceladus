@@ -2,7 +2,8 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { RealtimeFeedProvider, useRealtimeFeed } from './RealtimeFeedProvider'
+import { RealtimeFeedProvider, useRealtimeFeed, useRealtimeFeedEvents } from './RealtimeFeedProvider'
+import { REALTIME_FEED_QUERY_KEY } from './feedEventReducer'
 import { useFeedBufferStore } from '../store/feedBufferStore'
 import type { RealtimeClientEvent } from './appsyncRealtimeClient'
 import type { FeedRealtimeEvent } from '../types/feedEvents'
@@ -92,7 +93,9 @@ describe('RealtimeFeedProvider — buffered live events (ENC-TSK-K24)', () => {
   })
 
   function Consumer() {
-    const { events } = useRealtimeFeed()
+    // ENC-TSK-M73 (B67 AC-13): the visible list is read from the
+    // REALTIME_FEED_QUERY_KEY cache via the shared hook — no ctx.events copy.
+    const events = useRealtimeFeedEvents()
     return (
       <ul data-testid="visible-events">
         {events.map((e) => (
@@ -130,9 +133,10 @@ describe('RealtimeFeedProvider — buffered live events (ENC-TSK-K24)', () => {
     let ctx!: ReturnType<typeof useRealtimeFeed>
     function CaptureConsumer() {
       ctx = useRealtimeFeed()
+      const events = useRealtimeFeedEvents()
       return (
         <ul data-testid="visible-events">
-          {ctx.events.map((e) => (
+          {events.map((e) => (
             <li key={e.eventId}>{e.eventId}</li>
           ))}
         </ul>
@@ -199,7 +203,8 @@ describe('RealtimeFeedProvider — buffered live events (ENC-TSK-K24)', () => {
       ctx.mergeBufferedEvents()
       await new Promise((resolve) => setTimeout(resolve, 0))
     })
-    expect(ctx.events.map((e) => e.eventId)).toEqual(['replay-1'])
+    const afterFirst = qc.getQueryData<FeedRealtimeEvent[]>(REALTIME_FEED_QUERY_KEY) ?? []
+    expect(afterFirst.map((e) => e.eventId)).toEqual(['replay-1'])
 
     // Same eventId redelivered post-reconnect (replay-from-cursor overlap).
     await act(async () => {
@@ -211,7 +216,8 @@ describe('RealtimeFeedProvider — buffered live events (ENC-TSK-K24)', () => {
       await new Promise((resolve) => setTimeout(resolve, 0))
     })
 
-    expect(ctx.events.filter((e) => e.eventId === 'replay-1')).toHaveLength(1)
+    const afterReplay = qc.getQueryData<FeedRealtimeEvent[]>(REALTIME_FEED_QUERY_KEY) ?? []
+    expect(afterReplay.filter((e) => e.eventId === 'replay-1')).toHaveLength(1)
   })
 
   it('a burst of rapid live events does not corrupt or drop buffered state (AC-15 low-priority scheduling proxy)', async () => {
@@ -240,5 +246,45 @@ describe('RealtimeFeedProvider — buffered live events (ENC-TSK-K24)', () => {
     // the scenario the buffer exists to absorb without ever forcing an
     // uncontrolled render storm on the rendered list.
     expect(container.querySelector('[data-testid="visible-events"]')?.textContent).toBe('')
+  })
+
+  it('the consumer view is the REALTIME_FEED_QUERY_KEY cache itself — no divergent component-local copy (AC-13)', async () => {
+    let ctx!: ReturnType<typeof useRealtimeFeed>
+    let hookEvents: FeedRealtimeEvent[] = []
+    function CaptureConsumer() {
+      ctx = useRealtimeFeed()
+      hookEvents = useRealtimeFeedEvents()
+      return null
+    }
+
+    act(() => {
+      root.render(
+        <QueryClientProvider client={qc}>
+          <RealtimeFeedProvider>
+            <CaptureConsumer />
+          </RealtimeFeedProvider>
+        </QueryClientProvider>,
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      pushEvent(makeEvent({ eventId: 'a', cursor: 1 }))
+      pushEvent(makeEvent({ eventId: 'b', cursor: 2 }))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    await act(async () => {
+      ctx.mergeBufferedEvents()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    const cache = qc.getQueryData<FeedRealtimeEvent[]>(REALTIME_FEED_QUERY_KEY) ?? []
+    expect(cache.map((e) => e.eventId).sort()).toEqual(['a', 'b'])
+    // Same contents AND same array reference: the consumer holds no copy that
+    // could drift from the cache — the cache is the sole source of truth.
+    expect(hookEvents).toEqual(cache)
+    expect(hookEvents).toBe(cache)
   })
 })
