@@ -12,6 +12,7 @@ import time
 from typing import Any, Callable, Dict
 
 from artifact_store import read_latest
+from baseline import run_baseline_capture
 from config import TIER_PREDECESSOR
 from legacy_schedules import inventory_document
 from metrics import publish_beat_metrics
@@ -30,6 +31,10 @@ TIER_HANDLERS: Dict[str, Callable[[], Dict[str, Any]]] = {
     "light_integrate": run_light_integrate,
     "heavy_integrate": run_heavy_integrate,
     "coherence": run_coherence,
+    # ENC-TSK-N26: on-demand pre-cutover baseline capture. Deliberately absent
+    # from config.TIER_ORDER / TIER_PREDECESSOR -- not part of the scheduled
+    # harmonic beat chain, invoked standalone via {"tier": "baseline_capture"}.
+    "baseline_capture": run_baseline_capture,
 }
 
 

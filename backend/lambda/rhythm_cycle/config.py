@@ -22,6 +22,9 @@ SNS_TOPIC_ARN = os.environ.get("RHYTHM_SNS_TOPIC_ARN", "")
 
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "projects")
 AGENT_SESSIONS_TABLE = os.environ.get("AGENT_SESSIONS_TABLE", "agent-sessions")
+# ENC-TSK-N26: percolation_monitor's own telemetry table, read-only from here.
+# Default matches percolation_monitor/lambda_function.py's PERCOLATION_TABLE default.
+PERCOLATION_TABLE = os.environ.get("PERCOLATION_TABLE", "enceladus-percolation-telemetry")
 
 # JSON list of record_id prefixes or exact ids allowed for in-beat dispatch.
 PRE_APPROVED_SCOPES_RAW = os.environ.get("PRE_APPROVED_DISPATCH_SCOPES", "[]")
