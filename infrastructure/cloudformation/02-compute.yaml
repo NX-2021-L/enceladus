@@ -7571,6 +7571,8 @@ Resources:
   # ---------------------------------------------------------------------------
   # ENC-PLN-068 / DOC-BDDE755DB874 — Rhythm Cycle (gamma only)
   # EventBridge Scheduler groups + shared beat Lambda (ENC-TSK-K79..K94)
+  # ENC-TSK-N49: beat-artifact S3 retention equalized to 7d for all tiers via
+  # tools/apply_rhythm_artifact_lifecycle.py (gamma compute-stack deploy step).
   # ---------------------------------------------------------------------------
   RhythmCycleFunction:
     Type: AWS::Lambda::Function

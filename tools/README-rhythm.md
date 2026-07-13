@@ -78,3 +78,10 @@ SSO session before running). Needed permissions:
 - **IAM** — `GetRole`, `GetRolePolicy` on the rhythm role
 
 No write, delete, or update permissions are required or used.
+
+## S3 artifact retention (gamma)
+
+Beat timestamped artifacts under `gamma/rhythm-cycle/{tier}/` expire after **7 days**
+(equalized across all tiers by `tools/apply_rhythm_artifact_lifecycle.py`, applied
+during the gamma compute-stack deploy). Prior skew (~1d for sense/decide vs ~7d for
+others) truncated harvester history for the tiers ENC-ISS-553 needs most.
