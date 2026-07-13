@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-12.10",
-  "updated_at": "2026-07-12T23:58:00Z",
-  "last_change_summary": "ENC-TSK-N32: embedding_refresh rhythm tenant activated (PLN-078 W4a, N09 activation) onto the bounded devops-titan-embedding-backfill carrier. titan_embedding_backfill/lambda_function.py gains tenant-mode: detects the rhythm-beat payload (result_key present, per tenant_invoker.py), applies EMBEDDING_REFRESH_MAX_PER_RUN (default 500) as event.limit when tenant-invoked without an explicit limit (runaway-cost backstop), and writes the heavy-beat completion-stanza {tenant,status,completed_at,detail:{processed,skipped,errors,missing_node}} to result_key (mirrors the ENC-TSK-N23/N24 contract). One-shot invocation + UAT probe paths unchanged; per-record embedding_text_hash skip-gating keeps a per-window refresh budget-safe. Manifest 11-appconfig-rhythm-tenants.yaml: embedding_refresh enabled=true with function_name devops-titan-embedding-backfill${EnvironmentSuffix}, and library_health_skillbuilder removed (ENC-TSK-N33 scope, not a lambda tenant) -> 8 tenants, 6 enabled. No entity/field schema change; bumping per the lambda_function.py touch guard.",
+  "version": "2026-07-13.1",
+  "updated_at": "2026-07-13T06:40:00Z",
+  "last_change_summary": "ENC-TSK-N54 (ENC-ISS-554): graph_health_metrics/lambda_function.py and graph_query_api/graph_health_metric.py quarantine degenerate Fiedler lambda2 readings -- compute_fiedler_value now rejects any lambda2 <= 1e-9 as ok=False with an explicit invalid_reason (sample_capped_degenerate vs genuine_disconnection_suspected) instead of a confident zero, and graph_health_metrics no longer silently substitutes the GraphEdgeDensity proxy under the FiedlerAlgebraicConnectivity metric name on fetch failure (omits the key instead). No entity/field schema change; bumping per the lambda_function.py touch guard.",
   "owners": [
     "enceladus-platform"
   ],
@@ -8399,6 +8399,11 @@
       "version": "2026-07-12.9",
       "date": "2026-07-12",
       "summary": "ENC-TSK-N24: entropy/telemetry rhythm tenants wired (PLN-078 W2b), completing the heavy manifest at 9 tenants (5 enabled). corpus_entropy_engine and percolation_monitor lambda_function.py gain the heavy-beat completion-stanza contract from backend/lambda/rhythm_cycle/tenant_invoker.py (result_key-gated S3 stanza write {tenant,status,completed_at,detail}; CEE_HARD_DISABLED skips report status=skipped; scheduled EventBridge invokes unaffected). gdmp_remediation wired enabled=false (SAFETY: GDMP optimistic-concurrency PATCH defect + hard-disable in force); embedding_refresh + library_health_skillbuilder wired unfunded with empty function_name pending N09 budget gate. Also fixes the ENC-TSK-N18 template defect that blocked stack creation (top-level CFN Description 1181 chars > 1024 limit; docs moved to comments). No entity/field schema change; bumping per the lambda_function.py touch guard."
+    },
+    {
+      "version": "2026-07-13.1",
+      "date": "2026-07-13",
+      "summary": "ENC-TSK-N54 (ENC-ISS-554): graph_health_metrics/lambda_function.py and graph_query_api/graph_health_metric.py quarantine degenerate Fiedler lambda2 readings -- compute_fiedler_value now rejects any lambda2 <= 1e-9 as ok=False with an explicit invalid_reason (sample_capped_degenerate vs genuine_disconnection_suspected) instead of a confident zero, and graph_health_metrics no longer silently substitutes the GraphEdgeDensity proxy under the FiedlerAlgebraicConnectivity metric name on fetch failure (omits the key instead). No entity/field schema change; bumping per the lambda_function.py touch guard."
     }
   ]
 }
