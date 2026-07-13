@@ -7711,6 +7711,13 @@ Resources:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-corpus-entropy-engine*"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-percolation-monitor*"
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:enceladus-corpus-entropy-gdmp-remediation*"
+                  # ENC-ISS-549: embedding_refresh tenant (ENC-TSK-N32, enabled
+                  # in 11-appconfig-rhythm-tenants.yaml) invokes
+                  # devops-titan-embedding-backfill; N32 wired the manifest but
+                  # omitted this grant, so the heavy beat's async invoke was
+                  # AccessDenied and the tenant was silently dropped. Grant added
+                  # here to match the intentional enablement.
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:devops-titan-embedding-backfill*"
         - PolicyName: AppConfigAccess
           PolicyDocument:
             Version: '2012-10-17'
