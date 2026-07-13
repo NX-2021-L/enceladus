@@ -479,6 +479,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/apply_rhythm_artifact_lifecycle.py --env-prefix gamma
+
+      - name: Report stack events on failure
         if: failure()
         run: |
           for s in "${{ needs.plan.outputs.data_stack_name }}" "${{ needs.plan.outputs.stack_name }}"; do
