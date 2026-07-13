@@ -86,7 +86,10 @@ class LegacyInventoryTests(unittest.TestCase):
 
 class SenseConstraintTests(unittest.TestCase):
     @mock.patch("tiers.sense.write_artifact")
-    @mock.patch("tiers.sense._open_task_count", return_value=5)
+    @mock.patch(
+        "tiers.sense._open_task_count",
+        return_value={"count": 5, "truncated": False, "page_count": 1, "cursor_terminus": None},
+    )
     @mock.patch("tiers.sense._checkout_census", return_value=[])
     @mock.patch("tiers.sense._session_census", return_value=[])
     @mock.patch("tiers.sense.read_latest", return_value={"open_task_count": 3})
@@ -100,6 +103,25 @@ class SenseConstraintTests(unittest.TestCase):
         snap = run_sense()
         self.assertFalse(snap["constraints"]["embeddings"])
         self.assertEqual(snap["open_task_delta"], 2)
+        self.assertEqual(snap["open_task_count"], 5)
+        self.assertFalse(snap["open_task_count_truncated"])
+
+    @mock.patch("tiers.sense.write_artifact")
+    @mock.patch(
+        "tiers.sense._open_task_count",
+        return_value={"count": 10000, "truncated": True, "page_count": 50, "cursor_terminus": "c50"},
+    )
+    @mock.patch("tiers.sense._checkout_census", return_value=[])
+    @mock.patch("tiers.sense._session_census", return_value=[])
+    @mock.patch("tiers.sense.read_latest", return_value={"open_task_count": 0})
+    def test_sense_snapshot_marks_truncated_count_as_floor(
+        self, _read_latest, _sess, _checkout, _open, write_artifact
+    ):
+        from tiers.sense import run_sense
+
+        write_artifact.return_value = {"timestamped_key": "k", "latest_key": "l", "bytes": "10"}
+        snap = run_sense()
+        self.assertTrue(snap["open_task_count_truncated"])
 
 
 class TrackerUrlShapeTests(unittest.TestCase):
@@ -117,8 +139,11 @@ class TrackerUrlShapeTests(unittest.TestCase):
         import tiers.sense as sense
 
         with mock.patch.object(sense, "TRACKER_API_BASE", "https://x/api/v1/tracker"):
-            count = sense._open_task_count()
-        self.assertEqual(count, 7)
+            result = sense._open_task_count()
+        self.assertEqual(result["count"], 7)
+        self.assertEqual(result["page_count"], 1)
+        self.assertFalse(result["truncated"])
+        self.assertIsNone(result["cursor_terminus"])
         url, params = get_json.call_args[0]
         self.assertEqual(url, f"https://x/api/v1/tracker/{sense.PROJECT_ID}")
         self.assertEqual(params["type"], "task")
@@ -126,6 +151,39 @@ class TrackerUrlShapeTests(unittest.TestCase):
         self.assertEqual(params["page_size"], 200)
         self.assertNotIn("record_type", params)
         self.assertNotIn("project_id", params)
+
+    def test_sense_open_task_count_follows_cursor_to_exhaustion(self):
+        """ENC-ISS-557: a next_cursor on a page_size=200 response must not be
+        dropped -- the prior implementation returned "count" (page-scoped)
+        as if it were the total, plateauing at 200 forever once the real
+        backlog exceeded one page."""
+        import tiers.sense as sense
+
+        pages = [
+            {"count": 200, "next_cursor": "c1"},
+            {"count": 200, "next_cursor": "c2"},
+            {"count": 43, "next_cursor": ""},
+        ]
+        with mock.patch.object(sense, "TRACKER_API_BASE", "https://x/api/v1/tracker"):
+            with mock.patch.object(sense, "get_json", side_effect=pages) as get_json:
+                result = sense._open_task_count()
+        self.assertEqual(result["count"], 443)
+        self.assertEqual(result["page_count"], 3)
+        self.assertFalse(result["truncated"])
+        self.assertIsNone(result["cursor_terminus"])
+        second_call_params = get_json.call_args_list[1][0][1]
+        self.assertEqual(second_call_params["next_cursor"], "c1")
+
+    def test_sense_open_task_count_marks_truncated_at_max_pages(self):
+        import tiers.sense as sense
+
+        page = {"count": 200, "next_cursor": "still-more"}
+        with mock.patch.object(sense, "TRACKER_API_BASE", "https://x/api/v1/tracker"):
+            with mock.patch.object(sense, "get_json", return_value=page):
+                result = sense._open_task_count()
+        self.assertEqual(result["page_count"], sense._MAX_PAGES)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["cursor_terminus"], "still-more")
 
     @mock.patch("tiers.decide.get_json", return_value={"records": []})
     def test_decide_open_leaf_tasks_url_shape(self, get_json):
