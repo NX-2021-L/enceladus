@@ -3627,7 +3627,14 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="tracker_list",
-            description="Returns tracker records for a project, filterable by type and status. Paginated (default 25).",
+            description=(
+                "Returns tracker records for a project, filterable by type and status. Paginated (default 25). "
+                "ENC-ISS-558: 'total' reflects only the records actually fetched in this call, never the "
+                "full-project count. When more records exist beyond what was fetched, the response carries "
+                "total_is_lower_bound=true (and next_cursor) -- treat 'total' as a floor, not a measurement, "
+                "whenever that flag is present. Pass exhaust=true for a bounded, cursor-walked exact count "
+                "(more round trips; capped, see exhaustion_truncated)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -3651,6 +3658,15 @@ async def list_tools() -> list[Tool]:
                     "cursor": {
                         "type": "string",
                         "description": "Pagination cursor from previous response's next_cursor.",
+                    },
+                    "exhaust": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, walk next_cursor to exhaustion (bounded, see ENC-ISS-558) before "
+                            "computing 'total', instead of reporting a lower bound. Costs one raw-API round "
+                            "trip per page -- expensive on large result sets, so leave false for hot-path / "
+                            "session-init reads and reserve for callers that need an exact count."
+                        ),
                     },
                 },
                 "required": ["project_id"],
@@ -5967,22 +5983,13 @@ async def _tracker_creation_rules(args: dict) -> list[TextContent]:
     return _result_text(resp)
 
 
-async def _tracker_list(args: dict) -> list[TextContent]:
-    project_id = args["project_id"]
-    record_type = args.get("record_type")
-    status_filter = args.get("status")
-    page_size = int(args.get("page_size", 25))
-    cursor = args.get("cursor")
-    query_params: Dict[str, Any] = {}
-    if record_type:
-        query_params["type"] = record_type
-    if status_filter:
-        query_params["status"] = status_filter
-    resp = _tracker_api_request("GET", f"/{project_id}", query=query_params or None)
-    if resp.get("error"):
-        return _result_text(resp)
-    items = resp.get("records", [])
-    # Orphan detection (ENC-FTR-013): flag tasks without Feature lineage
+# ENC-ISS-558: bounded exhaustion guard for tracker_list(exhaust=true), mirroring
+# sense.py's ENC-ISS-557 _MAX_PAGES pattern. Never walk next_cursor unbounded.
+_TRACKER_LIST_MAX_EXHAUST_PAGES = 50
+
+
+def _summarize_tracker_records(items: list) -> tuple:
+    """Build the compact summary shape plus an orphan count for a list of raw records."""
     orphan_count = 0
     summary = []
     for r in items:
@@ -6000,20 +6007,85 @@ async def _tracker_list(args: dict) -> list[TextContent]:
                 entry["orphan"] = True
                 orphan_count += 1
         summary.append(entry)
-    # Cursor pagination (ENC-TSK-820)
-    page, next_cursor, total = _paginate(
-        summary, page_size, cursor,
-        key_fn=lambda e: e.get("id", ""),
-    )
-    result: Dict[str, Any] = {"records": page, "count": len(page), "total": total}
+    return summary, orphan_count
+
+
+async def _tracker_list(args: dict) -> list[TextContent]:
+    project_id = args["project_id"]
+    record_type = args.get("record_type")
+    status_filter = args.get("status")
+    page_size = max(1, min(int(args.get("page_size", 25)), 100))
+    cursor = args.get("cursor")
+    exhaust = bool(args.get("exhaust", False))
+
+    def _fetch_page(page_cursor: Optional[str]) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"page_size": page_size}
+        if record_type:
+            params["type"] = record_type
+        if status_filter:
+            params["status"] = status_filter
+        if page_cursor:
+            params["next_cursor"] = page_cursor
+        return _tracker_api_request("GET", f"/{project_id}", query=params)
+
+    # ENC-ISS-558: the raw tracker API has no page-independent 'total' field --
+    # only 'count' (this page) and 'next_cursor' (more data outstanding or not).
+    # Forward the caller's page_size/cursor to the RAW request (previously this
+    # was never done -- every call re-fetched the raw API's own default single
+    # page and re-sliced it locally, so a caller's cursor never actually moved
+    # the underlying query and 'total' was really just that one default page's
+    # size, mislabeled as a full-project total).
+    resp = _fetch_page(cursor)
+    if resp.get("error"):
+        return _result_text(resp)
+    first_page_items = resp.get("records", [])
+    next_cursor = resp.get("next_cursor")
+    all_items = list(first_page_items)
+    truncated = False
+
+    if exhaust:
+        pages_fetched = 1
+        walk_cursor = next_cursor
+        while walk_cursor:
+            if pages_fetched >= _TRACKER_LIST_MAX_EXHAUST_PAGES:
+                truncated = True
+                break
+            resp = _fetch_page(walk_cursor)
+            if resp.get("error"):
+                return _result_text(resp)
+            all_items.extend(resp.get("records", []))
+            pages_fetched += 1
+            walk_cursor = resp.get("next_cursor")
+        next_cursor = walk_cursor
+
+    page_summary, page_orphan_count = _summarize_tracker_records(first_page_items)
+    if exhaust:
+        total = len(all_items)
+        _, orphan_count = _summarize_tracker_records(all_items)
+    else:
+        total = len(first_page_items)
+        orphan_count = page_orphan_count
+
+    # Honest floor, never a silently-wrong measurement: 'total' (and
+    # 'orphan_tasks') only claim exactness when no next_cursor remains
+    # outstanding after whatever fetching this call actually did.
+    total_is_lower_bound = bool(next_cursor)
+
+    result: Dict[str, Any] = {"records": page_summary, "count": len(page_summary), "total": total}
+    if total_is_lower_bound:
+        result["total_is_lower_bound"] = True
     if next_cursor:
         result["next_cursor"] = next_cursor
+    if exhaust and truncated:
+        result["exhaustion_truncated"] = True
     if orphan_count > 0:
         result["orphan_tasks"] = orphan_count
         result["orphan_warning"] = (
             f"{orphan_count} task(s) have no parent or feature lineage. "
             "Consider linking them to a feature for traceability."
         )
+        if total_is_lower_bound:
+            result["orphan_tasks_is_lower_bound"] = True
     return _result_text(result)
 
 
