@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-13.6",
-  "updated_at": "2026-07-13T07:28:00Z",
-  "last_change_summary": "ENC-TSK-N48: did_work/output_count added to the rhythm heavy-beat completion stanza (BRD DOC-44230223DD1C §4.1 amendment). All six enabled tenant lambda_function.py (corpus_entropy_engine, memory_consolidation, handoff_consolidation_engine, percolation_monitor, titan_embedding_backfill, graph_health_metrics) plus rhythm_cycle/tenant_invoker.py emit did_work (default status=='completed') + output_count; the beat reads did_work three-valued and emits a new tenant_no_work CloudWatch metric distinct from tenant_stall. 02-compute.yaml CEE_HARD_DISABLED 0→1 (temporary, io-approved) for the AC-4 proof window. No entity/field schema change; bumping per the lambda_function.py touch guard. Prior: ENC-TSK-N45 v4/main port (documents/search default sort); ENC-ISS-555 / ENC-TSK-N52 CEE orphan→lineage_unanchored; N51 percolation susceptibility-peak estimator.",
+  "version": "2026-07-13.7",
+  "updated_at": "2026-07-13T18:30:00Z",
+  "last_change_summary": "ENC-ISS-558: tracker_list's 'total'/'orphan_tasks' reporting contract fixed. Previously the raw tracker API's page_size/cursor were never forwarded (every call re-fetched the raw API's own default page and re-sliced it locally with _paginate()), so 'total' silently mislabeled one already-capped page as a full-project total (observed total=24 vs a true count >200). Now forwards page_size/cursor to the raw request and marks total_is_lower_bound=true (+ next_cursor) whenever more data remains outstanding, rather than exhausting by default -- tracker_list is the hot session-init read every agent hits at boot, unlike the sibling ENC-ISS-557 fix in sense.py (a once-per-tick background job where bounded exhaustion is cheap). Added opt-in exhaust=true (bounded, mirrors sense.py's guard) for callers needing an exact count. New entity mcp_server.tracker_list documents the contract. Prior: ENC-TSK-N48 did_work/output_count rhythm stanza; ENC-TSK-N45 v4/main port; N51 percolation susceptibility-peak estimator.",
   "owners": [
     "enceladus-platform"
   ],
@@ -7977,6 +7977,40 @@
         "contract_parity": {
           "type": "rule",
           "definition": "required_fields/valid_initial_status match tracker_mutation lambda_function.py _handle_create_record and _DEFAULT_STATUS for task (title, acceptance_criteria; open), feature (title, user_story, acceptance_criteria; planned), and plan (title only; drafted) -- see test_creation_rules.py contract test."
+        }
+      }
+    },
+    "mcp_server.tracker_list": {
+      "description": "ENC-ISS-558: MCP search action tracker.list (tool tracker_list) 'total'/'orphan_tasks' reporting contract. The raw tracker API has no page-independent 'total' field -- only 'count' (this page) and 'next_cursor' (more data outstanding or not). Prior behavior never forwarded the caller's page_size/cursor to the raw request (every call re-fetched the raw API's own default page and re-sliced it locally with _paginate()), so a caller's cursor never advanced the underlying query and 'total' was really just that one default page's size, silently mislabeled as a full-project total (observed: total=24 vs a true count >200 with next_cursor outstanding on the identical filter). Contract decision: report-as-lower-bound by default rather than exhaust-by-default, because tracker_list is the hot session-init read every agent hits at boot (page_size=10 in the mandatory init sequence per DOC-FFB4C9D87BCC) -- forcing exhaustion there would multiply round trips across every agent session boot on the platform. Contrast with the sibling ENC-ISS-557 fix in rhythm_cycle/tiers/sense.py's _open_task_count(), a once-per-rhythm-cycle-tick background job where bounded exhaustion is cheap; that asymmetry is why the two sibling issues took different default contracts on the same underlying bug.",
+      "fields": {
+        "page_size": {
+          "type": "integer",
+          "definition": "Now forwarded to the raw tracker API request (previously silently dropped -- the root cause of the undercount). Clamped to [1, 100]."
+        },
+        "cursor": {
+          "type": "string",
+          "definition": "Now forwarded to the raw tracker API request as next_cursor (previously only used for a local re-slice over an unrelated single fetch, so it never actually advanced the underlying query)."
+        },
+        "exhaust": {
+          "type": "boolean",
+          "default": false,
+          "definition": "Opt-in bounded-exhaustion mode (ENC-ISS-558). Walks next_cursor via the raw API until it naturally empties or _TRACKER_LIST_MAX_EXHAUST_PAGES=50 is hit (mirrors sense.py's ENC-ISS-557 _MAX_PAGES guard). Default false -- leave off for hot-path/session-init reads; use for callers that need an exact count and can pay the extra round trips."
+        },
+        "total": {
+          "type": "integer",
+          "definition": "Count of records actually fetched in this call (one page by default, or the full walked set when exhaust=true). No longer presented as an implicit full-project total."
+        },
+        "total_is_lower_bound": {
+          "type": "boolean",
+          "definition": "Present and true whenever a next_cursor remains outstanding after whatever fetching this call did -- i.e. 'total' is a floor, not a measurement. Absent (not merely false) when the count is exact."
+        },
+        "exhaustion_truncated": {
+          "type": "boolean",
+          "definition": "Present and true only when exhaust=true hit the _TRACKER_LIST_MAX_EXHAUST_PAGES guard before the cursor naturally emptied -- the exhaustive walk itself was capped, so even the exhaust=true total is still a lower bound in this case."
+        },
+        "orphan_tasks_is_lower_bound": {
+          "type": "boolean",
+          "definition": "Same lower-bound semantics as total_is_lower_bound, applied to orphan_tasks -- orphan detection has the identical undercount failure mode as total when only a partial page was fetched."
         }
       }
     }
