@@ -1,6 +1,6 @@
 import type { PropertyFilterQuery } from './applyPropertyFilter'
 
-export type FeedSort = 'tier' | 'id' | 'status' | 'title'
+export type FeedSort = 'tier' | 'id' | 'status' | 'title' | 'updated'
 
 export interface FeedRouteSearch {
   q: string
@@ -14,13 +14,16 @@ export const FEED_SEARCH_DEFAULTS: FeedRouteSearch = {
   q: '',
   f: '',
   op: 'and',
-  sort: 'tier',
+  // ENC-TSK-N56 (ENC-TSK-N45 UAT follow-up): the feed defaults to most-recently
+  // updated first, matching the N45 intent that every feed defaults to
+  // time-last-updated, newest to oldest.
+  sort: 'updated',
   scroll: 0,
 }
 
 export const FEED_RETURN_STORAGE_KEY = 'enc.feed.returnSearch'
 
-const FEED_SORTS: FeedSort[] = ['tier', 'id', 'status', 'title']
+const FEED_SORTS: FeedSort[] = ['tier', 'id', 'status', 'title', 'updated']
 
 function isFeedSort(value: unknown): value is FeedSort {
   return typeof value === 'string' && FEED_SORTS.includes(value as FeedSort)
@@ -30,7 +33,7 @@ export function parseFeedSearch(raw: Record<string, unknown>): FeedRouteSearch {
   const q = typeof raw.q === 'string' ? raw.q : ''
   const f = typeof raw.f === 'string' ? raw.f : ''
   const op = raw.op === 'or' ? 'or' : 'and'
-  const sort = isFeedSort(raw.sort) ? raw.sort : 'tier'
+  const sort = isFeedSort(raw.sort) ? raw.sort : 'updated'
   const scrollRaw = raw.scroll
   const scroll =
     typeof scrollRaw === 'number'
@@ -86,7 +89,7 @@ export function feedSearchToParams(search: FeedRouteSearch): URLSearchParams {
   if (search.q) params.set('q', search.q)
   if (search.f) params.set('f', search.f)
   if (search.op !== 'and') params.set('op', search.op)
-  if (search.sort !== 'tier') params.set('sort', search.sort)
+  if (search.sort !== 'updated') params.set('sort', search.sort)
   if (search.scroll > 0) params.set('scroll', String(search.scroll))
   return params
 }

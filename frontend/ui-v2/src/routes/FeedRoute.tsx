@@ -56,7 +56,11 @@ import './feed.css'
 const LIST_CHUNK = 24
 const WIDE_MEDIA = '(min-width: 64rem)'
 const SORT_OPTIONS: { value: FeedSort; label: string }[] = [
-  { value: 'tier', label: 'Tier (default)' },
+  // ENC-TSK-N56 (ENC-TSK-N45 UAT follow-up): 'Last Updated' is offered and is
+  // the default (see FEED_SEARCH_DEFAULTS.sort = 'updated'). 'Tier' remains
+  // available as the search-relevance ordering.
+  { value: 'updated', label: 'Last Updated' },
+  { value: 'tier', label: 'Tier' },
   { value: 'id', label: 'Record ID' },
   { value: 'title', label: 'Title' },
   { value: 'status', label: 'Status' },
@@ -91,7 +95,7 @@ export function FeedRoute() {
   }
 
   const { data: projects = [] } = useQuery(projectRegistryQueryOptions)
-  const { isHydrating } = useRealtimeFeed()
+  const { isHydrating, refetchSnapshot } = useRealtimeFeed()
   const events = useRealtimeFeedEvents()
   const { isWarm } = useCacheEngineState()
   const corpus = (() => {
@@ -342,9 +346,16 @@ export function FeedRoute() {
           <span>Sort</span>
           <select
             value={sort}
-            onChange={(event) =>
+            onChange={(event) => {
+              // ENC-TSK-N56 (ENC-TSK-N45 UAT follow-up): switch the sort
+              // immediately (client-side reorder via sortSearchHits) AND
+              // re-trigger the realtime feed snapshot fetch so the corpus is
+              // refreshed and re-flattened. The feed's tier/delta logic can
+              // otherwise leave gaps in a pure last-updated ordering; refetching
+              // pulls the authoritative set ordered by the selected sort.
               patchFeedSearch({ sort: event.target.value as FeedSort, scroll: 0 })
-            }
+              refetchSnapshot()
+            }}
           >
             {SORT_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>

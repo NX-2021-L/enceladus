@@ -19,6 +19,18 @@ describe('feedSearchParams', () => {
     expect(parseFeedSearch({})).toEqual(FEED_SEARCH_DEFAULTS)
   })
 
+  it('defaults the sort to last-updated and falls back to it for unknown values (ENC-TSK-N56)', () => {
+    expect(FEED_SEARCH_DEFAULTS.sort).toBe('updated')
+    expect(parseFeedSearch({}).sort).toBe('updated')
+    expect(parseFeedSearch({ sort: 'bogus' }).sort).toBe('updated')
+    expect(parseFeedSearch({ sort: 'updated' }).sort).toBe('updated')
+  })
+
+  it('omits the default (updated) sort from the URL but serializes others (ENC-TSK-N56)', () => {
+    expect(buildFeedPath(parseFeedSearch({ sort: 'updated' }))).toBe('/feed')
+    expect(buildFeedPath(parseFeedSearch({ sort: 'tier' }))).toContain('sort=tier')
+  })
+
   it('round-trips query, filters, sort, and scroll', () => {
     const parsed = parseFeedSearch({
       q: 'ENC',
