@@ -90,6 +90,105 @@ class MonteCarloTest(unittest.TestCase):
         self.assertAlmostEqual(pc, p_grid[10], places=6)
 
 
+class SusceptibilityEstimatorTest(unittest.TestCase):
+    """ENC-TSK-N51: second-largest-cluster (susceptibility) estimator."""
+
+    def test_component_ratios_two_equal_clusters(self):
+        # two disjoint edges over 4 occupied nodes: two size-2 clusters.
+        edges = [("a", "b"), ("c", "d")]
+        largest, second = pm._component_ratios(edges, {"a", "b", "c", "d"}, 4)
+        self.assertAlmostEqual(largest, 0.5, places=6)
+        self.assertAlmostEqual(second, 0.5, places=6)
+
+    def test_component_ratios_single_giant(self):
+        # one connected path: largest=4/4, second=0 (no second cluster).
+        edges = [("a", "b"), ("b", "c"), ("c", "d")]
+        largest, second = pm._component_ratios(edges, {"a", "b", "c", "d"}, 4)
+        self.assertAlmostEqual(largest, 1.0, places=6)
+        self.assertAlmostEqual(second, 0.0, places=6)
+
+    def test_component_ratios_no_active_edge(self):
+        # occupied singletons with no active edge: largest is a lone node.
+        largest, second = pm._component_ratios([("a", "b")], {"a"}, 10)
+        self.assertAlmostEqual(largest, 0.1, places=6)
+        self.assertAlmostEqual(second, 0.0, places=6)
+
+    def test_full_sweep_returns_two_aligned_curves(self):
+        n = 200
+        edges = _ring_lattice(n, 6)
+        universe = sorted({v for e in edges for v in e})
+        p_grid = pm._linspace(0.02, 0.95, 30)
+        lcc, second = pm._monte_carlo_sweep_full(universe, edges, n, p_grid, trials=20, seed=7)
+        self.assertEqual(len(lcc), 30)
+        self.assertEqual(len(second), 30)
+        # LCC curve from the full sweep is ~monotone in p (same as the LCC-only sweep).
+        for lo, hi in zip(lcc, lcc[1:]):
+            self.assertLessEqual(lo, hi + 0.06)
+
+    def test_susceptibility_pc_picks_peak(self):
+        p_grid = pm._linspace(0.0, 1.0, 11)
+        second = [0.0, 0.02, 0.05, 0.30, 0.08, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0]
+        pc = pm._empirical_pc_susceptibility(p_grid, second)
+        self.assertAlmostEqual(pc, p_grid[3], places=6)
+
+    def test_susceptibility_pc_in_range(self):
+        n = 200
+        edges = _ring_lattice(n, 6)
+        universe = sorted({v for e in edges for v in e})
+        p_grid = pm._linspace(0.02, 0.60, 30)
+        _lcc, second = pm._monte_carlo_sweep_full(universe, edges, n, p_grid, trials=25, seed=11)
+        pc = pm._empirical_pc_susceptibility(p_grid, second)
+        self.assertGreaterEqual(pc, p_grid[0])
+        self.assertLessEqual(pc, p_grid[-1])
+
+    def test_susceptibility_lower_variance_than_curvature(self):
+        # On a broad transition the susceptibility peak is far more stable across
+        # seeds than the argmax-2nd-derivative estimator (ENC-TSK-N51 core claim).
+        n = 300
+        edges = _ring_lattice(n, 4)  # low-degree -> broad, smeared transition
+        universe = sorted({v for e in edges for v in e})
+        p_grid = pm._linspace(0.02, 0.98, 30)
+        raw, sus = [], []
+        for seed in range(8):
+            lcc, second = pm._monte_carlo_sweep_full(universe, edges, n, p_grid, trials=15, seed=seed)
+            raw.append(pm._empirical_pc(p_grid, lcc))
+            sus.append(pm._empirical_pc_susceptibility(p_grid, second))
+
+        def pstdev(xs):
+            m = sum(xs) / len(xs)
+            return (sum((x - m) ** 2 for x in xs) / len(xs)) ** 0.5
+
+        self.assertLess(pstdev(sus), pstdev(raw))
+
+
+class RowSchemaTest(unittest.TestCase):
+    """ENC-TSK-N51: the telemetry row keeps empirical_pc (consumer compat) and
+    adds the estimator-provenance fields."""
+
+    def test_run_percolation_row_has_new_and_legacy_fields(self):
+        captured = {}
+
+        def fake_fetch():
+            edges = [(str(a), str(b)) for a, b in _ring_lattice(120, 6)]
+            n = len({v for e in edges for v in e})
+            return n, edges, None, None
+
+        with mock.patch.object(pm, "_fetch_graph", side_effect=fake_fetch), \
+             mock.patch.object(pm, "_write_ddb", side_effect=lambda row: captured.update(row)), \
+             mock.patch.object(pm, "_publish_cloudwatch"), \
+             mock.patch.object(pm, "MC_TRIALS", 10):
+            resp = pm._run_percolation({}, None)
+
+        self.assertEqual(resp["statusCode"], 200)
+        # backward-compatible: empirical_pc still present for existing consumers
+        self.assertIn("empirical_pc", captured)
+        # new provenance fields
+        self.assertIn("empirical_pc_curvature", captured)
+        self.assertEqual(captured["empirical_pc_method"], "susceptibility_peak")
+        self.assertIn("sweep_second_cluster_ratio", captured)
+        self.assertEqual(len(captured["sweep_second_cluster_ratio"]), pm.MC_NUM_P)
+
+
 class UnionFindTest(unittest.TestCase):
     def test_single_component(self):
         edges = [("a", "b"), ("b", "c"), ("c", "d")]
