@@ -1,7 +1,7 @@
 {
-  "version": "2026-07-13.5",
-  "updated_at": "2026-07-13T07:26:00Z",
-  "last_change_summary": "ENC-TSK-N48: did_work/output_count added to the rhythm heavy-beat completion stanza (BRD DOC-44230223DD1C §4.1 amendment). All six enabled tenant lambda_function.py (corpus_entropy_engine, memory_consolidation, handoff_consolidation_engine, percolation_monitor, titan_embedding_backfill, graph_health_metrics) plus rhythm_cycle/tenant_invoker.py emit did_work (default status=='completed') + output_count; the beat reads did_work three-valued and emits a new tenant_no_work CloudWatch metric distinct from tenant_stall. 02-compute.yaml CEE_HARD_DISABLED 0→1 (temporary, io-approved) for the AC-4 proof window. No entity/field schema change; bumping per the lambda_function.py touch guard. Prior: ENC-ISS-555 / ENC-TSK-N52 CEE orphan→lineage_unanchored; N51 percolation susceptibility-peak estimator.",
+  "version": "2026-07-13.6",
+  "updated_at": "2026-07-13T07:28:00Z",
+  "last_change_summary": "ENC-TSK-N48: did_work/output_count added to the rhythm heavy-beat completion stanza (BRD DOC-44230223DD1C §4.1 amendment). All six enabled tenant lambda_function.py (corpus_entropy_engine, memory_consolidation, handoff_consolidation_engine, percolation_monitor, titan_embedding_backfill, graph_health_metrics) plus rhythm_cycle/tenant_invoker.py emit did_work (default status=='completed') + output_count; the beat reads did_work three-valued and emits a new tenant_no_work CloudWatch metric distinct from tenant_stall. 02-compute.yaml CEE_HARD_DISABLED 0→1 (temporary, io-approved) for the AC-4 proof window. No entity/field schema change; bumping per the lambda_function.py touch guard. Prior: ENC-TSK-N45 v4/main port (documents/search default sort); ENC-ISS-555 / ENC-TSK-N52 CEE orphan→lineage_unanchored; N51 percolation susceptibility-peak estimator.",
   "owners": [
     "enceladus-platform"
   ],
