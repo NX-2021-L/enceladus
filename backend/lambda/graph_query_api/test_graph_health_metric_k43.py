@@ -101,6 +101,46 @@ class TestComputeFiedlerValue(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("lambda2", result["error"])
 
+    def test_degenerate_lambda2_at_capped_sample_size_is_rejected_ac2(self):
+        # ENC-ISS-554: eigenvalues[1] == 0.0 with n == limit means the
+        # LAPLACIAN_MAX_VERTICES cap was hit -- the sample is very likely a
+        # non-representative induced-subgraph artifact, not a genuine
+        # full-graph disconnection reading. Must be ok=False, never a
+        # confident zero.
+        # Use a raw fn (not the shared fixture helper) so laplacian.n can be
+        # pinned to the requested limit, exercising the "capped" branch.
+        def _fn(driver, project_id, params):
+            return {
+                "eigenvalues": [0.0, 0.0, 0.1],
+                "laplacian": {"n": params["limit"], "edge_count": 3, "eig_method": "eigsh_SA", "normalization": "combinatorial"},
+            }
+        result = ghm.compute_fiedler_value(object(), "enceladus", query_laplacian_fn=_fn, limit=500)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["invalid_reason"], "sample_capped_degenerate")
+        self.assertEqual(result["lambda2_raw"], 0.0)
+        self.assertNotIn("lambda2", result)  # never publishable as a reading
+
+    def test_degenerate_lambda2_below_cap_flags_genuine_disconnection_ac2(self):
+        # n < limit means the full vertex set was captured (no truncation);
+        # a degenerate lambda2 here is a real disconnection signal, still
+        # never published as ok=True, but distinguishable in the reason.
+        def _fn(driver, project_id, params):
+            return {
+                "eigenvalues": [0.0, 0.0, 0.2],
+                "laplacian": {"n": 12, "edge_count": 10, "eig_method": "dense_eigh", "normalization": "combinatorial"},
+            }
+        result = ghm.compute_fiedler_value(object(), "enceladus", query_laplacian_fn=_fn, limit=500)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["invalid_reason"], "genuine_disconnection_suspected")
+
+    def test_positive_lambda2_still_succeeds_ac2(self):
+        # Sanity check: the epsilon gate does not reject legitimate positive
+        # readings.
+        fn = _fake_query_laplacian_fn({"enceladus": [0.0, 0.42, 1.1]})
+        result = ghm.compute_fiedler_value(object(), "enceladus", query_laplacian_fn=fn)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["lambda2"], 0.42)
+
     def test_never_touches_gds_projection_helpers(self):
         # AC-2 hard gate: the module's *code* (not its explanatory docstrings/
         # comments) must never invoke a GDS/AGA symbol -- only the injected
